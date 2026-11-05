@@ -228,6 +228,18 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       return b.state === "closed" ? (b.merged === true ? "merged" : "closed") : "unknown";
     },
 
+    /** D#6 STACK-THREE-DEEP: how a public pull request ended and where it went (`GET /pulls/<n>`): its state, whether it merged, the branch it targeted and the repository's default branch. Null for no such pull request; a rate limit, a 5xx or a body that is not a pull request throws. */
+    async pullRequestBase(input: { codeRepo: string; number: number; token: string }): Promise<{ state: "open" | "closed"; merged: boolean; baseRef: string; defaultBranch: string } | null> {
+      const { owner, name } = split(input.codeRepo);
+      if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/pulls/${input.number}`, input.token);
+      if (res.status === 404) return null;
+      if (res.status >= 500) throw new PlanePushApiError("public_unavailable", true);
+      const b = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { state?: unknown; merged?: unknown; base?: { ref?: unknown; repo?: { default_branch?: unknown } | null } }) : undefined;
+      if (!b || (b.state !== "open" && b.state !== "closed")) throw new PlanePushApiError("public_unavailable");
+      return { state: b.state, merged: b.merged === true, baseRef: typeof b.base?.ref === "string" ? b.base.ref : "", defaultBranch: typeof b.base?.repo?.default_branch === "string" ? b.base.repo.default_branch : "" };
+    },
+
     async branchExists(input: { codeRepo: string; branch: string; token: string }): Promise<boolean> {
       const { owner, name } = split(input.codeRepo);
       if (!BRANCH.test(input.branch) || input.branch.includes("..")) throw new PlanePushApiError("public_unavailable");

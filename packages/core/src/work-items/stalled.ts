@@ -81,6 +81,7 @@ const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   halted: 'The work was halted.',
   stack_parent_no_pull_request: 'The item this work builds on has no pull request yet, so this did not start. Build that item until it has a pull request, then start this one again.',
   stack_parent_closed: 'The pull request this work builds on was closed without merging, so this did not start. Reopen that pull request on GitHub, then start this one again.',
+  stack_parent_merged_off_main: "The pull request this work builds on was merged into a branch other than main, so this did not start. Nothing can be done from here on this item: plan the change again as a new item once that work is in main.",
   stack_parent_branch_unusable: 'The branch this work builds on is not in this repository, so it cannot be built on and this did not start. Nothing can be done from here.',
   stack_parent_head_moved: 'The pull request this work builds on changed while this was starting, so it did not start. Start it again once that pull request has settled.',
   stack_parent_unreadable: 'The pull request this work builds on could not be read, so this did not start. Start it again in a few minutes.',

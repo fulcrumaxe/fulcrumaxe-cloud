@@ -32,14 +32,15 @@ describe("D#598 P3b: no repo, pairing, plan or account gate on the stacked paths
   });
 
   /**
-   * The one deliberate exception (STACK-ON-REFUSED-PARENT): `parentPublishRefused` reads the parent's newest push row and whether the repository is still paired, ONLY to expire a stale
-   * refusal. It never turns stacking on or off for a repository, a plan or an account. Everything else it names is scanned like the other stacked files; the three allowed words are
-   * the `readPlanePush` import and call, and the single `repo_pairing` read.
+   * The deliberate exceptions, both in this file. STACK-ON-REFUSED-PARENT: `parentPublishRefused` reads the parent's newest push row and whether the repository is still paired, to expire a stale
+   * refusal. STACK-THREE-DEEP: `readStackParentForRead` reads the same push row for the number of the parent's public pull request, so that how the parent ENDED is asked of the copy that merges.
+   * Neither turns stacking on or off for a repository, a plan or an account: one expires a refusal, the other chooses which pull request is asked about. Everything else the file names is scanned like the
+   * other stacked files; the allowed words are the `readPlanePush` import and its two calls, and the single `repo_pairing` read.
    */
   it("stackParentPublish.ts: the exception is exactly the push-row read and the one pairing read; any other forbidden term turns this red", () => {
     const code = codeOf(read("../../core/src/work-items/stackParentPublish.ts"));
     expect(code.match(/repo_pairing/g)).toHaveLength(1);
-    expect(code.match(/readPlanePush/g)).toHaveLength(2);
+    expect(code.match(/readPlanePush/g)).toHaveLength(3);
     const rest = code.replace(/import \{ readPlanePush \} from '\.\.\/repos\/planePushRecord\.js';/, "").replace(/readPlanePush\(/g, "").replace(/FROM repo_pairing WHERE repo_id = \$1 AND account_id = \$2/, "");
     expect(rest).not.toMatch(FORBIDDEN);
     expect(rest.length).toBeGreaterThan(150);

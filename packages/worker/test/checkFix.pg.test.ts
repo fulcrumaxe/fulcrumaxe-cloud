@@ -8,6 +8,7 @@ import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { DispatchFailedError, ExecutionModeChangedError, IdempotencyKeyTakenError, JobIssueError, RUNNER_CONTINUES_BOUND_KIND, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { maxFixRounds } from "@fx/spend";
 import type { BranchSyncOutcome } from "@fx/github";
+import { createStackBasePort } from "@fx/pipeline";
 import { BASE_SYNCED_PROMPT_LINE, checkFixBeforeStart } from "../src/fixRoundBase.js";
 const withSync = (beforeStart: ReturnType<typeof checkFixBeforeStart>) => ({ beforeStart, baseSync: () => beforeStart.state });
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, FAILED_FILES_PROMPT_LEAD, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
@@ -473,14 +474,15 @@ describe("check fix round [pg]", () => {
     // D#6 FIXROUND-REPUBLISH-STACKED: a SANDBOX check round on a stacked change goes on while its parent is open; a runner-side round and a parent that ended are refused, with no merge.
     describe("on a change stacked on another pull request", () => {
       const P = "7".repeat(40);
-      const open = { state: "open", merged: false, headSha: P, headRef: "fx/parent", headInBaseRepo: true, branchTipSha: P } as const;
-      const stackedRound = async (side: "sandbox" | "runner", read: () => Promise<typeof open | Record<string, unknown>>, over: { stage?: string; retargeted?: boolean } = {}) => {
+      const open = { state: "open", merged: false, headSha: P, headRef: "fx/parent", headInBaseRepo: true, branchTipSha: P, baseRef: "main", defaultBranch: "main" } as const;
+      const stackedRound = async (side: "sandbox" | "runner", read: () => Promise<typeof open | Record<string, unknown>>, over: { stage?: string; retargeted?: boolean; noParentPr?: boolean; paired?: string } = {}) => {
         await publicCopy();
         const parent = randomUUID();
         await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'pr_opened', 9042)", [parent, A.accountId, A.repoId]);
-        await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, envelope) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4, $5::jsonb)", [randomUUID(), A.accountId, parent, A.repoId, JSON.stringify({ summary: "built", pr_number: 40 })]);
+        if (over.noParentPr !== true) await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, envelope) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4, $5::jsonb)", [randomUUID(), A.accountId, parent, A.repoId, JSON.stringify({ summary: "built", pr_number: 40 })]);
         await admin.query("UPDATE work_items SET stack_parent_id = $1 WHERE id = $2", [parent, A.workItemId]);
         if (over.stage !== undefined) await admin.query("UPDATE work_items SET stage = $2 WHERE id = $1", [parent, over.stage]);
+        if (over.paired !== undefined) await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 8, 'https://github.com/acme/widgets-public/pull/8', $7)", [A.accountId, parent, A.repoId, "d".repeat(64), "e".repeat(40), "f".repeat(40), over.paired]);
         let failed: string;
         if (side === "sandbox") {
           failed = await ended({ reason: "check_failed", sandbox: true });
@@ -557,10 +559,122 @@ describe("check fix round [pg]", () => {
         expect(ok.readParent).toHaveBeenCalledTimes(1);
       });
 
-      it("a retargeted change whose parent merged goes on: one merge of main", async () => {
-        const ok = await stackedRound("sandbox", async () => open, { stage: "merged", retargeted: true });
+      it.each(["sandbox", "runner"] as const)("a retargeted %s change whose parent merged (our rows say so) into main goes on: GitHub is asked which branch it merged into, then one merge of main", async (side) => {
+        const ok = await stackedRound(side, async () => ({ ...open, state: "closed", merged: true }), { stage: "merged", retargeted: true });
+        expect(ok.out.ok).toBe(true);
+        expect(ok.readParent).toHaveBeenCalledTimes(1);
+        expect(ok.merges).toHaveBeenCalledTimes(1);
+      });
+
+      // D#6 STACK-THREE-DEEP: G <- P <- C. P merged into G's branch (not main) and C's base was then set to main. Both our rows and GitHub say P merged; only P's base says it is not in main.
+      it.each([
+        ["sandbox", "rows say merged", { stage: "merged" }],
+        ["runner", "rows say merged", { stage: "merged" }],
+        ["sandbox", "rows still say open", {}],
+        ["runner", "rows still say open", {}],
+      ] as const)("a retargeted %s change whose parent merged into another branch (%s) is refused republish_stack_parent_off_main: no merge, nothing started", async (side, _l, rows) => {
+        const refused = await stackedRound(side, async () => ({ ...open, state: "closed", merged: true, baseRef: "fx/grandparent" }), { ...rows, retargeted: true });
+        expect(refused.out).toEqual({ ok: false, reason: "republish_stack_parent_off_main" });
+        expect(refused.merges).not.toHaveBeenCalled();
+        expect(refused.sync.mock.calls.every((c) => c[0].readOnly === true)).toBe(true);
+        expect(refused.readParent).toHaveBeenCalledTimes(1);
+        expect(resumed).toHaveLength(0);
+        expect(await facts()).toEqual([{ kind: "escalated", code: "republish_stack_parent_off_main" }]);
+      });
+
+      it("a change still based on its parent's branch whose parent merged into another branch is refused republish_stack_parent_off_main, not told to change its base to main", async () => {
+        const { out, merges } = await stackedRound("sandbox", async () => ({ ...open, state: "closed", merged: true, baseRef: "fx/grandparent" }));
+        expect(out).toEqual({ ok: false, reason: "republish_stack_parent_off_main" });
+        expect(merges).not.toHaveBeenCalled();
+        expect(resumed).toHaveLength(0);
+      });
+
+      it.each([
+        ["no base branch in the read", { baseRef: "" }],
+        ["no default branch in the read", { defaultBranch: "" }],
+      ])("a retargeted change whose merged parent's base cannot be established (%s): refused base_sync_unavailable, no merge", async (_l, over) => {
+        const refused = await stackedRound("sandbox", async () => ({ ...open, state: "closed", merged: true, ...over }), { stage: "merged", retargeted: true });
+        expect(refused.out).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        expect(refused.merges).not.toHaveBeenCalled();
+        expect(resumed).toHaveLength(0);
+      });
+
+      it.each([
+        ["retargeted", { retargeted: true }],
+        ["still on the parent's branch", {}],
+      ] as const)("a change (%s) whose parent has no recorded pull request is refused republish_stack_parent_no_pull_request (permanent), never base_sync_unavailable", async (_l, over) => {
+        const refused = await stackedRound("sandbox", async () => open, { ...over, noParentPr: true });
+        expect(refused.out).toEqual({ ok: false, reason: "republish_stack_parent_no_pull_request" });
+        expect(refused.merges).not.toHaveBeenCalled();
+        expect(refused.readParent).not.toHaveBeenCalled();
+        expect(resumed).toHaveLength(0);
+      });
+
+      // D#6 STACK-THREE-DEEP, paired repositories: the public pull request is the one that merges; its private copy is closed unmerged by the sweep or stays open until it runs. The reads answer as the real ones do.
+      const privateCopy = (over: Record<string, unknown> = {}) => ({ number: 40, state: "open", merged: false, head: { sha: P, ref: "fx/parent", repo: { full_name: "acme/widgets" } }, base: { ref: "main", repo: { full_name: "acme/widgets", default_branch: "main" } }, ...over });
+      type PublicEnd = { state: "open" | "closed"; merged: boolean; baseRef: string; defaultBranch: string } | null;
+      const real = (priv: Record<string, unknown>, pub: () => Promise<PublicEnd>) => {
+        const privateReads: string[] = [];
+        const publicReads: unknown[] = [];
+        const http = { request: async (req: { path: string }) => (privateReads.push(req.path), req.path.includes("/git/ref/") ? { status: 200, body: { object: { sha: P } } } : { status: 200, body: priv }) };
+        const port = createStackBasePort({ open: async () => http, publicPull: async (i) => (publicReads.push(i), pub()) });
+        return { read: (i: never) => port.readParent(i), privateReads, publicReads };
+      };
+      const mergedToMain = async (): Promise<PublicEnd> => ({ state: "closed", merged: true, baseRef: "main", defaultBranch: "main" });
+
+      it.each([
+        ["sandbox", "closed unmerged by the sweep", { state: "closed", merged: false }],
+        ["runner", "closed unmerged by the sweep", { state: "closed", merged: false }],
+        ["sandbox", "still open", {}],
+        ["runner", "still open", {}],
+      ] as const)("a retargeted %s change whose paired parent merged to main on the public side (private copy %s) goes on: one real merge of main, the private copy is never read", async (side, _l, priv) => {
+        const r = real(privateCopy(priv), mergedToMain);
+        const ok = await stackedRound(side, r.read as never, { retargeted: true, paired: "pr_merged" });
         expect(ok.out.ok).toBe(true);
         expect(ok.merges).toHaveBeenCalledTimes(1);
+        expect(r.publicReads).toEqual([{ accountId: A.accountId, codeRepo: "acme/widgets-public", number: 8 }]);
+        expect(r.privateReads).toEqual([]);
+      });
+
+      it.each(["sandbox", "runner"] as const)("a retargeted %s change whose paired parent merged on the public side into another branch is refused republish_stack_parent_off_main: no merge, nothing started", async (side) => {
+        const r = real(privateCopy({ state: "closed", merged: true }), async () => ({ state: "closed", merged: true, baseRef: "fx/grandparent", defaultBranch: "main" }));
+        const refused = await stackedRound(side, r.read as never, { retargeted: true, paired: "pr_merged" });
+        expect(refused.out).toEqual({ ok: false, reason: "republish_stack_parent_off_main" });
+        expect(refused.merges).not.toHaveBeenCalled();
+        expect(refused.sync.mock.calls.every((c) => c[0].readOnly === true)).toBe(true);
+        expect(resumed).toHaveLength(0);
+      });
+
+      it("a retargeted change whose paired parent's public read fails is refused base_sync_unavailable: the private copy is not trusted instead", async () => {
+        const r = real(privateCopy({ state: "closed", merged: true }), async () => { throw new Error("boom ghp_000"); });
+        const refused = await stackedRound("sandbox", r.read as never, { retargeted: true, paired: "pr_merged", stage: "merged" });
+        expect(refused.out).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        expect(refused.merges).not.toHaveBeenCalled();
+        expect(r.privateReads).toEqual([]);
+      });
+
+      // The paired sandbox executor's envelope carries no pull request number, so a paired parent can have a public pull request and no private number on record.
+      it.each([
+        ["sandbox", "merged to main", mergedToMain, { ok: true }],
+        ["runner", "merged to main", mergedToMain, { ok: true }],
+        ["sandbox", "merged into another branch", async (): Promise<PublicEnd> => ({ state: "closed", merged: true, baseRef: "fx/grandparent", defaultBranch: "main" }), { ok: false, reason: "republish_stack_parent_off_main" }],
+        ["sandbox", "still open", async (): Promise<PublicEnd> => ({ state: "open", merged: false, baseRef: "main", defaultBranch: "main" }), { ok: false, reason: "republish_stack_parent_no_pull_request" }],
+        ["sandbox", "gone (404)", async (): Promise<PublicEnd> => null, { ok: false, reason: "republish_stack_parent_no_pull_request" }],
+      ] as const)("a retargeted %s change whose paired parent has no private pull request number and whose public copy is %s", async (side, _l, pub, want) => {
+        const r = real(privateCopy(), pub);
+        const out = await stackedRound(side, r.read as never, { retargeted: true, paired: "pr_merged", noParentPr: true });
+        if (want.ok) expect(out.out.ok).toBe(true);
+        else expect(out.out).toEqual(want);
+        expect(r.privateReads).toEqual([]);
+        expect(out.merges).toHaveBeenCalledTimes(want.ok ? 1 : 0);
+      });
+
+      it("a retargeted change whose parent has no push row is read through its private copy; no public read is made", async () => {
+        const r = real(privateCopy({ state: "closed", merged: true }), async () => { throw new Error("must not be asked"); });
+        const ok = await stackedRound("sandbox", r.read as never, { retargeted: true, stage: "merged" });
+        expect(ok.out.ok).toBe(true);
+        expect(r.publicReads).toEqual([]);
+        expect(r.privateReads.length).toBeGreaterThan(0);
       });
 
       it("a runner-side round on a stacked change is refused republish_stacked_unsupported and the parent is never read", async () => {

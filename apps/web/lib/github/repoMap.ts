@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { createRepoTreeSource, liveInstallationTokens } from "@fx/github";
+import { createLivePlanePushPort } from "./planePushHosted";
 import { createPgRepoMapCache, createPinContentPort, createRepoMapPort, createStackBasePort, startBuildForItem, type StartBuildOptions } from "@fx/pipeline";
 import { openInstallationHttp } from "./installationHttp";
 
@@ -28,6 +29,7 @@ export function createBuildWithRepoMap(open: typeof openInstallationHttp = openI
       // D#598 P3b: an item with a stack parent reads the parent's open pull request and branch tip (read-only tokens) before its run starts.
       // D#598 P1f-5c: a paired repository's build records the default branch's head as its base (read-only `repo_map` token, the map's own read).
       planeBase: { defaultHead: async (r) => createRepoTreeSource(await open("repo_map", r), { owner: r.owner, name: r.name }).headSha() },
-      stackBase: createStackBasePort({ open: (kind, r) => open(kind, { repoId: r.repoId, owner: r.owner, name: r.name }) }),
+      // A paired parent ended on its PUBLIC pull request; the live port is made on first use (an App that is not configured answers a fixed refusal then, not at wiring).
+      stackBase: createStackBasePort({ open: (kind, r) => open(kind, { repoId: r.repoId, owner: r.owner, name: r.name }), publicPull: (i) => createLivePlanePushPort().pullRequestBase(i) }),
     });
 }

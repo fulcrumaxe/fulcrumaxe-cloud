@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { readStackParentPull, type StackParentPull } from './stackParentPull.js';
 import { readPlanePush } from '../repos/planePushRecord.js';
 
 /**
@@ -12,4 +13,15 @@ export async function parentPublishRefused(client: PoolClient, accountId: string
   if (push === null || push.state !== 'refused') return false;
   const paired = await client.query('SELECT 1 FROM repo_pairing WHERE repo_id = $1 AND account_id = $2', [push.repoId, accountId]);
   return paired.rows.length > 0;
+}
+
+/**
+ * D#6 STACK-THREE-DEEP: the parent as `readStackParentPull` has it, plus the PUBLIC pull request its push row names (null when it has none). A paired parent's public copy is the one that merges, so how the parent ENDED is asked of it;
+ * its private copy is closed unmerged by the sweep, or stays open until the sweep runs. This only chooses which pull request is asked about; it never turns stacking on or off.
+ */
+export async function readStackParentForRead(client: PoolClient, accountId: string, workItemId: string): Promise<(StackParentPull & { publicPr: { codeRepo: string; number: number } | null }) | null> {
+  const parent = await readStackParentPull(client, workItemId);
+  if (parent === null) return null;
+  const push = await readPlanePush(client, accountId, parent.parentId);
+  return { ...parent, publicPr: push !== null && push.prNumber !== null ? { codeRepo: push.codeRepo, number: push.prNumber } : null };
 }

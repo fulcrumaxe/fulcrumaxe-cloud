@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
-import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE, REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE, REPUBLISH_STACK_PARENT_OPEN_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
-import type { StackParentFacts } from "@fx/pipeline";
+import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE, REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE, REPUBLISH_STACK_PARENT_OPEN_SENTENCE, REPUBLISH_STACK_PARENT_OFF_MAIN_SENTENCE, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { createStackBasePort, type StackParentFacts } from "@fx/pipeline";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps } from "../src/advance.js";
 import { BASE_SYNCED_STAGE, FIX_BASE_EVENT } from "../src/fixRoundBase.js";
@@ -504,7 +504,7 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
   describe("FIXROUND-REPUBLISH-STACKED: the parent decides", () => {
     const PARENT_TIP = "7".repeat(40);
     const PARENT_PR = 40;
-    const openParent: StackParentFacts = { state: "open", merged: false, headSha: PARENT_TIP, headRef: "fx/parent", headInBaseRepo: true, branchTipSha: PARENT_TIP };
+    const openParent: StackParentFacts = { state: "open", merged: false, headSha: PARENT_TIP, headRef: "fx/parent", headInBaseRepo: true, branchTipSha: PARENT_TIP, baseRef: "main", defaultBranch: "main" };
     const fixBaseOf = async (runId: string) => (await admin.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [runId, FIX_BASE_EVENT])).rows.map((r) => r.payload);
     const codes = async (w: string) => (await facts(w)).filter((f) => ["escalated", "stopped"].includes(f.kind)).map((f) => [f.kind, f.code]);
     /** A change with a public copy whose pull request is stacked on a parent item's pull request (the number the parent's run reported). `parentPr: null`: the parent has no recorded pull request. */
@@ -643,13 +643,14 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
         await setParentStage(t, stage);
         if (stage === "closed") await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-public', $2, $3, $4, 8, 'https://github.com/acme/widgets-public/pull/8', 'pr_merged' FROM work_items WHERE id = $1", [t.w, "f".repeat(64), "d".repeat(40), "e".repeat(40)]);
         const merges = vi.fn();
-        const stackBase = parentPort(async () => openParent);
+        const stackBase = parentPort(async () => ({ ...closedOnGithub, merged: true }));
         const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase });
         const out = await h.module.advanceStartFix(who(t), fixReq(t));
         expect(out.ok, stage).toBe(true);
         expect(merges).toHaveBeenCalledTimes(1);
         expect(h.resumed[0]!.base).toEqual({ sha: BASE, branch: t.branch });
-        expect(stackBase.readParent).not.toHaveBeenCalled();
+        // Our rows keep no record of which branch the parent merged into, so a merged row is not enough: GitHub is asked.
+        expect(stackBase.readParent).toHaveBeenCalledTimes(1);
       }
     });
 
@@ -711,7 +712,6 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
     it.each([
       ["GitHub cannot be asked", { read: async () => { throw new Error("boom ghp_000"); } }],
       ["GitHub answers a state that is neither open nor closed", { read: async () => ({ ...openParent, state: "draft" as never }) }],
-      ["the parent has no recorded pull request", { read: async () => openParent, parentPr: null }],
       ["no parent port is wired", { read: null }],
     ] as Array<[string, { read: (() => Promise<StackParentFacts>) | null; parentPr?: number | null }]>)("a retargeted child whose parent cannot be read (%s): refused base_sync_unavailable on every path, zero merges, nothing started", async (_label, over) => {
       for (const [name, side, run] of rounds) {
@@ -723,6 +723,290 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
         expect(merges, name).not.toHaveBeenCalled();
         expect(h.resume, name).not.toHaveBeenCalled();
         expect((await codes(t.w)).map((c) => c[1]), name).toEqual(["base_sync_unavailable"]);
+      }
+    });
+
+    // D#6 STACK-THREE-DEEP, paired repositories: the public pull request is the one that merges. Its private copy is closed unmerged by the sweep, or stays open until the sweep runs. These answer as the real reads do
+    // (the real stack-base port over a fake private read and a fake public read), so a read of the wrong copy fails here.
+    type PublicEnd = { state: "open" | "closed"; merged: boolean; baseRef: string; defaultBranch: string } | null;
+    const privatePull = (over: Record<string, unknown> = {}) => ({ number: PARENT_PR, state: "open", merged: false, head: { sha: PARENT_TIP, ref: "fx/parent", repo: { full_name: "acme/widgets" } }, base: { ref: "main", repo: { full_name: "acme/widgets", default_branch: "main" } }, ...over });
+    function realPort(priv: Record<string, unknown>, pub: () => Promise<PublicEnd>) {
+      const privateReads: string[] = [];
+      const publicReads: unknown[] = [];
+      const http = {
+        request: async (req: { path: string }) => {
+          privateReads.push(req.path);
+          return req.path.includes("/git/ref/") ? { status: 200, body: { object: { sha: PARENT_TIP } } } : { status: 200, body: priv };
+        },
+      };
+      const port = createStackBasePort({
+        open: async () => http,
+        publicPull: async (i) => {
+          publicReads.push(i);
+          return pub();
+        },
+      });
+      return { port, privateReads, publicReads };
+    }
+    /** The parent was published: its push row names the public pull request (number 8 in the public repository). */
+    const pairParent = (t: { w: string }, state: string) =>
+      admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-public', $2, $3, $4, 8, 'https://github.com/acme/widgets-public/pull/8', $5 FROM work_items WHERE id = $1", [t.w, "d".repeat(64), "e".repeat(40), "f".repeat(40), state]);
+    const mergedToMain = async (): Promise<PublicEnd> => ({ state: "closed", merged: true, baseRef: "main", defaultBranch: "main" });
+    const PUBLIC_PR = { accountId: "", codeRepo: "acme/widgets-public", number: 8 };
+
+    it.each([
+      ["closed unmerged by the sweep", privatePull({ state: "closed", merged: false }), "merged"],
+      ["still open (the sweep has not run)", privatePull(), "merged"],
+      ["still open, and our rows have not caught up with the merge", privatePull(), "pr_opened"],
+    ])("a paired parent merged to main on the public side, its private copy %s: every round path goes on with one real merge of main, and the private pull request is never read", async (_l, priv, stage) => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, stage);
+        await pairParent(t, "pr_merged");
+        const merges = vi.fn();
+        const real = realPort(priv, mergedToMain);
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: real.port });
+        expect(((await run(h, t)) as { ok: boolean }).ok, name).toBe(true);
+        expect(merges, name).toHaveBeenCalledTimes(name === "conflict round" ? 0 : 1);
+        expect(real.publicReads, name).toEqual([{ ...PUBLIC_PR, accountId: t.a.accountId }]);
+        expect(real.privateReads, name).toEqual([]);
+      }
+    });
+
+    it.each(["merged", "pr_opened"])("a paired parent merged on the public side into another branch (item row %s), the child retargeted to main: every round path is refused republish_stack_parent_off_main with zero merges", async (stage) => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, stage);
+        await pairParent(t, "pr_merged");
+        const merges = vi.fn();
+        const real = realPort(privatePull({ state: "closed", merged: true }), async () => ({ state: "closed", merged: true, baseRef: "fx/grandparent", defaultBranch: "main" }));
+        const syncBase = retargeted(merges);
+        const h = harness({ privateHead: async () => ASKED, syncBase, stackBase: real.port });
+        expect(await run(h, t), name).toEqual({ ok: false, reason: "republish_stack_parent_off_main" });
+        expect(merges, name).not.toHaveBeenCalled();
+        expect(syncBase.mock.calls.every((c) => (c[0] as { readOnly?: boolean }).readOnly === true), name).toBe(true);
+        expect(h.resume, name).not.toHaveBeenCalled();
+      }
+    });
+
+    it("a paired parent closed without merging on the public side is refused republish_stack_parent_closed even though its private copy says merged", async () => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await pairParent(t, "pr_closed");
+        const merges = vi.fn();
+        const real = realPort(privatePull({ state: "closed", merged: true }), async () => ({ state: "closed", merged: false, baseRef: "main", defaultBranch: "main" }));
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: real.port });
+        expect(await run(h, t), name).toEqual({ ok: false, reason: "republish_stack_parent_closed" });
+        expect(merges, name).not.toHaveBeenCalled();
+      }
+    });
+
+    it("a child still on its paired parent's branch, whose public copy merged to main: told the parent has ended (change the base to main), not that the parent is closed or open; zero merges", async () => {
+      const t = await stacked();
+      await pairParent(t, "pr_merged");
+      const merges = vi.fn();
+      const real = realPort(privatePull(), mergedToMain);
+      const h = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase: real.port });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_stack_parent_ended" });
+      expect(merges).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["the public read fails", async (): Promise<PublicEnd> => { throw new Error("boom ghp_000"); }],
+    ])("a paired parent when %s: base_sync_unavailable on every path, zero merges, the private copy is never trusted instead", async (_l, pub) => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, "merged");
+        await pairParent(t, "pr_merged");
+        const merges = vi.fn();
+        const real = realPort(privatePull({ state: "closed", merged: true }), pub);
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: real.port });
+        expect(await run(h, t), name).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        expect(merges, name).not.toHaveBeenCalled();
+        expect(real.privateReads, name).toEqual([]);
+      }
+    });
+
+    it.each([
+      ["retargeted to main", "retargeted"],
+      ["still on its parent's branch", "stacked"],
+    ])("a blip on the public read (%s) is read again, at most three times in all: a paired parent merged to main goes on after two blips; a lasting outage ends base_sync_unavailable after exactly three", async (_l, shape) => {
+      const run = async (failures: number) => {
+        const t = await stacked();
+        await setParentStage(t, "merged");
+        await pairParent(t, "pr_merged");
+        let left = failures;
+        const real = realPort(privatePull({ state: "closed", merged: true }), async () => {
+          if (left-- > 0) throw Object.assign(new Error("public pull request read answered 503"), { transient: true });
+          return mergedToMain();
+        });
+        const merges = vi.fn();
+        const h = harness({ privateHead: async () => ASKED, syncBase: shape === "retargeted" ? retargeted(merges) : port(merges), stackBase: real.port });
+        return { out: await h.module.advanceStartFix(who(t), fixReq(t)), real, merges };
+      };
+      const blips = await run(2);
+      expect(blips.real.publicReads).toHaveLength(3);
+      if (shape === "retargeted") expect(blips.out.ok).toBe(true);
+      else expect(blips.out).toEqual({ ok: false, reason: "republish_stack_parent_ended" });
+      const outage = await run(99);
+      expect(outage.out).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(outage.real.publicReads).toHaveLength(3);
+      expect(outage.merges).not.toHaveBeenCalled();
+    });
+
+    // D#6 STACK-THREE-DEEP round 2.
+    const closedUnmerged = async (): Promise<PublicEnd> => ({ state: "closed", merged: false, baseRef: "main", defaultBranch: "main" });
+    const openPublic = async (): Promise<PublicEnd> => ({ state: "open", merged: false, baseRef: "main", defaultBranch: "main" });
+
+    it("a paired parent closed on both copies: the closed sentence's step is walked. Reopening only one copy returns the same refusal; reopening both (the branch is there) goes on", async () => {
+      const closedBoth = [privatePull({ state: "closed", merged: false }), closedUnmerged] as const;
+      const onlyPrivate = [privatePull(), closedUnmerged] as const;
+      const onlyPublic = [privatePull({ state: "closed", merged: false }), openPublic] as const;
+      const both = [privatePull(), openPublic] as const;
+      expect(REPUBLISH_STACK_PARENT_CLOSED_SENTENCE).toMatch(/reopen both its public pull request and its private copy/);
+      for (const [label, [priv, pub], goesOn] of [["both closed", closedBoth, false], ["only the private copy reopened", onlyPrivate, false], ["only the public pull request reopened", onlyPublic, false], ["both reopened", both, true]] as const) {
+        const t = await stacked();
+        await setParentStage(t, "closed_unmerged");
+        await pairParent(t, "pr_closed");
+        const merges = vi.fn();
+        const real = realPort(priv, pub);
+        const h = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase: real.port });
+        const out = await h.module.advanceStartFix(who(t), fixReq(t));
+        if (goesOn) expect(out.ok, label).toBe(true);
+        else expect(out, label).toEqual({ ok: false, reason: "republish_stack_parent_closed" });
+        expect(merges, label).toHaveBeenCalledTimes(goesOn ? 1 : 0);
+      }
+    });
+
+    it("a paired parent, the child still on its branch: the ended answer comes from the public pull request, never from the item row", async () => {
+      for (const [label, priv, pub, want] of [
+        ["public closed unmerged, item row says merged", privatePull({ state: "closed", merged: true }), closedUnmerged, "republish_stack_parent_closed"],
+        ["public open, private copy merged, item row says merged", privatePull({ state: "closed", merged: true }), openPublic, "republish_stack_parent_closed"],
+        ["public merged to main, item row says closed", privatePull({ state: "closed", merged: false }), mergedToMain, "republish_stack_parent_ended"],
+      ] as const) {
+        const t = await stacked();
+        await setParentStage(t, label.includes("row says merged") ? "merged" : "closed_unmerged");
+        await pairParent(t, label.includes("closed unmerged") && label.includes("public closed") ? "pr_closed" : "pr_opened");
+        const merges = vi.fn();
+        const h = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase: realPort(priv, pub).port });
+        expect(await h.module.advanceStartFix(who(t), fixReq(t)), label).toEqual({ ok: false, reason: want });
+        expect(merges, label).not.toHaveBeenCalled();
+      }
+    });
+
+    it("the public pull request open, its private copy closed and saying merged, the child retargeted to main: refused republish_stack_parent_closed on every path (the merged bit is not taken from the private copy)", async () => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, "merged");
+        await pairParent(t, "pr_opened");
+        const merges = vi.fn();
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: realPort(privatePull({ state: "closed", merged: true }), openPublic).port });
+        expect(await run(h, t), name).toEqual({ ok: false, reason: "republish_stack_parent_closed" });
+        expect(merges, name).not.toHaveBeenCalled();
+      }
+    });
+
+    it("a lagging closed row does not decide for a paired parent: the public pull request merged to main, the child retargeted, goes on on every path", async () => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, "closed_unmerged");
+        await pairParent(t, "pr_opened");
+        const merges = vi.fn();
+        const real = realPort(privatePull({ state: "closed", merged: false }), mergedToMain);
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: real.port });
+        expect(((await run(h, t)) as { ok: boolean }).ok, name).toBe(true);
+        expect(real.publicReads, name).toHaveLength(1);
+      }
+    });
+
+    it("a re-paired parent (an older push row without a pull request, a newer one with): the newest push row decides, so the public pull request is asked and a lagging closed row does not refuse", async () => {
+      const t = await stacked();
+      await setParentStage(t, "closed_unmerged");
+      await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, code) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-old', $2, 'refused', 'scan_refused' FROM work_items WHERE id = $1", [t.w, "c".repeat(64)]);
+      await pairParent(t, "pr_opened");
+      const merges = vi.fn();
+      const real = realPort(privatePull({ state: "closed", merged: false }), mergedToMain);
+      const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: real.port });
+      expect(((await h.module.advanceStartFix(who(t), fixReq(t))) as { ok: boolean }).ok).toBe(true);
+      expect(real.publicReads).toHaveLength(1);
+    });
+
+    it("a lasting 404 on the public pull request is refused republish_stack_parent_no_pull_request (reading again, or pressing Request changes, cannot clear it) on every path", async () => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, "merged");
+        await pairParent(t, "pr_merged");
+        const merges = vi.fn();
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: realPort(privatePull(), async (): Promise<PublicEnd> => null).port });
+        expect(await run(h, t), name).toEqual({ ok: false, reason: "republish_stack_parent_no_pull_request" });
+        expect(merges, name).not.toHaveBeenCalled();
+      }
+    });
+
+    // A paired parent can have a public pull request and no private number on record (the paired sandbox executor's envelope carries none; the opener can fail while publish still runs; a built child can be linked later).
+    describe("a paired parent with no private pull request number on record", () => {
+      const noPrivate = async (side: "sandbox" | "runner", stage: string, push: string) => {
+        const t = await stacked(side, null);
+        await setParentStage(t, stage);
+        await pairParent(t, push);
+        return t;
+      };
+      it("public merged to main, the child retargeted: goes on on every path, the public pull request is read and the private one is not", async () => {
+        for (const [name, side, run] of rounds) {
+          const t = await noPrivate(side, "merged", "pr_merged");
+          const merges = vi.fn();
+          const real = realPort(privatePull(), mergedToMain);
+          const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: real.port });
+          expect(((await run(h, t)) as { ok: boolean }).ok, name).toBe(true);
+          expect(real.publicReads, name).toHaveLength(1);
+          expect(real.privateReads, name).toEqual([]);
+        }
+      });
+      it("public merged into another branch, or closed unmerged: refused off_main / closed on every path", async () => {
+        for (const [name, side, run] of rounds) {
+          for (const [pub, want, push] of [[async (): Promise<PublicEnd> => ({ state: "closed", merged: true, baseRef: "fx/grandparent", defaultBranch: "main" }), "republish_stack_parent_off_main", "pr_merged"], [closedUnmerged, "republish_stack_parent_closed", "pr_closed"]] as const) {
+            const t = await noPrivate(side, "pr_opened", push);
+            const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(vi.fn()), stackBase: realPort(privatePull(), pub).port });
+            expect(await run(h, t), `${name}/${want}`).toEqual({ ok: false, reason: want });
+          }
+        }
+      });
+      it("public still open: the private copy is needed and is not on record, so republish_stack_parent_no_pull_request on every path", async () => {
+        for (const [name, side, run] of rounds) {
+          const t = await noPrivate(side, "pr_opened", "pr_opened");
+          const merges = vi.fn();
+          const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: realPort(privatePull(), openPublic).port });
+          expect(await run(h, t), name).toEqual({ ok: false, reason: "republish_stack_parent_no_pull_request" });
+          expect(merges, name).not.toHaveBeenCalled();
+        }
+      });
+      it("the child still on the parent's branch: a public copy that is still open with no private number, or that is gone (404), is refused republish_stack_parent_no_pull_request, never as unavailable", async () => {
+        for (const [pub, hasNumber] of [[openPublic, false], [async (): Promise<PublicEnd> => null, true]] as const) {
+          const t = await stacked("sandbox", hasNumber ? PARENT_PR : null);
+          await pairParent(t, "pr_opened");
+          const merges = vi.fn();
+          const h = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase: realPort(privatePull(), pub).port });
+          expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_stack_parent_no_pull_request" });
+          expect(merges).not.toHaveBeenCalled();
+        }
+      });
+      it("the child still on the parent's branch, public merged to main: told the parent has ended", async () => {
+        const t = await noPrivate("sandbox", "merged", "pr_merged");
+        const h = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn()), stackBase: realPort(privatePull(), mergedToMain).port });
+        expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_stack_parent_ended" });
+      });
+    });
+
+    it("a parent with no push row is read through its private pull request, and the public read is never made", async () => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, "merged");
+        const merges = vi.fn();
+        const real = realPort(privatePull({ state: "closed", merged: true }), async () => { throw new Error("must not be asked"); });
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: real.port });
+        expect(((await run(h, t)) as { ok: boolean }).ok, name).toBe(true);
+        expect(real.publicReads, name).toEqual([]);
+        expect(real.privateReads.length, name).toBeGreaterThan(0);
       }
     });
 
@@ -850,14 +1134,80 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       });
     });
 
-    it("a parent with no recorded pull request number: refused base_sync_unavailable, the parent is never read, zero merges", async () => {
+    it("a parent with no recorded pull request number: refused republish_stack_parent_no_pull_request (a permanent state, not a transient one), the parent is never read, zero merges", async () => {
       const t = await stacked("sandbox", null);
       const merges = vi.fn();
       const stackBase = parentPort(async () => openParent);
       const h = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase });
-      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_stack_parent_no_pull_request" });
       expect(stackBase.readParent).not.toHaveBeenCalled();
       expect(merges).not.toHaveBeenCalled();
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: REPUBLISH_STACK_PARENT_NO_PULL_REQUEST_SENTENCE });
+    });
+
+    it("the no-pull-request sentence says what clears it and names a step that exists; it never offers Request changes, which would stop at the same place", () => {
+      expect(REPUBLISH_STACK_PARENT_NO_PULL_REQUEST_SENTENCE).toMatch(/clears only if that item's pull request gets recorded/);
+      expect(REPUBLISH_STACK_PARENT_NO_PULL_REQUEST_SENTENCE).toMatch(/yourself, or close this item/);
+      expect(REPUBLISH_STACK_PARENT_NO_PULL_REQUEST_SENTENCE).not.toMatch(/Request changes|Build again|try again later|null|undefined|republish_|base to main on GitHub|Couldn't bring/);
+    });
+
+    // D#6 STACK-THREE-DEEP: G <- P <- C. P merged into G's branch while G is open, and C's base was set to main. The rows and GitHub both say P merged; only its base says the work is not in main.
+    const offMain: StackParentFacts = { ...closedOnGithub, merged: true, baseRef: "fx/grandparent" };
+    const parentRows = ["merged", "closed", "pr_opened"] as const;
+
+    it.each(parentRows)("a retargeted child whose parent merged into another branch (item row %s): every round path is refused republish_stack_parent_off_main with zero merges, nothing started or published", async (stage) => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, stage);
+        if (stage === "closed") await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-public', $2, $3, $4, 8, 'https://github.com/acme/widgets-public/pull/8', 'pr_merged' FROM work_items WHERE id = $1", [t.w, "d".repeat(64), "e".repeat(40), "f".repeat(40)]);
+        const merges = vi.fn();
+        const syncBase = retargeted(merges);
+        const stackBase = parentPort(async () => offMain);
+        const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
+        const before = await runs(t.w);
+        expect(await run(h, t), `${name}/${stage}`).toEqual({ ok: false, reason: "republish_stack_parent_off_main" });
+        expect(merges, name).not.toHaveBeenCalled();
+        expect(syncBase.mock.calls.every((c) => (c[0] as { readOnly?: boolean }).readOnly === true), name).toBe(true);
+        expect(stackBase.readParent, name).toHaveBeenCalledTimes(1);
+        expect(h.resume, name).not.toHaveBeenCalled();
+        expect(await runs(t.w), name).toBe(before);
+        expect((await admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1 AND role = 'plane_publish'", [t.w])).rows, name).toEqual([]);
+        expect(await codes(t.w), name).toEqual([["escalated", "republish_stack_parent_off_main"]]);
+      }
+    });
+
+    it("a child still on its parent's branch, whose parent merged into another branch, is refused republish_stack_parent_off_main (not told to change its base to main), zero merges", async () => {
+      for (const stage of parentRows) {
+        const t = await stacked();
+        await setParentStage(t, stage);
+        const merges = vi.fn();
+        const h = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase: parentPort(async () => offMain) });
+        expect(await h.module.advanceStartFix(who(t), fixReq(t)), stage).toEqual({ ok: false, reason: "republish_stack_parent_off_main" });
+        expect(merges, stage).not.toHaveBeenCalled();
+        expect(h.resume, stage).not.toHaveBeenCalled();
+      }
+    });
+
+    it("the off-main sentence says the work would be published, names no step that publishes it (not Request changes, not a base of main) and carries no raw code", async () => {
+      const t = await stacked();
+      const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(vi.fn()), stackBase: parentPort(async () => offMain) });
+      await h.module.advanceStartFix(who(t), fixReq(t));
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: REPUBLISH_STACK_PARENT_OFF_MAIN_SENTENCE });
+      expect(REPUBLISH_STACK_PARENT_OFF_MAIN_SENTENCE).toMatch(/would publish it/);
+      expect(REPUBLISH_STACK_PARENT_OFF_MAIN_SENTENCE).toMatch(/close this item and start the change again as a new item once that work is in main/);
+      expect(REPUBLISH_STACK_PARENT_OFF_MAIN_SENTENCE).not.toMatch(/Press Request changes|Build again|null|undefined|republish_|base to main on GitHub/);
+    });
+
+    it("a retargeted child whose merged parent's base is not shown, or whose parent has no recorded pull request, is refused with the matching fixed code on every path", async () => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await setParentStage(t, "merged");
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(vi.fn()), stackBase: parentPort(async () => ({ ...offMain, baseRef: "" })) });
+        expect(await run(h, t), name).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        const n = await stacked(side, null);
+        const hn = harness({ privateHead: async () => ASKED, syncBase: retargeted(vi.fn()), stackBase: parentPort(async () => openParent) });
+        expect(await run(hn, n), name).toEqual({ ok: false, reason: "republish_stack_parent_no_pull_request" });
+      }
     });
 
     it("the pull request's base is not the parent's branch the read found (a race between the two reads): refused republish_stacked_unsupported, zero merges", async () => {
@@ -893,15 +1243,15 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       for (const h of [hr, hc, ho]) expect(h.resume).not.toHaveBeenCalled();
     });
 
-    it("a change on the default branch (the parent merged and the pull request was retargeted) is not stacked: one sync call, the parent is never read", async () => {
+    it("a change on the default branch (the parent merged and the pull request was retargeted) is not stacked: the parent is read once for the branch it merged into (main), then the sync merges", async () => {
       const t = await stacked();
       await setParentStage(t, "merged");
-      const stackBase = parentPort(async () => openParent);
+      const stackBase = parentPort(async () => ({ ...closedOnGithub, merged: true }));
       const syncBase = vi.fn(async () => merged());
       const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
       expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
-      expect(syncBase).toHaveBeenCalledTimes(1);
-      expect(stackBase.readParent).not.toHaveBeenCalled();
+      expect(syncBase).toHaveBeenCalledTimes(2);
+      expect(stackBase.readParent).toHaveBeenCalledTimes(1);
     });
   });
 });

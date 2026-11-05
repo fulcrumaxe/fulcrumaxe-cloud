@@ -6,10 +6,10 @@ import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
-import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPLACE_ROUND_CODE_OF, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN } from "@fx/core/src/work-items/baseSync.js";
+import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPLACE_ROUND_CODE_OF, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN, REPUBLISH_STACK_PARENT_OFF_MAIN, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST } from "@fx/core/src/work-items/baseSync.js";
 import { retryTransientRead } from "@fx/core/src/github/transientRead.js";
-import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
-import { decideStackStart } from "@fx/pipeline";
+import { readStackParentForRead } from "@fx/core/src/work-items/stackParentPublish.js";
+import { decideStackStart, parentReadInput, StackParentMissingError } from "@fx/pipeline";
 import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { RUNNER_REPLACE_ROUND_KIND } from "@fx/runner";
 import { clearReplaceAuthorization } from "@fx/core/src/setup-requests/branchPushed.js";
@@ -89,12 +89,13 @@ export async function syncRunBranch(
     live ??= privateHead ? await privateHead({ repo: input.repo, branch: input.pr.branch }) : null;
     if (live === null || !SHA.test(live)) throw new Error("no head");
     // A parent that ended unmerged is read from our rows before anything is merged; the sync then only reads (nothing is written until the parent is shown open).
-    // A parent our rows do not show merged is also asked of GitHub when the pull request turns out to target main (below), so that first call only reads too.
+    // Any other parent is also asked of GitHub when the pull request turns out to target main (below), so that first call only reads too. That includes a parent our rows show merged: they keep no record of which branch it merged into, and a merge into a branch other than main leaves its work out of main.
     const row = input.publicCopy === true ? await stackParentRow(pool, who) : null;
-    closed = row?.end === "closed";
-    probe = row !== null && row.end !== "merged";
+    // A closed row ends the round with no read, unless the parent has a public pull request: that one is asked first (the row can lag it, and would say "closed" of a parent that merged).
+    closed = row?.end === "closed" && !row.paired;
+    probe = row !== null;
     outcome = await syncBase({ repo: input.repo, branch: input.pr.branch, prNumber: input.pr.number, ...(input.publicCopy === true ? { publicCopy: true } : {}), ...(input.readOnly === true || closed || probe ? { readOnly: true } : {}) });
-    // The branch holds its parent's work, and the pull request no longer points at the parent's branch: a base of main would publish it unless the parent merged. GitHub says so now; our rows can lag.
+    // The branch holds its parent's work, and the pull request no longer points at the parent's branch: a base of main would publish it unless the parent merged into main. GitHub says so now; our rows can lag and never held the branch.
     if (probe && !closed && outcome.kind !== "stacked") {
       const end = await liveParentEnd(pool, ports, who, input.repo);
       if (end !== "merged") parentCode = end;
@@ -150,33 +151,43 @@ export async function stackParentEnd(pool: Pool, who: Who): Promise<"merged" | "
 }
 
 /** The item's stack parent from our rows: null when it has none, else how it ended (`stackParentEnd`'s word). */
-async function stackParentRow(pool: Pool, who: Who): Promise<{ end: "merged" | "closed" | null } | null> {
+async function stackParentRow(pool: Pool, who: Who): Promise<{ end: "merged" | "closed" | null; paired: boolean } | null> {
   const { rows } = await withTenant(pool, who.accountId, (client) =>
-    client.query<{ stage: string; push: string | null }>(
-      `SELECT p.stage, pp.state AS push FROM work_items w JOIN work_items p ON p.account_id = w.account_id AND p.id = w.stack_parent_id
-         LEFT JOIN plane_pushes pp ON pp.account_id = p.account_id AND pp.work_item_id = p.id WHERE w.id = $1 AND w.account_id = $2`,
+    client.query<{ stage: string; push: string | null; pr: number | null }>(
+      `SELECT p.stage, pp.state AS push, pp.pr_number AS pr FROM work_items w JOIN work_items p ON p.account_id = w.account_id AND p.id = w.stack_parent_id
+         LEFT JOIN plane_pushes pp ON pp.account_id = p.account_id AND pp.work_item_id = p.id WHERE w.id = $1 AND w.account_id = $2
+        ORDER BY pp.created_at DESC NULLS LAST, pp.id LIMIT 1`,
       [who.workItemId, who.accountId],
     ),
   );
   const r = rows[0];
   if (!r) return null;
-  if (r.stage === "merged" || r.push === "pr_merged") return { end: "merged" };
-  return { end: r.stage === "closed_unmerged" || r.stage === "closed" || r.push === "pr_closed" ? "closed" : null };
+  // `paired`: the parent has a public pull request, which is the one asked when it matters; our rows only lag it.
+  const paired = r.pr !== null;
+  if (r.stage === "merged" || r.push === "pr_merged") return { end: "merged", paired };
+  return { end: r.stage === "closed_unmerged" || r.stage === "closed" || r.push === "pr_closed" ? "closed" : null, paired };
 }
 
 /**
- * The parent of a change whose pull request targets main, asked of GitHub now (our rows lag, and a retarget leaves the child's branch holding the parent's work): `merged` lets the round go on, a parent still open or closed
- * unmerged is the code that refuses it, and a parent that cannot be read (no port, no recorded pull request, a failed or odd read) is `base_sync_unavailable`.
+ * The parent of a change whose pull request targets main, asked of GitHub now (our rows lag, and a retarget leaves the child's branch holding the parent's work): `merged` (into the default branch) lets the round go on, a parent still open, closed
+ * unmerged or merged into another branch is the code that refuses it, a parent with no recorded pull request is its own permanent code, and a parent that cannot be read (no port, a failed or odd read, a merge whose base was not shown) is `base_sync_unavailable`.
  */
 async function liveParentEnd(pool: Pool, ports: FixRoundHeadPorts | null | undefined, who: Who, repo: Repo): Promise<"merged" | string> {
   try {
-    const parent = await withTenant(pool, who.accountId, (client) => readStackParentPull(client, who.workItemId));
-    if (!ports?.stackBase || parent === null || parent.prNumber === null) return BASE_SYNC_UNAVAILABLE;
-    const read = await retryTransientRead(() => ports.stackBase!.readParent({ repoId: repo.id, owner: repo.owner, name: repo.name, prNumber: parent.prNumber! }));
+    const parent = await withTenant(pool, who.accountId, (client) => readStackParentForRead(client, who.accountId, who.workItemId));
+    if (!ports?.stackBase || parent === null) return BASE_SYNC_UNAVAILABLE;
+    // A parent with a public pull request is read from it first; the private number is needed only when that one is still open (the port says so).
+    if (parent.prNumber === null && parent.publicPr === null) return REPUBLISH_STACK_PARENT_NO_PULL_REQUEST;
+    const stackBase = ports.stackBase;
+    const readInput = parentReadInput(who.accountId, repo, parent);
+    const read = await retryTransientRead(() => stackBase.readParent(readInput));
     if (read.state === "open") return REPUBLISH_STACK_PARENT_OPEN;
     if (read.state !== "closed") return BASE_SYNC_UNAVAILABLE;
-    return read.merged ? "merged" : REPUBLISH_STACK_PARENT_CLOSED;
-  } catch {
+    if (!read.merged) return REPUBLISH_STACK_PARENT_CLOSED;
+    const decided = decideStackStart(read);
+    return decided.ok ? "merged" : decided.reason === "stack_parent_merged_off_main" ? REPUBLISH_STACK_PARENT_OFF_MAIN : BASE_SYNC_UNAVAILABLE;
+  } catch (err) {
+    if (err instanceof StackParentMissingError) return REPUBLISH_STACK_PARENT_NO_PULL_REQUEST;
     // fx-swallow-ok: the cause can carry a repository name or a token; only the fixed code survives
     console.warn(JSON.stringify({ event: "advance.stack_parent_unavailable", work_item_id: who.workItemId }));
     return BASE_SYNC_UNAVAILABLE;
@@ -185,26 +196,31 @@ async function liveParentEnd(pool: Pool, ports: FixRoundHeadPorts | null | undef
 
 /**
  * D#6 FIXROUND-REPUBLISH-STACKED: a sandbox round on a stacked change with a public copy goes on only while the pull request it is stacked on is verifiably open (the build start's own rule, `decideStackStart`).
- * The parent is read from our rows for its number and from GitHub for its state, and only after the port answered `stacked`. Merged or closed: `republish_stack_parent_ended`. A parent that cannot be read, or whose
+ * The parent is read from our rows for its number and from GitHub for its state, and only after the port answered `stacked`. Merged (into main) or closed: `republish_stack_parent_ended`; merged into another branch: `republish_stack_parent_off_main`; no recorded pull request: `republish_stack_parent_no_pull_request`. A parent that cannot be read, or whose
  * branch moved between the two reads: `base_sync_unavailable`. No recorded parent (the database keeps a parent in the child's repository), no port, or a base that is not the parent's branch: the refusal stands. Then the sync is asked again, naming the branch.
  */
 async function syncStacked(pool: Pool, ports: FixRoundHeadPorts | null | undefined, who: Who, input: { repo: Repo; pr: { number: number; branch: string } }, baseRef: string): Promise<{ outcome: BranchSyncOutcome } | { code: string }> {
   const { stackBase, syncBase } = ports ?? {};
-  const parent = await withTenant(pool, who.accountId, (client) => readStackParentPull(client, who.workItemId));
+  const parent = await withTenant(pool, who.accountId, (client) => readStackParentForRead(client, who.accountId, who.workItemId));
   if (!stackBase || !syncBase || parent === null) return { code: REPUBLISH_STACKED_UNSUPPORTED };
-  if (parent.prNumber === null) return { code: BASE_SYNC_UNAVAILABLE };
+  if (parent.prNumber === null && parent.publicPr === null) return { code: REPUBLISH_STACK_PARENT_NO_PULL_REQUEST };
   try {
-    const read = await retryTransientRead(() => stackBase.readParent({ repoId: input.repo.id, owner: input.repo.owner, name: input.repo.name, prNumber: parent.prNumber! }));
+    const readInput = parentReadInput(who.accountId, input.repo, parent);
+    const read = await retryTransientRead(() => stackBase.readParent(readInput));
     const decided = decideStackStart(read);
+    if (!decided.ok && decided.reason === "stack_parent_merged_off_main") return { code: REPUBLISH_STACK_PARENT_OFF_MAIN };
     if (!decided.ok && decided.reason !== "stack_parent_closed") return { code: BASE_SYNC_UNAVAILABLE };
     if (!decided.ok || decided.base === null) {
-      // Ended. GitHub's merged bit is not trusted alone: the cleanup sweep closes a merged paired parent's private pull request unmerged, so our rows (the item's stage) say which it was.
+      // Ended. A parent with a public pull request was read from it, and its merge bit is the truth: our rows are not consulted (a merged row over a public pull request that closed unmerged would say "merged" falsely).
+      if (parent.publicPr !== null) return { code: read.merged ? REPUBLISH_STACK_PARENT_ENDED : REPUBLISH_STACK_PARENT_CLOSED };
+      // No public copy. GitHub's merged bit is not trusted alone: the cleanup sweep closes a merged paired parent's private pull request unmerged, so our rows (the item's stage) say which it was.
       const end = await stackParentEnd(pool, who);
       return { code: end === "merged" || (end === null && read.merged) ? REPUBLISH_STACK_PARENT_ENDED : REPUBLISH_STACK_PARENT_CLOSED };
     }
     if (decided.base.branch !== baseRef) return { code: REPUBLISH_STACKED_UNSUPPORTED };
     return { outcome: await syncBase({ repo: input.repo, branch: input.pr.branch, prNumber: input.pr.number, publicCopy: true, stackBranch: decided.base.branch }) };
-  } catch {
+  } catch (err) {
+    if (err instanceof StackParentMissingError) return { code: REPUBLISH_STACK_PARENT_NO_PULL_REQUEST };
     // fx-swallow-ok: the cause can carry a repository name or a token; only the fixed code survives
     console.warn(JSON.stringify({ event: "advance.stack_parent_unavailable", work_item_id: who.workItemId }));
     return { code: BASE_SYNC_UNAVAILABLE };
