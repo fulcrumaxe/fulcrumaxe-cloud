@@ -265,6 +265,38 @@ describe("pullRequestState (D#6 REPUBLISH-CLOSED-PR)", () => {
   });
 });
 
+describe("pullRequestBase (D#6 STACK-THREE-DEEP)", () => {
+  const ask = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.pullRequestBase({ accountId: ACCOUNT, codeRepo: "acme/widgets", number: 9 });
+
+  it.each([
+    ["merged into the default branch", pr({ state: "closed", merged: true, base: { ref: "main", repo: { default_branch: "main" } } }), { state: "closed", merged: true, baseRef: "main", defaultBranch: "main" }],
+    ["merged into another branch", pr({ state: "closed", merged: true, base: { ref: "fx/grandparent", repo: { default_branch: "main" } } }), { state: "closed", merged: true, baseRef: "fx/grandparent", defaultBranch: "main" }],
+    ["closed without merging", pr({ state: "closed", merged: false, base: { ref: "main", repo: { default_branch: "main" } } }), { state: "closed", merged: false, baseRef: "main", defaultBranch: "main" }],
+    ["open", pr({ base: { ref: "main", repo: { default_branch: "main" } } }), { state: "open", merged: false, baseRef: "main", defaultBranch: "main" }],
+    ["a read that does not show the default branch", pr({ state: "closed", merged: true, base: { ref: "main" } }), { state: "closed", merged: true, baseRef: "main", defaultBranch: "" }],
+  ])("says %s", async (_l, body, want) => {
+    const t = await setup({ pr: body });
+    await expect(ask(t)).resolves.toEqual(want);
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+  });
+
+  it("no such pull request answers null; a 500, a body that is not a pull request and a state GitHub does not name throw (never merged), with the token revoked", async () => {
+    await expect(ask(await setup({ pr: undefined }))).resolves.toBeNull();
+    const t = await setup({ pr: pr(), fail: "pulls" });
+    // A 5xx is flagged as a blip (REPUBLISH-TRANSIENT-RETRY reads again); a body that is not a pull request is not.
+    await expect(ask(t)).rejects.toMatchObject({ code: "public_unavailable", transient: true });
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+    await expect(ask(await setup({ pr: "not an object" }))).rejects.toMatchObject({ code: "public_unavailable", transient: false });
+    await expect(ask(await setup({ pr: pr({ state: undefined }) }))).rejects.toMatchObject({ code: "public_unavailable" });
+  });
+
+  it("another account's installation is refused before any read", async () => {
+    const t = await setup({ pr: pr() });
+    await expect(t.hosted.pullRequestBase({ accountId: "22222222-2222-4222-8222-222222222222", codeRepo: "acme/widgets", number: 9 })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    expect(t.server.seen.every((r) => r.path === "/repos/acme/widgets/installation")).toBe(true);
+  });
+});
+
 describe("branchHead (the record module's port)", () => {
   it("reads through a fresh token that is revoked after, and answers null for no branch", async () => {
     const t = await setup({ branchHead: HEAD });

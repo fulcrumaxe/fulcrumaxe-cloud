@@ -7,7 +7,7 @@ import { retryTransientRead } from "@fx/core/src/github/transientRead.js";
 import { buildExecutorPrompt } from "../src/advance/build.js";
 import { classifyStall } from "@fx/core/src/work-items/stalled.js";
 import { errorCodeOrOther } from "@fx/telemetry";
-import { createStackBasePort, decideStackStart, isSafeBranchName, STACK_START_REFUSALS, type StackParentFacts } from "../src/advance/stackBase.js";
+import { createStackBasePort, decideStackStart, isSafeBranchName, StackParentMissingError, STACK_START_REFUSALS, type StackParentFacts } from "../src/advance/stackBase.js";
 
 /**
  * D#598 P3b (body acceptance 10 and 11, C1 item 1): where a stacked child's run starts. The decision is a pure table; the port is
@@ -16,7 +16,7 @@ import { createStackBasePort, decideStackStart, isSafeBranchName, STACK_START_RE
  */
 const HEAD = "a".repeat(40);
 const MOVED = "b".repeat(40);
-const open = (over: Partial<StackParentFacts> = {}): StackParentFacts => ({ state: "open", merged: false, headSha: HEAD, headRef: "fx/issue-41", headInBaseRepo: true, branchTipSha: HEAD, ...over });
+const open = (over: Partial<StackParentFacts> = {}): StackParentFacts => ({ state: "open", merged: false, headSha: HEAD, headRef: "fx/issue-41", headInBaseRepo: true, branchTipSha: HEAD, baseRef: "main", defaultBranch: "main", ...over });
 
 describe("decideStackStart", () => {
   it("an open parent whose pull request head equals the fetched branch tip: start from that branch at that commit", () => {
@@ -30,6 +30,17 @@ describe("decideStackStart", () => {
 
   it("the parent already merged: the child builds on the default branch like any item", () => {
     expect(decideStackStart(open({ state: "closed", merged: true }))).toEqual({ ok: true, base: null });
+  });
+
+  it("the parent merged into another branch than the default one: refused, its work is not in main", () => {
+    expect(decideStackStart(open({ state: "closed", merged: true, baseRef: "fx/grandparent" }))).toEqual({ ok: false, reason: "stack_parent_merged_off_main" });
+  });
+
+  it.each([
+    ["no base branch in the read", { baseRef: "" }],
+    ["no default branch in the read", { defaultBranch: "" }],
+  ])("a merged parent whose base cannot be established (%s): unreadable, never merged-into-main", (_label, over) => {
+    expect(decideStackStart(open({ state: "closed", merged: true, ...over }))).toEqual({ ok: false, reason: "stack_parent_unreadable" });
   });
 
   it("the parent was closed without merging: refused", () => {
@@ -134,7 +145,7 @@ describe("createStackBasePort over the real installation client", () => {
   it("reads the pull request with the read-only pull request token and the branch tip with the contents-read token, and nothing else", async () => {
     const t = setup(pr());
     const facts = await t.port.readParent(TARGET);
-    expect(facts).toEqual({ state: "open", merged: false, headSha: HEAD, headRef: "fx/issue-41", headInBaseRepo: true, branchTipSha: HEAD });
+    expect(facts).toEqual({ state: "open", merged: false, headSha: HEAD, headRef: "fx/issue-41", headInBaseRepo: true, branchTipSha: HEAD, baseRef: "main", defaultBranch: "main" });
     expect(t.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /repos/acme/widgets/pulls/41", "GET /repos/acme/widgets/git/ref/heads/fx/issue-41"]);
     expect(t.minted.map((m) => m.permissions)).toEqual([{ metadata: "read", pull_requests: "read" }, { metadata: "read", contents: "read" }]);
     expect(t.minted.every((m) => m.repositories?.length === 1 && m.repositories[0] === "widgets")).toBe(true);
@@ -145,6 +156,19 @@ describe("createStackBasePort over the real installation client", () => {
     const facts = await t.port.readParent(TARGET);
     expect(decideStackStart(facts)).toEqual({ ok: true, base: null });
     expect(t.calls).toHaveLength(1);
+  });
+
+  it("a parent merged into another branch is read as such: base and default branch come from the same pull request read", async () => {
+    const t = setup(pr({ state: "closed", merged: true, base: { ref: "fx/grandparent", repo: { full_name: "acme/widgets", default_branch: "main" } } }), "unrequested");
+    const facts = await t.port.readParent(TARGET);
+    expect(facts).toMatchObject({ baseRef: "fx/grandparent", defaultBranch: "main" });
+    expect(decideStackStart(facts)).toEqual({ ok: false, reason: "stack_parent_merged_off_main" });
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it("a merged parent whose read carries no default branch: unreadable", async () => {
+    const t = setup(pr({ state: "closed", merged: true, base: { ref: "main", repo: { full_name: "acme/widgets" } } }), "unrequested");
+    expect(decideStackStart(await t.port.readParent(TARGET))).toEqual({ ok: false, reason: "stack_parent_unreadable" });
   });
 
   it("a head in a fork: the branch is not read, and the decision is unusable", async () => {
@@ -225,5 +249,108 @@ describe("STACK-ON-REFUSED-PARENT: every stack refusal is a closed code with a p
     expect(why).toContain("Try the push again");
     expect(why).toContain("Build again");
     expect(why).toContain("whichever it offers");
+  });
+});
+
+
+// D#6 STACK-THREE-DEEP: a paired parent ends on its PUBLIC pull request. The private copy is closed unmerged by the sweep, or stays open until it runs; neither says where the public one went.
+describe("createStackBasePort: a parent with a public copy is asked about the public pull request", () => {
+  const PUB = { accountId: "11111111-1111-4111-8111-111111111111", codeRepo: "acme/widgets-public", number: 8 };
+  const privatePull = (over: Record<string, unknown> = {}) => ({ number: 41, state: "open", merged: false, head: { sha: HEAD, ref: "fx/issue-41", repo: { full_name: "acme/widgets" } }, base: { ref: "main", repo: { full_name: "acme/widgets", default_branch: "main" } }, ...over });
+  function build(privateBody: unknown, publicBody: () => Promise<{ state: "open" | "closed"; merged: boolean; baseRef: string; defaultBranch: string } | null>) {
+    const privateReads: string[] = [];
+    const publicReads: unknown[] = [];
+    const http = {
+      request: async (req: { path: string }) => {
+        privateReads.push(req.path);
+        return req.path.includes("/git/ref/") ? { status: 200, body: { object: { sha: HEAD } } } : { status: 200, body: privateBody };
+      },
+    };
+    const port = createStackBasePort({
+      open: async () => http,
+      publicPull: async (i) => {
+        publicReads.push(i);
+        return publicBody();
+      },
+    });
+    return { port, privateReads, publicReads };
+  }
+  const TARGET = { repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets", prNumber: 41 };
+  const target = { ...TARGET, publicPr: PUB };
+
+  it.each([
+    ["the private copy closed unmerged by the sweep", privatePull({ state: "closed", merged: false })],
+    ["the private copy still open", privatePull()],
+  ])("merged to main on the public side, %s: merged into main, and the private pull request is never read", async (_l, priv) => {
+    const t = build(priv, async () => ({ state: "closed", merged: true, baseRef: "main", defaultBranch: "main" }));
+    const facts = await t.port.readParent(target);
+    expect(decideStackStart(facts)).toEqual({ ok: true, base: null });
+    expect(t.publicReads).toEqual([PUB]);
+    expect(t.privateReads).toEqual([]);
+  });
+
+  it("merged on the public side into another branch: refused as merged off main, whatever the private copy says", async () => {
+    const t = build(privatePull({ state: "closed" }), async () => ({ state: "closed", merged: true, baseRef: "fx/grandparent", defaultBranch: "main" }));
+    expect(decideStackStart(await t.port.readParent(target))).toEqual({ ok: false, reason: "stack_parent_merged_off_main" });
+  });
+
+  it("closed without merging on the public side: closed, even if the private copy says merged", async () => {
+    const t = build(privatePull({ state: "closed", merged: true }), async () => ({ state: "closed", merged: false, baseRef: "main", defaultBranch: "main" }));
+    expect(decideStackStart(await t.port.readParent(target))).toEqual({ ok: false, reason: "stack_parent_closed" });
+  });
+
+  it("open on the public side: the private copy is the branch the child builds on and answers as it always did", async () => {
+    const t = build(privatePull(), async () => ({ state: "open", merged: false, baseRef: "main", defaultBranch: "main" }));
+    expect(decideStackStart(await t.port.readParent(target))).toEqual({ ok: true, base: { branch: "fx/issue-41", sha: HEAD } });
+  });
+
+  it("open on the public side while the private copy says merged: not merged (the public copy is the one that merges)", async () => {
+    const t = build(privatePull({ state: "closed", merged: true }), async () => ({ state: "open", merged: false, baseRef: "main", defaultBranch: "main" }));
+    expect(decideStackStart(await t.port.readParent(target))).toEqual({ ok: false, reason: "stack_parent_closed" });
+  });
+
+  it.each([
+    [
+      "a public read that fails",
+      async () => {
+        throw new Error("boom");
+      },
+    ],
+    ["no such public pull request", async () => null],
+  ])("%s: the read throws (unavailable), it never falls back to the private copy", async (_l, publicBody) => {
+    const t = build(privatePull({ state: "closed", merged: true }), publicBody);
+    await expect(t.port.readParent(target)).rejects.toThrow();
+    expect(t.privateReads).toEqual([]);
+  });
+
+  it("no public read is wired for a parent that has a public copy: throws", async () => {
+    const port = createStackBasePort({ open: async () => ({ request: async () => ({ status: 200, body: privatePull() }) }) });
+    await expect(port.readParent(target)).rejects.toThrow("no public read");
+  });
+
+  it("no private pull request number on record: an ended public copy still answers (the private one is never read); an open one, a missing one and an unpaired parent say there is no pull request to read", async () => {
+    const noPrivate = { ...target, prNumber: null };
+    const merged = build(privatePull(), async () => ({ state: "closed", merged: true, baseRef: "main", defaultBranch: "main" }));
+    expect(decideStackStart(await merged.port.readParent(noPrivate))).toEqual({ ok: true, base: null });
+    expect(merged.privateReads).toEqual([]);
+    const closed = build(privatePull(), async () => ({ state: "closed", merged: false, baseRef: "main", defaultBranch: "main" }));
+    expect(decideStackStart(await closed.port.readParent(noPrivate))).toEqual({ ok: false, reason: "stack_parent_closed" });
+    const isOpen = build(privatePull(), async () => ({ state: "open", merged: false, baseRef: "main", defaultBranch: "main" }));
+    await expect(isOpen.port.readParent(noPrivate)).rejects.toBeInstanceOf(StackParentMissingError);
+    expect(isOpen.privateReads).toEqual([]);
+    await expect(build(privatePull(), async () => null).port.readParent(target)).rejects.toBeInstanceOf(StackParentMissingError);
+    await expect(build(privatePull(), async () => null).port.readParent({ ...TARGET, prNumber: null })).rejects.toBeInstanceOf(StackParentMissingError);
+  });
+
+  it("a public read that fails is a plain error, not a missing pull request (reading again can clear it)", async () => {
+    await expect(build(privatePull(), async () => { throw new Error("boom"); }).port.readParent(target)).rejects.not.toBeInstanceOf(StackParentMissingError);
+  });
+
+  it("a parent with no public copy uses the private read alone", async () => {
+    const t = build(privatePull({ state: "closed", merged: true }), async () => {
+      throw new Error("must not be asked");
+    });
+    expect(decideStackStart(await t.port.readParent(TARGET))).toEqual({ ok: true, base: null });
+    expect(t.publicReads).toEqual([]);
   });
 });

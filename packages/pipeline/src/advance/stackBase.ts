@@ -5,7 +5,8 @@ import { SHA_PATTERN } from "../build/mergeGate.js";
  * D#598 P3b: where a stacked child's executor starts. An item with a `stack_parent_id` builds on its parent's open pull request, so the
  * run starts from that pull request's head and its own pull request is opened against the parent's branch (not the default branch).
  *
- * Nothing here looks at which repository, which plan or whether the repository is paired: the same rules hold for every connected repo.
+ * Nothing here looks at which repository or which plan: the same rules hold for every connected repo. The one place it looks at a pairing is how the parent ENDED: a parent whose push row names a public pull request is asked about that
+ * public pull request (the copy that merges). The private one is read for a parent with no public copy, and for the branch a child builds on while the public one is still open (`readParent`).
  *
  * The check that makes the start safe is the one in the Spec: the head sha GitHub gives for the parent's pull request must equal the tip
  * of the parent's branch as fetched (a second, separate read). When they differ the parent is moving, or the read is stale, and the start
@@ -25,17 +26,51 @@ export interface StackParentFacts {
   headInBaseRepo: boolean;
   /** The tip of `headRef` as the branch read (`GET git/ref/heads/<ref>`) says. */
   branchTipSha: string;
+  /** `base.ref`: the branch the pull request targets, i.e. where a merged one merged. Empty when the read did not carry it. */
+  baseRef: string;
+  /** `base.repo.default_branch`: the repository's default branch as that same read says. Empty when it did not carry it. */
+  defaultBranch: string;
+}
+
+/** The parent's public pull request when the platform opened one (a paired repository): the copy that merges. */
+export interface PublicParentPull {
+  accountId: string;
+  codeRepo: string;
+  number: number;
 }
 
 export interface StackBasePort {
-  /** Reads the parent's pull request and its branch tip. A read that cannot be made throws. */
-  readParent(input: { repoId: string; owner: string; name: string; prNumber: number }): Promise<StackParentFacts>;
+  /**
+   * Reads the parent's pull request and its branch tip. A read that cannot be made throws. With `publicPr` (the parent has a public copy), how the parent ENDED is asked of that public pull request, not of the
+   * private one: the private copy is closed unmerged by the sweep, or stays open until it runs, and neither says where the public one merged.
+   */
+  readParent(input: { repoId: string; owner: string; name: string; prNumber: number | null; publicPr?: PublicParentPull }): Promise<StackParentFacts>;
 }
+
+/**
+ * The parent has no pull request to read, and none will appear by reading again: no private number on record (needed for an unpaired parent, or a paired one whose public copy is still open, which is the branch the child builds on),
+ * or the public pull request its push row names does not exist. Callers answer it with a fixed permanent code, not "unavailable".
+ */
+export class StackParentMissingError extends Error {
+  constructor() {
+    super("stack parent: no pull request to read");
+    this.name = "StackParentMissingError";
+  }
+}
+
+/** The input a caller gives `readParent` for a parent read from our rows (`readStackParentForRead`): the private number (null when none is recorded), and the public copy when it has one. */
+export function parentReadInput(accountId: string, repo: { id: string; owner: string; name: string }, parent: { prNumber: number | null; publicPr: { codeRepo: string; number: number } | null }): Parameters<StackBasePort["readParent"]>[0] {
+  return { repoId: repo.id, owner: repo.owner, name: repo.name, prNumber: parent.prNumber, ...(parent.publicPr ? { publicPr: { accountId, ...parent.publicPr } } : {}) };
+}
+
+/** What the public read says: `state`, the merge bit, the branch the pull request targeted and the repository's default branch (empty when not shown). Null: no such pull request. */
+export type PublicPullFacts = { state: "open" | "closed"; merged: boolean; baseRef: string; defaultBranch: string } | null;
 
 /** The refusals a start can answer with for a stacked item. Fixed codes, never text. */
 export const STACK_START_REFUSALS = [
   "stack_parent_no_pull_request",
   "stack_parent_closed",
+  "stack_parent_merged_off_main",
   "stack_parent_branch_unusable",
   "stack_parent_head_moved",
   "stack_parent_unreadable",
@@ -60,7 +95,12 @@ export type StackStart =
 
 /** The decision, from what GitHub said. Pure, so the table of cases is a plain test. */
 export function decideStackStart(facts: StackParentFacts): StackStart {
-  if (facts.state === "closed") return facts.merged ? { ok: true, base: null } : { ok: false, reason: "stack_parent_closed" };
+  if (facts.state === "closed") {
+    if (!facts.merged) return { ok: false, reason: "stack_parent_closed" };
+    // Merged counts only when it merged into the default branch: a parent merged into another open branch left its work out of main, and a child built on or retargeted to main would publish it.
+    if (facts.baseRef === "" || facts.defaultBranch === "") return { ok: false, reason: "stack_parent_unreadable" };
+    return facts.baseRef === facts.defaultBranch ? { ok: true, base: null } : { ok: false, reason: "stack_parent_merged_off_main" };
+  }
   if (facts.state !== "open" || facts.merged) return { ok: false, reason: "stack_parent_unreadable" };
   if (!facts.headInBaseRepo || !isSafeBranchName(facts.headRef)) return { ok: false, reason: "stack_parent_branch_unusable" };
   if (!SHA_PATTERN.test(facts.headSha) || !SHA_PATTERN.test(facts.branchTipSha)) return { ok: false, reason: "stack_parent_unreadable" };
@@ -82,32 +122,52 @@ export interface StackBaseHttp {
  * The real port over read-only repository clients. Two GETs: the pull request (the `read` client: metadata and pull requests) and the branch ref (the `repo_map` client, whose exact path list includes one branch ref and nothing else of the code). Anything unexpected throws (the start
  * answers `stack_parent_unreadable`), so a malformed answer is never read as an open pull request.
  */
-export function createStackBasePort(deps: { open(kind: "read" | "repo_map", r: { repoId: string; owner: string; name: string }): Promise<StackBaseHttp> }): StackBasePort {
+export function createStackBasePort(deps: { open(kind: "read" | "repo_map", r: { repoId: string; owner: string; name: string }): Promise<StackBaseHttp>; publicPull?(input: PublicParentPull): Promise<PublicPullFacts> }): StackBasePort {
+  /** THE one public read of a parent's end (a retry wraps this function). Ended (merged or closed): the facts, built from the public pull request. Still open: null, and the private copy answers (it is the branch the child builds on). Anything else throws. */
+  async function readPublicEnd(publicPr: PublicParentPull): Promise<StackParentFacts | null> {
+    if (!deps.publicPull) throw new Error("stack parent: no public read");
+    const pub = await deps.publicPull(publicPr);
+    if (pub === null) throw new StackParentMissingError();
+    if (pub.state === "open") return null;
+    return { state: "closed", merged: pub.merged, headSha: "", headRef: "", headInBaseRepo: false, branchTipSha: "", baseRef: pub.baseRef, defaultBranch: pub.defaultBranch };
+  }
   return {
-    async readParent({ repoId, owner, name, prNumber }) {
-      if (!NAME.test(owner) || !NAME.test(name) || !Number.isSafeInteger(prNumber) || prNumber <= 0) throw new Error("stack parent: invalid repository or pull request number");
-      const target = { repoId, owner, name };
-      const http = await deps.open("read", target);
-      const repo = `/repos/${owner}/${name}`;
-      const pull = await http.request({ method: "GET", path: `${repo}/pulls/${prNumber}` });
-      // A 5xx is marked as a blip so a caller may read again (D#6 REPUBLISH-TRANSIENT-RETRY); the message is the same.
-      if (pull.status >= 500) throw transientReadError(`stack parent: pull request read answered ${pull.status}`);
-      if (pull.status !== 200 || !isObj(pull.body)) throw new Error(`stack parent: pull request read answered ${pull.status}`);
-      const b = pull.body;
-      const head = b.head;
-      const base = b.base;
-      if (!isObj(head) || typeof head.sha !== "string" || typeof head.ref !== "string" || !isObj(base) || !isObj(base.repo) || typeof base.repo.full_name !== "string") throw new Error("stack parent: malformed pull request");
-      if (b.state !== "open" && b.state !== "closed") throw new Error("stack parent: malformed pull request state");
-      const headInBaseRepo = isObj(head.repo) && typeof head.repo.full_name === "string" && head.repo.full_name.toLowerCase() === base.repo.full_name.toLowerCase();
-      // The branch tip is only read for a branch we could use; a merged or closed pull request needs no tip.
-      let branchTipSha = "";
-      if (b.state === "open" && headInBaseRepo && isSafeBranchName(head.ref)) {
-        const ref = await (await deps.open("repo_map", target)).request({ method: "GET", path: `${repo}/git/ref/heads/${head.ref.split("/").map(encodeURIComponent).join("/")}` });
-        if (ref.status >= 500) throw transientReadError(`stack parent: branch read answered ${ref.status}`);
-        if (ref.status !== 200 || !isObj(ref.body) || !isObj(ref.body.object) || typeof ref.body.object.sha !== "string") throw new Error(`stack parent: branch read answered ${ref.status}`);
-        branchTipSha = ref.body.object.sha;
-      }
-      return { state: b.state, merged: b.merged === true || (typeof b.merged_at === "string" && b.state === "closed"), headSha: head.sha, headRef: head.ref, headInBaseRepo, branchTipSha };
+    async readParent({ repoId, owner, name, prNumber, publicPr }) {
+      const ended = publicPr ? await readPublicEnd(publicPr) : null;
+      if (ended !== null) return ended;
+      // The private copy is the branch the child builds on: needed for a parent with no public copy, and for one whose public copy is still open.
+      if (prNumber === null) throw new StackParentMissingError();
+      const facts = await readPrivateParent({ repoId, owner, name, prNumber });
+      // A parent whose public copy is still open has not merged, whatever its private copy says.
+      return publicPr && facts.state === "closed" ? { ...facts, merged: false } : facts;
     },
   };
+  async function readPrivateParent({ repoId, owner, name, prNumber }: { repoId: string; owner: string; name: string; prNumber: number }): Promise<StackParentFacts> {
+    if (!NAME.test(owner) || !NAME.test(name) || !Number.isSafeInteger(prNumber) || prNumber <= 0) throw new Error("stack parent: invalid repository or pull request number");
+    const target = { repoId, owner, name };
+    const http = await deps.open("read", target);
+    const repo = `/repos/${owner}/${name}`;
+    const pull = await http.request({ method: "GET", path: `${repo}/pulls/${prNumber}` });
+    // A 5xx is marked as a blip so a caller may read again (D#6 REPUBLISH-TRANSIENT-RETRY); the message is the same.
+    if (pull.status >= 500) throw transientReadError(`stack parent: pull request read answered ${pull.status}`);
+    if (pull.status !== 200 || !isObj(pull.body)) throw new Error(`stack parent: pull request read answered ${pull.status}`);
+    const b = pull.body;
+    const head = b.head;
+    const base = b.base;
+    if (!isObj(head) || typeof head.sha !== "string" || typeof head.ref !== "string" || !isObj(base) || !isObj(base.repo) || typeof base.repo.full_name !== "string") throw new Error("stack parent: malformed pull request");
+    if (b.state !== "open" && b.state !== "closed") throw new Error("stack parent: malformed pull request state");
+    const headInBaseRepo = isObj(head.repo) && typeof head.repo.full_name === "string" && head.repo.full_name.toLowerCase() === base.repo.full_name.toLowerCase();
+    // The branch tip is only read for a branch we could use; a merged or closed pull request needs no tip.
+    let branchTipSha = "";
+    if (b.state === "open" && headInBaseRepo && isSafeBranchName(head.ref)) {
+      const ref = await (await deps.open("repo_map", target)).request({ method: "GET", path: `${repo}/git/ref/heads/${head.ref.split("/").map(encodeURIComponent).join("/")}` });
+      if (ref.status >= 500) throw transientReadError(`stack parent: branch read answered ${ref.status}`);
+      if (ref.status !== 200 || !isObj(ref.body) || !isObj(ref.body.object) || typeof ref.body.object.sha !== "string") throw new Error(`stack parent: branch read answered ${ref.status}`);
+      branchTipSha = ref.body.object.sha;
+    }
+    const merged = b.merged === true || (typeof b.merged_at === "string" && b.state === "closed");
+    const baseRef = typeof base.ref === "string" ? base.ref : "";
+    const defaultBranch = typeof base.repo.default_branch === "string" ? base.repo.default_branch : "";
+    return { state: b.state, merged, headSha: head.sha, headRef: head.ref, headInBaseRepo, branchTipSha, baseRef, defaultBranch };
+  }
 }

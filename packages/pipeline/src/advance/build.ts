@@ -11,10 +11,9 @@ import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/w
 import { isBuildableKind } from "@fx/discussions";
 import { EXCLUDE_PROMPT_LINE, effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
-import { parentPublishRefused } from "@fx/core/src/work-items/stackParentPublish.js";
+import { parentPublishRefused, readStackParentForRead } from "@fx/core/src/work-items/stackParentPublish.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
-import { decideStackStart, type StackBasePort, type StackParentFacts, type StackStartRefusal } from "./stackBase.js";
+import { decideStackStart, parentReadInput, StackParentMissingError, type StackBasePort, type StackParentFacts, type StackStartRefusal } from "./stackBase.js";
 import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
 import { startWaitFor } from "./reservationPauses.js";
@@ -370,17 +369,18 @@ async function resolveStackBase(
   port: StackBasePort | undefined,
 ): Promise<{ ok: true; base: { branch: string; sha: string } | null } | { ok: false; reason: StackStartRefusal }> {
   if (isRunnerMode(executionMode)) return { ok: false, reason: "stack_runtime_unsupported" };
-  const parent = await withTenant(pool, accountId, (client) => readStackParentPull(client, workItemId));
+  const parent = await withTenant(pool, accountId, (client) => readStackParentForRead(client, accountId, workItemId));
   // A parent whose public change was refused is not a base to stack on. Derived from the parent's current push row on each start (a retried parent clears it); only a start with no run yet gets here.
   if (parent !== null && (await withTenant(pool, accountId, (client) => parentPublishRefused(client, accountId, parent.parentId)))) return { ok: false, reason: "stack_parent_publish_refused" };
-  if (parent === null || parent.prNumber === null) return { ok: false, reason: "stack_parent_no_pull_request" };
+  // A parent with a public pull request is read from it first; the private number is needed only when that one is still open (the port says so).
+  if (parent === null || (parent.prNumber === null && parent.publicPr === null)) return { ok: false, reason: "stack_parent_no_pull_request" };
   if (port === undefined || facts.repo_id === null || !facts.gh_owner || !facts.gh_name) return { ok: false, reason: "stack_base_unavailable" };
   let read: StackParentFacts;
   try {
-    read = await port.readParent({ repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, prNumber: parent.prNumber });
-  } catch {
+    read = await port.readParent(parentReadInput(accountId, { id: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name }, parent));
+  } catch (err) {
     // fx-swallow-ok: a read that cannot be made is a refusal with a fixed code, never a start from the default branch
-    return { ok: false, reason: "stack_parent_unreadable" };
+    return { ok: false, reason: err instanceof StackParentMissingError ? "stack_parent_no_pull_request" : "stack_parent_unreadable" };
   }
   const decided = decideStackStart(read);
   return decided.ok ? { ok: true, base: decided.base } : { ok: false, reason: decided.reason };
@@ -646,7 +646,7 @@ export async function readStage(pool: Pool, accountId: string, workItemId: strin
  * HO-2b) are the two ways a move of a running run to the other side can end with nothing to continue: the item already had ten continuations,
  * or the new run could not start. In both the work is saved on the run's branch.
  */
-export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed", "push_cap_reached", "check_rounds_used", "check_fix_branch_unknown", "public_branch_moved", "public_head_unavailable", "base_sync_conflict", "base_sync_unavailable", "republish_base_missing", "republish_stacked_unsupported", "republish_stack_parent_ended", "republish_stack_parent_closed", "republish_stack_parent_open", "check_failed_outside_change"] as const;
+export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed", "push_cap_reached", "check_rounds_used", "check_fix_branch_unknown", "public_branch_moved", "public_head_unavailable", "base_sync_conflict", "base_sync_unavailable", "republish_base_missing", "republish_stacked_unsupported", "republish_stack_parent_ended", "republish_stack_parent_closed", "republish_stack_parent_open", "republish_stack_parent_off_main", "republish_stack_parent_no_pull_request", "check_failed_outside_change"] as const;
 export type BuildFailureCode = (typeof BUILD_FAILURE_CODES)[number];
 
 export type BuildFailureResult = { status: "recorded"; stage: "needs_human" } | { status: "unchanged"; stage: string | null };

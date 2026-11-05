@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { startBuildForItem } from "../src/advance/buildTesting.js";
-import type { StackBasePort, StackParentFacts } from "../src/advance/stackBase.js";
+import { createStackBasePort, type StackBasePort, type StackParentFacts } from "../src/advance/stackBase.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
@@ -42,14 +42,14 @@ class World implements AdvanceRunPorts {
 }
 
 class Github implements StackBasePort {
-  reads: Array<{ repoId: string; owner: string; name: string; prNumber: number }> = [];
+  reads: Array<{ repoId: string; owner: string; name: string; prNumber: number | null; publicPr?: unknown }> = [];
   constructor(private readonly answer: () => Promise<StackParentFacts> | StackParentFacts) {}
-  async readParent(input: { repoId: string; owner: string; name: string; prNumber: number }): Promise<StackParentFacts> {
+  async readParent(input: { repoId: string; owner: string; name: string; prNumber: number | null; publicPr?: unknown }): Promise<StackParentFacts> {
     this.reads.push(input);
     return this.answer();
   }
 }
-const openParent = (over: Partial<StackParentFacts> = {}): StackParentFacts => ({ state: "open", merged: false, headSha: HEAD, headRef: "fx/issue-41", headInBaseRepo: true, branchTipSha: HEAD, ...over });
+const openParent = (over: Partial<StackParentFacts> = {}): StackParentFacts => ({ state: "open", merged: false, headSha: HEAD, headRef: "fx/issue-41", headInBaseRepo: true, branchTipSha: HEAD, baseRef: "main", defaultBranch: "main", ...over });
 
 async function item(accountId: string, repoId: string, ghNumber: number, stage: string): Promise<string> {
   const id = randomUUID();
@@ -141,6 +141,49 @@ describe("D#598 P3b: a stacked child's executor starts from the parent's open pu
     const prompt = t.world.requests[0]!.prompt;
     expect(prompt).toContain("BASE=$(git rev-parse --abbrev-ref HEAD)");
     expect(prompt).not.toContain("refs/remotes/origin");
+  });
+
+  it("the parent merged into another branch than the default one (D#6 STACK-THREE-DEEP): refused with its fixed code, nothing started, never built on main", async () => {
+    const t = await stackedWorld();
+    expect(await start(t, new Github(() => openParent({ state: "closed", merged: true, baseRef: "fx/grandparent" })))).toEqual({ status: "refused", reason: "stack_parent_merged_off_main" });
+    expect(t.world.requests).toEqual([]);
+    expect(await stageOf(t.childId)).toBe("spec_ready");
+  });
+
+  it("a paired parent that merged publicly: its public pull request is the one asked about, and the child starts on the default branch (its private copy was closed unmerged)", async () => {
+    const t = await stackedWorld();
+    await h.admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) VALUES ($1, $2, $3, 'customer-co/storefront-public', $4, $5, $6, 8, 'https://github.com/customer-co/storefront-public/pull/8', 'pr_merged')", [t.accountId, t.parentId, t.repoId, "d".repeat(64), "e".repeat(40), "f".repeat(40)]);
+    const gh = new Github(() => openParent({ state: "closed", merged: true }));
+    expect(await start(t, gh)).toMatchObject({ status: "started" });
+    expect(gh.reads).toEqual([{ repoId: t.repoId, owner: "customer-co", name: "storefront", prNumber: 41, publicPr: { accountId: t.accountId, codeRepo: "customer-co/storefront-public", number: 8 } }]);
+    expect(t.world.requests[0]!.headSha).toBeUndefined();
+  });
+
+  it("a paired parent with no private pull request number on record: its public pull request merged to main starts the child on the default branch; open or gone, it is refused with the no-pull-request code", async () => {
+    for (const [pub, want] of [
+      [{ state: "closed", merged: true, baseRef: "main", defaultBranch: "main" }, "started"],
+      [{ state: "open", merged: false, baseRef: "main", defaultBranch: "main" }, "stack_parent_no_pull_request"],
+      [null, "stack_parent_no_pull_request"],
+    ] as const) {
+      const t = await stackedWorld({ parentPr: null });
+      await h.admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) VALUES ($1, $2, $3, 'customer-co/storefront-public', $4, $5, $6, 8, 'https://github.com/customer-co/storefront-public/pull/8', 'pr_merged')", [t.accountId, t.parentId, t.repoId, "d".repeat(64), "e".repeat(40), "f".repeat(40)]);
+      const port = createStackBasePort({ open: async () => { throw new Error("the private pull request must not be read"); }, publicPull: async () => pub });
+      const out = await start(t, port);
+      if (want === "started") expect(out).toMatchObject({ status: "started" });
+      else expect(out).toEqual({ status: "refused", reason: want });
+    }
+  });
+
+  it("a parent with no push row and no pull request number is refused, as before", async () => {
+    const t = await stackedWorld({ parentPr: null });
+    expect(await start(t, new Github(() => openParent()))).toEqual({ status: "refused", reason: "stack_parent_no_pull_request" });
+  });
+
+  it("a parent with no push row is read through its private pull request alone", async () => {
+    const t = await stackedWorld();
+    const gh = new Github(() => openParent());
+    await start(t, gh);
+    expect(gh.reads).toEqual([{ repoId: t.repoId, owner: "customer-co", name: "storefront", prNumber: 41 }]);
   });
 
   it("GitHub cannot be read: refused as unreadable, never started from the default branch", async () => {

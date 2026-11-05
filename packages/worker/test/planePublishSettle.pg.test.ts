@@ -68,7 +68,13 @@ describe("settling a paired sandbox build, and opening the public pull request a
     close: async () => undefined,
   };
   let parent: StackParentFacts | Error;
-  const stackBase: StackBasePort = { readParent: async () => (parent instanceof Error ? Promise.reject(parent) : parent) };
+  const parentReads: unknown[] = [];
+  const stackBase: StackBasePort = {
+    readParent: async (i) => {
+      parentReads.push(i);
+      return parent instanceof Error ? Promise.reject(parent) : parent;
+    },
+  };
 
   /** The public side. */
   const gh = { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, opened: [] as Array<{ codeRepo: string; branch: string; title: string; body: string }>, openError: undefined as string | undefined, calls: [] as string[] };
@@ -150,7 +156,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
     identityMissing = false;
     Object.assign(priv, { calls: [], opened: [], ready: [], existing: false, openError: false, readyError: false, defaultBranch: "main" });
     Object.assign(gh, { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" }, opened: [], openError: undefined, calls: [] });
-    parent = { state: "open", merged: false, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "e".repeat(40) };
+    parent = { state: "open", merged: false, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "e".repeat(40), baseRef: "main", defaultBranch: "main" };
     A = await seedAccount(admin, randomUUID());
     await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [A.repoId]);
     await admin.query("UPDATE work_items SET gh_number = 42, title = 'Add a thing' WHERE id = $1", [A.workItemId]);
@@ -359,14 +365,34 @@ describe("settling a paired sandbox build, and opening the public pull request a
     });
 
     it("a parent that merged since: against the default branch", async () => {
-      parent = { state: "closed", merged: true, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "" };
+      parent = { state: "closed", merged: true, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "", baseRef: "main", defaultBranch: "main" };
       await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
       expect(priv.opened[0]).toMatchObject({ base: "main" });
     });
 
+    it("a paired parent: its public pull request is named in the read; merged to main, the private pull request goes against the default branch, and the private copy never decides", async () => {
+      parentReads.length = 0;
+      await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-public', $2, $3, $4, 8, 'https://github.com/acme/widgets-public/pull/8', 'pr_merged' FROM work_items WHERE id = $1", [A.workItemId, "d".repeat(64), "e".repeat(40), "f".repeat(40)]);
+      parent = { state: "closed", merged: true, headSha: "", headRef: "", headInBaseRepo: false, branchTipSha: "", baseRef: "main", defaultBranch: "main" };
+      await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
+      expect(priv.opened[0]).toMatchObject({ base: "main" });
+      expect(parentReads).toEqual([expect.objectContaining({ prNumber: 31, publicPr: { accountId: A.accountId, codeRepo: "acme/widgets-public", number: 8 } })]);
+    });
+
+    it("a paired parent with no private pull request number on record: the public pull request is still asked, and merged to main the private pull request goes against the default branch", async () => {
+      await admin.query("DELETE FROM agent_runs WHERE work_item_id = (SELECT stack_parent_id FROM work_items WHERE id = $1)", [A.workItemId]);
+      await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-public', $2, $3, $4, 8, 'https://github.com/acme/widgets-public/pull/8', 'pr_merged' FROM work_items WHERE id = $1", [A.workItemId, "d".repeat(64), "e".repeat(40), "f".repeat(40)]);
+      parentReads.length = 0;
+      parent = { state: "closed", merged: true, headSha: "", headRef: "", headInBaseRepo: false, branchTipSha: "", baseRef: "main", defaultBranch: "main" };
+      await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
+      expect(priv.opened[0]).toMatchObject({ base: "main" });
+      expect(parentReads).toEqual([expect.objectContaining({ prNumber: null, publicPr: expect.objectContaining({ number: 8 }) })]);
+    });
+
     it.each([
       ["a parent that cannot be read", () => (parent = new Error("down"))],
-      ["a parent closed without merging", () => (parent = { state: "closed", merged: false, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "" })],
+      ["a parent merged into another branch than the default one", () => (parent = { state: "closed", merged: true, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "", baseRef: "fx/grandparent", defaultBranch: "main" })],
+      ["a parent closed without merging", () => (parent = { state: "closed", merged: false, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "", baseRef: "main", defaultBranch: "main" })],
     ])("%s: no pull request is opened (never one against the wrong base), and the publish step still runs", async (_l, arrange) => {
       arrange();
       const r = await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });

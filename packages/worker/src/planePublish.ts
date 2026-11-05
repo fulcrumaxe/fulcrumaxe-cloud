@@ -17,8 +17,8 @@ import { raiseAfterLeaseFailure } from "./fixRoundHeads.js";
 export { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, type RetryFacts };
 import { PLANE_PUBLISH_ROLE, PLANE_PUBLISH_VCPUS, recordChildCodePullRequest, insertAgentRun, insertRunEvent, runPublishSandbox, sandboxNameFor, writeRunStatus, writeRunStatusOn, type ExecutionRun, type LostRunOutcome, type NetworkPolicyRule, type PlanePublishInput, type PlanePublishLine, type SandboxPort } from "@fx/runner";
 import { sandboxRunCost } from "@fx/spend";
-import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
-import { decideStackStart, markBuildNeedsHuman, type StackBasePort } from "@fx/pipeline";
+import { readStackParentForRead } from "@fx/core/src/work-items/stackParentPublish.js";
+import { decideStackStart, markBuildNeedsHuman, parentReadInput, type StackBasePort } from "@fx/pipeline";
 import { loadRunPullRequestText, type RunPullRequestPort } from "@fx/runner-cloud";
 
 /**
@@ -702,13 +702,13 @@ async function openPrivatePullRequest(deps: PlanePublishDeps, accountId: string,
     // The private draft is opened on the build identity's branch: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. A refusal opens nothing.
     const resolved = await resolveIdentity(deps.pool, accountId, facts.workItemId, "observe");
     if (!resolved.ok) return "skipped";
-    const { text, parent } = await withTenant(deps.pool, accountId, async (c) => ({ text: await loadRunPullRequestText(c, { accountId, runId: facts.runId }), parent: await readStackParentPull(c, facts.workItemId) }));
+    const { text, parent } = await withTenant(deps.pool, accountId, async (c) => ({ text: await loadRunPullRequestText(c, { accountId, runId: facts.runId }), parent: await readStackParentForRead(c, accountId, facts.workItemId) }));
     if (text === null) return "failed";
     let base = await port.defaultBranch(facts.repo);
     if (parent !== null) {
       // A stacked item's run branched from its parent's branch, so its pull request goes against that branch (a parent that merged since is the default branch).
-      if (parent.prNumber === null || !deps.stackBase) return "failed";
-      const decided = decideStackStart(await deps.stackBase.readParent({ repoId: facts.repo.id, owner: facts.repo.owner, name: facts.repo.name, prNumber: parent.prNumber }));
+      if ((parent.prNumber === null && parent.publicPr === null) || !deps.stackBase) return "failed";
+      const decided = decideStackStart(await deps.stackBase.readParent(parentReadInput(accountId, facts.repo, parent)));
       if (!decided.ok) return "failed";
       if (decided.base !== null) base = decided.base.branch;
     }
