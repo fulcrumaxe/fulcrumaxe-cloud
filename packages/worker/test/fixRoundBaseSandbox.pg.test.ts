@@ -786,6 +786,70 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       expect(await codes(t.w)).toEqual([["stopped", "base_sync_unavailable"]]);
     });
 
+    // D#6 REPUBLISH-TRANSIENT-RETRY: the parent read (both places it is made) is read again after a blip, at most three times; a lasting outage ends exactly as before.
+    describe("D#6 REPUBLISH-TRANSIENT-RETRY: a blip on the stack-parent read", () => {
+      const blip = () => Object.assign(new Error("stack parent: pull request read answered 503"), { transient: true });
+      /** Fails `n` times with a blip (or with a plain error when `plain`), then answers. */
+      const failing = (n: number, then: StackParentFacts, plain = false) => {
+        let left = n;
+        return async (): Promise<StackParentFacts> => {
+          if (left-- > 0) throw plain ? new Error("forbidden") : blip();
+          return then;
+        };
+      };
+
+      it.each([1, 2])("a stacked change whose parent read fails %i time(s) then says open: the round starts after n+1 reads, with the same sync calls as without a blip", async (n) => {
+        const t = await stacked();
+        const merges = vi.fn();
+        const syncBase = port(merges, { upToDate: true });
+        const stackBase = parentPort(failing(n, openParent));
+        const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
+        expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+        expect(stackBase.readParent).toHaveBeenCalledTimes(n + 1);
+        expect(syncBase).toHaveBeenCalledTimes(2);
+        expect(merges).not.toHaveBeenCalled();
+      });
+
+      it("a child retargeted to main whose parent read fails twice then says merged goes on (one merge of main, three reads); a parent that then says open is still refused", async () => {
+        const t = await stacked();
+        const merges = vi.fn();
+        const stackBase = parentPort(failing(2, { ...closedOnGithub, merged: true }));
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase });
+        expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+        expect(stackBase.readParent).toHaveBeenCalledTimes(3);
+        expect(merges).toHaveBeenCalledTimes(1);
+        const t2 = await stacked();
+        const merges2 = vi.fn();
+        const stackBase2 = parentPort(failing(1, openParent));
+        const h2 = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges2), stackBase: stackBase2 });
+        expect(await h2.module.advanceStartFix(who(t2), fixReq(t2))).toEqual({ ok: false, reason: "republish_stack_parent_open" });
+        expect(merges2).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ["stacked on its parent's branch", "stacked"],
+        ["retargeted to main", "retargeted"],
+      ])("a lasting outage (%s) is exactly three reads and then the same base_sync_unavailable, zero merges, nothing started", async (_label, shape) => {
+        const t = await stacked();
+        const merges = vi.fn();
+        const stackBase = parentPort(failing(99, openParent));
+        const h = harness({ privateHead: async () => ASKED, syncBase: shape === "stacked" ? port(merges) : retargeted(merges), stackBase });
+        expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        expect(stackBase.readParent).toHaveBeenCalledTimes(3);
+        expect(merges).not.toHaveBeenCalled();
+        expect(h.resume).not.toHaveBeenCalled();
+        expect(await codes(t.w)).toEqual([["stopped", "base_sync_unavailable"]]);
+      });
+
+      it("an error that is not a blip (a 4xx, a malformed answer) is read once and refused as before", async () => {
+        const t = await stacked();
+        const stackBase = parentPort(failing(99, openParent, true));
+        const h = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn()), stackBase });
+        expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        expect(stackBase.readParent).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it("a parent with no recorded pull request number: refused base_sync_unavailable, the parent is never read, zero merges", async () => {
       const t = await stacked("sandbox", null);
       const merges = vi.fn();

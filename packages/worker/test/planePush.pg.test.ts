@@ -17,7 +17,7 @@ import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse,
 import { mergeQueue } from "@fx/pipeline";
 import { RUNNER_REPLACE_ROUND_KIND, insertRunEvent } from "@fx/runner";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
-import { createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
+import { LIVE_READ_FAILED_EVENT, MAX_FAILED_LIVE_READS_PER_LEASE, createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
 import { ORIGIN, newKey, signed, type TestKey } from "../../runner-cloud/test/helpers.js";
 
 /**
@@ -933,6 +933,50 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
         answer = "open";
         expect((await askToken(run)).status).toBe(200);
         expect(asked).toHaveLength(2);
+      });
+
+      // D#6 REPUBLISH-TRANSIENT-RETRY: the hosted port retries the read inside one ask; asks on a lease whose read keeps THROWING are capped by count, per lease (run + generation).
+      describe("D#6 REPUBLISH-TRANSIENT-RETRY: asks on a lease whose live read keeps failing", () => {
+        const failures = async (runId: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2 ORDER BY seq", [runId, LIVE_READ_FAILED_EVENT])).rows.map((r) => r.payload);
+
+        it(`the first ${MAX_FAILED_LIVE_READS_PER_LEASE} asks that throw each read and are counted on the lease; the next makes no read and no token and still answers 503 public_unavailable, even when GitHub is back`, async () => {
+          await open();
+          answer = "throws";
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          for (let i = 1; i <= MAX_FAILED_LIVE_READS_PER_LEASE; i++) {
+            expect((await askToken(run)).status).toBe(503);
+            expect(asked).toHaveLength(i);
+          }
+          expect(await failures(run.id)).toEqual(Array.from({ length: MAX_FAILED_LIVE_READS_PER_LEASE }, () => ({ lease_generation: run.generation })));
+          answer = "open";
+          const capped = await askToken(run);
+          expect(capped.status).toBe(503);
+          expect(capped.body).toMatchObject({ error: { code: "public_unavailable" } });
+          expect(asked).toHaveLength(MAX_FAILED_LIVE_READS_PER_LEASE);
+          expect(await failures(run.id)).toHaveLength(MAX_FAILED_LIVE_READS_PER_LEASE);
+          await untouched();
+        });
+
+        it("the cap is per lease: another run reads again, and an answer that is not a throw (unknown, a 404) is never counted", async () => {
+          await open();
+          answer = "unknown";
+          const quiet = await claimedRun({ continues: { baseSha: BASE } });
+          for (let i = 0; i < MAX_FAILED_LIVE_READS_PER_LEASE + 2; i++) expect((await askToken(quiet)).status).toBe(503);
+          expect(asked).toHaveLength(MAX_FAILED_LIVE_READS_PER_LEASE + 2);
+          expect(await failures(quiet.id)).toEqual([]);
+          answer = "open";
+          expect((await askToken(quiet)).status).toBe(200);
+        });
+
+        it("a capped lease on one run does not stop a fresh run of the same item", async () => {
+          await open();
+          answer = "throws";
+          const first = await claimedRun({ continues: { baseSha: BASE } });
+          for (let i = 0; i < MAX_FAILED_LIVE_READS_PER_LEASE; i++) await askToken(first);
+          await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [first.id]);
+          answer = "open";
+          expect((await askToken(await claimedRun({ continues: { baseSha: BASE } }))).status).toBe(200);
+        });
       });
 
       it("a facade built with no live read answers 503 public_unavailable for an update and records nothing (fail closed, no refusal code)", async () => {

@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { InstallationTokenCache, type AccessTokenRequester } from "../../github/src/installationToken.js";
 import { createInstallationHttp } from "../../github/src/installationHttp.js";
 import { strictGithubFetch } from "../../github/test/helpers/strictGithub.js";
+import { retryTransientRead } from "@fx/core/src/github/transientRead.js";
 import { buildExecutorPrompt } from "../src/advance/build.js";
 import { classifyStall } from "@fx/core/src/work-items/stalled.js";
 import { errorCodeOrOther } from "@fx/telemetry";
@@ -102,7 +103,8 @@ describe("createStackBasePort over the real installation client", () => {
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const TARGET = { repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets", prNumber: 41 };
 
-  function setup(pull: unknown, ref: { status: number; body: unknown } | "unrequested" = { status: 200, body: { object: { sha: HEAD } } }) {
+  function setup(pull: unknown, ref: { status: number; body: unknown } | "unrequested" = { status: 200, body: { object: { sha: HEAD } } }, pullFailures = 0) {
+    let failsLeft = pullFailures;
     const calls: Array<{ method: string; path: string; auth: string | undefined }> = [];
     const minted: Array<Parameters<AccessTokenRequester>[0]> = [];
     const requester: AccessTokenRequester = async (p) => {
@@ -112,7 +114,7 @@ describe("createStackBasePort over the real installation client", () => {
     const fetchImpl = strictGithubFetch((async (input: string | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       calls.push({ method: init?.method ?? "GET", path: url.pathname, auth: (init?.headers as Record<string, string> | undefined)?.authorization });
-      if (url.pathname === "/repos/acme/widgets/pulls/41") return json(200, pull);
+      if (url.pathname === "/repos/acme/widgets/pulls/41") return failsLeft-- > 0 ? json(503, { message: "Service Unavailable" }) : json(200, pull);
       if (url.pathname.startsWith("/repos/acme/widgets/git/ref/heads/") && ref !== "unrequested") return json(ref.status, ref.body);
       return json(404, { message: "Not Found" });
     }) as unknown as typeof fetch);
@@ -164,6 +166,24 @@ describe("createStackBasePort over the real installation client", () => {
   it("a branch ref that answers 404 throws (the start answers unreadable)", async () => {
     const t = setup(pr(), { status: 404, body: { message: "Not Found" } });
     await expect(t.port.readParent(TARGET)).rejects.toThrow("branch read answered 404");
+  });
+
+  // D#6 REPUBLISH-TRANSIENT-RETRY: a 5xx is marked as a blip, with the same message; a 4xx or an odd 200 never is.
+  it("a 5xx on the pull request or the branch read throws a transient error with the usual message; a 4xx does not", async () => {
+    await expect(setup(pr(), undefined, 1).port.readParent(TARGET)).rejects.toMatchObject({ transient: true, message: "stack parent: pull request read answered 503" });
+    await expect(setup(pr(), { status: 502, body: {} }).port.readParent(TARGET)).rejects.toMatchObject({ transient: true, message: "stack parent: branch read answered 502" });
+    const refused = await setup(pr(), { status: 403, body: {} }).port.readParent(TARGET).catch((e: unknown) => e);
+    expect((refused as { transient?: unknown }).transient).toBeUndefined();
+  });
+
+  it("read again through retryTransientRead: two blips then the answer is three pull request reads, and a lasting outage is three reads then the same throw", async () => {
+    const sleep = async () => undefined;
+    const ok = setup(pr(), undefined, 2);
+    await expect(retryTransientRead(() => ok.port.readParent(TARGET), { sleep })).resolves.toMatchObject({ state: "open", headSha: HEAD });
+    expect(ok.calls.filter((c) => c.path === "/repos/acme/widgets/pulls/41")).toHaveLength(3);
+    const down = setup(pr(), undefined, 99);
+    await expect(retryTransientRead(() => down.port.readParent(TARGET), { sleep })).rejects.toThrow("pull request read answered 503");
+    expect(down.calls.filter((c) => c.path === "/repos/acme/widgets/pulls/41")).toHaveLength(3);
   });
 
   it("a branch ref answer without an object sha throws", async () => {

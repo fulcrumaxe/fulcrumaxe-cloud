@@ -3,6 +3,7 @@ import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { advanceActionFor } from './advance.js';
 import { blockingReasons, isQueuedSql, removedByPerson } from './mergeReadiness.js';
+import { CLOSE_ON_GITHUB_STAGES } from './operatorActions.js';
 import { readReviewHold } from './reviewHold.js';
 import { cleanWorkItemTitle } from './title.js';
 
@@ -214,13 +215,20 @@ interface Row {
   last_at: Date | null;
   last_activity: Date;
   queued: boolean;
+  /** The stage Needs a person was entered from (null at any other stage, or none recorded). */
+  needs_human_from: string | null;
 }
 
 /** The label for the card's top button at this stage, asked of the stage driver's own table; null when it does not advance here. */
-export function stallActionLabel(stage: string, facts: { discussionId: string | null; kind: string | null; hasSpec: boolean; noVerdictHold: boolean; followUp?: boolean }): string | null {
+export function stallActionLabel(stage: string, facts: { discussionId: string | null; kind: string | null; hasSpec: boolean; noVerdictHold: boolean; followUp?: boolean; prOpen?: boolean }): string | null {
   const verdict = advanceActionFor({ stage, discussion_id: facts.discussionId, kind: facts.kind, has_spec: facts.hasSpec, no_verdict_hold: facts.noVerdictHold, ...(facts.followUp === true ? { follow_up: true } : {}) });
   if (!verdict.ok) return null;
-  if (stage === 'needs_human') return verdict.action === 'review' ? 'Continue the review' : 'Build again';
+  if (stage === 'needs_human') {
+    if (verdict.action === 'review') return 'Continue the review';
+    // D#6 REPUBLISH-TRANSIENT-RETRY: with the pull request still open a rebuild stops at it (`rebuild_pr_open`), so the press is a dead end. What works there is Request changes (#724, #733), which needs the
+    // person's note and so is not a one-press button: the row offers nothing and says to open the card, which lists it.
+    return facts.prOpen === true ? null : 'Build again';
+  }
   return STALL_ACTION_LABELS[stage] ?? null;
 }
 
@@ -240,6 +248,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
               EXISTS (SELECT 1 FROM decision_asks a WHERE a.work_item_id = w.id AND a.state IN ('open', 'overdue')) AS waiting_ask,
               e.kind AS last_kind, e.code AS last_code, e.reasons AS last_reasons, e.created_at AS last_at,
               ${isQueuedSql('w.account_id', 'w.id')} AS queued,
+              (SELECT t.from_stage FROM work_item_transitions t WHERE t.work_item_id = w.id AND t.to_stage = 'needs_human' ORDER BY t.at DESC, t.created_at DESC LIMIT 1) AS needs_human_from,
               GREATEST(w.updated_at, e.created_at, (SELECT max(r.updated_at) FROM agent_runs r WHERE r.work_item_id = w.id)) AS last_activity
          FROM work_items w
          LEFT JOIN discussions d ON d.id = w.discussion_id
@@ -273,7 +282,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
       stage: r.stage,
       code: stall.code,
       why: stall.why,
-      actionLabel: stallActionLabel(r.stage, { discussionId: r.discussion_id, kind: r.kind, hasSpec: r.has_spec, noVerdictHold: r.hold, followUp: r.follow_up }),
+      actionLabel: stallActionLabel(r.stage, { discussionId: r.discussion_id, kind: r.kind, hasSpec: r.has_spec, noVerdictHold: r.hold, followUp: r.follow_up, prOpen: r.stage === 'needs_human' && r.needs_human_from !== null && CLOSE_ON_GITHUB_STAGES.includes(r.needs_human_from) }),
       since: stall.since,
     });
   }

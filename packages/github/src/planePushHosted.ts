@@ -1,3 +1,4 @@
+import { retryTransientRead } from "@fx/core/src/github/transientRead.js";
 import { createPlanePushApi } from "./planePushApi.js";
 
 /**
@@ -90,7 +91,7 @@ export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => num
         return api.inMainHistory({ codeRepo, sha: tipSha, token });
       }),
 
-    pullRequestState: ({ accountId, codeRepo, number }) => withFreshToken(accountId, codeRepo, (token) => api.pullRequestState({ codeRepo, number, token })),
+    pullRequestState: ({ accountId, codeRepo, number }) => withFreshToken(accountId, codeRepo, (token) => retryTransientRead(() => api.pullRequestState({ codeRepo, number, token }))),
 
     verifyPullRequest: ({ accountId, codeRepo, branch, number }) =>
       withFreshToken(accountId, codeRepo, async (token) => {

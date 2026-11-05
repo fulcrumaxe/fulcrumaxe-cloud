@@ -24,9 +24,12 @@ import { InstallationTokenCache, InstallationTokenError, MintTimeoutError, forge
 export type PlanePushApiFailure = "app_not_installed" | "code_repo_installation_not_owned" | "token_scope_mismatch" | "public_unavailable" | "pr_failed";
 
 export class PlanePushApiError extends Error {
-  constructor(readonly code: PlanePushApiFailure) {
+  /** D#6 REPUBLISH-TRANSIENT-RETRY: set only for a 5xx or a transport failure of a read, which `retryTransientRead` may repeat. */
+  readonly transient: boolean;
+  constructor(readonly code: PlanePushApiFailure, transient = false) {
     super(`planePushApi: ${code}`);
     this.name = "PlanePushApiError";
+    this.transient = transient;
   }
 }
 
@@ -74,7 +77,7 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       });
     } catch {
       // fx-swallow-ok: replaced by a fixed code; the original's text can carry the request URL
-      throw new PlanePushApiError("public_unavailable");
+      throw new PlanePushApiError("public_unavailable", true);
     }
     const text = await res.text();
     let parsed: unknown = null;
@@ -217,6 +220,8 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new PlanePushApiError("public_unavailable");
       const res = await call("GET", `/repos/${owner}/${name}/pulls/${input.number}`, input.token);
       if (res.status === 404) return "unknown";
+      // A 5xx is a blip the caller may read again; every other status (a 403 or 429 rate limit included) is thrown as it always was.
+      if (res.status >= 500) throw new PlanePushApiError("public_unavailable", true);
       const b = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { state?: unknown; merged?: unknown }) : undefined;
       if (!b) throw new PlanePushApiError("public_unavailable");
       if (b.state === "open" && b.merged !== true) return "open";
