@@ -96,4 +96,10 @@ describe('accept reads a stored body through the same cleaning (a row stored bef
     expect(parseNewItemBody(escaped('body', '\\u003c!-- x --\\u003e ok'), KINDS)).toEqual({ title: 't', kind: 'task', body: '[removed] ok' });
     expect(parseNewItemBody(escaped('title', 'A\\u200bB'), KINDS).title).toBe('AB');
   });
+  it('a title that holds only what the trust rule keeps (a pictograph with its selector, a subscript) comes back as it was typed; what the rule removes goes', () => {
+    // defang compares with the trust package's own removal, so a kept selector is not mistaken for a change that NFKC would then apply to the whole title.
+    expect(parseNewItemBody(item('H₂O ❤️', 'b'), KINDS).title).toBe('H₂O ❤️');
+    expect(parseNewItemBody(item('H₂O︁ ❤️', 'b'), KINDS).title).toBe('H₂O ❤️');
+    expect(parseNewItemBody(item('S︁TATUS:x', 'b'), KINDS).title).toBe('[removed]');
+  });
 });

@@ -243,6 +243,29 @@ describe("memory recall (D#601 MEM-3)", () => {
       expect(await recall(w, "stable")).toHaveLength(12);
     });
 
+    it("agent entries that outrank a person's cannot crowd the person's lines out of a full slot", async () => {
+      const w = await world();
+      await setSlot(w, 2048);
+      // The agent entries sort first (lower ids, same scope); with no floor they would fill the whole slot.
+      for (let i = 0; i < 40; i += 1) await put(w, { scope: "repo", author: "agent", id: low(), body: filler(`agent entry ${String(i).padStart(2, "0")}`, 200) });
+      const mine = [await put(w, { scope: "repo", author: "person", id: high(), body: filler("person rule one", 200) }), await put(w, { scope: "repo", author: "person", id: high(), body: filler("person rule two", 200) })];
+      const stable = await recall(w, "stable");
+      expect(stable.filter((e) => e.origin === "person").map((e) => e.id).sort()).toEqual([...mine].sort());
+      expect(stable.some((e) => e.origin === "agent")).toBe(true);
+      expect(Buffer.byteLength(renderMemorySlot(stable, 2048).text, "utf8")).toBeLessThanOrEqual(2048);
+    });
+
+    it("the item part has the same floor: agent notes on the item that outrank a person's cannot crowd the person's item lines out", async () => {
+      const w = await world();
+      await setSlot(w, 2048);
+      for (let i = 0; i < 40; i += 1) await put(w, { scope: "item", author: "agent", id: low(), body: filler(`agent item note ${String(i).padStart(2, "0")}`, 200) });
+      const mine = [await put(w, { scope: "item", author: "person", id: high(), body: filler("person item rule one", 200) }), await put(w, { scope: "item", author: "person", id: high(), body: filler("person item rule two", 200) })];
+      const item = await recall(w, "item");
+      expect(item.filter((e) => e.origin === "person").map((e) => e.id).sort()).toEqual([...mine].sort());
+      expect(item.some((e) => e.origin === "agent")).toBe(true);
+      expect(Buffer.byteLength(renderMemorySlot(item, 2048).text, "utf8")).toBeLessThanOrEqual(2048);
+    });
+
     it("ranks by ts_rank against the item's title and Spec once the entries do not all fit, and falls back to id order when nothing matches", async () => {
       const pair = async (w: World) => {
         await setSlot(w, 1024);

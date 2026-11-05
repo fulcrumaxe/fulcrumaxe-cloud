@@ -11,14 +11,16 @@ const MAX_INPUT = 200_000;
 const FIELD_MAX = 3000;
 const ITEMS_MAX = 50;
 const DEPTH_MAX = 8;
-const ZERO_WIDTH = /[\p{Cf}͏᠎]/gu;
+/** Copy of `INVISIBLE_PATTERN` and its callback in `@fx/trust` (what draws as nothing is removed; a text/emoji selector straight after a pictograph, and the keycap one, stay). A test walks every default-ignorable code point through both. */
+const INVISIBLE = /(?<=\p{Extended_Pictographic})([︎️])|(?<=[0-9#*])(️)(?=⃣)|[\p{Cf}\p{Default_Ignorable_Code_Point}͏᠎⠀]/gu;
+const stripInvisible = (text: string): string => text.replace(INVISIBLE, (_m, pict: string | undefined, keycap: string | undefined) => pict ?? keycap ?? "");
 const COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
 const TOKEN_A = /SPAWN_REQUEST[^\n]*(\n?)/gi;
 const TOKEN_B = /TERMINATE_REQUEST[^\n]*(\n?)/gi;
 const STATUS = /^STATUS:[A-Za-z_]+[^\n]*(\n?)/gim;
 
 export function stripControlTokens(text: string): string {
-  let s = text.normalize("NFKC").replace(ZERO_WIDTH, "");
+  let s = stripInvisible(text.normalize("NFKC"));
   s = s.replace(COMMENT, MARKER).replace(TOKEN_A, `${MARKER}$1`).replace(TOKEN_B, `${MARKER}$1`);
   return s.replace(STATUS, `${MARKER}$1`);
 }

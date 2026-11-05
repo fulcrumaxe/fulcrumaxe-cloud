@@ -119,10 +119,28 @@ const NEUTRALIZED_START = "<<UNTRUSTED EXTERNAL CONTENT (neutralized)>>";
  * individually because they carry no visible mark at all, unlike a
  * normal diacritic.
  *
+ * Widened (D#601 review of the memory path): `\p{Default_Ignorable_Code_Point}`
+ * is added so the class follows the Unicode property instead of a hand
+ * list. It brings in what is not Cf but draws as nothing: every variation
+ * selector (U+FE00..FE0F, U+E0100..E01EF), the Hangul fillers (U+115F,
+ * U+1160, U+3164, U+FFA0), the Khmer inherent vowels and the Mongolian
+ * free variation selectors. `S<VS>TATUS:SPEC_READY` used to keep the
+ * variation selector inside the word, so the line did not read as a
+ * token and reached a prompt looking like one. U+2800 (braille blank) is
+ * not default-ignorable but draws as a blank cell, so it is named
+ * individually. ZWJ and ZWNJ were already stripped here (they are Cf) and
+ * stay so: the memory path keeps them where a script needs them, this
+ * gate treats the text as untrusted and does not. The text and emoji
+ * variation selectors (U+FE0E, U+FE0F) stay only straight after a
+ * pictograph, and the emoji one in a keycap (digit, selector, U+20E3):
+ * there they change how a symbol draws and cannot sit inside a word.
+ *
  * Requires the `u` (Unicode) regex flag for `\p{...}` property escapes.
  * Stripped before matching, never present in the marker's own text.
  */
-const ZERO_WIDTH_PATTERN = /[\p{Cf}͏᠎]/gu;
+const INVISIBLE_PATTERN = /(?<=\p{Extended_Pictographic})([\ufe0e\ufe0f])|(?<=[0-9#*])(\ufe0f)(?=\u20e3)|[\p{Cf}\p{Default_Ignorable_Code_Point}\u034f\u180e\u2800]/gu;
+/** The runner's `assistant/fence.ts` carries a copy of this pattern and of the callback below (it ships without this package); a test walks every default-ignorable code point through both. Removes the invisible characters, except a text/emoji variation selector straight after a pictograph (and the keycap one), which does visible work and cannot split a word. */
+export const stripInvisible = (text: string): string => text.replace(INVISIBLE_PATTERN, (_m, pict: string | undefined, keycap: string | undefined) => pict ?? keycap ?? "");
 
 /**
  * Token patterns. All three carry the `i` flag (fix round #5 —
@@ -308,7 +326,7 @@ function boundInputLength(text: string): { text: string; truncated: boolean } {
  * cover.
  */
 export function stripControlTokens(text: string): string {
-  let sanitized = text.normalize("NFKC").replace(ZERO_WIDTH_PATTERN, "");
+  let sanitized = stripInvisible(text.normalize("NFKC"));
   sanitized = sanitized.replace(HTML_COMMENT_PATTERN, CONTROL_TOKEN_MARKER);
   sanitized = sanitized.replace(SPAWN_REQUEST_PATTERN, `${CONTROL_TOKEN_MARKER}$1`);
   sanitized = sanitized.replace(TERMINATE_REQUEST_PATTERN, `${CONTROL_TOKEN_MARKER}$1`);
