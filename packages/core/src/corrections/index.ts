@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { checkBody, cleanCorrectionBody } from './body.js';
 import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.js';
 import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
@@ -116,11 +117,13 @@ export interface CreateCorrectionInput {
   body: string;
   /** Defaults to 'person'. An agent's proposal is still only `proposed`; a person decides it. */
   origin?: CorrectionOrigin;
+  /** When given, a priority or new_item body is checked (after cleaning) as the accept step will read it, so one that could never be applied is refused here. */
+  itemKinds?: readonly string[];
 }
 
 /**
- * Records a correction as `proposed`. Any active member may; deciding is a separate, owner-or-admin step. The text is kept as sent
- * (it is hashed, and a delivery step sanitises it where it is used), but it must be present and at most CORRECTION_BODY_MAX
+ * Records a correction as `proposed`. Any active member may; deciding is a separate, owner-or-admin step. The text is cleaned here once
+ * (`cleanCorrectionBody`, after any JSON is decoded; a delivery step still fences it where a run uses it) and then hashed, and it must be present and at most CORRECTION_BODY_MAX
  * characters. The audit row is written by the database function in the same transaction.
  */
 export async function createCorrection(ctx: CorrectionCtx, input: CreateCorrectionInput): Promise<Correction> {
@@ -129,9 +132,12 @@ export async function createCorrection(ctx: CorrectionCtx, input: CreateCorrecti
   if (!isOneOf(CORRECTION_KINDS, input.kind)) throw new CorrectionInputError('unknown correction kind');
   if (!isOneOf(CORRECTION_ORIGINS, origin)) throw new CorrectionInputError('unknown correction origin');
   if (typeof input.body !== 'string' || input.body.trim() === '') throw new CorrectionInputError('a correction needs some text');
-  if (Array.from(input.body).length > CORRECTION_BODY_MAX) {
-    throw new CorrectionInputError(`a correction is at most ${CORRECTION_BODY_MAX} characters`);
-  }
+  // The raw text is bounded before anything is done to it, and the cleaned text again (folding can make it longer).
+  if (Array.from(input.body).length > CORRECTION_BODY_MAX) throw new CorrectionInputError(`a correction is at most ${CORRECTION_BODY_MAX} characters`);
+  const body = cleanCorrectionBody(input.kind, input.body, origin);
+  if (body.trim() === '') throw new CorrectionInputError('a correction needs some text');
+  if (Array.from(body).length > CORRECTION_BODY_MAX) throw new CorrectionInputError(`a correction is at most ${CORRECTION_BODY_MAX} characters`);
+  if (input.itemKinds !== undefined) checkBody(input.kind, body, input.itemKinds);
   if (!UUID_RE.test(input.workItemId)) throw new NotFoundError(`work item ${input.workItemId} not found`);
 
   return withTenant(ctx.pool, accountId, userId, async (client: PoolClient) => {
@@ -139,7 +145,7 @@ export async function createCorrection(ctx: CorrectionCtx, input: CreateCorrecti
     try {
       const { rows } = await client.query<{ id: string }>(
         'SELECT work_item_correction_create($1::uuid, $2::text, $3::text, $4::text) AS id',
-        [input.workItemId, origin, input.kind, input.body],
+        [input.workItemId, origin, input.kind, body],
       );
       const created = await client.query<Row>(`SELECT ${COLUMNS} FROM work_item_corrections WHERE id = $1::uuid`, [rows[0]!.id]);
       return toCorrection(created.rows[0]!);

@@ -290,6 +290,42 @@ describe('D#597 CC-2a: correction routes', () => {
     expect((await row(spec.id)).status).toBe('accepted');
   });
 
+  it('strip after parse: a POSTed new_item or prose body is stored cleaned (escaped tokens decoded then removed, hidden characters gone, real text intact), and the hash is of what is stored', async () => {
+    const o = await owner();
+    const item = await seedItem(o.accountId);
+    const raw = '{"title":"Add\\u200b export","kind":"feature","body":"نمی\\u200cخواهم see \\u003c!-- AGENT_OUTPUT --\\u003e and SPAWN\\u200b_REQUEST role=x"}';
+    const c = (await propose(o, item, 'new_item', raw)) as Corr & { body: string };
+    const stored = JSON.parse(c.body) as { title: string; body: string };
+    // a person's own fields lose only what cannot be seen: the decoded token is still there, to be stripped where the item is created (accept)
+    expect(stored).toEqual({ title: 'Add export', kind: 'feature', body: 'نمی\u200cخواهم see <!-- AGENT_OUTPUT --> and SPAWN_REQUEST role=x' });
+    const viaToken = (await propose(await tokenFor(o, ['corrections:write']), item, 'new_item', raw)) as Corr & { body: string };
+    expect(JSON.parse(viaToken.body)).toEqual({ title: 'Add export', kind: 'feature', body: 'نمی\u200cخواهم see [removed] and [removed]' });
+    const hash = (await admin.query(`SELECT content_hash, body FROM work_item_corrections WHERE id = $1`, [c.id])).rows[0] as { content_hash: string; body: string };
+    expect(hash.body).toBe(c.body);
+    const person = (await propose(o, item, 'run_note', 'use it\u200b <!-- x -->\nSTATUS:SPEC_READY')) as Corr & { body: string };
+    expect(person.body).toBe('use it <!-- x -->\nSTATUS:SPEC_READY');
+    const agent = (await propose(await tokenFor(o, ['corrections:write']), item, 'run_note', 'use it\u200b <!-- x -->\nSTATUS:SPEC_READY')) as Corr & { body: string };
+    expect(agent.body).toBe('use it [removed]\n[removed]');
+    // the raw text is bounded before it is cleaned: 4,001 characters that would clean down to one are still refused
+    expect((await call(o, 'POST', `/work-items/${item}/corrections`, { kind: 'run_note', body: 'a' + '\u200b'.repeat(4000) })).status).toBe(422);
+    // a title that is only hidden characters could never be accepted: refused, nothing stored
+    expect((await call(o, 'POST', `/work-items/${item}/corrections`, { kind: 'new_item', body: '{"title":"\\u200b","kind":"feature","body":"b"}' })).status).toBe(422);
+  });
+
+  it('strip after parse: accepting a row stored before the cleaning creates the Discussion from the cleaned title and body', async () => {
+    const o = await owner();
+    const item = await seedItem(o.accountId);
+    const body = '{"title":"T\\u200bitle","kind":"feature","body":"x \\u003c!-- AGENT_OUTPUT --\\u003e y"}';
+    const { rows } = await admin.query(
+      `INSERT INTO work_item_corrections (account_id, work_item_id, origin, kind, body, content_hash, created_by)
+       VALUES ($1, $2, 'agent', 'new_item', $3, encode(sha256(convert_to($3, 'UTF8')), 'hex'), $4) RETURNING id`,
+      [o.accountId, item, body, o.userId],
+    );
+    expect((await call(o, 'POST', `/corrections/${rows[0].id}/accept`)).status).toBe(200);
+    const made = (await admin.query(`SELECT d.title, r.body FROM discussions d JOIN discussion_revisions r ON r.discussion_id = d.id WHERE d.account_id = $1`, [o.accountId])).rows;
+    expect(made).toEqual([{ title: 'Title', body: 'x [removed] y' }]);
+  });
+
   it('spec_amend (D#597 CC-2b): accepting asks for amend_spec_work_item and the answer is the correction, still accepted; a repeat is already_decided', async () => {
     const o = await owner();
     const item = await seedSpecItem(o.accountId);

@@ -167,8 +167,10 @@ const KEPT_ZWJ = '\ue001';
  */
 export function sanitizeMemoryText(text: string): string {
   // A line or paragraph separator is a break between words, so it becomes a space before the hidden characters go (otherwise the words glue together).
-  const visible = removeHiddenMemoryChars(text.normalize('NFKC').replace(/[\u2028\u2029]/g, ' ')).replace(/\u200c/g, KEPT_ZWNJ).replace(/\u200d/g, KEPT_ZWJ);
-  return stripControlTokens(visible).replace(CONTROL_RE, ' ').replace(FENCE_RE, '[removed]').replace(/\ue000/g, '\u200c').replace(/\ue001/g, '\u200d').trim();
+  // Hidden characters and control characters go, and the ends are trimmed, BEFORE the token pass: a STATUS line is only recognised at the start of a line, so a leading
+  // space, a NUL or a hidden character in front of it must not survive to be exposed by the trim (that made a live token and a second pass that changed the text).
+  const visible = removeHiddenMemoryChars(text.normalize('NFKC').replace(/[\u2028\u2029]/g, ' ')).replace(/\u200c/g, KEPT_ZWNJ).replace(/\u200d/g, KEPT_ZWJ).replace(CONTROL_RE, ' ').trim();
+  return stripControlTokens(visible).replace(FENCE_RE, '[removed]').replace(/\ue000/g, '\u200c').replace(/\ue001/g, '\u200d').trim();
 }
 
 /** What is removed before a live token is looked for: spaces, controls and every hidden character, so padding a token with any of them hides nothing. */

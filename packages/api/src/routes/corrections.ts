@@ -8,7 +8,6 @@ import {
   ContentChangedError,
   PauseUnavailableError,
   acceptCorrection,
-  checkBody,
   rejectCorrection,
   type DecisionResult,
 } from "@fx/core/src/corrections/accept.js";
@@ -154,11 +153,11 @@ export const correctionRoutes: RouteEntry[] = [
       await assertBoundRepo(ctx, { workItemId });
       const body = input.body as z.infer<typeof createBodySchema>;
       try {
-        checkBody(body.kind, body.body, DISCUSSION_KINDS);
         const c = await createCorrection(cctx(ctx), {
           workItemId,
           kind: body.kind,
           body: body.body,
+          itemKinds: DISCUSSION_KINDS,
           origin: ctx.principal.kind === "token" ? "agent" : "person",
         });
         return dto(c);

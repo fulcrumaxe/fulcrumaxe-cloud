@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
-import { sanitize, stripControlTokens, structuralValue } from '@fx/trust';
-import { checkBody } from '../corrections/body.js';
+import { sanitize, structuralValue } from '@fx/trust';
 import { CORRECTION_BODY_MAX, CORRECTION_KINDS, CorrectionInputError, createCorrection, listCorrections } from '../corrections/index.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { getWorkItemActivity } from '../work-items/activity.js';
@@ -180,15 +179,13 @@ const TOOLS: readonly Tool[] = [
     required: ['item_id', 'kind', 'body'],
     async run(ctx, st, i) {
       await loadItem(ctx, i.item_id!);
-      // Model text: control tokens defanged before the write (the row is fenced again where a run uses it).
-      const body = stripControlTokens(i.body!);
+      // Model text goes as sent: `createCorrection` cleans it once, after any JSON in it is decoded (cleaning the raw text here would miss an escaped token).
+      const body = i.body!;
       if (body.trim() === '') throw new CorrectionInputError('empty');
-      // The route's own check: a priority or new_item body that could never be accepted is refused here, not saved.
-      checkBody(i.kind!, body, ctx.itemKinds);
       const key = createHash('sha256').update(`${i.item_id}\n${i.kind}\n${body}`).digest('hex');
       let id = st.drafts.get(key);
       if (id === undefined) {
-        const c = await createCorrection(ctx, { workItemId: i.item_id!, kind: i.kind as (typeof CORRECTION_KINDS)[number], body, origin: 'agent' });
+        const c = await createCorrection(ctx, { workItemId: i.item_id!, kind: i.kind as (typeof CORRECTION_KINDS)[number], body, origin: 'agent', itemKinds: ctx.itemKinds });
         id = c.id;
         st.drafts.set(key, id);
       }
