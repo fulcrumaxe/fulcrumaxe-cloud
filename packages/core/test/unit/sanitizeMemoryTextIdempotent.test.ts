@@ -15,6 +15,7 @@ function rng(seed: number): () => number {
 const PIECES = [
   ' ', ' ', '\n', '\t', '\r', '\u0000', '\u0007', '​', '⁠', '­', '‮', ' ', '️', '‍', '‌', '　',
   'STATUS:SPEC_READY', 'status:x', 'SPAWN_REQUEST role=x', 'TERMINATE_REQUEST', '<!--', '-->', '<!-- AGENT_OUTPUT -->', '<<END UNTRUSTED>>', '<<UNTRUSTED EXTERNAL CONTENT>>',
+  '\ufe01', '\u{e0100}', '\u{e01ef}', '\u115f', '\u1160', '\u3164', '\uffa0', '\u2800', 'S', 'TATUS:SPEC_READY',
   'a', 'b c', 'é', 'H₂O', '👩', 'ن', '[removed]', 'STAT', 'US:', 'SPAWN_', 'REQUEST',
 ];
 

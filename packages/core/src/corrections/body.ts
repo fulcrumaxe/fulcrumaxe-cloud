@@ -1,6 +1,6 @@
 import { WORK_ITEM_PRIORITIES } from '../work-items/read.js';
 import { removeHiddenMemoryChars } from '@fulcrumaxe/runner-protocol';
-import { stripControlTokens } from '@fx/trust';
+import { stripControlTokens, stripInvisible } from '@fx/trust';
 import { sanitizeMemoryText } from '../memory/index.js';
 import { CorrectionInputError } from './index.js';
 
@@ -83,13 +83,12 @@ function hiddenOnly(text: string): string {
   return removeHiddenMemoryChars(text.replace(/[\u2028\u2029]/g, ' ')).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ');
 }
 
-/** What `stripControlTokens` changes besides the tokens: NFKC and no format characters. If that is all it changed, the text is returned as it came (so H2O written with a subscript stays). */
-const FORMAT_CHARS = /[\p{Cf}͏᠎]/gu;
+/** `stripControlTokens` changes more than the tokens: NFKC, and no invisible characters (`stripInvisible`, the trust package's own rule, so the two cannot drift apart). If that is all it changed, the text is returned as it came (so H2O written with a subscript stays). */
 function defang(text: string): string {
   // Judged on the trimmed text: a leading space or line break must not hide a token at the start of a line.
   const trimmed = text.trim();
   const stripped = stripControlTokens(trimmed);
-  return stripped === trimmed.normalize('NFKC').replace(FORMAT_CHARS, '') ? text : stripped;
+  return stripped === stripInvisible(trimmed.normalize('NFKC')) ? text : stripped;
 }
 
 /**

@@ -18,7 +18,7 @@ import { MEMORY_SLOT_DEFAULT_BYTES, MEMORY_SLOT_MAX_BYTES, renderMemorySlot, typ
  * What fits: when every entry fits the repository's slot, every entry is used. When not, they are taken in the order item, repo, role, account,
  * then by `ts_rank` of the entry against the item's title and Spec, then by id, and whole entries that do not fit are skipped (a cut command is
  * worse than a missing one). Item entries are chosen first against the whole slot and the stable part gets what they leave, so the two parts
- * together never exceed it. Ranking is full text in Postgres on one entry and one query: nothing in it is a statistic over other tenants' rows.
+ * together never exceed it. Inside each part a person's own lines are chosen first against half the room, the other lines against the rest, and room one side leaves unused goes to the other (`selectWithPersonFloor`). Ranking is full text in Postgres on one entry and one query: nothing in it is a statistic over other tenants' rows.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -126,22 +126,47 @@ function wholeSize(list: readonly MemoryEntry[], budget: number): number | null 
   return r.trimmedBytes === 0 && r.recalled.length === list.length ? bytesOf(r.text) : null;
 }
 
+/** Adds to `kept`, in rank order, every whole entry of `ranked` that still fits `budget` with them. Returns the new list in render order. */
+function extendWithinBudget(kept: readonly MemoryEntry[], ranked: readonly MemoryEntry[], budget: number): MemoryEntry[] {
+  const out = [...kept];
+  let used = out.length === 0 ? 0 : (wholeSize([...out].sort(byRenderOrder), budget) ?? 0);
+  for (const entry of ranked) {
+    // The smallest possible line, fence included, is longer than this: nothing else can fit.
+    if (budget - used < 40) break;
+    const size = wholeSize([...out, entry].sort(byRenderOrder), budget);
+    if (size === null) continue;
+    out.push(entry);
+    used = size;
+  }
+  return out.sort(byRenderOrder);
+}
+
 /** Picks entries for `budget` bytes: all of them when they fit, else best first, whole entries only. `ranked` is best first. Returns them in render order. */
 export function selectWithinBudget(ranked: readonly MemoryEntry[], budget: number): MemoryEntry[] {
   if (budget <= 0 || ranked.length === 0) return [];
   const all = [...ranked].sort(byRenderOrder);
   if (wholeSize(all, budget) !== null) return all;
-  const kept: MemoryEntry[] = [];
-  let used = 0;
-  for (const entry of ranked) {
-    // The smallest possible line, fence included, is longer than this: nothing else can fit.
-    if (budget - used < 40) break;
-    const size = wholeSize([...kept, entry].sort(byRenderOrder), budget);
-    if (size === null) continue;
-    kept.push(entry);
-    used = size;
-  }
-  return kept.sort(byRenderOrder);
+  return extendWithinBudget([], ranked, budget);
+}
+
+/** The share of a slot a person's own lines are chosen against before any other line is considered. */
+export const PERSON_FLOOR_SHARE = 0.5;
+
+/**
+ * Like `selectWithinBudget`, but a person's lines are chosen first against half of `budget`, then every other line against what is left, then any room still
+ * unused goes to the person's lines that did not fit the first time. So agent, import and receipt lines can never crowd a person's lines out of the first half,
+ * and neither side leaves room empty that the other could use. `ranked` is best first.
+ */
+export function selectWithPersonFloor(ranked: readonly MemoryEntry[], budget: number): MemoryEntry[] {
+  if (budget <= 0 || ranked.length === 0) return [];
+  const all = [...ranked].sort(byRenderOrder);
+  if (wholeSize(all, budget) !== null) return all;
+  const people = ranked.filter((e) => e.origin === "person");
+  const others = ranked.filter((e) => e.origin !== "person");
+  const floor = selectWithinBudget(people, Math.floor(budget * PERSON_FLOOR_SHARE));
+  const withOthers = extendWithinBudget(floor, others, budget);
+  const taken = new Set(withOthers);
+  return extendWithinBudget(withOthers, people.filter((e) => !taken.has(e)), budget);
 }
 
 const CONTEXT_SQL = `SELECT r.gh_node_id, i.gh_installation_id, s.memory_slot_bytes, w.id AS item_id, w.title, w.stage, sp.body AS spec_body
@@ -296,11 +321,11 @@ export function createMemoryPort(pool: Pool, options: { onSkip?: (s: RecallSkip)
         }
         // The text the prompt would really hold (after the fence-lookalike escape and the cuts) is checked too, not only the stored columns.
         const finalOk = (mine: boolean) => (e: MemoryEntry): boolean => clean(secrets, e.id, mine, e.text);
-        const itemChosen = selectWithinBudget([...rankedBy(approved.filter((r) => r.scope === "item")), ...sources].filter(finalOk(isItem)), budget);
+        const itemChosen = selectWithPersonFloor([...rankedBy(approved.filter((r) => r.scope === "item")), ...sources].filter(finalOk(isItem)), budget);
         const chosen =
           slot === "item"
             ? itemChosen
-            : selectWithinBudget(rankedBy([...approved.filter((r) => r.scope !== "item"), ...receipts]).filter(finalOk(!isItem)), budget - (itemChosen.length === 0 ? 0 : bytesOf(renderMemorySlot(itemChosen, budget).text)));
+            : selectWithPersonFloor(rankedBy([...approved.filter((r) => r.scope !== "item"), ...receipts]).filter(finalOk(!isItem)), budget - (itemChosen.length === 0 ? 0 : bytesOf(renderMemorySlot(itemChosen, budget).text)));
         // Only real entries are stamped: the item's own records are not rows of memory_entries.
         const stamped = chosen.filter((e) => e.source === undefined).map((e) => e.id);
         if (stamped.length > 0) await client.query("SELECT memory_mark_recalled($1::uuid[])", [stamped]);
