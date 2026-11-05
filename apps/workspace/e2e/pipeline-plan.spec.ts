@@ -142,19 +142,24 @@ test.describe("D#483 S3-L2b: Plan states", () => {
   });
 
   test("a failed import shows one sentence for each of the fourteen error codes, and the previous plan stays on screen", async ({ page }) => {
+    test.slow(); // fourteen tab round trips in one test: on a loaded runner they take several times the usual two seconds
     const m = newMock();
     m.plan = withLatest({ id: "99999999-9999-4999-8999-999999999999", state: "failed", error_code: "internal_error", error_detail: null, counts: {} });
     const { errors } = await start(page, m);
     const seen = new Set<string>();
+    let last = "";
     for (const code of FAILURE_CODES) {
       m.plan = withLatest({ id: "99999999-9999-4999-8999-999999999999", state: "failed", error_code: code, error_detail: code === "plan_file_inconsistent" ? "task D#1:A is listed twice" : code === "plan_file_shape" ? "milestones is not a list" : null, counts: {} });
       await press(page, tid(page, "pl-tab-inbox"));
       await press(page, tid(page, "pl-tab-plan"));
+      // Wait for this code's sentence to replace the last one before reading it; the line below is true of the old render too.
+      await expect(status(page).locator("p").first()).not.toHaveText(last);
       await expect(status(page).locator("p").nth(1)).toContainText("Your previous plan, imported");
       await expect(tid(page, "pl-plan-table")).toBeVisible();
       await expect(tid(page, "pl-plan-milestone").locator("td")).toHaveText(["2", "1", "1"]);
       const text = (await status(page).locator("p").first().textContent()) ?? "";
       expect(text).not.toContain(code);
+      last = text;
       seen.add(text);
       if (code === "plan_file_inconsistent") expect(text).toContain("task D#1:A is listed twice");
       if (code === "plan_file_shape") expect(text).toContain("roadmap.json didn't match the expected shape: milestones is not a list.");
