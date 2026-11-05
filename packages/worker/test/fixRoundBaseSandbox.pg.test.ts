@@ -346,58 +346,6 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       }
     });
 
-    // D#6 FIRST-PUBLISH-BASE-DRIFT: the item has a push row that published nothing yet. The round still merges the pull request's base (a stacked change's parent branch included), so the first publish must diff from it.
-    describe("before the item's first publish", () => {
-      const pending = async (t: { a: SeedRefs; w: string }, state = "refused") => {
-        await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3) ON CONFLICT (repo_id) DO NOTHING", [t.a.repoId, t.a.accountId, ["private/**"]]);
-        await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, code) VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, 'push_failed')", [t.a.accountId, t.w, t.a.repoId, "f".repeat(64), state]);
-      };
-
-      const stackedMerged = async (): Promise<BranchSyncOutcome> => merged({ baseRef: "fx/parent", stacked: true });
-      const stackedUpToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "fx/parent", stacked: true });
-
-      it("a change whose pull request targets the default branch records no base, merged or up to date: the first publish replaces the build start with the merge base", async () => {
-        for (const syncBase of [async () => merged(), upToDate]) {
-          const t = await item("sandbox");
-          await pending(t);
-          const out = await harness({ privateHead: async () => ASKED, syncBase }).module.advanceStartFix(who(t), fixReq(t));
-          expect(out.ok).toBe(true);
-          expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([]);
-        }
-      });
-
-      it("a change stacked on a parent branch records the parent's tip the sync merged (or found), marked as before the first publish", async () => {
-        const t = await item("sandbox");
-        await pending(t);
-        const syncBase = vi.fn(stackedMerged);
-        const out = await harness({ privateHead: async () => ASKED, syncBase }).module.advanceStartFix(who(t), fixReq(t));
-        expect(out.ok).toBe(true);
-        expect(syncBase).toHaveBeenCalledWith({ repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, branch: t.branch, prNumber: PR });
-        expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([{ base_sha: BASE, branch: t.branch, pre_publish: true }]);
-        const u = await item("sandbox");
-        await pending(u);
-        const outU = await harness({ privateHead: async () => ASKED, syncBase: stackedUpToDate }).module.advanceStartFix(who(u), fixReq(u));
-        expect(await fixBaseOf((outU as { runId: string }).runId)).toEqual([{ base_sha: "f".repeat(40), branch: u.branch, pre_publish: true }]);
-      });
-
-      it("a round that is refused, a runner round and an item whose branch a person took over record no base", async () => {
-        const refused = await item("sandbox");
-        await pending(refused);
-        expect((await harness({ privateHead: async () => ASKED, syncBase: conflict }).module.advanceStartFix(who(refused), fixReq(refused))).ok).toBe(false);
-        expect(await runs(refused.w)).toBe(1);
-        const runner = await item("runner");
-        await pending(runner);
-        const outR = await harness({ privateHead: async () => ASKED, syncBase: stackedUpToDate }).module.advanceStartFix(who(runner), fixReq(runner));
-        expect(outR.ok).toBe(true);
-        expect(await fixBaseOf((outR as { runId: string }).runId)).toEqual([]);
-        const taken = await item("sandbox");
-        await pending(taken);
-        await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [taken.w]);
-        const outT = await harness({ privateHead: async () => ASKED, syncBase: stackedUpToDate }).module.advanceStartFix(who(taken), fixReq(taken));
-        expect(await fixBaseOf((outT as { runId: string }).runId)).toEqual([]);
-      });
-    });
-
     it("a stacked change is refused republish_stacked_unsupported BEFORE any merge, as on the runner side: nothing starts, the item is in Needs a person with the plain sentence", async () => {
       const t = await item("sandbox");
       await publicCopy(t);
@@ -612,6 +560,64 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       const h = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn(), { parents: [ASKED, "1".repeat(40)] }), stackBase: parentPort(async () => openParent) });
       expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
       expect(h.resume).not.toHaveBeenCalled();
+    });
+
+    // D#6 FIRST-PUBLISH-BASE-DRIFT: a sandbox round before the item's first publish (a push row that published nothing) merges the base too, so it gets the parent decision a round with a public copy gets.
+    // Nothing is signed or recorded for it: the first publish reads its base from the commits.
+    const toPending = (t: { w: string }) => admin.query("UPDATE plane_pushes SET state = 'building', head_sha = NULL, tip_sha = NULL, pr_number = NULL, pr_url = NULL WHERE work_item_id = $1", [t.w]);
+
+    it("before the first publish, a stacked change on its parent's branch with the parent open: the round starts, the sync names the parent's branch, and no base is recorded", async () => {
+      const t = await stacked();
+      await toPending(t);
+      const merges = vi.fn();
+      const syncBase = port(merges, { tip: "8".repeat(40) });
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase: parentPort(async () => ({ ...openParent, headSha: "8".repeat(40), branchTipSha: "8".repeat(40) })) });
+      const out = await h.module.advanceStartFix(who(t), fixReq(t));
+      expect(out.ok).toBe(true);
+      expect(merges).toHaveBeenCalledTimes(1);
+      expect(syncBase.mock.calls.map((c) => c[0])).toEqual([expect.objectContaining({ publicCopy: true, readOnly: true }), expect.objectContaining({ publicCopy: true, stackBranch: "fx/parent" })]);
+      expect(h.resumed[0]!.base).toBeUndefined();
+      expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([]);
+    });
+
+    it("before the first publish, a change whose pull request targets main while its stack parent has not merged is refused before anything is merged (the parent probe), as with a public copy", async () => {
+      const t = await stacked();
+      await toPending(t);
+      const merges = vi.fn();
+      const syncBase = vi.fn(async (i: { readOnly?: boolean }): Promise<BranchSyncOutcome> => {
+        if (i.readOnly === true) return { kind: "up_to_date", baseSha: BASE, baseRef: "main", stacked: false };
+        merges();
+        return merged();
+      });
+      const h = harness({ privateHead: async () => ASKED, syncBase: syncBase as never, stackBase: parentPort(async () => openParent) });
+      const out = await h.module.advanceStartFix(who(t), fixReq(t));
+      expect(out).toEqual({ ok: false, reason: "republish_stack_parent_open" });
+      expect(merges).not.toHaveBeenCalled();
+      expect(h.resume).not.toHaveBeenCalled();
+    });
+
+    it("before the first publish, that same change with its parent merged into main is merged as any change on main", async () => {
+      const t = await stacked();
+      await toPending(t);
+      const merges = vi.fn();
+      const syncBase = vi.fn(async (i: { readOnly?: boolean }): Promise<BranchSyncOutcome> => {
+        if (i.readOnly === true) return { kind: "up_to_date", baseSha: BASE, baseRef: "main", stacked: false };
+        merges();
+        return merged();
+      });
+      const h = harness({ privateHead: async () => ASKED, syncBase: syncBase as never, stackBase: parentPort(async () => ({ ...openParent, state: "closed" as const, merged: true })) });
+      expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect(merges).toHaveBeenCalledTimes(1);
+    });
+
+    it("an item that is not stacked and has published nothing yet is synced as before (nothing to decide), and records no base", async () => {
+      const t = await item("sandbox");
+      await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3) ON CONFLICT (repo_id) DO NOTHING", [t.a.repoId, t.a.accountId, ["private/**"]]);
+      await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state) VALUES ($1, $2, $3, 'acme/widgets-public', $4, 'building')", [t.a.accountId, t.w, t.a.repoId, "f".repeat(64)]);
+      const syncBase = vi.fn(async () => merged());
+      const out = await harness({ privateHead: async () => ASKED, syncBase }).module.advanceStartFix(who(t), fixReq(t));
+      expect(out.ok).toBe(true);
+      expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([]);
     });
 
     const setParentStage = async (t: { w: string }, stage: string) => admin.query("UPDATE work_items SET stage = $2 WHERE id = (SELECT stack_parent_id FROM work_items WHERE id = $1)", [t.w, stage]);

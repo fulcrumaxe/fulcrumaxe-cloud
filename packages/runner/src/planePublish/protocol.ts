@@ -40,6 +40,10 @@ export interface PlanePublishInput {
   updateOf?: string;
   /** D#6 FIRST-PUBLISH-BASE-DRIFT: present (true) only for a change whose private pull request targets the default branch: the hook diffs from the merge base of the head with `privateDefaultTip`, so what a round before the publish merged in from the default branch is not part of the change. */
   baseIsDefaultMergeBase?: true;
+  /** D#6 FIRST-PUBLISH-BASE-DRIFT: present only for a change stacked on a parent branch (never with `baseIsDefaultMergeBase`): the parent's branch tip as the worker read it; the hook diffs from the merge base of the head with it. */
+  privateBaseTip?: string;
+  /** D#6 FIRST-PUBLISH-BASE-DRIFT: present (true) only together with `baseIsDefaultMergeBase`: the change's stack parent merged into the default branch, so a recorded start that is not on it (a squash merge) is allowed: the change is then diffed from that start, and refused if a merge commit lies after it. */
+  parentMerged?: true;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -56,9 +60,11 @@ export function parsePlanePublishInput(raw: string): PlanePublishInput | undefin
     return undefined;
   }
   const KEYS = ["own", "codeRepo", "privateBase", "privateHead", "privateDefaultTip", "branch", "title", "body", "identity", "commitTime", "pairing"] as const;
-  const optional = ["updateOf", "baseIsDefaultMergeBase"].filter((k) => isObject(v) && Object.hasOwn(v, k));
+  const optional = ["updateOf", "baseIsDefaultMergeBase", "privateBaseTip", "parentMerged"].filter((k) => isObject(v) && Object.hasOwn(v, k));
   if (!isObject(v) || !strictKeys(v, [...KEYS, ...optional])) return undefined;
   if (Object.hasOwn(v, "baseIsDefaultMergeBase") && v.baseIsDefaultMergeBase !== true) return undefined;
+  if (Object.hasOwn(v, "parentMerged") && (v.parentMerged !== true || v.baseIsDefaultMergeBase !== true)) return undefined;
+  if (Object.hasOwn(v, "privateBaseTip") && (!(typeof v.privateBaseTip === "string" && OBJECT_ID.test(v.privateBaseTip)) || Object.hasOwn(v, "baseIsDefaultMergeBase"))) return undefined;
   if (Object.hasOwn(v, "updateOf") && !(typeof v.updateOf === "string" && OBJECT_ID.test(v.updateOf))) return undefined;
   const { own, identity, pairing } = v;
   if (!isObject(own) || !strictKeys(own, ["owner", "name"]) || typeof own.owner !== "string" || !OWNER.test(own.owner) || typeof own.name !== "string" || !NAME.test(own.name)) return undefined;

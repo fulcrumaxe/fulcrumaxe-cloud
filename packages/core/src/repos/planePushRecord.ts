@@ -54,7 +54,7 @@ export interface RetryFacts {
 }
 
 /** Refusals that repeat on every attempt (the recorded start of the run cannot change), so a retry would only spend attempts: "Try the push again" is not offered for them. */
-export const DETERMINISTIC_PUBLISH_REFUSALS: readonly string[] = ['base_not_on_default', 'base_unavailable'];
+export const DETERMINISTIC_PUBLISH_REFUSALS: readonly string[] = ['base_not_on_default', 'base_not_on_parent', 'base_unavailable', 'merge_in_change'];
 
 /**
  * THE one predicate for "may this item try the push again now": a refused push of a sandbox build with fewer than three push attempts. The worker's

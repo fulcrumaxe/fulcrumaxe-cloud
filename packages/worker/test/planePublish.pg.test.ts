@@ -250,7 +250,7 @@ describe("the paired publish step [pg]", () => {
       expect(await planeRow()).toMatchObject({ state: "refused", code: "scan_refused", refusals: [{ kind: "path", place: "docs/ops/a.md", rule_key: "overlay" }] });
     });
 
-    it.each(["base_not_on_default", "base_unavailable"] as const)("%s repeats on every attempt, so Try the push again is not offered and a retry spends no attempt; its sentence says what works", async (code) => {
+    it.each(["base_not_on_default", "base_unavailable", "base_not_on_parent", "merge_in_change"] as const)("%s repeats on every attempt, so Try the push again is not offered and a retry spends no attempt; its sentence says what works", async (code) => {
       output = () => say({ phase: "refused", code });
       expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code, attemptNo: 1 });
       expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "skipped", why: "not_retryable" });
@@ -374,8 +374,8 @@ describe("the paired publish step [pg]", () => {
       expect(input).toMatchObject({ privateBase: BASE, privateHead: "f".repeat(40) });
     });
 
-    // D#6 FIRST-PUBLISH-BASE-DRIFT: a round before the first publish merged the pull request's base; the cloud recorded the base it merged, and the publish diffs from it.
-    describe("a round before the first publish recorded the base it merged", () => {
+    // D#6 FIRST-PUBLISH-BASE-DRIFT: a round before the first publish may have merged the pull request's base; the hook reads the base from the commits, so no record is consulted.
+    describe("a round before the first publish", () => {
       const MERGED_BASE = "9".repeat(40);
       const roundAfter = async (parent: string, payload: Record<string, unknown>, hoursLater = 1): Promise<string> => {
         const id = randomUUID();
@@ -389,42 +389,16 @@ describe("the paired publish step [pg]", () => {
       };
       const lastInput = () => JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content);
 
-      const stackOnParent = async () => {
-        const parent = randomUUID();
-        await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'pr_opened', 9042)", [parent, A.accountId, A.repoId]);
-        await admin.query("UPDATE work_items SET stack_parent_id = $1 WHERE id = $2", [parent, A.workItemId]);
-      };
-
-      it("a change on the default branch is told to diff from its merge base with the default branch: the recorded base and the start commit are both left out of the signing, on a first publish and on a retry", async () => {
-        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/issue-42", pre_publish: true });
+      it("a change on the default branch is told to diff from its merge base with the default branch, whatever a round recorded, on a first publish and on a retry", async () => {
+        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/issue-42" });
         expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "published", attemptNo: 1 });
         expect(lastInput()).toMatchObject({ privateBase: BASE, privateHead: PRIVATE_HEAD, baseIsDefaultMergeBase: true });
         expect(lastInput()).not.toHaveProperty("updateOf");
+        expect(lastInput()).not.toHaveProperty("privateBaseTip");
+        expect(lastInput()).not.toHaveProperty("parentMerged");
         await admin.query("UPDATE plane_pushes SET state = 'refused', code = 'push_failed', head_sha = NULL, tip_sha = NULL, pr_number = NULL, pr_url = NULL WHERE work_item_id = $1", [A.workItemId]);
         expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toMatchObject({ kind: "published", attemptNo: 2 });
         expect(lastInput()).toMatchObject({ privateBase: BASE, baseIsDefaultMergeBase: true });
-      });
-
-      it("a stacked change keeps the old signing (its parent's branch is not readable by the hook yet): the recorded base, and no merge-base flag", async () => {
-        await stackOnParent();
-        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/issue-42", pre_publish: true });
-        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "published", attemptNo: 1 });
-        expect(lastInput()).toMatchObject({ privateBase: MERGED_BASE });
-        expect(lastInput()).not.toHaveProperty("baseIsDefaultMergeBase");
-      });
-
-      it("a stacked change whose recorded base names another branch than the one that publishes is refused, with no attempt spent", async () => {
-        await stackOnParent();
-        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/other-branch", pre_publish: true });
-        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "refused", code: "bad_input", attemptNo: null, reason: "base_branch_mismatch" });
-        expect(fake.state.created).toHaveLength(0);
-      });
-
-      it("a stacked change with a base recorded without the marker (a public-copy update's) signs the start commit", async () => {
-        await stackOnParent();
-        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/issue-42" });
-        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "published", attemptNo: 1 });
-        expect(lastInput()).toMatchObject({ privateBase: BASE });
       });
     });
 
