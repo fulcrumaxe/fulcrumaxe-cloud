@@ -6,6 +6,7 @@ import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { assertRoleEvidence, assertRoleMove, assertRoleRoomForStep } from './evidence.js';
+import { recordAutoApprovalReversal } from './reversal.js';
 
 /**
  * D#601 MEM-1: the durable memory store. Values mirror the CHECKs of migration 0793. Every write goes through a database function that
@@ -404,11 +405,14 @@ export async function editMemory(
   });
 }
 
-/** Soft delete; `restore: true` brings it back to its prior status inside 30 days. */
+/** Soft delete; `restore: true` brings it back to its prior status inside 30 days. Deleting an auto-approved entry leaves its reversal receipt. */
 export async function deleteMemory(ctx: MemoryCtx, input: { id: string; restore?: boolean }): Promise<{ outcome: string; entry: MemoryEntry }> {
   assertUuid('memory entry', input.id);
   return inSession(ctx, async (client) => {
+    // MEM-10: the entry as it stood before the delete says whether a person ever approved it (see recordAutoApprovalReversal).
+    const [before] = input.restore === true ? [] : await readEntries(client, [input.id]);
     const { rows } = await client.query<{ r: string }>('SELECT memory_delete($1::uuid, $2) AS r', [input.id, input.restore === true]);
+    if (before !== undefined && before.status === 'approved') await recordAutoApprovalReversal(client, before);
     return { outcome: rows[0]!.r, entry: await readEntry(client, input.id) };
   });
 }
