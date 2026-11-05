@@ -3,7 +3,7 @@ import type { Pool } from "pg";
 import { MAX_JOB_PINS } from "@fulcrumaxe/runner-protocol";
 import { CONTEXT_EXCLUDES_MAX, ContextRuleError, listContextRules, type ContextRuleErrorCode } from "@fx/core/src/context/contextRules.js";
 import { ForbiddenError, NotFoundError } from "@fx/core/src/tenancy/errors.js";
-import { DEFAULT_CONTEXT_RULE_TIMEOUTS, removeContextRuleChecked, saveContextRule, type ContextRuleTimeouts, type PinTreeSource, type SaveContextRuleDeps } from "@fx/pipeline";
+import { createMissingResolver, DEFAULT_CONTEXT_RULE_TIMEOUTS, removeContextRuleChecked, saveContextRule, type ContextRuleTimeouts, type PinTreeSource, type SaveContextRuleDeps } from "@fx/pipeline";
 import { ApiError } from "../errors.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import type { RouteEntry } from "../registry.js";
@@ -24,6 +24,9 @@ export interface ContextRuleDeps {
   timeouts: ContextRuleTimeouts;
 }
 export const contextRuleDeps: ContextRuleDeps = { openTree: null, timeouts: DEFAULT_CONTEXT_RULE_TIMEOUTS };
+
+/** D#600 CX-9b: the pinned paths that are not in the default branch's tree, read lazily through the same registered tree reader. */
+export const missingResolver = createMissingResolver({ openTree: () => contextRuleDeps.openTree });
 
 export const saveDeps = (pool: Pool): SaveContextRuleDeps => ({
   pool,
@@ -65,7 +68,9 @@ const ruleSchema = z.object({
   repo_id: z.string().uuid().nullable(),
   work_item_id: z.string().uuid().nullable(),
 });
-export const contextRuleResponseSchema = z.object({ data: z.array(ruleSchema).max(1000) });
+/** A listed rule; `missing_at` (D#600 CX-9b) is the default branch's head sha a pinned path was not found at, and is absent when the path exists or could not be checked. */
+const listedRuleSchema = ruleSchema.extend({ missing_at: z.string().regex(/^[0-9a-f]{40}$/).optional() });
+export const contextRuleResponseSchema = z.object({ data: z.array(listedRuleSchema).max(1000) });
 
 const putBodySchema = z
   .object({
@@ -102,7 +107,7 @@ export const contextRuleRoutes: RouteEntry[] = [
     description:
       "Session only, member. Name `repo_id` for the rules set on a repository, or `work_item_id` for the rules in force for an item: the item's own rules, and the repository's for every path the item has no rule on. " +
       "A pin keeps a file in the run's prompt; an exclude keeps a path (or glob) out of what the agent may read. A change applies from the next run, and a run already started keeps the rules it began with. " +
-      "Another account's repository or item answers an empty list.",
+      "Another account's repository or item answers an empty list. A pin whose path is not in the default branch's tree carries `missing_at`, the head sha it was looked for at; the label is best effort and left off when the tree cannot be read, is too large, or the read is slow.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",
@@ -111,8 +116,10 @@ export const contextRuleRoutes: RouteEntry[] = [
     responseSchema: contextRuleResponseSchema,
     handler: async (ctx, input) => {
       const q = input.query as z.infer<typeof querySchema>;
-      const rules = await listContextRules(ctx.pool, ctx.principal, q.repo_id !== undefined ? { repoId: q.repo_id } : { workItemId: q.work_item_id! });
-      return { data: rules.map((r) => ({ id: r.id, scope: r.scope, kind: r.kind, path: r.path, repo_id: r.repoId, work_item_id: r.workItemId })) };
+      const target = q.repo_id !== undefined ? { repoId: q.repo_id } : { workItemId: q.work_item_id! };
+      const rules = await listContextRules(ctx.pool, ctx.principal, target);
+      const missing = await missingResolver.missingPins(ctx.pool, ctx.principal, target, rules);
+      return { data: rules.map((r) => ({ id: r.id, scope: r.scope, kind: r.kind, path: r.path, repo_id: r.repoId, work_item_id: r.workItemId, ...(missing.has(r.id) ? { missing_at: missing.get(r.id)! } : {}) })) };
     },
   },
   {

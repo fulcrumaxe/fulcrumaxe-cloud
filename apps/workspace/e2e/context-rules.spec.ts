@@ -467,6 +467,72 @@ async function setupPipeline(page: Page, m: ContextMock) {
 }
 const mine = (scope: "repo" | "item", kind: "pin" | "exclude", path: string) => ruleOf(scope, kind, path, { repo: ITEM.repo_id, item: ITEM.id });
 
+test.describe("D#600 CX-9b: a pinned path that is gone stays listed as 'Path not found at <sha>' (mocked API)", () => {
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const gone = () => newContextMock({ rules: [ruleOf("repo", "pin", "src/gone.ts"), ruleOf("repo", "pin", "src/kept.ts"), ruleOf("repo", "exclude", "old/**")], missing: { "src/gone.ts": SHA, "old/**": SHA } });
+  const note = (page: Page) => t(page, REPO_APP, "ctx-path-missing");
+
+  test("only the missing pin carries the sentence; the row keeps its controls, never blocks, and is gone after Remove with an Undo that restores it; the page measures fit", async ({ page }) => {
+    const m = gone();
+    const errors = await setupRepos(page, m);
+    await expect(rowsOf(page, REPO_APP)).toHaveCount(3);
+    await expect(note(page)).toHaveCount(1);
+    await expect(note(page)).toHaveText("Path not found at 0123456");
+    await expect(rowsOf(page, REPO_APP).filter({ hasText: "gone.ts" }).locator('[data-testid="ctx-path-missing"]')).toHaveCount(1);
+    await expect(rowsOf(page, REPO_APP).filter({ hasText: "kept.ts" }).locator('[data-testid="ctx-path-missing"]')).toHaveCount(0);
+    await expect(rowsOf(page, REPO_APP).filter({ hasText: "old/**" }).locator('[data-testid="ctx-path-missing"]')).toHaveCount(0); // an exclude is never labelled
+    const gonerow = rowsOf(page, REPO_APP).filter({ hasText: "gone.ts" });
+    await expect(gonerow.locator('[data-ctl="remove"]')).toBeEnabled();
+    const fit = await page.evaluate((app) => {
+      const win = document.querySelector(`${app} .repos-app`) as HTMLElement;
+      const li = [...document.querySelectorAll<HTMLElement>(`${app} [data-testid="ctx-row"]`)].find((r) => r.textContent!.includes("gone.ts"))!;
+      const p = li.querySelector<HTMLElement>('[data-testid="ctx-path-missing"]')!;
+      return { viewport: window.innerWidth, appScroll: [win.scrollWidth, win.clientWidth], rowScroll: li.scrollWidth - li.clientWidth, noteRight: Math.round(p.getBoundingClientRect().right), rowRight: Math.round(li.getBoundingClientRect().right), noteHeight: Math.round(p.getBoundingClientRect().height) };
+    }, REPO_APP);
+    measure({ test: "path not found", ...fit });
+    expect(fit.appScroll[0]).toBeLessThanOrEqual(fit.appScroll[1]);
+    expect(fit.rowScroll).toBeLessThanOrEqual(0);
+    expect(fit.noteRight).toBeLessThanOrEqual(fit.rowRight);
+    const axe = await new AxeBuilder({ page }).include(`${REPO_APP} [data-testid="ctx"]`).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
+    expect(axe.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
+    await gonerow.locator('[data-ctl="remove"]').click();
+    await expect(rowsOf(page, REPO_APP)).toHaveCount(2);
+    await expect(note(page)).toHaveCount(0);
+    await t(page, REPO_APP, "ctx-undo").click();
+    await expect(rowsOf(page, REPO_APP)).toHaveCount(3);
+    await expect(note(page)).toHaveText("Path not found at 0123456"); // derived from the list again, not stamped on the row
+    expect(errors).toEqual([]);
+  });
+
+  test("a tree that cannot be read lists the same pins with no sentence at all (no label, no error), and the page shows no null or undefined", async ({ page }) => {
+    const m = newContextMock({ rules: [ruleOf("repo", "pin", "src/gone.ts")] });
+    await setupRepos(page, m);
+    await expect(rowsOf(page, REPO_APP)).toHaveCount(1);
+    await expect(note(page)).toHaveCount(0);
+    await expect(t(page, REPO_APP, "ctx-load-error")).toHaveCount(0);
+    expect(await ctx(page, REPO_APP).innerText()).not.toMatch(/\b(null|undefined|NaN)\b/);
+  });
+
+  test("a malformed missing_at (not a hex sha) is ignored, never shown", async ({ page }) => {
+    const m = newContextMock({ rules: [ruleOf("repo", "pin", "src/gone.ts")], missing: { "src/gone.ts": "<script>x</script>" } });
+    await setupRepos(page, m);
+    await expect(rowsOf(page, REPO_APP)).toHaveCount(1);
+    await expect(note(page)).toHaveCount(0);
+  });
+
+  test("the sentence is the Spec's wording, and at 375 px it stays inside the page", async ({ page }) => {
+    const m = gone();
+    await setupRepos(page, m);
+    await expect(note(page)).toHaveText("Path not found at 0123456");
+    await page.setViewportSize({ width: 375, height: 800 });
+    await expect(note(page)).toBeVisible();
+    const box = await note(page).evaluate((n) => [Math.round(n.getBoundingClientRect().right), Math.round(n.closest('[data-testid="ctx"]')!.getBoundingClientRect().right), document.documentElement.scrollWidth - document.documentElement.clientWidth, window.innerWidth]);
+    measure({ test: "path not found 375", noteRight: box[0], panelRight: box[1], docOverflow: box[2], viewport: box[3] });
+    expect(box[0]).toBeLessThanOrEqual(box[1]);
+    expect(box[2]).toBeLessThanOrEqual(0);
+  });
+});
+
 test.describe("D#600 CX-9b: this item's context rules in the Pipeline item pane (mocked API)", () => {
   test("this item or whole repo: an admin chooses the scope; the list holds the item's rules and the repo's, each tagged", async ({ page }) => {
     const m = newContextMock({ rules: [mine("repo", "pin", "docs/guide.md"), mine("item", "exclude", "legacy/**")] });

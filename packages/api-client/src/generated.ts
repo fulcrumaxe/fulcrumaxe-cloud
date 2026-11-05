@@ -886,6 +886,7 @@ export interface Operations {
         path: string;
         repo_id: (string) | (null);
         work_item_id: (string) | (null);
+        missing_at?: string;
       }>;
     };
   };

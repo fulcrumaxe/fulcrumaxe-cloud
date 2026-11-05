@@ -104,6 +104,7 @@ describe("the copy tables", () => {
     expect(COPY.overBudget).toBe("Your pins are over this budget. They are never cut to fit it during a run.");
     expect(COPY.readdsPins).toBe("Removing this exclude puts pinned files back in this item's runs, and they no longer fit the budget. Remove it anyway?");
     expect(UNDO_MS).toBe(10000);
+    expect(COPY.pathMissing("0123456789abcdef0123456789abcdef01234567")).toBe("Path not found at 0123456");
   });
 });
 
@@ -177,6 +178,19 @@ describe("the rules controller", () => {
     return { call, ctl };
   }
   const writes = (call) => call.log.filter((a) => a[0] !== "GET");
+
+  it("CX-9b: keeps missing_at on a pin when it is a hex sha, and drops it from an exclude, from a non-sha and from a non-string", async () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const { ctl } = await ready([
+      { id: "a", kind: "pin", scope: "repo", path: "gone.ts", missing_at: sha },
+      { id: "b", kind: "exclude", scope: "repo", path: "x/**", missing_at: sha },
+      { id: "c", kind: "pin", scope: "repo", path: "bad.ts", missing_at: "<b>x</b>" },
+      { id: "d", kind: "pin", scope: "repo", path: "num.ts", missing_at: 7 },
+      { id: "e", kind: "pin", scope: "repo", path: "here.ts" },
+    ]);
+    expect(ctl.state.rules.map((r) => [r.path, r.missing_at])).toEqual([["gone.ts", sha], ["x/**", undefined], ["bad.ts", undefined], ["num.ts", undefined], ["here.ts", undefined]]);
+    expect(ruleRows(ctl.state.rules, { isAdmin: true }).find((r) => r.path === "gone.ts").missing_at).toBe(sha);
+  });
 
   it("loads a repository's rules by repo_id and an item's by work_item_id, keeping only well-formed rows", async () => {
     const { call, ctl } = await ready([{ id: "a", kind: "pin", scope: "repo", path: "x.ts" }, { id: "b", kind: "weird", scope: "repo", path: "y" }, null, { id: "c", kind: "pin", scope: "repo", path: "" }]);

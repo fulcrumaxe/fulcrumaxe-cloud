@@ -75,6 +75,7 @@ export const COPY = {
   help: "Not a security boundary: tests and shell commands can still read it",
   scopeItem: "This item", scopeRepo: "Whole repo", scopeLabel: "Applies to",
   bracket: "In an exclude, [id] is glob syntax, so it does not match a folder named [id]. Use ? or *, or exclude the parent.",
+  pathMissing: (sha) => "Path not found at " + String(sha).slice(0, 7),
   sameName: (folder) => "Same file name as another rule. Told apart by the folder " + folder + ".", topLevel: "the top level",
   empty: "No rules yet. Pin a file to always include it, or keep a path out of context.",
   loading: "Loading rules...", loadFailed: "Rules aren't available right now.",
@@ -127,7 +128,7 @@ export function checkPath(path, kind) {
 
 const pickRule = (r) =>
   r && typeof r.id === "string" && (r.kind === "pin" || r.kind === "exclude") && (r.scope === "repo" || r.scope === "item") && typeof r.path === "string" && r.path !== ""
-    ? { id: r.id, kind: r.kind, scope: r.scope, path: r.path } : null;
+    ? { id: r.id, kind: r.kind, scope: r.scope, path: r.path, ...(r.kind === "pin" && typeof r.missing_at === "string" && /^[0-9a-f]{7,40}$/.test(r.missing_at) ? { missing_at: r.missing_at } : {}) } : null;
 
 /** The folder (with its trailing slash) and the file name of a path. */
 export function splitPath(path) {
@@ -431,6 +432,7 @@ function mountPanel(host, { target, withBudget, heading, clock = { set: (f, ms) 
         h("button", { type: "button", class: "ctx-btn", role: "switch", "aria-checked": ex ? "true" : "false", "aria-label": COPY.keepOut + ": " + r.path, "aria-describedby": rows.some((x) => x.kind === "exclude") ? id + "-help" : null,
           "data-ctl": "switch", "data-testid": "ctx-switch", onClick: () => rules.toggle(r) }, COPY.keepOut),
         h("button", { type: "button", class: "ctx-btn", "aria-label": COPY.remove + " " + r.path, "data-ctl": "remove", "data-testid": "ctx-remove", onClick: () => removeRule(r, false) }, COPY.remove)] : []),
+      ...(r.missing_at ? [h("p", { class: "ctx-muted", "data-testid": "ctx-path-missing" }, COPY.pathMissing(r.missing_at))] : []),
       ...(r.bracket ? [h("p", { "data-testid": "ctx-bracket-row" }, COPY.bracket)] : []),
       ...(r.told ? [h("p", { class: "ctx-muted", "data-testid": "ctx-same-name" }, COPY.sameName(r.told))] : []));
   }

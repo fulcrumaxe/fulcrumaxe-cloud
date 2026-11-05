@@ -28,6 +28,8 @@ export interface ContextMock {
   isAdmin: boolean;
   /** Bytes a pinned path weighs when the budget is measured (default 1000). */
   size: Record<string, number>;
+  /** D#600 CX-9b: the sha a pinned path is missing at (the route adds `missing_at` to a pin only, and to nothing it could not check). Empty: the tree is not available. */
+  missing: Record<string, string>;
   /** Replies forced for the next calls of a kind ("PUT", "DELETE", "GET list", "GET settings", "PUT settings"), oldest first. */
   forced: Record<string, { status: number; code: string; headers?: Record<string, string> }[]>;
   requests: string[];
@@ -62,7 +64,7 @@ export const serverText = (code: string) => MESSAGES[code] ?? code;
 const envelope = (code: string) => ({ error: { code, message: serverText(code), request_id: "33333333-3333-4333-8333-333333333333" } });
 
 export function newContextMock(over: Partial<ContextMock> = {}): ContextMock {
-  return { rules: [], budget: null, roles: {}, itemBudget: null, isAdmin: true, size: {}, forced: {}, requests: [], bodies: [], ...over };
+  return { rules: [], budget: null, roles: {}, itemBudget: null, isAdmin: true, size: {}, missing: {}, forced: {}, requests: [], bodies: [], ...over };
 }
 
 export async function installContextRoutes(page: Page, m: ContextMock): Promise<void> {
@@ -99,7 +101,8 @@ export async function installContextRoutes(page: Page, m: ContextMock): Promise<
       const keys = [...url.searchParams.keys()];
       const repo = url.searchParams.get("repo_id"), item = url.searchParams.get("work_item_id");
       if (!isList || keys.length !== 1 || (repo === null) === (item === null)) return json(route, 422, envelope("validation_failed"));
-      return json(route, 200, { data: repo ? m.rules.filter((r) => r.repo_id === repo) : inForce(item!) });
+      const listed = repo ? m.rules.filter((r) => r.repo_id === repo) : inForce(item!);
+      return json(route, 200, { data: listed.map((r) => (r.kind === "pin" && m.missing[r.path] ? { ...r, missing_at: m.missing[r.path] } : r)) });
     }
     if (method === "PUT" && isList) {
       const f = forced("PUT", route);

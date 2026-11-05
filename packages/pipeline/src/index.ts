@@ -49,6 +49,7 @@ export * from "./prompt/repoMap.js";
 export * from "./prompt/pinContent.js";
 export * from "./prompt/memoryRecall.js";
 export * from "./prompt/contextRulesSave.js";
+export * from "./prompt/contextRuleMissing.js";
 export * from "./prompt/contextRulesRemove.js";
 export * from "./prompt/contextBudgetSetting.js";
 export * as mergeQueue from "./mergeQueue/index.js";
