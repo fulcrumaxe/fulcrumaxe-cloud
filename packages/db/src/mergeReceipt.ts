@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { reportError } from '@fx/telemetry';
 import { readMergeDial, type MergeDial } from './mergeDial.js';
-import { writeMergeReceipt } from './receiptWriter.js';
+import { writeMergeReceipt, writePlanWritebackReceipt } from './receiptWriter.js';
 
 /**
  * D#7 DW-R4: the one place that leaves the receipt behind a merge by policy (`merged`) or behind a pull request the policy alone left for a person
@@ -35,6 +35,31 @@ const SAVEPOINT = 'merge_receipt_write';
 
 /** GitHub's own reasons for taking an entry out of its queue when it merged it. Mirrors `DEQUEUE_SUCCESS_CODES` in @fx/core (which this package can not import); a test pins the two equal. */
 export const QUEUE_SUCCESS_DEQUEUE_CODES: readonly string[] = ['merge', 'already_merged'];
+
+/**
+ * The receipt behind a plan update (write-back) the merge queue's gate merged by policy (migration 0988). Called in the tick's merge transaction right after the
+ * entry is marked merged, with the dial the gate decided on (read in the same decision, never re-read here, so it can not name a later version). Same contract as
+ * `recordMergeReceiptOn`: a savepoint, so a refusal rolls back only itself; a miss is reported (`merge_receipt_failed`) and the merge, which already happened on
+ * GitHub, stands. An entry marked merged with no receipt is a missed one.
+ */
+export async function recordWritebackReceiptOn(client: PoolClient, call: { planWritebackId: string; headSha: string; dial: MergeDial }): Promise<'written' | 'replayed' | 'failed'> {
+  await client.query(`SAVEPOINT ${SAVEPOINT}`);
+  try {
+    if (call.dial.disposition === 'ask') throw new Error('plan write-back receipt: the merge dial says ask');
+    const written = await writePlanWritebackReceipt(client, { planWritebackId: call.planWritebackId, headSha: call.headSha, chosen: call.dial.disposition, dialVersion: call.dial.version });
+    await client.query(`RELEASE SAVEPOINT ${SAVEPOINT}`);
+    return written.replayed ? 'replayed' : 'written';
+  } catch (error) {
+    try {
+      await client.query(`ROLLBACK TO SAVEPOINT ${SAVEPOINT}`);
+      await client.query(`RELEASE SAVEPOINT ${SAVEPOINT}`);
+    } catch (rollbackError) {
+      reportError(rollbackError, { stage: 'merge.receipt', code: 'merge_receipt_failed' });
+    }
+    reportError(error, { stage: 'merge.receipt', code: 'merge_receipt_failed' });
+    return 'failed';
+  }
+}
 
 export async function recordMergeReceiptOn(client: PoolClient, call: MergeReceiptCall): Promise<MergeReceiptResult> {
   await client.query(`SAVEPOINT ${SAVEPOINT}`);

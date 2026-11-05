@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import type { PullFacts } from "@fx/core/src/plan/index.js";
 import { createGitHubMergeGatePort } from "../../src/build/githubMergePort.js";
 import { runPlanWriteback, type PlanWritebackDeps } from "../../src/build/planWriteback.js";
 import { createWritebackGitHub } from "../../src/build/planWritebackGitHub.js";
-import { listWritebackNeedsYou, readAutoMerge, runQueueTick, type QueueTickDeps } from "../../src/mergeQueue/index.js";
+import { endWritebackEntry, listWritebackNeedsYou, readAutoMerge, runQueueTick, settlePullRequest, type QueueTickDeps } from "../../src/mergeQueue/index.js";
+import { moveState } from "../../src/build/planWritebackStore.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { APP_EMAIL, FakeGitHub, NAME, OWNER } from "../build/helpers/fakeWritebackGitHub.js";
 import { PLAN_PATH, planFile, pull } from "../build/helpers/planFixture.js";
@@ -22,6 +24,7 @@ import { pgHarness } from "../helpers/pgHarness.js";
  * contents API (with its 1 MB inline limit) from the write-back fake the P5b suite uses, served behind a strict TLS server (real connection path, User-Agent and credential checks). What it cannot fake
  * faithfully: the fake's compare answers one unpaged response.
  */
+vi.mock("@fx/telemetry", async (original) => ({ ...(await original<typeof import("@fx/telemetry")>()), reportError: vi.fn() }));
 const HUMAN_MERGE_ONLY = "FX_HUMAN_MERGE_ONLY_REPO_IDS";
 const savedLock = process.env[HUMAN_MERGE_ONLY];
 afterEach(() => {
@@ -185,6 +188,170 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
       expect(await count("agent_runs", w.accountId)).toBe(0);
       await tick(w);
       expect(mergeCalls(w)).toBe(1);
+    });
+  });
+
+  describe("plan write-back receipt and the merge dial", () => {
+    const setDial = (w: World, disposition: string, version: number, preset: string | null = null) =>
+      db.admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'merge_after_reviews', $3, $4, $5, $6)`, [w.accountId, w.repoId, disposition, preset, version, w.userId]);
+    const receipts = async (w: World) =>
+      (await db.admin.query(
+        `SELECT r.* FROM plan_writeback_receipts l JOIN decision_receipts r ON r.id = l.receipt_id WHERE l.account_id = $1 ORDER BY r.created_at`,
+        [w.accountId],
+      )).rows as Array<Record<string, unknown>>;
+    const on = async (w: World) => {
+      await setRepoAutoMerge(w, true);
+      await setToggle(w, true);
+    };
+    const failedReports = () => vi.mocked(reportError).mock.calls.filter((c) => (c[1] as { code?: string } | undefined)?.code === "merge_receipt_failed");
+
+    it("a repo with no dial row (the default) merges and leaves one receipt a person can read: class 2, policy, no work item, no run, the dial at version 0", async () => {
+      vi.mocked(reportError).mockClear();
+      const w = await world();
+      await on(w);
+      expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
+      expect(await receipts(w)).toMatchObject([{ decision_type: "merge_after_reviews", class: "human_over_the_loop", chosen: "act", rejected_alternative: "ask", dial_version: 0, actor: "policy", work_item_id: null, run_id: null }]);
+      await tick(w);
+      expect(await receipts(w)).toHaveLength(1);
+      expect(failedReports()).toEqual([]);
+    });
+
+    it("announce is recorded as announce with the version that decided", async () => {
+      const w = await world();
+      await on(w);
+      await setDial(w, "announce", 1, "balanced");
+      expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
+      expect(await receipts(w)).toMatchObject([{ chosen: "announce", dial_version: 1 }]);
+    });
+
+    it("the switch on and the dial at ask: no merge call, its own stop, no receipt; moving the dial releases it and the merge leaves its receipt (the dial is never raised for the person)", async () => {
+      const w = await world();
+      await on(w);
+      await setDial(w, "ask", 1, "cautious");
+      expect((await tick(w)).steps[0]).toMatchObject({ step: "released", why: "writeback_merge_dial_ask" });
+      expect(mergeCalls(w)).toBe(0);
+      expect(await entry(w)).toMatchObject({ state: "stopped", reason: "writeback_merge_dial_ask" });
+      expect(await needsYou(w)).toMatchObject([{ code: "writeback_merge_dial_ask" }]);
+      expect(await receipts(w)).toEqual([]);
+      expect((await db.admin.query(`SELECT count(*)::int AS n FROM decision_settings WHERE account_id = $1`, [w.accountId])).rows[0].n).toBe(1);
+      await setDial(w, "act", 2);
+      expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
+      expect(await receipts(w)).toMatchObject([{ chosen: "act", dial_version: 2 }]);
+    });
+
+    it("the switch off leaves a person's merge: no receipt, whatever the dial says", async () => {
+      const w = await world();
+      await setRepoAutoMerge(w, true);
+      await setDial(w, "act", 1);
+      expect((await tick(w)).steps[0]).toMatchObject({ step: "released", why: "ready_human_merges" });
+      expect(await receipts(w)).toEqual([]);
+    });
+
+    it("a receipt that can not be written is reported and the merge stands", async () => {
+      vi.mocked(reportError).mockClear();
+      const w = await world();
+      await on(w);
+      await db.admin.query(`ALTER FUNCTION plan_writeback_receipt_write(uuid, text, text, integer, integer) RENAME TO plan_writeback_receipt_write_off`);
+      try {
+        expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
+      } finally {
+        await db.admin.query(`ALTER FUNCTION plan_writeback_receipt_write_off(uuid, text, text, integer, integer) RENAME TO plan_writeback_receipt_write`);
+      }
+      expect(mergeCalls(w)).toBe(1);
+      expect(await entry(w)).toMatchObject({ state: "merged", merged_by: "gate" });
+      expect(await receipts(w)).toEqual([]);
+      expect(failedReports()).toHaveLength(1);
+    });
+
+    it("after a dial-ask stop the next tick leaves the entry alone: it answers idle, nothing is requeued and updated_at does not move (no churn every tick)", async () => {
+      const w = await world();
+      await on(w);
+      await setDial(w, "ask", 1, "cautious");
+      await tick(w);
+      const before = (await db.admin.query(`SELECT state, reason, updated_at::text AS at FROM merge_queue_entries WHERE account_id = $1`, [w.accountId])).rows[0];
+      expect(before).toMatchObject({ state: "stopped", reason: "writeback_merge_dial_ask" });
+      for (let i = 0; i < 3; i++) expect((await tick(w)).steps[0]).toMatchObject({ step: "idle" });
+      expect((await db.admin.query(`SELECT state, reason, updated_at::text AS at FROM merge_queue_entries WHERE account_id = $1`, [w.accountId])).rows[0]).toEqual(before);
+      expect(mergeCalls(w)).toBe(0);
+    });
+
+    describe("the race: GitHub's own close settles the entry as a person's merge before the tick's transaction commits", () => {
+      const writebackId = async (w: World) => (await db.admin.query(`SELECT id FROM plan_writebacks WHERE account_id = $1`, [w.accountId])).rows[0].id as string;
+      /** Runs `settle` right after the merge call returns, which is where GitHub's delivery or the write-back's reconcile can get in. */
+      const settleAfterMerge = (w: World, settle: () => Promise<unknown>) => {
+        const real = w.deps.writeback!.merge;
+        w.deps.writeback!.merge = async (pr, args) => {
+          const out = await real(pr, args);
+          await settle();
+          return out;
+        };
+      };
+
+      it("webhook first: the entry ends as a person's, the merge stands, and the receipt is still written from the gate's fact", async () => {
+        vi.mocked(reportError).mockClear();
+        const w = await world();
+        await on(w);
+        settleAfterMerge(w, () => tenant(w, (c) => settlePullRequest(c, { accountId: w.accountId, repoId: w.repoId, prNumber: w.prNumber, merged: true })));
+        expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
+        expect(mergeCalls(w)).toBe(1);
+        expect(await entry(w)).toMatchObject({ state: "merged", merged_by: "person" });
+        expect(await receipts(w)).toMatchObject([{ chosen: "act", dial_version: 0, actor: "policy" }]);
+        expect(failedReports()).toEqual([]);
+      });
+
+      it("reconcile first: the write-back and its entry are ended as merged by the reconcile's own calls, and the receipt is still written", async () => {
+        vi.mocked(reportError).mockClear();
+        const w = await world();
+        await on(w);
+        const id = await writebackId(w);
+        settleAfterMerge(w, () =>
+          tenant(w, async (c) => {
+            await moveState(c, { accountId: w.accountId, id, from: ["open", "changed_by_other"], to: "merged" });
+            await endWritebackEntry(c, { accountId: w.accountId, planWritebackId: id, how: "merged" });
+          }),
+        );
+        expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
+        expect(await entry(w)).toMatchObject({ state: "merged", merged_by: "person" });
+        expect(await receipts(w)).toMatchObject([{ chosen: "act", dial_version: 0 }]);
+        expect(failedReports()).toEqual([]);
+      });
+
+      it("a merge a person makes by hand (no merge call by the gate, no fact) gets no receipt", async () => {
+        const w = await world();
+        await on(w);
+        await tenant(w, (c) => settlePullRequest(c, { accountId: w.accountId, repoId: w.repoId, prNumber: w.prNumber, merged: true }));
+        await tick(w);
+        expect(mergeCalls(w)).toBe(0);
+        expect(await receipts(w)).toEqual([]);
+        expect((await db.admin.query(`SELECT count(*)::int AS n FROM plan_writeback_merges WHERE account_id = $1`, [w.accountId])).rows[0].n).toBe(0);
+      });
+
+      it("the fact is written only after a merge call that succeeded: a 405, a 502 or a 409 leaves plan_writeback_merges and the receipts empty", async () => {
+        for (const answer of [405, 502, 409]) {
+          const w = await world();
+          await on(w);
+          w.g.world.mergeAnswer = answer;
+          await tick(w);
+          expect(w.g.world.merges).toHaveLength(1); // the call was made
+          expect((await db.admin.query(`SELECT count(*)::int AS n FROM plan_writeback_merges WHERE account_id = $1`, [w.accountId])).rows[0].n).toBe(0);
+          expect(await receipts(w)).toEqual([]);
+        }
+      });
+
+      it("a fact that can not be written is reported and the merge stands (no receipt: nothing recorded the merge)", async () => {
+        vi.mocked(reportError).mockClear();
+        const w = await world();
+        await on(w);
+        await db.admin.query(`ALTER TABLE plan_writeback_merges RENAME TO plan_writeback_merges_off`);
+        try {
+          expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
+        } finally {
+          await db.admin.query(`ALTER TABLE plan_writeback_merges_off RENAME TO plan_writeback_merges`);
+        }
+        expect(mergeCalls(w)).toBe(1);
+        expect(await receipts(w)).toEqual([]);
+        expect(failedReports().length).toBeGreaterThanOrEqual(1);
+      });
     });
   });
 

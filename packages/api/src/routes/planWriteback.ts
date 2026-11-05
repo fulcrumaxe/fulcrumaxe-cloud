@@ -5,7 +5,9 @@ import {
   PlanWritebackSettingError,
   appendPlanWritebackVersion,
   getCurrentPlanWritebackSetting,
+  listPlanWritebackMerges,
 } from "@fx/db/src/planWritebackSettings.js";
+import { readMergeDial } from "@fx/db/src/mergeDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { assertRepoExists } from "@fx/core/src/role-settings/internal.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
@@ -28,12 +30,19 @@ const settingResponse = z.object({
   auto_merge: z.boolean(),
   /** True when no person ever chose a value for this repo (the default, off, is in force). */
   default: z.boolean(),
+  /** The repo's merge dial (`merge_after_reviews`), which must also allow before a plan update is merged by itself: `ask` holds it for a person even with the switch on. */
+  merge_dial: z.enum(["act", "announce", "ask"]),
+  /** The newest plan updates merged by policy, newest first: the receipts behind them. */
+  recent_merges: z.array(z.object({ id: z.string(), at: z.string(), chosen: z.enum(["act", "announce"]) })),
 });
 const putBody = z.object({ auto_merge: z.boolean() }).strict();
 
 async function read(client: PoolClient, repoId: string): Promise<z.infer<typeof settingResponse>> {
   const current = await getCurrentPlanWritebackSetting(client, repoId);
-  return current ? { auto_merge: current.autoMerge, default: false } : { auto_merge: PLAN_WRITEBACK_DEFAULT_AUTO_MERGE, default: true };
+  const dial = await readMergeDial(client, repoId);
+  const merges = (await listPlanWritebackMerges(client, repoId)).map((m) => ({ id: m.id, at: m.at.toISOString(), chosen: m.chosen }));
+  const base = { merge_dial: dial.disposition, recent_merges: merges };
+  return current ? { auto_merge: current.autoMerge, default: false, ...base } : { auto_merge: PLAN_WRITEBACK_DEFAULT_AUTO_MERGE, default: true, ...base };
 }
 
 export const planWritebackRoutes: RouteEntry[] = [

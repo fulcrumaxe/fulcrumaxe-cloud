@@ -15119,6 +15119,12 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "notes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
@@ -17859,11 +17865,48 @@
                     },
                     "default": {
                       "type": "boolean"
+                    },
+                    "merge_dial": {
+                      "type": "string",
+                      "enum": [
+                        "act",
+                        "announce",
+                        "ask"
+                      ]
+                    },
+                    "recent_merges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "at": {
+                            "type": "string"
+                          },
+                          "chosen": {
+                            "type": "string",
+                            "enum": [
+                              "act",
+                              "announce"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "at",
+                          "chosen"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
                     "auto_merge",
-                    "default"
+                    "default",
+                    "merge_dial",
+                    "recent_merges"
                   ],
                   "additionalProperties": false
                 }
@@ -17995,11 +18038,48 @@
                     },
                     "default": {
                       "type": "boolean"
+                    },
+                    "merge_dial": {
+                      "type": "string",
+                      "enum": [
+                        "act",
+                        "announce",
+                        "ask"
+                      ]
+                    },
+                    "recent_merges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "at": {
+                            "type": "string"
+                          },
+                          "chosen": {
+                            "type": "string",
+                            "enum": [
+                              "act",
+                              "announce"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "at",
+                          "chosen"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
                     "auto_merge",
-                    "default"
+                    "default",
+                    "merge_dial",
+                    "recent_merges"
                   ],
                   "additionalProperties": false
                 }

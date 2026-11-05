@@ -213,6 +213,27 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(bad.status).toBe(422);
   });
 
+  it('a preset that would put the merge dial at ask says so when the repo merges plan updates automatically: one fixed note, only then, and the preview writes nothing', async () => {
+    const f = await fixture();
+    const preview = async (preset: string) => (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset })).json()) as { notes?: string[] };
+    expect((await preview('cautious')).notes).toBeUndefined(); // the plan-update switch is off
+    await admin.query(`INSERT INTO plan_writeback_settings (account_id, repo_id, auto_merge, version, changed_by) VALUES ($1, $2, true, 1, $3)`, [f.owner.accountId, f.repoId, f.owner.userId]);
+    expect((await preview('cautious')).notes).toEqual(['Merging a pull request once its reviews pass: plan updates are set to merge automatically in this repo, and with Ask me first a person merges them instead.']);
+    expect((await preview('balanced')).notes).toBeUndefined(); // announce still merges
+    expect((await preview('autonomous')).notes).toBeUndefined();
+    expect(await versions(f.repoId)).toHaveLength(0);
+  });
+
+  it('the plan-update note belongs to the merge dial only: with that dial already at ask and the switch on, Cautious still moves other dials but adds no note', async () => {
+    const f = await fixture();
+    expect((await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'merge_after_reviews', disposition: 'ask' })).status).toBe(200);
+    await admin.query(`INSERT INTO plan_writeback_settings (account_id, repo_id, auto_merge, version, changed_by) VALUES ($1, $2, true, 1, $3)`, [f.owner.accountId, f.repoId, f.owner.userId]);
+    const out = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'cautious' })).json()) as { moves: { decision_type: string; to: string }[]; notes?: string[] };
+    expect(out.moves.some((m) => m.to === 'ask' && m.decision_type !== 'merge_after_reviews')).toBe(true);
+    expect(out.moves.some((m) => m.decision_type === 'merge_after_reviews')).toBe(false);
+    expect(out.notes).toBeUndefined();
+  });
+
   it('S5-b1a-2: a preset that moves a dial, or a dial set looser, wakes the auto-start pass; setting it to ask does not', async () => {
     const sets: string[] = [];
     setPendingHooks({ store: { get: async () => null, set: async (key) => { sets.push(key); }, delete: async () => {} } });

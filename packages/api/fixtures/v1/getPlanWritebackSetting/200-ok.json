@@ -1,4 +1,6 @@
 {
   "auto_merge": false,
-  "default": true
+  "default": true,
+  "merge_dial": "act",
+  "recent_merges": []
 }

@@ -1732,6 +1732,7 @@ export interface Operations {
         to: "ask" | "announce" | "act";
         note: string;
       }>;
+      notes?: Array<string>;
     };
   };
   applyDecisionPreset: {
@@ -2075,6 +2076,12 @@ export interface Operations {
     response: {
       auto_merge: boolean;
       default: boolean;
+      merge_dial: "act" | "announce" | "ask";
+      recent_merges: Array<{
+        id: string;
+        at: string;
+        chosen: "act" | "announce";
+      }>;
     };
   };
   setPlanWritebackSetting: {
@@ -2088,6 +2095,12 @@ export interface Operations {
     response: {
       auto_merge: boolean;
       default: boolean;
+      merge_dial: "act" | "announce" | "ask";
+      recent_merges: Array<{
+        id: string;
+        at: string;
+        chosen: "act" | "announce";
+      }>;
     };
   };
   keepPublicBranch: {

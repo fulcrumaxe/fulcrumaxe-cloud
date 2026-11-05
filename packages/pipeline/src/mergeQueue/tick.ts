@@ -13,6 +13,8 @@ import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
 import { adoptParkedSlot, listConflictRounds, listHeadRefreshes, listWritebackNeedsYou, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, requeueReadyWritebacks, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
 import { runWritebackGate, writebackPermission, type WritebackTickPort } from "./writeback.js";
+import type { MergeDial } from "@fx/db/src/mergeDial.js";
+import { recordWritebackReceiptOn } from "@fx/db/src/mergeReceipt.js";
 import { handToPerson } from "./events.js";
 import type { MergeQueueEntry, PrFacts } from "./types.js";
 
@@ -37,7 +39,8 @@ import type { MergeQueueEntry, PrFacts } from "./types.js";
  */
 
 export type QueueGateResult =
-  | { outcome: "merged" }
+  /** A plan write-back's merge also carries the dial it was decided on and the head merged: the receipt names them. */
+  | { outcome: "merged"; dial?: MergeDial; sha?: string }
   | { outcome: "merge_delegated" }
   /** D#694 B5: the gate put the pull request in the merge queue of the host. B6-3: the entry gives the slot back and reads as "queued to merge" from its facts until the webhook records the end. */
   | { outcome: "merge_enqueued" }
@@ -128,9 +131,9 @@ export async function runQueueTick(deps: QueueTickDeps, input: { accountId: stri
 async function reopenReadyWritebacks(deps: QueueTickDeps, input: { accountId: string; repoId: string }): Promise<void> {
   if (!deps.writeback) return;
   const waiting = await deps.inTenant(input.accountId, (c) => listWritebackNeedsYou(c, input));
-  if (!waiting.some((w) => w.code === "ready_human_merges")) return;
-  const { setting, locks } = await writebackPermission(deps, input);
-  if (setting && locks.repoAutoMerge && !locks.humanMergeOnly) await deps.inTenant(input.accountId, (c) => requeueReadyWritebacks(c, input));
+  if (!waiting.some((w) => w.code === "ready_human_merges" || w.code === "writeback_merge_dial_ask")) return;
+  const { setting, locks, dial } = await writebackPermission(deps, input);
+  if (setting && locks.repoAutoMerge && !locks.humanMergeOnly && dial.disposition !== "ask") await deps.inTenant(input.accountId, (c) => requeueReadyWritebacks(c, input));
 }
 
 async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: string }, out: QueueTickResult): Promise<Map<string, PrFacts>> {
@@ -284,6 +287,12 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
         // MQ-WIRE-1: the merge is a fact about GitHub, so the item records it now, in the same transaction, as the pull_request webhook would (same stage
         // writer, same markers: build slot, planned-PR siblings, branch cleanup). A webhook that follows finds the item already merged and is a no-op.
         if (merged?.entryKind === "work_item" && merged.workItemId) await recordQueueMerge(c, merged.workItemId, held.id, deps.now?.() ?? new Date());
+        // The plan update the gate merged by policy leaves its receipt, whatever `markMerged` answered: it keys on the gate's own fact (written straight after the merge call),
+        // so an entry GitHub's webhook already settled as a person's merge still gets it. A savepoint: a miss is reported, the merge stands.
+        if (held.entryKind === "plan_writeback" && held.planWritebackId !== null) {
+          if (gate.dial !== undefined && gate.sha !== undefined) await recordWritebackReceiptOn(c, { planWritebackId: held.planWritebackId, headSha: gate.sha, dial: gate.dial });
+          else reportError(new Error("plan write-back merged without its dial and head"), { stage: "merge.receipt", code: "merge_receipt_failed" });
+        }
       });
       return { step: "merged", entryId: held.id, prNumber: held.prNumber };
     case "parked":

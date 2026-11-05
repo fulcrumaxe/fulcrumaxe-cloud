@@ -6,6 +6,7 @@ import { DIAL_DEFAULT_MARKER, appendDialVersion, getCurrentDialSetting, type Dec
 import { FIXED_INVARIANTS } from "@fx/db/src/dialInventory.js";
 import { PRESET_HELD_SENTENCE, PlanHolderOnlyError, RUNNER_RUN_DECISION_TYPE, isLoosening } from "@fx/db/src/runnerPlanLoosen.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { readPlanWritebackAutoMerge } from "@fx/db/src/planWritebackSettings.js";
 import { assertRepoExists } from "@fx/core/src/role-settings/internal.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
@@ -77,7 +78,11 @@ const previewResponseSchema = z.object({
   /** Exactly the class 2 dials this preset would change. Empty when the repo already matches. */
   moves: z.array(moveSchema),
   held: z.array(heldSchema).optional(),
+  /** Fixed sentences about a side effect of the preset that no single move shows (the plan-update switch held by the merge dial); absent when none. */
+  notes: z.array(z.string()).optional(),
 });
+/** The preset would put the merge dial at ask while the repo's plan-update switch is on: the plan updates would then wait for a person. */
+const PLAN_UPDATE_NOTE = "Merging a pull request once its reviews pass: plan updates are set to merge automatically in this repo, and with Ask me first a person merges them instead.";
 const applyResponseSchema = settingsResponseSchema.extend({ moved: z.array(moveSchema), held: z.array(heldSchema).optional() });
 
 type SettingsResponse = z.infer<typeof settingsResponseSchema>;
@@ -264,6 +269,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
         await assertRepoExists(client, repoId);
         const rows = await currentRows(client, repoId);
         const { moves, held } = movesFor(name, rows);
+        const holdsPlanUpdates = moves.some((m) => m.decision_type === "merge_after_reviews" && m.to === "ask") && (await readPlanWritebackAutoMerge(client, accountId, repoId));
         return {
           preset: preset.name,
           label: preset.label,
@@ -271,6 +277,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
           active_preset: activePreset(rows),
           moves,
           ...(held.length > 0 ? { held } : {}),
+          ...(holdsPlanUpdates ? { notes: [PLAN_UPDATE_NOTE] } : {}),
         };
       });
     },

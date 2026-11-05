@@ -211,6 +211,23 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     expect(await tid(page, "au-status").innerText()).not.toMatch(/undefined|null|NaN/);
   });
 
+  test("a preset that would put the merge dial at ask says, in the preview, that plan updates then wait for a person (only when the server sends the note)", async ({ page }) => {
+    const NOTE = "Merging a pull request once its reviews pass: plan updates are set to merge automatically in this repo, and with Ask me first a person merges them instead.";
+    await boot(page, { post: (route, tail) => json(route, 200, tail.endsWith("preview") ? { ...PREVIEW, notes: [NOTE] } : APPLIED) });
+    await openAutonomy(page);
+    await tid(page, "au-preset-balanced").click();
+    await expect(tid(page, "au-note")).toHaveText([NOTE]);
+    await expect(tid(page, "au-preview")).not.toContainText(/undefined|null|NaN/);
+  });
+
+  test("a preview without a note shows none", async ({ page }) => {
+    await boot(page, { post: (route, tail) => json(route, 200, tail.endsWith("preview") ? PREVIEW : APPLIED) });
+    await openAutonomy(page);
+    await tid(page, "au-preset-balanced").click();
+    await expect(tid(page, "au-preview")).toBeVisible();
+    await expect(tid(page, "au-note")).toHaveCount(0);
+  });
+
   test("a preset the repo already matches says nothing changes", async ({ page }) => {
     await boot(page, { post: (route) => json(route, 200, { ...PREVIEW, moves: [] }) });
     await openAutonomy(page);

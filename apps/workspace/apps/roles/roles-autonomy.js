@@ -577,6 +577,7 @@ export function mountAutonomy(host, ctx) {
                 )
               ),
           ...(preview.held || []).map((m) => h("p", { class: "au-line", "data-testid": "au-held" }, dialLabel(m.decision_type) + ": " + m.note)), // a dial the preset would loosen, left as it is
+          ...(Array.isArray(preview.notes) ? preview.notes.filter((t) => typeof t === "string") : []).map((t) => h("p", { class: "au-line", "data-testid": "au-note" }, t)), // a side effect no single move shows (plan updates held by the merge dial)
           h("p", { class: "au-line au-muted" }, "Decisions that always ask you stay as they are."),
           h(
             "div",
