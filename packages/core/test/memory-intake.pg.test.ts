@@ -139,6 +139,20 @@ describe('memory proposal intake (D#601 MEM-2)', () => {
     expect(normalizedMemoryHash('A  b')).toBe(normalizedMemoryHash(' a\nB '));
   });
 
+  it('still catches a duplicate of a row stored before cleaning removed hidden characters, and a hidden-character copy of a stored row', async () => {
+    const it3 = await itemFor();
+    const old = await writeMemory(ctx(), { scope: 'item', scopeRef: it3, kind: 'command', body: 'Run pnpm test first' });
+    // A row as an older cleaner left it: a Hangul filler inside a word.
+    await admin.query(`UPDATE memory_entries SET body = $2, content_sha256 = encode(sha256(convert_to($2::text, 'UTF8')), 'hex') WHERE id = $1`, [(old as { id: string }).id, 'Run pnpm te\u3164st first']);
+    const out = await ingest(await run(), [p('run pnpm test first'), p('Run pnpm te\u2800st first')], { workItemId: it3 });
+    expect(out).toMatchObject({ refused: [{ index: 0, reason: 'duplicate' }, { index: 1, reason: 'duplicate' }] });
+    // A legacy row holding a line separator between words still matches the same words with a space.
+    const it4 = await itemFor();
+    const legacy = await writeMemory(ctx(), { scope: 'item', scopeRef: it4, kind: 'fact', body: 'a b' });
+    await admin.query(`UPDATE memory_entries SET body = $2, content_sha256 = encode(sha256(convert_to($2::text, 'UTF8')), 'hex') WHERE id = $1`, [(legacy as { id: string }).id, 'a\u2028b']);
+    expect(await ingest(await run(), [p('a b')], { workItemId: it4 })).toMatchObject({ refused: [{ index: 0, reason: 'duplicate' }] });
+  });
+
   it('keeps a same-text proposal for a different scope reference: duplicates are per scope', async () => {
     const other = await itemFor();
     await writeMemory(ctx(), { scope: 'item', scopeRef: other, kind: 'fact', body: 'per scope text' });

@@ -7,6 +7,7 @@ import { z } from "zod";
 import { isDetailPath, isDetailRef } from "./detailRules.js";
 import { CONTEXT_MAX_COUNT, CONTEXT_MAX_TOOL_CALLS, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "./contextLedger.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
+import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
 
 /** The isolation tiers a runner can report. Display only. There is no "none". */
@@ -497,15 +498,8 @@ export const MEMORY_PROPOSAL_SCOPES = ["item", "repo", "role"] as const;
 export const MEMORY_PROPOSAL_KINDS = ["convention", "command", "fact", "gotcha", "preference", "decision"] as const;
 export const MAX_MEMORY_PROPOSALS_PER_RUN = 3;
 export const MEMORY_PROPOSAL_BODY_MAX_BYTES = 1024;
-/** Text a person can read as it is: no control character, no format character (bidi marks, zero-width), no line or paragraph separator. */
-export const MEMORY_PROPOSAL_TEXT = new RegExp(
-  // Refused: control, format (bidi marks, zero-width, soft hyphen, tags), private-use, unassigned and surrogate code points, line and paragraph separators, variation selectors,
-  // and the characters that draw as blanks (Hangul fillers, the braille blank, the combining grapheme joiner). Allowed in their place: a joiner between two pictographs and the
-  // emoji variation selector after one, so ordinary emoji and joined emoji sequences still pass.
-  "^(?:[^\\p{Cc}\\p{Cf}\\p{Co}\\p{Cn}\\p{Cs}\\u2028\\u2029\\u034f\\u115f\\u1160\\u2800\\u3164\\uffa0\\ufe00-\\ufe0f\\u{e0100}-\\u{e01ef}]"
-    + "|(?<=\\p{Extended_Pictographic})\\ufe0f|(?<=\\p{Extended_Pictographic}\\ufe0f?)\\u200d(?=\\p{Extended_Pictographic}))+$",
-  "u",
-);
+/** Text a person can read as it is: nothing hidden (see memoryText.ts), except the joiners a script or an emoji needs. */
+export const MEMORY_PROPOSAL_TEXT = new RegExp(`^(?:[^${MEMORY_HIDDEN_CLASS}]|${MEMORY_KEPT_JOINER})+$`, "u");
 export const MemoryProposalItem = z
   .object({
     scope: z.enum(MEMORY_PROPOSAL_SCOPES),

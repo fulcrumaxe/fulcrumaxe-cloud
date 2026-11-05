@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { MEMORY_HIDDEN_CLASS } from '@fulcrumaxe/runner-protocol';
 import type { Pool, PoolClient } from 'pg';
 import { CATALOGUE_VERSION, getCatalogueEntry } from '@fx/decisions';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
@@ -118,9 +119,14 @@ const ROLE_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const LABEL_RE = /^[A-Za-z0-9._:/-]{1,100}$/;
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** The text the duplicate check compares: case, whitespace and compatibility forms aside, the same words are the same proposal. */
+const HIDDEN_RE = new RegExp(`[${MEMORY_HIDDEN_CLASS}]`, 'gu');
+/**
+ * The text the duplicate check compares: case, whitespace, compatibility forms and hidden characters aside, the same words are the same proposal. The hash is computed
+ * from the stored text at every comparison and is not stored, so dropping hidden characters from both sides stops no earlier match (equal inputs stay equal) and a row
+ * stored before cleaning removed them still matches the same words without them.
+ */
 export function normalizedMemoryHash(text: string): string {
-  return createHash('sha256').update(text.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(), 'utf8').digest('hex');
+  return createHash('sha256').update(text.normalize('NFKC').replace(/[\p{Cc}\u2028\u2029]/gu, ' ').replace(HIDDEN_RE, '').toLowerCase().replace(/\s+/g, ' ').trim(), 'utf8').digest('hex');
 }
 
 /** How many of a repository's most recent declined entries (rejected, retired, deleted, replaced by an edit) the dial compares a new proposal against. */

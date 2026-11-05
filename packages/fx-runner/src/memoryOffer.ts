@@ -4,8 +4,8 @@
  * The agent may end its AGENT_OUTPUT envelope with `memory_proposals`. That text is untrusted. It is taken out of the envelope before `done` is sent (jobHandler), so it
  * is in no request body, and it reaches the cloud only when the person says yes to that exact proposal at their own terminal, after the run has ended:
  *
- *   - Read: the strict reader below keeps at most three proposals, each as a scope, a kind and a body from closed sets and a text check (no control or format character, 1 to
- *     1024 bytes). Anything else about a proposal (a reason, a role, any other key) is dropped on the spot and never shown or sent. A proposal that fails the check stays out.
+ *   - Read: the strict reader below keeps at most three proposals, each as a scope, a kind and a body from closed sets and a text check (nothing the person cannot see, apart from the joiners a script or emoji needs, 1 to
+ *     1024 bytes). Anything else about a proposal (a reason, a role, any other key) is dropped on the spot and never shown or sent. A proposal that fails the check stays out, and one fixed line gives how many entries were not valid.
  *   - Offered once per run: the local record `memory-offer-<run id>.json` (0600, in the state directory) is written before the first question, and a run whose record exists is never
  *     offered again. It holds the proposals and what became of each, so a "no" is kept on this machine and nothing is lost.
  *   - Asked once per proposal, never as a batch, on the terminal only (ttyAsk.ts). No terminal, a build whose cloud dropped `mem_proposal_v1`, a timeout and a closed input are all "no".
@@ -24,6 +24,7 @@ import type { MemoryProposalsResult } from "./daemon/client.js";
 export const OFFER_TIMEOUT_MS = 120_000;
 const VIEWS_PER_PROPOSAL = 3;
 const PREVIEW_CHARS = 200;
+const MAX_ENTRIES_CHECKED = 100;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** `unconfirmed`: sent in a message of which the cloud took in only some (it answers counts, not which), so none of them is called sent. */
@@ -48,28 +49,40 @@ export const OFFER_COPY = {
   failed: "fx-runner: the memory proposal could not be sent, so it stayed on this machine; nothing was retried",
   changed: "fx-runner: a memory proposal changed after you saw it, so it stayed on this machine",
   noAnswer: "fx-runner: no answer, so that memory proposal stayed on this machine",
+  refused: (n: number): string => `fx-runner: ${n} memory ${n === 1 ? "proposal was" : "proposals were"} not valid (text, scope, kind or size), so ${n === 1 ? "it was" : "they were"} not offered`,
 } as const;
 
 const sha256Hex = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
-/** The strict reader: the proposals this run may offer, from the untrusted envelope value. Never throws. */
-export function readProposals(raw: unknown): OfferedProposal[] {
-  if (!Array.isArray(raw)) return [];
+/** The strict reader: the proposals this run may offer, and how many of the envelope's first entries failed the check (never their text). From the untrusted value; never throws. */
+export function readProposalsCounted(raw: unknown): { proposals: OfferedProposal[]; refused: number } {
+  if (!Array.isArray(raw)) return { proposals: [], refused: 0 };
   const out: OfferedProposal[] = [];
   const seen = new Set<string>();
-  for (const item of raw.slice(0, MAX_MEMORY_PROPOSALS_PER_RUN)) {
-    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+  let refused = 0;
+  // Every entry is checked (up to a bound, since the array is untrusted) so a bad one is counted wherever it sits; at most three valid ones are kept.
+  for (const item of raw.slice(0, MAX_ENTRIES_CHECKED)) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      refused++;
+      continue;
+    }
     const { scope, kind, body } = item as Record<string, unknown>;
-    if (typeof body !== "string") continue;
+    if (typeof body !== "string") {
+      refused++;
+      continue;
+    }
     const parsed = MemoryProposalItem.safeParse({ scope, kind, body, body_sha256: sha256Hex(body) });
+    if (!parsed.success) refused++;
     // The same body twice is one proposal, the first: a yes is bound to a body, so a body has one scope and one kind.
-    if (parsed.success && !seen.has(body)) {
+    else if (!seen.has(body) && out.length < MAX_MEMORY_PROPOSALS_PER_RUN) {
       seen.add(body);
       out.push({ scope: parsed.data.scope, kind: parsed.data.kind, body: parsed.data.body, sha256: parsed.data.body_sha256 });
     }
   }
-  return out;
+  return { proposals: out, refused };
 }
+
+export const readProposals = (raw: unknown): OfferedProposal[] => readProposalsCounted(raw).proposals;
 
 /** The title is built from the two closed words, never from agent text. */
 const titleOf = (p: OfferedProposal): string => `${p.kind} (${p.scope} scope)`;
@@ -128,10 +141,15 @@ export function createMemoryOffer(deps: MemoryOfferDeps): (runId: string, raw: u
 
 async function offer(deps: MemoryOfferDeps, runId: string, raw: unknown): Promise<void> {
   if (!UUID.test(runId)) return;
-  const proposals = readProposals(raw);
-  if (proposals.length === 0) return;
+  const { proposals, refused } = readProposalsCounted(raw);
+  if (proposals.length === 0) {
+    // A proposal that failed the text check is not dropped without a word: one fixed line with the count, never the text.
+    if (refused > 0) deps.say(OFFER_COPY.refused(refused));
+    return;
+  }
   // One offer per run id: a record that exists means this run was offered (or kept) already.
   if (readPrivateFile(deps.stateDir, fileOf(runId)) !== undefined) return;
+  if (refused > 0) deps.say(OFFER_COPY.refused(refused));
   // A role lesson from a runner run has no way in later (the cloud takes a role proposal only once the item is done, and a runner run is not revisited), so it is never offered: it stays in the record.
   const offerable = proposals.filter((p) => p.scope !== "role");
   const record: OfferRecord = { run_id: runId, proposals: proposals.map((p) => ({ ...p, state: (p.scope === "role" ? "kept_local" : "pending") as OfferState })) };
