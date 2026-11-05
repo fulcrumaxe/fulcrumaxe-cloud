@@ -105,11 +105,19 @@ describe('memory (D#601 MEM-1)', () => {
       await expect(decideMemory(as(a.accountId, aMember), { id: e.id, to: 'approved' })).rejects.toBeInstanceOf(ForbiddenError);
       await expect(getMemory(as(b.accountId, b.userId), e.id)).rejects.toBeInstanceOf(NotFoundError);
       await expect(decideMemory(as(b.accountId, b.userId), { id: e.id, to: 'approved' })).rejects.toBeInstanceOf(NotFoundError);
-      await expect(decideMemory(as(a.accountId, aAdmin), { id: e.id, to: 'retired' })).rejects.toMatchObject({ code: 'invalid_transition' });
       const done = await decideMemory(as(a.accountId, aAdmin), { id: e.id, to: 'approved' });
       expect(done).toMatchObject({ outcome: 'decided', entry: { status: 'approved', approvedBy: aAdmin } });
       expect((await decideMemory(as(a.accountId, aAdmin), { id: e.id, to: 'approved' })).outcome).toBe('already_decided');
+      await expect(decideMemory(as(a.accountId, aAdmin), { id: e.id, to: 'rejected' })).rejects.toMatchObject({ code: 'invalid_transition' });
       await expect(decideMemory(as(a.accountId, aAdmin), { id: e.id, to: 'deleted' as 'approved' })).rejects.toMatchObject({ code: 'invalid_message' });
+    });
+    it('decideMemory refuses retired and proposed before the database: those steps are revertMemory, which writes the reversal receipt', async () => {
+      const e = await proposeMemory(as(a.accountId, aMember), { scope: 'repo', scopeRef: REPO, kind: 'fact', body: 'retire goes through revertMemory' });
+      await decideMemory(as(a.accountId, aAdmin), { id: e.id, to: 'approved' });
+      for (const to of ['retired', 'proposed'] as const) {
+        await expect(decideMemory(as(a.accountId, aAdmin), { id: e.id, to: to as 'approved' })).rejects.toMatchObject({ code: 'invalid_message' });
+      }
+      expect((await getMemory(as(a.accountId, aAdmin), e.id)).status).toBe('approved');
     });
     it('refuses an unknown scope, kind or author kind before the database, and a non-UUID id as NotFound', async () => {
       const ctx = as(a.accountId, aMember);

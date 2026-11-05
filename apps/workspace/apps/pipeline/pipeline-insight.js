@@ -184,7 +184,8 @@ const REASON_WORDS = {
   // D#483 S5-j2a1: another merge on this repository (a direct merge or the queue's slot) holds it for now; this one asks again.
   merge_repo_busy: "Another merge on this repository is finishing; this one goes next.",
   // D#483 S5-j2a2: the order check of the merge. `ordered_resource_out_of_order` keeps the queue's sentence (see FIELD_SENTENCES and BLOCKING_SENTENCES).
-  ordered_resource_unreadable: "We couldn't read this repository to check the order of its migrations, so the platform didn't merge. It checks again on the next try.",
+  // Same remedy as packages/core stalled.ts: no timer asks again, so the sure way forward is a new push and Check the merge (or a hand merge).
+  ordered_resource_unreadable: "We couldn't read this repository to check the order of its migrations, so the platform didn't merge. Push a new commit to the pull request's branch and press Check the merge to run the check again; or merge it yourself on GitHub.",
   ordered_resource_path_too_long: "A file path in this pull request is too long to check the order of this repository's migrations, so the platform stopped it. Remove the file, or merge it by hand.",
   merge_hold_expired: "This repository was held for a pull request in GitHub's merge queue for 24 hours; the hold was ended so other merges can go.",
   ordered_resource_waiting: "Waiting for a pull request ahead of it in GitHub's merge queue, so the migration numbers stay in order.",

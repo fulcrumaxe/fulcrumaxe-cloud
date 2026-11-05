@@ -542,6 +542,15 @@ test.describe("D#519 MQ5-c2: queue chip and merge-stop sentences", () => {
     });
   }
 
+  test("ordered_resource_unreadable: the step row says to push and press Check the merge, and promises no retry", async ({ page }) => {
+    const current = { json: activity({ steps: [gate(["ordered_resource_unreadable"])] }) };
+    await openWith(page, current);
+    const row = tid(page, "pl-step").last();
+    await expect(row).toContainText("press Check the merge to run the check again");
+    await expect(row).not.toContainText("next try");
+    expect(await tid(page, "pl-live").innerText()).not.toMatch(NO_BAD);
+  });
+
   test("the chip counts ahead, follows the next read, and is announced politely", async ({ page }) => {
     const current = { json: activity({ queue_wait: { ahead: 2 } }) };
     await openWith(page, current);
