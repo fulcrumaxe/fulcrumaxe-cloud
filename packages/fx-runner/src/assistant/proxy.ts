@@ -11,7 +11,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import path from "node:path";
 import { assistantCall } from "./cloudCall.js";
 import { fenceJson } from "./fence.js";
-import { READ_TOOLS, readPath } from "./readTools.js";
+import { READ_TOOLS, correctionsPath, readPath } from "./readTools.js";
 import { AssistantError, assertStateDirSafe, readAssistantToken, type AssistantProblem } from "./tokenFile.js";
 
 /** The whole tool list: the corrections list and `draft_correction` (CC-7a-1) and the six read tools (CC-7a-2). Nothing here writes except the proposal. */
@@ -71,7 +71,7 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
       throw error;
     }
     if (stored.token === dead || o.now().getTime() >= Date.parse(stored.expires_at)) return refuse(401, "assistant_relink");
-    let target = `/api/v1/work-items/${String(id)}/corrections`;
+    let target = correctionsPath(String(id));
     if (read) {
       const planned = readPath(tool, args, stored.repo_id);
       if ("fault" in planned) return refuse(400, "assistant_tool_refused", planned.fault);

@@ -324,12 +324,31 @@ export function stripControlTokens(text: string): string {
  * around.
  */
 function neutralizeDelimiters(text: string): string {
-  return text
-    .split(UNTRUSTED_DELIMITER_END)
-    .join(NEUTRALIZED_END)
-    .split(UNTRUSTED_DELIMITER_START)
-    .join(NEUTRALIZED_START);
+  // Matched on the decomposed text so a letter with an accent (NFKC composes `N` + U+0301) still reads as its letter. Text with no marker comes back byte for byte.
+  const decomposed = text.normalize("NFD");
+  const out = decomposed.replace(FENCE_MARKER, (_m, end: string | undefined) => (end === undefined ? NEUTRALIZED_START : NEUTRALIZED_END));
+  return out === decomposed ? text : out.normalize("NFC"); // the text was NFKC already, so NFC puts every other character back
 }
+
+/**
+ * Characters that draw like a letter or bracket of a fence marker and that NFKC leaves alone, mapped to the ASCII they imitate (NFKC already folds the fullwidth forms).
+ * The runner carries a copy of this table and of the pattern below (it ships on its own); a test pins the copy on hostile text.
+ */
+export const FENCE_LOOKALIKES: Readonly<Record<string, string>> = {
+  "\u2215": "/", "\u2044": "/", "\u2571": "/", "\u29f8": "/", "\u226a": "<<", "\u226b": ">>",
+  "\u2039": "<", "\u27e8": "<", "\u3008": "<", "\u00ab": "<", "\u203a": ">", "\u27e9": ">", "\u3009": ">", "\u00bb": ">",
+  "\u0443": "u", "\u03c5": "u", "\u057d": "u", "\u0578": "n", "\u043f": "n", "\u0442": "t", "\u0433": "r", "\u0455": "s", "\u0435": "e", "\u0501": "d",
+  "\u0423": "u", "\u03a5": "u", "\u054d": "u", "\u0548": "n", "\u041f": "n", "\u0422": "t", "\u0413": "r", "\u0405": "s", "\u0415": "e", "\u0500": "d",
+  "\u0395": "e", "\u039d": "n", "\u03a4": "t", "\u039f": "o", "\u03a7": "x", "\u0391": "a", "\u043e": "o", "\u041e": "o", "\u03bf": "o", "\u0441": "c", "\u0421": "c", "\u0445": "x", "\u0425": "x", "\u0430": "a", "\u0410": "a", "\u04cf": "l",
+};
+const classOf = (ch: string): string => `[${ch}${Object.entries(FENCE_LOOKALIKES).filter(([, v]) => v === ch).map(([k]) => k).join("")}]`;
+/** Whitespace and combining marks may sit between any two characters of a marker. */
+const GAP = "[\\s\\p{Mn}]*";
+const word = (w: string): string => [...w].map(classOf).join(GAP);
+/** `<<`, `>>` or the single characters U+226A and U+226B, with space and lookalike brackets allowed. Group 1 is set for the closing marker. */
+const OPEN = `(?:\u226a|${classOf("<")}${GAP}${classOf("<")})`;
+const CLOSE = `(?:\u226b|${classOf(">")}${GAP}${classOf(">")})`;
+const FENCE_MARKER = new RegExp(`${OPEN}${GAP}(${word("end")}${GAP})?${word("untrusted")}(?:${GAP}${word("external")}${GAP}${word("content")})?[^<>\u226a\u226b]{0,40}${CLOSE}`, "giu");
 
 /**
  * Bound the input length, strip control-plane tokens, append the

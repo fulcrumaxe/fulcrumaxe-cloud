@@ -34,6 +34,7 @@
   },
   "devDependencies": {
     "@fulcrumaxe/fx-runner": "workspace:*",
+    "@fx/roles": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/sitekit-checks": "workspace:*",
     "@fx/test-guard": "workspace:*",
