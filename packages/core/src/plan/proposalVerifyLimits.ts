@@ -30,6 +30,8 @@ export interface VerifyKeyInput {
   gh_number: number | null;
   discussion_number: number | null;
   verify_attempts: number;
+  /** Times the proposal was sent back to be checked (0994). From the first on it is part of the key, so a re-check never meets the run of an earlier one. */
+  verify_requeues: number;
   /** D#483 S4-f2: the analyst's `path:start-end` refs. Null for every row made before them, whose key must not change; required so a caller cannot forget it. */
   analysis_refs: readonly string[] | null;
 }
@@ -46,10 +48,10 @@ const textHash8 = (p: VerifyKeyInput): string =>
   createHash('sha256').update(JSON.stringify([p.title, p.summary, verifySourceRefs(p)])).digest('hex').slice(0, 8);
 
 /**
- * The current attempt's run key, `proposal-verify:<id>:<text_hash_8>:<attempts>`. The text is part of the key, so an edited proposal sent
+ * The current attempt's run key, `proposal-verify:<id>:<text_hash_8>:<attempts>`, plus `:<requeues>` once the proposal was sent back for a re-check. The text is part of the key, so an edited proposal sent
  * back to `pending` starts a fresh key space. The id stays the second `:` field: the counters below read it there.
  */
-export const proposalVerifyKey = (p: VerifyKeyInput): string => `${PROPOSAL_VERIFY_KEY_PREFIX}${p.id}:${textHash8(p)}:${p.verify_attempts}`;
+export const proposalVerifyKey = (p: VerifyKeyInput): string => `${PROPOSAL_VERIFY_KEY_PREFIX}${p.id}:${textHash8(p)}:${p.verify_attempts}${p.verify_requeues > 0 ? `:${p.verify_requeues}` : ''}`;
 
 /** Verifier runs keyed for one repository's proposals and started this UTC day. `$1` account, `$2` repo, `$3` the key prefix pattern. */
 const verifierRunsToday = (externalOnly: boolean): string => `SELECT k.run_id FROM agent_run_idempotency_keys k
