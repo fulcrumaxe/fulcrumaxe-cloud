@@ -7232,7 +7232,7 @@
       "get": {
         "operationId": "listContextRules",
         "summary": "The pins and excludes of a repository, or in force for an item",
-        "description": "Session only, member. Name `repo_id` for the rules set on a repository, or `work_item_id` for the rules in force for an item: the item's own rules, and the repository's for every path the item has no rule on. A pin keeps a file in the run's prompt; an exclude keeps a path (or glob) out of what the agent may read. A change applies from the next run, and a run already started keeps the rules it began with. Another account's repository or item answers an empty list.",
+        "description": "Session only, member. Name `repo_id` for the rules set on a repository, or `work_item_id` for the rules in force for an item: the item's own rules, and the repository's for every path the item has no rule on. A pin keeps a file in the run's prompt; an exclude keeps a path (or glob) out of what the agent may read. A change applies from the next run, and a run already started keeps the rules it began with. Another account's repository or item answers an empty list. A pin whose path is not in the default branch's tree carries `missing_at`, the head sha it was looked for at; the label is best effort and left off when the tree cannot be read, is too large, or the read is slow.",
         "security": [
           {
             "session": []
@@ -7322,6 +7322,10 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "missing_at": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{40}$"
                           }
                         },
                         "required": [
