@@ -76,19 +76,24 @@ interface GateEnqueue {
  * A gate fact written before migration 0990 is evidence with no version (dialVersion null): the caller keeps the time-based read for it, for those facts only.
  */
 async function gateEnqueueOf(client: PoolClient, accountId: string, workItemId: string, head: string): Promise<GateEnqueue | null> {
+  // Only evidence written after the newest removal at that head (one that is not GitHub's own success reason) counts: a gate decision from before the removal says nothing about a
+  // later enqueue. A gate retry after the removal is new evidence and counts.
+  const floor = `COALESCE((SELECT max(r.seq) FROM work_item_driver_events r WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.kind = 'merge_dequeued' AND r.head_sha = $3 AND NOT (COALESCE(r.code, '') = ANY($4::text[]))), 0)`;
   const own = await client.query<{ dial_version: number | null }>(
     `SELECT dial_version FROM work_item_driver_events
       WHERE account_id = $1 AND work_item_id = $2 AND head_sha = $3 AND ((kind = 'merge_gate' AND code = 'merge_enqueued') OR (kind = 'merge_enqueued' AND dial_version IS NOT NULL))
+        AND seq > ${floor}
       ORDER BY (dial_version IS NOT NULL) DESC, seq DESC LIMIT 1`,
-    [accountId, workItemId, head],
+    [accountId, workItemId, head, QUEUE_SUCCESS_DEQUEUE_CODES],
   );
   if (own.rows[0] !== undefined) return { dialVersion: own.rows[0].dial_version };
   const paired = await client.query<{ dial_version: number | null }>(
     `SELECT g.dial_version FROM plane_merge_orders o
        JOIN work_item_driver_events g ON g.account_id = o.account_id AND g.work_item_id = o.work_item_id AND g.kind = 'merge_gate' AND g.code = 'merge_delegated' AND g.head_sha = o.reviewed_head
       WHERE o.account_id = $1 AND o.work_item_id = $2 AND o.expected_public_head = $3 AND o.state IN ('enqueued', 'merged')
+        AND g.seq > ${floor}
       ORDER BY (g.dial_version IS NOT NULL) DESC, g.seq DESC LIMIT 1`,
-    [accountId, workItemId, head],
+    [accountId, workItemId, head, QUEUE_SUCCESS_DEQUEUE_CODES],
   );
   return paired.rows[0] !== undefined ? { dialVersion: paired.rows[0].dial_version } : null;
 }
