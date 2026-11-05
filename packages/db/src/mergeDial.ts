@@ -36,3 +36,22 @@ export async function readMergeDial(client: PoolClient, repoId: string, at?: Dat
   const stored = row.disposition as MergeDial['disposition'];
   return { disposition: entry.allowedDispositions.includes(stored) ? stored : 'ask', version: row.version };
 }
+
+/**
+ * The dial at exactly `version`: what the gate read and wrote on its fact (migration 0990). Version 0 is "no row" (the catalogue default). A version with no row is an
+ * error, never a guess: the receipt must name a version that existed. Same reading of the stored value as `readMergeDial`.
+ */
+export async function readMergeDialVersion(client: PoolClient, repoId: string, version: number): Promise<MergeDial> {
+  const entry = getCatalogueEntry(MERGE_DIAL_TYPE);
+  if (!entry) throw new Error('merge_after_reviews is not in the catalogue');
+  if (version === 0) return { disposition: entry.defaultDisposition, version: 0 };
+  const { rows } = await client.query<{ disposition: string; preset: string | null }>(
+    'SELECT disposition, preset FROM decision_settings WHERE repo_id = $1 AND decision_type = $2 AND version = $3',
+    [repoId, MERGE_DIAL_TYPE, version],
+  );
+  const row = rows[0];
+  if (row === undefined) throw new Error('merge dial: the version a fact names has no row');
+  if (row.preset === DIAL_DEFAULT_MARKER) return { disposition: entry.defaultDisposition, version };
+  const stored = row.disposition as MergeDial['disposition'];
+  return { disposition: entry.allowedDispositions.includes(stored) ? stored : 'ask', version };
+}

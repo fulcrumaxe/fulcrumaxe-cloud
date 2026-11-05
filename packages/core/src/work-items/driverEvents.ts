@@ -33,6 +33,7 @@ import { ACTOR_YOU, PERSON_REQUEUE_REASON, QUEUE_AGAIN_ACTION, queueAuditAtSql }
  *   review_status        the `fulcrumaxe/review` commit status. code: posted | skipped | failed.
  *   merge_gate            the merge gate's outcome. code: its outcome; reasons: its block codes.
  *   merged_by_gate        the gate itself merged the pull request (a merge by a person has no such row).
+ *                         merge_gate, merged_by_gate and merge_enqueued also carry `dial_version` (migration 0990): the merge dial's version the gate read for that decision.
  *   stopped               the driver stopped for a reason that is none of the above. code: the reason (`reviewer_environment`: a reviewer could not run the tests; reasons: its roles; no verdict was recorded).
  *   pr_head_pushed        the pull request's head moved to this commit (head_sha, pr_number). A person's push seen as pull_request.synchronize, or one the
  *                         driver itself saw (code: observed). Its created_at, the database clock, starts the quiet period of a cloud-verified review.
@@ -92,6 +93,8 @@ export function reviewFixRoundsSql(alias: string): string {
 
 /** D#694 B5 (migration 0938): the kinds that may carry a queue entry id. */
 export const QUEUE_EVENT_KINDS: readonly DriverEventKind[] = ['merge_enqueued', 'merge_dequeued', 'merged_via_queue'];
+/** Migration 0990: the kinds that may carry the merge dial's version. */
+export const GATE_DIAL_KINDS: readonly DriverEventKind[] = ['merge_gate', 'merged_by_gate', 'merge_enqueued'];
 const QUEUE_ENTRY_RE = /^[A-Za-z0-9_=-]{1,100}$/;
 export type DriverEventKind = (typeof DRIVER_EVENT_KINDS)[number];
 
@@ -191,6 +194,8 @@ export interface DriverEventInput {
   attempt?: number | null;
   /** The three queue kinds only: GitHub's node id of the queue entry (migration 0938). */
   queueEntryId?: string | null;
+  /** The merge gate's own facts only (`GATE_DIAL_KINDS`, migration 0990): the version of the merge dial the gate read when it decided (0 = no row, the catalogue default). The receipt names this version, never a re-read. */
+  dialVersion?: number | null;
   /** A merge-conflict `stopped` fact only (migration 0957): the conflicted paths and the base branch. Both are checked by the table, so a bad one fails the write. */
   detail?: { conflictFiles?: readonly string[]; baseRef?: string | null };
 }
@@ -221,6 +226,10 @@ export function assertDriverEvent(e: DriverEventInput): void {
     if (!QUEUE_EVENT_KINDS.includes(e.kind)) throw new Error('driver event: only a queue fact carries a queue entry id');
     if (typeof e.queueEntryId !== 'string' || !QUEUE_ENTRY_RE.test(e.queueEntryId)) throw new Error('driver event: queue entry id is not a node id');
   }
+  if (e.dialVersion != null) {
+    if (!GATE_DIAL_KINDS.includes(e.kind)) throw new Error('driver event: only a merge gate fact carries a dial version');
+    if (!Number.isSafeInteger(e.dialVersion) || e.dialVersion < 0 || e.dialVersion > 2_147_483_647) throw new Error('driver event: bad dial version');
+  }
   if (e.attempt != null && !(Number.isInteger(e.attempt) && e.attempt >= 0 && e.attempt <= MAX_WAITING_ATTEMPT)) throw new Error('driver event: bad attempt');
 }
 
@@ -231,10 +240,10 @@ export function assertDriverEvent(e: DriverEventInput): void {
 export async function recordDriverEvent(client: PoolClient, accountId: string, e: DriverEventInput): Promise<{ recorded: boolean }> {
   assertDriverEvent(e);
   const r = await client.query(
-    `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, round, run_id, dedupe_key, stage, attempt, queue_entry_id)
-     VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12, $13)
+    `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, round, run_id, dedupe_key, stage, attempt, queue_entry_id, dial_version)
+     VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12, $13, $14)
      ON CONFLICT (account_id, work_item_id, kind, dedupe_key) DO NOTHING RETURNING id`,
-    [accountId, e.workItemId, e.kind, e.code ?? null, [...(e.reasons ?? [])], e.headSha ?? null, e.prNumber ?? null, e.round ?? null, e.runId ?? null, e.dedupeKey, e.stage ?? null, e.attempt ?? null, e.queueEntryId ?? null],
+    [accountId, e.workItemId, e.kind, e.code ?? null, [...(e.reasons ?? [])], e.headSha ?? null, e.prNumber ?? null, e.round ?? null, e.runId ?? null, e.dedupeKey, e.stage ?? null, e.attempt ?? null, e.queueEntryId ?? null, e.dialVersion ?? null],
   );
   const d = e.detail;
   if (r.rowCount === 1 && d !== undefined && ((d.conflictFiles?.length ?? 0) > 0 || (d.baseRef ?? null) !== null)) {

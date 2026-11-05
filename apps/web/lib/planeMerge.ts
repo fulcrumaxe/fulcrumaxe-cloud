@@ -156,7 +156,10 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
     }
     await withTenant(pool, accountId, async (client) => {
       const removals = (await listHeadRemovals(client, accountId, order.workItemId, order.expectedPublicHead, order.prNumber, { all: true })).length;
-      await recordDriverEvent(client, accountId, { workItemId: order.workItemId, kind: "merge_enqueued", dedupeKey: enqueueDedupeKey(order.expectedPublicHead, removals), code: "queue", headSha: order.expectedPublicHead, prNumber: order.prNumber, queueEntryId: input.entryId });
+      // The dial version the gate read for this order: on its newest `merge_gate` fact at the reviewed head (migration 0990). None (an older fact) leaves the receipt on the time read.
+      const gate = await client.query<{ dial_version: number }>("SELECT dial_version FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_gate' AND head_sha = $3 AND dial_version IS NOT NULL ORDER BY seq DESC LIMIT 1", [accountId, order.workItemId, order.reviewedHead]);
+      const dialVersion = gate.rows[0]?.dial_version;
+      await recordDriverEvent(client, accountId, { workItemId: order.workItemId, kind: "merge_enqueued", dedupeKey: enqueueDedupeKey(order.expectedPublicHead, removals), code: "queue", headSha: order.expectedPublicHead, prNumber: order.prNumber, queueEntryId: input.entryId, ...(dialVersion !== undefined ? { dialVersion } : {}) });
     });
   }
 

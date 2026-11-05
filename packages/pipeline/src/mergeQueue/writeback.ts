@@ -154,7 +154,9 @@ export async function runWritebackGate(
   const decided = decideWritebackMerge({ ...base, evidence });
   if (decided.decision !== "merge") return stop(decided.decision === "writeback_content_mismatch" || decided.decision === "writeback_pr_mismatch" ? decided.decision : "writeback_check_unfinished");
   const out = await deps.writeback.merge(input.pr, { sha: decided.sha });
-  if ("merged" in out && out.merged === true) {
+  // A 5xx does not say whether GitHub merged. One re-read: merged at the sent head by a bot is the gate's merge (as for a work item); anything else stays a stop.
+  const landed = "httpStatus" in out && out.httpStatus >= 500 && port !== null && (await port.github.readPull(input.pr.prNumber).then((p) => p.merged && p.headSha === decided.sha && p.mergedByType === "Bot", () => false));
+  if (("merged" in out && out.merged === true) || landed) {
     // The gate's own fact, straight after the merge call and in a transaction of its own: the receipt keys on it, not on the entry (GitHub's webhook or the write-back's
     // reconcile can settle the entry as a person's merge before the tick's transaction commits). A failed write is reported and the merge stands.
     const chosen = dial.disposition === "announce" ? "announce" : "act";

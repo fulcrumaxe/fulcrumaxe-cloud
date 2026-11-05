@@ -328,7 +328,9 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     if (body.mergeable !== null && typeof body.mergeable !== "boolean") bad("pull.mergeable");
     if (typeof body.mergeable_state !== "string") bad("pull.mergeable_state");
     const mergeableState: MergeableState = MERGEABLE_STATES.has(body.mergeable_state) ? (body.mergeable_state as MergeableState) : "unknown";
-    return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: body.mergeable, mergeableState, ...branches };
+    // `merged_by.type` (`User`, `Bot`) from this same read: who merged. Absent or unreadable is null.
+    const mergedBy = isObj(body.merged_by) && typeof body.merged_by.type === "string" ? body.merged_by.type : null;
+    return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: body.mergeable, mergeableState, ...(state.merged ? { mergedBy } : {}), ...branches };
   }
 
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -344,11 +346,11 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     return { branch, sha: sha as string };
   }
 
-  /** Reads until GitHub has computed `mergeable` or the bound is spent; the last read is returned, `null` included. */
+  /** Reads until GitHub has computed `mergeable`, the bound is spent, or the pull request is merged (GitHub answers `mergeable: null` for a merged one for good); the last read is returned, `null` included. */
   async function readMergeability(pr: PullRequestRef, gatedHeadSha?: string): Promise<PullRequestMergeability> {
     const limit = Math.max(1, deps.mergeablePollLimit ?? MERGEABLE_POLL_LIMIT);
     let m = await readMergeabilityOnce(pr);
-    for (let reads = 1; m.mergeable === null && !deps.local && reads < limit && (gatedHeadSha === undefined || m.headSha === gatedHeadSha); reads++) {
+    for (let reads = 1; m.mergeable === null && !m.merged && !deps.local && reads < limit && (gatedHeadSha === undefined || m.headSha === gatedHeadSha); reads++) {
       await sleep(deps.mergeablePollIntervalMs ?? MERGEABLE_POLL_INTERVAL_MS);
       m = await readMergeabilityOnce(pr);
     }

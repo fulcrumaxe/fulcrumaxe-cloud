@@ -36,6 +36,7 @@ interface Pr {
   base: string;
   state: "open" | "closed";
   merged: boolean;
+  mergedBy?: string;
 }
 
 const gitBlob = (text: string): string => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
@@ -82,7 +83,7 @@ export class FakeGitHub {
     return c.sha;
   }
   /** A person merges the pull request: its file content lands on the default branch in one new commit. */
-  merge(prNumber: number): void {
+  merge(prNumber: number, by = "User"): void {
     const pr = this.prs.find((p) => p.number === prNumber)!;
     const head = this.commits.get(this.refs.get(pr.head)!)!;
     const base = this.commits.get(this.refs.get(pr.base)!)!;
@@ -90,6 +91,7 @@ export class FakeGitHub {
     this.refs.set(pr.base, c.sha);
     pr.state = "closed";
     pr.merged = true;
+    pr.mergedBy = by;
   }
   /** A person closes the pull request without merging. */
   closeUnmerged(prNumber: number): void {
@@ -117,6 +119,7 @@ export class FakeGitHub {
       number: p.number,
       state: p.state,
       merged: p.merged,
+      ...(p.merged ? { merged_by: { type: p.mergedBy ?? "User" } } : {}),
       draft: false,
       head: { ref: p.head, sha: this.refs.get(p.head) ?? "0".repeat(40), repo: { full_name: `${OWNER}/${NAME}` } },
       base: { ref: p.base, repo: { full_name: `${OWNER}/${NAME}` } },

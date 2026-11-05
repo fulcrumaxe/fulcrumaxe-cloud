@@ -1064,6 +1064,73 @@ describe("H14b merge gate: table [pg]", () => {
       expect(result.outcome).toBe("ready_human_merges");
     });
 
+    it("a 502 whose merge had landed on GitHub is the gate's merge, not a person's", async () => {
+      const world = await seedWorld("internal");
+      for (const run of standard()) await insertRun(world, run);
+      const github = new FakeGitHub({
+        pr: { headSha: HEAD, state: "open", merged: false, draft: false, body: "", labels: [], comments: [] },
+        ciBySha: { [HEAD]: greenCi(HEAD) },
+        onMerge: (fake) => {
+          fake.pr.merged = true;
+          fake.pr.mergedBy = "Bot";
+          fake.pr.state = "closed";
+          return { merged: false, httpStatus: 502 };
+        },
+      });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toEqual({ outcome: "merged", headSha: HEAD });
+      expect(github.humanMarks).toHaveLength(0);
+    });
+
+    it("a 502 whose pull request a person merged at the same head in the window is theirs: no claim (a stop); nor one whose merger GitHub did not name", async () => {
+      for (const by of ["User", null]) {
+        const world = await seedWorld("internal");
+        for (const run of standard()) await insertRun(world, run);
+        const github = new FakeGitHub({
+          pr: { headSha: HEAD, state: "open", merged: false, draft: false, body: "", labels: [], comments: [] },
+          ciBySha: { [HEAD]: greenCi(HEAD) },
+          onMerge: (fake) => {
+            fake.pr.merged = true;
+            fake.pr.mergedBy = by;
+            fake.pr.state = "closed";
+            return { merged: false, httpStatus: 502 };
+          },
+        });
+        const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+        expect(result.outcome).toBe("ready_human_merges");
+      }
+    });
+
+    it("a 502 on a pull request merged at a head other than the gated one is no merge of the gate's", async () => {
+      const world = await seedWorld("internal");
+      for (const run of standard()) await insertRun(world, run);
+      const github = new FakeGitHub({
+        pr: { headSha: HEAD, state: "open", merged: false, draft: false, body: "", labels: [], comments: [] },
+        ciBySha: { [HEAD]: greenCi(HEAD) },
+        onMerge: (fake) => {
+          fake.pr.merged = true;
+          fake.pr.mergedBy = "Bot";
+          fake.pr.state = "closed";
+          fake.pr.headSha = NEW;
+          return { merged: false, httpStatus: 502 };
+        },
+      });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result.outcome).toBe("ready_human_merges");
+    });
+
+    it("a 502 on a pull request that is still open stays a stop for a person", async () => {
+      const world = await seedWorld("internal");
+      for (const run of standard()) await insertRun(world, run);
+      const github = new FakeGitHub({
+        pr: { headSha: HEAD, state: "open", merged: false, draft: false, body: "", labels: [], comments: [] },
+        ciBySha: { [HEAD]: greenCi(HEAD) },
+        onMerge: () => ({ merged: false, httpStatus: 502 }),
+      });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_call_refused"] });
+    });
+
     it.each(["not-a-sha; rm -rf /", "", "A".repeat(40), "a".repeat(39), " " + "a".repeat(40)])(
       "S2: a 409 whose re-read head is junk (%j) marks for a human and requests no review",
       async (junk) => {

@@ -519,6 +519,17 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
     expect(rows).toEqual([{ code: "queue", head_sha: HEAD, pr_number: 41, queue_entry_id: "MQE_kwDOfake1" }]);
   });
 
+  it("migration 0990: the enqueue fact names the dial version the gate read, which the receipt written later uses", async () => {
+    const w = await world({ repo: withQueue() });
+    await passBoth(w);
+    const user = randomUUID();
+    await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [user, `${user}@example.test`]);
+    await h.admin.query("INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'merge_after_reviews', 'announce', 'balanced', 1, $3)", [w.accountId, w.repoId, user]);
+    expect(await queued(w)).toMatchObject({ outcome: "merge_enqueued" });
+    const { rows } = await h.admin.query("SELECT kind, dial_version FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('merge_gate', 'merge_enqueued') ORDER BY seq", [w.workItemId]);
+    expect(rows).toEqual([{ kind: "merge_gate", dial_version: 1 }, { kind: "merge_enqueued", dial_version: 1 }]);
+  });
+
   it("a replayed gate on the same head writes the enqueue fact once", async () => {
     const w = await world({ repo: withQueue() });
     await passBoth(w);
@@ -848,6 +859,24 @@ describe("D#7 DW-R4: the merge dial and the receipt behind a merge by policy", (
     await setDial(d, "act", 1, "default");
     expect(await gate(d)).toMatchObject({ outcome: "merged" });
     expect(await receipts(d)).toMatchObject([{ chosen: "act", dial_version: 1 }]);
+  });
+
+  const factVersions = async (w: World) => (await h.admin.query("SELECT kind, dial_version FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('merge_gate', 'merged_by_gate', 'merge_enqueued') ORDER BY seq", [w.workItemId])).rows;
+
+  it("migration 0990: the gate writes the dial version it read on its own facts (0 for no row); a stop before the dial was read names none", async () => {
+    const w = await world();
+    await passBoth(w);
+    await setDial(w, "announce", 1, "balanced");
+    expect(await gate(w)).toMatchObject({ outcome: "merged" });
+    expect(await factVersions(w)).toEqual([{ kind: "merge_gate", dial_version: 1 }, { kind: "merged_by_gate", dial_version: 1 }]);
+    const bare = await world();
+    await passBoth(bare);
+    expect(await gate(bare)).toMatchObject({ outcome: "merged" });
+    expect(await factVersions(bare)).toEqual([{ kind: "merge_gate", dial_version: 0 }, { kind: "merged_by_gate", dial_version: 0 }]);
+    const early = await world({ repo: { state: "closed" } });
+    await passBoth(early);
+    expect(await gate(early)).toMatchObject({ outcome: "pr_not_open" });
+    expect(await factVersions(early)).toEqual([{ kind: "merge_gate", dial_version: null }]);
   });
 
   it("ask leaves the merge to a person even with auto-merge on: nothing merges, one 'ask' receipt names the dial version, a second look writes no second", async () => {

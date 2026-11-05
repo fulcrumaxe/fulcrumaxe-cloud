@@ -64,6 +64,24 @@ describe("D#519 MQ1 gate: a refused merge is classified from re-reads, never fro
     return { result, requested, sleeps: made.sleeps };
   }
 
+  it("a merged pull request answers mergeable null for good: the port reads it once and never sleeps", async () => {
+    const g = await github({ merged: true, state: "closed" });
+    const { port, sleeps } = portOver(g.http, { pollLimit: 3 });
+    expect(await port.getMergeability(PR, { gatedHeadSha: HEAD })).toMatchObject({ merged: true, mergeable: null, mergedBy: "Bot" });
+    expect(g.server.seen.filter((r) => r.method === "GET" && r.path.endsWith("/pulls/7"))).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("a 502 on the merge call after GitHub merged it: claimed as the gate's merge when GitHub names a bot; a person's merge in the window is theirs", async () => {
+    const landAs = (by: string) => ({ mergeAnswer: 502, onMerge: (w: { merged: boolean; state: "open" | "closed"; mergedByType?: string }) => { w.merged = true; w.state = "closed"; w.mergedByType = by; } });
+    const bot = await github(landAs("Bot"));
+    const claimed = await gate(bot);
+    expect(claimed.result).toEqual({ outcome: "merged", headSha: HEAD });
+    expect(claimed.sleeps).toEqual([]);
+    const person = await github(landAs("User"));
+    expect((await gate(person)).result).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_call_refused"] });
+  });
+
   it("1. 405 then mergeable:false / dirty: merge_conflict, not merge_call_refused", async () => {
     const g = await github({ conflict: true });
     const { result } = await gate(g);

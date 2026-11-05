@@ -25,6 +25,8 @@ export interface FakePullRequest extends Omit<PullRequestState, "baseRef" | "def
   /** GitHub always sends both (the real contract: `base.ref` and `base.repo.default_branch`). A fixture that says neither is a PR into the default branch, "main". */
   baseRef?: string;
   defaultBranch?: string;
+  /** `merged_by.type` GitHub reports once the pull request is merged. */
+  mergedBy?: string | null;
   body: string;
   labels: string[];
   comments: string[];
@@ -107,7 +109,8 @@ export class FakeGitHub implements MergeGateGitHubPort {
   }
 
   async getMergeability(_pr: PullRequestRef): Promise<PullRequestMergeability> {
-    return { headSha: this.pr.headSha, state: this.pr.state, merged: this.pr.merged, ...this.mergeability };
+    // As GitHub answers: a merged pull request has `mergeable: null` for good, and says who merged it.
+    return { headSha: this.pr.headSha, state: this.pr.state, merged: this.pr.merged, ...this.mergeability, ...(this.pr.merged ? { mergeable: null, mergedBy: this.pr.mergedBy ?? null } : {}) };
   }
 
   async updateBranch(_pr: PullRequestRef, args: { expectedHeadSha: string }): Promise<UpdateBranchOutcome> {
