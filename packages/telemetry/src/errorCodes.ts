@@ -431,6 +431,16 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_reaping",
   // Sandbox reaper (D#2 SANDBOX-REAPER-2b): the database mode setting could not be read, so the reap passes ran as off.
   "sandbox_reap_mode_unreadable",
+  // Sandbox inventory failures (D#6): why a daily inventory pass ended without writing, by failure class instead of `other`.
+  "sandbox_inventory_credentials",
+  "sandbox_inventory_denied",
+  "sandbox_inventory_not_found",
+  "sandbox_inventory_rate_limited",
+  "sandbox_inventory_provider_error",
+  "sandbox_inventory_rejected",
+  "sandbox_inventory_no_answer",
+  "sandbox_inventory_bad_answer",
+  "sandbox_inventory_write_failed",
   // Memory store (D#601 MEM-1, MEM-2): the codes MemoryInputError carries, and the reasons the proposal intake refuses with. (invalid_message is listed above.)
   "invalid_transition",
   "secret_detected",
