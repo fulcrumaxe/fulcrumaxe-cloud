@@ -88,12 +88,76 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
         own_plan_api_equivalent_usd: 0,
         own_plan_usage_state: 'recorded',
         own_plan_tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+        context_pct: null,
         created_at: createdAt.toISOString(),
         updated_at: createdAt.toISOString(),
       });
       expect(Object.keys(dto).sort()).toEqual(
-        ['id', 'repo_id', 'kind', 'issue_number', 'title', 'stage', 'provenance', 'priority', 'queue_rank', 'cost_usd', 'own_plan_api_equivalent_usd', 'own_plan_usage_state', 'own_plan_tokens', 'created_at', 'updated_at'].sort(),
+        ['id', 'repo_id', 'kind', 'issue_number', 'title', 'stage', 'provenance', 'priority', 'queue_rank', 'cost_usd', 'own_plan_api_equivalent_usd', 'own_plan_usage_state', 'own_plan_tokens', 'context_pct', 'created_at', 'updated_at'].sort(),
       );
+    });
+
+    // D#600 CX-9b: context_pct is the whole percent the item's newest RUNNING run has filled, from the warning level (70) up, else null. Derived on every read.
+    describe('context_pct (CX-9b)', () => {
+      async function runWithFigure(refs: SeedRefs, workItemId: string, status: string, last: number | null, window: number | null, createdAt = new Date()): Promise<string> {
+        const id = randomUUID();
+        await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at) VALUES ($1, $2, $3, 'build', 'local', $4, $5)`, [id, refs.accountId, workItemId, status, createdAt]);
+        if (last !== null) await admin.query(`INSERT INTO run_context_figure (account_id, run_id, last_context_tokens, window_tokens) VALUES ($1, $2, $3, $4)`, [refs.accountId, id, last, window]);
+        return id;
+      }
+      const pct = async (refs: SeedRefs, id: string) => (await getWorkItem({ pool: appUserPool, principal: refs }, id)).context_pct;
+
+      it('is the percent, rounded down, once a running run reaches 70, and null below it, with no run, and with no figure yet', async () => {
+        const item = await insertWorkItem(refsA, { createdAt: new Date() });
+        expect(await pct(refsA, item)).toBeNull();
+        const run = await runWithFigure(refsA, item, 'running', null, null);
+        expect(await pct(refsA, item)).toBeNull();
+        await admin.query(`INSERT INTO run_context_figure (account_id, run_id, last_context_tokens, window_tokens) VALUES ($1, $2, 139999, 200000)`, [refsA.accountId, run]);
+        expect(await pct(refsA, item)).toBeNull();
+        await admin.query(`UPDATE run_context_figure SET last_context_tokens = 149999 WHERE run_id = $1`, [run]);
+        expect(await pct(refsA, item)).toBe(74);
+      });
+
+      it('is capped at 100, and is null when the model has no window (never guessed)', async () => {
+        const over = await insertWorkItem(refsA, { createdAt: new Date() });
+        await runWithFigure(refsA, over, 'running', 300_000, 200_000);
+        expect(await pct(refsA, over)).toBe(100);
+        const unknown = await insertWorkItem(refsA, { createdAt: new Date() });
+        await runWithFigure(refsA, unknown, 'running', 300_000, null);
+        expect(await pct(refsA, unknown)).toBeNull();
+      });
+
+      it('only a running run counts: an ended run takes the chip away, and a newer run that starts clear replaces an older full one', async () => {
+        const item = await insertWorkItem(refsA, { createdAt: new Date() });
+        const old = await runWithFigure(refsA, item, 'running', 180_000, 200_000, new Date('2026-01-01T00:00:00Z'));
+        expect(await pct(refsA, item)).toBe(90);
+        const fresh = await runWithFigure(refsA, item, 'running', 20_000, 200_000, new Date('2026-01-02T00:00:00Z'));
+        expect(await pct(refsA, item)).toBeNull();
+        await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [fresh]);
+        expect(await pct(refsA, item)).toBe(90);
+        await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [old]);
+        expect(await pct(refsA, item)).toBeNull();
+      });
+
+      it("the newest running run decides: a newer running run with no figure (or no known window) shows no chip even when an older running run is full", async () => {
+        const item = await insertWorkItem(refsA, { createdAt: new Date() });
+        await runWithFigure(refsA, item, 'running', 180_000, 200_000, new Date('2026-01-01T00:00:00Z'));
+        expect(await pct(refsA, item)).toBe(90);
+        const newer = await runWithFigure(refsA, item, 'running', null, null, new Date('2026-01-02T00:00:00Z'));
+        expect(await pct(refsA, item)).toBeNull();
+        await admin.query(`INSERT INTO run_context_figure (account_id, run_id, last_context_tokens, window_tokens) VALUES ($1, $2, 190000, NULL)`, [refsA.accountId, newer]);
+        expect(await pct(refsA, item)).toBeNull();
+        await admin.query(`UPDATE run_context_figure SET window_tokens = 200000 WHERE run_id = $1`, [newer]);
+        expect(await pct(refsA, item)).toBe(95);
+      });
+
+      it("the list carries it too, and another account's item never shows it", async () => {
+        const item = await insertWorkItem(refsA, { createdAt: new Date() });
+        await runWithFigure(refsA, item, 'running', 160_000, 200_000);
+        const listed = await listWorkItems({ pool: appUserPool, principal: refsA }, { limit: 200 });
+        expect(listed.data.find((w) => w.id === item)?.context_pct).toBe(80);
+        await expect(getWorkItem({ pool: appUserPool, principal: refsB }, item)).rejects.toThrow();
+      });
     });
 
     it('cost_usd sums every run under the work item, and ignores runs with a null usd', async () => {

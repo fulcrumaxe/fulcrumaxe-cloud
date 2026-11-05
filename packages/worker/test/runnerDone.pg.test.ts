@@ -305,6 +305,54 @@ describe("runner done [pg]", () => {
         expect(rows[0]).toMatchObject({ basis: "measured", first_turn_input_tokens: "100", peak_context_tokens: "400", cache_read_tokens: "900", cache_write_tokens: "50", compactions: 1, tool_output_bytes: { Read: 7 }, sections: body.sections });
       });
 
+      // D#600 CX-9b: the latest turn's context and the window the job named reach run_context_figure in the same transaction; each is optional on the wire.
+      describe("context figure (CX-9b)", () => {
+        const figureRows = async (id: string) => (await admin.query("SELECT last_context_tokens, window_tokens FROM run_context_figure WHERE account_id = $1 AND run_id = $2", [A.accountId, id])).rows;
+
+        it("stores the figure and the window beside the ledger", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: { ...body, last_context: 150, context_window: 200_000 } });
+          expect(await figureRows(id)).toEqual([{ last_context_tokens: "150", window_tokens: "200000" }]);
+          expect(await ledgerRows(id)).toHaveLength(1);
+        });
+
+        it("a runner that names no window stores the figure with the window NULL (window not known), and one that sends no figure stores no row", async () => {
+          const a = await pending();
+          await facade.finishRunnerDone({ ...lease(a, await claimed(a)), verdict: ok, contextLedger: { ...body, last_context: 150 } });
+          expect(await figureRows(a)).toEqual([{ last_context_tokens: "150", window_tokens: null }]);
+          const b = await pending();
+          await facade.finishRunnerDone({ ...lease(b, await claimed(b)), verdict: ok, contextLedger: body });
+          expect(await figureRows(b)).toEqual([]);
+          const c = await pending();
+          await facade.finishRunnerDone({ ...lease(c, await claimed(c)), verdict: ok });
+          expect(await figureRows(c)).toEqual([]);
+        });
+
+        it("a taken-over run stores no figure, whatever was sent", async () => {
+          const id = await pending();
+          await facade.finishRunnerDone({ ...lease(id, await claimed(id)), verdict: { outcome: "failed", failureReason: "taken_over", prNumber: null }, contextLedger: { ...body, last_context: 150, context_window: 200_000 } });
+          expect(await figureRows(id)).toEqual([]);
+        });
+
+        it("a figure the table refuses (past its cap) leaves the ledger and the verdict, and the fixed log line", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          const lines: string[] = [];
+          const warn = console.warn;
+          console.warn = (line: unknown) => void lines.push(String(line));
+          try {
+            expect(await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: { ...body, last_context: 999_999_999_999_9 } as never })).toEqual({ kind: "recorded", verdict: ok });
+          } finally {
+            console.warn = warn;
+          }
+          expect(await figureRows(id)).toEqual([]);
+          expect(await ledgerRows(id)).toHaveLength(1);
+          expect((await row(id)).status).toBe("succeeded");
+          expect(lines.join("\n")).toContain("runner.done.context_ledger_not_recorded");
+        });
+      });
+
       it("an older runner that sent no ledger gets a partial row with nothing measured: null figures, never zeros", async () => {
         const id = await pending();
         const g = await claimed(id);

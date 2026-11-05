@@ -38,5 +38,9 @@
   "repo_map_version": "v1 · 3f9a1c07b2d4",
   "rescan_skipped": 3,
   "rescan_unavailable": false,
-  "budget_source": null
+  "budget_source": null,
+  "context_last_tokens": 61000,
+  "context_window_tokens": 200000,
+  "context_pct": 30,
+  "context_warn_pct": 70
 }

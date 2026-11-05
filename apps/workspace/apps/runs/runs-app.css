@@ -173,6 +173,8 @@
 .runs-ctx-size { flex: 0 0 5.5em; text-align: right; font-variant-numeric: tabular-nums; }
 .runs-ctx-bar { flex: 1 1 6em; min-width: 4em; max-width: 14em; height: 0.7em; accent-color: var(--accent, #1aff80); }
 .runs-ctx-pct { flex: 0 0 auto; min-width: 3em; font-variant-numeric: tabular-nums; }
+.runs-ctx-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 0 10px; padding: 6px 10px; border: 1px solid var(--accent, #1aff80); font-weight: 600; min-width: 0; }
+.runs-ctx-banner p { margin: 0; flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
 .runs-ctx-trim { flex: 1 1 100%; font-size: 0.8rem; font-weight: 600; overflow-wrap: anywhere; }
 /* The shared muted tone does not reach 4.5:1 in the themes; this panel's headings and notes use the text colour (checked by axe in every theme). */
 .runs-ctx .runs-sec-title,

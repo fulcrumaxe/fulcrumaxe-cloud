@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason, checkNotRunReason, readCheckFailedFiles, CHECK_FAILED_FILES_DROPPED } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
+import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextFigure, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { normaliseCheck } from "@fx/runner-cloud";
 import { guarded, RunActionInputError } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
@@ -173,6 +173,18 @@ async function recordRunnerLedger(client: PoolClient, input: FinishRunnerDoneInp
   } catch {
     // fx-swallow-ok: the ledger is advisory; the savepoint is rolled back and a fixed line is the trace
     await client.query("ROLLBACK TO SAVEPOINT context_ledger");
+    console.warn(JSON.stringify({ event: LEDGER_WRITE_FAILED, run_id: input.runId }));
+  }
+  // D#600 CX-9b: how full the window was at the end (the latest turn's context and the window the job named). Its own savepoint, so a refused figure never costs the ledger or the verdict.
+  const last = measure.last_context_tokens;
+  if (last === undefined || last === null) return;
+  await client.query("SAVEPOINT context_figure");
+  try {
+    await recordContextFigure(client, { accountId: input.accountId, runId: input.runId, lastContextTokens: last, windowTokens: measure.window_tokens });
+    await client.query("RELEASE SAVEPOINT context_figure");
+  } catch {
+    // fx-swallow-ok: advisory like the ledger; the savepoint is rolled back and the same fixed line is the trace
+    await client.query("ROLLBACK TO SAVEPOINT context_figure");
     console.warn(JSON.stringify({ event: LEDGER_WRITE_FAILED, run_id: input.runId }));
   }
 }

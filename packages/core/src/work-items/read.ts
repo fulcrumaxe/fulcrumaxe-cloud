@@ -5,6 +5,7 @@ import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import type { WorkItemStage } from './stages.js';
 import { cleanWorkItemTitle } from './title.js';
+import { CONTEXT_WARN_PCT } from '@fulcrumaxe/runner-protocol';
 
 /** D#31 comment 18494573 (C7): this module's own local copy of the ctx principal shape. */
 export interface Principal {
@@ -48,6 +49,12 @@ export interface WorkItemDTO {
   own_plan_usage_state: OwnPlanUsageState;
   /** C42-5: the tokens the item's runner runs reported (all zero when none did). */
   own_plan_tokens: { input: number; output: number; cache_read: number; cache_write: number };
+  /**
+   * D#600 CX-9b: how full the context window of the item's run that is going now is, as a whole percent, only once it reaches the warning level (`CONTEXT_WARN_PCT`); null
+   * otherwise (no run going, no figure yet, the model's window not known, or still below the level). Derived on every read from the run's figure row, never stored: a run that
+   * has ended, or a later run that starts clear, takes the chip away with no other change.
+   */
+  context_pct: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -70,6 +77,7 @@ interface WorkItemRow {
   own_plan_output: string;
   own_plan_cache_read: string;
   own_plan_cache_write: string;
+  live_context_pct: string | null;
   created_at: Date;
   updated_at: Date;
   created_at_cursor: string; // fix round 1: see runs/read.ts's RunRow.created_at_cursor
@@ -103,7 +111,13 @@ const WORK_ITEM_SELECT = `
          COALESCE((SELECT SUM(u.input_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_input,
          COALESCE((SELECT SUM(u.output_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_output,
          COALESCE((SELECT SUM(u.cache_read_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_cache_read,
-         COALESCE((SELECT SUM(u.cache_write_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_cache_write
+         COALESCE((SELECT SUM(u.cache_write_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_cache_write,
+         -- D#600 CX-9b: the whole percent of the window the item's newest running run has filled (the same floor and cap as contextPct); NULL when that run has no figure or no known window.
+         -- The newest running run is picked first and its figure read after, so a newer run with no figure yet (or no known window) shows no chip rather than an older run's.
+         (SELECT CASE WHEN f.last_context_tokens IS NULL OR f.window_tokens IS NULL THEN NULL ELSE LEAST((f.last_context_tokens * 100) / f.window_tokens, 100) END
+            FROM (SELECT rr.account_id, rr.id FROM agent_runs rr WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id AND rr.status = 'running'
+                   ORDER BY rr.created_at DESC, rr.id DESC LIMIT 1) newest
+            LEFT JOIN run_context_figure f ON f.account_id = newest.account_id AND f.run_id = newest.id) AS live_context_pct
     FROM work_items wi
     LEFT JOIN agent_runs ar ON ar.work_item_id = wi.id AND ar.account_id = wi.account_id
 `;
@@ -140,6 +154,7 @@ function toDTO(row: WorkItemRow): WorkItemDTO {
     own_plan_api_equivalent_usd: ownState === 'recorded' ? Number(row.own_plan_api_equivalent_usd) : null,
     own_plan_usage_state: ownState,
     own_plan_tokens: { input: Number(row.own_plan_input), output: Number(row.own_plan_output), cache_read: Number(row.own_plan_cache_read), cache_write: Number(row.own_plan_cache_write) },
+    context_pct: row.live_context_pct !== null && Number(row.live_context_pct) >= CONTEXT_WARN_PCT ? Math.min(Math.floor(Number(row.live_context_pct)), 100) : null,
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
   };

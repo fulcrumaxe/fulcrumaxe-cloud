@@ -21,6 +21,7 @@ export const workItemResponseSchema = z.object({
   own_plan_api_equivalent_usd: z.number().nullable().describe("What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan). Null unless own_plan_usage_state is recorded: a figure that was never recorded or never priced is not zero."),
   own_plan_usage_state: z.enum(OWN_PLAN_USAGE_STATES).describe("recorded: every finished run on the person's machine has a priced usage row (or there is none); not_priced: a run has tokens and no API price; not_recorded: a finished run reported no usage."),
   own_plan_tokens: z.object({ input: z.number(), output: z.number(), cache_read: z.number(), cache_write: z.number() }).describe("The tokens the item's runs on the person's machine reported."),
+  context_pct: z.number().int().min(0).max(100).nullable().describe("The whole percent of the model's context window that the item's running run has filled, only once it reaches the warning level; null otherwise (no run going, no figure yet, the window not known, or still below the level)."),
   created_at: z.string(),
   updated_at: z.string(),
 });

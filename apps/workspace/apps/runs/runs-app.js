@@ -11,7 +11,7 @@ import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-dis
 import { openRunStream } from "../_lib/stream.js";
 // D#597 CC-6a-2: the assistant panel. The boot budget is full (130 of 130 files), so it lives with the Pipeline detail panels it sits beside.
 import { createAssistantPanel } from "../pipeline/pipeline-actions.js";
-import { exportLink, foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerHeadTotal, runnerNotes, titleOf } from "./runs-detail.js";
+import { contextBanner, exportLink, foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerHeadTotal, runnerNotes, titleOf } from "./runs-detail.js";
 import {
   EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, isUuid, launchRunId, loadRun, loadWorkItemRepoId, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
@@ -268,6 +268,8 @@ function mountApp(contentEl, launchArg) {
           h("span", { class: "runs-head-usd", "data-testid": "runs-head-usd" }, (ins && runnerHeadTotal(ins)) || runUsd(run))
         ),
         approvalBlock(run, detail.approval, () => approve(detail)),
+        // D#600 CX-9b: the near-limit banner, worked out from the context as last read; Dismiss hides it for this view only (the item's chip is not touched).
+        detail.context ? contextBanner(detail.context, detail.ctxDismissed === true, () => { detail.ctxDismissed = true; repaintKeepFocus(); }) : null,
         ins ? headMeta(ins) : null,
         ...(ins ? runnerNotes(ins) : []),
         h("div", { class: "runs-links" }, exportLink(run.id)),
@@ -360,16 +362,21 @@ function mountApp(contentEl, launchArg) {
   }
   // D#600 CX-8: what the run loaded into its context. Read when the run opens and again when it ends (its ledger is written then);
   // undefined while it loads, null when it could not be read (the panel then offers Retry).
-  function loadContext(mine, id) {
+  // `quiet` is the re-read while the run goes on (its context grows): a failed or unreadable answer keeps what is showing, and an answer that changes nothing redraws nothing.
+  function loadContext(mine, id, quiet = false) {
     const ac = detailAc;
     loadRunContext(id, undefined, ac.signal).then(
       (body) => {
         if (ac.signal.aborted || detail !== mine) return;
-        mine.context = readContext(body);
+        // A re-read that was asked while the run went on and answers after it ended must not replace the end-of-run read (the answers can arrive in either order).
+        if (quiet && !isLiveStatus(mine.run.status)) return;
+        const next = readContext(body);
+        if (quiet && (next === null || (mine.context && JSON.stringify(mine.context) === JSON.stringify(next)))) return;
+        mine.context = next;
         repaintKeepFocus();
       },
       () => {
-        if (ac.signal.aborted || detail !== mine) return;
+        if (ac.signal.aborted || detail !== mine || quiet) return;
         mine.context = null;
         repaintKeepFocus();
       }
@@ -438,7 +445,11 @@ function mountApp(contentEl, launchArg) {
           mine.assistant = createAssistantPanel({ itemId: d.run.work_item_id, repoId: (signal) => loadWorkItemRepoId(d.run.work_item_id, undefined, signal) });
           mine.assistant.setRunEvents(mine.events);
         }
-        mine.reinsight = coalesce(() => loadInsight(mine, id), 5000);
+        mine.reinsight = coalesce(() => {
+          loadInsight(mine, id);
+          // D#600 CX-9b: while the run goes on its context figure moves, so it is read again with the insight (once the first read is in).
+          if (isLiveStatus(mine.run.status) && mine.context !== undefined) loadContext(mine, id, true);
+        }, 5000);
         mine.reinsight();
         loadContext(mine, id);
         loadApproval(mine);

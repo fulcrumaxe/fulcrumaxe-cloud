@@ -6,6 +6,7 @@
 import { z } from "zod";
 import { isDetailPath, isDetailRef } from "./detailRules.js";
 import { CONTEXT_MAX_COUNT, CONTEXT_MAX_TOOL_CALLS, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "./contextLedger.js";
+import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
@@ -659,6 +660,9 @@ export const ContextLedgerBody = z
       .max(64),
     first_turn_input: ledgerCount.optional(),
     peak_context: ledgerCount.optional(),
+    // D#600 CX-9b (additive; the cloud deploys first): the latest main-thread turn's context in tokens. A runner that does not send it leaves the run without a figure ("Not recorded").
+    last_context: ledgerCount.optional(),
+    context_window: safeInt.min(1).max(CONTEXT_WINDOW_MAX_TOKENS).optional(),
     cache_read: ledgerCount.optional(),
     cache_write: ledgerCount.optional(),
     memory: ledgerCount.optional(),

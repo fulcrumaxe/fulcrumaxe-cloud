@@ -90,5 +90,9 @@
   "repo_map_version": "v1 \u00b7 3f9a1c07b2d4",
   "rescan_skipped": 0,
   "rescan_unavailable": true,
-  "budget_source": null
+  "budget_source": null,
+  "context_last_tokens": null,
+  "context_window_tokens": null,
+  "context_pct": null,
+  "context_warn_pct": 70
 }

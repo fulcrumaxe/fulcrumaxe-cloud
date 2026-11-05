@@ -18,5 +18,9 @@
   "repo_map_version": null,
   "rescan_skipped": null,
   "rescan_unavailable": null,
-  "budget_source": null
+  "budget_source": null,
+  "context_last_tokens": null,
+  "context_window_tokens": null,
+  "context_pct": null,
+  "context_warn_pct": 70
 }

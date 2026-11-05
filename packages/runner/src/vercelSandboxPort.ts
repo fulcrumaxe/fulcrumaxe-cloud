@@ -1190,6 +1190,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       );
       // D#600 CX-1a: measures this command's context from the same lines the meter reads; integers only.
       const ledger = new ContextLedgerCapture(disabledToolsFor(opts.excludes));
+      let lastFigure = 0;
       const deliver = async (line: string): Promise<void> => {
         if (run.stopped || limitHit !== undefined) return;
         let parsed: unknown;
@@ -1215,7 +1216,17 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         guard.observe(event);
         // CX-6a: after a main-thread turn, say how full the window is. The file is rewritten only when the figure crosses in, changes or drops out.
         if (parsed.type === "assistant") {
-          const pct = windowTokens === undefined ? undefined : contextPct(ledger.lastContextTokens(), windowTokens);
+          // CX-9b: the same figure goes to the cloud's row when a turn changed it, so the run page and the item card can show it while the run goes on.
+          const nowTokens = ledger.lastContextTokens();
+          if (nowTokens !== lastFigure) {
+            lastFigure = nowTokens;
+            try {
+              opts.onContextFigure?.(nowTokens, windowTokens);
+            } catch {
+              // fx-swallow-ok: the only observer queues a best-effort write and cannot throw; a figure is never worth ending a run for
+            }
+          }
+          const pct = windowTokens === undefined ? undefined : contextPct(nowTokens, windowTokens);
           const next = pct !== undefined && pct >= CONTEXT_WARN_PCT ? pct : undefined;
           if (next !== contextPctNow) {
             contextPctNow = next;
@@ -1280,7 +1291,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             // fx-swallow-ok: the only observer adds to a counter and cannot throw; if it ever did, the count stays a floor and the run ends as it would have
           }
           try {
-            opts.onContextLedger?.({ ...ledger.snapshot(), denied_tool_calls: ledger.deniedToolCalls() });
+            opts.onContextLedger?.({ ...ledger.snapshot(), denied_tool_calls: ledger.deniedToolCalls(), ...(windowTokens === undefined ? {} : { window_tokens: windowTokens }) });
           } catch {
             // fx-swallow-ok: the only observer stores the measure on the run's bookkeeping and cannot throw; a ledger is never worth ending a run for
           }

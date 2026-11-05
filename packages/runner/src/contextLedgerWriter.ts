@@ -70,3 +70,22 @@ export async function recordContextLedger(client: PoolClient, input: ContextLedg
     throw err;
   }
 }
+
+/**
+ * D#600 CX-9b: stores how full the run's context window is (migration 0989): the latest main-thread turn's context in tokens, and the model's window when it has one.
+ * Written on the run-writer login inside the tenant's transaction, like the ledger; the table takes these two numbers and nothing else. A later call replaces the figure.
+ * `windowTokens` undefined leaves a stored window as it is (NULL on a first write: window not known for this model). A value that is not a whole number in range is
+ * refused as `ContextLedgerInvalid` before anything is sent, so a bad figure never reaches the database's CHECK.
+ */
+export async function recordContextFigure(client: PoolClient, input: { accountId: string; runId: string; lastContextTokens: number; windowTokens?: number | undefined }): Promise<void> {
+  const last = input.lastContextTokens;
+  const window = input.windowTokens;
+  if (!Number.isSafeInteger(last) || last < 0 || last > 1_000_000_000_000) throw new ContextLedgerInvalid();
+  if (window !== undefined && (!Number.isSafeInteger(window) || window < 1 || window > 10_000_000)) throw new ContextLedgerInvalid();
+  const updated = await client.query(
+    `UPDATE run_context_figure SET last_context_tokens = $3::bigint, window_tokens = COALESCE($4::bigint, window_tokens), recorded_at = now() WHERE account_id = $1::uuid AND run_id = $2::uuid`,
+    [input.accountId, input.runId, last, window ?? null],
+  );
+  if ((updated.rowCount ?? 0) > 0) return;
+  await client.query(`INSERT INTO run_context_figure (account_id, run_id, last_context_tokens, window_tokens) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::bigint)`, [input.accountId, input.runId, last, window ?? null]);
+}

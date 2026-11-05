@@ -136,3 +136,37 @@ describe("ContextLedgerCapture follow-ups from the CX-1a review", () => {
     expect(c.snapshot()).toMatchObject({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null });
   });
 });
+
+// D#600 CX-9b (additive): the latest turn's context and the window the job named, on the wire.
+describe("last_context and context_window on the wire (CX-9b)", () => {
+  const withFigure = { ...ok, last_context: 7, context_window: 200_000 };
+
+  it("a ledger with both parses, and one without them still does (an older runner)", () => {
+    expect(ContextLedgerBody.safeParse(withFigure).success).toBe(true);
+    expect(ContextLedgerBody.safeParse(ok).success).toBe(true);
+  });
+
+  it.each([
+    ["a negative context", { ...withFigure, last_context: -1 }],
+    ["a fractional context", { ...withFigure, last_context: 1.5 }],
+    ["a string context", { ...withFigure, last_context: "7" }],
+    ["a context past the cap", { ...withFigure, last_context: CONTEXT_MAX_COUNT + 1 }],
+    ["a zero window", { ...withFigure, context_window: 0 }],
+    ["a fractional window", { ...withFigure, context_window: 1.5 }],
+    ["a window past the price table's bound", { ...withFigure, context_window: 10_000_001 }],
+    ["a window as text", { ...withFigure, context_window: "200000" }],
+  ])("refuses %s", (_name, body) => {
+    expect(ContextLedgerBody.safeParse(body).success).toBe(false);
+  });
+
+  it("round-trips through the measure: absent stays absent, never 0", () => {
+    const base = contextLedgerFromWire(ok as never).measure;
+    const sent = contextLedgerToWire({ ...base, last_context_tokens: 7, window_tokens: 200_000 }, []);
+    expect(sent).toMatchObject({ last_context: 7, context_window: 200_000 });
+    expect(contextLedgerFromWire(sent).measure).toMatchObject({ last_context_tokens: 7, window_tokens: 200_000 });
+    const bare = contextLedgerToWire(base, []);
+    expect(Object.keys(bare)).not.toContain("last_context");
+    expect(Object.keys(bare)).not.toContain("context_window");
+    expect(Object.keys(contextLedgerFromWire(bare).measure)).not.toContain("last_context_tokens");
+  });
+});

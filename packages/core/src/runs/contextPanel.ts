@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
-import { CONTEXT_TRIMMED_REASONS, type ContextTrimmedReason } from '@fulcrumaxe/runner-protocol';
+import { CONTEXT_TRIMMED_REASONS, CONTEXT_WARN_PCT, contextPct, type ContextTrimmedReason } from '@fulcrumaxe/runner-protocol';
 import type { RunsReadCtx } from './read.js';
 
 /**
@@ -75,6 +75,24 @@ export interface RunContextPanel {
    * predates the record, and for a run with no ledger.
    */
   budget_source: 'item' | 'role' | 'repo' | null;
+  /**
+   * D#600 CX-9b: how full the run's context window is, from the run's figure row (migration 0989; present while the run goes on, unlike the ledger). `context_last_tokens`:
+   * the latest main-thread turn's context in tokens, null when none was recorded (a run with no usage, an older runner, a run that has not had a turn). `context_window_tokens`:
+   * the model's window as the price table gave it, null when the model has none (the window is then not known and no percent is worked out; it is never guessed).
+   * `context_pct` is derived here, not stored: the whole percent of the window, at most 100, null when either figure is missing. `context_warn_pct` is the level from which the
+   * run and its item card say so; the screens read it from here and hold no number of their own.
+   */
+  context_last_tokens: number | null;
+  context_window_tokens: number | null;
+  context_pct: number | null;
+  context_warn_pct: number;
+}
+
+/** The three figure fields for a run: the percent is derived from the two stored numbers, so it can never disagree with them. */
+function figureOf(last: string | null, window: string | null): Pick<RunContextPanel, 'context_last_tokens' | 'context_window_tokens' | 'context_pct' | 'context_warn_pct'> {
+  const l = last === null ? null : Number(last);
+  const w = window === null ? null : Number(window);
+  return { context_last_tokens: l, context_window_tokens: w, context_pct: l === null || w === null ? null : (contextPct(l, w) ?? null), context_warn_pct: CONTEXT_WARN_PCT };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -102,6 +120,8 @@ interface Row {
   rescan_skipped: number | null;
   rescan_unavailable: boolean | null;
   budget_source: string | null;
+  fig_last: string | null;
+  fig_window: string | null;
 }
 
 interface EntryRow {
@@ -139,9 +159,11 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
                 l.first_turn_input_tokens, l.peak_context_tokens, l.cache_read_tokens, l.cache_write_tokens, l.memory_tokens,
                 l.tool_output_bytes, l.compactions, l.denied_tool_calls,
                 i.recalled_entry_ids AS recalled_ids, i.recalled_entry_versions AS recalled_versions, i.map_version, i.map_sha256,
-                (i.run_id IS NOT NULL) AS has_inputs, i.rescan_skipped, i.rescan_unavailable, i.budget_source
+                (i.run_id IS NOT NULL) AS has_inputs, i.rescan_skipped, i.rescan_unavailable, i.budget_source,
+                f.last_context_tokens AS fig_last, f.window_tokens AS fig_window
            FROM agent_runs r
            LEFT JOIN run_context_ledger l ON l.account_id = r.account_id AND l.run_id = r.id
+           LEFT JOIN run_context_figure f ON f.account_id = r.account_id AND f.run_id = r.id
            LEFT JOIN run_context_inputs i ON i.account_id = r.account_id AND i.run_id = r.id
           WHERE r.id = $1::uuid AND r.account_id = $2::uuid`,
         [id, accountId],
@@ -170,6 +192,8 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
         rescan_skipped: null,
         rescan_unavailable: null,
         budget_source: null,
+        // A run still going has a figure and no ledger yet, so the figure is read on this branch too.
+        ...figureOf(r.fig_last, r.fig_window),
       };
     }
 
@@ -213,6 +237,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       rescan_skipped: r.has_inputs ? count(r.rescan_skipped) : null,
       rescan_unavailable: r.has_inputs ? r.rescan_unavailable === true : null,
       budget_source: r.budget_source === 'item' || r.budget_source === 'role' || r.budget_source === 'repo' ? r.budget_source : null,
+      ...figureOf(r.fig_last, r.fig_window),
     };
   });
 }

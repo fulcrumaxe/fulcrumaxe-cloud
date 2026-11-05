@@ -167,6 +167,7 @@ export interface Operations {
           cache_read: number;
           cache_write: number;
         };
+        context_pct: (number) | (null);
         created_at: string;
         updated_at: string;
       }>;
@@ -198,6 +199,7 @@ export interface Operations {
         cache_read: number;
         cache_write: number;
       };
+      context_pct: (number) | (null);
       created_at: string;
       updated_at: string;
     };
@@ -232,6 +234,7 @@ export interface Operations {
         cache_read: number;
         cache_write: number;
       };
+      context_pct: (number) | (null);
       created_at: string;
       updated_at: string;
     };
@@ -862,6 +865,10 @@ export interface Operations {
       rescan_skipped: (number) | (null);
       rescan_unavailable: boolean | null;
       budget_source: ("item" | "role" | "repo") | (null);
+      context_last_tokens: (number) | (null);
+      context_window_tokens: (number) | (null);
+      context_pct: (number) | (null);
+      context_warn_pct: number;
     };
   };
   listContextRules: {

@@ -40,6 +40,7 @@ describe("ContextLedgerCapture", () => {
       basis: "measured",
       first_turn_input_tokens: 9 + 4875 + 7622,
       peak_context_tokens: 9 + 4875 + 7622,
+      last_context_tokens: 9 + 4875 + 7622,
       cache_read_tokens: 7622,
       cache_write_tokens: 4875,
       tool_output_bytes: {},
@@ -81,7 +82,7 @@ describe("ContextLedgerCapture", () => {
 
   it("a stream with no usage is partial with null figures, never zeros", () => {
     const m = measure([{ type: "system", subtype: "init" }, assistant("m", undefined as never, { type: "text", text: "x" }), { type: "result", subtype: "success" }]);
-    expect(m).toEqual({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null, tool_output_bytes: {}, compactions: 0, tool_call_counts: {} });
+    expect(m).toEqual({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, last_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null, tool_output_bytes: {}, compactions: 0, tool_call_counts: {} });
   });
 
   it("hostile lines are ignored: wrong types, negative, fractional or out-of-range numbers, missing or oversize ids, huge arrays", () => {
@@ -237,6 +238,7 @@ describe("mergeContextLedgerMeasures", () => {
       basis: "measured",
       first_turn_input_tokens: 111,
       peak_context_tokens: 322,
+      last_context_tokens: 322,
       cache_read_tokens: 400,
       cache_write_tokens: 30,
       tool_output_bytes: { Read: 6 },
@@ -304,5 +306,34 @@ describe("ContextLedgerCapture: refusals as the real CLI words them", () => {
 
   it("EACCES and not-found errors are not counted, with or without disabled tools", () => {
     expect(count(["Grep", "Glob"], [calls, errorResult("r", "EACCES: permission denied, open '/work/x'"), errorResult("g", "ENOENT: no such file or directory"), errorResult("b", "File does not exist.")])).toBe(0);
+  });
+});
+
+// D#600 CX-9b: the context of the main thread's latest turn (the figure the run page and the item card show), and the window beside it.
+describe("last context figure (CX-9b)", () => {
+  it("is the latest main-thread turn's context, so it falls after a compaction while the peak stays", () => {
+    const m = measure([assistant("m1", usage(1, 10, 100)), assistant("m2", usage(2, 20, 700)), { type: "system", subtype: "compact_boundary" }, assistant("m3", usage(3, 30, 40))]);
+    expect(m.peak_context_tokens).toBe(722);
+    expect(m.last_context_tokens).toBe(73);
+  });
+
+  it("a sub-agent thread's turn does not move it (its context is its own)", () => {
+    const sub = { ...assistant("s1", usage(9, 9, 99_999)), parent_tool_use_id: "toolu_task" };
+    const m = measure([assistant("m1", usage(1, 10, 100)), sub]);
+    expect(m.last_context_tokens).toBe(111);
+  });
+
+  it("a repeat of a message id is one turn, and a stream with no usage reports null, never 0", () => {
+    expect(measure([assistant("m1", usage(1, 1, 1)), assistant("m1", usage(1, 1, 1))]).last_context_tokens).toBe(3);
+    expect(measure([{ type: "system", subtype: "init" }]).last_context_tokens).toBeNull();
+  });
+
+  it("merging takes the later command's figure; a later command that measured nothing leaves the earlier one; windows follow the same rule", () => {
+    const a = { ...measure([assistant("m1", usage(1, 10, 100))]), window_tokens: 200_000 };
+    const b = measure([assistant("m2", usage(2, 20, 300))]);
+    expect(mergeContextLedgerMeasures(a, b)).toMatchObject({ last_context_tokens: 322, window_tokens: 200_000 });
+    const none = measure([{ type: "system", subtype: "init" }]);
+    expect(mergeContextLedgerMeasures(a, none)).toMatchObject({ last_context_tokens: 111, window_tokens: 200_000 });
+    expect(mergeContextLedgerMeasures(b, { ...none, window_tokens: 1_000_000 })).toMatchObject({ last_context_tokens: 322, window_tokens: 1_000_000 });
   });
 });
