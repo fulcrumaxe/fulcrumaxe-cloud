@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
+import { DEQUEUE_SUCCESS_CODES, listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
 import { isQueuedSql, removalRetryAllowed, removedByPerson } from "@fx/core/src/work-items/mergeReadiness.js";
 import { MAX_CONFLICT_ROUNDS, MERGE_QUEUE_LEASE_SECONDS } from "./policy.js";
 import { eligibilityContext, pickNext } from "./eligibility.js";
@@ -22,6 +22,30 @@ type Queryable = Pick<PoolClient, "query">;
 
 const COLUMNS = `id, account_id, repo_id, entry_kind, work_item_id, plan_writeback_id, pr_number, head_sha, depends_on_pr_number, approved_at, state, phase, work_kind,
   work_run_id, slot_holder, lease_until, slot_taken_at, refresh_count, conflict_rounds, reason, merged_by, created_at, updated_at`;
+
+const SUCCESS_CODES_SQL = `ARRAY[${DEQUEUE_SUCCESS_CODES.map((c) => `'${c}'`).join(", ")}]::text[]`;
+
+/**
+ * SQL boolean for a queue entry `e` (any alias with account_id, work_item_id and pr_number): the gate itself put the head last enqueued for this pull request into the host's queue,
+ * and nothing a person did has ended that since. Same evidence as the merge receipt's (packages/db mergeReceipt.ts), read at the head of the newest `merge_enqueued` fact of the
+ * entry's pull request and counted only when it is newer than the newest removal of that head that is not GitHub's success reason:
+ *  - the gate's own fact: `merge_gate` (code `merge_enqueued`), or a `merge_enqueued` fact that carries a dial version (the webhook's and the reconcile's carry none);
+ *  - a paired item's public pull request: an order that ended enqueued or merged, with the gate's `merge_gate` fact (code `merge_delegated`) at the order's reviewed head.
+ * A person's press of "Merge when ready" leaves only the webhook's fact, and a hand re-queue after a removal leaves a newer fact of the same kind: neither is evidence.
+ */
+const gateQueuedSql = (e: string): string => `EXISTS (
+    SELECT 1 FROM (SELECT l.head_sha FROM work_item_driver_events l
+                    WHERE l.account_id = ${e}.account_id AND l.work_item_id = ${e}.work_item_id AND l.kind = 'merge_enqueued' AND l.pr_number = ${e}.pr_number AND l.head_sha IS NOT NULL
+                    ORDER BY l.seq DESC LIMIT 1) h
+      CROSS JOIN LATERAL (SELECT COALESCE(max(r.seq), 0) AS seq FROM work_item_driver_events r
+                           WHERE r.account_id = ${e}.account_id AND r.work_item_id = ${e}.work_item_id AND r.kind = 'merge_dequeued' AND r.head_sha = h.head_sha
+                             AND NOT (COALESCE(r.code, '') = ANY(${SUCCESS_CODES_SQL}))) rm
+     WHERE EXISTS (SELECT 1 FROM work_item_driver_events f
+                    WHERE f.account_id = ${e}.account_id AND f.work_item_id = ${e}.work_item_id AND f.head_sha = h.head_sha AND f.seq > rm.seq
+                      AND ((f.kind = 'merge_gate' AND f.code = 'merge_enqueued') OR (f.kind = 'merge_enqueued' AND f.dial_version IS NOT NULL)))
+        OR EXISTS (SELECT 1 FROM plane_merge_orders o
+                     JOIN work_item_driver_events g ON g.account_id = o.account_id AND g.work_item_id = o.work_item_id AND g.kind = 'merge_gate' AND g.code = 'merge_delegated' AND g.head_sha = o.reviewed_head
+                    WHERE o.account_id = ${e}.account_id AND o.work_item_id = ${e}.work_item_id AND o.expected_public_head = h.head_sha AND o.state IN ('enqueued', 'merged') AND g.seq > rm.seq))`;
 
 /** Clears everything that only means something while an entry holds the slot or waits for work. */
 const CLEAR_SLOT_AND_WORK = `phase = NULL, slot_holder = NULL, lease_until = NULL, slot_taken_at = NULL, work_kind = NULL, work_run_id = NULL`;
@@ -582,10 +606,11 @@ export async function settlePullRequest(
   if (input.merged) {
     return one(
       client,
-      // A pull request the host's queue merged (the webhook has written `merged_via_queue` before it settles the entry, or the item still reads as queued) was put there by the gate, so the queue's merge is the gate's; any other merge is a person's.
+      // A pull request the host's queue merged (the webhook has written `merged_via_queue` before it settles the entry, or the item still reads as queued) is the gate's merge only when the gate queued it (`gateQueuedSql`); a person's own "Merge when ready", or another tool's enqueue, is a person's merge.
       `UPDATE merge_queue_entries e SET state = 'merged', reason = NULL, ${CLEAR_SLOT_AND_WORK},
               merged_by = CASE WHEN e.work_item_id IS NOT NULL AND (${isQueuedSql("e.account_id", "e.work_item_id", "e.pr_number")}
                                  OR EXISTS (SELECT 1 FROM work_item_driver_events n WHERE n.account_id = e.account_id AND n.work_item_id = e.work_item_id AND n.kind = 'merged_via_queue' AND n.pr_number = e.pr_number))
+                                 AND ${gateQueuedSql("e")}
                                THEN 'gate' ELSE 'person' END
         WHERE e.account_id = $1 AND e.repo_id = $2 AND e.pr_number = $3 AND e.state IN ('in_review', 'queued', 'in_flight', 'awaiting_work', 'stopped')
         RETURNING ${COLUMNS}`,

@@ -37,6 +37,9 @@ describe("host-queue settle and the one automatic retry [pg]", () => {
         prNumber: o.pr ?? it.pr,
       }),
     );
+  /** The gate's own fact for the enqueue: the evidence that the gate, not a person, put the pull request in the host's queue. */
+  const gateFact = (r: QueueRepo, it: QueueItem, head = it.head) =>
+    tenant(r, (c) => recordDriverEvent(c, r.accountId, { workItemId: it.workItemId, kind: "merge_gate", dedupeKey: `${head}:merge_enqueued`, code: "merge_enqueued", headSha: head, prNumber: it.pr, dialVersion: 0 }));
   /** What the webhook does for a removal: the mapper writes the fact, then the queue settles from it. */
   const removal = async (r: QueueRepo, it: QueueItem, head: string, o: { code?: string; actor?: "user" | "app"; payloadReason?: string } = {}) => {
     await fact(r, it, "merge_dequeued", head, o);
@@ -174,6 +177,7 @@ describe("host-queue settle and the one automatic retry [pg]", () => {
   it("a merge of an entry waiting in the host's queue settles it as merged by the gate; any other merge is a person's; out of order and replayed deliveries end merged", async () => {
     const r = await setup([7, 8]);
     const it = await enqueued(r, 7);
+    await gateFact(r, it);
     await fact(r, it, "merged_via_queue", it.head);
     for (let i = 0; i < 3; i++) await apply(r, closedMerged(7, it.head));
     expect(await r.entry(7)).toMatchObject({ state: "merged", mergedBy: "gate", slotHolder: null });
