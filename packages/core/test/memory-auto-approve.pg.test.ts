@@ -191,6 +191,25 @@ describe('memory auto-approve dial in the intake (D#601 MEM-10)', () => {
     expect((await memoryAutoApproved(ctx())).cards).toEqual([]);
   });
 
+  it('undo approval and delete of an auto-approved entry each leave one reversal receipt in the clicker\'s name, and a restore then a second delete leave no more', async () => {
+    await setDial('announce', 1);
+    const [undone, deleted] = [text('undone'), text('deleted')];
+    await ingest(await newRun(), [fact(undone), fact(deleted)]);
+    const [uId, dId] = [await idOf(undone), await idOf(deleted)];
+    const policy = await receipts();
+    expect(policy).toHaveLength(2);
+    await revertMemory(ctx(), { ids: [uId], action: 'undo_approve' });
+    expect((await status(undone)).status).toBe('proposed');
+    await deleteMemory(ctx(), { id: dId });
+    expect((await status(deleted)).status).toBe('deleted');
+    const reversals = await receipts('reversal_recorded');
+    expect(reversals.map((r) => r.reverses_receipt_id).sort()).toEqual(policy.map((r) => r.id).sort());
+    for (const r of reversals) expect(r).toMatchObject({ actor: owner, chosen: 'reversed' });
+    await deleteMemory(ctx(), { id: dId, restore: true });
+    await deleteMemory(ctx(), { id: dId });
+    expect(await receipts('reversal_recorded')).toHaveLength(2);
+  });
+
   it('the review screen\'s list: place and run are words, never null; a person\'s approval, a retired entry and a restored one are not listed', async () => {
     await setDial('announce', 1);
     const bodies = [text('listed one'), text('listed two')];

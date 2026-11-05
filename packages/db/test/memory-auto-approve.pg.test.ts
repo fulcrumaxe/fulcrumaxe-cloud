@@ -278,6 +278,122 @@ describe('migration 0986: memory_auto_approve [pg]', () => {
       expect((await admin.query(`SELECT 1 FROM decision_receipts WHERE reverses_receipt_id IS NOT NULL AND account_id = $1`, [A.accountId])).rowCount).toBe(0);
     });
 
+    // MEM-10 (migration 0993): the other two Undos of an auto-approved entry. Each helper is one person's click.
+    const decide = (id: string, to: string) => asApp((c) => c.query(`SELECT memory_decide($1::uuid, $2)`, [id, to]), A.accountId, A.userId);
+    const del = (id: string, restore = false) => asApp((c) => c.query(`SELECT memory_delete($1::uuid, $2)`, [id, restore]), A.accountId, A.userId);
+    const auto = async (): Promise<{ id: string; policy: string }> => {
+      const id = await propose({ scope: 'item', ref: A.workItemId });
+      return { id, policy: (await asApp((c) => approve(c, id))).rows[0]!.r };
+    };
+    const reversalsOf = async (policy: string) => (await admin.query(`SELECT id, actor, chosen FROM decision_receipts WHERE reverses_receipt_id = $1`, [policy])).rows;
+    const totalReversals = async () => (await admin.query(`SELECT 1 FROM decision_receipts WHERE reverses_receipt_id IS NOT NULL AND account_id = $1`, [A.accountId])).rowCount;
+
+    it('retire, undo approval and delete of an auto-approved entry each write exactly one receipt, in the person\'s name, and a replay writes no second', async () => {
+      const [r, u, d] = [await auto(), await auto(), await auto()];
+      await retire(r.id);
+      await decide(u.id, 'proposed');
+      await del(d.id);
+      for (const e of [r, u, d]) {
+        const first = await reverse(e.id);
+        expect(first).not.toBeNull();
+        expect(await reverse(e.id)).toBe(first);
+        expect(await reversalsOf(e.policy)).toEqual([{ id: first, actor: A.userId, chosen: 'reversed' }]);
+      }
+      expect(await totalReversals()).toBe(3);
+    });
+
+    it('an Undo of an approval a person made writes nothing: approved by hand, approved by hand after the policy\'s Undo, retired then restored by hand', async () => {
+      const byHand = await propose({ scope: 'item', ref: A.workItemId });
+      await decide(byHand, 'approved');
+      await decide(byHand, 'proposed');
+      expect(await reverse(byHand)).toBeNull();
+      await decide(byHand, 'approved');
+      await del(byHand);
+      expect(await reverse(byHand)).toBeNull();
+      // The policy approved, a person undid it, a person approved it by hand, a person undid that: the step before the last Undo is the person's.
+      const again = await auto();
+      await decide(again.id, 'proposed');
+      await decide(again.id, 'approved');
+      await decide(again.id, 'proposed');
+      expect(await reverse(again.id)).toBeNull();
+      // Policy approval, retire, a person's restore, delete: the restore is the step in force.
+      const restored = await auto();
+      await retire(restored.id);
+      await decide(restored.id, 'approved');
+      await del(restored.id);
+      expect(await reverse(restored.id)).toBeNull();
+      expect(await totalReversals()).toBe(0);
+    });
+
+    it('an entry that was never auto-approved writes nothing: waiting, rejected then reconsidered, deleted while waiting, deleted after a retire', async () => {
+      const waiting = await propose({ scope: 'item', ref: A.workItemId });
+      expect(await reverse(waiting)).toBeNull();
+      await decide(waiting, 'rejected');
+      await decide(waiting, 'proposed'); // a reconsider writes memory.reverted too, but from rejected
+      expect(await reverse(waiting)).toBeNull();
+      const gone = await propose({ scope: 'item', ref: A.workItemId });
+      await del(gone);
+      expect(await reverse(gone)).toBeNull();
+      // Policy-approved, undone (receipt), rejected, reconsidered: the reconsider is not an Undo of an approval, so nothing new.
+      const e = await auto();
+      await decide(e.id, 'proposed');
+      const first = await reverse(e.id);
+      await decide(e.id, 'rejected');
+      await decide(e.id, 'proposed');
+      expect(await reverse(e.id)).toBeNull();
+      expect(await reversalsOf(e.policy)).toHaveLength(1);
+      expect(first).not.toBeNull();
+      // Retired (receipt), then deleted: the entry was not approved when it was deleted.
+      const r = await auto();
+      await retire(r.id);
+      expect(await reverse(r.id)).not.toBeNull();
+      await del(r.id);
+      expect(await reverse(r.id)).toBeNull();
+      expect(await reversalsOf(r.policy)).toHaveLength(1);
+    });
+
+    it('holds each guard on its own, against states the screens cannot produce (rows written by hand): the Undo must be of an approval, the step before it and the step in force must be the policy\'s approval', async () => {
+      const forge = (id: string, actor: string, action: string, payload: Record<string, unknown>) =>
+        admin.query(`INSERT INTO audit_log (account_id, actor, action, payload) VALUES ($1, $2, $3, $4::jsonb)`, [A.accountId, actor, action, JSON.stringify({ entry_id: id, ...payload })]);
+      const setStatus = (id: string, to: string) => admin.query(`UPDATE memory_entries SET status = $2 WHERE id = $1`, [id, to]);
+      // A proposed entry whose latest step is a revert FROM REJECTED (a reconsider) right after the policy's approval: not an Undo of an approval.
+      const reconsidered = await auto();
+      await setStatus(reconsidered.id, 'proposed');
+      await forge(reconsidered.id, A.userId, 'memory.reverted', { from_status: 'rejected', to_status: 'proposed' });
+      expect(await reverse(reconsidered.id)).toBeNull();
+      // A proposed entry whose latest step is a policy approval (written to look like an approval of an approved entry), not a revert.
+      const noRevert = await auto();
+      await setStatus(noRevert.id, 'proposed');
+      await forge(noRevert.id, 'policy:memory_auto_approve', 'memory.approved', { receipt_id: noRevert.policy, from_status: 'approved' });
+      expect(await reverse(noRevert.id)).toBeNull();
+      // A retired entry whose latest step carries the policy\'s receipt id but is a person\'s approval, or is the policy\'s restore rather than its approval.
+      const personRow = await auto();
+      await setStatus(personRow.id, 'retired');
+      await forge(personRow.id, A.userId, 'memory.approved', { receipt_id: personRow.policy });
+      expect(await reverse(personRow.id)).toBeNull();
+      const restoreRow = await auto();
+      await setStatus(restoreRow.id, 'retired');
+      await forge(restoreRow.id, 'policy:memory_auto_approve', 'memory.restored', { receipt_id: restoreRow.policy });
+      expect(await reverse(restoreRow.id)).toBeNull();
+      expect(await totalReversals()).toBe(0);
+    });
+
+    it('refuses an entry that is still in force or in another state the Undos do not reach, and another account\'s entry, for every Undo', async () => {
+      const live = await auto();
+      expect(await code(reverse(live.id))).toBe('P0002'); // approved
+      const rejected = await propose({ scope: 'item', ref: A.workItemId });
+      await decide(rejected, 'rejected');
+      expect(await code(reverse(rejected))).toBe('P0002');
+      await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT (account_id, user_id) DO UPDATE SET role = 'owner'`, [B.accountId, B.userId]);
+      const other = (id: string) => asApp(async (c) => c.query('SELECT memory_auto_approve_reversal($1, $2)', [id, CATALOGUE_VERSION]), B.accountId, B.userId);
+      const [u, d] = [await auto(), await auto()];
+      await decide(u.id, 'proposed');
+      await del(d.id);
+      expect(await code(other(u.id))).toBe('P0002');
+      expect(await code(other(d.id))).toBe('P0002');
+      expect(await totalReversals()).toBe(0);
+    });
+
     it('another account cannot reverse this one\'s entry', async () => {
       const id = await propose({ scope: 'item', ref: A.workItemId });
       await asApp((c) => approve(c, id));
