@@ -29,7 +29,7 @@ export interface MergeReceiptCall {
   decidedBy?: { kind: 'merge_enqueued' | 'merge_gate'; head: string; code?: string };
 }
 
-/** `not_policy`: the merge was not the gate's to receipt (a person removed the pull request from the host's queue before it merged); nothing is written and nothing is reported. */
+/** `not_policy`: the merge was not the gate's to receipt (a person removed the pull request from the host's queue before it merged, or a person or another tool queued it and no gate fact of ours stands at that head); nothing is written and nothing is reported. */
 export type MergeReceiptResult = 'written' | 'replayed' | 'no_run' | 'failed' | 'not_policy';
 
 const SAVEPOINT = 'merge_receipt_write';
@@ -62,6 +62,37 @@ export async function recordWritebackReceiptOn(client: PoolClient, call: { planW
   }
 }
 
+/** What the gate left behind for a pull request it sent to the host's queue: the dial version it read (null on a fact written before migration 0990). */
+interface GateEnqueue {
+  dialVersion: number | null;
+}
+
+/**
+ * The gate's own decision to put the pull request at `head` in the host's queue, or null when none of ours decided it (a person's "Merge when ready", another tool). Two shapes:
+ *  - a pull request the gate queued itself: its `merge_gate` fact (code merge_enqueued) at that head, or its own enqueue fact, which alone among the enqueue facts carries a
+ *    dial version. The webhook's and the reconcile's enqueue facts carry none and are not evidence.
+ *  - a paired item's public pull request, queued by a runner on an order the gate placed: the order names the reviewed head, and the gate's `merge_gate` fact (code merge_delegated)
+ *    is keyed on that head, not on the public one. Only an order that ended enqueued or merged counts.
+ * A gate fact written before migration 0990 is evidence with no version (dialVersion null): the caller keeps the time-based read for it, for those facts only.
+ */
+async function gateEnqueueOf(client: PoolClient, accountId: string, workItemId: string, head: string): Promise<GateEnqueue | null> {
+  const own = await client.query<{ dial_version: number | null }>(
+    `SELECT dial_version FROM work_item_driver_events
+      WHERE account_id = $1 AND work_item_id = $2 AND head_sha = $3 AND ((kind = 'merge_gate' AND code = 'merge_enqueued') OR (kind = 'merge_enqueued' AND dial_version IS NOT NULL))
+      ORDER BY (dial_version IS NOT NULL) DESC, seq DESC LIMIT 1`,
+    [accountId, workItemId, head],
+  );
+  if (own.rows[0] !== undefined) return { dialVersion: own.rows[0].dial_version };
+  const paired = await client.query<{ dial_version: number | null }>(
+    `SELECT g.dial_version FROM plane_merge_orders o
+       JOIN work_item_driver_events g ON g.account_id = o.account_id AND g.work_item_id = o.work_item_id AND g.kind = 'merge_gate' AND g.code = 'merge_delegated' AND g.head_sha = o.reviewed_head
+      WHERE o.account_id = $1 AND o.work_item_id = $2 AND o.expected_public_head = $3 AND o.state IN ('enqueued', 'merged')
+      ORDER BY (g.dial_version IS NOT NULL) DESC, g.seq DESC LIMIT 1`,
+    [accountId, workItemId, head],
+  );
+  return paired.rows[0] !== undefined ? { dialVersion: paired.rows[0].dial_version } : null;
+}
+
 export async function recordMergeReceiptOn(client: PoolClient, call: MergeReceiptCall): Promise<MergeReceiptResult> {
   await client.query(`SAVEPOINT ${SAVEPOINT}`);
   try {
@@ -76,6 +107,7 @@ export async function recordMergeReceiptOn(client: PoolClient, call: MergeReceip
     );
     // A pull request the gate queued is the gate's merge only while its enqueue stands: if a person took it out of the host's queue (a removal after the newest
     // enqueue of that head that is not GitHub's own success reason) and then merged it by hand, it is theirs and gets no policy receipt.
+    let gate: GateEnqueue | null = null;
     if (call.decidedBy?.kind === 'merge_enqueued') {
       const removed = await client.query(
         `SELECT 1 FROM work_item_driver_events r
@@ -85,6 +117,13 @@ export async function recordMergeReceiptOn(client: PoolClient, call: MergeReceip
         [accountId, workItemId, call.decidedBy.head, QUEUE_SUCCESS_DEQUEUE_CODES],
       );
       if ((removed.rowCount ?? 0) > 0) {
+        await client.query(`RELEASE SAVEPOINT ${SAVEPOINT}`);
+        return 'not_policy';
+      }
+      // And it is the gate's only if the gate decided it: a person's own press of GitHub's "Merge when ready" (or another tool's enqueue) leaves the webhook's enqueue fact
+      // and no gate fact at that head, so the merge is theirs, as a hand merge is: no policy receipt (the item still moves to merged by the delivery's own transition).
+      gate = await gateEnqueueOf(client, accountId, workItemId, call.decidedBy.head);
+      if (gate === null) {
         await client.query(`RELEASE SAVEPOINT ${SAVEPOINT}`);
         return 'not_policy';
       }
@@ -113,15 +152,8 @@ export async function recordMergeReceiptOn(client: PoolClient, call: MergeReceip
           [accountId, workItemId, d.kind, d.head, d.code ?? null],
         );
         at = when.rows[0]?.at ?? null;
-        named = when.rows[0]?.dial_version ?? null;
-        // An enqueue fact the webhook or the reconcile wrote first has no version: the gate's own `merge_enqueued` fact at that head names the one it read.
-        if (named === null && d.kind === 'merge_enqueued') {
-          const gate = await client.query<{ dial_version: number }>(
-            `SELECT dial_version FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_gate' AND code = 'merge_enqueued' AND head_sha = $3 AND dial_version IS NOT NULL ORDER BY seq DESC LIMIT 1`,
-            [accountId, workItemId, d.head],
-          );
-          named = gate.rows[0]?.dial_version ?? null;
-        }
+        // The version the gate read: on the enqueue fact if it is the gate's own, else on the gate's fact found above (the webhook or the reconcile wrote the enqueue first).
+        named = when.rows[0]?.dial_version ?? gate?.dialVersion ?? null;
       }
       // The version the gate wrote on its fact is the one that decided (migration 0990). A fact with none (written before 0990, or by the webhook or the reconcile)
       // keeps the older read: the newest version created at or before the fact's time. That read can name a version the gate did not see (a dial row committed after the decision).

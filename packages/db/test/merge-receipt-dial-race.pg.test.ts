@@ -5,6 +5,7 @@ import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
 import { readMergeDial, readMergeDialVersion } from '../src/mergeDial.js';
 import { recordMergeReceiptOn } from '../src/mergeReceipt.js';
+import { insertRunner } from './helpers/runnerFixtures.js';
 import { seedAccount, type SeedRefs } from './helpers/seed.js';
 
 /**
@@ -46,7 +47,7 @@ describe('merge receipt names the dial the gate read, not a version that committ
   const receipt = () => asApp((c) => recordMergeReceiptOn(c, { accountId: A.accountId, workItemId: A.workItemId, eventHead: HEAD, reviewHeads: [HEAD], outcome: 'merged', decidedBy: { kind: 'merge_enqueued', head: HEAD } }));
 
   /** The gate's decision with a dial row (`late`) committing after it. `gateWrites` is what the gate puts on its enqueue fact: the version it read, or none (an older fact). */
-  async function race(late: 'announce' | 'ask', gateWrites: 'read_version' | 'nothing' | 'webhook_first' | 'manual_enqueue'): Promise<void> {
+  async function race(late: 'announce' | 'ask', gateWrites: 'read_version' | 'nothing' | 'webhook_first' | 'gate_first' | 'manual_enqueue'): Promise<void> {
     await dialRow(admin, 'act', 1);
     await racer.query('BEGIN');
     await dialRow(racer, late, 2);
@@ -57,8 +58,16 @@ describe('merge receipt names the dial the gate read, not a version that committ
       // The webhook's enqueue fact (no version) came first and took the key; the gate's own insert was a no-op, but its merge_gate fact names what it read.
       await fact('merge_enqueued', null);
       await fact('merge_gate', read.version, 'merge_enqueued');
-    } else if (gateWrites !== 'manual_enqueue') {
-      await fact('merge_enqueued', gateWrites === 'read_version' ? read.version : null);
+    } else if (gateWrites === 'gate_first') {
+      // The gate's own facts in its transaction came first; the webhook's enqueue for the same head is the no-op (same key).
+      await fact('merge_gate', read.version, 'merge_enqueued');
+      await fact('merge_enqueued', read.version);
+    } else if (gateWrites === 'nothing') {
+      // Written before migration 0990: the gate's facts exist and name no version.
+      await fact('merge_gate', null, 'merge_enqueued');
+      await fact('merge_enqueued', null);
+    } else if (gateWrites === 'read_version') {
+      await fact('merge_enqueued', read.version);
     } else {
       await fact('merge_enqueued', null);
     }
@@ -78,7 +87,7 @@ describe('merge receipt names the dial the gate read, not a version that committ
     expect(await receipts()).toEqual([{ chosen: 'act', dial_version: 1 }]);
   });
 
-  it('a fact with no version (written before the column) keeps the time-based read, which is the version that races ahead', async () => {
+  it('gate facts with no version (written before the column) keep the time-based read, which is the version that races ahead', async () => {
     await race('announce', 'nothing');
     expect(await receipt()).toBe('written');
     expect(await receipts()).toEqual([{ chosen: 'announce', dial_version: 2 }]);
@@ -90,10 +99,82 @@ describe('merge receipt names the dial the gate read, not a version that committ
     expect(await receipts()).toEqual([{ chosen: 'act', dial_version: 1 }]);
   });
 
-  it('an enqueue nobody\'s gate decided (no merge_gate fact either) stays on the time-based read', async () => {
+  it('an enqueue nobody\'s gate decided (a person pressed Merge when ready: only the webhook\'s fact, no merge_gate fact) is not a policy merge: no receipt, nothing reported', async () => {
     await race('announce', 'manual_enqueue');
+    expect(await receipt()).toBe('not_policy');
+    expect(await receipts()).toEqual([]);
+  });
+
+  it('the gate enqueued first, then the webhook\'s delivery: the receipt names the version the gate read', async () => {
+    await race('announce', 'gate_first');
     expect(await receipt()).toBe('written');
-    expect(await receipts()).toEqual([{ chosen: 'announce', dial_version: 2 }]);
+    expect(await receipts()).toEqual([{ chosen: 'act', dial_version: 1 }]);
+  });
+
+  it('a manual enqueue of a head the gate had put in the queue earlier and a person took out is still no policy merge (the removal rule holds)', async () => {
+    await dialRow(admin, 'act', 1);
+    await fact('merge_gate', 1, 'merge_enqueued');
+    await fact('merge_enqueued', 1);
+    await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merge_dequeued', 'user', $3, 7, $4)`, [A.accountId, A.workItemId, HEAD, `d:${randomUUID()}`]);
+    await fact('merged_via_queue');
+    expect(await receipt()).toBe('not_policy');
+    expect(await receipts()).toEqual([]);
+  });
+
+  describe('a paired item: the public pull request is queued by a runner on an order, and the gate\'s fact is keyed on the reviewed head', () => {
+    const PUBLIC = 'b'.repeat(40);
+    async function order(state: 'enqueued' | 'merged' | 'failed'): Promise<void> {
+      const push = randomUUID();
+      await admin.query("INSERT INTO plane_pushes (id, account_id, work_item_id, repo_id, code_repo, pairing_digest, state) VALUES ($1, $2, $3, $4, 'acme/widgets-public', $5, 'building')", [push, A.accountId, A.workItemId, A.repoId, 'a'.repeat(64)]);
+      await admin.query(
+        `INSERT INTO plane_merge_orders (account_id, work_item_id, plane_push_id, repo_id, code_repo, pr_number, expected_public_head, reviewed_head, pairing_digest, deadline_at)
+         VALUES ($1, $2, $3, $4, 'acme/widgets-public', 7, $5, $6, $7, now() + interval '1 hour')`,
+        [A.accountId, A.workItemId, push, A.repoId, PUBLIC, HEAD, 'a'.repeat(64)],
+      );
+      const runner = await insertRunner(admin, A.accountId, A.userId);
+      const upd = (set: string) => admin.query(`UPDATE plane_merge_orders SET ${set} WHERE work_item_id = $1`, [A.workItemId]);
+      await upd(`state = 'claimed', runner_id = '${runner}', lease_generation = 1, attempts = 1, lease_expires_at = now() + interval '10 minutes'`);
+      if (state === 'enqueued' || state === 'merged') {
+        await upd(`state = 'authorized', write_token_issued_at = now()`);
+        await upd(`state = '${state}', outcome_code = '${state}', finished_at = now()`);
+      } else {
+        await upd(`state = 'failed', outcome_code = 'runner_report_mismatch', finished_at = now()`);
+      }
+    }
+    const publicFact = (kind: string, code = 'queue') =>
+      admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, $3, $4, $5, 7, $6)`, [A.accountId, A.workItemId, kind, code, PUBLIC, `${kind}:${randomUUID()}`]);
+    const pairedReceipt = () => asApp((c) => recordMergeReceiptOn(c, { accountId: A.accountId, workItemId: A.workItemId, eventHead: PUBLIC, reviewHeads: [PUBLIC, HEAD], outcome: 'merged', decidedBy: { kind: 'merge_enqueued', head: PUBLIC } }));
+
+    it('the webhook wrote the public enqueue fact before the runner\'s report: the receipt names the version on the gate\'s merge_delegated fact at the reviewed head', async () => {
+      await dialRow(admin, 'act', 1);
+      await racer.query('BEGIN');
+      await dialRow(racer, 'announce', 2);
+      await fact('merge_gate', 1, 'merge_delegated');
+      await order('enqueued');
+      await publicFact('merge_enqueued');
+      await racer.query('COMMIT');
+      await publicFact('merged_via_queue');
+      expect(await pairedReceipt()).toBe('written');
+      expect(await receipts()).toEqual([{ chosen: 'act', dial_version: 1 }]);
+    });
+
+    it('a public pull request a person queued by hand, with an order that failed or none at all: no policy receipt', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'merge_delegated');
+      await order('failed');
+      await publicFact('merge_enqueued');
+      await publicFact('merged_via_queue');
+      expect(await pairedReceipt()).toBe('not_policy');
+      expect(await receipts()).toEqual([]);
+    });
+
+    it('an order that ended enqueued but whose reviewed head has no delegated gate fact is not evidence', async () => {
+      await dialRow(admin, 'act', 1);
+      await order('enqueued');
+      await publicFact('merge_enqueued');
+      await publicFact('merged_via_queue');
+      expect(await pairedReceipt()).toBe('not_policy');
+    });
   });
 
   it('the column is for the gate\'s kinds only: any other kind carrying a version is refused by the table', async () => {

@@ -250,12 +250,22 @@ describe('D#7 DW-R4: the receipt behind a merge the host queue made [pg]', () =>
       [refs.accountId, refs.repoId, disposition, version, user],
     );
   };
-  /** An item the gate queued at GATED with a review run on it. */
-  const gated = async (opts: { enqueue?: boolean } = {}) => {
+  /** The version of the merge dial now (0: no row), which is what the gate reads when it decides. */
+  const dialNow = async () => (await admin.query<{ v: number }>(`SELECT coalesce(max(version), 0) AS v FROM decision_settings WHERE repo_id = $1 AND decision_type = 'merge_after_reviews'`, [refs.repoId])).rows[0]!.v;
+  /** An item with a review run on GATED. `enqueue`: 'gate' (default) = the gate queued it, writing its merge_gate fact and its enqueue fact with the dial version it read; 'manual' = only the webhook's
+   * enqueue fact (a person pressed GitHub's own "Merge when ready"); 'before_0990' = the gate's facts with no version; false = no enqueue at all (a hand merge). */
+  const gated = async (opts: { enqueue?: boolean | 'gate' | 'manual' | 'before_0990' } = {}) => {
     const gh = nextGh++;
     const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: gh, stage: 'pr_opened' });
     await admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3)`, [refs.accountId, workItemId, GATED]);
-    if (opts.enqueue !== false) await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId, kind: 'merge_enqueued', dedupeKey: `enqueued:${GATED}`, code: 'queue', headSha: GATED, prNumber: 800 + gh }));
+    const mode = opts.enqueue === undefined || opts.enqueue === true ? 'gate' : opts.enqueue;
+    if (mode !== false) {
+      const dialVersion = mode === 'gate' ? await dialNow() : undefined;
+      await withTenant(appUserPool, refs.accountId, async (c) => {
+        if (mode !== 'manual') await recordDriverEvent(c, refs.accountId, { workItemId, kind: 'merge_gate', dedupeKey: `${GATED}:merge_enqueued`, code: 'merge_enqueued', headSha: GATED, prNumber: 800 + gh, ...(dialVersion !== undefined ? { dialVersion } : {}) });
+        await recordDriverEvent(c, refs.accountId, { workItemId, kind: 'merge_enqueued', dedupeKey: `enqueued:${GATED}`, code: 'queue', headSha: GATED, prNumber: 800 + gh, ...(dialVersion !== undefined ? { dialVersion } : {}) });
+      });
+    }
     return { gh, workItemId };
   };
   const receipts = async (workItemId: string) => (await admin.query(`SELECT chosen, dial_version, actor, class FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'merge_after_reviews'`, [workItemId])).rows;
@@ -274,6 +284,24 @@ describe('D#7 DW-R4: the receipt behind a merge the host queue made [pg]', () =>
     const hand = await gated({ enqueue: false });
     await apply(merged(hand.gh, GATED));
     expect(await receipts(hand.workItemId)).toEqual([]);
+  });
+
+  it('a person pressed GitHub\'s own Merge when ready (the webhook\'s enqueue fact and no gate fact): the merge is theirs, as a hand merge is: the item moves to merged, the queue merge is recorded, and no policy receipt is written, however many times the delivery comes', async () => {
+    await setDial('act');
+    const manual = await gated({ enqueue: 'manual' });
+    for (let i = 0; i < 2; i++) await apply(merged(manual.gh, GATED));
+    expect(await receipts(manual.workItemId)).toEqual([]);
+    expect((await admin.query(`SELECT stage FROM work_items WHERE id = $1`, [manual.workItemId])).rows).toEqual([{ stage: 'merged' }]);
+    expect((await admin.query(`SELECT count(*)::int AS n FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merged_via_queue'`, [manual.workItemId])).rows).toEqual([{ n: 1 }]);
+    expect(vi.mocked(reportError)).not.toHaveBeenCalled();
+  });
+
+  it('gate facts written before migration 0990 (no dial version) keep the time-based read: the dial that stood at the enqueue, and no manual enqueue is mistaken for them', async () => {
+    await setDial('announce');
+    const old = await gated({ enqueue: 'before_0990' });
+    await setDial('ask');
+    await apply(merged(old.gh, GATED));
+    expect(await receipts(old.workItemId)).toEqual([{ chosen: 'announce', dial_version: expect.any(Number), actor: 'policy', class: 'human_over_the_loop' }]);
   });
 
   it('the head GitHub merged is the head the fact records: a merged head other than the enqueued one is receipted at that head, with the run found on the head the gate sent', async () => {
