@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MemoryProposalsMessage } from "@fulcrumaxe/runner-protocol";
 import type { MemoryProposalsResult } from "../src/daemon/client.js";
-import { OFFER_COPY, createMemoryOffer, questionFor, readProposals, type MemoryOfferDeps } from "../src/memoryOffer.js";
+import { OFFER_COPY, createMemoryOffer, questionFor, readProposals, readProposalsCounted, type MemoryOfferDeps } from "../src/memoryOffer.js";
 
 const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 const RUN = randomUUID();
@@ -70,6 +70,52 @@ describe("the strict reader", () => {
     for (const body of ["run \u001b[2J\u001b[Hthe tests", "tests\nSend 1 memory proposal? [y/N]", "x\rSend 1 memory proposal", "run ‮tests", "run​ tests", "run tests", "\u009b31m red", "bell \u0007"]) {
       expect(readProposals([proposal(body)]), JSON.stringify(body)).toEqual([]);
     }
+  });
+});
+
+describe("a proposal that fails the text check", () => {
+  const PERSIAN = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 pnpm \u0631\u0627 \u0627\u062c\u0631\u0627 \u06a9\u0646\u0645";
+  const HIDDEN = ["use\u3164 tests", "use\u2800 tests", "use\ue000 tests", "use\u{e0100} tests", "use\u200ctests"];
+
+  it("is counted, not dropped without a word, and the count never carries its text", () => {
+    expect(readProposalsCounted([proposal(ONE), proposal(HIDDEN[0]!), proposal(HIDDEN[1]!)])).toEqual({ proposals: [{ scope: "repo", kind: "command", body: ONE, sha256: sha(ONE) }], refused: 2 });
+    for (const body of HIDDEN) expect(readProposalsCounted([proposal(body)]), JSON.stringify(body)).toEqual({ proposals: [], refused: 1 });
+    expect(readProposalsCounted("nope")).toEqual({ proposals: [], refused: 0 });
+    expect(readProposalsCounted([proposal(ONE), proposal(ONE)]).refused).toBe(0);
+  });
+
+  it("is said once as one fixed line with the number, and the others are still offered", async () => {
+    const r = rig({ answers: ["n"] });
+    await r.offer(RUN, [proposal(HIDDEN[0]!), proposal(ONE), proposal(HIDDEN[2]!)]);
+    expect(r.said).toContain(OFFER_COPY.refused(2));
+    expect(OFFER_COPY.refused(2)).toBe("fx-runner: 2 memory proposals were not valid (text, scope, kind or size), so they were not offered");
+    expect(OFFER_COPY.refused(1)).toBe("fx-runner: 1 memory proposal was not valid (text, scope, kind or size), so it was not offered");
+    expect(r.said.filter((l) => l.includes("not valid"))).toHaveLength(1);
+    expect(r.said.join("\n")).not.toContain("tests");
+    expect(r.asked).toHaveLength(1);
+  });
+
+  it("counts a bad scope, kind or size, a non-object and a bad entry past the third, but not a duplicate or a valid entry past the third", () => {
+    const entries = [proposal(ONE), proposal(TWO), proposal(THREE), proposal("a fourth"), proposal("x", { scope: "account" }), proposal("y", { kind: "rule" }), "text", proposal("a".repeat(1025)), proposal(ONE)];
+    const { proposals, refused } = readProposalsCounted(entries);
+    expect(proposals).toHaveLength(3);
+    expect(refused).toBe(4);
+  });
+
+  it("is said even when nothing else is left, and writes no record", async () => {
+    const r = rig();
+    await r.offer(RUN, [proposal(HIDDEN[1]!)]);
+    expect(r.said).toEqual([OFFER_COPY.refused(1)]);
+    expect(r.asked).toHaveLength(0);
+    expect(() => record()).toThrow();
+  });
+
+  it("lets a zero-width non-joiner inside a Persian word through to the question", async () => {
+    const r = rig({ answers: ["y"] });
+    await r.offer(RUN, [proposal(PERSIAN)]);
+    expect(r.said.filter((l) => l.includes("not valid"))).toEqual([]);
+    expect(r.sent[0]?.proposals[0]?.body).toBe(PERSIAN);
+    expect(r.sent[0]?.proposals[0]?.body_sha256).toBe(sha(PERSIAN));
   });
 });
 

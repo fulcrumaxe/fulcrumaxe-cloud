@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { redactSecrets, redactShapes } from '@fx/runtime/src/redact.js';
+import { MEMORY_HIDDEN_CLASS, removeHiddenMemoryChars } from '@fulcrumaxe/runner-protocol';
 import { stripControlTokens } from '@fx/trust';
 import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
@@ -154,16 +155,24 @@ export function repoScopeRef(repoNodeId: string, installationId: number | string
   return `${repoNodeId}@${installationId}`;
 }
 
+/** Where a kept joiner waits while the control-token pass runs (that pass removes every format character). Private-use code points never survive the first step, so these are free. */
+const KEPT_ZWNJ = '\ue000';
+const KEPT_ZWJ = '\ue001';
+
 /**
- * Cleans one piece of memory text before it is stored: NFKC and zero-width characters removed, control-plane tokens (a SPAWN_REQUEST, a
- * STATUS line, an HTML comment) replaced by a marker, control characters and both fence delimiters replaced, and the ends trimmed. The
- * result is plain text. Cleaning is not trust: whether the text sits inside the fence at render time follows `authorKind`.
+ * Cleans one piece of memory text before it is stored: NFKC, then every character a person cannot see removed (zero-width, bidi, tags, soft hyphen, private-use, Hangul
+ * fillers, the braille blank, variation selectors; see `removeHiddenMemoryChars`) except the joiners Persian, the Indic scripts and emoji need, control-plane tokens (a
+ * SPAWN_REQUEST, a STATUS line, an HTML comment) replaced by a marker, control characters and both fence delimiters replaced, and the ends trimmed. The result is plain
+ * text. Cleaning is not trust: whether the text sits inside the fence at render time follows `authorKind`.
  */
 export function sanitizeMemoryText(text: string): string {
-  return stripControlTokens(text).replace(CONTROL_RE, ' ').replace(FENCE_RE, '[removed]').trim();
+  // A line or paragraph separator is a break between words, so it becomes a space before the hidden characters go (otherwise the words glue together).
+  const visible = removeHiddenMemoryChars(text.normalize('NFKC').replace(/[\u2028\u2029]/g, ' ')).replace(/\u200c/g, KEPT_ZWNJ).replace(/\u200d/g, KEPT_ZWJ);
+  return stripControlTokens(visible).replace(CONTROL_RE, ' ').replace(FENCE_RE, '[removed]').replace(/\ue000/g, '\u200c').replace(/\ue001/g, '\u200d').trim();
 }
 
-const INVISIBLE_RE = /[\s\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029\u2060\ufeff]/g;
+/** What is removed before a live token is looked for: spaces, controls and every hidden character, so padding a token with any of them hides nothing. */
+const INVISIBLE_RE = new RegExp(`[\\s\\u0000-\\u001f\\u007f${MEMORY_HIDDEN_CLASS}]`, 'gu');
 /** Below this length a live value is not tried in encoded or space-stripped forms (too short to tell from ordinary text). */
 const MIN_ENCODED_SECRET_CHARS = 16;
 
