@@ -65,13 +65,30 @@ describe('D#598 P5c-a: plan write-back setting routes', () => {
     (await admin.query(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'plan_writeback_setting.changed' ORDER BY created_at, id`, [accountId])).rows;
   const versions = async (accountId: string) => (await admin.query(`SELECT auto_merge, version, changed_by FROM plan_writeback_settings WHERE account_id = $1 ORDER BY version`, [accountId])).rows;
 
+  it('the answer carries the repo\'s merge dial (ask holds the merge even with the switch on) and the newest automatic merges, newest first, for a member; another repo\'s reads none', async () => {
+    const f = await fixture();
+    await admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'merge_after_reviews', 'ask', 'cautious', 1, $3)`, [f.owner.accountId, f.repoId, f.owner.userId]);
+    expect(await (await put(f.owner, f.repoId, true)).json()).toEqual({ auto_merge: true, default: false, merge_dial: 'ask', recent_merges: [] });
+    // A merged write-back with its receipt, as the tick leaves them.
+    const wb = randomUUID();
+    const head = 'a'.repeat(40);
+    await admin.query(`INSERT INTO plan_writebacks (id, account_id, repo_id, state, plan_path, branch, pr_number, head_sha, base_sha) VALUES ($1, $2, $3, 'open', 'plan.json', 'fulcrumaxe/plan-update-x', 9, $4, $5)`, [wb, f.owner.accountId, f.repoId, head, 'c'.repeat(40)]);
+    await admin.query(`INSERT INTO merge_queue_entries (account_id, repo_id, entry_kind, plan_writeback_id, pr_number, head_sha, approved_at, state, merged_by) VALUES ($1, $2, 'plan_writeback', $3, 9, $4, now(), 'merged', 'gate')`, [f.owner.accountId, f.repoId, wb, head]);
+    const rec = (await admin.query<{ id: string }>(`INSERT INTO decision_receipts (account_id, decision_type, class, chosen, rejected_alternative, dial_version, input_trust_classes, actor, catalogue_version) VALUES ($1, 'merge_after_reviews', 'human_over_the_loop', 'announce', 'ask', 2, '[]', 'policy', 1) RETURNING id`, [f.owner.accountId])).rows[0]!.id;
+    await admin.query(`INSERT INTO plan_writeback_receipts (account_id, plan_writeback_id, receipt_id) VALUES ($1, $2, $3)`, [f.owner.accountId, wb, rec]);
+    const mine = (await (await get(f.member, f.repoId)).json()) as { recent_merges: Array<{ id: string; at: string; chosen: string }> };
+    expect(mine.recent_merges).toEqual([{ id: rec, at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), chosen: 'announce' }]);
+    const other = await fixture();
+    expect(((await (await get(other.owner, other.repoId)).json()) as { recent_merges: unknown[] }).recent_merges).toEqual([]);
+  });
+
   it('P5c-a-2: GET with no stored value answers off as the default, with no null or undefined; any member and a read token may read it', async () => {
     const f = await fixture();
     for (const who of [f.owner, f.member]) {
       const res = await get(who, f.repoId);
       expect(res.status).toBe(200);
       const text = await res.text();
-      expect(JSON.parse(text)).toEqual({ auto_merge: false, default: true });
+      expect(JSON.parse(text)).toEqual({ auto_merge: false, default: true, merge_dial: "act", recent_merges: [] });
       expect(text).not.toMatch(/null|undefined/);
     }
     const plaintext = generateToken();
@@ -87,10 +104,10 @@ describe('D#598 P5c-a: plan write-back setting routes', () => {
     const f = await fixture();
     const res = await put(f.admin, f.repoId, true);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ auto_merge: true, default: false });
+    expect(await res.json()).toEqual({ auto_merge: true, default: false, merge_dial: "act", recent_merges: [] });
     expect(await versions(f.owner.accountId)).toEqual([{ auto_merge: true, version: 1, changed_by: f.admin.userId }]);
-    expect(await (await put(f.owner, f.repoId, false)).json()).toEqual({ auto_merge: false, default: false });
-    expect(await (await get(f.member, f.repoId)).json()).toEqual({ auto_merge: false, default: false });
+    expect(await (await put(f.owner, f.repoId, false)).json()).toEqual({ auto_merge: false, default: false, merge_dial: "act", recent_merges: [] });
+    expect(await (await get(f.member, f.repoId)).json()).toEqual({ auto_merge: false, default: false, merge_dial: "act", recent_merges: [] });
     expect((await audit(f.owner.accountId)).map((r) => [r.actor, r.payload])).toEqual([
       [f.admin.userId, { actor: f.admin.userId, repo_id: f.repoId, version: 1, previous: false, new: true }],
       [f.owner.userId, { actor: f.owner.userId, repo_id: f.repoId, version: 2, previous: true, new: false }],
@@ -111,7 +128,7 @@ describe('D#598 P5c-a: plan write-back setting routes', () => {
     // A fresh key with the value in force answers the current row and adds no version and no audit row.
     const same = await put(f.owner, f.repoId, true);
     expect(same.status).toBe(200);
-    expect(await same.json()).toEqual({ auto_merge: true, default: false });
+    expect(await same.json()).toEqual({ auto_merge: true, default: false, merge_dial: "act", recent_merges: [] });
     expect(await versions(f.owner.accountId)).toHaveLength(1);
     expect(await audit(f.owner.accountId)).toHaveLength(1);
   });

@@ -747,8 +747,18 @@ export const PLAN_WRITEBACK_WORDS = Object.freeze({
 });
 export const planWritebackUrl = (repoId) => "/api/v1/repos/" + encodeURIComponent(repoId) + "/plan-writeback/setting";
 
-/** The answer read, or null unless both fields are booleans. */
-export const readPlanWriteback = (b) => (b && typeof b.auto_merge === "boolean" && typeof b.default === "boolean" ? { on: b.auto_merge } : null);
+/**
+ * The merge dial holds a plan update whose switch is on (the switch and the dial must both allow). Said plainly, with the setting's name and where it is changed;
+ * the stop notice (writebackNotice in the pipeline) says the same about the same setting and the same place.
+ */
+export const PLAN_WRITEBACK_HELD = "Automatic merging is on, but \"Merging a pull request once its reviews pass\" is set to ask, so a person merges plan updates for now. Change that in Roles, Autonomy.";
+
+/** The answer read, or null unless both fields are booleans. `dial` and `last` are null when the answer carries no usable word or receipt. */
+export const readPlanWriteback = (b) => {
+  if (!(b && typeof b.auto_merge === "boolean" && typeof b.default === "boolean")) return null;
+  const merges = Array.isArray(b.recent_merges) ? b.recent_merges.filter((m) => m && typeof m.at === "string" && /^\d{4}-\d\d-\d\d/.test(m.at)) : [];
+  return { on: b.auto_merge, dial: b.merge_dial === "act" || b.merge_dial === "announce" || b.merge_dial === "ask" ? b.merge_dial : null, last: merges.length > 0 ? merges[0].at.slice(0, 10) : null };
+};
 
 /** What the switch shows for a state, with no DOM. `st`: { status: loading | ready | error, on, phase: idle | saving | saved | error, error }. */
 export function planWritebackModel(st, canChange) {
@@ -761,6 +771,9 @@ export function planWritebackModel(st, canChange) {
     adminOnly: !canChange,
     saved: st.phase === "saved" ? (st.on ? PLAN_WRITEBACK_WORDS.savedOn : PLAN_WRITEBACK_WORDS.savedOff) : "",
     error: st.phase === "error" ? st.error : "",
+    // The merge dial holds the merge: the switch is on and the dial says ask. Shown whenever it is true, not only after a save.
+    held: st.on === true && st.dial === "ask" ? PLAN_WRITEBACK_HELD : "",
+    last: st.last ? "Last plan update merged automatically on " + st.last + "." : "",
   };
 }
 
@@ -774,7 +787,7 @@ export function createPlanWritebackController({ call = api, signal, repoId, onCh
   async function load() {
     try {
       const v = readPlanWriteback(await call("GET", planWritebackUrl(repoId), undefined, signal));
-      set(v ? { status: "ready", on: v.on } : { status: "error" });
+      set(v ? { status: "ready", on: v.on, dial: v.dial, last: v.last } : { status: "error" });
     } catch (e) {
       if (!cancelled(e)) set({ status: "error" });
     }
@@ -785,7 +798,7 @@ export function createPlanWritebackController({ call = api, signal, repoId, onCh
     try {
       const v = readPlanWriteback(await call("PUT", planWritebackUrl(repoId), { auto_merge: on }, signal, { idempotencyKey: crypto.randomUUID() }));
       if (!v) return set({ phase: "error", error: PLAN_WRITEBACK_WORDS.saveFailed });
-      set({ on: v.on, phase: "saved" });
+      set({ on: v.on, dial: v.dial, last: v.last, phase: "saved" });
     } catch (e) {
       if (!cancelled(e)) set({ phase: "error", error: e && e.status === 403 ? PLAN_WRITEBACK_WORDS.adminOnly : PLAN_WRITEBACK_WORDS.saveFailed });
     }
@@ -812,10 +825,12 @@ export function createPlanWritebackControl({ call = api, signal, repoId, canChan
   const adminOnly = h("p", { class: "repos-muted", "data-testid": "repos-plan-writeback-admin-only" }, PLAN_WRITEBACK_WORDS.adminOnly);
   const saved = h("p", { class: "repos-muted", role: "status", "data-testid": "repos-plan-writeback-saved" });
   const failed = h("p", { class: "repos-error", role: "alert", tabindex: "-1", id: "repos-plan-writeback-error", "data-testid": "repos-plan-writeback-error" });
+  const held = h("p", { class: "repos-muted", role: "status", "data-testid": "repos-plan-writeback-held" });
+  const last = h("p", { class: "repos-muted", "data-testid": "repos-plan-writeback-last" });
   const group = h("div", { "data-testid": "repos-plan-writeback-group" },
     h("label", { class: "repos-toggle", for: "repos-plan-writeback-switch" }, box, h("span", null, h("strong", null, PLAN_WRITEBACK_LABEL),
       h("span", { class: "repos-muted", id: "repos-plan-writeback-help", "data-testid": "repos-plan-writeback-help" }, PLAN_WRITEBACK_SENTENCE))),
-    adminOnly, saved, failed);
+    held, last, adminOnly, saved, failed);
   const el = h("div", { class: "repos-toggle-group", "data-testid": "repos-plan-writeback" }, note, group);
   let hadError = false;
   function paint() {
@@ -830,6 +845,10 @@ export function createPlanWritebackControl({ call = api, signal, repoId, canChan
     box.disabled = m.adminOnly; // a member's switch is plainly off-limits; a save in flight only sets aria-disabled
     box.setAttribute("aria-disabled", m.busy ? "true" : "false");
     adminOnly.hidden = !m.adminOnly;
+    held.textContent = m.held;
+    held.hidden = m.held === "";
+    last.textContent = m.last;
+    last.hidden = m.last === "";
     saved.textContent = m.saved;
     failed.textContent = m.error;
     if (m.error && !hadError) failed.focus();

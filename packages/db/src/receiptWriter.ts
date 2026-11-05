@@ -360,3 +360,47 @@ export async function writeMergeReceipt(client: PoolClient, input: MergeReceiptI
   ));
   return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
 }
+
+export interface PlanWritebackReceiptInput {
+  planWritebackId: string;
+  /** The write-back's recorded head, the one the gate merged. */
+  headSha: string;
+  /** `act` or `announce`: the merge dial's word at `dialVersion`. A write-back the dial left to a person is never receipted. */
+  chosen: 'act' | 'announce';
+  dialVersion: number;
+}
+
+/**
+ * Plan write-back (migration 0988): the class 2 receipt behind a plan update the platform merged by policy. It has no work item and no run; the one definer
+ * `plan_writeback_receipt_write` writes it (through `decision_receipt_write`) and ties it to the write-back. The database refuses a write-back the gate did not merge.
+ * At most one per write-back: a replay answers the first receipt. The actor (`policy`) and the account come from the session.
+ */
+export async function writePlanWritebackReceipt(client: PoolClient, input: PlanWritebackReceiptInput): Promise<{ id: string; replayed: boolean }> {
+  if (!isText(input.planWritebackId)) throw new ReceiptWriteError('receipt_missing_run_id');
+  const entry = CATALOGUE.find((e) => e.id === 'merge_after_reviews');
+  if (!entry || entry.class !== 'human_over_the_loop') throw new ReceiptWriteError('receipt_unknown_decision_type');
+  if (!HEAD_SHA.test(input.headSha) || (input.chosen !== 'act' && input.chosen !== 'announce')) throw new ReceiptWriteError('receipt_chosen_invalid');
+  if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
+  const { rows } = await withReversalWindow(client, 'merge_after_reviews', () => client.query<{ o_id: string; o_replayed: boolean }>(
+    'SELECT o_id, o_replayed FROM plan_writeback_receipt_write($1::uuid, $2::text, $3::text, $4::integer, $5::integer)',
+    [input.planWritebackId, input.headSha, input.chosen, input.dialVersion, CATALOGUE_VERSION],
+  ));
+  return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
+}
+
+/**
+ * Plan write-back (migration 0988): the gate's own fact that it merged this write-back, written straight after its merge call succeeds, in a transaction of its own and
+ * before the queue entry is touched: the receipt keys on this fact, never on the entry's state (GitHub's webhook can settle the entry as a person's merge first). One per
+ * write-back; a second write answers `false` and changes nothing. `client` must come from `withTenant`.
+ */
+export async function writePlanWritebackMergeFact(client: PoolClient, input: PlanWritebackReceiptInput): Promise<boolean> {
+  if (!isText(input.planWritebackId)) throw new ReceiptWriteError('receipt_missing_run_id');
+  if (!HEAD_SHA.test(input.headSha) || (input.chosen !== 'act' && input.chosen !== 'announce')) throw new ReceiptWriteError('receipt_chosen_invalid');
+  if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
+  const { rowCount } = await client.query(
+    `INSERT INTO plan_writeback_merges (account_id, plan_writeback_id, head_sha, chosen, dial_version)
+     VALUES (current_setting('app.account_id')::uuid, $1::uuid, $2, $3, $4) ON CONFLICT (account_id, plan_writeback_id) DO NOTHING`,
+    [input.planWritebackId, input.headSha, input.chosen, input.dialVersion],
+  );
+  return (rowCount ?? 0) > 0;
+}

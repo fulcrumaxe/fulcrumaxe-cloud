@@ -1,6 +1,8 @@
 import type { PoolClient } from "pg";
 import { MAX_ROADMAP_BYTES } from "@fx/core/src/plan/index.js";
 import { readPlanWritebackAutoMerge } from "@fx/db/src/planWritebackSettings.js";
+import { readMergeDial, type MergeDial } from "@fx/db/src/mergeDial.js";
+import { writePlanWritebackMergeFact } from "@fx/db/src/receiptWriter.js";
 import { buildWritebackText, type WritebackTruth } from "../build/planWriteback.js";
 import { createWritebackGitHub, type WritebackGitHub, type WritebackHttp } from "../build/planWritebackGitHub.js";
 import type { GitHubHttp } from "../build/githubMergePort.js";
@@ -42,10 +44,13 @@ export type WritebackDecision =
   | { decision: "writeback_content_mismatch" }
   | { decision: "writeback_pr_mismatch" }
   | { decision: "writeback_check_unfinished" }
+  | { decision: "writeback_merge_dial_ask" }
   | { decision: "merge"; sha: string };
 
 /**
- * Pure. Toggle off (or no row), the repo's auto-merge off or the human-merge-only lock: a person merges, whatever GitHub says. Otherwise
+ * Pure. Toggle off (or no row), the repo's auto-merge off or the human-merge-only lock: a person merges, whatever GitHub says. The switch and the merge dial
+ * (`merge_after_reviews`) must BOTH allow, as for a work item: a dial at `ask` with the switch on is its own stop (`writeback_merge_dial_ask`), so the person is
+ * told which setting holds the merge. Otherwise
  * the evidence must show the PR's file at the recorded head equal, byte for byte, to the file the platform computes at the recorded base,
  * and no other path changed (a rename counts as a change, since it removes the source file); and the entry's pull request is the record's; only then is there a merge, naming the recorded head.
  */
@@ -56,9 +61,12 @@ export function decideWritebackMerge(a: {
   head: string;
   /** The pull request number the queue entry holds; it must be the one the record names. */
   prNumber: number;
+  /** The repo's merge dial as read for this decision; anything but `act` or `announce` leaves the merge to a person. */
+  dial: MergeDial;
   evidence?: WritebackEvidence;
 }): WritebackDecision {
   if (a.setting !== true || a.locks.repoAutoMerge !== true || a.locks.humanMergeOnly !== false) return { decision: "ready_human_merges" };
+  if (a.dial.disposition !== "act" && a.dial.disposition !== "announce") return { decision: "writeback_merge_dial_ask" };
   if (a.record.prNumber !== a.prNumber) return { decision: "writeback_pr_mismatch" };
   if (a.evidence === undefined) return { decision: "need_evidence" };
   if (a.evidence.kind === "unfinished" || a.record.state !== "open" || a.record.headSha === null || a.record.baseSha === null) return { decision: "writeback_check_unfinished" };
@@ -103,7 +111,7 @@ export async function gatherEvidence(port: NonNullable<Awaited<ReturnType<Writeb
 }
 
 export type WritebackGateResult =
-  | { outcome: "merged" }
+  | { outcome: "merged"; dial: MergeDial; sha: string }
   | { outcome: "head_moved" }
   | { outcome: "pr_not_open" }
   | { outcome: "ready_human_merges"; reasons: readonly string[] };
@@ -124,8 +132,8 @@ export async function readRepoLocks(client: PoolClient, accountId: string, repoI
 }
 
 /** The setting and the locks, read now in one tenant transaction. Anything that cannot be read is off and locked. */
-export async function writebackPermission(deps: { inTenant: Tenant }, target: { accountId: string; repoId: string }): Promise<{ setting: boolean; locks: WritebackLocks }> {
-  return deps.inTenant(target.accountId, async (c) => ({ setting: await readAutoMerge(c, target.accountId, target.repoId), locks: await readRepoLocks(c, target.accountId, target.repoId) })).catch(() => ({ setting: false, locks: LOCKED }));
+export async function writebackPermission(deps: { inTenant: Tenant }, target: { accountId: string; repoId: string }): Promise<{ setting: boolean; locks: WritebackLocks; dial: MergeDial }> {
+  return deps.inTenant(target.accountId, async (c) => ({ setting: await readAutoMerge(c, target.accountId, target.repoId), locks: await readRepoLocks(c, target.accountId, target.repoId), dial: await readMergeDial(c, target.repoId) })).catch(() => ({ setting: false, locks: LOCKED, dial: { disposition: "ask" as const, version: 0 } }));
 }
 
 /** The gate for a `plan_writeback` entry that holds the slot with green CI on `headSha`. Makes at most one merge call. */
@@ -134,18 +142,27 @@ export async function runWritebackGate(
   input: { accountId: string; repoId: string; planWritebackId: string; pr: PullRequestRef; headSha: string },
 ): Promise<WritebackGateResult> {
   const target = { accountId: input.accountId, repoId: input.repoId };
-  const stop = (reason: "ready_human_merges" | "writeback_content_mismatch" | "writeback_pr_mismatch" | "writeback_check_unfinished"): WritebackGateResult => ({ outcome: "ready_human_merges", reasons: [reason] });
+  const stop = (reason: "ready_human_merges" | "writeback_content_mismatch" | "writeback_pr_mismatch" | "writeback_check_unfinished" | "writeback_merge_dial_ask"): WritebackGateResult => ({ outcome: "ready_human_merges", reasons: [reason] });
   const record = await deps.inTenant(input.accountId, (c) => getWriteback(c, input.accountId, input.planWritebackId));
   if (record === null) return stop("writeback_check_unfinished");
-  const { setting, locks } = await writebackPermission(deps, target);
-  const base = { setting, locks, record, head: input.headSha, prNumber: input.pr.prNumber };
-  if (decideWritebackMerge(base).decision === "ready_human_merges") return stop("ready_human_merges");
+  const { setting, locks, dial } = await writebackPermission(deps, target);
+  const base = { setting, locks, dial, record, head: input.headSha, prNumber: input.pr.prNumber };
+  const first = decideWritebackMerge(base).decision;
+  if (first === "ready_human_merges" || first === "writeback_merge_dial_ask") return stop(first);
   const port = await deps.writeback.open(target).catch(() => null);
   const evidence: WritebackEvidence = port === null ? { kind: "unfinished" } : await gatherEvidence(port, record, input.headSha);
   const decided = decideWritebackMerge({ ...base, evidence });
   if (decided.decision !== "merge") return stop(decided.decision === "writeback_content_mismatch" || decided.decision === "writeback_pr_mismatch" ? decided.decision : "writeback_check_unfinished");
   const out = await deps.writeback.merge(input.pr, { sha: decided.sha });
-  if ("merged" in out && out.merged === true) return { outcome: "merged" };
+  if ("merged" in out && out.merged === true) {
+    // The gate's own fact, straight after the merge call and in a transaction of its own: the receipt keys on it, not on the entry (GitHub's webhook or the write-back's
+    // reconcile can settle the entry as a person's merge before the tick's transaction commits). A failed write is reported and the merge stands.
+    const chosen = dial.disposition === "announce" ? "announce" : "act";
+    await deps.inTenant(input.accountId, (c) => writePlanWritebackMergeFact(c, { planWritebackId: input.planWritebackId, headSha: decided.sha, chosen, dialVersion: dial.version })).catch((err) => {
+      reportError(err, { stage: "merge.receipt", code: "merge_receipt_failed" });
+    });
+    return { outcome: "merged", dial, sha: decided.sha };
+  }
   if ("httpStatus" in out && out.httpStatus === 409) return { outcome: "head_moved" };
   return { outcome: "ready_human_merges", reasons: ["merge_call_refused"] };
 }

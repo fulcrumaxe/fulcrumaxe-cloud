@@ -3,6 +3,7 @@
 // for the DOM calls it makes. The browser keyboard path is driven by the Repos e2e. The vitest environment is node.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  PLAN_WRITEBACK_HELD,
   PLAN_WRITEBACK_LABEL,
   PLAN_WRITEBACK_SENTENCE,
   PLAN_WRITEBACK_WORDS,
@@ -219,5 +220,43 @@ describe("the plan-update merge switch: the view", () => {
     expect(byId(broken.view.el, "repos-plan-writeback-group").hidden).toBe(true);
     expect(byId(broken.view.el, "repos-plan-writeback-note").textContent).toBe("This setting isn't available right now.");
     expect(byId(broken.view.el, "repos-plan-writeback-note").hidden).toBe(false);
+  });
+});
+
+describe("the plan-update merge switch: the merge dial holds it", () => {
+  const HELD = "Automatic merging is on, but \"Merging a pull request once its reviews pass\" is set to ask, so a person merges plan updates for now. Change that in Roles, Autonomy.";
+  const ready = (over) => ({ status: "ready", phase: "idle", error: "", on: true, dial: "act", last: null, ...over });
+
+  it("says plainly that the merge dial is what holds it, names the setting and where to change it", () => {
+    expect(PLAN_WRITEBACK_HELD).toBe(HELD);
+    expect(planWritebackModel(ready({ dial: "ask" }), true).held).toBe(HELD);
+  });
+
+  it("says nothing when nothing is held: the switch off, the dial at act or announce, or a dial the answer did not carry", () => {
+    for (const st of [ready({ on: false, dial: "ask" }), ready({ dial: "act" }), ready({ dial: "announce" }), ready({ dial: null })]) {
+      expect(planWritebackModel(st, true).held).toBe("");
+    }
+  });
+
+  it("reads the dial and the newest automatic merge from the answer; an odd word reads as no dial, never as ask", () => {
+    const base = { auto_merge: true, default: false };
+    expect(readPlanWriteback({ ...base, merge_dial: "ask", recent_merges: [{ id: "r", at: "2026-11-04T09:30:00.000Z", chosen: "act" }] })).toEqual({ on: true, dial: "ask", last: "2026-11-04" });
+    expect(readPlanWriteback({ ...base, merge_dial: "maybe", recent_merges: "x" })).toEqual({ on: true, dial: null, last: null });
+    expect(planWritebackModel(ready({ last: "2026-11-04" }), true).last).toBe("Last plan update merged automatically on 2026-11-04.");
+  });
+
+  it("the controller keeps the dial from the read and from the write, and a write never touches anything but the switch", async () => {
+    const seen = [];
+    const call = async (method, path, body) => {
+      seen.push([method, path, body]);
+      return { auto_merge: method === "PUT" ? body.auto_merge : false, default: false, merge_dial: "ask", recent_merges: [] };
+    };
+    const ctl = createPlanWritebackController({ call, repoId: REPO });
+    await ctl.load();
+    expect(planWritebackModel(ctl.state, true).held).toBe("");
+    await ctl.change(true);
+    expect(planWritebackModel(ctl.state, true).held).toBe(HELD);
+    expect(seen.map((s) => s[0])).toEqual(["GET", "PUT"]);
+    expect(seen[1][2]).toEqual({ auto_merge: true });
   });
 });

@@ -7,7 +7,7 @@ const BASE = "b".repeat(40);
 const record = { state: "open" as const, planPath: ".autonomous-team/roadmap.json", headSha: HEAD, baseSha: BASE, prNumber: 7 };
 const open: WritebackLocks = { repoAutoMerge: true, humanMergeOnly: false };
 const read = (over: Partial<Extract<WritebackEvidence, { kind: "read" }>> = {}): WritebackEvidence => ({ kind: "read", mergeBaseSha: BASE, files: [record.planPath], expected: "{}\n", actual: "{}\n", ...over });
-const decide = (over: Partial<Parameters<typeof decideWritebackMerge>[0]> = {}) => decideWritebackMerge({ setting: true, locks: open, record, head: HEAD, prNumber: 7, evidence: read(), ...over });
+const decide = (over: Partial<Parameters<typeof decideWritebackMerge>[0]> = {}) => decideWritebackMerge({ setting: true, locks: open, dial: { disposition: "act", version: 0 }, record, head: HEAD, prNumber: 7, evidence: read(), ...over });
 
 describe("D#598 P5c-b decideWritebackMerge (pure)", () => {
   it("merges only on a byte-equal file at the recorded head and base, naming the recorded head", () => {
@@ -55,6 +55,20 @@ describe("D#598 P5c-b decideWritebackMerge (pure)", () => {
     for (const r of [{ ...record, state: "changed_by_other" as const }, { ...record, headSha: null }, { ...record, baseSha: null }]) {
       expect(decide({ record: r }).decision).toBe("writeback_check_unfinished");
     }
+  });
+
+  it("the merge dial and the switch must both allow: ask holds a plan update with the switch on, and says so; act and announce merge; a switch that is off stays 'a person merges'", () => {
+    expect(decide({ dial: { disposition: "ask", version: 3 } })).toEqual({ decision: "writeback_merge_dial_ask" });
+    expect(decide({ dial: { disposition: "ask", version: 0 }, evidence: undefined })).toEqual({ decision: "writeback_merge_dial_ask" });
+    expect(decide({ dial: { disposition: "announce", version: 2 } })).toEqual({ decision: "merge", sha: HEAD });
+    expect(decide({ setting: false, dial: { disposition: "ask", version: 3 } }).decision).toBe("ready_human_merges");
+    // anything that is not a known word is read as ask
+    expect(decide({ dial: { disposition: "bogus" as never, version: 1 } }).decision).toBe("writeback_merge_dial_ask");
+  });
+
+  it("the stop notice names the setting that holds the merge and where to change it", () => {
+    const s = writebackNotice({ kind: "writeback_merge_dial_ask" });
+    expect(s).toBe("Plan update ready. Automatic merging is on for plan updates, but \"Merging a pull request once its reviews pass\" is set to ask, so a person merges it. Change that in Roles, Autonomy.");
   });
 
   it("the exact copy of the three sentences", () => {

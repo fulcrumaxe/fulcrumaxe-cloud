@@ -60,6 +60,26 @@ export async function getCurrentPlanWritebackSetting(client: PoolClient, repoId:
   return rows[0] ? map(rows[0]) : null;
 }
 
+export interface PlanWritebackMerge {
+  /** The receipt's id. */
+  id: string;
+  at: Date;
+  /** What the merge dial said when the platform merged: `act` (merged) or `announce` (merged and said so). */
+  chosen: 'act' | 'announce';
+}
+
+/** The repo's newest plan updates the platform merged by policy (migration 0988), newest first: the receipts a person reads next to the switch. RLS scopes it to the session's account. */
+export async function listPlanWritebackMerges(client: PoolClient, repoId: string, limit = 5): Promise<PlanWritebackMerge[]> {
+  const { rows } = await client.query<{ id: string; created_at: Date; chosen: string }>(
+    `SELECT r.id, r.created_at, r.chosen FROM plan_writeback_receipts l
+       JOIN plan_writebacks w ON w.account_id = l.account_id AND w.id = l.plan_writeback_id
+       JOIN decision_receipts r ON r.id = l.receipt_id
+      WHERE w.repo_id = $1::uuid AND r.decision_type = 'merge_after_reviews' ORDER BY r.created_at DESC, r.id LIMIT $2::integer`,
+    [repoId, limit],
+  );
+  return rows.map((r) => ({ id: r.id, at: r.created_at, chosen: r.chosen === 'announce' ? 'announce' : 'act' }));
+}
+
 /**
  * The reader the merge queue's tick uses: true only when the repo's current version says so; false when there is no row. The account is
  * named too, so a caller cannot read another account's row even on a client whose session is wider than one account.

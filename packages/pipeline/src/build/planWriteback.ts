@@ -79,13 +79,17 @@ export type RestartCause = "merge_conflict" | "branch_behind";
  * The fixed sentences "Needs you" (P8c) shows for a write-back. Pure functions of a fixed template and a number or a validated path:
  * no model text, no GitHub text.
  */
+/** The merge dial is what holds a plan update whose switch is on: said plainly, with the setting's name and where to change it. The Repos screen says the same. */
+export const WRITEBACK_DIAL_ASK_SENTENCE =
+  "Plan update ready. Automatic merging is on for plan updates, but \"Merging a pull request once its reviews pass\" is set to ask, so a person merges it. Change that in Roles, Autonomy.";
 export function writebackNotice(
   n:
     | { kind: "changed_by_other"; prNumber: number }
     | { kind: "plan_file_not_in_overlay"; path: string }
     | { kind: "waiting" }
-    | { kind: "ready_human_merges" | "writeback_content_mismatch" | "writeback_pr_mismatch" | "writeback_check_unfinished" },
+    | { kind: "ready_human_merges" | "writeback_content_mismatch" | "writeback_pr_mismatch" | "writeback_check_unfinished" | "writeback_merge_dial_ask" },
 ): string {
+  if (n.kind === "writeback_merge_dial_ask") return WRITEBACK_DIAL_ASK_SENTENCE;
   // D#598 P5c-b: the three stops of the merge decision. Fixed copy; nothing from GitHub or a model.
   if (n.kind === "ready_human_merges") return "Plan update ready. A person merges it, or turn on automatic merging for plan updates in this repo's settings.";
   if (n.kind === "writeback_content_mismatch") return "This plan update changes something we did not compute. A person needs to look at it.";

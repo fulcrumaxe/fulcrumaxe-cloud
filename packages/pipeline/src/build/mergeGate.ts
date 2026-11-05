@@ -481,6 +481,8 @@ export type MergeBlockReason =
   | "writeback_pr_mismatch"
   /** D#598 P5c-b: the comparison for a plan write-back could not finish; nothing merged and a person merges. */
   | "writeback_check_unfinished"
+  /** The write-back's switch is on but the repo's merge dial says ask; a person merges until the dial is moved. */
+  | "writeback_merge_dial_ask"
   | "merge_dependency_closed"
   | "history_rewritten";
 
