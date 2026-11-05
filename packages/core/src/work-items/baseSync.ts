@@ -16,6 +16,9 @@ export const BASE_SYNCED = 'base_synced';
 const STEP_ANY = "An owner or admin can press Request changes, once no agents are working, to run another round.";
 const STEP_PRESS = "Press Request changes to run another round.";
 const STEP_ROUNDS = "All of this pull request's fix rounds are used, so the cloud can't run another. Update the public branch yourself, or close this item.";
+const STACKED_STEP_ANY = "; then an owner or admin can press Request changes, once no agents are working, to run another round.";
+const STACKED_STEP_PRESS = "; then press Request changes to run another round.";
+const STACKED_STEP_ROUNDS = ". All of this pull request's fix rounds are used, so the cloud can't run another round.";
 const OPEN_PR_LEADS = {
   conflict: "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there).",
   unavailable: "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed.",
@@ -24,6 +27,8 @@ const OPEN_PR_LEADS = {
 } as const;
 /** The sentence a viewer sees for a stop above: `sentence` is its generic form; any other text is returned as it is. */
 export function openPrStopSentence(sentence: string, canRequestChanges: boolean, roundsUsed: boolean): string {
+  // The stacked-change stops end a GitHub step with "; then <any viewer's step>." (below): the same per-viewer swap, so a viewer whose card does not list Request changes is not told to press it.
+  if (sentence.includes(STACKED_STEP_ANY)) return sentence.replace(STACKED_STEP_ANY, canRequestChanges ? STACKED_STEP_PRESS : roundsUsed ? STACKED_STEP_ROUNDS : STACKED_STEP_ANY);
   const lead = Object.values(OPEN_PR_LEADS).find((l) => sentence === `${l} ${STEP_ANY}`);
   return lead === undefined ? sentence : `${lead} ${canRequestChanges ? STEP_PRESS : roundsUsed ? STEP_ROUNDS : STEP_ANY}`;
 }
