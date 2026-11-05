@@ -24,7 +24,7 @@ describe("the account ceiling by plan [pg]", () => {
   let repos: string[];
   let seq = 0;
 
-  const flat = { maxConcurrentRunnerJobs: 16, maxConcurrentHeavyRunnerJobs: 8, maxRunWallClockMs: 7_200_000 };
+  const flat = { maxConcurrentRunnerJobs: 18, maxConcurrentHeavyRunnerJobs: 10, maxRunWallClockMs: 7_200_000 };
   const make = (over: { hostedLimits?: HostedLimitsSource; wakeEnabled?: () => boolean } = {}): RunnerClaimFacade =>
     createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => T0, randomBetween: (min) => min, limits: () => flat, ...over });
   const eight: ClaimCapacity = { light: { limit: 4, in_use: 0 }, heavy: { limit: 4, in_use: 0 } };
@@ -246,7 +246,7 @@ describe("the account ceiling by plan [pg]", () => {
       await admin.query("UPDATE accounts SET plan = 'runner' WHERE id = $1", [A.accountId]);
       const runners = [await newRunner(), await newRunner(), await newRunner(), await newRunner(), await newRunner()];
       for (let i = 0; i < 30; i++) await pending(repos[i % 3]!, true);
-      expect((await drain(make(), runners)).running).toBe(16);
+      expect((await drain(make(), runners)).running).toBe(flat.maxConcurrentRunnerJobs);
     });
   });
 });
