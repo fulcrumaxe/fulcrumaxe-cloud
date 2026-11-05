@@ -59,7 +59,7 @@ export const STALL_ACTION_LABELS: Readonly<Record<string, string>> = Object.free
 });
 
 /** Code words that read badly as a sentence; every other code is shown with its underscores as spaces. */
-const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
+export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   not_started_runner_daily_limit: "A reviewer couldn't start because the runner's daily limit was reached, so the review stopped before it could finish.",
   review: 'The review stopped before it could finish.',
   review_quiet_period_unsettled: 'The review was still waiting for the pull request to stop changing when the pipeline gave up waiting.',
@@ -88,6 +88,7 @@ const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   stack_parent_publish_refused: "That item's change wasn't published, so this did not start. Publish it again from that item, with Try the push again or Build again, whichever it offers, then start this one again.",
   stack_base_unavailable: 'The pull request this work builds on could not be checked just now, so this did not start. Start it again in a few minutes.',
   stack_runtime_unsupported: 'This item builds on a runner, which cannot build on top of another pull request, so this did not start. An owner or admin can change where this repository\'s work runs in Repos, then start this one again. If this item was handed off to a runner, that won\'t change it.',
+  ordered_resource_path_too_long: "A file this pull request adds has a path longer than 512 characters, which the check on numbered files cannot read, so the pull request was not merged. Rename or remove that file on the pull request's branch and push; the merge is checked again on the new commit.",
   parent_has_children: 'This item still has planned pull requests in progress, so the new Spec does not build it. They stay as they are: decide what happens to them, then start the work again.',
   parent_splits: 'This Spec is split into several pull requests, so this item is not built itself. Each planned pull request is built as its own item once the Spec is approved.',
 });
