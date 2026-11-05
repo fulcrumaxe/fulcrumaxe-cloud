@@ -134,6 +134,31 @@ async function productLabelActors(issues: ReadonlyArray<IssueFacts>, source: Pla
   return out;
 }
 
+/**
+ * D#483: a discovery reads an issue's labels and events, then writes much later; a maintainer's unlabel in between must not be overwritten with
+ * the product's ownership. Just before the write, each proposal whose owner came from the label has its label actor read again (the same read as
+ * `productLabelActors`, which gives null once the label is gone). Anything but a fresh maintain or admin answer (gone, unreadable, no reader, a
+ * spent budget) drops the label's effect: the proposal falls back to the repository default and nothing is handed over. Fail closed.
+ */
+async function reconfirmProductLabels(proposals: ItemProposal[], source: PlanSource, partial: () => void): Promise<void> {
+  for (const p of proposals) {
+    if (p.labelPermission === undefined || p.ghNumber === null) continue;
+    let fresh: RepoPermission | null = null;
+    try {
+      fresh = source.labelActorPermission ? await source.labelActorPermission(p.ghNumber, PRODUCT_LABEL) : null;
+    } catch (err) {
+      // fx-swallow-ok: unreadable means not confirmed; only a spent request budget is told to the import (partial), no GitHub text is kept
+      if ((err as { code?: unknown } | null)?.code === BUDGET_SPENT) partial();
+    }
+    if (fresh === 'maintain' || fresh === 'admin') {
+      p.labelPermission = fresh;
+      continue;
+    }
+    delete p.labelPermission;
+    p.owner = decideOwnerProcess({ repoHasEngineLoop: true, kind: 'issue' });
+  }
+}
+
 /** A failure the source (the GitHub client) raised, in the import's own codes. Anything else is `internal_error`. */
 function codeOf(err: unknown): ImportErrorCode {
   const code = (err as { code?: unknown } | null)?.code;
@@ -159,6 +184,8 @@ export async function executePlanImport(input: ExecuteInput): Promise<ImportOutc
     const head = await source.head();
     let truncated = false;
     const finish = async (w: { level: ImportLevel; sourcePath: string | null; plan: ParsedPlan; computed: ComputedPlan; maxMergedPr: number; fallbackNote: string | null; itemProposals?: ItemProposal[] }, owner: OwnerProcess): Promise<ImportOutcome> => {
+      // The label reads above may be old by now (a maintainer may have removed it since): confirm again just before the write.
+      if (w.itemProposals) await reconfirmProductLabels(w.itemProposals, source, () => { truncated = true; });
       const evidence = source.evidence();
       await writeSucceededImport(pool, principal, { importId, repoId, sourceSha: head.sha, owner, truncated, evidence, ...w });
       return { state: 'succeeded', importId, level: w.level, computed: w.computed, truncated, sourcePath: w.sourcePath, sourceSha: head.sha, maxMergedPr: w.maxMergedPr, evidence };

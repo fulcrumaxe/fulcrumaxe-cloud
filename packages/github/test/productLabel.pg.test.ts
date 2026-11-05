@@ -10,7 +10,7 @@ import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import type { GithubWebhookDbDeps, GithubWebhookPayload, HandleWebhookResult } from "../src/eventMapper.js";
 import { handleGithubWebhookEventForApp } from "../src/webhookGate.js";
 import { createIssueAuthorLookup } from "../src/issueAuthorLookup.js";
-import { createLoginPermissionLookup } from "../src/loginPermission.js";
+import { createIssueLabelLookup, createLoginPermissionLookup } from "../src/loginPermission.js";
 import { InstallationTokenCache } from "../src/installationToken.js";
 import { createPlanSourceFactory } from "../src/planSource.js";
 import { FETCH_DEFAULT_USER_AGENT } from "./helpers/strictGithub.js";
@@ -69,6 +69,7 @@ describe("the product label on an issue (D#483)", () => {
     const base = { resolveInstallation: async () => ({ installationId: 777, appKind: "team" }), appCredentials: creds, requester: gh.requester, cache: new InstallationTokenCache(), fetchImpl };
     const lookup = createIssueAuthorLookup(base);
     const permission = createLoginPermissionLookup(base);
+    const labelLookup = createIssueLabelLookup(base);
     const factory = createPlanSourceFactory({ resolveInstallation: base.resolveInstallation, appCredentials: creds, requester: gh.requester, fetchImpl: gh.fetch });
     const deps: GithubWebhookDbDeps = {
       appUserPool,
@@ -77,7 +78,7 @@ describe("the product label on an issue (D#483)", () => {
         const found = await lookup(input);
         return found.status === "found" ? { login: found.login, permission: found.permission } : null;
       },
-      ...(wire.sender === false ? {} : { senderPermission: (input) => permission(input) }),
+      ...(wire.sender === false ? {} : { senderPermission: (input) => permission(input), issueHasLabel: (input) => labelLookup(input) }),
       repoHasEngineLoop: async (input) => {
         const source = factory(input);
         const head = await source.head();
@@ -92,7 +93,7 @@ describe("the product label on an issue (D#483)", () => {
   const FUTURE = () => new Date(Date.now() + 3_600_000).toISOString();
 
   /** GitHub's own payload shape for `issues.labeled` / `.unlabeled`: the `label` object, the `sender`, and the issue with its labels. */
-  function labelPayload(r: { ghInstallationId: number; ghRepoId: number }, n: number, action: "labeled" | "unlabeled", sender: string, over: { label?: string; state?: string; pull?: boolean; author?: string; createdAt?: string } = {}): GithubWebhookPayload {
+  function labelPayload(r: { ghInstallationId: number; ghRepoId: number }, n: number, action: "labeled" | "unlabeled", sender: string, over: { label?: string; state?: string; pull?: boolean; author?: string; createdAt?: string; labels?: unknown[] } = {}): GithubWebhookPayload {
     const name = over.label ?? PRODUCT_LABEL;
     const label = { id: 208045946, node_id: "MDU6TGFiZWwyMDgwNDU5NDY=", url: `https://api.github.com/repos/acme/widgets/labels/${encodeURIComponent(name)}`, name, color: "ededed", default: false, description: null };
     return {
@@ -105,7 +106,7 @@ describe("the product label on an issue (D#483)", () => {
         author_association: "NONE",
         state: over.state ?? "open",
         created_at: over.createdAt ?? FUTURE(),
-        labels: action === "labeled" ? [label] : [],
+        labels: over.labels ?? (action === "labeled" ? [label] : []),
         ...(over.pull ? { pull_request: { url: `https://api.github.com/repos/acme/widgets/pulls/${n}` } } : {}),
       },
       label,
@@ -122,7 +123,20 @@ describe("the product label on an issue (D#483)", () => {
       repository: { id: r.ghRepoId, full_name: "acme/widgets", default_branch: "main" },
     } as unknown as GithubWebhookPayload;
   }
-  const deliver = async (deps: GithubWebhookDbDeps, body: GithubWebhookPayload): Promise<HandleWebhookResult> => handleGithubWebhookEventForApp(deps, "issues", body, randomUUID(), "team");
+  /**
+   * Delivers an `issues` payload. GitHub's live issue is what the label check reads, so the fake issue is first made to carry the labels the payload
+   * lists (a delivery that is current), unless `live` says what it really has now (a replay of an old payload).
+   */
+  const deliver = async (deps: GithubWebhookDbDeps, body: GithubWebhookPayload, live?: string[]): Promise<HandleWebhookResult> => {
+    const issue = (body as unknown as { issue?: { number: number; labels?: Array<{ name: string }> } }).issue;
+    if (gh && issue && (body as { action?: string }).action !== "opened") {
+      const names = live ?? (issue.labels ?? []).map((l) => l.name);
+      const item = gh.state.items.find((i) => i.number === issue.number);
+      if (item) item.labels = names;
+      else gh.state.items.push({ ...issueItem(issue.number, "stranger"), labels: names });
+    }
+    return handleGithubWebhookEventForApp(deps, "issues", body, randomUUID(), "team");
+  };
   const applied = (out: HandleWebhookResult) => (out.handled ? out.result : out);
 
   const proposal = async (r: SeedRefs, n: number) =>
@@ -275,6 +289,57 @@ describe("the product label on an issue (D#483)", () => {
     expect(await audits(r)).toEqual([{ to: "product", permission: "admin" }]);
   });
 
+  it("a labeled that arrives after the label was taken off, or an unlabeled after it was put back, moves nothing and costs no permission read", async () => {
+    const r = await tenant();
+    const { deps } = await github({ stranger: "read", boss: "admin" }, [issueItem(80, "stranger"), issueItem(81, "stranger")]);
+    for (const n of [80, 81]) await deliver(deps, openedPayload(r, n, "stranger"));
+    await deliver(deps, labelPayload(r, 80, "labeled", "boss"));
+    await deliver(deps, labelPayload(r, 80, "unlabeled", "boss"));
+    expect((await proposal(r, 80))!.owner_process).toBe("internal_loop");
+    const reads = permissionReads().length;
+    // The delivery (or its re-delivery) says the issue no longer has the label.
+    expect(applied(await deliver(deps, labelPayload(r, 80, "labeled", "boss", { labels: [] })))).not.toMatchObject({ applied: "proposal_owner_changed" });
+    expect((await proposal(r, 80))!.owner_process).toBe("internal_loop");
+    // An unlabeled whose issue still carries the label (it was put back) does not hand the proposal back.
+    await deliver(deps, labelPayload(r, 81, "labeled", "boss"));
+    expect((await proposal(r, 81))!.owner_process).toBe("product");
+    const before = permissionReads().length;
+    expect(applied(await deliver(deps, labelPayload(r, 81, "unlabeled", "boss", { labels: [{ name: PRODUCT_LABEL }] })))).not.toMatchObject({ applied: "proposal_owner_changed" });
+    expect((await proposal(r, 81))!.owner_process).toBe("product");
+    expect(permissionReads().length).toBe(before);
+    expect(reads).toBeGreaterThan(0);
+    expect(await audits(r)).toEqual([{ to: "product", permission: "admin" }, { to: "internal_loop", permission: "admin" }, { to: "product", permission: "admin" }]);
+  });
+
+  it("the live labels decide: a replayed labeled while the issue lacks the label, a replayed unlabeled while it has it, a failed read, a timeout and no reader all move nothing", async () => {
+    const r = await tenant();
+    const { deps } = await github({ stranger: "read", boss: "admin" }, [issueItem(90, "stranger"), issueItem(91, "stranger"), issueItem(92, "stranger"), issueItem(93, "stranger")]);
+    for (const n of [90, 91, 92, 93]) await deliver(deps, openedPayload(r, n, "stranger"));
+    const moved = (out: HandleWebhookResult) => applied(out) as { applied?: string };
+    // An old labeled payload (it lists the label) delivered again after a maintainer took the label off.
+    expect(moved(await deliver(deps, labelPayload(r, 90, "labeled", "boss"), []))).not.toMatchObject({ applied: "proposal_owner_changed" });
+    expect((await proposal(r, 90))!.owner_process).toBe("internal_loop");
+    // The label is on, and an old unlabeled payload (it lists no label) is delivered again.
+    await deliver(deps, labelPayload(r, 91, "labeled", "boss"));
+    expect((await proposal(r, 91))!.owner_process).toBe("product");
+    expect(moved(await deliver(deps, labelPayload(r, 91, "unlabeled", "boss"), [PRODUCT_LABEL]))).not.toMatchObject({ applied: "proposal_owner_changed" });
+    expect((await proposal(r, 91))!.owner_process).toBe("product");
+    // The live read fails (a 500 from GitHub).
+    gh!.state.faults.issuesStatus = 500;
+    expect(moved(await deliver(deps, labelPayload(r, 92, "labeled", "boss")))).not.toMatchObject({ applied: "proposal_owner_changed" });
+    gh!.state.faults.issuesStatus = undefined;
+    expect((await proposal(r, 92))!.owner_process).toBe("internal_loop");
+    // The read runs past its deadline (the web app's reader throws then), and there is no reader at all.
+    const slow: GithubWebhookDbDeps = { ...deps, issueHasLabel: async () => { throw new Error("senderPermission: deadline"); } };
+    expect(moved(await deliver(slow, labelPayload(r, 93, "labeled", "boss")))).not.toMatchObject({ applied: "proposal_owner_changed" });
+    const none: GithubWebhookDbDeps = { ...deps, issueHasLabel: undefined };
+    expect(moved(await deliver(none, labelPayload(r, 93, "labeled", "boss")))).not.toMatchObject({ applied: "proposal_owner_changed" });
+    expect((await proposal(r, 93))!.owner_process).toBe("internal_loop");
+    // The same labeled, current, does act (so the above are not refused for another reason).
+    expect(moved(await deliver(deps, labelPayload(r, 93, "labeled", "boss")))).toMatchObject({ applied: "proposal_owner_changed", to: "product", count: 1 });
+    expect(await audits(r)).toEqual([{ to: "product", permission: "admin" }, { to: "product", permission: "admin" }]);
+  });
+
   describe("discovery", () => {
     async function runImport(r: SeedRefs, factory: ReturnType<typeof createPlanSourceFactory>) {
       const principal = { accountId: r.accountId, userId: r.userId };
@@ -303,8 +368,8 @@ describe("the product label on an issue (D#483)", () => {
       // The first pass creates them: only the maintainer's is the product's from the start, and nothing is audited as a move.
       expect(await Promise.all([1, 2, 3, 4, 5, 6].map(async (n) => (await proposal(r, n))!.owner_process))).toEqual(["product", "internal_loop", "internal_loop", "internal_loop", "internal_loop", "internal_loop"]);
       expect(await audits(r)).toEqual([]);
-      // Only issues carrying the label cost events reads: five of them.
-      expect(gh!.server.seen.filter((s) => /\/issues\/\d+\/events$/.test(s.path)).map((s) => s.path.split("/")[5])).toEqual(["1", "2", "3", "4", "6"]);
+      // Only issues carrying the label cost events reads: five of them, and the maintainer's is read once more, last, just before the write.
+      expect(gh!.server.seen.filter((s) => /\/issues\/\d+\/events$/.test(s.path)).map((s) => s.path.split("/")[5])).toEqual(["1", "2", "3", "4", "6", "1"]);
     });
 
     it("a re-run flips an existing new internal_loop proposal once the label is there, never undoes it, and a failing events read changes nothing and does not fail the import", async () => {
@@ -327,6 +392,54 @@ describe("the product label on an issue (D#483)", () => {
       await runImport(r, factory);
       expect((await proposal(r, 1))!.owner_process).toBe("product");
       expect(await audits(r)).toHaveLength(1);
+    });
+
+    it("two labeled events with no unlabeled between (the label deleted and recreated): the later actor decides, whichever order the maintainer is in", async () => {
+      const r = await tenant();
+      const ev = (...actors: string[]) => actors.map((actor) => ({ event: "labeled" as const, label: PRODUCT_LABEL, actor }));
+      const { factory } = await github({ stranger: "read", boss: "admin", dev: "write" }, [
+        issueItem(7, "stranger", { labels: [PRODUCT_LABEL], events: ev("boss", "dev") }),
+        issueItem(8, "stranger", { labels: [PRODUCT_LABEL], events: ev("dev", "boss") }),
+      ]);
+      await runImport(r, factory);
+      expect((await proposal(r, 7))!.owner_process).toBe("internal_loop");
+      expect((await proposal(r, 8))!.owner_process).toBe("product");
+    });
+
+    it("a maintainer who takes the label off after discovery read it (before it wrote) is not overwritten: a new proposal is the repository default and an existing one stays", async () => {
+      const r = await tenant();
+      const fresh = issueItem(1, "stranger");
+      const existing = issueItem(2, "stranger");
+      const { factory } = await github({ stranger: "read", boss: "admin" }, [fresh, existing]);
+      const first = factory;
+      await runImport(r, first);
+      expect((await proposal(r, 2))!.owner_process).toBe("internal_loop");
+      for (const i of [fresh, existing]) {
+        i.labels = [PRODUCT_LABEL];
+        i.events = [{ event: "labeled", label: PRODUCT_LABEL, actor: "boss" }];
+      }
+      // The first events read of each issue sees the label; then the maintainer removes it, before the write.
+      const racing = ((target: never) => {
+        const source = first(target);
+        let reads = 0;
+        return {
+          ...source,
+          labelActorPermission: async (number: number, name: string) => {
+            const out = await source.labelActorPermission(number, name);
+            reads += 1;
+            if (reads === 2) for (const i of [fresh, existing]) { i.labels = []; i.events!.push({ event: "unlabeled", label: PRODUCT_LABEL, actor: "boss" }); }
+            return out;
+          },
+        };
+      }) as unknown as typeof factory;
+      await runImport(r, racing);
+      expect((await proposal(r, 1))!.owner_process).toBe("internal_loop");
+      expect((await proposal(r, 2))!.owner_process).toBe("internal_loop");
+      expect(await audits(r)).toEqual([]);
+      // Without the race the same label does hand issue 2 over (so the test above is not passing for another reason).
+      for (const i of [fresh, existing]) { i.labels = [PRODUCT_LABEL]; i.events = [{ event: "labeled", label: PRODUCT_LABEL, actor: "boss" }]; }
+      await runImport(r, first);
+      expect((await proposal(r, 2))!.owner_process).toBe("product");
     });
   });
 });
