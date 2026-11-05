@@ -39,6 +39,10 @@ interface World {
   pr?: unknown;
   /** Make the named read answer 500. */
   fail?: "ref" | "commit" | "compare" | "pulls";
+  /** With fail "pulls": answer with the failure only for the first N reads of the pull request, then answer normally (a blip). */
+  failFirst?: number;
+  /** With fail "pulls": the status to fail with (default 500). */
+  failStatus?: number;
   /** How `POST /pulls` answers: created (the default), refused for good (422), or down (503). */
   create?: "ok" | "refused" | "down";
   /** What the mint answer says the token holds, given what was asked (default: exactly what was asked, plus the implicit metadata read). */
@@ -47,6 +51,7 @@ interface World {
 
 async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) {
   const revoked = new Set<string>();
+  let pullReads = 0;
   const route = (r: GhRequest): GhReply | undefined => {
     const bearer = /^Bearer (\S+)$/.exec(r.headers["authorization"] ?? "")?.[1];
     if (r.method === "DELETE" && r.path === "/installation/token") {
@@ -66,7 +71,7 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
       if (world.create === "down") return ghError(503, "unavailable");
       return json(201, { number: 9, html_url: "https://github.com/acme/widgets/pull/9" });
     }
-    if (r.path === "/repos/acme/widgets/pulls/9") return world.fail === "pulls" ? ghError(500, "boom") : world.pr === undefined ? ghError(404, "Not Found") : json(200, world.pr);
+    if (r.path === "/repos/acme/widgets/pulls/9") return world.fail === "pulls" && (world.failFirst === undefined || ++pullReads <= world.failFirst) ? ghError(world.failStatus ?? 500, "boom") : world.pr === undefined ? ghError(404, "Not Found") : json(200, world.pr);
     return undefined;
   };
   server = await startStrictGithubServer((req) => route(req) ?? ghError(404, "Not Found"));
@@ -218,6 +223,33 @@ describe("pullRequestState (D#6 REPUBLISH-CLOSED-PR)", () => {
     await expect(ask(t)).rejects.toMatchObject({ code: "public_unavailable" });
     expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
     await expect(ask(await setup({ pr: "not an object" }))).rejects.toMatchObject({ code: "public_unavailable" });
+  });
+
+  // D#6 REPUBLISH-TRANSIENT-RETRY: counted with the strict server's own request log (one token, N reads of the pull request, one revoke).
+  const pullReadsOf = (t: Awaited<ReturnType<typeof setup>>) => t.server.seen.filter((x) => x.path === "/repos/acme/widgets/pulls/9").length;
+  it.each([1, 2])("a 5xx that passes after %i failed read(s) answers the real state, on ONE token that is revoked once", async (n) => {
+    const t = await setup({ pr: pr({ state: "closed", merged: true }), fail: "pulls", failFirst: n });
+    await expect(ask(t)).resolves.toBe("merged");
+    expect(pullReadsOf(t)).toBe(n + 1);
+    expect(t.mintedTokens).toHaveLength(1);
+    expect(t.trail().filter((x) => x.startsWith("DELETE"))).toHaveLength(1);
+  });
+  it("a 5xx that never passes is read exactly three times, then throws the same public_unavailable (fail closed), token revoked", async () => {
+    const t = await setup({ pr: pr(), fail: "pulls" });
+    await expect(ask(t)).rejects.toMatchObject({ code: "public_unavailable" });
+    expect(pullReadsOf(t)).toBe(3);
+    expect(t.mintedTokens).toHaveLength(1);
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+  });
+  it.each([401, 403, 422, 429])("a %i is an answer, not a blip: one read, no retry, still public_unavailable", async (status) => {
+    const t = await setup({ pr: pr(), fail: "pulls", failStatus: status });
+    await expect(ask(t)).rejects.toMatchObject({ code: "public_unavailable" });
+    expect(pullReadsOf(t)).toBe(1);
+  });
+  it("a 404 is unknown after one read", async () => {
+    const t = await setup({});
+    await expect(ask(t)).resolves.toBe("unknown");
+    expect(pullReadsOf(t)).toBe(1);
   });
 
   it("the existing verifyPullRequest still answers null for a closed or merged pull request", async () => {

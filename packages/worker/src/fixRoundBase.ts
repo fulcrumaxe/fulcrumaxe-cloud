@@ -7,6 +7,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPLACE_ROUND_CODE_OF, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN } from "@fx/core/src/work-items/baseSync.js";
+import { retryTransientRead } from "@fx/core/src/github/transientRead.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { decideStackStart } from "@fx/pipeline";
 import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
@@ -171,7 +172,7 @@ async function liveParentEnd(pool: Pool, ports: FixRoundHeadPorts | null | undef
   try {
     const parent = await withTenant(pool, who.accountId, (client) => readStackParentPull(client, who.workItemId));
     if (!ports?.stackBase || parent === null || parent.prNumber === null) return BASE_SYNC_UNAVAILABLE;
-    const read = await ports.stackBase.readParent({ repoId: repo.id, owner: repo.owner, name: repo.name, prNumber: parent.prNumber });
+    const read = await retryTransientRead(() => ports.stackBase!.readParent({ repoId: repo.id, owner: repo.owner, name: repo.name, prNumber: parent.prNumber! }));
     if (read.state === "open") return REPUBLISH_STACK_PARENT_OPEN;
     if (read.state !== "closed") return BASE_SYNC_UNAVAILABLE;
     return read.merged ? "merged" : REPUBLISH_STACK_PARENT_CLOSED;
@@ -193,7 +194,7 @@ async function syncStacked(pool: Pool, ports: FixRoundHeadPorts | null | undefin
   if (!stackBase || !syncBase || parent === null) return { code: REPUBLISH_STACKED_UNSUPPORTED };
   if (parent.prNumber === null) return { code: BASE_SYNC_UNAVAILABLE };
   try {
-    const read = await stackBase.readParent({ repoId: input.repo.id, owner: input.repo.owner, name: input.repo.name, prNumber: parent.prNumber });
+    const read = await retryTransientRead(() => stackBase.readParent({ repoId: input.repo.id, owner: input.repo.owner, name: input.repo.name, prNumber: parent.prNumber! }));
     const decided = decideStackStart(read);
     if (!decided.ok && decided.reason !== "stack_parent_closed") return { code: BASE_SYNC_UNAVAILABLE };
     if (!decided.ok || decided.base === null) {

@@ -178,6 +178,15 @@ describe('R6: the action is the card\'s top button', () => {
     expect(stallActionLabel('needs_human', { ...base, noVerdictHold: true })).toBe('Continue the review');
   });
 
+  it('at Needs a person with the pull request still open Build again is a dead end (the rebuild stops at the open pull request): the row offers no press and the card names Request changes', () => {
+    expect(stallActionLabel('needs_human', { ...base, prOpen: true })).toBeNull();
+    // The review hold still re-enters the review, which works with the pull request open; a closed or absent pull request still builds again.
+    expect(stallActionLabel('needs_human', { ...base, prOpen: true, noVerdictHold: true })).toBe('Continue the review');
+    expect(stallActionLabel('needs_human', { ...base, prOpen: false })).toBe('Build again');
+    // Only Needs a person is affected: the pull request stages keep their labels.
+    expect(stallActionLabel('pr_opened', { ...base, prOpen: true })).toBe(STALL_ACTION_LABELS.pr_opened);
+  });
+
   it('is null where the driver cannot advance (no Spec to build from), so the row offers nothing it would refuse', () => {
     expect(stallActionLabel('needs_human', { ...base, hasSpec: false })).toBeNull();
     expect(stallActionLabel('pr_opened', { ...base, hasSpec: false })).toBeNull();

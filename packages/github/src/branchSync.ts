@@ -1,3 +1,4 @@
+import { retryTransientRead, transientReadError } from "@fx/core/src/github/transientRead.js";
 import type { InstallationHttp, InstallationHttpKind, InstallationHttpTarget } from "./installationHttp.js";
 
 /**
@@ -47,7 +48,22 @@ export function createBranchSyncPort(open: (kind: InstallationHttpKind, target: 
       const http = await open("branch_sync", { repoId: repo.id, owner: repo.owner, name: repo.name, branch, prNumber });
       try {
         const root = `/repos/${repo.owner}/${repo.name}`;
-        const pull = await http.request({ method: "GET", path: `${root}/pulls/${prNumber}` });
+        // D#6 REPUBLISH-TRANSIENT-RETRY: the two reads (never the merge below) are read again after a 5xx or a dropped connection, at most three times each. A 5xx that outlasts that is
+        // answered as it was before (the last response), so the checks below throw the same fixed reason.
+        const get = async (path: string): Promise<{ status: number; body: unknown }> => {
+          let last: { status: number; body: unknown } | undefined;
+          try {
+            return await retryTransientRead(async () => {
+              last = await http.request({ method: "GET", path });
+              if (last.status >= 500) throw transientReadError("branchSync: read answered 5xx");
+              return last;
+            });
+          } catch (err) {
+            if (last !== undefined && last.status >= 500) return last;
+            throw err;
+          }
+        };
+        const pull = await get(`${root}/pulls/${prNumber}`);
         const baseRef = dig(pull.body, "base", "ref");
         if (pull.status !== 200 || dig(pull.body, "state") !== "open" || dig(pull.body, "head", "ref") !== branch || typeof baseRef !== "string" || !BRANCH.test(baseRef) || baseRef === branch) throw new BranchSyncError("pull_request_unreadable");
         // The head must be in this repository: a fork's branch of the same name is not the branch being brought up to date.
@@ -56,7 +72,7 @@ export function createBranchSyncPort(open: (kind: InstallationHttpKind, target: 
         const stacked = dig(pull.body, "base", "repo", "default_branch") !== baseRef;
         // A stacked change's public copy is rebuilt only when the caller named the open parent's branch and it is this pull request's base; otherwise the round is refused here, before the base is read and before the merge.
         if (publicCopy === true && stacked && stackBranch !== baseRef) return { kind: "stacked", baseRef };
-        const ref = await http.request({ method: "GET", path: `${root}/git/ref/heads/${segment(baseRef)}` });
+        const ref = await get(`${root}/git/ref/heads/${segment(baseRef)}`);
         const baseSha = dig(ref.body, "object", "sha");
         if (ref.status !== 200 || typeof baseSha !== "string" || !SHA.test(baseSha)) throw new BranchSyncError("base_unreadable");
         if (readOnly === true) return { kind: "up_to_date", baseSha, baseRef, stacked };

@@ -199,6 +199,10 @@ const isConflictRound = async (client: PoolClient, accountId: string, runId: str
 
 /** The event a conflict round's grant leaves: the public main tip the cloud read before the runner pushed (the report is compared with it, never trusted). */
 export const ROUND_TIP_EVENT = "plane.round_tip";
+/** D#6 REPUBLISH-TRANSIENT-RETRY: one per token ask whose live pull request read failed even after its retries, on a lease. */
+export const LIVE_READ_FAILED_EVENT = "plane.live_read_failed";
+/** The asks on one lease that may read GitHub for the pull request's live state once earlier ones failed. */
+export const MAX_FAILED_LIVE_READS_PER_LEASE = 3;
 /** The head a fix round's token request was granted its lease on (the person's authorized head, or the stamp); the settle step checks the row still says the same. */
 export const UPDATE_LEASE_EVENT = "plane.update_lease";
 /** The fixed refusals of a token, and the labels the attempt ends with, when the row changed between the grant and the token. */
@@ -238,6 +242,22 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
     await withTenant(runnerPool, input.accountId, (client) => insertRunEvent(client, input.accountId, input.runId, ROUND_TIP_EVENT, { tip }));
   };
 
+  /**
+   * D#6 REPUBLISH-TRANSIENT-RETRY: the live state for this ask. The read itself is retried inside the hosted port (one token, at most three reads). A read that THREW is counted on the lease: after
+   * `MAX_FAILED_LIVE_READS_PER_LEASE` such asks the lease is answered `unknown` (so `public_unavailable`, the same answer) with no token minted and nothing read. A cap by count, not by time: the runner
+   * stops after one refusal, so asks on one lease are few, and a count needs no clock and bounds a lease's cost whatever its length: at most 3 asks x (1 token + 3 reads + 1 revoke).
+   */
+  const liveState = async (input: PlanePushLeaseInput, peek: { number: number; codeRepo: string; failedReads: number }): Promise<"open" | "closed" | "merged" | "unknown"> => {
+    if (!deps.pullRequestState || peek.failedReads >= MAX_FAILED_LIVE_READS_PER_LEASE) return "unknown";
+    try {
+      return await deps.pullRequestState({ accountId: input.accountId, codeRepo: peek.codeRepo, number: peek.number });
+    } catch {
+      // fx-swallow-ok: GitHub could not be asked; the failure is counted on the lease and the grant answers public_unavailable
+      await withTenant(runnerPool, input.accountId, (client) => insertRunEvent(client, input.accountId, input.runId, LIVE_READ_FAILED_EVENT, { lease_generation: input.leaseGeneration })).catch(() => undefined);
+      return "unknown";
+    }
+  };
+
   const grant = (input: PlanePushLeaseInput & { atTip?: true }): Promise<PlanePushGrantResult> =>
       guarded(async () => {
         requireLease(input);
@@ -248,9 +268,11 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const f = await runFacts(c, input);
           if (f === null || !f.continues || !hasOpenPublicPr(f.row) || f.row.prNumber === null) return null;
           const { rows } = await c.query("SELECT 1 FROM plane_push_attempts WHERE run_id = $1 AND lease_generation = $2 AND runtime = 'runner' AND account_id = $3", [input.runId, input.leaseGeneration, input.accountId]);
-          return rows.length > 0 ? null : { number: f.row.prNumber, codeRepo: f.row.codeRepo };
+          if (rows.length > 0) return null;
+          const failed = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 AND payload->>'lease_generation' = $4", [input.accountId, input.runId, LIVE_READ_FAILED_EVENT, String(input.leaseGeneration)]);
+          return { number: f.row.prNumber, codeRepo: f.row.codeRepo, failedReads: Number(failed.rows[0]?.n ?? 0) };
         });
-        const live = peek === null ? null : { ...peek, state: deps.pullRequestState ? await deps.pullRequestState({ accountId: input.accountId, codeRepo: peek.codeRepo, number: peek.number }).catch(() => "unknown" as const) : ("unknown" as const) };
+        const live = peek === null ? null : { number: peek.number, codeRepo: peek.codeRepo, state: await liveState(input, peek) };
         return withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushGrantResult> => {
           const held = await fence(client, input);
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };

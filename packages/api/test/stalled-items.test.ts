@@ -160,6 +160,19 @@ describe('R6: stalled items list', () => {
     expect(body.items[0]).toMatchObject({ work_item_id: id, stage: 'needs_human', code: 'stopped', action_label: 'Build again', can_act: true });
   });
 
+  it('D#6 REPUBLISH-TRANSIENT-RETRY: Needs a person reached from a pull request stage has no Build again press (the open pull request stops the rebuild); one reached from the build still has it', async () => {
+    const f = await fixture();
+    const fromPr = await item(f.refs, 'needs_human', 'Came from review');
+    const fromBuild = await item(f.refs, 'needs_human', 'Came from the build');
+    for (const [id, from] of [[fromPr, 'pr_opened'], [fromBuild, 'in_progress']] as const) {
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, $3, 'needs_human', now(), 'control_plane', 'x')`, [f.refs.accountId, id, from]);
+      await fact(f.refs, id, 'escalated', { code: 'base_sync_unavailable' });
+    }
+    const byId = new Map((await read(f.who)).items.map((i) => [i.work_item_id, i]));
+    expect(byId.get(fromPr)).toMatchObject({ stage: 'needs_human', action_label: null, can_act: false });
+    expect(byId.get(fromBuild)).toMatchObject({ stage: 'needs_human', action_label: 'Build again', can_act: true });
+  });
+
   it('a build the worker refused at Spec ready is listed with the build button', async () => {
     const f = await fixture();
     const id = await item(f.refs, 'spec_ready');

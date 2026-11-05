@@ -1,3 +1,4 @@
+import { transientReadError } from "@fx/core/src/github/transientRead.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
 
 /**
@@ -89,6 +90,8 @@ export function createStackBasePort(deps: { open(kind: "read" | "repo_map", r: {
       const http = await deps.open("read", target);
       const repo = `/repos/${owner}/${name}`;
       const pull = await http.request({ method: "GET", path: `${repo}/pulls/${prNumber}` });
+      // A 5xx is marked as a blip so a caller may read again (D#6 REPUBLISH-TRANSIENT-RETRY); the message is the same.
+      if (pull.status >= 500) throw transientReadError(`stack parent: pull request read answered ${pull.status}`);
       if (pull.status !== 200 || !isObj(pull.body)) throw new Error(`stack parent: pull request read answered ${pull.status}`);
       const b = pull.body;
       const head = b.head;
@@ -100,6 +103,7 @@ export function createStackBasePort(deps: { open(kind: "read" | "repo_map", r: {
       let branchTipSha = "";
       if (b.state === "open" && headInBaseRepo && isSafeBranchName(head.ref)) {
         const ref = await (await deps.open("repo_map", target)).request({ method: "GET", path: `${repo}/git/ref/heads/${head.ref.split("/").map(encodeURIComponent).join("/")}` });
+        if (ref.status >= 500) throw transientReadError(`stack parent: branch read answered ${ref.status}`);
         if (ref.status !== 200 || !isObj(ref.body) || !isObj(ref.body.object) || typeof ref.body.object.sha !== "string") throw new Error(`stack parent: branch read answered ${ref.status}`);
         branchTipSha = ref.body.object.sha;
       }

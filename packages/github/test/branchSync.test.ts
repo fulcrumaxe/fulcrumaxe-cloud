@@ -30,6 +30,8 @@ interface World {
   conflicts: Set<string>;
   /** Overrides what the merges endpoint answers, for the failure cases. */
   mergesAnswer?: () => Response;
+  /** D#6 REPUBLISH-TRANSIENT-RETRY: how many of the next reads of the pull request / the base ref answer 503 before they answer normally. */
+  blips?: { pulls: number; ref: number };
 }
 
 function world(): World {
@@ -64,10 +66,12 @@ function setup(w: World, mint: Partial<{ permissions: Record<string, string>; re
     }
     const root = "/repos/acme/widgets";
     if (method === "GET" && url.pathname === `${root}/pulls/12`) {
+      if (w.blips && w.blips.pulls-- > 0) return json(503, { message: "Service Unavailable" });
       return json(200, { number: 12, state: w.pull.state, head: { ref: w.pull.headRef, repo: { id: w.pull.headRepo } }, base: { ref: w.pull.baseRef, repo: { id: w.pull.baseRepo, ...(w.pull.defaultBranch === null ? {} : { default_branch: w.pull.defaultBranch }) } } });
     }
     const ref = /^\/repos\/acme\/widgets\/git\/ref\/heads\/(.+)$/.exec(url.pathname);
     if (method === "GET" && ref) {
+      if (w.blips && w.blips.ref-- > 0) return json(503, { message: "Service Unavailable" });
       const sha = w.refs.get(decodeURIComponent(ref[1]!));
       return sha ? json(200, { ref: `refs/heads/${ref[1]}`, object: { type: "commit", sha } }) : json(404, { message: "Not Found" });
     }
@@ -276,6 +280,57 @@ describe("branch sync: the merges call and what comes back", () => {
     const t = setup(w);
     await expect(ask(t.port)).rejects.toThrow("base_unreadable");
     expect(t.log.some((l) => l.startsWith("POST"))).toBe(false);
+  });
+});
+
+describe("branch sync: a blip on a read (D#6 REPUBLISH-TRANSIENT-RETRY)", () => {
+  const count = (t: ReturnType<typeof setup>, prefix: string) => t.log.filter((l) => l.startsWith(prefix)).length;
+  const REF_MAIN = "GET /repos/acme/widgets/git/ref/heads/main";
+
+  it("two 503s on the pull request and two on the base ref, then success: the merge is made once, after 3 + 3 reads", async () => {
+    const w = world();
+    w.blips = { pulls: 2, ref: 2 };
+    const t = setup(w);
+    expect((await ask(t.port)).kind).toBe("merged");
+    expect(count(t, "GET /repos/acme/widgets/pulls/12")).toBe(3);
+    expect(count(t, REF_MAIN)).toBe(3);
+    expect(count(t, "POST")).toBe(1);
+    expect(t.revoked()).toBe(1);
+  });
+
+  it("a pull request read that never passes: three reads, the same fixed reason as before, no merge", async () => {
+    const w = world();
+    w.blips = { pulls: 99, ref: 0 };
+    const t = setup(w);
+    await expect(ask(t.port)).rejects.toThrow("pull_request_unreadable");
+    expect(count(t, "GET /repos/acme/widgets/pulls/12")).toBe(3);
+    expect(count(t, "POST")).toBe(0);
+    expect(t.revoked()).toBe(1);
+  });
+
+  it("a base ref read that never passes: three reads, base_unreadable, no merge", async () => {
+    const w = world();
+    w.blips = { pulls: 0, ref: 99 };
+    const t = setup(w);
+    await expect(ask(t.port)).rejects.toThrow("base_unreadable");
+    expect(count(t, REF_MAIN)).toBe(3);
+    expect(count(t, "POST")).toBe(0);
+  });
+
+  it("the merge is a write and is never repeated: a 5xx from /merges is one POST and the usual refusal", async () => {
+    const w = world();
+    w.mergesAnswer = () => json(503, { message: "Service Unavailable" });
+    const t = setup(w);
+    await expect(ask(t.port)).rejects.toThrow("merge_refused");
+    expect(count(t, "POST")).toBe(1);
+  });
+
+  it("a 404 on a read is an answer: one read, no retry", async () => {
+    const w = world();
+    w.refs.delete("main");
+    const t = setup(w);
+    await expect(ask(t.port)).rejects.toThrow("base_unreadable");
+    expect(count(t, REF_MAIN)).toBe(1);
   });
 });
 
