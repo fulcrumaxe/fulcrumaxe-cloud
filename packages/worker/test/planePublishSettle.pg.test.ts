@@ -166,6 +166,15 @@ describe("settling a paired sandbox build, and opening the public pull request a
   });
 
   describe("the private pull request (Q1)", () => {
+    it("D#6 FIRST-PUBLISH-BASE-DRIFT: a round before the first publish that recorded the base it merged settles as a FIRST publish (not an update), diffed from the merge base with the default branch", async () => {
+      const round = await executorRun();
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'plane.fix_base', $3::jsonb)", [A.accountId, round, JSON.stringify({ base_sha: "7".repeat(40), branch: "fx/issue-42", pre_publish: true })]);
+      const r = await worker().settlePairedBuild({ accountId: A.accountId, executorRunId: round });
+      expect(r).toEqual({ privatePullRequest: "opened", publish: { kind: "published", state: "pr_opened", attemptNo: 1 } });
+      expect(JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content)).toMatchObject({ privateBase: BASE, privateHead: PRIVATE_HEAD, baseIsDefaultMergeBase: true });
+      expect((await attempts()).map((a) => a.kind)).toEqual(["push"]);
+    });
+
     it("is opened as a draft on the dispatch repo from the branch fx/issue-<n>, then made ready, with the fixed text from our rows; the publish step then runs", async () => {
       const r = await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
       expect(r).toEqual({ privatePullRequest: "opened", publish: { kind: "published", state: "pr_opened", attemptNo: 1 } });

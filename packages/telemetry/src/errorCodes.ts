@@ -359,6 +359,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "rule_files_not_private",
   "private_read_failed",
   "base_not_ancestor",
+  "base_unavailable",
+  "base_not_on_default",
   "public_unavailable",
   "public_tip_moved",
   "app_not_installed",

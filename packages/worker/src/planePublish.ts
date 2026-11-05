@@ -79,7 +79,7 @@ export interface PlanePublishDeps {
 }
 
 /** Why a publish was refused `bad_input` before any attempt: a closed set, so the log says which input was missing while the stored code stays one word. */
-export type BadInputReason = "no_identity" | "base_missing" | "head_missing" | "default_tip_missing";
+export type BadInputReason = "no_identity" | "base_missing" | "head_missing" | "default_tip_missing" | "base_branch_mismatch";
 
 export type PublishResult =
   /** Nothing to do: the item is unpaired, the run is not a finished sandbox executor run, or the item may not retry now. No run row, no sandbox. */
@@ -112,13 +112,15 @@ interface Facts {
   /** This executor run already opened (or reused) its private pull request: a replay opens nothing, and a pull request a person closed is never reopened. */
   privatePrDone: boolean;
   lastPushRuntime: RetryFacts["lastPushRuntime"];
+  /** The push row's refusal code (a deterministic refusal is not retried). */
+  code: string | null;
   /** FIXROUND-REPUBLISH (R2-c2): the head the platform last left on the public branch (the stamp), the base a sandbox fix round was brought up to date with, and the update attempts this run already has. */
   stamp: string | null;
   /** The push row's recorded pull request number (the live state is read for it). */
   prNumber: number | null;
   /** The work item's stage now: a pull request closed or merged on GitHub leaves the push row at `pr_opened`, and it is the item that records it. */
   itemStage: string;
-  fixBase: { sha: string; branch: string; conflict: boolean } | null;
+  fixBase: { sha: string; branch: string; conflict: boolean; prePublish: boolean } | null;
   updateAttempts: number;
   pairing: { codeRepo: string; overlayGlobs: string[]; identifierRulesPath: string | null; planDataRulesPath: string | null; prFooter: string | null } | null;
 }
@@ -161,7 +163,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   );
   const p = pairs[0];
   const { rows: pushes } = await client.query(
-    `SELECT id, code_repo, branch, pairing_digest, state, head_sha, replace_authorized_head, pr_number, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes
+    `SELECT id, code, code_repo, branch, pairing_digest, state, head_sha, replace_authorized_head, pr_number, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes
       WHERE account_id = $1 AND work_item_id = $2 AND repo_id = $3
       ORDER BY COALESCE(lower(code_repo) = lower($4::text), false) DESC, created_at DESC, id LIMIT 1`,
     [accountId, r.work_item_id, r.dispatch_repo_id, p?.code_repo ?? null],
@@ -181,7 +183,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   // The base the cloud wrote when it started a sandbox fix round that must update the public pull request (a malformed one reads as none: the round then publishes nothing).
   const { rows: bases } = await client.query<{ payload: { base_sha?: unknown; branch?: unknown } | null }>("SELECT payload FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 ORDER BY seq DESC LIMIT 1", [accountId, r.run_id, FIX_BASE_EVENT]);
   const b = bases[0]?.payload;
-  const fixBase = b && typeof b.base_sha === "string" && SHA.test(b.base_sha) && typeof b.branch === "string" && UPDATE_BRANCH.test(b.branch) && !b.branch.includes("..") ? { sha: b.base_sha, branch: b.branch, conflict: (b as { conflict?: unknown }).conflict === true } : null;
+  const fixBase = b && typeof b.base_sha === "string" && SHA.test(b.base_sha) && typeof b.branch === "string" && UPDATE_BRANCH.test(b.branch) && !b.branch.includes("..") ? { sha: b.base_sha, branch: b.branch, conflict: (b as { conflict?: unknown }).conflict === true, prePublish: (b as { pre_publish?: unknown }).pre_publish === true } : null;
   const { rows: updates } = await client.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM plane_push_attempts a JOIN agent_runs pr ON pr.account_id = a.account_id AND pr.id = a.run_id
       WHERE a.account_id = $1 AND a.plane_push_id = $2 AND a.kind = 'fix_round' AND pr.parent_run_id = $3`,
@@ -192,7 +194,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
     stamp: typeof push.replace_authorized_head === "string" ? push.replace_authorized_head : typeof push.head_sha === "string" ? push.head_sha : null, fixBase, updateAttempts: updates[0]?.n ?? 0, prNumber: typeof push.pr_number === "number" ? push.pr_number : null,
     runId: r.run_id, status: r.status, sandboxSide: r.sandbox_side === true, baseSha: buildBase, workItemId: r.work_item_id,
     repo: { id: r.dispatch_repo_id, owner: r.gh_owner, name: r.gh_name }, title: r.title,
-    pushId: push.id, codeRepo: push.code_repo, branch: push.branch, stampedDigest: push.pairing_digest, state: push.state, managedByPerson: push.managed === true,
+    pushId: push.id, code: typeof push.code === "string" ? push.code : null, codeRepo: push.code_repo, branch: push.branch, stampedDigest: push.pairing_digest, state: push.state, managedByPerson: push.managed === true,
     // An item refused before any sandbox was started has no attempt yet; its executor ran in the sandbox, so a retry is a sandbox retry.
     pushAttempts: stats[0]?.n ?? 0, runPushAttempts: own[0]?.pushes ?? 0, privatePrDone: own[0]?.marked === true, lastPushRuntime: stats[0]?.last ?? (r.sandbox_side === true ? "sandbox" : null),
     pairing: p ? { codeRepo: p.code_repo, overlayGlobs: p.overlay_globs, identifierRulesPath: p.identifier_rules_path, planDataRulesPath: p.plan_data_rules_path, prFooter: p.pr_footer } : null,
@@ -258,6 +260,13 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   const resolved = await resolveIdentity(deps.pool, accountId, facts.workItemId, mode === "first" ? "start" : "observe");
   if (!resolved.ok) return refuse(resolved.code);
   const build = resolved.identity;
+  // D#6 FIRST-PUBLISH-BASE-DRIFT: a round before this publish may have merged the pull request's base into the branch. A change on the default branch is diffed from the merge base of its head with the default branch,
+  // which the hook reads from the fetched commits (so a round that failed, a round still running and a person's own merge all count). A stacked change's base is its parent's branch, which the hook cannot read yet:
+  // it keeps the build's start commit, or the base a marked round recorded for exactly this branch (a mismatch is refused, never signed).
+  const stacked = (await withTenant(deps.pool, accountId, (c) => readStackParentForRead(c, accountId, facts.workItemId))) !== null;
+  const recorded = facts.fixBase?.prePublish === true ? facts.fixBase : null;
+  if (stacked && recorded !== null && recorded.branch !== build.branch) return refuse("bad_input", "base_branch_mismatch");
+  const privateBase = stacked && recorded !== null ? recorded.sha : facts.baseSha;
   // Final guard, before any attempt is spent: a child's finished body that would still close an issue is never published.
   if (childTextRefused(facts.title, facts.runId, pairing.prFooter, build)) return refuse(CHILD_BODY_CLOSING_CODE);
   let policy: NetworkPolicyRule[];
@@ -322,7 +331,7 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   const text = buildPlanePushText({ itemTitle: textTitle(facts.title, build), runId: facts.runId, prFooter: pairing.prFooter, issueNumber: build.issueNumber, child: build.isChild });
   await noteFooterSkipped(deps.pool, accountId, facts.runId, pairing.prFooter, build);
   const input: PlanePublishInput = {
-    own: { owner: facts.repo.owner, name: facts.repo.name }, codeRepo: facts.codeRepo, privateBase: facts.baseSha, privateHead: head, privateDefaultTip: defaultTip, branch: facts.branch, title: text.title, body: text.body,
+    own: { owner: facts.repo.owner, name: facts.repo.name }, codeRepo: facts.codeRepo, privateBase, privateHead: head, privateDefaultTip: defaultTip, ...(stacked ? {} : { baseIsDefaultMergeBase: true as const }), branch: facts.branch, title: text.title, body: text.body,
     identity, commitTime: Math.floor(now() / 1000),
     pairing: { overlayGlobs: pairing.overlayGlobs, identifierRulesPath: pairing.identifierRulesPath, planDataRulesPath: pairing.planDataRulesPath },
   };
@@ -864,7 +873,7 @@ export function createPlanePublish(deps: PlanePublishDeps | null): PlanePublish 
     async settlePairedBuild(i) {
       const facts = await withTenant(deps.pool, i.accountId, (c) => readFacts(c, i.accountId, { runId: i.executorRunId }));
       // A sandbox fix round that was started to update the open public pull request (it carries the base the cloud signed): the update, and no private pull request (it has one).
-      if (facts !== null && facts.sandboxSide && facts.status === "succeeded" && facts.fixBase !== null) return { privatePullRequest: "skipped", publish: await republish(deps, i.accountId, facts) };
+      if (facts !== null && facts.sandboxSide && facts.status === "succeeded" && facts.fixBase !== null && !facts.fixBase.prePublish) return { privatePullRequest: "skipped", publish: await republish(deps, i.accountId, facts) };
       // Only the start of an item's public change: a sandbox executor run that finished, on a record that is still at the start (building or scanning). "Already settled" is
       // judged per executor run, not per record: Build again re-stamps a refused record to building and keeps its old attempts, and its new run must still open the private
       // pull request and publish.

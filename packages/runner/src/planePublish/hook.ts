@@ -196,8 +196,28 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
       // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
       throw new PlaneRouteError("base_not_ancestor", "the recorded base is not an ancestor of the run's head");
     }
+    // The base a round before this publish may have moved: for a change on the default branch it is where the head's history leaves the default branch, read here from the fetched commits.
+    let privateBase = input.privateBase;
+    if (input.baseIsDefaultMergeBase === true) {
+      // The change claims to start on the default branch: its recorded start must be a commit of that branch. A start that is only on another branch (a parent's, with the stack link gone) would make the parent's unmerged work the change.
+      try {
+        await planePushGit(work, ["merge-base", "--is-ancestor", input.privateBase, "refs/fx/default"]);
+      } catch {
+        // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
+        throw new PlaneRouteError("base_not_on_default", "the recorded start of the run is not on the default branch");
+      }
+    }
+    if (input.baseIsDefaultMergeBase === true) {
+      try {
+        privateBase = (await planePushGit(work, ["merge-base", "refs/fx/head", "refs/fx/default"])).toString("utf8").trim();
+        if (!/^[0-9a-f]{40}$/.test(privateBase)) throw new Error("no merge base");
+      } catch {
+        // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
+        throw new PlaneRouteError("base_unavailable", "the run's last commit and the default branch have no common starting point");
+      }
+    }
     const result = await routeAndPush(
-      { repoDir: work, privateBase: input.privateBase, privateHead: input.privateHead, privateDefaultTip: input.privateDefaultTip, own: input.own, defaultBranch: "main", branch: input.branch, ...(input.updateOf === undefined ? {} : { updateOf: input.updateOf }), title: input.title, body: input.body, identity: input.identity, commitTime: input.commitTime },
+      { repoDir: work, privateBase, privateHead: input.privateHead, privateDefaultTip: input.privateDefaultTip, own: input.own, defaultBranch: "main", branch: input.branch, ...(input.updateOf === undefined ? {} : { updateOf: input.updateOf }), title: input.title, body: input.body, identity: input.identity, commitTime: input.commitTime },
       { loadPairing: async () => pairing, loadOwn: async () => input.own, api: createProxyPublicApi(input.codeRepo, deps.apiOrigin, deps.fetchFn), transport },
     );
     final =

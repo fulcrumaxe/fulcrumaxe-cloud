@@ -38,6 +38,8 @@ export interface PlanePublishInput {
   pairing: { overlayGlobs: string[]; identifierRulesPath: string | null; planDataRulesPath: string | null };
   /** FIXROUND-REPUBLISH (R2-c2): present only for an UPDATE of the branch the platform pushed: the head it last left there (our stamp). The hook replaces exactly that head or nothing. */
   updateOf?: string;
+  /** D#6 FIRST-PUBLISH-BASE-DRIFT: present (true) only for a change whose private pull request targets the default branch: the hook diffs from the merge base of the head with `privateDefaultTip`, so what a round before the publish merged in from the default branch is not part of the change. */
+  baseIsDefaultMergeBase?: true;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -54,7 +56,9 @@ export function parsePlanePublishInput(raw: string): PlanePublishInput | undefin
     return undefined;
   }
   const KEYS = ["own", "codeRepo", "privateBase", "privateHead", "privateDefaultTip", "branch", "title", "body", "identity", "commitTime", "pairing"] as const;
-  if (!isObject(v) || !strictKeys(v, Object.hasOwn(v, "updateOf") ? [...KEYS, "updateOf"] : KEYS)) return undefined;
+  const optional = ["updateOf", "baseIsDefaultMergeBase"].filter((k) => isObject(v) && Object.hasOwn(v, k));
+  if (!isObject(v) || !strictKeys(v, [...KEYS, ...optional])) return undefined;
+  if (Object.hasOwn(v, "baseIsDefaultMergeBase") && v.baseIsDefaultMergeBase !== true) return undefined;
   if (Object.hasOwn(v, "updateOf") && !(typeof v.updateOf === "string" && OBJECT_ID.test(v.updateOf))) return undefined;
   const { own, identity, pairing } = v;
   if (!isObject(own) || !strictKeys(own, ["owner", "name"]) || typeof own.owner !== "string" || !OWNER.test(own.owner) || typeof own.name !== "string" || !NAME.test(own.name)) return undefined;

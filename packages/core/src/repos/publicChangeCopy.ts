@@ -22,6 +22,8 @@ export const PUBLIC_CHANGE_REFUSAL_REASON: Readonly<Record<string, string>> = {
   bad_input: 'the change could not be read',
   private_read_failed: "the run's commits could not be read from the private repository",
   base_not_ancestor: 'the recorded start of the run is not an ancestor of its last commit',
+  base_unavailable: "the run's last commit and the branch it is based on have no common starting point, so the change cannot be published from this build; retrying will not help, so close the item and start the change as a new one",
+  base_not_on_default: "the run started from a commit that is not on the default branch, so its change cannot be told apart from work that is not merged yet; retrying will not help, so close the item and start the change as a new one",
   pairing_self: 'the public repository is this repository',
   pairing_changed: 'the pairing changed while the change was being prepared',
   pairing_off: 'the pairing is off',

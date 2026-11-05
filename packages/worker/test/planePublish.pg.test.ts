@@ -13,6 +13,7 @@ import { createFakeModelConnectionPort } from "../../runner/test/helpers/sandbox
 import { createReaperSdkFake } from "../../runner/test/helpers/reaperSdkFake.js";
 import { buildWorker } from "../src/compositionRoot.js";
 import { PUBLISH_ATTEMPT_LIMIT, createPlanePublish, createPublishSettler, mayRetryPublish, type PlanePublishDeps } from "../src/planePublish.js";
+import { publicChangeSentence } from "@fx/core/src/repos/publicChangeCopy.js";
 
 /**
  * [pg] D#598 P1f-5b: the publish step against the real tables and constraints. The sandbox is the runner package's strict fake (the same
@@ -249,6 +250,16 @@ describe("the paired publish step [pg]", () => {
       expect(await planeRow()).toMatchObject({ state: "refused", code: "scan_refused", refusals: [{ kind: "path", place: "docs/ops/a.md", rule_key: "overlay" }] });
     });
 
+    it.each(["base_not_on_default", "base_unavailable"] as const)("%s repeats on every attempt, so Try the push again is not offered and a retry spends no attempt; its sentence says what works", async (code) => {
+      output = () => say({ phase: "refused", code });
+      expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code, attemptNo: 1 });
+      expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "skipped", why: "not_retryable" });
+      expect(await attempts()).toHaveLength(1);
+      expect(mayRetryPublish({ state: "refused", lastPushRuntime: "sandbox", pushAttempts: 1, managedByPerson: false, code })).toBe(false);
+      expect(mayRetryPublish({ state: "refused", lastPushRuntime: "sandbox", pushAttempts: 1, managedByPerson: false, code: "push_failed" })).toBe(true);
+      expect(publicChangeSentence("refused", code)).toMatch(/retrying will not help, so close the item and start the change as a new one$/);
+    });
+
     it("base_not_ancestor is recorded as its own code", async () => {
       output = () => say({ phase: "refused", code: "base_not_ancestor" });
       expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code: "base_not_ancestor", attemptNo: 1 });
@@ -361,6 +372,60 @@ describe("the paired publish step [pg]", () => {
       expect(r).toMatchObject({ kind: "published", state: "pr_opened", attemptNo: 2 });
       const input = JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content);
       expect(input).toMatchObject({ privateBase: BASE, privateHead: "f".repeat(40) });
+    });
+
+    // D#6 FIRST-PUBLISH-BASE-DRIFT: a round before the first publish merged the pull request's base; the cloud recorded the base it merged, and the publish diffs from it.
+    describe("a round before the first publish recorded the base it merged", () => {
+      const MERGED_BASE = "9".repeat(40);
+      const roundAfter = async (parent: string, payload: Record<string, unknown>, hoursLater = 1): Promise<string> => {
+        const id = randomUUID();
+        await admin.query(
+          `INSERT INTO agent_runs (id, account_id, work_item_id, parent_run_id, role, runtime, status, execution_mode, dispatch_repo_id, head_sha, created_at)
+           VALUES ($1, $2, $3, $4, 'executor', 'production', 'succeeded', 'sandbox', $5, $6, now() + interval '1 hour' * $7)`,
+          [id, A.accountId, A.workItemId, parent, A.repoId, "e".repeat(40), hoursLater],
+        );
+        await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'plane.fix_base', $3::jsonb)", [A.accountId, id, JSON.stringify(payload)]);
+        return id;
+      };
+      const lastInput = () => JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content);
+
+      const stackOnParent = async () => {
+        const parent = randomUUID();
+        await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'pr_opened', 9042)", [parent, A.accountId, A.repoId]);
+        await admin.query("UPDATE work_items SET stack_parent_id = $1 WHERE id = $2", [parent, A.workItemId]);
+      };
+
+      it("a change on the default branch is told to diff from its merge base with the default branch: the recorded base and the start commit are both left out of the signing, on a first publish and on a retry", async () => {
+        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/issue-42", pre_publish: true });
+        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "published", attemptNo: 1 });
+        expect(lastInput()).toMatchObject({ privateBase: BASE, privateHead: PRIVATE_HEAD, baseIsDefaultMergeBase: true });
+        expect(lastInput()).not.toHaveProperty("updateOf");
+        await admin.query("UPDATE plane_pushes SET state = 'refused', code = 'push_failed', head_sha = NULL, tip_sha = NULL, pr_number = NULL, pr_url = NULL WHERE work_item_id = $1", [A.workItemId]);
+        expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toMatchObject({ kind: "published", attemptNo: 2 });
+        expect(lastInput()).toMatchObject({ privateBase: BASE, baseIsDefaultMergeBase: true });
+      });
+
+      it("a stacked change keeps the old signing (its parent's branch is not readable by the hook yet): the recorded base, and no merge-base flag", async () => {
+        await stackOnParent();
+        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/issue-42", pre_publish: true });
+        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "published", attemptNo: 1 });
+        expect(lastInput()).toMatchObject({ privateBase: MERGED_BASE });
+        expect(lastInput()).not.toHaveProperty("baseIsDefaultMergeBase");
+      });
+
+      it("a stacked change whose recorded base names another branch than the one that publishes is refused, with no attempt spent", async () => {
+        await stackOnParent();
+        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/other-branch", pre_publish: true });
+        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "refused", code: "bad_input", attemptNo: null, reason: "base_branch_mismatch" });
+        expect(fake.state.created).toHaveLength(0);
+      });
+
+      it("a stacked change with a base recorded without the marker (a public-copy update's) signs the start commit", async () => {
+        await stackOnParent();
+        const round = await roundAfter(executorRunId, { base_sha: MERGED_BASE, branch: "fx/issue-42" });
+        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId: round })).toMatchObject({ kind: "published", attemptNo: 1 });
+        expect(lastInput()).toMatchObject({ privateBase: BASE });
+      });
     });
 
     it("makes attempt 2 and then 3; a fourth is refused retry_limit and creates no sandbox and no run row", async () => {
