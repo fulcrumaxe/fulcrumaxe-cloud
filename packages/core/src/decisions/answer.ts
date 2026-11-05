@@ -21,7 +21,7 @@ import { REVERSAL_ASK_ALLOW } from './reversalOverCap.js';
  * person's user id set, so the receipt's actor is that person. It writes no run-action request (DP11c's).
  */
 export type AskAnswerErrorCode =
-  | 'session_required' | 'forbidden' | 'not_found' | 'already_answered' | 'invalid_choice' | 'ask_no_run' | 'ask_receipt_mismatch' | 'runner_gone';
+  | 'session_required' | 'forbidden' | 'not_found' | 'already_answered' | 'invalid_choice' | 'ask_no_run' | 'ask_receipt_mismatch' | 'runner_gone' | 'run_moved_on';
 
 /** `status` is the HTTP status a route answers with. Branch on `code`, never on the message. */
 export class AskAnswerError extends Error {
@@ -110,7 +110,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       if (typeof choice !== 'string' || (choice !== 'deny' && !ask.options.some((o) => o.id === choice))) throw new AskAnswerError(422, 'invalid_choice');
       // A member-plan ask (D#7 DW-R7): only the plan holder answers, and "approve" approves the run for them. No resume request: the claim takes an approved run.
       if (isMemberPlanAsk(ask.decision_type)) {
-        wakeRunners = await answerMemberPlanAsk(client, { askId: ask.id, runId: ask.run_id, userId, choice }, (why) => (why === 'moot' ? new AskAnswerError(409, 'already_answered') : why === 'runner_gone' ? new AskAnswerError(409, 'runner_gone') : new AskAnswerError(403, 'forbidden')));
+        wakeRunners = await answerMemberPlanAsk(client, { askId: ask.id, runId: ask.run_id, userId, choice }, (why) => (why === 'moot' ? new AskAnswerError(409, 'run_moved_on') : why === 'runner_gone' ? new AskAnswerError(409, 'runner_gone') : new AskAnswerError(403, 'forbidden')));
       }
       // A fix-round ask (D#483 S5-b2a part 2). Starting it IS the sub-item approval (the card's Approve runs the same function): the keyed receipt in the person's name,
       // the ask closed, and one advance request that re-enters the workflow waiting on it. A hold or a deny takes the generic path below, which files no resume.

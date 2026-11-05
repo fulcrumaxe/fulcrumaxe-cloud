@@ -20969,7 +20969,7 @@
             }
           },
           "409": {
-            "description": "The ask is already answered (`already_answered`), or has no run to resume.",
+            "description": "The ask is already answered (`already_answered`), has no run to resume (`ask_no_run`), its run has moved on (`run_moved_on`: for a member-plan ask, the run was approved elsewhere, claimed, cancelled or finished; the sweep withdraws the ask), or, for a yes to a member-plan ask, the plan holder has no live subscription runner that lists the run's repository (`runner_gone`: the runner was removed or revoked, or never set up). Nothing is written and the ask stays open; the holder can add the repository to a runner on their plan, or set one up, and say yes again.",
             "content": {
               "application/json": {
                 "schema": {

@@ -67,7 +67,8 @@ const MESSAGES: Record<string, string> = {
   already_answered: "this ask is already answered",
   ask_no_run: "this ask has no run to resume",
   ask_receipt_mismatch: "this ask cannot be answered",
-  runner_gone: "the plan holder has no runner that lists this repository",
+  runner_gone: "the plan holder has no live subscription runner that lists this repository",
+  run_moved_on: "the run this ask was about has moved on, so there is nothing to answer",
 };
 
 /** The core's named refusals as API answers; anything else is left to the generic mapper. */
@@ -128,7 +129,7 @@ export const decisionAskRoutes: RouteEntry[] = [
     rateClass: "write",
     extraResponses: {
       "404": "No such ask in this account.",
-      "409": "The ask is already answered (`already_answered`), or has no run to resume.",
+      "409": "The ask is already answered (`already_answered`), has no run to resume (`ask_no_run`), its run has moved on (`run_moved_on`: for a member-plan ask, the run was approved elsewhere, claimed, cancelled or finished; the sweep withdraws the ask), or, for a yes to a member-plan ask, the plan holder has no live subscription runner that lists the run's repository (`runner_gone`: the runner was removed or revoked, or never set up). Nothing is written and the ask stays open; the holder can add the repository to a runner on their plan, or set one up, and say yes again.",
       "503": "Answers are not available yet (`decision_answers_unavailable`).",
     },
     paramsSchema: idParamsSchema,

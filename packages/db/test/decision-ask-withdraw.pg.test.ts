@@ -221,6 +221,69 @@ describe('decision_ask_withdraw (0826)', () => {
     });
   });
 
+  describe('a member-plan ask whose run is no longer waiting (0991)', () => {
+    const PLAN_TYPE = 'runner_run_on_member_plan';
+    const PLAN_SQL = RAISE_SQL.replace("$1::text", "'" + PLAN_TYPE + "'").replace("$2::uuid", "$1::uuid").replace("$3::uuid", "$2::uuid").replace("$4::jsonb", "$3::jsonb");
+    /** One item whose only executor run has the given state, and a member-plan ask on that run. */
+    async function planAsk(t: SeedRefs, run: { status: string; approvedBy?: string | null }): Promise<{ id: string; workItemId: string; runId: string }> {
+      const workItemId = randomUUID();
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage) VALUES ($1, $2, $3, 'feature', 'internal', 'in_progress')`, [workItemId, t.accountId, t.repoId]);
+      await admin.query(
+        `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, approved_by) VALUES ($1, $2, $3, 'executor', 'local', $4, $5)`,
+        [runId, t.accountId, workItemId, run.status, run.approvedBy ?? null],
+      );
+      const id = await withTenant(invokerPool, t.accountId, async (c) => (await c.query<{ id: string }>(PLAN_SQL, [workItemId, runId, JSON.stringify(OPTIONS)])).rows[0]!.id);
+      return { id, workItemId, runId };
+    }
+
+    it('a run that is pending and unapproved keeps its ask', async () => {
+      const w = await planAsk(a, { status: 'pending' });
+      expect((await sweep([w.id])).size).toBe(0);
+      expect((await readAsk(w.id)).state).toBe('open');
+    });
+
+    it.each(['running', 'failed', 'cancelled', 'succeeded'])('a run that is %s: its ask is withdrawn as run_moved_on', async (status) => {
+      const w = await planAsk(a, { status });
+      expect(await sweep([w.id])).toEqual(new Map<string, AskWithdrawReason>([[w.id, 'run_moved_on']]));
+      expect(await readAsk(w.id)).toMatchObject({ state: 'withdrawn', withdrawn_reason: 'run_moved_on', answered_option: null, receipt_id: null });
+    });
+
+    it('a pending run that was approved elsewhere (the Runs card, or the claim) is no longer waiting', async () => {
+      const w = await planAsk(a, { status: 'pending', approvedBy: a.userId });
+      expect(await sweep([w.id])).toEqual(new Map<string, AskWithdrawReason>([[w.id, 'run_moved_on']]));
+    });
+
+    it('an overdue ask on a moved-on run is withdrawn too, and the stronger reasons still win over it', async () => {
+      const w = await planAsk(a, { status: 'running' });
+      await admin.query(`UPDATE decision_asks SET state = 'overdue' WHERE id = $1`, [w.id]);
+      const closed = await planAsk(a, { status: 'running' });
+      await setStage(closed.workItemId, 'closed');
+      const halted = await planAsk(a, { status: 'running' });
+      await halt(halted.workItemId);
+      expect(await sweep([w.id, closed.id, halted.id])).toEqual(new Map<string, AskWithdrawReason>([[w.id, 'run_moved_on'], [closed.id, 'item_closed'], [halted.id, 'item_halted']]));
+    });
+
+    it('only a member-plan ask follows its run: another type on a running run is left alone', async () => {
+      const it1 = await item(a);
+      await admin.query(`UPDATE agent_runs SET status = 'running' WHERE id = $1`, [it1.runId]);
+      const id = await raise(a, it1.workItemId, it1.runId);
+      expect((await sweep([id])).size).toBe(0);
+      expect((await readAsk(id)).state).toBe('open');
+    });
+
+    it('the reason is a known one, frozen once set, and receipt_writer has the three run columns the sweep reads (and not the signed job)', async () => {
+      const w = await planAsk(a, { status: 'running' });
+      await sweep([w.id]);
+      await expect(admin.query(`UPDATE decision_asks SET withdrawn_reason = 'superseded' WHERE id = $1`, [w.id])).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      const { rows } = await admin.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.column_privileges WHERE grantee = 'receipt_writer' AND table_name = 'agent_runs' AND privilege_type = 'SELECT' ORDER BY column_name`,
+      );
+      expect(rows.map((r) => r.column_name)).toEqual(expect.arrayContaining(['approved_by', 'runner_id', 'status']));
+      expect(rows.map((r) => r.column_name)).not.toContain('job_signed');
+    });
+  });
+
   describe('across tenants, and within the limit', () => {
     it('withdraws the stale asks of two tenants in one call, each with its own reason', async () => {
       const ia = await item(a, { stage: 'closed' });

@@ -56,6 +56,8 @@ export const WORDS = {
   proceedUnnamed: "If nobody answers in time, the agent goes ahead with its recommended option.",
   stopOpen: "If nobody answers in time, the work stays paused until someone answers.",
   stopOverdue: "The work is paused until someone answers.",
+  planStopOpen: "If nobody answers in time, this run is not started on that plan.",
+  planStopOverdue: "This run is not started on that plan until it is answered.",
   markDone: "Mark done",
   withdraw: "Withdraw",
   keep: "Keep their version",
@@ -79,7 +81,8 @@ export const WORDS = {
   overdue: "Overdue",
   answered: "Answered",
   alreadyAnswered: "That was already answered.",
-  runnerGone: "Your runner no longer lists this repository, so this run can't start on your plan. Add the repository to your runner, then say yes again. Nothing was started.",
+  runMovedOn: "That run has already moved on, so there is nothing to answer.",
+  runnerGone: "You have no live runner on your plan that lists this repository (it may have been removed, or never set up), so this run can't start on your plan. Add the repository to a runner on your plan, or set one up, then say yes again. Nothing was started.",
   mergeStep: "Merge this pull request on GitHub",
   openPr: "Open pull request",
   stalledStarted: "Started. The card moves when it is done.",
@@ -106,7 +109,8 @@ export const waitingHolderWords = (name) => "Waiting for " + name + " to answer.
 export const proceedWords = (name) => "If nobody answers in time, the agent goes ahead with: " + name + ".";
 
 /** What happens if nobody answers, from `timeout_outcome`; "" when there is nothing to say. */
-export function timeoutSentence(outcome, overdue, proposedLabel) {
+export function timeoutSentence(outcome, overdue, proposedLabel, plan = false) {
+  if (outcome === "stop_and_flag" && plan) return overdue ? WORDS.planStopOverdue : WORDS.planStopOpen;
   if (outcome === "proceed_recommended") return overdue ? "" : proposedLabel ? proceedWords(proposedLabel) : WORDS.proceedUnnamed;
   if (outcome === "stop_and_flag") return overdue ? WORDS.stopOverdue : WORDS.stopOpen;
   return "";
@@ -192,7 +196,7 @@ export function readAsk(a) {
     workItemId: text(a.work_item_id),
     due: due === "" ? "" : (overdue ? "Was due " : "Answer by ") + due,
     dueMs: dueMs(a.answer_due_at),
-    timeout: timeoutSentence(a.timeout_outcome, overdue, proposed ? proposed.label : ""),
+    timeout: timeoutSentence(a.timeout_outcome, overdue, proposed ? proposed.label : "", a.decision_type === "runner_run_on_member_plan"),
     title: a.label,
     reason: quotedReason(a.rationale),
     state: "open",
@@ -279,6 +283,7 @@ export function failureSentence(e) {
   if (e && e.status === 403) return WORDS.onlyAdmins;
   if (e && e.status === 409 && e.code === "already_answered") return WORDS.alreadyAnswered;
   if (e && e.status === 409 && e.code === "runner_gone") return WORDS.runnerGone;
+  if (e && e.status === 409 && e.code === "run_moved_on") return WORDS.runMovedOn;
   return WORDS.failed;
 }
 

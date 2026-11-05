@@ -11,7 +11,7 @@ import { RUNNER_MODES_SQL } from "@fx/runner";
  * repo's dial lets the claim approve it (announce or act, 0767), so under `ask` such a run used to wait with nobody told. Called from the claim's idle path, this
  * raises ONE ask for each such run: it names the repo and the plan holder (the runner's registrant, whose plan the run would spend), and only that person
  * answers it (answerAsk). Yes approves the run for the holder through `agent_run_approve`, the same function as the Runs card's Approve, so the claim then takes
- * it as it takes any run the holder approved; no is a receipt and nothing else. Silence stops and flags: the catalogue allows no other timeout.
+ * it as it takes any run the holder approved; no is a receipt and nothing else: it keeps the run off the holder's plan, but does not stop it (the person who started it, or a runner on an API key, can still run it). Silence stops and flags: the catalogue allows no other timeout.
  *
  * Runs on the RECEIPT login's pool (the only login that may call the ask definer). Once per run, ever: the run's own key in `runner_plan_asks` (0982) is read
  * under a lock on the run, and the definer that writes it refuses a second row, so a repeat claim attempt, two runners, or a run answered "no" gets no second ask.
@@ -21,7 +21,7 @@ const MAX_PER_CLAIM = 5;
 const MAX_TRIED_PER_CLAIM = 25;
 export const MEMBER_PLAN_ASK_OPTIONS = [
   { id: "approve", label: "Yes, use my plan for this run" },
-  { id: "decline", label: "No, don't run it" },
+  { id: "decline", label: "No, not on my plan" },
 ] as const;
 
 interface WaitingRun {
@@ -34,7 +34,7 @@ interface WaitingRun {
 /** Raises one run's ask and records its holder. Throws, leaving the caller's savepoint to undo it. */
 async function raiseOne(client: PoolClient, run: WaitingRun, runnerId: string): Promise<void> {
   // The repo and the holder's name are customer text, so the whole sentence is stored fenced and shown as a quotation.
-  const rationale = sanitize(`A run in ${run.repo} is waiting to use ${run.holder_name}'s Claude plan. It starts only if ${run.holder_name} says yes here. If nobody answers in time, it stays stopped.`);
+  const rationale = sanitize(`A run in ${run.repo} is waiting to use ${run.holder_name}'s Claude plan. It runs on that plan only with ${run.holder_name}'s go-ahead. If nobody answers here in time, the run is not started on that plan until ${run.holder_name} answers.`);
   const askId = await raiseAskMarked(client, {
     class: "human_over_the_loop",
     decisionType: RUNNER_RUN_DECISION_TYPE,
