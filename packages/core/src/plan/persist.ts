@@ -4,6 +4,7 @@ import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import type { ComputedPlan, ComputedTask } from './computePlan.js';
 import type { ItemProposal } from './issuesLevel.js';
 import type { OwnerProcess } from './ownerProcess.js';
+import { setProposalOwnerFromLabel } from './ownerFromLabel.js';
 import type { ParsedPlan } from './roadmapFile.js';
 
 /**
@@ -267,6 +268,15 @@ export async function writeSucceededImport(pool: Pool, principal: ImportPrincipa
       await client.query(ITEM_PROPOSALS_SQL, [accountId, w.repoId, w.importId, JSON.stringify(items)]);
     }
     await requeueChanged(client, changed);
+    // D#483: an issue whose product label a maintainer or admin applied hands an EXISTING `new` proposal over to the product (the upsert above never
+    // changes an owner). The definer moves it only while it is `new` with no work item, audits the move and re-queues the check; a proposal that is
+    // already the product's, decided, or started is left as it is, so a later discovery never undoes a person's undo or a decision.
+    const handed = (w.itemProposals ?? []).filter((p) => p.source === 'github_issue' && p.ghNumber !== null && p.labelPermission !== undefined);
+    if (handed.length > 0) {
+      await client.query('RESET ROLE');
+      for (const p of handed) await setProposalOwnerFromLabel(client, w.repoId, p.ghNumber as number, 'product', p.labelPermission as 'maintain' | 'admin');
+      await client.query('SET LOCAL ROLE plan_importer');
+    }
     // A `new` proposal this import did not touch belongs to a task, issue or Discussion that is now done, closed or gone (or to a
     // level the repo no longer uses): derived, so withdrawn. A proposal from another source (a preview) is not the importer's.
     await client.query(

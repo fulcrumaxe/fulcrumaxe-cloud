@@ -344,3 +344,34 @@ export async function readAuthorPermission(client: PlanReadClient, repo: RepoRef
   }
   return isRecord(body) ? toPermission(body) : unexpected();
 }
+
+const MAX_LABEL_EVENT_PAGES = 3;
+
+/**
+ * D#483: who applied the CURRENT `label` on an issue: the actor of its newest `labeled` event, unless an `unlabeled` event for the name came
+ * after it. Events are read oldest first, three pages at most; if the cap is hit with a full page a later relabel may sit past it, so the
+ * actor is not established (null: fail closed). A 404 (the issue is gone) is null. Only the actor's login is returned, never event text.
+ */
+export async function readLabelActor(client: PlanReadClient, repo: RepoRef, number: number, label: string): Promise<string | null> {
+  let actor: string | null = null;
+  for (let page = 1; page <= MAX_LABEL_EVENT_PAGES; page += 1) {
+    const res = await client.request({ method: "GET", path: `/repos/${repo.owner}/${repo.name}/issues/${number}/events`, query: { per_page: 100, page } });
+    if (res.status === 404) return null;
+    if (res.status !== 200) return unexpected();
+    let events: unknown;
+    try {
+      events = JSON.parse(res.text);
+    } catch {
+      // fx-swallow-ok: a non-JSON events answer is the other side misbehaving
+      return unexpected();
+    }
+    if (!Array.isArray(events)) return unexpected();
+    for (const e of events) {
+      if (!isRecord(e) || !isRecord(e.label) || e.label.name !== label) continue;
+      if (e.event === "labeled") actor = isRecord(e.actor) && typeof e.actor.login === "string" ? e.actor.login : null;
+      else if (e.event === "unlabeled") actor = null;
+    }
+    if (events.length < 100) return actor;
+  }
+  return null;
+}

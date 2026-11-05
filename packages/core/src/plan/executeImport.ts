@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import type { RepoPermission } from '@fx/trust';
 import { computePlan, type ComputedPlan, type PullFacts } from './computePlan.js';
 import { buildIssuesLevel, type DiscussionFacts, type IssueFacts, type ItemProposal } from './issuesLevel.js';
-import { decideOwnerProcess, type OwnerProcess } from './ownerProcess.js';
+import { decideOwnerProcess, PRODUCT_LABEL, type OwnerProcess } from './ownerProcess.js';
 import { isCorrectionComment, isSpecDiscussion, memoizePermissions, parseSpecTables, trustedCorrectionAuthors, trustedSpecDiscussions, type SpecComment } from './specTables.js';
 import {
   ImportNotRunningError,
@@ -71,6 +71,8 @@ export interface PlanSource {
   issues(): Promise<{ issues: IssueFacts[]; truncated: boolean }>;
   /** A login's real permission on the repository (a person who is not a collaborator is `none`). */
   authorPermission(login: string): Promise<RepoPermission>;
+  /** D#483: the real permission of whoever applied the issue's current label `name`, read from its events now; null when that cannot be established. */
+  labelActorPermission?(number: number, name: string): Promise<RepoPermission | null>;
   /** What was asked of GitHub and what the minted token could do (acceptance A2). Read after the reads. */
   evidence(): ImportEvidence;
 }
@@ -99,6 +101,38 @@ const FAILURE_CODES: ReadonlySet<string> = new Set([
 ]);
 /** The request client's own word for a spent budget; the import records it as `request_budget_exhausted`. */
 const BUDGET_SPENT = 'request_budget_exceeded';
+
+/** At most this many issues have their label events read in one import; past it the import says it is partial (the rest are not trusted this time). */
+export const MAX_LABEL_CHECKS = 50;
+
+/**
+ * D#483: for each OPEN issue carrying the product label, the permission now of whoever applied the latest such label (the source reads the
+ * events). A failed read or no actor leaves the issue out (not trusted); a spent budget ends the checks and marks the import partial.
+ */
+async function productLabelActors(issues: ReadonlyArray<IssueFacts>, source: PlanSource, partial: () => void): Promise<Map<number, RepoPermission>> {
+  const out = new Map<number, RepoPermission>();
+  if (!source.labelActorPermission) return out;
+  let checked = 0;
+  for (const i of issues) {
+    if (i.state !== 'open' || !i.labels?.includes(PRODUCT_LABEL)) continue;
+    if (checked >= MAX_LABEL_CHECKS) {
+      partial();
+      break;
+    }
+    checked += 1;
+    try {
+      const permission = await source.labelActorPermission(i.number, PRODUCT_LABEL);
+      if (permission !== null) out.set(i.number, permission);
+    } catch (err) {
+      // fx-swallow-ok: unreadable means not trusted; only a spent request budget is told to the import (partial), no GitHub text is kept
+      if ((err as { code?: unknown } | null)?.code === BUDGET_SPENT) {
+        partial();
+        break;
+      }
+    }
+  }
+  return out;
+}
 
 /** A failure the source (the GitHub client) raised, in the import's own codes. Anything else is `internal_error`. */
 function codeOf(err: unknown): ImportErrorCode {
@@ -200,7 +234,8 @@ export async function executePlanImport(input: ExecuteInput): Promise<ImportOutc
     const issues = await tolerant(() => source.issues(), { issues: [], truncated: true });
     if (issues.truncated) truncated = true;
     const loop = await hasLoop();
-    const level3 = buildIssuesLevel(issues.issues, read.discussions, loop);
+    const labelActors = loop ? await productLabelActors(issues.issues, source, () => { truncated = true; }) : new Map<number, RepoPermission>();
+    const level3 = buildIssuesLevel(issues.issues, read.discussions, loop, labelActors);
     if (level3.truncated) truncated = true;
     return await finish({ level: 'issues_discussions', sourcePath: null, plan: { milestones: [], tasks: [] }, computed: level3.computed, maxMergedPr: 0, fallbackNote, itemProposals: level3.proposals }, decideOwnerProcess({ repoHasEngineLoop: loop, kind: 'task' }));
   } catch (err) {

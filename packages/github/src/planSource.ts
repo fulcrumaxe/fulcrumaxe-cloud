@@ -1,7 +1,7 @@
 import type { RepoPermission } from "@fx/trust";
 import { createPlanReadClient, PlanReadError, type PlanReadDeps, type PlanReadTarget } from "./planReadClient.js";
 import { listRecentOpenItems, type RecentItem } from "./discoveryReaders.js";
-import { listDiscussionComments, listDiscussions, listIssuesAndPulls, readAuthorPermission, readRepoFile, readRepoHead, type IssuesAndPulls } from "./planReaders.js";
+import { listDiscussionComments, listDiscussions, listIssuesAndPulls, readAuthorPermission, readLabelActor, readRepoFile, readRepoHead, type IssuesAndPulls } from "./planReaders.js";
 
 /**
  * D#483 S3: the read side of one plan import, shaped as @fx/core's `PlanSource` (structurally; this package does not import
@@ -23,7 +23,9 @@ export interface PlanSourceShape {
   pulls(): Promise<{ pulls: PlanSourceFacts[]; truncated: boolean }>;
   discussions(match: { isSpec(body: string): boolean }): Promise<{ discussions: DiscussionRow[]; specs: DiscussionRow[]; truncated: boolean }>;
   discussionComments(number: number, match: { isCorrection(body: string): boolean }): Promise<{ comments: Array<{ body: string; createdAt: string; authorLogin: string | null }> }>;
-  issues(): Promise<{ issues: Array<{ number: number; title: string; state: "open" | "closed" }>; truncated: boolean }>;
+  issues(): Promise<{ issues: Array<{ number: number; title: string; state: "open" | "closed"; labels: string[] }>; truncated: boolean }>;
+  /** D#483: the real permission of whoever applied the issue's current label `name` now, or null when that cannot be established. Reads the issue's events. */
+  labelActorPermission(number: number, name: string): Promise<RepoPermission | null>;
   authorPermission(login: string): Promise<RepoPermission>;
   /** D#483 S4-c: the most recently updated open issues and Discussions together (pull requests excluded). */
   recentOpen(): Promise<{ items: RecentItem[] }>;
@@ -57,9 +59,13 @@ export function createPlanSourceFactory(deps: PlanReadDeps): (target: PlanReadTa
       },
       async issues() {
         const r = await list();
-        return { issues: r.issues.map((i) => ({ number: i.number, title: i.title, state: i.state })), truncated: r.truncated };
+        return { issues: r.issues.map((i) => ({ number: i.number, title: i.title, state: i.state, labels: [...i.labels] })), truncated: r.truncated };
       },
       authorPermission: (login) => readAuthorPermission(client, repo, login),
+      async labelActorPermission(number, name) {
+        const actor = await readLabelActor(client, repo, number, name);
+        return actor === null ? null : readAuthorPermission(client, repo, actor);
+      },
       recentOpen: () => listRecentOpenItems(client, repo),
       evidence() {
         return { requests: client.requestLog.map((e) => ({ ...e })), tokenPermissions: client.tokenPermissions ? { ...client.tokenPermissions } : null };

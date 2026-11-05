@@ -35,6 +35,8 @@ export interface FakeItem {
   /** Present for a pull request. `merged_at` null means not merged. */
   pull?: { merged_at: string | null };
   labels?: string[];
+  /** The issue's timeline events for labels, oldest first, as GitHub reports them (`actor` is the login that did it). */
+  events?: Array<{ event: "labeled" | "unlabeled"; label: string; actor: string }>;
   /** `updated_at` (ISO). Default: derived from the number, so a higher number is more recently updated. */
   updatedAt?: string;
 }
@@ -85,6 +87,10 @@ export interface FakeGithubState {
     graphqlNullWithoutErrors?: boolean;
     /** The issues list answers this status. */
     issuesStatus?: number;
+    /** Every collaborator permission read answers this status (a server error, say). */
+    permissionStatus?: number;
+    /** The issue events route answers this status. */
+    eventsStatus?: number;
     /** Every contents read answers this status. */
     contentsStatus?: number;
     /** The default branch is missing from the GraphQL answer. */
@@ -347,6 +353,7 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
       // `role_name` is the exact role. Needs metadata read.
       const denied = needs(cred.permissions, "metadata");
       if (denied) return denied;
+      if (state.faults.permissionStatus) return ghError(state.faults.permissionStatus, "Server Error");
       const login = decodeURIComponent(collab[1]!);
       const role = state.collaborators[login];
       if (role === undefined) return ghError(404, "Not Found");
@@ -362,6 +369,19 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
       if (state.faults.issuesStatus) return ghError(state.faults.issuesStatus, "Server Error");
       const found = state.items.find((i) => i.number === Number(one[1]));
       return found ? jsonReply(200, itemJson(found)) : ghError(404, "Not Found");
+    }
+
+    // GET /repos/{o}/{n}/issues/{number}/events: the issue's timeline events (only the label events are modelled), oldest first, paged. Needs issues read.
+    const evs = new RegExp(`^${repoBase}/issues/([0-9]+)/events$`).exec(req.path);
+    if (evs) {
+      const denied = needs(cred.permissions, "issues");
+      if (denied) return denied;
+      if (state.faults.eventsStatus) return ghError(state.faults.eventsStatus, "Server Error");
+      const found = state.items.find((i) => i.number === Number(evs[1]));
+      if (!found) return ghError(404, "Not Found");
+      const all = (found.events ?? []).map((e, idx) => ({ id: idx + 1, event: e.event, actor: { login: e.actor, type: "User" }, label: { name: e.label, color: "ededed" }, created_at: stampOf(found.number) }));
+      const { items: pageItems, link } = pageOf(req, url.searchParams, all);
+      return jsonReply(200, pageItems, link ? { link } : {});
     }
 
     if (req.path === `${repoBase}/issues`) {
