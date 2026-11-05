@@ -321,7 +321,12 @@ describe('D#7 DW-R4: the receipt behind a merge the host queue made [pg]', () =>
 
     const again = await gated();
     await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId: again.workItemId, kind: 'merge_dequeued', dedupeKey: 'dq:app', code: 'merge_conflict', reasons: ['actor_app'], headSha: GATED, prNumber: 800 + again.gh }));
-    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId: again.workItemId, kind: 'merge_enqueued', dedupeKey: 'enqueued:second', code: 'queue', headSha: GATED, prNumber: 800 + again.gh }));
+    // The gate's own retry after the removal: its merge_gate fact and its enqueue fact, both with the dial version it read.
+    const retryVersion = await dialNow();
+    await withTenant(appUserPool, refs.accountId, async (c) => {
+      await recordDriverEvent(c, refs.accountId, { workItemId: again.workItemId, kind: 'merge_gate', dedupeKey: 'retry:merge_enqueued', code: 'merge_enqueued', headSha: GATED, prNumber: 800 + again.gh, dialVersion: retryVersion });
+      await recordDriverEvent(c, refs.accountId, { workItemId: again.workItemId, kind: 'merge_enqueued', dedupeKey: 'enqueued:second', code: 'queue', headSha: GATED, prNumber: 800 + again.gh, dialVersion: retryVersion });
+    });
     await apply(merged(again.gh, GATED));
     expect(await receipts(again.workItemId)).toHaveLength(1);
 

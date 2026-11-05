@@ -121,6 +121,63 @@ describe('merge receipt names the dial the gate read, not a version that committ
     expect(await receipts()).toEqual([]);
   });
 
+  const removal = (head: string, code: string) =>
+    admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merge_dequeued', $3, $4, 7, $5)`, [A.accountId, A.workItemId, code, head, `d:${randomUUID()}`]);
+
+  describe('gate evidence from before a removal says nothing about a later enqueue', () => {
+    it('a person re-queued by hand after the queue removed the gate\'s entry, before the gate retried: the old gate fact does not count, no policy receipt', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'merge_enqueued');
+      await fact('merge_enqueued', 1);
+      await removal(HEAD, 'checks_failed');
+      await fact('merge_enqueued', null); // the hand re-queue as the reconcile or webhook writes it: no version
+      await fact('merged_via_queue');
+      expect(await receipt()).toBe('not_policy');
+      expect(await receipts()).toEqual([]);
+    });
+
+    it('the gate retried after the removal: its new fact is evidence and the merge is receipted at the version it read', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'merge_enqueued');
+      await fact('merge_enqueued', 1);
+      await removal(HEAD, 'checks_failed');
+      await dialRow(admin, 'announce', 2);
+      await fact('merge_gate', 2, 'merge_enqueued');
+      await fact('merge_enqueued', 2);
+      await fact('merged_via_queue');
+      expect(await receipt()).toBe('written');
+      expect(await receipts()).toEqual([{ chosen: 'announce', dial_version: 2 }]);
+    });
+
+    it('a removal that is the host\'s own success reason is not a removal: the gate fact from before it still counts', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'merge_enqueued');
+      await fact('merge_enqueued', 1);
+      await removal(HEAD, 'merge');
+      await fact('merged_via_queue');
+      expect(await receipt()).toBe('written');
+      expect(await receipts()).toEqual([{ chosen: 'act', dial_version: 1 }]);
+    });
+
+    it('a removal at another head does not discard the gate fact at this one', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'merge_enqueued');
+      await fact('merge_enqueued', 1);
+      await removal('c'.repeat(40), 'user');
+      await fact('merged_via_queue');
+      expect(await receipt()).toBe('written');
+    });
+
+    it('a merge_gate fact that is not an enqueue (ready_human_merges) is not evidence of the gate\'s enqueue', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'ready_human_merges');
+      await fact('merge_enqueued', null);
+      await fact('merged_via_queue');
+      expect(await receipt()).toBe('not_policy');
+      expect(await receipts()).toEqual([]);
+    });
+  });
+
   describe('a paired item: the public pull request is queued by a runner on an order, and the gate\'s fact is keyed on the reviewed head', () => {
     const PUBLIC = 'b'.repeat(40);
     async function order(state: 'enqueued' | 'merged' | 'failed'): Promise<void> {
@@ -166,6 +223,39 @@ describe('merge receipt names the dial the gate read, not a version that committ
       await publicFact('merged_via_queue');
       expect(await pairedReceipt()).toBe('not_policy');
       expect(await receipts()).toEqual([]);
+    });
+
+    it('a hand re-queue after a removal of the public pull request: the delegated fact from before the removal does not count', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'merge_delegated');
+      await order('enqueued');
+      await publicFact('merge_enqueued');
+      await removal(PUBLIC, 'user');
+      await publicFact('merge_enqueued');
+      await publicFact('merged_via_queue');
+      expect(await pairedReceipt()).toBe('not_policy');
+      expect(await receipts()).toEqual([]);
+    });
+
+    it('the gate delegated again after the removal: the new delegated fact counts', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'merge_delegated');
+      await order('enqueued');
+      await publicFact('merge_enqueued');
+      await removal(PUBLIC, 'user');
+      await fact('merge_gate', 1, 'merge_delegated');
+      await publicFact('merge_enqueued');
+      await publicFact('merged_via_queue');
+      expect(await pairedReceipt()).toBe('written');
+    });
+
+    it('a merge_gate ready_human_merges fact at the reviewed head is not a delegated fact', async () => {
+      await dialRow(admin, 'act', 1);
+      await fact('merge_gate', 1, 'ready_human_merges');
+      await order('enqueued');
+      await publicFact('merge_enqueued');
+      await publicFact('merged_via_queue');
+      expect(await pairedReceipt()).toBe('not_policy');
     });
 
     it('an order that ended enqueued but whose reviewed head has no delegated gate fact is not evidence', async () => {
