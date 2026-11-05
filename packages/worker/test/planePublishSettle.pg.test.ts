@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { publicChangeSentence } from "@fx/core/src/repos/publicChangeCopy.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { createFakeSandbox, type AgentRuntime, type NetworkPolicyRule, type PlanePublishLine } from "@fx/runner";
 import type { PullRequestRef, RunPullRequestPort, RunPullRequestText } from "@fx/runner-cloud";
@@ -166,15 +167,6 @@ describe("settling a paired sandbox build, and opening the public pull request a
   });
 
   describe("the private pull request (Q1)", () => {
-    it("D#6 FIRST-PUBLISH-BASE-DRIFT: a round before the first publish that recorded the base it merged settles as a FIRST publish (not an update), diffed from the merge base with the default branch", async () => {
-      const round = await executorRun();
-      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'plane.fix_base', $3::jsonb)", [A.accountId, round, JSON.stringify({ base_sha: "7".repeat(40), branch: "fx/issue-42", pre_publish: true })]);
-      const r = await worker().settlePairedBuild({ accountId: A.accountId, executorRunId: round });
-      expect(r).toEqual({ privatePullRequest: "opened", publish: { kind: "published", state: "pr_opened", attemptNo: 1 } });
-      expect(JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content)).toMatchObject({ privateBase: BASE, privateHead: PRIVATE_HEAD, baseIsDefaultMergeBase: true });
-      expect((await attempts()).map((a) => a.kind)).toEqual(["push"]);
-    });
-
     it("is opened as a draft on the dispatch repo from the branch fx/issue-<n>, then made ready, with the fixed text from our rows; the publish step then runs", async () => {
       const r = await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
       expect(r).toEqual({ privatePullRequest: "opened", publish: { kind: "published", state: "pr_opened", attemptNo: 1 } });
@@ -385,7 +377,9 @@ describe("settling a paired sandbox build, and opening the public pull request a
       parent = { state: "closed", merged: true, headSha: "", headRef: "", headInBaseRepo: false, branchTipSha: "", baseRef: "main", defaultBranch: "main" };
       await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
       expect(priv.opened[0]).toMatchObject({ base: "main" });
-      expect(parentReads).toEqual([expect.objectContaining({ prNumber: 31, publicPr: { accountId: A.accountId, codeRepo: "acme/widgets-public", number: 8 } })]);
+      // one read for the private pull request's base, one for the publish's diff base
+      expect(parentReads).toHaveLength(2);
+      expect(parentReads[0]).toEqual(expect.objectContaining({ prNumber: 31, publicPr: { accountId: A.accountId, codeRepo: "acme/widgets-public", number: 8 } }));
     });
 
     it("a paired parent with no private pull request number on record: the public pull request is still asked, and merged to main the private pull request goes against the default branch", async () => {
@@ -395,18 +389,62 @@ describe("settling a paired sandbox build, and opening the public pull request a
       parent = { state: "closed", merged: true, headSha: "", headRef: "", headInBaseRepo: false, branchTipSha: "", baseRef: "main", defaultBranch: "main" };
       await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
       expect(priv.opened[0]).toMatchObject({ base: "main" });
-      expect(parentReads).toEqual([expect.objectContaining({ prNumber: null, publicPr: expect.objectContaining({ number: 8 }) })]);
+      expect(parentReads).toHaveLength(2);
+      expect(parentReads[0]).toEqual(expect.objectContaining({ prNumber: null, publicPr: expect.objectContaining({ number: 8 }) }));
     });
 
     it.each([
       ["a parent that cannot be read", () => (parent = new Error("down"))],
       ["a parent merged into another branch than the default one", () => (parent = { state: "closed", merged: true, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "", baseRef: "fx/grandparent", defaultBranch: "main" })],
       ["a parent closed without merging", () => (parent = { state: "closed", merged: false, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "", baseRef: "main", defaultBranch: "main" })],
-    ])("%s: no pull request is opened (never one against the wrong base), and the publish step still runs", async (_l, arrange) => {
+    ])("%s: no pull request is opened (never one against the wrong base), and the publish is refused before any attempt is spent (no base can be established)", async (_l, arrange) => {
       arrange();
       const r = await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
-      expect(r).toMatchObject({ privatePullRequest: "failed", publish: { kind: "published" } });
+      expect(r).toMatchObject({ privatePullRequest: "failed", publish: { kind: "refused", code: "stack_base_unavailable", attemptNo: null } });
       expect(priv.opened).toEqual([]);
+      expect(fake.state.created).toHaveLength(0);
+    });
+
+    it("the parent is read AFTER the branch head, so a round that merges the parent in between cannot leave its delta in the diff", async () => {
+      const order: string[] = [];
+      const base = stackBase;
+      await worker({
+        privateHead: async () => (order.push("head"), PRIVATE_HEAD),
+        stackBase: { readParent: async (i) => (order.push("parent"), base.readParent(i)) },
+      }).publishPairedChange({ accountId: A.accountId, executorRunId });
+      expect(order).toEqual(["head", "parent"]);
+    });
+
+    it("a parent read that fails once with a transient error is retried: no refusal is recorded", async () => {
+      let calls = 0;
+      const base = stackBase;
+      const r = await worker({
+        stackBase: { readParent: async (i) => { if (++calls === 1) throw Object.assign(new Error("502"), { transient: true }); return base.readParent(i); } },
+      }).publishPairedChange({ accountId: A.accountId, executorRunId });
+      expect(calls).toBeGreaterThan(1);
+      expect(r).toMatchObject({ kind: "published" });
+    });
+
+    it("the stack_base_unavailable sentence gives the reason and the step", async () => {
+      expect(publicChangeSentence("refused", "stack_base_unavailable")).toMatch(/closed, was merged into a branch other than the default branch, or could not be read.*keeps failing.*three times.*close this item and start the change as a new one; otherwise try the push again$/);
+    });
+
+    // D#6 FIRST-PUBLISH-BASE-DRIFT: a stacked change is diffed from the merge base of its head with its parent's branch tip; the worker hands the hook that tip.
+    it("a first publish of a stacked change tells the hook the parent's branch tip, and not the default-branch flag", async () => {
+      await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
+      const input = JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content);
+      expect(input).toMatchObject({ privateBase: BASE, privateBaseTip: "e".repeat(40) });
+      expect(input).not.toHaveProperty("baseIsDefaultMergeBase");
+      expect(input).not.toHaveProperty("parentMerged");
+    });
+
+    it("a parent that merged into the default branch: the change is diffed from its merge base with the default branch", async () => {
+      await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-public', $2, $3, $4, 8, 'https://github.com/acme/widgets-public/pull/8', 'pr_merged' FROM work_items WHERE id = $1", [A.workItemId, "f".repeat(64), HEAD, TIP]);
+      parent = { state: "closed", merged: true, headSha: "", headRef: "", headInBaseRepo: false, branchTipSha: "", baseRef: "main", defaultBranch: "main" };
+      await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
+      const input = JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content);
+      expect(input).toMatchObject({ baseIsDefaultMergeBase: true, parentMerged: true });
+      expect(input).not.toHaveProperty("privateBaseTip");
     });
   });
 

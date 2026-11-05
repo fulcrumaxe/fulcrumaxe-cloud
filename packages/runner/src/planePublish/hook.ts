@@ -181,7 +181,7 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
     try {
       await planePushGit(
         work,
-        [...HARDENING(deps.gitOrigin), "fetch", "--no-tags", "--quiet", "--no-write-fetch-head", `${deps.gitOrigin}/${input.own.owner}/${input.own.name}.git`, `${input.privateHead}:refs/fx/head`, `${input.privateBase}:refs/fx/base`, `${input.privateDefaultTip}:refs/fx/default`],
+        [...HARDENING(deps.gitOrigin), "fetch", "--no-tags", "--quiet", "--no-write-fetch-head", `${deps.gitOrigin}/${input.own.owner}/${input.own.name}.git`, `${input.privateHead}:refs/fx/head`, `${input.privateBase}:refs/fx/base`, `${input.privateDefaultTip}:refs/fx/default`, ...(input.privateBaseTip === undefined ? [] : [`${input.privateBaseTip}:refs/fx/parent`])],
         undefined,
         NO_PROMPT,
       );
@@ -196,24 +196,42 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
       // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
       throw new PlaneRouteError("base_not_ancestor", "the recorded base is not an ancestor of the run's head");
     }
-    // The base a round before this publish may have moved: for a change on the default branch it is where the head's history leaves the default branch, read here from the fetched commits.
+    // The base a round before this publish may have moved: for a change on the default branch it is where the head's history leaves the default branch; for a stacked change, where it leaves its parent's branch. Both are read here from the fetched commits.
     let privateBase = input.privateBase;
+    // A change on the default branch must start on it. The one exception is a change whose stack parent merged: a squash merge leaves the parent's commits off the default branch, so its recorded start is not on it. That change is diffed
+    // from its recorded start (what the code did before this check existed), which is only trustworthy when nothing was merged into the branch since: a merge commit in that range means a round (or the agent) brought in other work.
+    let diffFromRecordedStart = false;
     if (input.baseIsDefaultMergeBase === true) {
-      // The change claims to start on the default branch: its recorded start must be a commit of that branch. A start that is only on another branch (a parent's, with the stack link gone) would make the parent's unmerged work the change.
+      let startOnDefault = true;
       try {
         await planePushGit(work, ["merge-base", "--is-ancestor", input.privateBase, "refs/fx/default"]);
       } catch {
-        // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
-        throw new PlaneRouteError("base_not_on_default", "the recorded start of the run is not on the default branch");
+        // fx-swallow-ok: the answer is the refusal below, or the squash rule; the tool's text is dropped
+        startOnDefault = false;
+      }
+      if (!startOnDefault) {
+        if (input.parentMerged !== true) throw new PlaneRouteError("base_not_on_default", "the recorded start of the run is not on the default branch");
+        const merges = (await planePushGit(work, ["rev-list", "--merges", "-n", "1", `${input.privateBase}..refs/fx/head`])).toString("utf8").trim();
+        if (merges !== "") throw new PlaneRouteError("merge_in_change", "a merge commit lies between the recorded start of the run and its last commit");
+        diffFromRecordedStart = true;
       }
     }
-    if (input.baseIsDefaultMergeBase === true) {
+    if (input.privateBaseTip !== undefined) {
+      // A stacked change's recorded start must be in its parent's history as the parent is now: a parent that was rewound or force-pushed has dropped it, and the merge base would then publish the dropped work.
       try {
-        privateBase = (await planePushGit(work, ["merge-base", "refs/fx/head", "refs/fx/default"])).toString("utf8").trim();
+        await planePushGit(work, ["merge-base", "--is-ancestor", input.privateBase, "refs/fx/parent"]);
+      } catch {
+        // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
+        throw new PlaneRouteError("base_not_on_parent", "the recorded start of the run is not in its parent's history");
+      }
+    }
+    if ((input.baseIsDefaultMergeBase === true && !diffFromRecordedStart) || input.privateBaseTip !== undefined) {
+      try {
+        privateBase = (await planePushGit(work, ["merge-base", "refs/fx/head", input.privateBaseTip === undefined ? "refs/fx/default" : "refs/fx/parent"])).toString("utf8").trim();
         if (!/^[0-9a-f]{40}$/.test(privateBase)) throw new Error("no merge base");
       } catch {
         // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
-        throw new PlaneRouteError("base_unavailable", "the run's last commit and the default branch have no common starting point");
+        throw new PlaneRouteError("base_unavailable", "the run's last commit and the branch it is based on have no common starting point");
       }
     }
     const result = await routeAndPush(

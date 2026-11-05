@@ -361,6 +361,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "base_not_ancestor",
   "base_unavailable",
   "base_not_on_default",
+  "base_not_on_parent",
+  "merge_in_change",
   "public_unavailable",
   "public_tip_moved",
   "app_not_installed",

@@ -688,3 +688,377 @@ describe("a change on the default branch whose branch merged the default branch 
     expect(parsePlanePublishInput(JSON.stringify({ ...base, updateOf: "b".repeat(40), baseIsDefaultMergeBase: true }))).toMatchObject({ updateOf: "b".repeat(40) });
   });
 });
+
+/**
+ * D#6 FIRST-PUBLISH-BASE-DRIFT, on real git, for a change stacked on a parent branch: the parent's work is on the parent's branch and not on the public repo, so a base older than the parent's merged tip would publish it
+ * in the child's change. The hook diffs from the merge base of the head with the parent's branch tip the worker read.
+ */
+describe("a change stacked on a parent branch whose branch merged the parent's tip before it was published", () => {
+  let parentOld: string;
+  let parentMerged: string;
+  let parentNewer: string;
+  let head: string;
+  const pubPaths = (): string[] => sh(world.pubBare, "diff", "--name-only", world.publicTip, BRANCH).split("\n").filter(Boolean).sort();
+
+  beforeEach(() => {
+    // The parent's branch, with work the public repo does not have.
+    sh(world.priv, "checkout", "-q", "-B", "fx/parent", world.base);
+    put(world.priv, { "src/p.ts": "export const p = 1;\n" });
+    parentOld = commitAll(world.priv, "parent work");
+    // The child is cut from it and does its own work.
+    sh(world.priv, "checkout", "-q", "-B", "fx/run", parentOld);
+    put(world.priv, { "src/c.ts": "export const c = 3;\n" });
+    commitAll(world.priv, "child work");
+    // The parent moves (more of its work, and a private-only doc); a round before the first publish merges that tip into the child.
+    sh(world.priv, "checkout", "-q", "fx/parent");
+    put(world.priv, { "src/q.ts": "export const q = 1;\n", "docs/ops/plan.md": "private plan, moved\n" });
+    parentMerged = commitAll(world.priv, "parent moves on");
+    sh(world.priv, "checkout", "-q", "fx/run");
+    sh(world.priv, "merge", "-q", "--no-ff", "-m", "Bring fx/run up to date with fx/parent", parentMerged);
+    head = sh(world.priv, "rev-parse", "HEAD");
+    // The parent moves further afterwards, and the child never merges that.
+    sh(world.priv, "checkout", "-q", "fx/parent");
+    put(world.priv, { "src/r.ts": "export const r = 1;\n" });
+    parentNewer = commitAll(world.priv, "parent moves again");
+    for (const b of ["fx/run", "fx/parent"]) sh(world.priv, "push", "-q", "-f", world.privBare, b);
+  });
+
+  it("control: signed with the commit the child was cut at, the parent's merged-in work refuses the publish on its private-only doc", async () => {
+    const { lines } = await runHook(inputFor(head, { privateBase: world.base }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "scan_refused" });
+  }, 60_000);
+
+  it("with the parent's tip, the merge base is the tip the child merged, though the parent moved further: only the child's own path is published", async () => {
+    const { lines } = await runHook(inputFor(head, { privateBase: world.base, privateBaseTip: parentNewer }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+    expect(pubPaths()).toEqual(["src/c.ts"]);
+  }, 60_000);
+
+  it("a parent tip with no history in common with the head is refused base_not_on_parent and nothing is pushed", async () => {
+    sh(world.priv, "checkout", "-q", "--orphan", "fx/orphan");
+    sh(world.priv, "rm", "-rf", "-q", "--cached", ".");
+    put(world.priv, { "src/o.ts": "export const o = 1;\n" });
+    const orphan = commitAll(world.priv, "unrelated history");
+    sh(world.priv, "push", "-q", "-f", world.privBare, "fx/orphan");
+    const before = branches();
+    const { lines } = await runHook(inputFor(head, { privateBase: world.base, privateBaseTip: orphan }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "base_not_on_parent" });
+    expect(branches()).toBe(before);
+  }, 60_000);
+
+  it("the input shape accepts the parent tip only as a full commit id and never together with the default-branch flag", () => {
+    const base = inputFor("a".repeat(40));
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, privateBaseTip: "c".repeat(40) }))).toMatchObject({ privateBaseTip: "c".repeat(40) });
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, privateBaseTip: "main" }))).toBeUndefined();
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, privateBaseTip: "c".repeat(40), baseIsDefaultMergeBase: true }))).toBeUndefined();
+  });
+});
+
+/**
+ * D#6 FIRST-PUBLISH-BASE-DRIFT, on real git: the stacked cases a review found. A parent that was rewound or force-pushed has dropped the commit the child started from; a parent that was squash-merged to the default branch has
+ * commits that are not on it; and a change three deep (grandparent, parent, child) still publishes only its own path, as one commit on the public tip.
+ */
+describe("stacked changes: a rewound parent, a squash-merged parent and a change three deep", () => {
+  const pubPaths = (): string[] => sh(world.pubBare, "diff", "--name-only", world.publicTip, BRANCH).split("\n").filter(Boolean).sort();
+  const pushAll = (...bs: string[]): void => {
+    for (const b of bs) sh(world.priv, "push", "-q", "-f", world.privBare, b);
+  };
+
+  it("a parent rewound after the child was cut: the child's start is not in the parent's history, so the publish is refused base_not_on_parent and nothing is pushed", async () => {
+    sh(world.priv, "checkout", "-q", "-B", "fx/parent", world.base);
+    put(world.priv, { "src/p.ts": "export const p = 1;\n" });
+    const parentOld = commitAll(world.priv, "parent work");
+    sh(world.priv, "checkout", "-q", "-B", "fx/child", parentOld);
+    put(world.priv, { "src/c.ts": "export const c = 3;\n" });
+    const child = commitAll(world.priv, "child work");
+    // The parent is rewound to the base and given other work: the dropped commit is only in the child's history now.
+    sh(world.priv, "checkout", "-q", "fx/parent");
+    sh(world.priv, "reset", "-q", "--hard", world.base);
+    put(world.priv, { "src/q.ts": "export const q = 1;\n" });
+    const parentNew = commitAll(world.priv, "parent starts over");
+    pushAll("fx/child", "fx/parent");
+    const before = branches();
+    const { lines } = await runHook(inputFor(child, { privateBase: parentOld, privateBaseTip: parentNew }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "base_not_on_parent" });
+    expect(branches()).toBe(before);
+  }, 60_000);
+
+  describe("a parent squash-merged to the default branch (its commits are not on it, its content is)", () => {
+    let parentTip: string;
+    let child: string;
+    const treeOf = (rev: string): string[] => sh(world.pubBare, "ls-tree", "-r", "--name-only", rev).split("\n").filter(Boolean).sort();
+    const defaultTip = (): string => sh(world.priv, "rev-parse", "main");
+    const told = (head: string, base: string, over: Partial<PlanePublishInput> = {}): PlanePublishInput => inputFor(head, { privateBase: base, privateDefaultTip: defaultTip(), baseIsDefaultMergeBase: true, parentMerged: true, ...over });
+    /** The squash: one new commit on the default branch with `files`, on the private repository and (with `publicToo`) the public one. */
+    const squash = (files: Record<string, string>, publicToo = true): void => {
+      sh(world.priv, "checkout", "-q", "main");
+      put(world.priv, files);
+      commitAll(world.priv, "parent, squashed");
+      sh(world.priv, "push", "-q", "-f", world.privBare, "main");
+      if (!publicToo) return;
+      const pubWork = path.join(world.root, "pubwork");
+      put(pubWork, files);
+      commitAll(pubWork, "parent, squashed");
+      sh(pubWork, "push", "-q", world.pubBare, "main");
+      world.publicTip = sh(world.pubBare, "rev-parse", "main");
+    };
+    beforeEach(() => {
+      sh(world.priv, "checkout", "-q", "-B", "fx/parent", world.base);
+      put(world.priv, { "src/p.ts": "export const p = 1;\n" });
+      parentTip = commitAll(world.priv, "parent work");
+      sh(world.priv, "checkout", "-q", "-B", "fx/child", parentTip);
+      put(world.priv, { "src/c.ts": "export const c = 3;\n" });
+      child = commitAll(world.priv, "child work");
+      squash({ "src/p.ts": "export const p = 1;\n" });
+      pushAll("fx/child");
+    });
+
+    it("control: without being told the parent merged, the child's start is not on the default branch and the publish is refused", async () => {
+      const { lines } = await runHook(inputFor(child, { privateBase: parentTip, privateDefaultTip: defaultTip(), baseIsDefaultMergeBase: true }));
+      expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "base_not_on_default" });
+    }, 60_000);
+
+    it("told the parent merged, only the child's own path is published and nothing else changes in the public tree", async () => {
+      const before = treeOf(world.publicTip);
+      const { lines } = await runHook(told(child, parentTip));
+      expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+      expect(pubPaths()).toEqual(["src/c.ts"]);
+      expect(treeOf(BRANCH)).toEqual([...before, "src/c.ts"].sort());
+    }, 60_000);
+
+    it("the parent's path changed on public main since the squash is not the child's change: only the child's path is published", async () => {
+      const pubWork = path.join(world.root, "pubwork");
+      put(pubWork, { "src/p.ts": "export const p = 2;\n" });
+      commitAll(pubWork, "public edits p");
+      sh(pubWork, "push", "-q", world.pubBare, "main");
+      world.publicTip = sh(world.pubBare, "rev-parse", "main");
+      const { lines } = await runHook(told(child, parentTip));
+      expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+      expect(pubPaths()).toEqual(["src/c.ts"]);
+    }, 60_000);
+
+    it("a parent with no public copy whose private pull request was squash-merged: its path is not in the public repo and is not published", async () => {
+      sh(world.priv, "checkout", "-q", "-B", "fx/parent3", world.base);
+      put(world.priv, { "src/parent.ts": "export const parent = 1;\n" });
+      const parent3 = commitAll(world.priv, "parent work, never published");
+      sh(world.priv, "checkout", "-q", "-B", "fx/child3", parent3);
+      put(world.priv, { "src/c.ts": "export const c = 4;\n" });
+      const child3 = commitAll(world.priv, "child work");
+      squash({ "src/parent.ts": "export const parent = 1;\n" }, false);
+      pushAll("fx/child3");
+      const before = treeOf(world.publicTip);
+      const { lines } = await runHook(told(child3, parent3));
+      expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+      expect(pubPaths()).toEqual(["src/c.ts"]);
+      expect(treeOf(BRANCH)).toEqual([...before, "src/c.ts"].sort());
+    }, 60_000);
+
+    it("a parent whose public copy merged at an older head, with the child cut from a newer private tip: the unpublished work is not published", async () => {
+      sh(world.priv, "checkout", "-q", "-B", "fx/parent4", world.base);
+      put(world.priv, { "src/q.ts": "export const q = 1;\n" });
+      commitAll(world.priv, "parent work, published");
+      put(world.priv, { "src/unpublished.ts": "export const u = 1;\n" });
+      const parent4 = commitAll(world.priv, "parent work after its public copy");
+      sh(world.priv, "checkout", "-q", "-B", "fx/child4", parent4);
+      put(world.priv, { "src/c.ts": "export const c = 5;\n" });
+      const child4 = commitAll(world.priv, "child work");
+      pushAll("fx/child4");
+      const before = treeOf(world.publicTip);
+      const { lines } = await runHook(told(child4, parent4));
+      expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+      expect(treeOf(BRANCH)).toEqual([...before, "src/c.ts"].sort());
+      expect(treeOf(BRANCH)).not.toContain("src/unpublished.ts");
+    }, 60_000);
+
+    describe("a path the parent and the child both changed", () => {
+      let shared: string;
+      beforeEach(() => {
+        sh(world.priv, "checkout", "-q", "-B", "fx/parent5", world.base);
+        put(world.priv, { "src/a.ts": "export const a = 2; // the parent's line\n" });
+        const parent5 = commitAll(world.priv, "parent changes a");
+        sh(world.priv, "checkout", "-q", "-B", "fx/child5", parent5);
+        put(world.priv, { "src/a.ts": "export const a = 2; // the parent's line\nexport const a3 = 3;\n", "src/c.ts": "export const c = 6;\n" });
+        shared = commitAll(world.priv, "child changes a further");
+        pushAll("fx/child5");
+        squash({ "src/a.ts": "export const a = 2; // the parent's line\n" }, false);
+        sh(world.priv, "branch", "-f", "parent5-tip", parent5);
+      });
+      const input5 = (): PlanePublishInput => told(shared, sh(world.priv, "rev-parse", "parent5-tip"));
+
+      it("the public repo has the parent's version: the child's whole file goes out", async () => {
+        const pubWork = path.join(world.root, "pubwork");
+        put(pubWork, { "src/a.ts": "export const a = 2; // the parent's line\n" });
+        commitAll(pubWork, "public has the parent's version");
+        sh(pubWork, "push", "-q", world.pubBare, "main");
+        world.publicTip = sh(world.pubBare, "rev-parse", "main");
+        const { lines } = await runHook(input5());
+        expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+        expect(pubPaths()).toEqual(["src/a.ts", "src/c.ts"]);
+      }, 60_000);
+
+      it("the public repo does not have the parent's version: base_diverged, and nothing is pushed", async () => {
+        const before = branches();
+        const { lines } = await runHook(input5());
+        expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "base_diverged" });
+        expect(branches()).toBe(before);
+      }, 60_000);
+    });
+
+    describe("what the child itself did is published as it was, with no merge in its range", () => {
+      it("a deletion", async () => {
+        sh(world.priv, "checkout", "-q", "-B", "fx/childd", parentTip);
+        sh(world.priv, "rm", "-q", "src/b.ts");
+        const head = commitAll(world.priv, "child deletes b");
+        pushAll("fx/childd");
+        const { lines } = await runHook(told(head, parentTip));
+        expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+        expect(pubPaths()).toEqual(["src/b.ts"]);
+        expect(treeOf(BRANCH)).not.toContain("src/b.ts");
+      }, 60_000);
+
+      it("a rename: the source disappears and the target appears", async () => {
+        sh(world.priv, "checkout", "-q", "-B", "fx/childr", parentTip);
+        sh(world.priv, "mv", "src/b.ts", "src/b2.ts");
+        const head = commitAll(world.priv, "child renames b");
+        pushAll("fx/childr");
+        const { lines } = await runHook(told(head, parentTip));
+        expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+        expect(sh(world.pubBare, "diff", "--no-renames", "--name-only", world.publicTip, BRANCH).split("\n").sort()).toEqual(["src/b.ts", "src/b2.ts"]);
+        expect(treeOf(BRANCH)).toContain("src/b2.ts");
+        expect(treeOf(BRANCH)).not.toContain("src/b.ts");
+      }, 60_000);
+
+      it("a revert, and a child that only reverts (the change is not 'no change')", async () => {
+        // The parent changed a.ts (and the public repo has it); the child puts it back as it was at the build base.
+        sh(world.priv, "checkout", "-q", "-B", "fx/parent7", world.base);
+        put(world.priv, { "src/a.ts": "export const a = 2;\n" });
+        const parent7 = commitAll(world.priv, "parent changes a");
+        sh(world.priv, "checkout", "-q", "-B", "fx/child7", parent7);
+        put(world.priv, { "src/a.ts": "export const a = 1;\n" });
+        const head = commitAll(world.priv, "child reverts a");
+        pushAll("fx/child7");
+        squash({ "src/a.ts": "export const a = 2;\n" });
+        const { lines } = await runHook(told(head, parent7));
+        expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+        expect(pubPaths()).toEqual(["src/a.ts"]);
+        expect(sh(world.pubBare, "show", `${BRANCH}:src/a.ts`)).toBe("export const a = 1;");
+      }, 60_000);
+    });
+
+    describe("a merge commit between the recorded start and the head is refused merge_in_change, with nothing pushed", () => {
+      it("a round that merged the default branch into the child", async () => {
+        sh(world.priv, "checkout", "-q", "main");
+        put(world.priv, { "src/m.ts": "export const m = 1; // a private line on the default branch\n" });
+        commitAll(world.priv, "default branch moves");
+        sh(world.priv, "push", "-q", "-f", world.privBare, "main");
+        sh(world.priv, "checkout", "-q", "fx/child");
+        sh(world.priv, "merge", "-q", "--no-ff", "-m", "Bring fx/child up to date with main", "main");
+        const head = sh(world.priv, "rev-parse", "HEAD");
+        pushAll("fx/child");
+        const before = branches();
+        const { lines } = await runHook(told(head, parentTip));
+        expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "merge_in_change" });
+        expect(branches()).toBe(before);
+      }, 60_000);
+
+      it("a round that merged a newer tip of the parent", async () => {
+        sh(world.priv, "checkout", "-q", "fx/parent");
+        put(world.priv, { "src/later.ts": "export const later = 1;\n" });
+        commitAll(world.priv, "parent moves on");
+        sh(world.priv, "checkout", "-q", "fx/child");
+        sh(world.priv, "merge", "-q", "--no-ff", "-m", "Bring fx/child up to date with fx/parent", "fx/parent");
+        const head = sh(world.priv, "rev-parse", "HEAD");
+        pushAll("fx/child");
+        const before = branches();
+        const { lines } = await runHook(told(head, parentTip));
+        expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "merge_in_change" });
+        expect(branches()).toBe(before);
+      }, 60_000);
+
+      it("a merge the agent made itself", async () => {
+        sh(world.priv, "checkout", "-q", "-B", "side", world.base);
+        put(world.priv, { "src/side.ts": "export const side = 1;\n" });
+        commitAll(world.priv, "side work");
+        sh(world.priv, "checkout", "-q", "fx/child");
+        sh(world.priv, "merge", "-q", "--no-ff", "-m", "merge side", "side");
+        const head = sh(world.priv, "rev-parse", "HEAD");
+        pushAll("fx/child");
+        const before = branches();
+        const { lines } = await runHook(told(head, parentTip));
+        expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "merge_in_change" });
+        expect(branches()).toBe(before);
+      }, 60_000);
+    });
+
+    it("a parent that changed a rule file still matters: the rule-file check ranges from where the parent left the default branch, so the change is refused", async () => {
+      sh(world.priv, "checkout", "-q", "-B", "fx/parent8", world.base);
+      put(world.priv, { "rules/ids.txt": EDITED_IDS });
+      const parent8 = commitAll(world.priv, "parent edits the identifier rules");
+      sh(world.priv, "checkout", "-q", "-B", "fx/child8", parent8);
+      put(world.priv, { "src/d.ts": "export const d = 1;\n" });
+      const child8 = commitAll(world.priv, "child work");
+      pushAll("fx/child8");
+      const before = branches();
+      const { lines } = await runHook(told(child8, parent8));
+      expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "rule_file_changed" }] });
+      expect(branches()).toBe(before);
+    }, 60_000);
+
+    it("a true-merge parent (its commits are on the default branch) uses the ordinary merge-base path: only the child's path", async () => {
+      sh(world.priv, "checkout", "-q", "-B", "fx/parent9", world.base);
+      put(world.priv, { "src/p9.ts": "export const p9 = 1;\n" });
+      const parent9 = commitAll(world.priv, "parent work");
+      sh(world.priv, "checkout", "-q", "-B", "fx/child9", parent9);
+      put(world.priv, { "src/c.ts": "export const c = 9;\n" });
+      const child9 = commitAll(world.priv, "child work");
+      sh(world.priv, "checkout", "-q", "main");
+      sh(world.priv, "merge", "-q", "--no-ff", "-m", "merge the parent", "fx/parent9");
+      sh(world.priv, "push", "-q", "-f", world.privBare, "main");
+      pushAll("fx/child9");
+      const pubWork = path.join(world.root, "pubwork");
+      put(pubWork, { "src/p9.ts": "export const p9 = 1;\n" });
+      commitAll(pubWork, "parent, merged");
+      sh(pubWork, "push", "-q", world.pubBare, "main");
+      world.publicTip = sh(world.pubBare, "rev-parse", "main");
+      const { lines } = await runHook(told(child9, parent9));
+      expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+      expect(pubPaths()).toEqual(["src/c.ts"]);
+    }, 60_000);
+  });
+
+  it("three deep: the child publishes only its own path, as one commit whose parent is the public tip", async () => {
+    sh(world.priv, "checkout", "-q", "-B", "fx/gp", world.base);
+    put(world.priv, { "src/g.ts": "export const g = 1;\n" });
+    const gp = commitAll(world.priv, "grandparent work");
+    sh(world.priv, "checkout", "-q", "-B", "fx/parent", gp);
+    put(world.priv, { "src/p.ts": "export const p = 1;\n" });
+    commitAll(world.priv, "parent work");
+    sh(world.priv, "checkout", "-q", "-B", "fx/child", "fx/parent");
+    put(world.priv, { "src/c.ts": "export const c = 3;\n" });
+    commitAll(world.priv, "child work");
+    // The grandparent and the parent move; a round before the first publish merges the parent's tip into the child.
+    sh(world.priv, "checkout", "-q", "fx/gp");
+    put(world.priv, { "src/g2.ts": "export const g2 = 1;\n", "docs/ops/plan.md": "private plan, moved\n" });
+    commitAll(world.priv, "grandparent moves");
+    sh(world.priv, "checkout", "-q", "fx/parent");
+    sh(world.priv, "merge", "-q", "--no-ff", "-m", "parent takes the grandparent's move", "fx/gp");
+    const parentTip = sh(world.priv, "rev-parse", "HEAD");
+    sh(world.priv, "checkout", "-q", "fx/child");
+    sh(world.priv, "merge", "-q", "--no-ff", "-m", "child takes the parent's tip", parentTip);
+    const child = sh(world.priv, "rev-parse", "HEAD");
+    pushAll("fx/child", "fx/parent");
+    const { lines } = await runHook(inputFor(child, { privateBase: gp, privateBaseTip: parentTip }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+    expect(pubPaths()).toEqual(["src/c.ts"]);
+    expect(sh(world.pubBare, "rev-parse", `${BRANCH}^`)).toBe(world.publicTip);
+  }, 60_000);
+
+  it("the input shape: parentMerged only as true and only with the default-branch flag", () => {
+    const base = inputFor("a".repeat(40));
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, baseIsDefaultMergeBase: true, parentMerged: true }))).toMatchObject({ parentMerged: true });
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, parentMerged: true }))).toBeUndefined();
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, baseIsDefaultMergeBase: true, parentMerged: false }))).toBeUndefined();
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, privateBaseTip: "c".repeat(40), parentMerged: true }))).toBeUndefined();
+  });
+});
+
