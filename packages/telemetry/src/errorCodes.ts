@@ -30,6 +30,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ask_no_run",
   "ask_receipt_mismatch",
   "runner_gone",
+  "run_moved_on",
   "author_check_unavailable",
   "billing_not_configured",
   "checkout_in_progress",

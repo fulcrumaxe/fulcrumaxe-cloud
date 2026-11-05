@@ -27,11 +27,11 @@ describe("sweepAskWithdrawals", () => {
     const { pool, calls } = fake([[...ids(1, "item_closed"), ...ids(1, "item_halted", 1), ...ids(1, "superseded", 2)]]);
     const warns: string[] = [];
     const out = await sweepAskWithdrawals({ pool, warn: (l) => warns.push(l), limit: 10 });
-    expect(out).toEqual({ withdrawn: 3, byReason: { item_closed: 1, item_halted: 1, superseded: 1 }, failed: false });
+    expect(out).toEqual({ withdrawn: 3, byReason: { item_closed: 1, item_halted: 1, superseded: 1, run_moved_on: 0 }, failed: false });
     expect(calls).toHaveLength(1);
     expect(calls[0]![0]).toContain("decision_ask_withdraw($1::integer)");
     expect(calls[0]![1]).toEqual([10]);
-    expect(warns.map((l) => JSON.parse(l))).toEqual([{ event: "decision.ask_withdrawn", item_closed: 1, item_halted: 1, superseded: 1, total: 3 }]);
+    expect(warns.map((l) => JSON.parse(l))).toEqual([{ event: "decision.ask_withdrawn", item_closed: 1, item_halted: 1, superseded: 1, run_moved_on: 0, total: 3 }]);
   });
 
   it("nothing to do is one call, no line", async () => {
@@ -56,7 +56,7 @@ describe("sweepAskWithdrawals", () => {
     const { pool } = fake([ids(2, "item_closed", 0), new Error("connect ECONNREFUSED db.internal:5432 as receipt-user secret-pw")]);
     const warns: string[] = [];
     const out = await sweepAskWithdrawals({ pool, warn: (l) => warns.push(l), limit: 2 });
-    expect(out).toEqual({ withdrawn: 2, byReason: { item_closed: 2, item_halted: 0, superseded: 0 }, failed: true });
+    expect(out).toEqual({ withdrawn: 2, byReason: { item_closed: 2, item_halted: 0, superseded: 0, run_moved_on: 0 }, failed: true });
     expect(warns.map((l) => JSON.parse(l).event)).toEqual(["decision.ask_withdraw_failed", "decision.ask_withdrawn"]);
     expect(warns.join("\n")).not.toMatch(/db\.internal|receipt-user|secret-pw|ECONN/);
   });

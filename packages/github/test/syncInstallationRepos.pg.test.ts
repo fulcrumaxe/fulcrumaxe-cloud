@@ -360,6 +360,27 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
       expect(await attachedTo(acc)).toEqual([[1, inst.id], [2, inst.id], [3, null]]);
     });
 
+    it('a repository whose member-plan dial was tightened is not forgotten by a detach, a re-sync, or a delete: same row, same id, dial still ask; the database refuses the delete', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      await syncInstallationRepos(harness([{ id: 1, name: 'a' }]).deps, inst.id);
+      const [{ id: repoId }] = (await admin.query(`SELECT id FROM repos WHERE account_id = $1`, [acc])).rows;
+      const userId = randomUUID();
+      await admin.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [userId, `${userId}@example.test`]);
+      await admin.query(
+        `INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, version, changed_by) VALUES ($1, $2, 'runner_run_on_member_plan', 'ask', 1, $3)`,
+        [acc, repoId, userId],
+      );
+      const dial = async () => (await admin.query(`SELECT r.id, d.disposition FROM repos r JOIN decision_settings d ON d.repo_id = r.id WHERE r.account_id = $1 AND d.decision_type = 'runner_run_on_member_plan'`, [acc])).rows;
+      // The product has no way to delete a repo; the one raw way (a member's plain DELETE, or an admin's) is refused while any dial history exists.
+      await syncInstallationRepos(harness([]).deps, inst.id);
+      await expect(withTenant(appUserPool, acc, (c) => c.query(`DELETE FROM repos WHERE id = $1`, [repoId]))).rejects.toMatchObject({ code: PG_ERROR.FOREIGN_KEY_VIOLATION });
+      await expect(admin.query(`DELETE FROM repos WHERE id = $1`, [repoId])).rejects.toMatchObject({ code: PG_ERROR.FOREIGN_KEY_VIOLATION });
+      // Re-import of the same GitHub repository finds the same row, so the tightened dial is the one in force.
+      expect(await syncInstallationRepos(harness([{ id: 1, name: 'a' }]).deps, inst.id)).toMatchObject({ inserted: 0 });
+      expect(await dial()).toEqual([{ id: repoId, disposition: 'ask' }]);
+    });
+
     it('D#600 CX-3a: a repository the listing drops loses its cached map; one still listed keeps its own', async () => {
       const acc = await account();
       const inst = await install(acc);

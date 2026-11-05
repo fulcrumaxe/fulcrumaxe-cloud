@@ -477,7 +477,7 @@ describe("decision asks", () => {
 
   // D#7 DW-R7: a run on a member's plan is answered by that person alone.
   describe("a run on a member's plan", () => {
-    const PLAN = { id: "33333333-3333-4333-8333-333333333333", decision_type: "runner_run_on_member_plan", options: [{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, don't run it" }], proposed: "approve" };
+    const PLAN = { id: "33333333-3333-4333-8333-333333333333", decision_type: "runner_run_on_member_plan", options: [{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, not on my plan" }], proposed: "approve" };
     const callFor = (a, calls = []) => async (method, path, body) => {
       calls.push([method, path, body]);
       return method === "POST" ? { ask_id: a.id, receipt_id: "r1", answered_option: body.choice } : path === ASKS_FIRST_URL ? asksOf([a]) : path === LIST_URL ? setups : path === NEEDS_HUMAN_URL ? asksOf([]) : path === ME_URL ? { is_admin: true } : { items: [], not_shown: 0 };
@@ -610,6 +610,7 @@ describe("decision asks", () => {
       [fail(403, "forbidden"), WORDS.onlyAdmins],
       [fail(409, "already_answered"), WORDS.alreadyAnswered],
       [fail(409, "runner_gone"), WORDS.runnerGone],
+      [fail(409, "run_moved_on"), WORDS.runMovedOn],
       [fail(422, "invalid_choice"), WORDS.failed],
       [fail(404, "not_found"), WORDS.failed],
       [fail(503, "decision_answers_unavailable"), WORDS.failed],
@@ -793,6 +794,8 @@ describe("WS-F1d: asks", () => {
     ["open, stop_and_flag", { timeout_outcome: "stop_and_flag" }, "If nobody answers in time, the work stays paused until someone answers."],
     ["overdue, stop_and_flag", { timeout_outcome: "stop_and_flag", state: "overdue" }, "The work is paused until someone answers."],
     ["overdue, proceed_recommended", { timeout_outcome: "proceed_recommended", state: "overdue" }, ""],
+    ["a member-plan ask, open", { timeout_outcome: "stop_and_flag", decision_type: "runner_run_on_member_plan" }, "If nobody answers in time, this run is not started on that plan."],
+    ["a member-plan ask, overdue", { timeout_outcome: "stop_and_flag", state: "overdue", decision_type: "runner_run_on_member_plan" }, "This run is not started on that plan until it is answered."],
     ["any other value", { timeout_outcome: "whatever" }, ""],
   ])("A2: the timeout sentence, %s", (_name, over, sentence) => {
     expect(readAsk(ask(over)).timeout).toBe(sentence);

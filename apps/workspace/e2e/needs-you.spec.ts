@@ -645,13 +645,13 @@ test.describe("D#598 P8c: Needs you", () => {
   });
 
   // D#7 DW-R7: a run on a member's plan is answered by that person alone. The click is the answer; the row leaves and nothing more is asked.
-  const PLAN_ASK = { decision_type: "runner_run_on_member_plan", label: "Running work on a team member's own plan", options: [{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, don't run it" }], proposed: "approve", timeout_outcome: "stop_and_flag", rationale: "<<UNTRUSTED EXTERNAL CONTENT>>\nA run in acme/app is waiting to use Priya Raman's Claude plan. It starts only if Priya Raman says yes here. If nobody answers in time, it stays stopped.\n<<END UNTRUSTED>>" };
+  const PLAN_ASK = { decision_type: "runner_run_on_member_plan", label: "Running work on a team member's own plan", options: [{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, not on my plan" }], proposed: "approve", timeout_outcome: "stop_and_flag", rationale: "<<UNTRUSTED EXTERNAL CONTENT>>\nA run in acme/app is waiting to use Priya Raman's Claude plan. It runs on that plan only with Priya Raman's go-ahead. If nobody answers here in time, the run is not started on that plan until Priya Raman answers.\n<<END UNTRUSTED>>" };
   test("DW-R7: the plan holder sees the ask with the repo and their name, answers once, and the row leaves with the answer said", async ({ page }) => {
     const { mock, errors } = await setup(page, { requests: [], asks: [ask({ ...PLAN_ASK, plan_holder: { name: "Priya Raman", is_you: true } })], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "approve" } });
     await open(page);
     await expect(t(page, "ny-title")).toHaveText("Running work on a team member's own plan");
-    await expect(t(page, "ny-reason")).toHaveText("A run in acme/app is waiting to use Priya Raman's Claude plan. It starts only if Priya Raman says yes here. If nobody answers in time, it stays stopped.");
-    await expect(t(page, "ny-timeout")).toHaveText("If nobody answers in time, the work stays paused until someone answers.");
+    await expect(t(page, "ny-reason")).toHaveText("A run in acme/app is waiting to use Priya Raman's Claude plan. It runs on that plan only with Priya Raman's go-ahead. If nobody answers here in time, the run is not started on that plan until Priya Raman answers.");
+    await expect(t(page, "ny-timeout")).toHaveText("If nobody answers in time, this run is not started on that plan.");
     await expect(t(page, "ny-waiting")).toHaveCount(0);
     await t(page, `ny-choice-${A1}-approve`).click();
     await expect(t(page, "ny-live")).toHaveText("Answered: Yes, use my plan for this run.");
@@ -670,7 +670,7 @@ test.describe("D#598 P8c: Needs you", () => {
   });
 
   // D#7 DW-R7 follow-up: a yes the holder's runners cannot act on is refused with a sentence that names the next step; the ask stays and can still be declined.
-  const GONE = "Your runner no longer lists this repository, so this run can't start on your plan. Add the repository to your runner, then say yes again. Nothing was started.";
+  const GONE = "You have no live runner on your plan that lists this repository (it may have been removed, or never set up), so this run can't start on your plan. Add the repository to a runner on your plan, or set one up, then say yes again. Nothing was started.";
   for (const width of [1280, 360]) {
     test(`DW-R7: a yes with no runner listing the repository says what to do next, keeps the ask open and answerable, at ${width} px`, async ({ page }) => {
       const { mock, errors } = await setup(page, { requests: [], asks: [ask({ ...PLAN_ASK, plan_holder: { name: "Priya Raman", is_you: true } })], answerReply: 409, answerCode: "runner_gone" });
@@ -692,6 +692,28 @@ test.describe("D#598 P8c: Needs you", () => {
       await clean(page, errors);
     });
   }
+
+  // D#7 DW-R7 follow-up: the run behind the ask moved on (started another way, failed, or removed) between the page loading and the click. The sentence shows, the list is read again and the row leaves; it runs on all three projects, so it is checked at phone, tablet and desktop widths.
+  test("DW-R7: a yes for a run that has moved on says so, reads the list again, the row leaves, and nothing scrolls sideways", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask({ ...PLAN_ASK, plan_holder: { name: "Priya Raman", is_you: true } })], answerReply: 409, answerCode: "run_moved_on" });
+    await open(page);
+    await expect(t(page, "ny-row")).toHaveCount(1);
+    mock.asks = []; // the server withdrew the ask when the run moved on
+    await press(t(page, `ny-choice-${A1}-approve`));
+    await expect(t(page, "ny-action-error")).toHaveText("That run has already moved on, so there is nothing to answer.");
+    await expect(t(page, "ny-empty")).toHaveText("Nothing needs you right now.");
+    await expect(t(page, "ny-row")).toHaveCount(0);
+    const m = await page.evaluate((sel) => {
+      const app = document.querySelector(sel) as HTMLElement;
+      const e = document.querySelector('[data-testid="ny-action-error"]') as HTMLElement | null;
+      return { over: app.scrollWidth > app.clientWidth, doc: document.documentElement.scrollWidth > document.documentElement.clientWidth, w: e ? e.getBoundingClientRect().width : 0, aw: app.clientWidth };
+    }, `${WIN} .ny-app`);
+    expect(m.over).toBe(false);
+    expect(m.doc).toBe(false);
+    expect(m.w).toBeLessThanOrEqual(m.aw);
+    expect(mock.answers).toHaveLength(1);
+    await clean(page, errors);
+  });
 
   test("E6: a network error then a second press resends the same Idempotency-Key, and the replayed answer removes the row and names the response's option", async ({ page }) => {
     const { mock, errors } = await setup(page, { requests: [], asks: [ask()], dropAnswers: 1, answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "leave_it" } });

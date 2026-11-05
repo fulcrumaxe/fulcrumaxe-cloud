@@ -310,7 +310,7 @@ export async function answerAskIn(client: PoolClient, input: { askId: string; ch
 }
 
 /** Why an ask was withdrawn (migration 0826). Stored on the row as `withdrawn_reason`. */
-export const ASK_WITHDRAW_REASONS = ['item_closed', 'item_halted', 'superseded'] as const;
+export const ASK_WITHDRAW_REASONS = ['item_closed', 'item_halted', 'superseded', 'run_moved_on'] as const;
 export type AskWithdrawReason = (typeof ASK_WITHDRAW_REASONS)[number];
 
 export interface WithdrawnAsk {
@@ -323,7 +323,7 @@ export const ASK_WITHDRAW_DEFAULT_LIMIT = 100;
 
 /**
  * One sweep of `decision_ask_withdraw()` (migration 0826) on the RECEIPT pool: every open or overdue ask whose item is closed, merged,
- * halted, or has a newer executor run is moved to `withdrawn` with its reason, across tenants. It is for the worker's tick only: the
+ * halted, has a newer executor run, or (a member-plan ask) whose run is no longer waiting, is moved to `withdrawn` with its reason, across tenants. It is for the worker's tick only: the
  * definer needs no session tenant, and nothing in the result is user text. Returns the asks that moved in this call, oldest first.
  */
 export async function withdrawStaleAsks(pool: Pick<Pool, 'query'>, limit: number = ASK_WITHDRAW_DEFAULT_LIMIT): Promise<WithdrawnAsk[]> {
@@ -340,7 +340,8 @@ export async function withdrawStaleAsks(pool: Pick<Pool, 'query'>, limit: number
 
 /**
  * D#7 DP4b-2 (R-7-DP4b-2): is this item waiting on an answer? Derived from current truth, never a stamp: the item has an `open` or `overdue` ask whose
- * run is the item's newest executor run. An ask on an older run (the item has moved on), or one that is answered, proceeded or withdrawn, is not a wait.
+ * run is the item's newest executor run. An ask on an older run (the item has moved on), or one that is answered, proceeded or withdrawn, is not a wait; nor is an
+ * open member-plan ask whose run is no longer pending, unapproved and unclaimed (nobody can answer it; the sweep withdraws it on its next tick).
  * The one definition the worker's `advanceBuildFailed` check and the activity read both use. `client` must come from `withTenant`.
  */
 export async function isItemWaitingOnAnswer(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
@@ -349,6 +350,9 @@ export async function isItemWaitingOnAnswer(client: Pick<PoolClient, 'query'>, w
        SELECT 1 FROM decision_asks a
         WHERE a.work_item_id = $1::uuid AND a.state IN ('open', 'overdue')
           AND a.run_id = (SELECT r.id FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.role = 'executor' ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+          -- A member-plan ask waits only while its run does (pending, unapproved, unclaimed), the same test the withdraw sweep (0991) uses, so an item is not held until the next tick.
+          AND NOT (a.decision_type = 'runner_run_on_member_plan' AND a.run_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM agent_runs m WHERE m.id = a.run_id AND m.status = 'pending' AND m.approved_by IS NULL AND m.runner_id IS NULL))
      ) AS waiting`,
     [workItemId],
   );

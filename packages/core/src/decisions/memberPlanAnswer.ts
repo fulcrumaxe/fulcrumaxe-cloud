@@ -10,7 +10,7 @@ import { RUNNER_RUN_DECISION_TYPE } from '@fx/db/src/runnerPlanDial.js';
  * A yes is refused (`runner_gone`) when the holder no longer has a live subscription runner that lists the run's repository: `approved_by` is written once, so approving
  * then would leave a run no runner of theirs can take. Nothing is written, the ask stays open and answerable, and the person is told to add the repository to their runner. The caller writes the receipt and closes the ask in the same transaction, so a refusal below leaves the ask open.
  *
- * Returns whether the run was approved, so the caller can wake the runners. `refuse` builds the caller's error: `forbidden` for anyone but the holder, and for a
+ * Returns whether the run was approved, so the caller can wake the runners. A No is refused as moot too when the run no longer waits, and the ask is then closed by the withdraw sweep (0991), not here: the refusal rolls the answer back. `refuse` builds the caller's error: `forbidden` for anyone but the holder, and for a
  * holder who can no longer approve; `moot` when the run is no longer waiting (cancelled, claimed, or approved some other way).
  */
 export const MEMBER_PLAN_APPROVE = 'approve';
@@ -23,6 +23,10 @@ export async function answerMemberPlanAsk(
 ): Promise<boolean> {
   const holder = (await client.query<{ plan_holder: string | null }>('SELECT plan_holder FROM runner_plan_asks WHERE ask_id = $1::uuid', [input.askId])).rows[0]?.plan_holder;
   if (holder === undefined || holder === null || holder !== input.userId || input.runId === null) throw refuse('forbidden');
+  // A No is only true while the run still waits: after the claim's own approval, the Runs card's Approve, a claim or a cancel, recording it as "declined" would be a receipt that
+  // contradicts what happened. It is refused as moot, like a yes, and the ask stays as it was.
+  const waiting = await client.query(`SELECT 1 FROM agent_runs WHERE id = $1::uuid AND status = 'pending' AND approved_by IS NULL AND runner_id IS NULL`, [input.runId]);
+  if (waiting.rows.length === 0) throw refuse('moot');
   if (input.choice !== MEMBER_PLAN_APPROVE) return false;
   const covered = await client.query(
     `SELECT 1 FROM agent_runs a JOIN runners r ON r.account_id = a.account_id AND r.registered_by = $2::uuid AND r.credential_mode = 'subscription' AND r.revoked_at IS NULL AND a.dispatch_repo_id = ANY (r.allowed_repo_ids)

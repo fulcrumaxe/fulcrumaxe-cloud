@@ -7,7 +7,10 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
+import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
+import { createAdvanceModule } from "../src/advance.js";
 import { runAskWindowTick } from "../src/askWindowTick.js";
+import { sweepAskWithdrawals } from "../src/askWithdrawSweep.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerPlanAsk } from "../src/runnerPlanAsk.js";
 
@@ -17,7 +20,7 @@ import { createRunnerPlanAsk } from "../src/runnerPlanAsk.js";
  */
 const LOGIN = "fx_runner_plan_ask_test";
 const ROLES = ["executor", "code-reviewer"];
-const OWNER_SENTENCE = (repo: string, name: string): string => `A run in ${repo} is waiting to use ${name}'s Claude plan. It starts only if ${name} says yes here. If nobody answers in time, it stays stopped.`;
+const OWNER_SENTENCE = (repo: string, name: string): string => `A run in ${repo} is waiting to use ${name}'s Claude plan. It runs on that plan only with ${name}'s go-ahead. If nobody answers here in time, the run is not started on that plan until ${name} answers.`;
 
 describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
   let adminPool: Pool;
@@ -64,17 +67,18 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
     return id;
   }
   /** A pending runner run with a real signed job, started by a teammate. */
-  async function pending(o: { initiatedBy?: string | null; approvedBy?: string | null } = {}): Promise<string> {
+  async function pending(o: { initiatedBy?: string | null; approvedBy?: string | null; repoId?: string; workItemId?: string } = {}): Promise<string> {
+    const repoId = o.repoId ?? A.repoId;
     const id = randomUUID();
     const job: Job = {
-      schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "app", private: true }, role: "executor", mode: "local", spec: null,
+      schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: repoId, owner: "acme", name: "app", private: true }, role: "executor", mode: "local", spec: null,
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") }, role_card: { text: "c", sha256: sha256Text("c") }, role_tools_sha256: "a".repeat(64), continues: null,
       branch_prefix: "fx/", model_hint: null, issued_at: new Date(T0 - 1000).toISOString(), expires_at: new Date(T0 + 72 * 3_600_000).toISOString(), key_id: "k1",
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, work_item_id, job_signed, initiated_by, approved_by, created_at)
        VALUES ($1, $2, 'executor', 'runner', 'pending', 'runner_local', $3, $4, $5::jsonb, $6, $7, now())`,
-      [id, A.accountId, A.repoId, A.workItemId, JSON.stringify(signJob(job, key)), o.initiatedBy === undefined ? teammate : o.initiatedBy, o.approvedBy ?? null],
+      [id, A.accountId, repoId, o.workItemId ?? A.workItemId, JSON.stringify(signJob(job, key)), o.initiatedBy === undefined ? teammate : o.initiatedBy, o.approvedBy ?? null],
     );
     return id;
   }
@@ -109,7 +113,7 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       expect(await raise()).toBe(1);
       const [ask] = await asks(id);
       expect(ask).toMatchObject({ state: "open", proposed: "approve", timeout_outcome: "stop_and_flag", run_id: id, work_item_id: A.workItemId });
-      expect(ask.options).toEqual([{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, don't run it" }]);
+      expect(ask.options).toEqual([{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, not on my plan" }]);
       expect(ask.rationale).toContain(OWNER_SENTENCE("acme/app", "Priya Raman"));
       expect(ask.rationale).not.toContain(holder);
       expect(ask.rationale + JSON.stringify(ask.options)).not.toMatch(/NaN|undefined|null/);
@@ -236,6 +240,30 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       }
     });
 
+    it("a no that arrives after the run was approved (the claim's own approval under a loosened dial, or the Runs card) is refused as moot: no declined receipt, nothing contradicts what ran", async () => {
+      const id = await pending();
+      await raise();
+      const [ask] = await asks(id);
+      await withTenant(receiptPool, A.accountId, holder, (c) => c.query("SELECT agent_run_approve($1)", [id]));
+      await expect(answer(holder, ask.id, "decline")).rejects.toMatchObject({ code: "run_moved_on", status: 409 });
+      await expect(answer(holder, ask.id, "deny")).rejects.toMatchObject({ code: "run_moved_on", status: 409 });
+      expect(await receipts(id)).toEqual([]);
+      expect((await asks(id))[0]).toMatchObject({ state: "open" });
+      expect(await runRow(id)).toMatchObject({ approved_by: holder });
+    });
+
+    it("a no for a cancelled run is refused as moot too, and a no for a run still waiting is taken", async () => {
+      const gone = await pending();
+      const waiting = await pending();
+      await raise();
+      const [goneAsk] = await asks(gone);
+      const [waitingAsk] = await asks(waiting);
+      await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [gone]);
+      await expect(answer(holder, goneAsk.id, "decline")).rejects.toMatchObject({ code: "run_moved_on", status: 409 });
+      await answer(holder, waitingAsk.id, "decline");
+      expect((await receipts(waiting)).map((r) => r.chosen)).toEqual(["decline"]);
+    });
+
     it("a second answer is refused as already answered and writes nothing more", async () => {
       const id = await pending();
       await raise();
@@ -262,7 +290,7 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       expect(await listed(holder)).toHaveLength(1);
       await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [id]);
       expect(await listed(holder)).toEqual([]);
-      await expect(answer(holder, ask.id, "approve")).rejects.toMatchObject({ code: "already_answered", status: 409 });
+      await expect(answer(holder, ask.id, "approve")).rejects.toMatchObject({ code: "run_moved_on", status: 409 });
       expect((await asks(id))[0]).toMatchObject({ state: "open" });
       expect(await receipts(id)).toEqual([]);
     });
@@ -524,10 +552,155 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       }
     });
 
+    it("the runs looked at per call are bounded at 25: with 25 failing runs ahead of it, a good run is not reached, and with 24 it is", async () => {
+      const bad: string[] = [];
+      for (let i = 0; i < 25; i++) bad.push(await pending());
+      const good = await pending();
+      await admin.query(`CREATE OR REPLACE FUNCTION fx_bad_ask() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.run_id::text = ANY (ARRAY['${bad.join("','")}']) THEN RAISE EXCEPTION 'forced failure' USING ERRCODE = 'check_violation'; END IF; RETURN NEW; END $$`);
+      await admin.query("CREATE TRIGGER fx_bad_ask BEFORE INSERT ON decision_asks FOR EACH ROW EXECUTE FUNCTION fx_bad_ask()");
+      try {
+        const failed: string[] = [];
+        const run = () => createRunnerPlanAsk(receiptPool, { onFailure: (runId) => failed.push(runId) })({ accountId: A.accountId, runnerId: runner, roles: ROLES });
+        expect(await run()).toBe(0);
+        expect(failed).toHaveLength(25);
+        expect(await asks(good)).toEqual([]);
+        // One fewer failing run ahead: the 25th run looked at is the good one.
+        await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [bad[0]]);
+        failed.length = 0;
+        expect(await run()).toBe(1);
+        expect(failed).toHaveLength(24);
+        expect(await asks(good)).toHaveLength(1);
+      } finally {
+        await admin.query("DROP TRIGGER IF EXISTS fx_bad_ask ON decision_asks");
+        await admin.query("DROP FUNCTION IF EXISTS fx_bad_ask()");
+      }
+    });
+
     it("the work per call is bounded: at most five asks are raised in one call", async () => {
       for (let i = 0; i < 8; i++) await pending();
       expect(await raise()).toBe(5);
       expect(await raise()).toBe(3);
+    });
+  });
+
+  describe("an account at its ceiling still raises the ask", () => {
+    it("a claim that stops at the account's limit still raises the waiting run's ask", async () => {
+      // The account may run one job at a time. The holder's first runner takes it; the claim of a second runner (free of its own, but the account is full) is offered a run
+      // on another repository (so the per-repository count does not hide it) and stops at the ceiling.
+      await admin.query("INSERT INTO account_runner_concurrency (account_id, total_jobs, per_repo_jobs, updated_by) VALUES ($1, 1, 1, $2)", [A.accountId, A.userId]);
+      const other = (await admin.query<{ id: string }>("INSERT INTO repos (account_id, gh_repo_id, product, execution_mode, gh_owner, gh_name) VALUES ($1, 987654, 'team', 'runner_local', 'acme', 'other') RETURNING id", [A.accountId])).rows[0]!.id;
+      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [runner, [A.repoId, other]]);
+      const second = await newRunner(holder, { repos: [A.repoId, other] });
+      const own = await pending({ initiatedBy: holder });
+      const one = createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => T0, randomBetween: (min) => min, raiseMemberPlanAsks: (i) => raise(i.runnerId, i.roles), limits: () => ({ maxConcurrentRunnerJobs: 1, maxConcurrentHeavyRunnerJobs: 1, maxRunWallClockMs: 7_200_000 }) });
+      const claim1 = (runnerId: string) => one.claimRunnerRun({ accountId: A.accountId, runnerId });
+      expect(await claim1(runner)).toMatchObject({ kind: "claimed", runId: own });
+      const next = await pending({ initiatedBy: holder, repoId: other });
+      const waiting = await pending();
+      expect(await asks(waiting)).toEqual([]);
+      expect(await claim1(second)).toMatchObject({ kind: "idle" });
+      expect((await runRow(next)).status).toBe("pending");
+      expect(await asks(waiting)).toHaveLength(1);
+    });
+  });
+
+  describe("an ask whose run moved on is withdrawn by the sweep", () => {
+    // A second item, so one run does not supersede the other (a newer executor run on the same item is the sweep's older reason, `superseded`).
+    const newItem = async (): Promise<string> => {
+      const id = randomUUID();
+      await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage) VALUES ($1, $2, $3, 'feature', 'internal', 'in_progress')", [id, A.accountId, A.repoId]);
+      return id;
+    };
+    const waitingOnAnswer = () => withTenant(receiptPool, A.accountId, (c) => isItemWaitingOnAnswer(c, A.workItemId));
+    const overdueEvents = async (askId: string) => (await admin.query("SELECT 1 FROM domain_events WHERE account_id = $1 AND type = 'decision.ask_overdue' AND subject_id = $2", [A.accountId, askId])).rowCount;
+    const makeDue = async (askId: string) => {
+      await admin.query("BEGIN");
+      await admin.query("SET LOCAL session_replication_role = replica");
+      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '30 days', answer_due_at = answer_due_at - interval '30 days' WHERE id = $1", [askId]);
+      await admin.query("COMMIT");
+    };
+    function advanceFacade() {
+      const recorded: unknown[][] = [];
+      const advance = createAdvanceModule(receiptPool, {
+        starter: null, resolveRunSeat: async () => ({ ok: false, reason: "unused" }) as never, startAdvance: async () => undefined, triage: null,
+        buildFailed: async (_pool, ...args) => { recorded.push(args); return { status: "recorded", stage: "needs_human" }; },
+      });
+      return { advance, recorded };
+    }
+
+    it("approved on the Runs card, claimed, then failed: the item stops waiting at once, before any sweep, and the failed build moves through advance", async () => {
+      const id = await pending();
+      await raise();
+      const [ask] = await asks(id);
+      // The control: while the run waits, the ask holds the item and a failed build is refused.
+      expect(await waitingOnAnswer()).toBe(true);
+      await withTenant(receiptPool, A.accountId, holder, (c) => c.query("SELECT agent_run_approve($1)", [id]));
+      // Approved some other way: nobody can answer it, so it no longer holds the item, though the row is still open.
+      expect(await waitingOnAnswer()).toBe(false);
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: id });
+      expect(await waitingOnAnswer()).toBe(false);
+      await admin.query("UPDATE agent_runs SET status = 'failed' WHERE id = $1", [id]);
+      // Before any sweep: nothing in Needs you, nobody can answer, the row is still open, and the item is not waiting.
+      expect(await listed(holder)).toEqual([]);
+      await expect(answer(holder, ask.id, "approve")).rejects.toMatchObject({ code: "run_moved_on", status: 409 });
+      await expect(answer(holder, ask.id, "decline")).rejects.toMatchObject({ code: "run_moved_on", status: 409 });
+      expect((await asks(id))[0]).toMatchObject({ state: "open" });
+      expect(await waitingOnAnswer()).toBe(false);
+      const { advance, recorded } = advanceFacade();
+      expect(await advance.advanceBuildFailed(A.accountId, A.workItemId, id, "no_pull_request")).toEqual({ status: "recorded", stage: "needs_human" });
+      expect(recorded).toHaveLength(1);
+      // The sweep still closes the row, with its own reason, and the item stays not waiting.
+      const out = await sweepAskWithdrawals({ pool: receiptPool, warn: () => undefined });
+      expect(out.byReason.run_moved_on).toBeGreaterThanOrEqual(1);
+      expect((await asks(id))[0]).toMatchObject({ state: "withdrawn", withdrawn_reason: "run_moved_on", answered_option: null });
+      expect(await waitingOnAnswer()).toBe(false);
+      expect(await receipts(id)).toEqual([]);
+    });
+
+    it("each way a run stops waiting ends the item's wait on its own: cancelled and handed to a runner; a run still pending and unapproved keeps it", async () => {
+      const waitingOn = (itemId: string) => withTenant(receiptPool, A.accountId, (c) => isItemWaitingOnAnswer(c, itemId));
+      const items = { still: await newItem(), cancelled: await newItem(), handed: await newItem() };
+      const runs = { still: await pending({ workItemId: items.still }), cancelled: await pending({ workItemId: items.cancelled }), handed: await pending({ workItemId: items.handed }) };
+      await raise();
+      for (const id of Object.values(runs)) expect(await asks(id)).toHaveLength(1);
+      for (const itemId of Object.values(items)) expect(await waitingOn(itemId)).toBe(true);
+      // Cancelled with no approval: the status alone moves it on.
+      await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [runs.cancelled]);
+      // Still pending and unapproved, but a runner holds it: the runner alone moves it on.
+      await admin.query("UPDATE agent_runs SET runner_id = $2 WHERE id = $1", [runs.handed, runner]);
+      expect(await waitingOn(items.still)).toBe(true);
+      expect(await waitingOn(items.cancelled)).toBe(false);
+      expect(await waitingOn(items.handed)).toBe(false);
+      // None of the rows was swept: all three asks are still open.
+      for (const id of Object.values(runs)) expect((await asks(id))[0]).toMatchObject({ state: "open" });
+    });
+
+    it("the tick withdraws before the overdue pass: a due ask on a moved-on run gets no overdue state and no overdue event, while one on a waiting run still goes overdue", async () => {
+      const moved = await pending();
+      const waiting = await pending({ workItemId: await newItem() });
+      await raise();
+      const [movedAsk] = await asks(moved);
+      const [waitingAsk] = await asks(waiting);
+      await withTenant(receiptPool, A.accountId, holder, (c) => c.query("SELECT agent_run_approve($1)", [moved]));
+      await makeDue(movedAsk.id);
+      await makeDue(waitingAsk.id);
+      await runAskWindowTick({ pool: receiptPool, warn: () => undefined });
+      expect((await asks(moved))[0]).toMatchObject({ state: "withdrawn", withdrawn_reason: "run_moved_on" });
+      expect(await overdueEvents(movedAsk.id)).toBe(0);
+      expect((await asks(waiting))[0]).toMatchObject({ state: "overdue", withdrawn_reason: null });
+      expect(await overdueEvents(waitingAsk.id)).toBe(1);
+    });
+
+    it("an ask stuck before this change is cleared by the next sweep, and an ask on a truly waiting run is untouched by it", async () => {
+      const stuck = await pending();
+      const waiting = await pending({ workItemId: await newItem() });
+      await raise();
+      await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [stuck]);
+      const out = await sweepAskWithdrawals({ pool: receiptPool, warn: () => undefined });
+      expect(out.failed).toBe(false);
+      expect((await asks(stuck))[0]).toMatchObject({ state: "withdrawn", withdrawn_reason: "run_moved_on" });
+      expect((await asks(waiting))[0]).toMatchObject({ state: "open", withdrawn_reason: null });
+      expect(await listed(holder)).toHaveLength(1);
     });
   });
 
