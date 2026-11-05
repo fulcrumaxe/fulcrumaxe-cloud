@@ -79,6 +79,8 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     }
     return r;
   };
+  /** The gate's own fact for the enqueue (the enqueue fact `setup` writes is the webhook's, which carries no dial version): the evidence that the gate, not a person, queued it. */
+  const gateQueued = (r: QueueRepo, it: QueueItem) => tenant(r, (c) => recordDriverEvent(c, r.accountId, { workItemId: it.workItemId, kind: "merge_gate", dedupeKey: `${it.head}:merge_enqueued`, code: "merge_enqueued", headSha: it.head, prNumber: it.pr, dialVersion: 0 }));
   const stage = async (it: QueueItem) => (await db.admin.query<{ stage: string }>(`SELECT stage FROM work_items WHERE id = $1`, [it.workItemId])).rows[0]!.stage;
   const facts = async (it: QueueItem, kind: string) => (await db.admin.query<{ code: string | null }>(`SELECT code FROM work_item_driver_events WHERE work_item_id = $1 AND kind = $2 ORDER BY seq`, [it.workItemId, kind])).rows.map((x) => x.code);
   const queued = (r: QueueRepo, it: QueueItem) => tenant(r, async (c) => (await c.query<{ q: boolean }>(`SELECT ${isQueuedSql("$1::uuid", "$2::uuid", String(it.pr))} AS q`, [r.accountId, it.workItemId])).rows[0]!.q);
@@ -86,6 +88,7 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
   it("a lost merge settles as merged by the queue: the fact, the entry (the gate's) and the item once; a replay and a later pass change nothing", async () => {
     const r = await setup([7]);
     const it = r.items.get(7)!;
+    await gateQueued(r, it);
     const w = world(r, { 7: { state: "closed", merged: true } });
     expect(await run(r, w)).toEqual({ reads: 1, settled: 1, escalated: 0 });
     expect(await r.entry(7)).toMatchObject({ state: "merged", mergedBy: "gate", slotHolder: null });
@@ -117,6 +120,7 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     await run(r, w, { now: at(60) });
     expect(await facts(it, "merged_via_queue")).toHaveLength(1);
     expect(await stage(it)).toBe("merged");
+    expect(await r.entry(7)).toMatchObject({ state: "merged", mergedBy: "person" });
     const receipts = await db.admin.query(`SELECT 1 FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'merge_after_reviews'`, [it.workItemId]);
     expect(receipts.rowCount).toBe(0);
   });
@@ -124,6 +128,7 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
   it("a merge at a head other than the one enqueued is still recorded as the queue's merge, with the difference raised once", async () => {
     const r = await setup([7]);
     const it = r.items.get(7)!;
+    await gateQueued(r, it);
     await run(r, world(r, { 7: { state: "closed", merged: true, headSha: it.fresh } }));
     expect(await facts(it, "escalated")).toEqual(["merged_head_differs"]);
     expect(await r.entry(7)).toMatchObject({ state: "merged", mergedBy: "gate" });
