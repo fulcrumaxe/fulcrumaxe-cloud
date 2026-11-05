@@ -99,11 +99,26 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     const r = await setup([7]);
     const it = r.items.get(7)!;
     await db.admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3)`, [r.accountId, it.workItemId, it.head]);
+    // The gate's own fact for this enqueue (the enqueue fact above is the webhook's, which carries no dial version): the gate read version 0 (no row).
+    await tenant(r, (c) => recordDriverEvent(c, r.accountId, { workItemId: it.workItemId, kind: "merge_gate", dedupeKey: `${it.head}:merge_enqueued`, code: "merge_enqueued", headSha: it.head, prNumber: it.pr, dialVersion: 0 }));
     const w = world(r, { 7: { state: "closed", merged: true } });
     await run(r, w);
     await run(r, w, { now: at(60) });
     const receipts = await db.admin.query(`SELECT chosen, dial_version, actor FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'merge_after_reviews'`, [it.workItemId]);
     expect(receipts.rows).toEqual([{ chosen: "act", dial_version: 0, actor: "policy" }]);
+  });
+
+  it("a merge settled here of a pull request a person queued by hand (no gate fact at that head) is the queue's merge as a fact and the item merged, with no policy receipt", async () => {
+    const r = await setup([7]);
+    const it = r.items.get(7)!;
+    await db.admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3)`, [r.accountId, it.workItemId, it.head]);
+    const w = world(r, { 7: { state: "closed", merged: true } });
+    await run(r, w);
+    await run(r, w, { now: at(60) });
+    expect(await facts(it, "merged_via_queue")).toHaveLength(1);
+    expect(await stage(it)).toBe("merged");
+    const receipts = await db.admin.query(`SELECT 1 FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'merge_after_reviews'`, [it.workItemId]);
+    expect(receipts.rowCount).toBe(0);
   });
 
   it("a merge at a head other than the one enqueued is still recorded as the queue's merge, with the difference raised once", async () => {

@@ -661,8 +661,9 @@ async function recordQueueMerge(client: PoolClient, accountId: string, workItemI
     prNumber: mapped.prNumber,
     ...(sent.queueEntryId !== null ? { queueEntryId: sent.queueEntryId } : {}),
   });
-  // D#7 DW-R4: the receipt for a merge the gate sent to the host's queue (a merge with no `merge_enqueued` fact, a person's, returned above). The dial is the one that
-  // stood when the gate enqueued; a failed write never fails this delivery (savepoint, reported).
+  // D#7 DW-R4: the receipt for a merge the gate sent to the host's queue (a merge with no `merge_enqueued` fact, a person's, returned above). The dial is the one the gate read
+  // when it enqueued. An enqueue the gate did not decide (a person pressed GitHub's own "Merge when ready", or another tool enqueued; the fact above is only this delivery's)
+  // gets no receipt: `recordMergeReceiptOn` answers `not_policy` when no gate fact of ours stands at that head. A failed write never fails this delivery (savepoint, reported).
   await recordMergeReceiptOn(client, { accountId, workItemId, eventHead: merged ?? sent.headSha, reviewHeads: [merged ?? sent.headSha, sent.headSha], outcome: 'merged', decidedBy: { kind: 'merge_enqueued', head: sent.headSha } });
   if (merged === sent.headSha) return;
   const { recorded } = await recordDriverEvent(client, accountId, {
