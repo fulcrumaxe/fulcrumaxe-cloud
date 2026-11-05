@@ -46,6 +46,8 @@ export interface WritebackPull {
   baseRef: string;
   /** True when the head branch lives in the base repository (not a fork). */
   sameRepo: boolean;
+  /** GitHub's `merged_by.type` (`User`, `Bot`); null when absent. */
+  mergedByType: string | null;
 }
 
 /** What GitHub says about the commits `head` has that `base` does not (the three-dot compare). */
@@ -168,6 +170,7 @@ export function createWritebackGitHub(deps: { http: WritebackHttp; owner: string
       headRef: head.ref,
       baseRef: base.ref,
       sameRepo: headRepo !== null && headRepo === baseRepo && baseRepo === fullName,
+      mergedByType: isObj(b.merged_by) && typeof b.merged_by.type === "string" ? b.merged_by.type : null,
     };
   }
 

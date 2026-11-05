@@ -141,6 +141,19 @@ describe('work item driver events', () => {
     await insert('merge_enqueued', 'MQE_raw_ok');
   });
 
+  it('migration 0990: only the merge gate\'s facts carry a dial version; it must be a non-negative integer; it is stored and read back', async () => {
+    const base = { workItemId: refs.workItemId, dedupeKey: 'dv' };
+    for (const kind of ['merge_gate', 'merged_by_gate', 'merge_enqueued'] as const) expect(() => assertDriverEvent({ ...base, kind, dialVersion: 3 })).not.toThrow();
+    expect(() => assertDriverEvent({ ...base, kind: 'stopped', dialVersion: 3 })).toThrow(/only a merge gate fact/);
+    for (const bad of [-1, 1.5, Number.NaN, 2 ** 31]) expect(() => assertDriverEvent({ ...base, kind: 'merge_gate', dialVersion: bad })).toThrow(/bad dial version/);
+    await withTenant(appUserPool, refs.accountId, async (c) => {
+      await recordDriverEvent(c, refs.accountId, { ...base, kind: 'merge_enqueued', dedupeKey: 'dv:with', code: 'queue', dialVersion: 0 });
+      await recordDriverEvent(c, refs.accountId, { ...base, kind: 'merge_enqueued', dedupeKey: 'dv:none', code: 'queue' });
+    });
+    const { rows } = await admin.query("SELECT dedupe_key, dial_version FROM work_item_driver_events WHERE work_item_id = $1 AND dedupe_key LIKE 'dv:%' ORDER BY dedupe_key", [refs.workItemId]);
+    expect(rows).toEqual([{ dedupe_key: 'dv:none', dial_version: null }, { dedupe_key: 'dv:with', dial_version: 0 }]);
+  });
+
   it('D#694 B5: the table stays append-only for the app role, new column included', async () => {
     await expect(withTenant(appUserPool, refs.accountId, (c) => c.query("UPDATE work_item_driver_events SET queue_entry_id = 'MQE_x' WHERE work_item_id = $1", [refs.workItemId]))).rejects.toThrow(/permission denied/);
   });

@@ -393,6 +393,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   // 4. The gate. It merges (bound to the head's sha) or marks the PR for a person.
   // The merge dial as the gate read it (D#7 DW-R4); what the receipt names. No row: the catalogue default at version 0.
   let mergeDial: MergeDial = { disposition: "act", version: 0 };
+  // Whether the gate read the dial at all: a stop before that read has no dial to name, so its facts carry no version.
+  let dialRead = false;
   const out = await runMergeGate(
     {
       pool,
@@ -425,6 +427,7 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       // A failed dial read throws (the step retries); it is never read as an `act`.
       isAutoMergeAllowed: async () => {
         mergeDial = await withTenant(pool, accountId, (client) => readMergeDial(client, ctx.repoId));
+        dialRead = true;
         return mergeDial.disposition !== "ask" && autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge });
       },
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
@@ -474,8 +477,11 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   // The card's rows speak of the head the reviewers judged and the item's own pull request; a paired item's public head rides in the dedupe key.
   const headForRow = publicPr !== null ? (SHA_PATTERN.test(headSha) ? headSha : null) : SHA_PATTERN.test(outHead) ? outHead : null;
   const keyHead = publicPr !== null ? `${headForRow ?? "nohead"}:${SHA_PATTERN.test(outHead) ? outHead : "nopublic"}` : (headForRow ?? "nohead");
+  // Migration 0990: the version the gate read is written on its own facts, so a receipt written later names it instead of re-reading the dial by time.
+  const dialFact = dialRead ? { dialVersion: mergeDial.version } : {};
   await withTenant(pool, accountId, async (client) => {
     await recordDriverEvent(client, accountId, {
+      ...dialFact,
       workItemId,
       kind: "merge_gate",
       dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}${policyHold ? ":policy_hold" : ""}${busy ? (out.outcome === "ready_human_merges" && out.reasons.includes("ordered_resource_unreadable") ? ":merge_repo_busy_unreadable" : ":merge_repo_busy") : ""}`,
@@ -485,11 +491,12 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       prNumber,
     });
     if (out.outcome === "merged") {
-      await recordDriverEvent(client, accountId, { workItemId, kind: "merged_by_gate", dedupeKey: `merged:${out.headSha}`, headSha: headForRow, prNumber });
+      await recordDriverEvent(client, accountId, { ...dialFact, workItemId, kind: "merged_by_gate", dedupeKey: `merged:${out.headSha}`, headSha: headForRow, prNumber });
     }
     // D#694 B5: a pull request put in GitHub's queue is a one-time stamp of what was sent. `merged_by_gate` stays for the direct path only; the merge itself is the webhook's to record.
     if (out.outcome === "merge_enqueued") {
       await recordDriverEvent(client, accountId, {
+        ...dialFact,
         workItemId,
         kind: "merge_enqueued",
         // A head the queue took out and the gate put back is a new fact (the retry's), not the first one again.
@@ -515,8 +522,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
  * D#7 DW-R4: writes the receipt behind a merge by policy (`merged`) or behind a pull request the policy left for a person (`ready`), through the database's
  * `merge_receipt_write` (see `recordMergeReceiptOn` in @fx/db, which the webhook and the queue reconcile use for the host queue's merge). It runs AFTER the
  * gate's facts are recorded, which is what the database checks, and it can not fail the merge: a miss is reported through the closed telemetry set and the merge
- * stands. A merge with a fact and no receipt is a missed one. `dial` is what the gate read when it decided; a caller that did not leaves it out and the dial that
- * stood at `decidedBy` (else now) is used.
+ * stands. A merge with a fact and no receipt is a missed one. `dial` is what the gate read when it decided; a caller that did not leaves it out and the version the
+ * `decidedBy` fact names is used (a fact with none: the dial as of its time; no `decidedBy`: now).
  */
 export async function recordMergeReceipt(pool: Pool, input: MergeReceiptCall & { accountId: string }): Promise<MergeReceiptResult> {
   try {

@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import { reportError } from '@fx/telemetry';
-import { readMergeDial, type MergeDial } from './mergeDial.js';
+import { readMergeDial, readMergeDialVersion, type MergeDial } from './mergeDial.js';
 import { writeMergeReceipt, writePlanWritebackReceipt } from './receiptWriter.js';
 
 /**
@@ -12,9 +12,10 @@ import { writeMergeReceipt, writePlanWritebackReceipt } from './receiptWriter.js
  * stage move) still commits. A miss is reported through the closed telemetry set (`merge_receipt_failed`; `merge_receipt_no_run` when no review run is
  * on any head given) and the merge stands.
  *
- * The dial the receipt names is the one that decided: the caller's own read (the gate), or the version that stood when the decision was recorded
- * (`decidedBy`: the newest fact of that kind at that head, such as the gate's `merge_enqueued`), else the dial now. A dial moved to `ask` since never
- * takes a receipt away from a merge that happened.
+ * The dial the receipt names is the one that decided: the caller's own read (the gate), or the version the deciding fact names (`decidedBy`: the newest fact of that
+ * kind at that head; for `merge_enqueued`, failing that the gate's own `merge_gate` fact of that code at that head). A fact with no version (written before migration 0990,
+ * or an enqueue nobody's gate decided) keeps the older read: the newest version created at or before the fact's time, which can name a version that committed after the
+ * decision. With no `decidedBy` it is the dial now. A dial moved to `ask` since never takes a receipt away from a merge that happened.
  */
 export interface MergeReceiptCall {
   accountId: string;
@@ -104,15 +105,27 @@ export async function recordMergeReceiptOn(client: PoolClient, call: MergeReceip
     let dial = call.dial;
     if (dial === undefined) {
       let at: string | null = null;
+      let named: number | null = null;
       if (call.decidedBy !== undefined) {
         const d = call.decidedBy;
-        const when = await client.query<{ at: string }>(
-          `SELECT created_at::text AS at FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = $3 AND head_sha = $4 AND ($5::text IS NULL OR code = $5) ORDER BY seq DESC LIMIT 1`,
+        const when = await client.query<{ at: string; dial_version: number | null }>(
+          `SELECT created_at::text AS at, dial_version FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = $3 AND head_sha = $4 AND ($5::text IS NULL OR code = $5) ORDER BY seq DESC LIMIT 1`,
           [accountId, workItemId, d.kind, d.head, d.code ?? null],
         );
         at = when.rows[0]?.at ?? null;
+        named = when.rows[0]?.dial_version ?? null;
+        // An enqueue fact the webhook or the reconcile wrote first has no version: the gate's own `merge_enqueued` fact at that head names the one it read.
+        if (named === null && d.kind === 'merge_enqueued') {
+          const gate = await client.query<{ dial_version: number }>(
+            `SELECT dial_version FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_gate' AND code = 'merge_enqueued' AND head_sha = $3 AND dial_version IS NOT NULL ORDER BY seq DESC LIMIT 1`,
+            [accountId, workItemId, d.head],
+          );
+          named = gate.rows[0]?.dial_version ?? null;
+        }
       }
-      dial = await readMergeDial(client, repoId, at);
+      // The version the gate wrote on its fact is the one that decided (migration 0990). A fact with none (written before 0990, or by the webhook or the reconcile)
+      // keeps the older read: the newest version created at or before the fact's time. That read can name a version the gate did not see (a dial row committed after the decision).
+      dial = named !== null ? await readMergeDialVersion(client, repoId, named) : await readMergeDial(client, repoId, at);
     }
     const chosen = call.outcome === 'ready' ? 'ask' : dial.disposition;
     const written = await writeMergeReceipt(client, { workItemId, headSha: call.eventHead, runId, outcome: call.outcome, chosen, dialVersion: dial.version });

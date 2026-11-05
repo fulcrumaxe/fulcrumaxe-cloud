@@ -42,12 +42,13 @@ const attestation = { reviewedHead: SRC, publicHead: PUB, same: true, incomplete
 /** A `merge_conflict_rounds` row of the item (D#519 MQ4-e1-a), open (no outcome) unless an outcome is given. */
 const roundRow = (outcome: string | null) => ({ id: "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a81", account_id: ACCOUNT, repo_id: REPO, work_item_id: ITEM, entry_id: null, round: 1, from_sha: SRC, base_sha: "b".repeat(40), base_ref: "main", conflict_files: ["src/a.ts"], run_id: null, to_sha: null, outcome, created_at: new Date(), ended_at: outcome === null ? null : new Date() });
 
-function fakePool(branch: string | null = `fx/p-${PUSH}`, rounds: Array<ReturnType<typeof roundRow>> = []) {
+function fakePool(branch: string | null = `fx/p-${PUSH}`, rounds: Array<ReturnType<typeof roundRow>> = [], dialVersion: number | null = null) {
   const statements: Array<{ sql: string; params: unknown[] | undefined }> = [];
   const client = {
     query: async (sql: string, params?: unknown[]) => {
       statements.push({ sql, params });
       if (/FROM merge_conflict_rounds/.test(sql)) return { rows: rounds, rowCount: rounds.length };
+      if (/SELECT dial_version FROM work_item_driver_events/.test(sql)) return { rows: dialVersion === null ? [] : [{ dial_version: dialVersion }], rowCount: dialVersion === null ? 0 : 1 };
       return { rows: /FROM plane_pushes/.test(sql) ? (branch === null ? [] : [{ branch }]) : [], rowCount: 0 };
     },
     release: () => undefined,
@@ -55,8 +56,8 @@ function fakePool(branch: string | null = `fx/p-${PUSH}`, rounds: Array<ReturnTy
   return { pool: { connect: async () => client } as never, statements };
 }
 
-function ops(over: { open?: ReturnType<typeof vi.fn>; reconcile?: ReturnType<typeof vi.fn>; closePrivate?: ReturnType<typeof vi.fn> | null; rounds?: Array<ReturnType<typeof roundRow>> } = {}) {
-  const f = fakePool(undefined, over.rounds);
+function ops(over: { open?: ReturnType<typeof vi.fn>; reconcile?: ReturnType<typeof vi.fn>; closePrivate?: ReturnType<typeof vi.fn> | null; rounds?: Array<ReturnType<typeof roundRow>>; dialVersion?: number } = {}) {
+  const f = fakePool(undefined, over.rounds, over.dialVersion ?? null);
   const plain = { request: vi.fn(async () => ({ status: 200, body: [] })) };
   const open = over.open ?? vi.fn(async () => plain as never);
   const closePrivate = over.closePrivate === null ? undefined : (over.closePrivate ?? vi.fn(async () => undefined));
@@ -249,9 +250,20 @@ describe("readPublicQueue and recordEnqueued", () => {
     const t = ops();
     await t.o.recordEnqueued({ accountId: ACCOUNT, order, entryId: "MQE_kwDOAAAAAQ" });
     const event = t.f.statements.find((s) => /INSERT INTO work_item_driver_events/.test(s.sql));
-    expect(event?.params).toEqual([ACCOUNT, ITEM, "merge_enqueued", "queue", [], PUB, 12, null, null, `enqueued:${PUB}`, null, null, "MQE_kwDOAAAAAQ"]);
+    expect(event?.params).toEqual([ACCOUNT, ITEM, "merge_enqueued", "queue", [], PUB, 12, null, null, `enqueued:${PUB}`, null, null, "MQE_kwDOAAAAAQ", null]);
     expect(t.f.statements.some((s) => s.params?.includes("merged_by_gate"))).toBe(false);
     expect(t.reconcile).not.toHaveBeenCalled();
+  });
+});
+
+describe("recordEnqueued names the dial version the gate read (migration 0990)", () => {
+  it("the enqueue fact carries the version on the item's newest merge_gate fact at the reviewed head, looked up at that head", async () => {
+    const t = ops({ dialVersion: 4 });
+    await t.o.recordEnqueued({ accountId: ACCOUNT, order, entryId: "MQE_kwDOAAAAAQ" });
+    const lookup = t.f.statements.find((s) => /SELECT dial_version FROM work_item_driver_events/.test(s.sql));
+    expect(lookup?.params).toEqual([ACCOUNT, ITEM, SRC]);
+    const event = t.f.statements.find((s) => /INSERT INTO work_item_driver_events/.test(s.sql));
+    expect(event?.params?.at(-1)).toBe(4);
   });
 });
 

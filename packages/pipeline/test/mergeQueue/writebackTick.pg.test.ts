@@ -247,6 +247,36 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
       expect(await receipts(w)).toEqual([]);
     });
 
+    it("a 5xx on the merge call after GitHub merged it: a bot's merge at the sent head is the gate's (fact and receipt); a person's merge in the window is theirs; an open PR stays a stop", async () => {
+      const answer502 = (w: World, land: "Bot" | "User" | "BotAtAnotherHead" | null) => {
+        w.deps.writeback = { ...w.deps.writeback!, merge: async () => {
+          if (land === "BotAtAnotherHead") w.gh.pushAs(w.gh.prs.find((p) => p.number === w.prNumber)!.head, "other.txt", "x");
+          if (land !== null) w.gh.merge(w.prNumber, land === "User" ? "User" : "Bot");
+          return { merged: false, httpStatus: 502 };
+        } };
+      };
+      const bot = await world();
+      await on(bot);
+      answer502(bot, "Bot");
+      expect((await tick(bot)).steps[0]).toMatchObject({ step: "merged" });
+      expect(await receipts(bot)).toMatchObject([{ chosen: "act", dial_version: 0, actor: "policy" }]);
+      const person = await world();
+      await on(person);
+      answer502(person, "User");
+      expect((await tick(person)).steps[0]).not.toMatchObject({ step: "merged" });
+      expect(await receipts(person)).toEqual([]);
+      const moved = await world();
+      await on(moved);
+      answer502(moved, "BotAtAnotherHead");
+      expect((await tick(moved)).steps[0]).not.toMatchObject({ step: "merged" });
+      expect(await receipts(moved)).toEqual([]);
+      const open = await world();
+      await on(open);
+      answer502(open, null);
+      expect((await tick(open)).steps[0]).not.toMatchObject({ step: "merged" });
+      expect(await receipts(open)).toEqual([]);
+    });
+
     it("a receipt that can not be written is reported and the merge stands", async () => {
       vi.mocked(reportError).mockClear();
       const w = await world();

@@ -182,6 +182,8 @@ export interface PullRequestMergeability {
   merged: boolean;
   mergeable: boolean | null;
   mergeableState: MergeableState;
+  /** GitHub's `merged_by.type` (`User`, `Bot`) when the pull request is merged; null when it did not say or the read does not carry it. */
+  mergedBy?: string | null;
   /** D#598 P3c: the branch the pull request merges into and the repository's default, from the same read. Absent from a port that does not say. */
   baseRef?: string;
   defaultBranch?: string;
@@ -985,6 +987,14 @@ async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput, le
   // status means one thing: 405 covers a conflict, an out-of-date branch and a protection refusal alike, and a 422 may or may not
   // be a moved head.
   const status = outcome.httpStatus;
+  // A 5xx does not say whether GitHub merged: the answer can fail after the merge happened. Re-read; a pull request merged at the gated head is the gate's merge (it carries the
+  // `merged_by_gate` fact and the receipt), not a person's. Only a merge GitHub attributes to a bot (our app) is claimed: a person's merge at the same head in that window is theirs.
+  // An unreadable PR, one not merged at this head, or one merged by anyone else stays a stop. (Another bot's merge in the window is a stated limit.)
+  if (status >= 500) {
+    // fx-swallow-ok: an unreadable pull request is the stop below (merge_call_refused); nothing is claimed as merged
+    const seen = await deps.github.getMergeability(input.pr, { gatedHeadSha: headSha }).catch(() => null);
+    if (seen !== null && seen.merged === true && seen.headSha === headSha && seen.mergedBy === "Bot") return { outcome: "merged", headSha };
+  }
   if (status !== 405 && status !== 403 && status !== 409 && status !== 422) return markHuman(deps, input.pr, headSha, ["merge_call_refused"]);
   // Re-read the PR from GitHub (never from the refusal). `getMergeability` has already polled a null `mergeable`.
   const after = await deps.github.getMergeability(input.pr, { gatedHeadSha: headSha });

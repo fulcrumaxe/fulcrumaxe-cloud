@@ -115,6 +115,8 @@ export interface MergeWorld {
   compares: Record<string, { status: "ahead" | "behind" | "diverged" | "identical"; aheadBy: number; behindBy: number; mergeBaseSha: string; files: Array<{ filename: string; previous_filename?: string }> }>;
   state: "open" | "closed";
   merged: boolean;
+  /** `merged_by.type` GitHub reports for a merged pull request (default `Bot`: the app's own merge). */
+  mergedByType?: string;
   draft: boolean;
   /** GIVEN: merging the base into the head conflicts. */
   conflict: boolean;
@@ -281,7 +283,11 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
       }
       let mergeable: boolean | null;
       let state: MergeableStateValue;
-      if (w.neverComputes || w.computeReads > 0) {
+      if (w.merged) {
+        // As GitHub answers: a merged pull request has `mergeable: null` for good.
+        mergeable = null;
+        state = "unknown";
+      } else if (w.neverComputes || w.computeReads > 0) {
         if (!w.neverComputes) w.computeReads -= 1;
         mergeable = null;
         state = "unknown";
@@ -296,6 +302,7 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
         draft: w.draft,
         mergeable,
         mergeable_state: state,
+        merged_by: w.merged ? { login: "fulcrumaxe-app[bot]", type: w.mergedByType ?? "Bot" } : null,
         head: { sha: w.headSha, ref: "fx/item-7", repo: { full_name: `${w.owner}/${w.name}` } },
         base: { ref: w.baseRef, repo: { full_name: `${w.owner}/${w.name}`, default_branch: w.defaultBranch ?? "main", private: w.isPublic !== true } },
         user: w.prAuthorLogin === null ? null : { login: w.prAuthorLogin ?? "fixture-author" },
