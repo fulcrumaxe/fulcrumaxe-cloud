@@ -67,6 +67,7 @@ const MESSAGES: Record<string, string> = {
   already_answered: "this ask is already answered",
   ask_no_run: "this ask has no run to resume",
   ask_receipt_mismatch: "this ask cannot be answered",
+  runner_gone: "the plan holder has no runner that lists this repository",
 };
 
 /** The core's named refusals as API answers; anything else is left to the generic mapper. */

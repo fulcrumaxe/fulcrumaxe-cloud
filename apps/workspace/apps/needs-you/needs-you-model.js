@@ -79,6 +79,7 @@ export const WORDS = {
   overdue: "Overdue",
   answered: "Answered",
   alreadyAnswered: "That was already answered.",
+  runnerGone: "Your runner no longer lists this repository, so this run can't start on your plan. Add the repository to your runner, then say yes again. Nothing was started.",
   mergeStep: "Merge this pull request on GitHub",
   openPr: "Open pull request",
   stalledStarted: "Started. The card moves when it is done.",
@@ -277,6 +278,7 @@ export function failureSentence(e) {
   if (isRateLimited(e)) return retryWords(waitSeconds(e));
   if (e && e.status === 403) return WORDS.onlyAdmins;
   if (e && e.status === 409 && e.code === "already_answered") return WORDS.alreadyAnswered;
+  if (e && e.status === 409 && e.code === "runner_gone") return WORDS.runnerGone;
   return WORDS.failed;
 }
 
