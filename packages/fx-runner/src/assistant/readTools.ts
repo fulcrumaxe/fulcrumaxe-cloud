@@ -53,3 +53,16 @@ export function readPath(tool: string, args: Record<string, unknown>, repoId: st
   for (const name of shape.required) if (!Object.hasOwn(given, name)) return { fault: `${name} is required` };
   return { path: shape.build(given, repoId) };
 }
+
+/** The corrections list: the one read the proxy makes outside the read tools. */
+export const correctionsPath = (id: string): string => `/api/v1/work-items/${id}/corrections`;
+
+/** Every route the runner reads, as the API's path templates (an id is `{id}`), derived from the tool shapes so a new tool is covered without a second list. */
+export function runnerReadRoutes(): string[] {
+  const SENTINEL = "00000000-0000-4000-8000-000000000000";
+  const routes = Object.values(SHAPES).map((shape) => {
+    const args = Object.fromEntries(Object.entries(shape.fields).filter(([, kind]) => kind === "id").map(([name]) => [name, SENTINEL]));
+    return shape.build(args, SENTINEL).split("?")[0]!;
+  });
+  return [...new Set([...routes, correctionsPath(SENTINEL)].map((r) => r.replaceAll(SENTINEL, "{id}")))];
+}

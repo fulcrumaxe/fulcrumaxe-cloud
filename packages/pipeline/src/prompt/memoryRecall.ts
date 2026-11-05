@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { repoScopeRef, storedTextHoldsSecret, type LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { FENCE_LOOKALIKES } from "@fx/trust";
 import { MEMORY_SLOT_DEFAULT_BYTES, MEMORY_SLOT_MAX_BYTES, renderMemorySlot, type MemoryEntry, type MemoryPort, type RenderedMemory } from "./assemblePrompt.js";
 
 /**
@@ -43,13 +44,8 @@ export function cutWithMarker(text: string, max: number): { text: string; cut: b
   return { text: buf.subarray(0, end).toString("utf8") + CUT_MARKER, cut: true };
 }
 
-/** Characters that look like a delimiter character but are not one, mapped to the one they imitate. NFKC handles the fullwidth forms. */
-const LOOKALIKES: Readonly<Record<string, string>> = {
-  "∕": "/", "⁄": "/", "╱": "/", "⧸": "/",
-  "‹": "<", "⟨": "<", "〈": "<", "«": "<", "›": ">", "⟩": ">", "〉": ">", "»": ">",
-  "у": "u", "υ": "u", "ս": "u", "ո": "n", "п": "n", "т": "t", "г": "r", "ѕ": "s", "е": "e", "ԁ": "d",
-  "У": "u", "Υ": "u", "Ս": "u", "Ո": "n", "П": "n", "Т": "t", "Г": "r", "Ѕ": "s", "Е": "e", "Ԁ": "d",
-};
+/** Characters that look like a delimiter character but are not one, mapped to the one they imitate: the one table of `@fx/trust`, which `sanitize` also folds with. NFKC handles the fullwidth forms. */
+const LOOKALIKES = FENCE_LOOKALIKES;
 const spaced = (word: string): string => [...word].join("\\s*");
 /** `<<UNTRUSTED EXTERNAL CONTENT>>`, `<<END UNTRUSTED>>` and their neutralised forms, in any letter case with space inside. */
 const FENCE_PATTERN = new RegExp(`<\\s*<\\s*(?:${spaced("end")}\\s*)?${spaced("untrusted")}[^<>]{0,80}>\\s*>`, "gi");
