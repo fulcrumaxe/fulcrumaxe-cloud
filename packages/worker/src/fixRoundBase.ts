@@ -42,12 +42,14 @@ export const BASE_SYNCED_STAGE = "base_synced";
 
 /** The run event a SANDBOX fix round carries when it must update the public pull request: `{ base_sha, branch }`, the base tip the cloud brought the branch up to date with. Written by the cloud in the run's create transaction; the settle reads it. */
 export const FIX_BASE_EVENT = "plane.fix_base";
+/** D#6 FIRST-PUBLISH-BASE-DRIFT: the extra field on that event for a round that ran before the item's first publish. The round merged the pull request's base into the branch, so the first publish (or its retry) diffs from this base, not the build's start commit; it is not an update of a public pull request. */
+export const PRE_PUBLISH_FIELD = "pre_publish";
 
 /** The one fixed line a round that followed a merge adds to its prompt (no item content): the checkout already holds the base's changes. */
 export const BASE_SYNCED_PROMPT_LINE = "Note: this branch was just brought up to date with its base branch, so the checkout already holds the base's latest changes. Do not merge or rebase it yourself.";
 
 /** `baseSha`: the base tip the branch now contains, read by the cloud in the same call; it becomes the signed diff base of the round (`continues.base_sha`). */
-export type BaseSyncResult = { ok: true; synced: boolean; baseSha: string } | { ok: false; reason: string };
+export type BaseSyncResult = { ok: true; synced: boolean; baseSha: string; stacked: boolean } | { ok: false; reason: string };
 
 /** The fact of a round refused because its branch could not be brought up to date (one per attempt): `stopped`, or `escalated` with the move to Needs a person (an escalation shares the move's stamp, which the card's lookup counts). The card shows the fixed sentence. */
 export async function recordBaseSyncUnavailable(pool: Pool, who: Who, attempt: string, liveHead: string | null, prNumber: number | null, toNeedsPerson = false): Promise<void> {
@@ -119,7 +121,7 @@ export async function syncRunBranch(
     o = lifted.outcome;
   }
   if (o.kind === "stacked") return refuse(REPUBLISH_STACKED_UNSUPPORTED);
-  if (o.kind === "up_to_date") return SHA.test(o.baseSha) ? { ok: true, synced: false, baseSha: o.baseSha } : unavailable(live);
+  if (o.kind === "up_to_date") return SHA.test(o.baseSha) ? { ok: true, synced: false, baseSha: o.baseSha, stacked: o.stacked } : unavailable(live);
   if (o.kind === "conflict") {
     await withTenant(pool, who.accountId, async (client) => {
       await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${BASE_SYNC_CONFLICT}:${attemptWord(input.attempt)}`, code: BASE_SYNC_CONFLICT, headSha: head, prNumber: input.pr.number });
@@ -139,7 +141,7 @@ export async function syncRunBranch(
     await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "pr_head_pushed", dedupeKey: `${BASE_SYNCED}:${first}..${o.sha}`, code: BASE_SYNCED, headSha: o.sha, prNumber: input.pr.number });
   });
   console.info(JSON.stringify({ event: "advance.base_synced", work_item_id: who.workItemId }));
-  return { ok: true, synced: true, baseSha: o.baseSha };
+  return { ok: true, synced: true, baseSha: o.baseSha, stacked: o.stacked };
 }
 
 /**
@@ -234,6 +236,12 @@ async function syncStacked(pool: Pool, ports: FixRoundHeadPorts | null | undefin
 export async function hasPublicCopy(pool: Pool, who: Who): Promise<boolean> {
   const row = await withTenant(pool, who.accountId, (client) => readPlanePush(client, who.accountId, who.workItemId));
   return row !== null && row.headSha !== null && row.managedByPersonAt === null;
+}
+
+/** D#6 FIRST-PUBLISH-BASE-DRIFT: the item has a push row that published nothing yet (and no person took the branch over): its first publish, or the retry of it, is still to come. */
+export async function awaitsFirstPublish(pool: Pool, who: Who): Promise<boolean> {
+  const row = await withTenant(pool, who.accountId, (client) => readPlanePush(client, who.accountId, who.workItemId));
+  return row !== null && row.headSha === null && row.managedByPersonAt === null;
 }
 
 /**

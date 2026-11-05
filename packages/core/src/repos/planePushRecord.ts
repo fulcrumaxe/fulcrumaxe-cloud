@@ -49,7 +49,12 @@ export interface RetryFacts {
   lastPushRuntime: 'runner' | 'sandbox' | 'hosted' | null;
   pushAttempts: number;
   managedByPerson: boolean;
+  /** The refusal code the row carries, when it is refused. */
+  code?: string | null;
 }
+
+/** Refusals that repeat on every attempt (the recorded start of the run cannot change), so a retry would only spend attempts: "Try the push again" is not offered for them. */
+export const DETERMINISTIC_PUBLISH_REFUSALS: readonly string[] = ['base_not_on_default', 'base_unavailable'];
 
 /**
  * THE one predicate for "may this item try the push again now": a refused push of a sandbox build with fewer than three push attempts. The worker's
@@ -57,7 +62,7 @@ export interface RetryFacts {
  * would be refused. (A `pushed_pr_not_opened` item is not here: that retry opens the PR with no sandbox, and its action is `open_pr`.)
  */
 export function mayRetryPublish(f: RetryFacts): boolean {
-  return f.state === 'refused' && f.lastPushRuntime === 'sandbox' && f.pushAttempts < PUBLISH_ATTEMPT_LIMIT && !f.managedByPerson;
+  return f.state === 'refused' && f.lastPushRuntime === 'sandbox' && f.pushAttempts < PUBLISH_ATTEMPT_LIMIT && !f.managedByPerson && !(f.code != null && DETERMINISTIC_PUBLISH_REFUSALS.includes(f.code));
 }
 
 /** Whether "Open the pull request again" applies: the branch is pushed, no pull request exists, and nobody has taken the branch over. */
@@ -390,8 +395,8 @@ export async function derivePlanePush(client: Queryable, input: { accountId: str
  * has no attempt yet; its executor ran in the sandbox, so the retry is a sandbox retry (the worker's reader makes the same reading). Null for an item with no row.
  */
 export async function readRetryFacts(client: Queryable, workItemId: string): Promise<RetryFacts | null> {
-  const { rows } = await client.query<{ state: PlanePushState; managed: boolean; n: number; last: RetryFacts['lastPushRuntime']; sandbox_side: boolean | null }>(
-    `SELECT p.state, p.managed_by_person_at IS NOT NULL AS managed,
+  const { rows } = await client.query<{ state: PlanePushState; code: string | null; managed: boolean; n: number; last: RetryFacts['lastPushRuntime']; sandbox_side: boolean | null }>(
+    `SELECT p.state, p.code, p.managed_by_person_at IS NOT NULL AS managed,
             (SELECT count(*)::int FROM plane_push_attempts a WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind = 'push') AS n,
             (SELECT (array_agg(a.runtime ORDER BY a.attempt_no DESC))[1] FROM plane_push_attempts a WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind = 'push') AS last,
             (SELECT r.job_signed IS NULL AND r.runtime = 'production' FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor'
@@ -401,5 +406,5 @@ export async function readRetryFacts(client: Queryable, workItemId: string): Pro
   );
   const r = rows[0];
   if (!r) return null;
-  return { state: r.state, managedByPerson: r.managed === true, pushAttempts: r.n, lastPushRuntime: r.last ?? (r.sandbox_side === true ? 'sandbox' : null) };
+  return { state: r.state, code: r.code, managedByPerson: r.managed === true, pushAttempts: r.n, lastPushRuntime: r.last ?? (r.sandbox_side === true ? 'sandbox' : null) };
 }

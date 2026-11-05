@@ -57,6 +57,8 @@ export type PlaneRefusalCode =
   | "rule_files_not_private"
   | "private_read_failed"
   | "base_not_ancestor"
+  | "base_unavailable"
+  | "base_not_on_default"
   | "pr_failed"
   | "republish_pr_closed"
   | "republish_pr_merged"
@@ -65,7 +67,7 @@ export type PlaneRefusalCode =
 export const PLANE_REFUSAL_CODES: readonly PlaneRefusalCode[] = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
   "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
-  "rule_files_not_private", "private_read_failed", "base_not_ancestor",
+  "rule_files_not_private", "private_read_failed", "base_not_ancestor", "base_unavailable", "base_not_on_default",
   // The stops the cloud refuses a fix round's token with (the route never throws them): a new runner reports the code it was refused with.
   "republish_pr_closed", "republish_pr_merged", "republish_pairing_off",
 ];

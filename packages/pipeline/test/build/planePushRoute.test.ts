@@ -829,3 +829,65 @@ describe("a stacked child's fix round republishes its own paths on public main",
     expect(headOf("item-1")).toBe(first);
   });
 });
+
+/**
+ * D#6 FIRST-PUBLISH-BASE-DRIFT, on real git: a round that ran BEFORE the first publish merged the pull request's base into the item's private branch, so the
+ * branch holds whatever reached that base since the build started. The first publish is the diff from the base it is SIGNED with to the head: the build's
+ * start commit leaves the merged-in work in the diff, the base the merge brought the branch up to leaves only the child's own paths.
+ */
+describe("a first publish after a round merged the base into the branch", () => {
+  let baseTip: string;
+  const paths = (from: string, to: string): string[] => sh(bare, "diff", "--name-only", from, to).split("\n").filter(Boolean).sort();
+
+  beforeEach(() => {
+    // The item's own work, on the branch cut at `privateBase`.
+    sh(priv, "checkout", "-q", "-b", "item");
+    put(priv, { "src/c.ts": "export const c = 1;\n" });
+    commitAll(priv, "the child's work");
+    // The base branch moved since: a path the public repo has too (it was synced), and work the public repo does not have.
+    sh(priv, "checkout", "-q", "trunk");
+    put(priv, { "src/b.ts": "export const b = 3;\n", "src/parent.ts": "export const parent = 1;\n" });
+    baseTip = commitAll(priv, "the base moves on");
+    put(pubWork, { "src/b.ts": "export const b = 3;\n" });
+    publicTip = commitAll(pubWork, "public gets b");
+    sh(pubWork, "push", "-q", bare, "main");
+    // The round before the first publish brings the branch up to date with its base.
+    sh(priv, "checkout", "-q", "item");
+    sh(priv, "merge", "-q", "--no-ff", "-m", "Bring item up to date with trunk", baseTip);
+  });
+
+  it("signed with the build's start commit, work the base gained rides along in the child's change", async () => {
+    const r = await routeAndPush(input({ privateBase, privateDefaultTip: baseTip }), deps());
+    if (r.plane !== "paired") throw new Error("unreachable");
+    expect(paths(publicTip, r.commit)).toEqual(["src/c.ts", "src/parent.ts"]);
+  });
+
+  it("signed with the base the merge brought the branch up to, only the child's own path is published", async () => {
+    const r = await routeAndPush(input({ privateBase: baseTip, privateDefaultTip: baseTip }), deps());
+    if (r.plane !== "paired") throw new Error("unreachable");
+    expect(paths(publicTip, r.commit)).toEqual(["src/c.ts"]);
+  });
+
+  it("runner first publish: the base the daemon records for a round with no signed base (the merge base of the branch tip with the default branch, read from the mirror by checkBase, pinned in gitPathNixSource.test.ts) publishes only the child's own path after a pre-publish merge", async () => {
+    const head = sh(priv, "rev-parse", "HEAD");
+    const recorded = sh(priv, "merge-base", head, baseTip);
+    expect(recorded).toBe(baseTip);
+    const r = await routeAndPush(input({ privateBase: recorded, privateDefaultTip: baseTip }), deps());
+    if (r.plane !== "paired") throw new Error("unreachable");
+    expect(paths(publicTip, r.commit)).toEqual(["src/c.ts"]);
+  });
+
+  it("a private-only path the base gained refuses the publish when signed with the start commit, and not with the new base", async () => {
+    sh(priv, "checkout", "-q", "trunk");
+    put(priv, { "docs/ops/plan.md": "private plan, moved\n" });
+    const tip2 = commitAll(priv, "a private doc moves");
+    sh(priv, "checkout", "-q", "item");
+    sh(priv, "merge", "-q", "--no-ff", "-m", "again", tip2);
+    const e = await refusal(routeAndPush(input({ privateBase, privateDefaultTip: tip2 }), deps()));
+    expect(e.code).toBe("scan_refused");
+    expect(e.message).toContain("docs/ops/plan.md");
+    const r = await routeAndPush(input({ privateBase: tip2, privateDefaultTip: tip2 }), deps());
+    if (r.plane !== "paired") throw new Error("unreachable");
+    expect(paths(publicTip, r.commit)).toEqual(["src/c.ts"]);
+  });
+});

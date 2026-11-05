@@ -37,7 +37,7 @@ import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedRevie
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
 import { CAPACITY_WAIT, CapacityWaitingError, REPO_GONE_REFUSALS, createCapacityGate, type CapacityPort } from "./capacityGate.js";
-import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, FIX_BASE_EVENT, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
+import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, FIX_BASE_EVENT, PRE_PUBLISH_FIELD, awaitsFirstPublish, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, refreshWaitingBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 import { STAGE_RESUME_PASS_SECONDS } from "./stageResume.js";
@@ -1835,6 +1835,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     let republishes = false;
     /** A sandbox round that must end by updating the public pull request: the base it was brought up to date with is recorded in the run's create transaction (the sandbox has no signed job to carry it). */
     let sandboxRepublish = false;
+    /** D#6 FIRST-PUBLISH-BASE-DRIFT: a sandbox round before the item's first publish that merged its pull request's base: the first publish diffs from the base recorded here. */
+    let prePublishBase = false;
+    /** Whether the pull request the sync ran on targets a branch other than the default one (the sync's own answer). */
+    let syncStacked = false;
     {
       // FIXROUND-BASE-SYNC-SANDBOX: the sync is the cloud's, so a sandbox round gets the same head check and sync (its prompt starts from the fetched branch tip).
       const runnerSide = isRunnerMode(effective);
@@ -1869,6 +1873,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey, publicCopy, stackedOk: !runnerSide });
           if (!sync.ok) return refuse(sync.reason);
           baseSynced = sync.synced;
+          syncStacked = sync.stacked;
           // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
           baseTip = sync.baseSha;
           syncedBranch = pr.branch;
@@ -1894,6 +1899,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (gate !== null) return refuse(gate);
       republishes = publicCopy && baseTip !== null && syncedBranch !== null;
       sandboxRepublish = republishes && !runnerSide;
+      // Only a pull request stacked on a parent branch needs the base signed (until the hook can read the parent's branch): one that targets the default branch keeps the build start, which the hook replaces with the merge base.
+      prePublishBase = !runnerSide && !publicCopy && syncStacked && baseTip !== null && syncedBranch !== null && (await awaitsFirstPublish(runnerPool, who));
     }
 
     // The board says "Changes requested" the moment a fix round starts, whatever an earlier record said (a pass recorded
@@ -2048,9 +2055,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             ...(conflict && req.conflictRound ? { conflictRound: req.conflictRound } : {}),
             // D#598 P1g-3a-3: the round a person's confirmed Replace started is marked here, in its create transaction: the one server fact its end and its public update read.
             inCreateTransaction: dec.inCreateTransaction(
-              sandboxRepublish || answered
+              sandboxRepublish || prePublishBase || answered
                 ? async (client: PoolClient, runId: string) => {
-                    if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) });
+                    if (sandboxRepublish || prePublishBase) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}), ...(prePublishBase ? { [PRE_PUBLISH_FIELD]: true } : {}) });
                     if (answered) await insertRunEvent(client, who.accountId, runId, RUNNER_REPLACE_ROUND_KIND, {});
                   }
                 : undefined,

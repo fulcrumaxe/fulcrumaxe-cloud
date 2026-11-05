@@ -50,6 +50,11 @@ describe.skipIf(!gitUsable)("nixSource against a plain git repo", () => {
     commit("mainMoved", "default branch moves on after the fork", { "later.txt": "x" });
     git(origin, "checkout", "-q", "-b", "fx/lockEdit", sha["side"]!);
     commit("sideLock", "edits the lock", { "flake.lock": JSON.stringify({ nodes: { root: {} }, root: "root", version: 7, edited: true }) });
+    // A round before the first publish merged the default branch into the run branch, then the item added more work (D#6 FIRST-PUBLISH-BASE-DRIFT).
+    git(origin, "checkout", "-q", "-b", "fx/merged", sha["side"]!);
+    git(origin, "merge", "-q", "--no-ff", "-m", "Bring fx/merged up to date with main", sha["mainMoved"]!);
+    sha["mergeCommit"] = git(origin, "rev-parse", "HEAD");
+    commit("mergedTip", "work after the merge", { "after.txt": "x" });
     git(origin, "checkout", "-q", "--orphan", "fx/orphan");
     commit("orphan", "unrelated history", { "orphan.txt": "x" });
     git(origin, "checkout", "-q", "main");
@@ -115,6 +120,11 @@ describe.skipIf(!gitUsable)("nixSource against a plain git repo", () => {
     expect(await gitPath.checkBase!(job, sha["side"]!)).toBe(sha["flake"]);
     expect(await gitPath.checkBase!(job, sha["sideFlake"]!)).toBe(sha["flake"]);
     expect(await gitPath.checkBase!(job, sha["sideLock"]!)).toBe(sha["flake"]);
+  });
+
+  it("checkBase: a run branch that merged the default branch before its first publish pins to the commit it merged, so the merged-in work is not the item's (runner side of D#6 FIRST-PUBLISH-BASE-DRIFT)", async () => {
+    expect(await gitPath.checkBase!(job, sha["mergeCommit"]!)).toBe(sha["mainMoved"]);
+    expect(await gitPath.checkBase!(job, sha["mergedTip"]!)).toBe(sha["mainMoved"]);
   });
 
   it("checkBase: a default-branch commit pins to itself; unrelated history, a missing commit and a malformed one give null", async () => {

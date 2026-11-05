@@ -594,3 +594,97 @@ describe("a fix round updates the open public branch (FIXROUND-REPUBLISH R2-c2)"
     expect(parsePlanePublishInput(JSON.stringify({ ...base, extra: 1 }))).toBeUndefined();
   });
 });
+
+/**
+ * D#6 FIRST-PUBLISH-BASE-DRIFT, on real git: a round before the first publish merged the default branch into the item's branch. For a change on the default branch the hook diffs from the merge
+ * base of the head with the default tip, read from the fetched commits, so no round's record is needed and nothing a round merged is part of the change.
+ */
+describe("a change on the default branch whose branch merged the default branch before it was published", () => {
+  let moved: string;
+  let merged: string;
+  const pubPaths = (): string[] => sh(world.pubBare, "diff", "--name-only", world.publicTip, BRANCH).split("\n").filter(Boolean).sort();
+
+  beforeEach(() => {
+    // The item's work, cut at the base.
+    const own = runWith({ "src/c.ts": "export const c = 3;\n" });
+    // The default branch moves on: a private-only doc, and a public file the public repo gets too.
+    sh(world.priv, "checkout", "-q", "main");
+    put(world.priv, { "docs/ops/plan.md": "private plan, moved\n", "src/b.ts": "export const b = 20;\n" });
+    moved = commitAll(world.priv, "default branch moves on");
+    sh(world.priv, "push", "-q", world.privBare, "main");
+    const pubWork = path.join(world.root, "pubwork");
+    put(pubWork, { "src/b.ts": "export const b = 20;\n" });
+    commitAll(pubWork, "public gets b");
+    sh(pubWork, "push", "-q", world.pubBare, "main");
+    world.publicTip = sh(world.pubBare, "rev-parse", "main");
+    // The round: merge the default branch into the item's branch.
+    sh(world.priv, "checkout", "-q", "fx/run");
+    sh(world.priv, "merge", "-q", "--no-ff", "-m", "Bring fx/run up to date with main", moved);
+    merged = sh(world.priv, "rev-parse", "HEAD");
+    sh(world.priv, "push", "-q", "-f", world.privBare, "fx/run");
+    expect(own).not.toBe(merged);
+  });
+
+  it("control: signed with the build's start commit, the default branch's private-only change refuses the publish", async () => {
+    const { lines } = await runHook(inputFor(merged, { privateDefaultTip: moved }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "overlay_path", place: "docs/ops/plan.md" }] });
+  }, 60_000);
+
+  it("with the flag, only the item's own paths are published", async () => {
+    const { lines } = await runHook(inputFor(merged, { privateDefaultTip: moved, baseIsDefaultMergeBase: true }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+    expect(pubPaths()).toEqual(["src/c.ts"]);
+  }, 60_000);
+
+  it("the default branch moved further since the merge: the base stays at what was merged, and the item's work from before the merge still publishes", async () => {
+    sh(world.priv, "checkout", "-q", "main");
+    put(world.priv, { "docs/ops/plan.md": "private plan, moved again\n", "src/a.ts": "export const a = 99;\n" });
+    const later = commitAll(world.priv, "default branch moves on again");
+    sh(world.priv, "push", "-q", world.privBare, "main");
+    const { lines } = await runHook(inputFor(merged, { privateDefaultTip: later, baseIsDefaultMergeBase: true }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+    expect(pubPaths()).toEqual(["src/c.ts"]);
+  }, 60_000);
+
+  it("no merge happened: the base is where the branch was cut, whatever the default branch did since", async () => {
+    const plain = runWith({ "src/d.ts": "export const d = 1;\n" }, world.base, "fx/plain");
+    const { lines } = await runHook(inputFor(plain, { privateDefaultTip: moved, baseIsDefaultMergeBase: true }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+    expect(pubPaths()).toEqual(["src/d.ts"]);
+  }, 60_000);
+
+  it("a head with no history in common with the default branch is refused base_not_on_default, and nothing is built or pushed", async () => {
+    sh(world.priv, "checkout", "-q", "--orphan", "fx/orphan");
+    sh(world.priv, "rm", "-rf", "-q", "--cached", ".");
+    put(world.priv, { "src/o.ts": "export const o = 1;\n" });
+    const orphan = commitAll(world.priv, "unrelated history");
+    sh(world.priv, "push", "-q", "-f", world.privBare, "fx/orphan");
+    const before = branches();
+    const { lines } = await runHook(inputFor(orphan, { privateBase: orphan, privateDefaultTip: moved, baseIsDefaultMergeBase: true }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "base_not_on_default" });
+    expect(branches()).toBe(before);
+  }, 60_000);
+
+  it("a recorded start that is not on the default branch (a parent's unmerged tip, the stack link gone) is refused base_not_on_default with the flag, and nothing is pushed", async () => {
+    // A parent branch with work the default branch does not have, and a child cut from it.
+    sh(world.priv, "checkout", "-q", "-B", "fx/parent", world.base);
+    put(world.priv, { "src/p.ts": "export const p = 1;\n" });
+    const parentTip = commitAll(world.priv, "parent work");
+    sh(world.priv, "checkout", "-q", "-B", "fx/child", parentTip);
+    put(world.priv, { "src/c.ts": "export const c = 3;\n" });
+    const child = commitAll(world.priv, "child work");
+    sh(world.priv, "push", "-q", "-f", world.privBare, "fx/child");
+    const before = branches();
+    const { lines } = await runHook(inputFor(child, { privateBase: parentTip, privateDefaultTip: moved, baseIsDefaultMergeBase: true }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "base_not_on_default" });
+    expect(branches()).toBe(before);
+  }, 60_000);
+
+  it("the input shape accepts the flag only as true", () => {
+    const base = inputFor("a".repeat(40));
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, baseIsDefaultMergeBase: true }))).toMatchObject({ baseIsDefaultMergeBase: true });
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, baseIsDefaultMergeBase: false }))).toBeUndefined();
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, baseIsDefaultMergeBase: "yes" }))).toBeUndefined();
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, updateOf: "b".repeat(40), baseIsDefaultMergeBase: true }))).toMatchObject({ updateOf: "b".repeat(40) });
+  });
+});

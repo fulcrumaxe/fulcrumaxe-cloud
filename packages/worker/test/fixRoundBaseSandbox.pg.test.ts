@@ -346,6 +346,58 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       }
     });
 
+    // D#6 FIRST-PUBLISH-BASE-DRIFT: the item has a push row that published nothing yet. The round still merges the pull request's base (a stacked change's parent branch included), so the first publish must diff from it.
+    describe("before the item's first publish", () => {
+      const pending = async (t: { a: SeedRefs; w: string }, state = "refused") => {
+        await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3) ON CONFLICT (repo_id) DO NOTHING", [t.a.repoId, t.a.accountId, ["private/**"]]);
+        await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, code) VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, 'push_failed')", [t.a.accountId, t.w, t.a.repoId, "f".repeat(64), state]);
+      };
+
+      const stackedMerged = async (): Promise<BranchSyncOutcome> => merged({ baseRef: "fx/parent", stacked: true });
+      const stackedUpToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "fx/parent", stacked: true });
+
+      it("a change whose pull request targets the default branch records no base, merged or up to date: the first publish replaces the build start with the merge base", async () => {
+        for (const syncBase of [async () => merged(), upToDate]) {
+          const t = await item("sandbox");
+          await pending(t);
+          const out = await harness({ privateHead: async () => ASKED, syncBase }).module.advanceStartFix(who(t), fixReq(t));
+          expect(out.ok).toBe(true);
+          expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([]);
+        }
+      });
+
+      it("a change stacked on a parent branch records the parent's tip the sync merged (or found), marked as before the first publish", async () => {
+        const t = await item("sandbox");
+        await pending(t);
+        const syncBase = vi.fn(stackedMerged);
+        const out = await harness({ privateHead: async () => ASKED, syncBase }).module.advanceStartFix(who(t), fixReq(t));
+        expect(out.ok).toBe(true);
+        expect(syncBase).toHaveBeenCalledWith({ repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, branch: t.branch, prNumber: PR });
+        expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([{ base_sha: BASE, branch: t.branch, pre_publish: true }]);
+        const u = await item("sandbox");
+        await pending(u);
+        const outU = await harness({ privateHead: async () => ASKED, syncBase: stackedUpToDate }).module.advanceStartFix(who(u), fixReq(u));
+        expect(await fixBaseOf((outU as { runId: string }).runId)).toEqual([{ base_sha: "f".repeat(40), branch: u.branch, pre_publish: true }]);
+      });
+
+      it("a round that is refused, a runner round and an item whose branch a person took over record no base", async () => {
+        const refused = await item("sandbox");
+        await pending(refused);
+        expect((await harness({ privateHead: async () => ASKED, syncBase: conflict }).module.advanceStartFix(who(refused), fixReq(refused))).ok).toBe(false);
+        expect(await runs(refused.w)).toBe(1);
+        const runner = await item("runner");
+        await pending(runner);
+        const outR = await harness({ privateHead: async () => ASKED, syncBase: stackedUpToDate }).module.advanceStartFix(who(runner), fixReq(runner));
+        expect(outR.ok).toBe(true);
+        expect(await fixBaseOf((outR as { runId: string }).runId)).toEqual([]);
+        const taken = await item("sandbox");
+        await pending(taken);
+        await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [taken.w]);
+        const outT = await harness({ privateHead: async () => ASKED, syncBase: stackedUpToDate }).module.advanceStartFix(who(taken), fixReq(taken));
+        expect(await fixBaseOf((outT as { runId: string }).runId)).toEqual([]);
+      });
+    });
+
     it("a stacked change is refused republish_stacked_unsupported BEFORE any merge, as on the runner side: nothing starts, the item is in Needs a person with the plain sentence", async () => {
       const t = await item("sandbox");
       await publicCopy(t);
