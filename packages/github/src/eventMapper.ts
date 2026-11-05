@@ -22,7 +22,9 @@ import { reversalHoldsClose } from '@fx/db/src/reversalCompensation.js';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { syncFailureTag } from './syncFailureTag.js';
 import { installationDiscoveryRef } from './installDiscovery.js';
-import { decideOwnerProcess } from '@fx/core/src/plan/ownerProcess.js';
+import { decideOwnerProcess, PRODUCT_LABEL } from '@fx/core/src/plan/ownerProcess.js';
+import { isLabelPermission, setProposalOwnerFromLabel, type LabelPermission } from '@fx/core/src/plan/ownerFromLabel.js';
+import { labelNeedsIntake, productLabelDelivery } from './productLabel.js';
 import { markWorkPending } from '@fx/core/src/pendingWork.js';
 import { CHILD_BINDING_KIND, CHILD_BINDING_PR_KIND, recordChildPullRequest } from '@fx/runner';
 import { applyIssueChange, fencedIssueSummary, proposalTitle, proposeFromIssue, type IssueChange, type ProposeOutcome } from './issueProposal.js';
@@ -125,6 +127,8 @@ export interface MapEventInput {
    * author: an `OWNER` claim with a lookup answering `read` is an outsider.
    */
   authorPermission?: LookedUpPermission | null;
+  /** D#483: for the product label's `labeled` / `unlabeled`, the SENDER's real permission, read for this delivery. Only maintain and admin act. */
+  labelSenderPermission?: RepoPermission | null;
 }
 
 /** issue.opened / discussion.created: creates a work_items row, gated by canCreateWork. */
@@ -238,6 +242,16 @@ export interface ProposeIssueEvent {
   title: string;
   summary: string | null;
   owner?: 'product' | 'internal_loop';
+  /** D#483: set when a maintainer's product label brought this issue in; the proposal is then owned by the product even if one already exists. */
+  labelPermission?: LabelPermission;
+}
+
+/** D#483: a maintainer or admin applied or removed the product label on an issue that already has a proposal or work item; the move is the definer's (proposal_owner_from_label). */
+export interface ProductLabelEvent {
+  kind: 'product_label';
+  change: 'labeled' | 'unlabeled';
+  ghNumber: number;
+  permission: LabelPermission;
 }
 
 /** D#483 S4-d: `issues.closed`, `.reopened` and `.edited` for the proposal an outside author's issue became (no proposal: nothing changes). */
@@ -256,6 +270,7 @@ export interface IgnoredEvent {
 export type MappedEvent =
   | CreateWorkItemEvent
   | ProposeIssueEvent
+  | ProductLabelEvent
   | IssueProposalChangeEvent
   | TransitionPrEvent
   | RecordPrPushEvent
@@ -274,6 +289,9 @@ type Actor = { login: string | null } | null;
 export interface GithubIssuePayload {
   action: string;
   issue: { number: number; title?: unknown; body?: unknown; user: Actor; author_association: string | null; state?: unknown; pull_request?: unknown; created_at?: unknown };
+  /** `labeled` and `unlabeled`: the label the event is about, and who did it. */
+  label?: { name?: unknown } | null;
+  sender?: { login?: unknown } | null;
   repository?: unknown;
   installation?: unknown;
 }
@@ -407,6 +425,12 @@ export function mapEvent(
       }
       if (p.action === 'edited') {
         return { kind: 'issue_proposal_change', change: { change: 'edited', ghNumber: n, title: proposalTitle(p.issue.title, n), summary: fencedIssueSummary(p.issue.body) } };
+      }
+      if (p.action === 'labeled' || p.action === 'unlabeled') {
+        const d = productLabelDelivery('issues', p);
+        if (d && isLabelPermission(input.labelSenderPermission)) {
+          return { kind: 'product_label', change: d.action, ghNumber: d.ghNumber, permission: input.labelSenderPermission };
+        }
       }
       if (p.action !== 'opened') {
         return { kind: 'ignored', reason: `issue.${String(p.action).slice(0, 40)}: only opened, edited, closed and reopened act` };
@@ -620,7 +644,8 @@ export interface ApplyEventCtx {
 export type ApplyResult =
   | { applied: 'created'; workItemId: string }
   | { applied: 'transitioned'; workItemId: string; recorded: boolean }
-  | { applied: 'proposed'; created: boolean }
+  | { applied: 'proposed'; created: boolean; ownerMoved?: true }
+  | { applied: 'proposal_owner_changed'; to: 'product' | 'internal_loop'; count: number }
   | { applied: 'proposal_rate_limited' }
   | { applied: 'proposal_changed'; count: number }
   | { applied: 'pr_push_recorded'; workItemId: string; recorded: boolean }
@@ -908,7 +933,16 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       // Never reached without an owner: the delivery resolves it (a read of the repository) or ignores the event.
       if (!mapped.owner) return { applied: 'skipped', reason: 'issue.opened: owner process unknown, left for the next discovery' };
       const out: ProposeOutcome = await proposeFromIssue(client, ctx.accountId, ctx.repoId, { ghNumber: mapped.ghNumber, title: mapped.title, summary: mapped.summary, owner: mapped.owner });
-      return out.outcome === 'proposal_rate_limited' ? { applied: 'proposal_rate_limited' } : { applied: 'proposed', created: out.created };
+      if (out.outcome === 'proposal_rate_limited') return { applied: 'proposal_rate_limited' };
+      // A proposal that already existed (an `opened` that landed first) keeps its owner on conflict; the label's hand-over still applies to it.
+      const moved = mapped.labelPermission && !out.created ? await setProposalOwnerFromLabel(client, ctx.repoId, mapped.ghNumber, 'product', mapped.labelPermission) : false;
+      return { applied: 'proposed', created: out.created, ...(moved ? { ownerMoved: true as const } : {}) };
+    }
+
+    case 'product_label': {
+      const to = mapped.change === 'labeled' ? 'product' : 'internal_loop';
+      const moved = await setProposalOwnerFromLabel(client, ctx.repoId, mapped.ghNumber, to, mapped.permission);
+      return { applied: 'proposal_owner_changed', to, count: moved ? 1 : 0 };
     }
 
     case 'issue_proposal_change':
@@ -1121,6 +1155,8 @@ export interface GithubWebhookDbDeps {
    * the proposal is not written now and the next discovery reads the issue.
    */
   repoHasEngineLoop?: (input: { repoId: string; owner: string; name: string }) => Promise<boolean>;
+  /** D#483: the real permission of the person who applied or removed the product label, asked for that one delivery and never stored. Absent, or a failure: the label is not honoured. */
+  senderPermission?: (input: { repoId: string; owner: string; name: string; login: string }) => Promise<RepoPermission>;
   /**
    * D#483 S4-c: called after the delivery's transaction (and, for added repositories, the repo sync) with the discoveries this
    * delivery queued, so a runner can start them. Queuing itself needs no hook: it is written by the delivery, once per repository and
@@ -1260,8 +1296,13 @@ export async function handleGithubWebhookEvent(
   // Issues we already know (a work item or a proposal) keep their usual handling, and cost no GitHub call.
   let intakeName: GithubWebhookEventName = eventName;
   let intakePayload: GithubWebhookPayload = payload;
+  // D#483: the product label's sender permission is read for this label only; a lesser sender, a failed read or no reader leaves the event to the ordinary rules.
+  const labelPermission = tenant.repoId ? await readLabelSenderPermission(deps, tenant.repoId, repoOwner, repoName, eventName, payload) : null;
   const candidate = tenant.repoId ? missedOpenedCandidate(eventName, payload) : null;
-  if (candidate && (await withTenant(deps.appUserPool, tenant.accountId, (client) => issueNeedsIntake(client, tenant.accountId, tenant.repoId, candidate.issue.number, String(candidate.issue.created_at))))) {
+  const labelIntake =
+    labelPermission !== null && candidate !== null && (payload as GithubIssuePayload).action === 'labeled' &&
+    (await withTenant(deps.appUserPool, tenant.accountId, (client) => labelNeedsIntake(client, tenant.accountId, tenant.repoId, candidate.issue.number)));
+  if (candidate && (labelIntake || (await withTenant(deps.appUserPool, tenant.accountId, (client) => issueNeedsIntake(client, tenant.accountId, tenant.repoId, candidate.issue.number, String(candidate.issue.created_at)))))) {
     intakeName = 'issues';
     intakePayload = candidate;
   }
@@ -1281,8 +1322,8 @@ export async function handleGithubWebhookEvent(
     }
   }
 
-  let mapped = mapEvent(intakeName, intakePayload, { allowlist: deps.allowlist ?? [], allowWritePermission: deps.allowWritePermission, authorPermission });
-  if (mapped.kind === 'propose_issue') mapped = await withProposalOwner(deps, tenant.repoId, repoOwner, repoName, mapped);
+  let mapped = mapEvent(intakeName, intakePayload, { allowlist: deps.allowlist ?? [], allowWritePermission: deps.allowWritePermission, authorPermission, labelSenderPermission: labelPermission });
+  if (mapped.kind === 'propose_issue') mapped = await withProposalOwner(deps, tenant.repoId, repoOwner, repoName, mapped, labelIntake ? labelPermission : null);
 
   const result = await withTenant(deps.appUserPool, tenant.accountId, (client) =>
     applyMappedEvent(
@@ -1296,7 +1337,8 @@ export async function handleGithubWebhookEvent(
   // edited one sent back through `proposal_requeue_verification`. Marked after the commit, void and best-effort, so an idle platform's
   // sweep connects on its next tick instead of waiting out the backstop.
   if (
-    (result.applied === 'proposed' && result.created) ||
+    (result.applied === 'proposed' && (result.created || result.ownerMoved === true)) ||
+    (result.applied === 'proposal_owner_changed' && result.count > 0 && result.to === 'product') ||
     (result.applied === 'proposal_changed' && result.count > 0 && mapped.kind === 'issue_proposal_change' && mapped.change.change === 'edited')
   ) {
     void markWorkPending('proposal-verify-sweep');
@@ -1326,8 +1368,31 @@ export async function handleGithubWebhookEvent(
   return { handled: true, result };
 }
 
+/**
+ * D#483: the permission of whoever applied or removed the product label when it is maintain or admin, else null; no GitHub call for any other
+ * event or label. Removing the label hands an issue back only where the engine loop is installed (elsewhere everything is the product's).
+ */
+async function readLabelSenderPermission(deps: GithubWebhookDbDeps, repoId: string, owner: string | undefined, name: string | undefined, eventName: GithubWebhookEventName, payload: GithubWebhookPayload): Promise<LabelPermission | null> {
+  const d = productLabelDelivery(eventName, payload);
+  if (!d || !deps.senderPermission || !owner || !name) return null;
+  try {
+    const permission = await deps.senderPermission({ repoId, owner, name, login: d.senderLogin });
+    if (!isLabelPermission(permission)) return null;
+    if (d.action === 'unlabeled') {
+      if (!deps.repoHasEngineLoop || !(await deps.repoHasEngineLoop({ repoId, owner, name }))) return null;
+    }
+    return permission;
+  } catch {
+    // fx-swallow-ok: fail closed by design; a fixed line is logged (no login, no repository, no driver text) and the label changes nothing
+    (deps.warn ?? console.warn)('github webhook: product label sender permission lookup failed; the label is not honoured');
+    return null;
+  }
+}
+
 /** S4-d: fills in who owns the proposal (S3 rule E6), or turns the event into an ignored one when that cannot be read (fail closed). */
-async function withProposalOwner(deps: GithubWebhookDbDeps, repoId: string, owner: string | undefined, name: string | undefined, mapped: ProposeIssueEvent): Promise<MappedEvent> {
+async function withProposalOwner(deps: GithubWebhookDbDeps, repoId: string, owner: string | undefined, name: string | undefined, mapped: ProposeIssueEvent, label: LabelPermission | null = null): Promise<MappedEvent> {
+  // A maintainer's label brought this issue in: the one owner function gives `product` (the engine loop's presence does not matter for it).
+  if (label) return { ...mapped, owner: decideOwnerProcess({ repoHasEngineLoop: true, kind: 'issue', labels: [{ name: PRODUCT_LABEL, actorPermission: label }] }), labelPermission: label };
   if (!deps.repoHasEngineLoop || !owner || !name || !repoId) return { kind: 'ignored', reason: 'issue.opened: owner process not readable, left for the next discovery' };
   try {
     const hasLoop = await deps.repoHasEngineLoop({ repoId, owner, name });

@@ -487,7 +487,7 @@ describe("the plan source (levels 2 and 3 read through the same read-only client
     const pulls = await source.pulls();
     const issues = await source.issues();
     expect(pulls.pulls.map((p) => [p.number, p.state, p.dLines])).toEqual([[1, "merged", ["Closes D#7:T1"]]]);
-    expect(issues.issues).toEqual([{ number: 2, title: "an issue", state: "open" }, { number: 3, title: "old", state: "closed" }]);
+    expect(issues.issues).toEqual([{ number: 2, title: "an issue", state: "open", labels: [] }, { number: 3, title: "old", state: "closed", labels: [] }]);
     const d = await source.discussions({ isSpec });
     expect(d.specs).toMatchObject([{ number: 7 }]);
     expect(d.discussions).toMatchObject([{ number: 7, title: "Plan", closed: false }]);

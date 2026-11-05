@@ -36,6 +36,7 @@ export * from './repoName.js';
 export * from './createRepo.js';
 export * from './issueAuthorLookup.js';
 export * from './issueReader.js';
+export * from './loginPermission.js';
 export * from './installationHttp.js';
 export * from './repoTreeSource.js';
 export * from './repoInstallationResolver.js';

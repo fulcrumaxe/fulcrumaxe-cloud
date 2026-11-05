@@ -1,5 +1,6 @@
 import type { ComputedPlan } from "./computePlan.js";
-import { decideOwnerProcess, type OwnerProcess } from "./ownerProcess.js";
+import type { RepoPermission } from "@fx/trust";
+import { decideOwnerProcess, PRODUCT_LABEL, type OwnerProcess } from "./ownerProcess.js";
 import { cleanText, MAX_PLAN_TASKS } from "./roadmapFile.js";
 
 /**
@@ -9,13 +10,16 @@ import { cleanText, MAX_PLAN_TASKS } from "./roadmapFile.js";
  *
  * Issue text is outsiders' text: titles and summaries are cleaned of control tokens and cut before they are stored. The
  * issues list holds pull requests too; the reader has already split them off (a `pull_request` key), so none arrive here.
- * A number that appears twice (the list shifts while it is paged) is one proposal. A product label on an issue is not read at
- * this level, so an issue follows the repository default (internal_loop where the engine loop is installed).
+ * A number that appears twice (the list shifts while it is paged) is one proposal. An issue follows the repository default
+ * (internal_loop where the engine loop is installed), except one whose product label was applied by a maintainer or admin: the caller
+ * establishes that (who applied the latest such label, that actor's permission now) and passes the permission by issue number.
  */
 export interface IssueFacts {
   number: number;
   title: string;
   state: "open" | "closed";
+  /** The issue's label names, when the reader has them (only the product label is looked at). */
+  labels?: readonly string[];
 }
 export interface DiscussionFacts {
   number: number;
@@ -32,6 +36,8 @@ export interface ItemProposal {
   title: string;
   summary: string | null;
   owner: OwnerProcess;
+  /** The permission of the person whose product label made this issue the product's (set only when it did); the import hands an existing proposal over with it. */
+  labelPermission?: "maintain" | "admin";
 }
 
 export interface IssuesLevelResult {
@@ -42,7 +48,12 @@ export interface IssuesLevelResult {
 
 const MAX_INT = 2147483647;
 
-export function buildIssuesLevel(issues: readonly IssueFacts[], discussions: readonly DiscussionFacts[], repoHasEngineLoop: boolean): IssuesLevelResult {
+export function buildIssuesLevel(
+  issues: readonly IssueFacts[],
+  discussions: readonly DiscussionFacts[],
+  repoHasEngineLoop: boolean,
+  labelActors: ReadonlyMap<number, RepoPermission> = new Map(),
+): IssuesLevelResult {
   const open = new Map<string, ItemProposal>();
   const closed = new Set<string>();
   for (const i of issues) {
@@ -54,6 +65,8 @@ export function buildIssuesLevel(issues: readonly IssueFacts[], discussions: rea
       continue;
     }
     closed.delete(key);
+    const actorPermission = labelActors.get(i.number);
+    const owner = decideOwnerProcess({ repoHasEngineLoop, kind: "issue", labels: actorPermission === undefined ? undefined : [{ name: PRODUCT_LABEL, actorPermission }] });
     open.set(key, {
       dedupeKey: key,
       source: "github_issue",
@@ -61,7 +74,8 @@ export function buildIssuesLevel(issues: readonly IssueFacts[], discussions: rea
       discussionNumber: null,
       title: cleanText(i.title, 256) || `Issue #${i.number}`,
       summary: null,
-      owner: decideOwnerProcess({ repoHasEngineLoop, kind: "issue" }),
+      owner,
+      ...(repoHasEngineLoop && owner === "product" && (actorPermission === "maintain" || actorPermission === "admin") ? { labelPermission: actorPermission } : {}),
     });
   }
   for (const d of discussions) {
