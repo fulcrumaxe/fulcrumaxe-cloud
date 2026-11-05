@@ -163,7 +163,7 @@ describe('agent-proposed role lessons (D#601 MEM-9)', () => {
 
   it('MEM-9-5: a retired role entry leaves the live set; lists show the source repo and run, never null', async () => {
     const id = (await entryOf('needs two repos')).id;
-    expect(await decideMemory(ctx(owner), { id, to: 'retired' })).toMatchObject({ entry: { status: 'retired' } });
+    expect(await revertMemory(ctx(owner), { ids: [id], action: 'retire' })).toMatchObject({ entries: [{ status: 'retired' }] });
     expect((await admin.query(`SELECT count(*)::int AS n FROM memory_entries WHERE id = $1 AND status = 'approved'`, [id])).rows[0].n).toBe(0);
     const list = await listMemory(ctx(owner), { scope: 'role' });
     const rows = list.groups.flatMap((g) => g.entries);
@@ -223,7 +223,7 @@ describe('agent-proposed role lessons (D#601 MEM-9)', () => {
     expect((await entryOf('cap renew candidate')).status).toBe('expired');
     // Room appears when one is retired.
     const one = (await admin.query(`SELECT id FROM memory_entries WHERE account_id = $1 AND scope_ref = $2 AND status = 'approved' LIMIT 1`, [a.accountId, role])).rows[0].id as string;
-    await decideMemory(ctx(owner), { id: one, to: 'retired' });
+    await revertMemory(ctx(owner), { ids: [one], action: 'retire' });
     expect(await decideMemory(ctx(owner), { id: toApprove, to: 'approved' })).toMatchObject({ entry: { status: 'approved' } });
   });
 

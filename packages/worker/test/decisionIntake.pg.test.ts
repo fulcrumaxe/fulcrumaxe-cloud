@@ -569,6 +569,14 @@ describe("decision intake: the call site [pg]", { timeout: 120_000 }, () => {
     });
   });
 
+  it("an ask of any other type on a finished run still counts as waiting: only a member-plan ask lets go with its run", async () => {
+    const w = await world({ declared: [CLASS2], envelope: { decision_request: request("d1") } });
+    await w.step();
+    await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [w.runId]);
+    expect((await asks(w.runId))[0]).toMatchObject({ state: "open", decision_type: CLASS2 });
+    expect(await withTenant(runnerPool, w.a.accountId, (c) => isItemWaitingOnAnswer(c, w.itemId))).toBe(true);
+  });
+
   it("the whole step, on a run no one read before, ends in the same word the second time (the answer is a function of the stored facts)", async () => {
     const w = await world({ declared: [CLASS1, CLASS2], dials: { [CLASS2]: { disposition: "ask" } }, envelope: { decision_request: request("d2"), decisions_taken: [taken("d1", { options: opts(["yes", "no"]), chosen: "yes" })] } });
     const first = await w.step();

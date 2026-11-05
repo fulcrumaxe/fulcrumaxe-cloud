@@ -6,6 +6,7 @@ import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { NotFoundError } from '../src/tenancy/errors.js';
 import { decideMemory, deleteMemory, editMemory, proposeMemory, writeMemory } from '../src/memory/index.js';
 import { memoryHistory, memoryHistoryActor } from '../src/memory/history.js';
+import { revertMemory } from '../src/memory/undo.js';
 
 /** D#601 MEM-4b1: an entry's permanent history, read from its audit rows on real Postgres, across edits, the sweeps and the 30 day purge. */
 describe('memoryHistory (D#601 MEM-4b1)', () => {
@@ -47,7 +48,7 @@ describe('memoryHistory (D#601 MEM-4b1)', () => {
     const c = ctx(a.accountId, aAdmin);
     const v1 = await proposeMemory(c, { scope: 'account', scopeRef: null, kind: 'fact', body: `history body ${++n}` });
     await decideMemory(c, { id: v1.id, to: 'approved' });
-    await decideMemory(c, { id: v1.id, to: 'proposed' }); // Undo of Approve
+    await revertMemory(c, { ids: [v1.id], action: 'undo_approve' });
     const v2 = await editMemory(c, { id: v1.id, body: `history body ${++n} edited` });
     await decideMemory(c, { id: v2.id, to: 'approved' });
     const expected = ['memory.proposed ->proposed v1', 'memory.approved proposed>approved v1', 'memory.reverted approved>proposed v1', 'memory.edited proposed>proposed v2', 'memory.approved proposed>approved v2'];

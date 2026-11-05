@@ -17,8 +17,12 @@ export const MEMORY_SCOPES = ['account', 'repo', 'item', 'role'] as const;
 export const MEMORY_KINDS = ['convention', 'command', 'fact', 'gotcha', 'preference', 'decision'] as const;
 export const MEMORY_AUTHOR_KINDS = ['person', 'agent', 'assistant', 'import', 'runner_agent'] as const;
 export const MEMORY_STATUSES = ['proposed', 'approved', 'rejected', 'expired', 'retired', 'deleted', 'archived', 'superseded'] as const;
-/** What a person's click can set through `decideMemory`. Expiry, archiving and supersession are never set by a click. */
-export const MEMORY_DECISIONS = ['approved', 'rejected', 'retired', 'proposed'] as const;
+/**
+ * What `decideMemory` takes: a first decision on a proposal. Retiring and stepping back (approved to proposed, rejected to proposed, expired to
+ * proposed, retired to approved) go through `revertMemory` in undo.ts, which also writes the reversal receipt; expiry, archiving and supersession
+ * are never set by a click.
+ */
+export const MEMORY_DECISIONS = ['approved', 'rejected'] as const;
 
 export const MEMORY_BODY_MAX_BYTES = 1024;
 export const MEMORY_WHY_MAX_BYTES = 256;
@@ -366,7 +370,7 @@ export async function writeMemory(ctx: MemoryCtx, input: Omit<ProposeMemoryInput
 
 export type DecideMemoryResult = { outcome: 'decided' | 'already_decided'; entry: MemoryEntry };
 
-/** Approve, reject, retire, or take a step back (approved to proposed, rejected to proposed, retired to approved, expired to proposed). */
+/** Approve or reject. Retiring and taking a step back are `revertMemory`'s, so each leaves its reversal receipt; asking for them here is `invalid_message`. */
 export async function decideMemory(ctx: MemoryCtx, input: { id: string; to: MemoryDecision }): Promise<DecideMemoryResult> {
   assertEnum('decision', MEMORY_DECISIONS, input.to);
   assertUuid('memory entry', input.id);
