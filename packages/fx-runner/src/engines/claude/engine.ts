@@ -218,7 +218,9 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
         // Integers only leave the capture (no text, no path); the result line comes last, so its snapshot covers the whole command.
         ledger.observe(message);
         const normalized = normalizeMessage({ runId: opts.runId, role: opts.role }, message, seq++, workdir);
-        const event = message.type === "result" ? { ...normalized, contextLedger: ledger.snapshot() } : normalized;
+        // D#600 CX-9b: beside the integers, the window the job named (when it did), so the cloud can say how full the context was.
+        const windowNow = (opts as EngineStartOptions).contextWindowTokens;
+        const event = message.type === "result" ? { ...normalized, contextLedger: { ...ledger.snapshot(), ...(windowNow === undefined ? {} : { window_tokens: windowNow }) } } : normalized;
         if (event.sessionId !== undefined && SESSION_ID_PATTERN.test(event.sessionId)) sessionId = event.sessionId;
         if (message.type === "result") {
           result = message;

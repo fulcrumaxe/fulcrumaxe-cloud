@@ -25,13 +25,15 @@ import { sdkSessionStubs } from "./helpers/sdkSession.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import type { NormalizedEvent } from "../src/types.js";
 import { RunLimitError, createUsageMeter, type RunLimits } from "../src/meteringGuard.js";
-import { claudePricing, computeModelUsd } from "@fx/spend";
+import { claudePricing, computeModelUsd, contextWindowTokensFor } from "@fx/spend";
 import { SandboxTarget, buildTerminalReport, maxLineUsd } from "../src/targets/sandboxTarget.js";
 import { startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./helpers/seed.js";
+/** The window the price table gives the test model, so the expectation follows the table rather than a copy of its number. */
+const WINDOW_SONNET = contextWindowTokensFor("sonnet-5");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const NAME = "rn-9-reviewer-run-1";
@@ -965,6 +967,36 @@ describe("D#600 CX-1a: the context measure of the command's own stream", () => {
     JSON.stringify({ type: "assistant", message: { id, content: blocks, usage: { input_tokens: input, cache_creation_input_tokens: write, cache_read_input_tokens: read } } });
   const toolResult = (id: string, content: unknown) => JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content }] } });
 
+  it("D#600 CX-9b: reports the context after each turn that changed it (not for a tool result), with the model's window, and the sub-agent's turns do not move it", async () => {
+    const figures: Array<[number, number | undefined]> = [];
+    await run(
+      [
+        turn("m1", 9, 4875, 7622, { type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }),
+        toolResult("t1", "ok"),
+        // The same turn repeated (a content block's own line) is not a new figure.
+        turn("m1", 9, 4875, 7622),
+        JSON.stringify({ type: "assistant", parent_tool_use_id: "toolu_task", message: { id: "sub1", role: "assistant", content: [], usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 900_000, output_tokens: 1 } } }),
+        turn("m2", 3, 100, 12_506),
+        result(envelope("pass")),
+      ],
+      0,
+      { onContextFigure: (tokens, window) => void figures.push([tokens, window]) },
+    );
+    expect(figures).toEqual([
+      [12_506, WINDOW_SONNET],
+      [12_609, WINDOW_SONNET],
+    ]);
+  });
+
+  it("D#600 CX-9b: an observer that throws does not end the run", async () => {
+    const { last } = await run([turn("m1", 9, 4875, 7622), result(envelope("pass"))], 0, {
+      onContextFigure: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(last?.type).toBe("result");
+  });
+
   it("reports peak, first turn, cache tokens, tool bytes and compactions once, when the stream ends", async () => {
     const measures: unknown[] = [];
     const { last } = await run(
@@ -984,6 +1016,9 @@ describe("D#600 CX-1a: the context measure of the command's own stream", () => {
         basis: "measured",
         first_turn_input_tokens: 12_506,
         peak_context_tokens: 12_609,
+        // D#600 CX-9b: the latest main-thread turn's context, and the model's window from the price table.
+        last_context_tokens: 12_609,
+        window_tokens: WINDOW_SONNET,
         cache_read_tokens: 20_128,
         cache_write_tokens: 4_975,
         tool_output_bytes: { Bash: 100_000 },

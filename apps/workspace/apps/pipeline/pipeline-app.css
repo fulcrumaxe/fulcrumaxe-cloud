@@ -64,6 +64,7 @@
 .pl-detail-name { margin: 0 0 4px; overflow-wrap: anywhere; line-height: 1.35; }
 .pl-card-meta { display: flex; flex-wrap: wrap; gap: 6px; color: var(--text-muted, rgba(26, 255, 128, 0.55)); font-size: 0.78rem; }
 .pl-tag { padding: 0 4px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.pl-ctx { font-weight: 600; }
 .pl-tag-done { color: var(--accent, #1aff80); }
 .pl-verdict { color: var(--accent, #1aff80); font-size: 0.78rem; }
 

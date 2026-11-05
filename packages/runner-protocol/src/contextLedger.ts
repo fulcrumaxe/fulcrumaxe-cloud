@@ -85,6 +85,13 @@ export interface ContextLedgerMeasure {
   basis: ContextLedgerBasis;
   first_turn_input_tokens: number | null;
   peak_context_tokens: number | null;
+  /**
+   * D#600 CX-9b: the context of the main thread's latest turn, in tokens (not the peak: after a compaction it falls). The cloud stores it once beside the model's window and
+   * works the percent out when it is read. `null` when no turn reported usage; absent on a measure that did not come from a stream. Never 0 for "not measured".
+   */
+  last_context_tokens?: number | null;
+  /** D#600 CX-9b: the model's context window in tokens as the run was given it (the price table's figure); absent when the model has none: the cloud then says the window is not known and works out no percent. */
+  window_tokens?: number;
   cache_read_tokens: number | null;
   cache_write_tokens: number | null;
   tool_output_bytes: Partial<Record<ContextTool, number>>;
@@ -280,6 +287,7 @@ export class ContextLedgerCapture {
       basis: measured ? "measured" : "partial",
       first_turn_input_tokens: measured ? this.firstContext : null,
       peak_context_tokens: measured ? this.peak : null,
+      last_context_tokens: measured ? this.lastContext : null,
       cache_read_tokens: measured ? Math.min(this.cacheRead, CONTEXT_MAX_COUNT) : null,
       cache_write_tokens: measured ? Math.min(this.cacheWrite, CONTEXT_MAX_COUNT) : null,
       tool_output_bytes,
@@ -316,6 +324,9 @@ export function mergeContextLedgerMeasures(a: ContextLedgerMeasure | undefined, 
     first_turn_input_tokens: a.first_turn_input_tokens ?? b.first_turn_input_tokens,
     peak_context_tokens:
       a.peak_context_tokens === null ? b.peak_context_tokens : b.peak_context_tokens === null ? a.peak_context_tokens : Math.max(a.peak_context_tokens, b.peak_context_tokens),
+    // The later command's latest turn is the run's current context; a later command that measured nothing leaves the earlier figure.
+    ...(a.last_context_tokens === undefined && b.last_context_tokens === undefined ? {} : { last_context_tokens: b.last_context_tokens ?? a.last_context_tokens ?? null }),
+    ...(b.window_tokens === undefined && a.window_tokens === undefined ? {} : { window_tokens: (b.window_tokens ?? a.window_tokens)! }),
     cache_read_tokens: add(a.cache_read_tokens, b.cache_read_tokens),
     cache_write_tokens: add(a.cache_write_tokens, b.cache_write_tokens),
     tool_output_bytes,
@@ -331,6 +342,10 @@ export interface ContextLedgerWire {
   sections: ContextSection[];
   first_turn_input?: number;
   peak_context?: number;
+  /** D#600 CX-9b (additive): the latest main-thread turn's context in tokens; absent when not measured or from a runner that does not send it. */
+  last_context?: number;
+  /** D#600 CX-9b (additive): the model's window in tokens as the job named it; absent when the job named none. */
+  context_window?: number;
   cache_read?: number;
   cache_write?: number;
   memory?: number;
@@ -347,6 +362,8 @@ export function contextLedgerToWire(measure: ContextLedgerMeasure, sections: rea
     sections: [...sections],
     ...keep("first_turn_input", measure.first_turn_input_tokens),
     ...keep("peak_context", measure.peak_context_tokens),
+    ...keep("last_context", measure.last_context_tokens),
+    ...keep("context_window", measure.window_tokens),
     ...keep("cache_read", measure.cache_read_tokens),
     ...keep("cache_write", measure.cache_write_tokens),
     ...keep("memory", memoryTokens),
@@ -373,6 +390,8 @@ export function contextLedgerFromWire(wire: ContextLedgerWire): { measure: Conte
       basis: wire.basis,
       first_turn_input_tokens: wire.first_turn_input ?? null,
       peak_context_tokens: wire.peak_context ?? null,
+      ...(wire.last_context === undefined ? {} : { last_context_tokens: wire.last_context }),
+      ...(wire.context_window === undefined ? {} : { window_tokens: wire.context_window }),
       cache_read_tokens: wire.cache_read ?? null,
       cache_write_tokens: wire.cache_write ?? null,
       tool_output_bytes: { ...wire.tool_output_bytes },

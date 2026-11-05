@@ -208,6 +208,55 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
     }
   });
 
+  // D#600 CX-9b: the run's context figure (migration 0989) is read for a live run too, and the percent is derived, never stored.
+  describe('context figure (CX-9b)', () => {
+    const seedFigure = (accountId: string, runId: string, last: number, window: number | null) =>
+      admin.query(`INSERT INTO run_context_figure (account_id, run_id, last_context_tokens, window_tokens) VALUES ($1, $2, $3, $4)`, [accountId, runId, last, window]);
+    const read = async (id: string, identity: { userId: string; accountId: string }) => {
+      const body = (await (await get(id, identity)).json()) as RunContextPanel;
+      expect(runContextResponseSchema.parse(body)).toEqual(body);
+      return body;
+    };
+
+    it('a run still going has its figure and no ledger: tokens, window, the derived whole percent (rounded down) and the warning level', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId, { status: 'running' });
+      await seedFigure(accountId, id, 149_999, 200_000);
+      expect(await read(id, { accountId, userId })).toMatchObject({ recorded: false, context_last_tokens: 149_999, context_window_tokens: 200_000, context_pct: 74, context_warn_pct: 70 });
+    });
+
+    it('an ended run keeps its figure beside its ledger', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId);
+      await seedLedger(accountId, id, { basis: 'measured', first: 1, peak: 2 });
+      await seedFigure(accountId, id, 140_000, 200_000);
+      expect(await read(id, { accountId, userId })).toMatchObject({ recorded: true, context_last_tokens: 140_000, context_pct: 70 });
+    });
+
+    it('a model with no window has the tokens and a null window and percent (never a guessed percent)', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId);
+      await seedFigure(accountId, id, 54_000, null);
+      expect(await read(id, { accountId, userId })).toMatchObject({ context_last_tokens: 54_000, context_window_tokens: null, context_pct: null });
+    });
+
+    it('a figure over the window is capped at 100, and a run with no figure has all three null', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const over = await seedRun(accountId);
+      await seedFigure(accountId, over, 250_000, 200_000);
+      expect(await read(over, { accountId, userId })).toMatchObject({ context_pct: 100 });
+      expect(await read(await seedRun(accountId, { status: 'running' }), { accountId, userId })).toMatchObject({ context_last_tokens: null, context_window_tokens: null, context_pct: null, context_warn_pct: 70 });
+    });
+
+    it("another account's figure is not readable: the run is a 404", async () => {
+      const a = await seedAccountWithMember(admin);
+      const b = await seedAccountWithMember(admin);
+      const id = await seedRun(a.accountId);
+      await seedFigure(a.accountId, id, 10, 100);
+      expect((await get(id, b)).status).toBe(404);
+    });
+  });
+
   it('a runner run is returned as sizes and counts only (no text field anywhere in the body)', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin);
     const id = await seedRun(accountId, { runtime: 'runner' });

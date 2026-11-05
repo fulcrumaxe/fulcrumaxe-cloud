@@ -342,6 +342,10 @@ export const CONTEXT_WORDS = {
   partial: "Estimated: this run's usage was only partly measured, so the shares below are estimates.",
   rescanUnavailable: "Memory was not used in this run because secrets couldn't be checked.",
   // D#600 CX-12: which level set the size this run's prompt was held to (nothing is shown when the role default applied).
+  // D#600 CX-9b: how full the window is. The window is only ever the price table's figure; with none, the screen says so and works out no percent.
+  windowUnknown: "window not known for this model",
+  notYet: "Not recorded yet.",
+  dismiss: "Dismiss",
   budget: { item: "Context budget: set for this item.", role: "Context budget: set for this role.", repo: "Context budget: set for this repository." },
 };
 
@@ -414,7 +418,49 @@ export function readContext(raw) {
     rescan_skipped: countOrNull(b.rescan_skipped),
     rescan_unavailable: b.rescan_unavailable === true,
     budget_source: b.budget_source === "item" || b.budget_source === "role" || b.budget_source === "repo" ? b.budget_source : null,
+    // D#600 CX-9b: the latest turn's context, the window and the percent, each null when not recorded or not known (never 0 for those).
+    context_last_tokens: countOrNull(b.context_last_tokens),
+    context_window_tokens: Number.isInteger(b.context_window_tokens) && b.context_window_tokens >= 1 ? b.context_window_tokens : null,
+    context_pct: Number.isInteger(b.context_pct) && b.context_pct >= 0 && b.context_pct <= 100 ? b.context_pct : null,
+    context_warn_pct: Number.isInteger(b.context_warn_pct) && b.context_warn_pct >= 1 && b.context_warn_pct <= 100 ? b.context_warn_pct : null,
   };
+}
+
+const ctxLive = (ctx) => ctx.status === "pending" || ctx.status === "running";
+
+/**
+ * D#600 CX-9b: the context's size now (a run going) or at the end, as [label, words]. A figure not recorded is "Not recorded" (or "Not recorded yet." while the run
+ * goes on; a run on the person's machine reports only when it ends); a window the model has no figure for is said so and gets no percent. Never null, undefined or NaN.
+ */
+export function contextNow(ctx) {
+  const live = ctxLive(ctx);
+  const label = live ? "Context now" : "Context at the end";
+  const t = ctx.context_last_tokens;
+  if (t === null) return [label, live ? (ctx.runtime === "runner" ? CONTEXT_WORDS.live : CONTEXT_WORDS.notYet) : CONTEXT_WORDS.notRecorded];
+  const w = ctx.context_window_tokens;
+  if (w === null) return [label, tokenText(t) + " (" + CONTEXT_WORDS.windowUnknown + ")"];
+  return [label, tokenText(t) + " of a " + w.toLocaleString("en-US") + "-token window" + (ctx.context_pct === null ? "" : " (" + ctx.context_pct + "%)")];
+}
+
+/** The sentence of the near-limit banner, or null: shown only from the warning level the server names, and never when the percent is not known. */
+export function contextBannerText(ctx) {
+  if (!ctx || ctx.context_pct === null || ctx.context_warn_pct === null || ctx.context_pct < ctx.context_warn_pct) return null;
+  return ctxLive(ctx) ? "This run's context is at " + ctx.context_pct + "% of the window." : "This run's context was at " + ctx.context_pct + "% of the window when it ended.";
+}
+
+/**
+ * The banner on the run: a status message with a Dismiss button, or nothing. Dismissing hides it for this view of the run only (the item card's chip is not touched, and a
+ * later run starts clear); the text is derived from the run's current figure on every draw, never remembered.
+ */
+export function contextBanner(ctx, dismissed, onDismiss) {
+  const text = dismissed ? null : contextBannerText(ctx);
+  if (text === null) return null;
+  return h(
+    "div",
+    { class: "runs-ctx-banner", "data-testid": "runs-ctx-banner" },
+    h("p", { role: "status", "data-testid": "runs-ctx-banner-text" }, text),
+    h("button", { type: "button", class: "runs-more", "data-testid": "runs-ctx-banner-dismiss", onClick: onDismiss }, CONTEXT_WORDS.dismiss)
+  );
 }
 
 /**
@@ -476,6 +522,8 @@ export function contextModel(ctx) {
     mapVersion: runner ? null : ctx.repo_map_version,
     rescanNotes: rescanNotes(ctx.rescan_skipped, ctx.rescan_unavailable),
     budgetLine: ctx.budget_source ? CONTEXT_WORDS.budget[ctx.budget_source] : null,
+    // D#600 CX-9b: the context's size now or at the end, as one more fact (kept apart from `facts`, which are the ledger's).
+    now: contextNow(ctx),
   };
 }
 
@@ -500,7 +548,15 @@ export function contextSection(context, retry) {
     return sec("error", h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-error" }, CONTEXT_WORDS.error), h("button", { type: "button", class: "runs-more", "data-testid": "runs-ctx-retry", "data-keep": "ctx", onClick: retry }, CONTEXT_WORDS.retry));
   }
   const m = contextModel(context);
-  if (m.state === "none" || m.state === "live") return sec(m.state, h("p", { class: "runs-muted", "data-testid": "runs-ctx-empty" }, m.text));
+  if (m.state === "none" || m.state === "live") {
+    // The figure is kept apart from the ledger (it is written while the run goes on), so a run with no ledger can still have one.
+    const now = ctxLive(context) || context.context_last_tokens !== null ? contextNow(context) : null;
+    return sec(
+      m.state,
+      h("p", { class: "runs-muted", "data-testid": "runs-ctx-empty" }, m.text),
+      now ? h("dl", { class: "runs-factlist", "data-testid": "runs-ctx-now" }, h("div", { class: "runs-fact" }, h("dt", null, now[0]), h("dd", null, now[1]))) : null
+    );
+  }
   const group = (title, rows, testid) => (rows.length ? [h("h5", { class: "runs-sub" }, title), h("ul", { class: "runs-ctx-rows", "data-testid": testid }, rows.map(ctxRow))] : []);
   return sec(
     m.state,
@@ -509,7 +565,7 @@ export function contextSection(context, retry) {
     ...group("What the prompt held", m.sections, "runs-ctx-sections"),
     ...m.pinNotes.map((t) => h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-pin-note" }, t)),
     h("p", { "data-testid": "runs-ctx-cache" }, m.cache),
-    h("dl", { class: "runs-factlist", "data-testid": "runs-ctx-facts" }, m.facts.map(([k, v]) => h("div", { class: "runs-fact" }, h("dt", null, k), h("dd", null, v)))),
+    h("dl", { class: "runs-factlist", "data-testid": "runs-ctx-facts" }, [...m.facts, m.now].map(([k, v]) => h("div", { class: "runs-fact" }, h("dt", null, k), h("dd", null, v)))),
     ...group("What tools returned", m.tools, "runs-ctx-tools"),
     m.memory && (m.memory.items.length || m.memory.tokens)
       ? h(

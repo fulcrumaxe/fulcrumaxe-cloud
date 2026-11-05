@@ -159,6 +159,10 @@ function mountApp(contentEl, launchArg) {
           { class: "pl-card-meta" },
           h("span", { class: "pl-tag pl-kind", "data-testid": "pl-kind" }, kind),
           item.provenance === "external" ? h("span", { class: "pl-tag" }, "External") : null,
+          // D#600 CX-9b: the item's running run has its context window filling up (the server sends the percent only from the warning level). Words and a number, not colour.
+          Number.isInteger(item.context_pct) && item.context_pct >= 0 && item.context_pct <= 100
+            ? h("span", { class: "pl-tag pl-ctx", "data-testid": "pl-ctx-chip", title: "The context window of this item's running run is " + item.context_pct + "% full" }, "Context " + item.context_pct + "%")
+            : null,
           item.stage === "merged" || item.stage === "closed_unmerged" || item.stage === "closed"
             ? h("span", { class: "pl-tag pl-tag-done" }, STAGE_LABELS[item.stage])
             : null

@@ -62,7 +62,7 @@ import {
 } from "../sandboxPort.js";
 import { reportError } from "@fx/telemetry";
 import { mergeContextLedgerMeasures, type ContextLedgerMeasure, type ContextSection, type ContextSpill } from "@fulcrumaxe/runner-protocol";
-import { recordContextLedger } from "../contextLedgerWriter.js";
+import { recordContextFigure, recordContextLedger } from "../contextLedgerWriter.js";
 import { modelIdForCliName } from "../vercelSandboxPort.js";
 import type { BrokenConnectionCode, ConnectionStatusPort } from "../connectionStatusPort.js";
 import type { ModelProvider, NormalizedEvent } from "../types.js";
@@ -238,6 +238,9 @@ interface RunBookkeeping {
   meteredModelCalls: number;
   /** D#600 CX-1a: what this run's streams said about its context, merged over its commands; recorded once at finalize. */
   contextLedger?: ContextLedgerMeasure;
+  /** D#600 CX-9b: the newest figure waiting to be stored, and the one writer draining it (one write at a time per run, so an older figure never lands after a newer one). */
+  figureNext?: { tokens: number; windowTokens: number | undefined };
+  figureBusy?: Promise<void>;
   /** D#600 CX-4a: set when the spill files could not be written and the uncut prompt went out: the sections of THAT prompt are what the ledger records. */
   uncutSections?: readonly ContextSection[];
   /** The metered token total (W3) and the plausibility flags (MP-PLAUS), both for the terminal report. */
@@ -482,6 +485,7 @@ export class SandboxTarget implements ExecutionTarget {
       ...this.extensionOf(run, bk),
       onModelCalls: (n) => (bk.meteredModelCalls += n),
       onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
+      onContextFigure: this.figureOf(run, bk),
       ...this.spillOf(run, bk),
       ...(excludes.length > 0 && { excludes }),
       ...(run.limits && { limits: run.limits }),
@@ -700,6 +704,7 @@ export class SandboxTarget implements ExecutionTarget {
         ...this.extensionOf(run, bk),
         onModelCalls: (n) => (bk.meteredModelCalls += n),
         onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
+        onContextFigure: this.figureOf(run, bk),
         ...this.spillOf(run, bk),
         ...(excludes.length > 0 && { excludes }),
         ...(run.limits && { limits: run.limits }),
@@ -992,6 +997,33 @@ export class SandboxTarget implements ExecutionTarget {
     return rules.filter((r) => r.kind === "exclude").map((r) => r.path);
   }
 
+  /**
+   * D#600 CX-9b: stores the latest context figure while the run goes on. Calls are queued as "the newest figure" and one write runs at a time, so a slow write never
+   * lets an older figure land after a newer one and a run of quick turns costs one write each at most. A failed write is reported and the run goes on: the figure is
+   * information, never a reason to end a run.
+   */
+  private figureOf(run: ExecutionRun, bk: RunBookkeeping): (tokens: number, windowTokens: number | undefined) => void {
+    return (tokens, windowTokens) => {
+      bk.figureNext = { tokens, windowTokens };
+      if (bk.figureBusy !== undefined) return;
+      bk.figureBusy = (async () => {
+        try {
+          while (bk.figureNext !== undefined) {
+            const next = bk.figureNext;
+            bk.figureNext = undefined;
+            try {
+              await this.withAccount(run.accountId, (client) => recordContextFigure(client, { accountId: run.accountId, runId: run.id, lastContextTokens: next.tokens, windowTokens: next.windowTokens }));
+            } catch (err) {
+              reportError(err, { stage: "run.context_figure" });
+            }
+          }
+        } finally {
+          bk.figureBusy = undefined;
+        }
+      })();
+    };
+  }
+
   private async recordContext(run: ExecutionRun): Promise<void> {
     const bk = this.runs.get(run.id);
     const measure = bk?.contextLedger;
@@ -1002,6 +1034,15 @@ export class SandboxTarget implements ExecutionTarget {
       await this.withAccount(run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure, ...(run.memoryTokens === undefined ? {} : { memoryTokens: run.memoryTokens }), ...(run.contextAssembly ? { assembly: run.contextAssembly } : {}) }));
     } catch (err) {
       reportError(err, { stage: "run.context_ledger" });
+    }
+    // CX-9b: the figure at the end, after any live write still in flight (so the end value is the one that stays).
+    await bk.figureBusy;
+    const last = measure.last_context_tokens;
+    if (last === undefined || last === null) return;
+    try {
+      await this.withAccount(run.accountId, (client) => recordContextFigure(client, { accountId: run.accountId, runId: run.id, lastContextTokens: last, windowTokens: measure.window_tokens }));
+    } catch (err) {
+      reportError(err, { stage: "run.context_figure" });
     }
   }
 

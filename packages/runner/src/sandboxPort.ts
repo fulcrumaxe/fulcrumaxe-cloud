@@ -126,6 +126,11 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
    * cache tokens, tool output bytes, compactions). Integers only; the caller merges the measures of a run's commands. Best effort. */
   onContextLedger?: (measure: ContextLedgerMeasure) => void;
   /**
+   * D#600 CX-9b: called after a main-thread turn changed the context's size, with the latest turn's context in tokens and the model's window (undefined: the model has none).
+   * The caller stores it for the run page and the item card while the run goes on. Best effort: it must not throw.
+   */
+  onContextFigure?: (lastContextTokens: number, windowTokens: number | undefined) => void;
+  /**
    * D#600 CX-4a: files holding text the prompt cut, written to `/fx/context/<code>.md` (outside the checkout) before the agent starts, with the uncut prompt
    * the port sends instead if a file cannot be written. `onSpill` is called once with whether they were written, so the caller records the sections of the
    * prompt that went out.
