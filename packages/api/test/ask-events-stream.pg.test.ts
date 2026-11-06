@@ -57,7 +57,7 @@ describe('decision.ask_* events reach the account stream', { timeout: 60_000 }, 
     await admin.query('BEGIN');
     try {
       await admin.query('SET LOCAL session_replication_role = replica');
-      await admin.query(`UPDATE decision_asks SET raised_at = raised_at - interval '2 days', answer_due_at = answer_due_at - interval '2 days' WHERE id = $1`, [id]);
+      await admin.query(`UPDATE decision_asks SET raised_at = raised_at - interval '48 hours', answer_due_at = answer_due_at - interval '48 hours' WHERE id = $1`, [id]);
       await admin.query('COMMIT');
     } catch (err) {
       await admin.query('ROLLBACK');

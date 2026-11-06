@@ -120,7 +120,9 @@ describe('AAP storage (0837)', () => {
       expect(rows.map((r) => r.proname).sort()).toEqual([...FUNCTIONS, ...PLAIN].sort());
       for (const r of rows) {
         expect(r.owner).toBe('aap_definer');
-        expect(r.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
+        // The three that count days run in UTC (0995), so a day is 24 hours whatever the caller's zone.
+        const inUtc = ['aap_sweep_at', 'aap_request_create', 'aap_request_create_idempotent'].includes(r.proname);
+        expect(r.proconfig).toEqual(inUtc ? ['search_path=pg_catalog, public, pg_temp', 'TimeZone=UTC'] : ['search_path=pg_catalog, public, pg_temp']);
         if (PLAIN.includes(r.proname)) expect([r.proname, r.prosecdef, r.grantees]).toEqual([r.proname, false, null]);
         else expect([r.proname, r.prosecdef, r.grantees]).toEqual([r.proname, true, [r.proname === 'aap_sweep' ? 'aap_sweeper' : 'aap_invoker']]);
       }
@@ -395,11 +397,11 @@ describe('AAP storage (0837)', () => {
     };
     /** The sweep at `col + delta` of a row, computed in SQL so microseconds are exact (a JS Date would round them to milliseconds). */
     const sweepAtRow = async (table: string, id: string, col: string, delta: string) => {
-      const { rows } = await admin.query(`SELECT (${col} + $2::interval)::text AS t FROM ${table} WHERE ${table === 'aap_idempotency' ? 'response_ref' : 'id'} = $1`, [id, delta]);
+      const { rows } = await admin.query(`SELECT (((${col} AT TIME ZONE 'UTC') + $2::interval) AT TIME ZONE 'UTC')::text AS t FROM ${table} WHERE ${table === 'aap_idempotency' ? 'response_ref' : 'id'} = $1`, [id, delta]);
       return sweepAt(rows[0].t);
     };
     const replayExact = async (id: string): Promise<boolean[]> =>
-      (await admin.query(`SELECT i.purge_after = r.decided_at + interval '7 days' AS exact FROM aap_idempotency i JOIN action_approvals r ON r.id = i.response_ref WHERE r.id = $1`, [id])).rows.map((r) => r.exact);
+      (await admin.query(`SELECT i.purge_after = ((r.decided_at AT TIME ZONE 'UTC') + interval '7 days') AT TIME ZONE 'UTC' AS exact FROM aap_idempotency i JOIN action_approvals r ON r.id = i.response_ref WHERE r.id = $1`, [id])).rows.map((r) => r.exact);
 
     it('expires a pending request at its deadline, and not before', async () => {
       const { secret } = await instance(a);
@@ -421,6 +423,25 @@ describe('AAP storage (0837)', () => {
       expect((await row(req.id)).arguments_sealed).not.toBeNull();
       await sweepAtRow('action_approvals', req.id, 'decided_at', '30 days');
       expect(await row(req.id)).toMatchObject({ arguments_sealed: null, arguments_kek_version: null, arguments_sha256: kept, arguments_bytes: bytes });
+    });
+
+    it('counts the 30 days in 720 hours even from the first pass of a repeated fall-back hour, in a session zone with daylight saving', async () => {
+      const { secret } = await instance(a);
+      const req = await createRequest(invokerPool, KEK, secret, input());
+      await asUser(a.accountId, owner, (c) => decideRequest(c, req.id, false, null, null));
+      await admin.query('BEGIN');
+      try {
+        await admin.query('SET LOCAL session_replication_role = replica');
+        await admin.query(`UPDATE action_approvals SET decided_at = '2026-11-01 01:30:00-04' WHERE id = $1`, [req.id]);
+        await admin.query('SET LOCAL session_replication_role = origin');
+        await admin.query(`SET LOCAL TIME ZONE 'America/New_York'`);
+        await sweepAt('2026-12-01 05:29:59.999999+00');
+        expect((await row(req.id)).arguments_sealed).not.toBeNull();
+        await sweepAt('2026-12-01 05:30:00+00');
+        expect((await row(req.id)).arguments_sealed).toBeNull();
+      } finally {
+        await admin.query('ROLLBACK');
+      }
     });
 
     it('drops the replay record 7 days after the decision, and keeps one for a request still pending', async () => {

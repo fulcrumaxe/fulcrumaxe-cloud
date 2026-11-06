@@ -108,7 +108,7 @@ describe('a reversal_over_cap answer (R4)', () => {
     const { workItemId, askId } = await overCap();
     await admin.query('BEGIN');
     await admin.query('SET LOCAL session_replication_role = replica');
-    await admin.query(`UPDATE decision_asks SET raised_at = raised_at - interval '10 days', answer_due_at = answer_due_at - interval '10 days' WHERE id = $1`, [askId]);
+    await admin.query(`UPDATE decision_asks SET raised_at = raised_at - interval '240 hours', answer_due_at = answer_due_at - interval '240 hours' WHERE id = $1`, [askId]);
     await admin.query('COMMIT');
     const out = await sweepOverdueAsks(receiptPool, { now: () => new Date() }, 500);
     expect(out.proceededAskIds).not.toContain(askId);

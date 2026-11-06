@@ -163,7 +163,7 @@ describe("receipt block wiring [pg]", { timeout: 120_000 }, () => {
     // The window ended two days ago: the guard freezes both columns, so it is bypassed for this one admin statement only.
     await admin.query("BEGIN");
     await admin.query("SET LOCAL session_replication_role = replica");
-    await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '2 days', answer_due_at = answer_due_at - interval '2 days' WHERE id = $1", [id]);
+    await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '48 hours', answer_due_at = answer_due_at - interval '48 hours' WHERE id = $1", [id]);
     await admin.query("COMMIT");
     await runAskWindowTick({ pool: receiptPool, warn: () => undefined, afterReceipt: refresher.hook });
     expect(w.patchBodies).toHaveLength(1);

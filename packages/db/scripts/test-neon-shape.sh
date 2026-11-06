@@ -1209,7 +1209,7 @@ check_invoker_exception_shape() {
   local dbname="$1" role="$2" invoker="$3" names="$4" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+      SELECT p.oid, (p.proconfig IN (ARRAY['search_path=pg_catalog, public, pg_temp'], ARRAY['search_path=pg_catalog, public, pg_temp', 'TimeZone=UTC']) AND p.proacl IS NOT NULL
         AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = '$invoker'::regrole)
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> '$invoker'::regrole OR a.is_grantable))) AS ok
       FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND p.proname IN ($names) AND pg_get_userbyid(p.proowner) = '$role') x;" 2>&1)" || rc=$?
@@ -4732,6 +4732,32 @@ fi
 # DS-0a item 4: the same discussion_eraser INHERIT/shape check, on the
 # D#94 parity path. A no-op today (discussion_eraser doesn't exist on main).
 ns_run_checks everywhere fx_d94_parity
+
+# 0995 widened check_invoker_exception_shape by exactly one value: TimeZone=UTC beside the pinned search_path. Prove the widening is that
+# narrow: UTC passes, any other zone fails, and an extra setting of any other kind fails. Probed on aap_request_create (an aap_definer
+# function named by the AAPI group) as the superuser, then put back so nothing later sees the change.
+echo "==> shape check widening: TimeZone=UTC passes; another zone or any other extra setting fails"
+TZ_PROBE_SIG='public.aap_request_create(text, uuid, text, text, bytea, integer, text, integer, text, jsonb, integer, timestamptz)'
+tz_probe() {
+  local want="$1" label="$2" got failed=false
+  got="$(check_invoker_exception_shape fx_d94_parity aap_definer aap_invoker "'aap_request_create'")"
+  case "$got" in SHAPE_FAIL:*) failed=true ;; esac
+  if { [ "$want" = pass ] && [ "$failed" = true ]; } || { [ "$want" = fail ] && [ "$failed" != true ]; }; then
+    echo "neon-shape: shape check probe FAILED ($label): expected $want, got '$got'" >&2
+    exit 1
+  fi
+}
+tz_probe_alter() { "${PSQL[@]}" -U postgres -d fx_d94_parity -c "$1" >/dev/null; }
+tz_probe_alter "ALTER FUNCTION $TZ_PROBE_SIG SET TimeZone = 'UTC';"
+tz_probe pass "TimeZone=UTC"
+tz_probe_alter "ALTER FUNCTION $TZ_PROBE_SIG SET TimeZone = 'Europe/Paris';"
+tz_probe fail "TimeZone=Europe/Paris"
+tz_probe_alter "ALTER FUNCTION $TZ_PROBE_SIG SET TimeZone = 'UTC'; ALTER FUNCTION $TZ_PROBE_SIG SET work_mem = '1MB';"
+tz_probe fail "TimeZone=UTC plus work_mem"
+tz_probe_alter "ALTER FUNCTION $TZ_PROBE_SIG RESET work_mem; ALTER FUNCTION $TZ_PROBE_SIG RESET TimeZone;"
+tz_probe pass "search_path only"
+tz_probe_alter "ALTER FUNCTION $TZ_PROBE_SIG SET TimeZone = 'UTC';"
+tz_probe pass "restored"
 
 ELAPSED=$((SECONDS - SCRIPT_START))
 echo "neon-shape: runtime ${ELAPSED}s"

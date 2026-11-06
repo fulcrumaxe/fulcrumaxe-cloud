@@ -75,7 +75,7 @@ describe('rejection memory through the import (S5-f)', () => {
     const id = async (n: number) => (await admin.query('SELECT id FROM proposals WHERE repo_id = $1 AND dedupe_key = $2', [repoId, `gh:issue:${n}`])).rows[0].id as string;
     const view = (n: number) => id(n).then((pid) => getProposal(ctx, pid));
     /** The date passes: the stored date moves two days back, so a date that was a day ahead is now a day behind. */
-    const aDayPasses = (pid: string) => admin.query(`UPDATE proposals SET resurface_after = resurface_after - interval '2 days' WHERE id = $1`, [pid]);
+    const aDayPasses = (pid: string) => admin.query(`UPDATE proposals SET resurface_after = resurface_after - interval '48 hours' WHERE id = $1`, [pid]);
     return { r, repoId, ctx, importWith, id, view, aDayPasses, reject: rejectProposal, restore: restoreProposal };
   }
   const OPEN = (n: number): IssueSpec => ({ number: n, title: `Issue ${n}`, state: 'open' });
