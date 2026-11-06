@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChangedFiles } from "../../src/daemon/checkStep.js";
 import { lockfileSyncFor } from "../../src/commands/run.js";
 import { PM_ON_FAIL_FLAG } from "../../src/daemon/depsInstall.js";
-import { createLockfileSync, lockSyncArgs, type LockSyncOutcome } from "../../src/daemon/lockfileSync.js";
+import { createLockfileSync, LOCK_SYNC_SETTINGS, lockSyncArgs, type LockSyncOutcome } from "../../src/daemon/lockfileSync.js";
+import { prepareCheckHome } from "../../src/sandbox/checkHome.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
 import { testLaunch } from "../helpers/launch.js";
 
@@ -217,6 +218,115 @@ describe("a dependency that needs the registry", () => {
     expect(r.said[0]).toMatch(/^fx-runner: lockfile update failed \(lockfile_sync_failed: needs_network, exit \d+\)/);
     expect(r.said[0]).not.toContain(ws);
     expect(readdirSync(scratch).filter((n) => n.startsWith("fx-locksync-"))).toEqual([]);
+  });
+});
+
+/**
+ * A workspace whose lockfile already lists a registry package, as every real repository's does. pnpm 11 judges such entries against its release-age policy, which needs registry metadata that an
+ * offline run does not have (`ERR_PNPM_NO_OFFLINE_META`), so these cases are the ones the empty fixture above could not reach. The runner's per-run settings file turns that one check off.
+ */
+describe("a lockfile that lists registry packages (the release-age policy needs metadata an offline run does not have)", () => {
+  const LEFT_PAD = "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==";
+  const registryLock = `lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n\n  a:\n    dependencies:\n      left-pad:\n        specifier: 1.3.0\n        version: 1.3.0\n\n  b: {}\n\npackages:\n\n  left-pad@1.3.0:\n    resolution: {integrity: ${LEFT_PAD}}\n    deprecated: use String.prototype.padStart()\n\nsnapshots:\n\n  left-pad@1.3.0: {}\n`;
+
+  beforeEach(() => {
+    put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }));
+    put("pnpm-lock.yaml", registryLock);
+    git("add", "-A");
+    git("commit", "-q", "-m", "registry dependency");
+    base = git("rev-parse", "HEAD");
+    pinFixture(ws);
+  });
+
+  it("without the settings file pnpm stops at the policy check (the failure this row fixed): ERR_PNPM_NO_OFFLINE_META", () => {
+    put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }, { description: "changed" }));
+    const r = pnpm(["install", "--lockfile-only", "--offline", "--no-frozen-lockfile"]);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/ERR_PNPM_NO_OFFLINE_META/);
+  });
+
+  it("a description change updates (the lockfile is judged without the network) and the registry entry is untouched", async () => {
+    put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }, { description: "changed" }));
+    const r = subject();
+    const outcome = await r.run();
+    // A description is not recorded in the lockfile: pnpm ran to the end (no needs_network) and the file is byte for byte the same.
+    expect(outcome).toEqual({ kind: "unchanged" });
+    expect(r.said).toEqual([]);
+    expect(read("pnpm-lock.yaml")).toBe(registryLock);
+  });
+
+  it("known limit, unchanged by this row: a change that does alter the lockfile makes pnpm re-resolve the registry entries, which needs their metadata: needs_network, closed", async () => {
+    put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0", "@x/b": "workspace:*" }));
+    const r = subject({ timeoutMs: 45_000 });
+    expect(await r.run()).toEqual({ kind: "failed", why: "needs_network" });
+    expect(r.said[0]).toMatch(/NO_OFFLINE_META\] Failed to resolve left-pad@1\.3\.0/);
+    // The policy check itself passed (it is what this row removes as a cause); only the re-resolution of that project is left.
+    expect(r.said[0]).toContain("Lockfile passes supply-chain policies");
+    expect(read("pnpm-lock.yaml")).toBe(registryLock);
+  });
+
+  it("a dependency that really is new still needs the network: needs_network, the lockfile back byte for byte", async () => {
+    put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0", "is-odd": "3.0.1" }));
+    const r = subject({ timeoutMs: 45_000 });
+    expect(await r.run()).toEqual({ kind: "failed", why: "needs_network" });
+    expect(read("pnpm-lock.yaml")).toBe(registryLock);
+    expect(r.said[0]).toMatch(/lockfile_sync_failed: needs_network/);
+  });
+
+  it("the settings file sits in pnpm's config directory inside the run's own scratch (0600, one key), never in the workspace, and the scratch is removed afterwards", async () => {
+    put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }, { description: "changed" }));
+    const seen: Array<{ file: string; text: string; mode: number; underScratch: boolean }> = [];
+    await subject({
+      capture: async (_c, _a, env) => {
+        const file = path.join(env.XDG_CONFIG_HOME ?? "", "pnpm", "config.yaml");
+        seen.push({ file, text: readFileSync(file, "utf8"), mode: statSync(file).mode & 0o777, underScratch: path.relative(scratch, file).startsWith("fx-locksync-") });
+        expect(existsSync(path.join(env.HOME ?? "", ".npmrc"))).toBe(false);
+        return { code: 0, timedOut: false, aborted: false, tail: "" };
+      },
+    }).run();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.text).toBe("minimumReleaseAge: 0\n");
+    expect(seen[0]!.mode).toBe(0o600);
+    expect(seen[0]!.underScratch).toBe(true);
+    expect(existsSync(path.join(ws, "pnpm", "config.yaml"))).toBe(false);
+    expect(git("status", "--porcelain").split("\n").map((l) => l.trim()).sort()).toEqual(["M a/package.json"]);
+    expect(readdirSync(scratch).filter((n) => n.startsWith("fx-locksync-"))).toEqual([]);
+  });
+
+  it("the check's home, which shares the settings-file helper, is unchanged: same path, same three keys, 0600", () => {
+    const home = prepareCheckHome(scratch, "/the/store");
+    const file = path.join(home, ".config", "pnpm", "config.yaml");
+    expect(readFileSync(file, "utf8")).toBe('verifyDepsBeforeRun: false\nminimumReleaseAge: 0\nstoreDir: "/the/store"\n');
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path.join(home, ".npmrc"), "utf8")).toBe("");
+    expect(readFileSync(path.join(prepareCheckHome(scratch, undefined), ".config", "pnpm", "config.yaml"), "utf8")).toBe("verifyDepsBeforeRun: false\nminimumReleaseAge: 0\n");
+  });
+
+  it("the command line still carries --offline and the pinned registry: the relaxation adds no network and no host", () => {
+    const args = lockSyncArgs({ registry: "https://registry.npmjs.org/", storeDir: "/s", cacheDir: "/c" });
+    expect(args).toContain("--offline");
+    expect(args.some((a) => /release-age|trust-policy/i.test(a))).toBe(false);
+    expect(LOCK_SYNC_SETTINGS).toEqual(["minimumReleaseAge: 0"]);
+  });
+
+  it("a repository that tries to set the policy, the network mode or another registry itself is refused before pnpm starts", async () => {
+    const attempts: Array<[string, string]> = [
+      ["pnpm-workspace.yaml", "packages:\n  - a\n  - b\nminimumReleaseAge: 10080\n"],
+      ["pnpm-workspace.yaml", "packages:\n  - a\n  - b\noffline: false\n"],
+      ["pnpm-workspace.yaml", "packages:\n  - a\n  - b\nregistry: https://evil.example/\n"],
+      [".npmrc", "minimum-release-age=0\n"],
+      [".npmrc", "offline=false\n"],
+      [".npmrc", "trust-policy=off\n"],
+    ];
+    for (const [file, text] of attempts) {
+      put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }, { description: "changed" }));
+      put(file, text);
+      const calls: string[] = [];
+      expect((await subject({ calls }).run()).kind).toBe("refused");
+      expect(calls).toEqual([]);
+      if (file === ".npmrc") rmSync(path.join(ws, file));
+      else put(file, "packages:\n  - a\n  - b\n");
+    }
   });
 });
 

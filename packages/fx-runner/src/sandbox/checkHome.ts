@@ -21,16 +21,27 @@ import path from "node:path";
  */
 
 /**
+ * Writes pnpm's user-level settings file, `<configHome>/pnpm/config.yaml`, into a directory the runner made for this one run (mode 0700, the file 0600, created with `wx` so an existing name or a
+ * planted link is never written through). `configHome` is `$XDG_CONFIG_HOME` when that is set and `<home>/.config` otherwise: the one place pnpm reads these keys from, which a repo's own settings
+ * files cannot reach (the pre-checks in `lockfileCheck.ts` refuse every key that is not on their short list, `minimumReleaseAge` and `offline` included). Returns the file's path.
+ */
+export function writePnpmUserSettings(configHome: string, lines: readonly string[]): string {
+  const dir = path.join(configHome, "pnpm");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, "config.yaml");
+  writeFileSync(file, `${lines.join("\n")}\n`, { flag: "wx", mode: 0o600 });
+  return file;
+}
+
+/**
  * Makes the home (a name the job cannot have chosen: `mkdtemp` never reuses one, so nothing the agent planted in the temp directory, a link included, is followed or written through; mode
  * 0700) with its two files (created with `wx`), and returns its path. Throws when any of it cannot be made.
  */
 export function prepareCheckHome(tempDir: string, storeDir: string | undefined): string {
   const home = mkdtempSync(path.join(tempDir, "fx-check-home-"));
-  const config = path.join(home, ".config", "pnpm");
-  mkdirSync(config, { recursive: true, mode: 0o700 });
   const lines = ["verifyDepsBeforeRun: false", "minimumReleaseAge: 0"];
   if (storeDir !== undefined) lines.push(`storeDir: ${JSON.stringify(storeDir)}`);
-  writeFileSync(path.join(config, "config.yaml"), `${lines.join("\n")}\n`, { flag: "wx", mode: 0o600 });
+  writePnpmUserSettings(path.join(home, ".config"), lines);
   writeFileSync(path.join(home, ".npmrc"), "", { flag: "wx", mode: 0o600 });
   return home;
 }
