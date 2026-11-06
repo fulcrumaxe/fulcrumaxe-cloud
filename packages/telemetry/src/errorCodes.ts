@@ -219,6 +219,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Cloud runner notices (D#6 R2b-3h): a notice that could not be written for a run, and a tick whose list came back full.
   "runner_notice_failed",
   "runner_notice_backlog",
+  // Claim verifier (D#483): a run that succeeded but left no answer to record, by cause.
+  "verify_result_missing",
+  "verify_result_refused",
+  "verify_result_unread",
   // Platform invariant sweep (D#597 CC-8): one code per rule, reported once per new alert.
   "invariant_stage_not_moved",
   "invariant_no_activity",
