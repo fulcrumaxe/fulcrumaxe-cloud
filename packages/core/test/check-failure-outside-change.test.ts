@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { failedOutsideChange } from '../src/work-items/checkFailure.js';
+import { changedPathsHint, failedOutsideChange } from '../src/work-items/checkFailure.js';
 
 const tail = '\nsome output tail\n';
 
@@ -47,5 +47,27 @@ describe('failedOutsideChange: a check that failed only in test files the change
 
   it.each([null, undefined, '', '\n', 'failed test files'])('%j is not decided', (summary) => {
     expect(failedOutsideChange(summary)).toBe(false);
+  });
+});
+
+describe('changedPathsHint (SCOPE-BEFORE-CHECK)', () => {
+  it('names the paths of the changed-files line in the header, among the runner\'s other header lines', () => {
+    expect(changedPathsHint(`failed test files (1): a.test.ts\nchanged files (2): src/a.ts, secrets/key.pem${tail}`)).toEqual(['src/a.ts', 'secrets/key.pem']);
+  });
+
+  it('a cut list still names what it shows; the count of the rest is not a name', () => {
+    expect(changedPathsHint(`changed files (80): src/a.ts, src/b.ts (and 78 more)${tail}`)).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+
+  it('never reads the output tail: the same line below the header is not a hint', () => {
+    expect(changedPathsHint('some output\nchanged files (1): secrets/key.pem\n')).toEqual([]);
+  });
+
+  it('a name that is not a plain relative path is dropped', () => {
+    expect(changedPathsHint('changed files (2): /etc/passwd, src/a.ts\n')).toEqual(['src/a.ts']);
+  });
+
+  it.each([null, undefined, '', 'changed files (x): a.ts\n', 'no header at all'])('%j gives no hint', (summary) => {
+    expect(changedPathsHint(summary)).toEqual([]);
   });
 });

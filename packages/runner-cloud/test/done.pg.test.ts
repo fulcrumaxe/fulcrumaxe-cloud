@@ -292,6 +292,82 @@ describe("done route [pg]", () => {
       expect(finished[0]!.check).toEqual(failing);
     });
 
+    // D#6 SCOPE-BEFORE-CHECK. A failed check whose summary header names a path outside the Spec's scope is a hint; the pull request's real file list decides.
+    describe("a failed check beside a change outside the scope", () => {
+      const withHeader = (names: string, over: Partial<DoneCheck> = {}) => report({ exit_code: 1, summary: `failed test files (1): src/a.test.ts\nchanged files (${String(names.split(", ").length)}): ${names}\nFAIL src/a.test.ts`, ...over });
+      const callWith = (s: Scene, check: DoneCheck) => s.call({ body: { run_id: s.runId, lease_generation: s.gen, check } });
+
+      it("ends scope_violation (not check_failed): the pull request is read, closed, its number and the branch kept, and the failed check still recorded", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts"), file("secrets/key.pem", "ADDED")] });
+        const failing = withHeader("secrets/key.pem, src/app.ts");
+        expect(parsedDone(await callWith(s, failing))).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+        expect(s.repo.pulls[0]!.state).toBe("closed");
+        expect(verdictOf()).toEqual({ outcome: "failed", failureReason: "scope_violation", prNumber: 1, branch: s.branch });
+        expect(finished[0]!.check).toEqual(failing);
+        expect(labels(s.fake)).not.toContain("A1 MarkReady");
+        // The refusal is recorded (it is what keeps the item at Needs a person) with the real out-of-scope paths, before the private pull request is closed.
+        expect(noted).toHaveLength(1);
+        expect(noted[0]).toMatchObject({ runId: s.runId, refusal: { reason: "scope_violation", prNumber: 1, total: 1, paths: ["secrets/key.pem"] } });
+      });
+
+      it("an in-scope change with the same failing check stays check_failed, as today: no pull request is left and the run branch is recorded", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+        const failing = report({ exit_code: 1, summary: "failed test files (1): src/a.test.ts\nchanged files (1): src/app.ts\nFAIL src/a.test.ts" });
+        expect(parsedDone(await callWith(s, failing))).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect(labels(s.fake)).toEqual([]);
+        expect(s.repo.pulls).toHaveLength(0);
+        expect(verdictOf()).toEqual({ outcome: "failed", failureReason: "check_failed", prNumber: null, branch: s.branch });
+        expect(noted).toEqual([]);
+      });
+
+      it("a hint the pull request's files do not bear out is check_failed, and the draft this call opened is closed again", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+        expect(parsedDone(await callWith(s, withHeader("secrets/key.pem")))).toMatchObject({ outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect(s.repo.pulls[0]!.state).toBe("closed");
+        expect(verdictOf()).toEqual({ outcome: "failed", failureReason: "check_failed", prNumber: null, branch: s.branch });
+        expect(noted).toEqual([]);
+      });
+
+      it("a pull request that already existed on the branch is left open when the hint is not borne out (only a draft this call opened is closed)", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+        s.fake.addForeignPull(s.repo, { head: s.branch, author: { login: FAKE_APP_LOGIN, type: "Bot" }, draft: false });
+        expect(parsedDone(await callWith(s, withHeader("secrets/key.pem"))).failure_reason).toBe("check_failed");
+        expect(s.repo.pulls[0]!.state).toBe("open");
+      });
+
+      it("no header in the summary means no hint: an out-of-scope diff is check_failed and GitHub is never asked", async () => {
+        const s = await scene({ check: APPROVED, files: [file("secrets/key.pem", "ADDED")] });
+        expect(parsedDone(await callWith(s, report({ exit_code: 1, summary: "FAIL src/a.test.ts" }))).failure_reason).toBe("check_failed");
+        expect(labels(s.fake)).toEqual([]);
+      });
+
+      it("a Spec with no readable file list is not judged here: check_failed, GitHub never asked", async () => {
+        const s = await scene({ check: APPROVED, scope: false, files: [file("secrets/key.pem", "ADDED")] });
+        expect(parsedDone(await callWith(s, withHeader("secrets/key.pem"))).failure_reason).toBe("check_failed");
+        expect(labels(s.fake)).toEqual([]);
+      });
+
+      it("a hint beside a rename in the real listing is left to the check: check_failed", async () => {
+        const s = await scene({ check: APPROVED, files: [file("secrets/key.pem", "RENAMED")] });
+        expect(parsedDone(await callWith(s, withHeader("secrets/key.pem"))).failure_reason).toBe("check_failed");
+      });
+
+      it("a branch with no commit ahead of the base is check_failed and no pull request is opened", async () => {
+        const s = await scene({ check: APPROVED, aheadBy: 0, files: [file("secrets/key.pem", "ADDED")] });
+        expect(parsedDone(await callWith(s, withHeader("secrets/key.pem"))).failure_reason).toBe("check_failed");
+        expect(s.repo.pulls).toHaveLength(0);
+        expect(labels(s.fake)).toEqual(["A2", "A1 RunBranchState"]);
+      });
+
+      it("GitHub unreachable while the files are read is 503 retry and nothing is written", async () => {
+        const s = await scene({ check: APPROVED, files: [file("secrets/key.pem", "ADDED")] });
+        s.fake.inject = { label: /^A1 RunBranchState$/, reply: { status: 503, body: {} } };
+        const res = await callWith(s, withHeader("secrets/key.pem"));
+        expect(res.status).toBe(503);
+        expect(finished).toHaveLength(0);
+      });
+    });
+
     it("the outcome comes from the check, never from agentOutput: a runner claiming success in its envelope still ends check_failed", async () => {
       const s = await scene({ check: APPROVED });
       const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, agentOutput: { verdict: "pass", summary: "all green" }, check: report({ exit_code: 2 }) } });

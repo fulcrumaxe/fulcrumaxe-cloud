@@ -16,7 +16,8 @@ import {
   type RunnerHttpResponse,
 } from "./http.js";
 import { stopReply } from "./heartbeat.js";
-import { loadAcceptanceScope, pathInScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
+import { changedPathsHint } from "@fx/core/src/work-items/checkFailure.js";
+import { loadAcceptanceScope, pathInScope, pathsOutsideScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
 import { RunPullRequestError, loadRunPullRequestText, type PullRequestRef, type PullRequestRepo, type RunPullRequestPort, type RunPullRequestText } from "./runPullRequest.js";
 import { normaliseCheck } from "./checkResult.js";
 import { checkConflictAttestation, storeConflictAttestation } from "./conflictAttest.js";
@@ -204,7 +205,7 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
   if (!port) throw new RunnerHttpError(503, "not_configured", "the runner API has no GitHub access configured");
   // D#6 R-CHK-3 (C47): the check is judged first, from the run's own signed job and the runner's report, never from `agentOutput`. A job that carried a check and a `done` with no
   // result cannot be told from a check nobody ran, so it is not judged either way (`internal_error`: no fix round is spent on a runner that skipped the step). A result for a job that
-  // carried no check is not the cloud's to record. A failed check ends the run `check_failed` BEFORE GitHub is asked anything: no commit test, no scope test, no pull request.
+  // carried no check is not the cloud's to record. A failed check ends the run `check_failed` BEFORE GitHub is asked anything: no commit test, no scope test, no pull request; the one exception is below (SCOPE-BEFORE-CHECK).
   let reported = runnerReported;
   if (ctx.job.check !== undefined) {
     if (reported === undefined) return failed("internal_error");
@@ -215,6 +216,15 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
     if (norm.outOfContract !== null || !checkPassed(norm.check)) {
       // The runner pushed the work to the run branch before reporting; recording it (with no pull request) is what lets the fix round continue from its tip.
       const branch = branchOf(ctx.job, i);
+      // D#6 SCOPE-BEFORE-CHECK: a change that went outside the Spec's file list is not worth a check-fix round. The runner's summary header names the paths it changed; when one of them is
+      // outside the scope that is only a HINT, and the cloud looks at the pull request's real file list before it decides. Confirmed: `scope_violation`, as for a passing check. Anything else
+      // (no hint, a hint the files do not bear out, GitHub unable to say for good) is `check_failed` exactly as before. This saves the fix rounds, not the check that already ran.
+      if (ctx.scope.kind === "known" && pathsOutsideScope(ctx.scope, changedPathsHint(norm.check.summary)).length > 0) {
+        const log = deps.log ?? ((line: string) => console.warn(line));
+        const confirmed = await confirmScopeViolation(port, ctx, ctx.repo, ctx.job, i, log, (refusal) => refuseScope(deps, i, refusal, log));
+        if (confirmed.kind === "verdict") return { ...confirmed, check: norm.check };
+        if (confirmed.kind !== "none") return confirmed;
+      }
       return { ...(failed("check_failed", RUNNER_RUN_BRANCH.test(branch) ? { branch } : {}) as Extract<Decision, { kind: "verdict" }>), check: norm.check };
     }
     reported = norm.check;
@@ -296,6 +306,60 @@ export function logPullRequestFailure(write: (line: string) => void, input: { ru
     );
   } catch {
     // fx-swallow-ok: diagnostics never change the verdict
+  }
+}
+
+/**
+ * The scope test for a run whose check failed (the runner's summary named a path outside the scope, a hint). Reads the branch and the pull request's real changed paths exactly as
+ * `judgeCommit` does and answers a `scope_violation` verdict (the pull request closed, its number and the branch recorded) only when they bear the hint out. Everything else is
+ * `{ kind: "none" }` and the caller ends the run `check_failed` as before: no commit or a head that did not move, a pull request or text that cannot be made, a renamed or unknown change
+ * type, files all inside the scope, or GitHub refusing for good. A pull request this call opened that turned out in scope is closed again; one that already existed is left alone.
+ * GitHub unreachable is `retry` (nothing is written, as everywhere in `done`).
+ */
+async function confirmScopeViolation(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, refuse: RefuseScope): Promise<Decision | { kind: "none" }> {
+  const none = { kind: "none" } as const;
+  if (ctx.scope.kind !== "known" || ctx.text === null) return none;
+  const continuation = job.continues !== null;
+  if (continuation && ctx.dispatchBase === null) return none;
+  const branch = branchOf(job, i);
+  let stage: "read" | "create" | "files" = "read";
+  let pr: PullRequestRef | null = null;
+  const close = async (): Promise<"closed" | "retry"> => {
+    try {
+      await port.close({ repo, number: pr!.number });
+      return "closed";
+    } catch (error) {
+      if (error instanceof RunPullRequestError) return error.retryable ? "retry" : "closed";
+      throw error;
+    }
+  };
+  try {
+    const base = await port.defaultBranch(repo);
+    const state = await port.branchState({ repo, branch, base });
+    if (!state.exists || state.aheadBy === null || state.aheadBy === 0) return none;
+    if (continuation && state.headOid === ctx.dispatchBase?.oid) return none;
+    stage = "create";
+    pr = await port.openDraft({ repo, branch, base, run: ctx.text });
+    stage = "files";
+    const changed = await port.changedFiles({ repo, number: pr.number });
+    // Order as in `judgeCommit`: the count, then renames and unknown types (which this path leaves to the check), then the paths.
+    const outside = changed.files.filter((f) => !pathInScope(ctx.scope, f.path)).map((f) => f.path);
+    const violated = !changed.complete || (changed.files.every((f) => PASSING_CHANGE_TYPES.has(f.changeType)) && outside.length > 0);
+    if (violated) {
+      // Recorded (and the public copy closed) BEFORE the private pull request is closed, as in `judgeCommit`, so the close the webhook reports is known to be the cloud's own.
+      const noted = await refuse({ reason: "scope_violation", prNumber: pr.number, total: changed.complete ? outside.length : null, paths: changed.complete ? outside : [] });
+      if (noted.kind !== "go") return noted;
+      if ((await close()) === "retry") return { kind: "retry" };
+      return verdictOf({ outcome: "failed", failureReason: "scope_violation", prNumber: pr.number, branch });
+    }
+    if (!pr.reused && (await close()) === "retry") return { kind: "retry" };
+    return none;
+  } catch (error) {
+    if (!(error instanceof RunPullRequestError)) throw error;
+    if (error.retryable) return { kind: "retry" };
+    logPullRequestFailure(write, { runId: i.runId, stage, error });
+    if (pr && !pr.reused && (await close()) === "retry") return { kind: "retry" };
+    return none;
   }
 }
 

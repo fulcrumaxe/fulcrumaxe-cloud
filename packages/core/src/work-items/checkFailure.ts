@@ -93,3 +93,18 @@ export function failedOutsideChange(summary: string | null | undefined): boolean
   }
   return true;
 }
+
+/**
+ * The paths the summary's header names as changed (`changed files (N): a, b`), only from the header at the very top, never the output tail. This is a HINT the runner wrote, used
+ * to decide whether the cloud should look at the branch's real file list; it is never a verdict on its own. A cut list still returns the names it shows (`(and K more)` is dropped).
+ * Empty when there is no such line or it is malformed.
+ */
+export function changedPathsHint(summary: string | null | undefined): string[] {
+  if (typeof summary !== 'string' || summary === '') return [];
+  for (const line of summary.split('\n')) {
+    if (!HEADER_PREFIXES.some((p) => line.startsWith(p))) break;
+    const read = readFileLine(line, 'changed files (');
+    if (read !== null) return [...read.files];
+  }
+  return [];
+}

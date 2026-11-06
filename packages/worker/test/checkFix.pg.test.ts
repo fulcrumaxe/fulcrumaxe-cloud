@@ -289,6 +289,8 @@ describe("check fix round [pg]", () => {
 
   it("refuses what it should: a run that did not fail its check, an unknown or foreign run, a live executor, a seat refusal, an item with no issue number, and a resume that throws", async () => {
     expect(await startCheckFixRound(deps(), who(), await ended({ reason: "no_commit" }))).toEqual({ ok: false, reason: "not_check_failed" });
+    // SCOPE-BEFORE-CHECK: a run `done` ended scope_violation beside a failed check is not a check failure to repair: no fix round starts for it.
+    expect(await startCheckFixRound(deps(), who(), await ended({ reason: "scope_violation" }))).toEqual({ ok: false, reason: "not_check_failed" });
     expect(await startCheckFixRound(deps(), who(), await ended({ reason: null }))).toEqual({ ok: false, reason: "not_check_failed" });
     expect(await startCheckFixRound(deps(), who(), randomUUID())).toEqual({ ok: false, reason: "not_check_failed" });
     expect(await startCheckFixRound(deps(), who(), "not-a-uuid")).toEqual({ ok: false, reason: "invalid_input" });
