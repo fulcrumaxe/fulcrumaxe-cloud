@@ -9,6 +9,10 @@ import { RUNNER_DISPATCH_BASE_KIND, readRecordedRunnerBranch, recordContextLedge
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLAIM_PATH, DISPATCH_BASE_KIND, claimRun, createRunPullRequestPort, donePath, doneRun, eventsPath, heartbeatRun, HEARTBEAT_PATH, ingestEvents, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { getRunInsight } from "@fx/core/src/runs/insight.js";
+import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { SCOPE_REFUSAL_EVENT, type ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
+import { applyMappedEvent } from "@fx/github";
+import { markBuildNeedsHuman } from "../../pipeline/src/advance/build.js";
 import { RunActionInputError } from "../src/index.js";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerGitTicketFacade } from "../src/runnerGitTicket.js";
@@ -77,7 +81,7 @@ describe("runner done [pg]", () => {
   }
 
   /** A pending runner run with a real signed job, ready to be claimed. */
-  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string; prNumber?: number; baseSha?: string }; check?: Check } = {}): Promise<string> {
+  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string; prNumber?: number; baseSha?: string }; check?: Check; newest?: boolean } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -101,7 +105,7 @@ describe("runner done [pg]", () => {
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, spec_version_id, created_at)
        VALUES ($1, $2, $3, $4, 'runner', 'pending', 'runner_local', $5, $6::jsonb, $7, $8, to_timestamp($9 / 1000.0))`,
-      [id, A.accountId, A.workItemId, job.role, A.repoId, JSON.stringify(signJob(job, signing)), A.userId, o.specVersion ?? null, T0 - 5000],
+      [id, A.accountId, A.workItemId, job.role, A.repoId, JSON.stringify(signJob(job, signing)), A.userId, o.specVersion ?? null, T0 - 5000 + (o.newest ? 3_600_000 : 0)],
     );
     return id;
   }
@@ -121,6 +125,142 @@ describe("runner done [pg]", () => {
     expect(r.envelope).toBeNull();
     expect((await statusEvents(id)).filter((p) => p.viaRunnerDone === true)).toEqual([]);
   };
+
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: the refusal record the route writes before it closes a refused run's pull request.
+  describe("noteScopeRefusal", () => {
+    const refusal = (prNumber = 1): ScopeRefusal => ({ reason: "scope_violation" as const, prNumber, total: 2, paths: ["tests/a.ts", "tests/b.ts"] });
+    const pairWith = (codeRepo = "acme/widgets-public") => admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4) ON CONFLICT (repo_id) DO UPDATE SET code_repo = EXCLUDED.code_repo", [A.repoId, A.accountId, codeRepo, ["private/**"]]);
+    const events = async (id: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2 ORDER BY seq", [id, SCOPE_REFUSAL_EVENT])).rows.map((r) => r.payload as Record<string, unknown>);
+    const publicRow = async (state: string, over: { managed?: boolean; repoId?: string } = {}) => {
+      await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+      await admin.query(
+        `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state, managed_by_person_at)
+         VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 41, 'https://github.com/acme/widgets-public/pull/41', $7, ${over.managed ? "now()" : "NULL"})`,
+        [A.accountId, A.workItemId, over.repoId ?? A.repoId, "f".repeat(64), "a".repeat(40), "b".repeat(40), state],
+      );
+    };
+
+    it("records the refusal once per pull request, under the lease, and writes nothing else", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      expect(await facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal() })).toEqual({ kind: "noted", publicPr: null });
+      // The event names the repository the private pull request lives in (the run's dispatch repository), written from the cloud's own rows.
+      expect(await events(id)).toEqual([{ reason: "scope_violation", prNumber: 1, repo: "acme/widgets", total: 2, paths: ["tests/a.ts", "tests/b.ts"] }]);
+      // A repeat (the route sends `done` again after a blip) records nothing new; another pull request is another record.
+      await facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal() });
+      expect(await events(id)).toHaveLength(1);
+      await facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal(2) });
+      expect(await events(id)).toHaveLength(2);
+      await nothingWritten(id);
+    });
+
+    it("is fenced like every lease method: a stale generation, another runner and an unknown run are told why and nothing is recorded", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      expect(await facade.noteScopeRefusal({ ...lease(id, g + 1), refusal: refusal() })).toEqual({ kind: "fenced", reason: "stale_generation" });
+      const other = await newRunner();
+      expect(await facade.noteScopeRefusal({ ...lease(id, g, other), refusal: refusal() })).toMatchObject({ kind: "fenced" });
+      expect(await facade.noteScopeRefusal({ ...lease(randomUUID(), g), refusal: refusal() })).toMatchObject({ kind: "fenced" });
+      expect(await events(id)).toEqual([]);
+    });
+
+    it("refuses a refusal that is not one (a pull request number that is not positive, a reason of another kind) before touching anything", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await expect(facade.noteScopeRefusal({ ...lease(id, g), refusal: { ...refusal(), prNumber: 0 } })).rejects.toBeInstanceOf(RunActionInputError);
+      await expect(facade.noteScopeRefusal({ ...lease(id, g), refusal: { ...refusal(), reason: "no_commit" as never } })).rejects.toBeInstanceOf(RunActionInputError);
+      expect(await events(id)).toEqual([]);
+    });
+
+    it("answers the public pull request only when the platform opened it, still holds it, and it is on the run's own repository", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await pairWith();
+      // Each ask is a refusal of its own pull request: a repeat of one record is answered by what that record named (tested below).
+      let n = 100;
+      const ask = () => facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal(++n) });
+      expect(await ask()).toEqual({ kind: "noted", publicPr: null });
+      await publicRow("pr_opened");
+      expect(await ask()).toEqual({ kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch: expect.stringMatching(/^fx\/p-[0-9a-f-]{36}$/) } });
+      for (const state of ["pr_closed", "pr_merged", "updated", "waiting_person_pushed"]) {
+        await publicRow(state);
+        expect(await ask(), state).toEqual({ kind: "noted", publicPr: null });
+      }
+      // A person who took the branch over keeps it.
+      await publicRow("pr_opened", { managed: true });
+      expect(await ask()).toEqual({ kind: "noted", publicPr: null });
+      // Another repository's record is not this run's.
+      const otherRepo = randomUUID();
+      await admin.query("INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, (SELECT installation_id FROM repos WHERE id = $3), $4, 'team')", [otherRepo, A.accountId, A.repoId, 9123]);
+      await publicRow("pr_opened", { repoId: otherRepo });
+      expect(await ask()).toEqual({ kind: "noted", publicPr: null });
+    });
+  });
+
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED, review round 1: the event names BOTH pull requests the cloud closes, each with the repository it lives in, so the hold of a close is scoped to that repository.
+  describe("noteScopeRefusal: the repositories the event names", () => {
+    const refusal = (prNumber = 1): ScopeRefusal => ({ reason: "scope_violation" as const, prNumber, total: 1, paths: ["tests/a.ts"] });
+    const events = async (id: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2 ORDER BY seq", [id, SCOPE_REFUSAL_EVENT])).rows.map((r) => r.payload as Record<string, unknown>);
+    const pushRow = async (): Promise<string> =>
+      (
+        await admin.query<{ branch: string }>(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state)
+           VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 41, 'https://github.com/acme/widgets-public/pull/41', 'pr_opened') RETURNING branch`,
+          [A.accountId, A.workItemId, A.repoId, "f".repeat(64), "a".repeat(40), "b".repeat(40)],
+        )
+      ).rows[0]!.branch;
+    const pair = (codeRepo = "acme/widgets-public") => admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4) ON CONFLICT (repo_id) DO UPDATE SET code_repo = EXCLUDED.code_repo", [A.repoId, A.accountId, codeRepo, ["private/**"]]);
+
+    it("writes the public copy (repository and number) into the event before anything is closed, beside the private repository and number", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await pair();
+      const branch = await pushRow();
+      expect(await facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal() })).toEqual({ kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch } });
+      expect(await events(id)).toEqual([{ reason: "scope_violation", prNumber: 1, repo: "acme/widgets", publicPr: { codeRepo: "acme/widgets-public", number: 41 }, total: 1, paths: ["tests/a.ts"] }]);
+    });
+
+    it("takes the repositories from its own rows: whatever the request says about them is dropped", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await pair();
+      await pushRow();
+      await facade.noteScopeRefusal({ ...lease(id, g), refusal: { ...refusal(), repo: "evil/other", publicPr: { codeRepo: "evil/other-public", number: 7 } } });
+      expect(await events(id)).toEqual([expect.objectContaining({ repo: "acme/widgets", publicPr: { codeRepo: "acme/widgets-public", number: 41 } })]);
+      const second = await pending({ newest: true });
+      await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [id]);
+      const g2 = await claimed(second);
+      await admin.query("UPDATE plane_pushes SET state = 'pr_closed' WHERE work_item_id = $1", [A.workItemId]);
+      await facade.noteScopeRefusal({ ...lease(second, g2), refusal: { ...refusal(5), publicPr: { codeRepo: "evil/other-public", number: 7 } } });
+      const none = (await events(second))[0]!;
+      expect(none).toMatchObject({ repo: "acme/widgets", prNumber: 5 });
+      expect(none).not.toHaveProperty("publicPr");
+    });
+
+    it("a pairing that no longer names the public repository records no public copy, closes nothing and says why in a fixed word", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await pair("acme/another-public");
+      await pushRow();
+      expect(await facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal() })).toEqual({ kind: "noted", publicPr: null, publicSkipped: "pairing_changed" });
+      expect((await events(id))[0]).not.toHaveProperty("publicPr");
+      // The repeat does not close a copy the first record did not name, even if the pairing is back.
+      await pair();
+      expect(await facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal() })).toEqual({ kind: "noted", publicPr: null });
+      expect(await events(id)).toHaveLength(1);
+    });
+
+    it("a repeat after the first record names the same public copy again (the runner sent done again after a blip on the public close)", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await pair();
+      const branch = await pushRow();
+      const ask = () => facade.noteScopeRefusal({ ...lease(id, g), refusal: refusal() });
+      await ask();
+      expect(await ask()).toEqual({ kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch } });
+      expect(await events(id)).toHaveLength(1);
+    });
+  });
 
   describe("begin", () => {
     it("proceeds for the runner that holds the run, renews the lease like a heartbeat, and changes nothing else", async () => {
@@ -1044,6 +1184,84 @@ describe("runner done [pg]", () => {
       const g = await claimRoute(id);
       expect(DoneReply.parse((await done(id, g)).body)).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: null });
       expect(fake.repos.get("acme/widgets")!.pulls).toHaveLength(0);
+    });
+
+    // D#6 CHECKFIX-SUCCESS-AS-FAILED, end to end: the check-fix round's pull request is refused by the scope check. The refusal is recorded before the close, the public pull request is closed with
+    // one comment, the webhook leaves the item alone, the driver moves it to Needs a person with the scope result named, and the card says which files were outside the list.
+    it("a fix round that touches a file outside the Spec's list ends scope_violation; the item reaches Needs a person (not closed_unmerged), the public pull request is closed, and the card names the files", async () => {
+      await admin.query("UPDATE work_items SET stage = 'in_progress', gh_number = 727 WHERE id = $1", [A.workItemId]);
+      await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+      await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3) ON CONFLICT (repo_id) DO NOTHING", [A.repoId, A.accountId, ["private/**"]]);
+      const publicBranch = (
+        await admin.query<{ branch: string }>(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state)
+           VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 41, 'https://github.com/acme/widgets-public/pull/41', 'pr_opened') RETURNING branch`,
+          [A.accountId, A.workItemId, A.repoId, "f".repeat(64), "a".repeat(40), "b".repeat(40)],
+        )
+      ).rows[0]!.branch;
+      const parentBranch = `fx/${randomUUID()}-g1`;
+      const id = await pending({ specVersion: await spec(["packages/fx-runner/**"]), continues: { branch: parentBranch }, newest: true });
+      const g = await claimRoute(id);
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 900, $3, $4::jsonb)", [A.accountId, id, DISPATCH_BASE_KIND, JSON.stringify({ head_oid: "c".repeat(40) })]);
+      const repo = fake.repos.get("acme/widgets")!;
+      fake.pushBranch(repo, parentBranch, {
+        files: [{ path: "packages/fx-runner/src/checkStep.ts", changeType: "MODIFIED" }, { path: "packages/worker/test/support/scanRunnerLoginReaders.ts", changeType: "MODIFIED" }, { path: "packages/worker/test/support/scanReceiptLoginReaders.ts", changeType: "MODIFIED" }],
+        aheadBy: 2,
+        oid: "d".repeat(40),
+      });
+      const publicCalls: Array<Record<string, unknown>> = [];
+      const planePush = {
+        mintToken: async () => ({ token: "t", expiresAt: new Date() }),
+        verifyPushed: async () => true,
+        verifyPullRequest: async () => null,
+        revokeToken: async () => true,
+        closeRefusedPullRequest: async (input: Record<string, unknown>) => (publicCalls.push({ ...input }), { result: "closed" as const, commented: true }),
+      };
+      const res = await run(() => doneRun({ ...deps, planePush: planePush as never }, send(donePath(id), { run_id: id, lease_generation: g }), id));
+      expect(DoneReply.parse(res.body)).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+      expect(await row(id)).toMatchObject({ status: "failed" });
+      expect(repo.pulls[0]).toMatchObject({ state: "closed", head: parentBranch });
+
+      // The record is on the run, with the count and the paths, and was written before the verdict.
+      const recorded = (await admin.query("SELECT seq, payload FROM run_events WHERE run_id = $1 AND kind = $2", [id, SCOPE_REFUSAL_EVENT])).rows;
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].payload).toEqual({ reason: "scope_violation", prNumber: 1, repo: "acme/widgets", publicPr: { codeRepo: "acme/widgets-public", number: 41 }, total: 2, paths: ["packages/worker/test/support/scanRunnerLoginReaders.ts", "packages/worker/test/support/scanReceiptLoginReaders.ts"] });
+      const verdictSeq = (await admin.query("SELECT seq FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed' AND payload->>'to' = 'failed'", [id])).rows[0].seq;
+      expect(Number(recorded[0].seq)).toBeLessThan(Number(verdictSeq));
+
+      // The public pull request was closed, once, with the plain comment.
+      expect(publicCalls).toHaveLength(1);
+      expect(publicCalls[0]).toMatchObject({ accountId: A.accountId, codeRepo: "acme/widgets-public", number: 41, branch: publicBranch });
+
+      // The opened delivery landed while `done` was running (the item is at PR opened); the cloud's own close is then held back from the item.
+      await admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [A.workItemId]);
+      const installationId = (await admin.query<{ id: string }>("SELECT id FROM installations WHERE account_id = $1 LIMIT 1", [A.accountId])).rows[0]?.id ?? randomUUID();
+      const ctx = { accountId: A.accountId, installationId, repoId: A.repoId, repo: { accountId: A.accountId, repoId: A.repoId, ghRepoId: 1, fullName: "acme/widgets" }, deliveryId: randomUUID() };
+      const deliver = (toStage: "pr_opened" | "closed_unmerged") => withTenant(appPool, A.accountId, (c) => applyMappedEvent(c, { ...ctx, deliveryId: randomUUID() }, { kind: "transition_pr", toStage, at: new Date(), prNumber: 1, linkedIssueNumber: 727, trust: "trusted", isFork: false }));
+      expect(await deliver("closed_unmerged")).toMatchObject({ applied: "skipped" });
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage).toBe("pr_opened");
+      // The cloud's close of the PUBLIC copy is delivered by the paired repository, with its own number and the platform's branch: it is held back the same way.
+      const deliverPublic = (toStage: "pr_opened" | "closed_unmerged", prNumber = 41) =>
+        withTenant(appPool, A.accountId, (c) =>
+          applyMappedEvent(c, { ...ctx, repo: { ...ctx.repo, fullName: "acme/widgets-public" }, deliveryId: randomUUID() }, { kind: "transition_pr", toStage, at: new Date(), prNumber, linkedIssueNumber: null, trust: "trusted", isFork: false, headRef: publicBranch }),
+        );
+      expect(await deliverPublic("closed_unmerged")).toMatchObject({ applied: "skipped" });
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage).toBe("pr_opened");
+
+      // The driver reads the run's end and records the item, under the scope result's own code.
+      expect(await markBuildNeedsHuman(writerPool, A.accountId, A.workItemId, id, "scope_violation")).toEqual({ status: "recorded", stage: "needs_human" });
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage).toBe("needs_human");
+      // A late opened delivery does not put it back; a repeat close finds it already moved.
+      expect(await deliver("pr_opened")).toMatchObject({ applied: "skipped" });
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage).toBe("needs_human");
+
+      // The card says how many files were outside the list and which. (This run was made newest of the item, as the fix round is.)
+      const activity = await getWorkItemActivity({ pool: appPool, principal: { accountId: A.accountId, userId: A.userId, role: "owner" } }, A.workItemId);
+      expect(activity.notice).toMatchObject({ kind: "needs_human" });
+      expect(activity.notice!.reason).toMatch(/touched 2 files: packages\/worker\/test\/support\/scanRunnerLoginReaders\.ts, packages\/worker\/test\/support\/scanReceiptLoginReaders\.ts outside the Spec's file list/);
+      expect(activity.notice!.reason).toMatch(/branch was kept/);
+      // The public copy was closed too, so the card says what Build again needs first.
+      expect(activity.notice!.reason).toMatch(/The public copy was closed too\. To build again, reopen it on GitHub first/);
     });
 
     it("the role list the route judges is the protocol's: every eligible role other than the executor and the docs-writer ends succeeded without GitHub", async () => {

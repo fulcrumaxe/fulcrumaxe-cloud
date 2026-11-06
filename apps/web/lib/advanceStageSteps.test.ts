@@ -114,6 +114,10 @@ describe("a failed runner run is recorded under the code of why it failed (C22 s
     ["usage_limit", "runner_usage_limit"],
     ["credential_mismatch", "run_failed"],
     ["internal_error", "run_failed"],
+    // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud's scope check refused the run's pull request: the code names the scope result.
+    ["scope_violation", "scope_violation"],
+    ["scope_unknown", "scope_unknown"],
+    ["no_commit", "run_failed"],
     [null, "run_failed"],
   ])("a failed runner run that ended %s is recorded as %s", async (failureReason, code) => {
     const w = runner(failureReason);
@@ -137,6 +141,10 @@ describe("a failed runner run is recorded under the code of why it failed (C22 s
   it("the two new codes are on the pipeline's closed list, so the write happens", async () => {
     const { BUILD_FAILURE_CODES } = await import("@fx/pipeline");
     expect(BUILD_FAILURE_CODES).toEqual(expect.arrayContaining(["runner_lost", "runner_usage_limit"]));
+  });
+  it("the two scope codes are on the pipeline's closed list too, so the write happens", async () => {
+    const { BUILD_FAILURE_CODES } = await import("@fx/pipeline");
+    expect(BUILD_FAILURE_CODES).toEqual(expect.arrayContaining(["scope_violation", "scope_unknown"]));
   });
 });
 

@@ -15,6 +15,7 @@ import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSent
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE, REPUBLISH_REPLACE_NO_CHANGE, REPUBLISH_REPLACE_FAILED, REPUBLISH_REPLACE_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN, REPUBLISH_STACK_PARENT_OFF_MAIN, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST, REPUBLISH_TIP_MOVED, republishFailedSentence } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } from './checkFailure.js';
+import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalSentence } from './scopeRefusal.js';
 import { openPrStopSentence } from './baseSync.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
 import { buildStartsByItself } from './stageApprovalGate.js';
@@ -888,6 +889,10 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
             )
           ).rows[0]
         : undefined;
+      // D#6 CHECKFIX-SUCCESS-AS-FAILED: the newest executor run ended because the cloud's scope check refused its pull request: the card says how many files were outside the Spec's list, and which.
+      const scopeRefusal = ex && ex.status === 'failed'
+        ? parseScopeRefusal((await client.query<{ payload: unknown }>(`SELECT payload FROM run_events WHERE run_id = $1::uuid AND kind = $2::text ORDER BY seq DESC LIMIT 1`, [ex.id, SCOPE_REFUSAL_EVENT])).rows[0]?.payload)
+        : null;
       const memoryEnd: RunEndedWhy | undefined = exEnd?.reason === 'resource_limit' ? { reason: 'resource_limit', detail: null, size_mb: null, memory_limit_bytes: memoryLimitOf(exEnd.memory_limit_bytes) } : undefined;
       const summary = ex?.summary?.trim() ? safeModelText(ex.summary, ACTIVITY_LIMITS.maxNoticeChars) : null;
       notice = rebuildSentence
@@ -900,6 +905,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           ? { kind: 'needs_human', reason: unverifiableSentence }
           : noVerdictSentence
           ? { kind: 'needs_human', reason: noVerdictSentence }
+          : scopeRefusal
+          ? { kind: 'needs_human', reason: scopeRefusalSentence(scopeRefusal) }
           : memoryEnd
           ? { kind: 'needs_human', reason: `The executor run ${ex!.status.replace(/_/g, ' ')} without a pull request.`, ended: memoryEnd }
           : {

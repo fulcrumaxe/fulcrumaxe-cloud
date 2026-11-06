@@ -3,6 +3,8 @@ import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEAS
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextFigure, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { normaliseCheck } from "@fx/runner-cloud";
+import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalPayload, type ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { guarded, RunActionInputError } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -67,7 +69,16 @@ export interface FinishRunnerDoneInput extends HeartbeatRunnerRunInput {
 export type BeginRunnerDoneResult = { kind: "proceed" } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneVerdict };
 export type FinishRunnerDoneResult = { kind: "recorded"; verdict: RunnerDoneVerdict } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneVerdict };
 
+/** What the cloud's scope refusal found out: the run's recorded refusal is in place, and the run's published public pull request when it has one the cloud may close. */
+export type NoteScopeRefusalResult = { kind: "fenced"; reason: StopReason } | { kind: "noted"; publicPr: { codeRepo: string; number: number; branch: string } | null; publicSkipped?: "pairing_changed" };
+
 export interface RunnerDoneFacade {
+  /**
+   * D#6 CHECKFIX-SUCCESS-AS-FAILED: BEFORE the cloud closes the private pull request of a run its scope check refused, records that refusal on the run (the fact the webhook and the
+   * stale-pull-request sweep read to leave the item at In progress), under the lease fence. A repeat for the same pull request records nothing new. Also answers the run's public pull
+   * request, when its item has one the platform opened and no person has taken the branch over, so the route can close it too. Nothing the runner sent is in either.
+   */
+  noteScopeRefusal(input: HeartbeatRunnerRunInput & { refusal: ScopeRefusal }): Promise<NoteScopeRefusalResult>;
   /** Fences a runner's `done`, extends its lease, and says whether to go on, stop, or answer the stored verdict again. */
   beginRunnerDone(input: HeartbeatRunnerRunInput): Promise<BeginRunnerDoneResult>;
   /** Records the cloud's verdict for the run under the fence, in one transaction. */
@@ -214,12 +225,50 @@ async function recordRunnerCheck(client: PoolClient, input: FinishRunnerDoneInpu
   });
 }
 
+const sameNamedPublicPr = (recorded: ScopeRefusal | null, now: { codeRepo: string; number: number }): boolean =>
+  recorded?.publicPr !== undefined && recorded.publicPr.number === now.number && recorded.publicPr.codeRepo.toLowerCase() === now.codeRepo.toLowerCase();
+
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
 export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = {}): RunnerDoneFacade {
   const now = deps.now ?? Date.now;
   const limits = deps.limits ?? runnerLimits;
 
   return {
+    noteScopeRefusal: (input) =>
+      guarded(async () => {
+        requireLease(input);
+        // The payload is cleaned by the one function that writes it; a refusal that does not survive it is not recorded.
+        const refusal = parseScopeRefusal(scopeRefusalPayload(input.refusal));
+        if (refusal === null) throw new RunActionInputError();
+        const at = new Date(now());
+        return withTenant(runnerPool, input.accountId, async (client): Promise<NoteScopeRefusalResult> => {
+          const held = await leaseVerdict(client, input, at, 0, limits(input.accountId).maxRunWallClockMs);
+          if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
+          // The repositories the event names are the cloud's own facts, read here from its rows: the run's dispatch repository (where the private pull request lives) and, on a paired
+          // repository, the public copy the platform opened and still holds. Nothing in them comes from the request, so a runner cannot point the hold at another repository.
+          const run = await client.query<{ work_item_id: string | null; dispatch_repo_id: string | null; repo: string | null }>(
+            `SELECT r.work_item_id, r.dispatch_repo_id, CASE WHEN g.gh_owner IS NULL OR g.gh_name IS NULL THEN NULL ELSE g.gh_owner || '/' || g.gh_name END AS repo
+               FROM agent_runs r LEFT JOIN repos g ON g.account_id = r.account_id AND g.id = r.dispatch_repo_id
+              WHERE r.account_id = $1 AND r.id = $2`,
+            [input.accountId, input.runId],
+          );
+          const facts = run.rows[0];
+          const row = facts?.work_item_id && facts.dispatch_repo_id ? await readPlanePush(client, input.accountId, facts.work_item_id) : null;
+          // Only the pull request the platform opened and still holds: a person who took the branch over keeps it, and a closed or merged one needs nothing.
+          const open = row !== null && row.repoId === facts?.dispatch_repo_id && row.state === "pr_opened" && row.managedByPersonAt === null && row.prNumber !== null;
+          // The public close also needs the repository's pairing to still name that public repository: a pairing removed or pointed elsewhere since the push means the record is no longer the platform's to act on.
+          const paired = open && (await client.query("SELECT 1 FROM repo_pairing WHERE account_id = $1 AND repo_id = $2 AND lower(code_repo) = lower($3)", [input.accountId, row.repoId, row.codeRepo])).rows.length > 0;
+          const publicPr = paired ? { codeRepo: row.codeRepo, number: row.prNumber!, branch: row.branch } : null;
+          // Whatever repository fields the request carried are dropped: the event names only what the rows above say.
+          const payload = scopeRefusalPayload({ reason: refusal.reason, prNumber: refusal.prNumber, total: refusal.total, paths: refusal.paths, ...(refusal.detail === undefined ? {} : { detail: refusal.detail }), ...(facts?.repo ? { repo: facts.repo } : {}), ...(publicPr === null ? {} : { publicPr: { codeRepo: publicPr.codeRepo, number: publicPr.number } }) });
+          const known = await client.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 AND payload->>'prNumber' = $4::text LIMIT 1", [input.accountId, input.runId, SCOPE_REFUSAL_EVENT, String(refusal.prNumber)]);
+          if (known.rows.length === 0) await insertRunEvent(client, input.accountId, input.runId, SCOPE_REFUSAL_EVENT, payload);
+          // A repeat (the runner sent `done` again) closes only the public pull request the FIRST record named: a copy the record does not name would be closed with nothing holding its close.
+          const named = known.rows.length === 0 ? publicPr : publicPr !== null && sameNamedPublicPr(parseScopeRefusal(known.rows[0]!.payload), publicPr) ? publicPr : null;
+          return { kind: "noted", publicPr: named, ...(open && !paired ? { publicSkipped: "pairing_changed" as const } : {}) };
+        });
+      }),
+
     beginRunnerDone: (input) =>
       guarded(async () => {
         requireLease(input);

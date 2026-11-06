@@ -70,6 +70,8 @@ export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   build_no_pull_request: 'The build finished without opening a pull request.',
   build_wait_timeout: 'The build ran out of time and was stopped.',
   build_check_rounds_used: "The build's checks kept failing and the automatic fixes are used up.",
+  build_scope_violation: "The build changed files outside the Spec's file list, so the pull request was closed and its branch kept. Open the card for the files.",
+  build_scope_unknown: "The build contained a file change the Spec's file list check cannot judge, so the pull request was closed and its branch kept. Open the card for the details.",
   max_fix_rounds: 'The reviewers asked for changes more times than the automatic fix rounds allow.',
   branch_answer_rounds_used: "Your answer about the public branch was recorded, but the automatic fix rounds are used up, so the pull request was not updated. Keep their version, or update the branch yourself.",
   fix_no_change_repeated: "Two fix rounds in a row changed nothing, so the pipeline stopped trying.",

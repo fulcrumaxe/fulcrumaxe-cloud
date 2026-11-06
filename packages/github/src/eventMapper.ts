@@ -19,6 +19,7 @@ import { withTenant } from '@fx/db/src/withTenant.js';
 import { recordMergeReceiptOn } from '@fx/db/src/mergeReceipt.js';
 import { queueDiscoveries, type QueuedDiscovery } from '@fx/db/src/discoveryRuns.js';
 import { reversalHoldsClose } from '@fx/db/src/reversalCompensation.js';
+import { scopeRefusalHoldsClose } from '@fx/core/src/work-items/scopeRefusal.js';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { syncFailureTag } from './syncFailureTag.js';
 import { installationDiscoveryRef } from './installDiscovery.js';
@@ -968,6 +969,18 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       if (mapped.toStage === 'closed_unmerged' && !child && (await reversalHoldsClose(client, workItemId, mapped.prNumber))) {
         return { applied: 'skipped', reason: 'pull_request.closed: closed by a reversal, which records the move itself' };
       }
+      // D#6 CHECKFIX-SUCCESS-AS-FAILED: a close the cloud made itself for a run its scope check refused is not a person's decision. The run's recorded refusal (written before the close) leaves the
+      // item at In progress, and the driver moves it to Needs a person with the scope result named. A close of any other pull request, a person's included, is recorded as before.
+      // The hold names the repository the delivery came from and that repository's own number: the private pull request, or its public copy on a paired repository (both are the cloud's own closes).
+      if (mapped.toStage === 'closed_unmerged' && (await scopeRefusalHoldsClose(client, workItemId, ctx.repo.fullName, mapped.prNumber))) {
+        return { applied: 'skipped', reason: 'pull_request.closed: closed by the cloud after its scope check refused the run, which records the move itself' };
+      }
+
+      // D#6 CHECKFIX-SUCCESS-AS-FAILED: the opened delivery of a pull request the cloud has already refused (its scope check ended the run and the refusal is recorded) can arrive after the driver moved the
+      // item to Needs a person; it must not put the item back at PR opened for a pull request that is closed. The driver moves the item itself, from wherever it is.
+      if (mapped.toStage === 'pr_opened' && (await scopeRefusalHoldsClose(client, workItemId, ctx.repo.fullName, mapped.prNumber))) {
+        return { applied: 'skipped', reason: 'pull_request.opened: the cloud already refused this pull request (scope check), which records the move itself' };
+      }
 
       let result;
       try {
@@ -989,6 +1002,7 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
         ) {
           return { applied: 'transitioned', workItemId, recorded: false };
         }
+
         // D#598: the same for a close or a merge that arrives after the item is already at that very stage (the worker read the pull request's state
         // back from GitHub when this delivery was late or lost, packages/worker prSlotReconcile.ts, and recorded the same move). Also refused before
         // anything is written, so it is a no-op and not a failed delivery.

@@ -47,6 +47,11 @@ export interface HostedPlanePush {
    * `PlanePushApiError` (`pr_failed`, or `public_unavailable` when GitHub could not be reached).
    */
   openPullRequest(input: { accountId: string; codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
+  /**
+   * Closes a public pull request the cloud refused after it was published, and leaves one plain comment (a fresh token revoked before this returns). A pull request that is not open is left as it is
+   * (`not_open`), and so is one whose head is not the recorded branch of the paired repository (`not_ours`). The branch is never touched. An unreadable answer throws a `PlanePushApiError`.
+   */
+  closeRefusedPullRequest(input: { accountId: string; codeRepo: string; number: number; branch: string; comment: string }): Promise<{ result: "closed"; commented: boolean } | { result: "not_open" } | { result: "not_ours" }>;
   /** Revokes a token `mintToken` handed out and the caller could not use. True when it is gone; never throws. */
   revokeToken(token: string): Promise<boolean>;
 }
@@ -96,6 +101,8 @@ export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => num
     pullRequestState: ({ accountId, codeRepo, number }) => withFreshToken(accountId, codeRepo, (token) => retryTransientRead(() => api.pullRequestState({ codeRepo, number, token }))),
 
     pullRequestBase: ({ accountId, codeRepo, number }) => withFreshToken(accountId, codeRepo, (token) => api.pullRequestBase({ codeRepo, number, token })),
+
+    closeRefusedPullRequest: ({ accountId, codeRepo, number, branch, comment }) => withFreshToken(accountId, codeRepo, (token) => api.closeRefusedPullRequest({ codeRepo, number, branch, token, comment })),
 
     verifyPullRequest: ({ accountId, codeRepo, branch, number }) =>
       withFreshToken(accountId, codeRepo, async (token) => {

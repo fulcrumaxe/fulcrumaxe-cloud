@@ -59,7 +59,7 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
   const origin = new URL(deps.apiOrigin ?? "https://api.github.com");
   if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.search || origin.username) throw new Error("planePushApi: apiOrigin must be a plain https origin");
 
-  async function call(method: "GET" | "POST" | "DELETE", path: string, auth: string, body?: unknown): Promise<{ status: number; body: unknown }> {
+  async function call(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, auth: string, body?: unknown): Promise<{ status: number; body: unknown }> {
     let res: Response;
     try {
       res = await fetchImpl(new URL(path, origin), {
@@ -247,6 +247,36 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       if (res.status === 200) return true;
       if (res.status === 404) return false;
       throw new PlanePushApiError("public_unavailable");
+    },
+
+    /**
+     * A public pull request the platform refused after it was published (the cloud's scope check ended the run `failed`): closed, then one plain comment saying why. Only a pull request that is
+     * OPEN and comes from the recorded branch of this repository is touched: a closed, merged or unknown one answers `not_open` and nothing is written (so a retry never closes twice and never comments twice). The branch and its content are never touched.
+     * The comment is best-effort after the close (`commented` says whether it landed); a rate limit or 5xx on the read or the close throws `public_unavailable`, retryable.
+     */
+    async closeRefusedPullRequest(input: { codeRepo: string; number: number; branch: string; token: string; comment: string }): Promise<{ result: "closed"; commented: boolean } | { result: "not_open" } | { result: "not_ours" }> {
+      const { owner, name } = split(input.codeRepo);
+      if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new PlanePushApiError("public_unavailable");
+      const path = `/repos/${owner}/${name}/pulls/${input.number}`;
+      const read = await call("GET", path, input.token);
+      if (read.status === 404) return { result: "not_open" };
+      if (read.status >= 500 || read.status === 429) throw new PlanePushApiError("public_unavailable", true);
+      const b = read.status === 200 && read.body !== null && typeof read.body === "object" ? (read.body as { state?: unknown; merged?: unknown; head?: { ref?: unknown; repo?: { full_name?: unknown } | null } | null }) : undefined;
+      if (!b) throw new PlanePushApiError("public_unavailable");
+      if (b.state !== "open" || b.merged === true) return { result: "not_open" };
+      // The stored number alone is not enough: the pull request must still come from the platform's own branch of this repository, or it is someone else's and is left as it is.
+      if (b.head?.ref !== input.branch || typeof b.head?.repo?.full_name !== "string" || b.head.repo.full_name.toLowerCase() !== input.codeRepo.toLowerCase()) return { result: "not_ours" };
+      const closed = await call("PATCH", path, input.token, { state: "closed" });
+      const cb = closed.body !== null && typeof closed.body === "object" ? (closed.body as { state?: unknown; number?: unknown }) : {};
+      if (closed.status !== 200 || cb.state !== "closed" || cb.number !== input.number) throw new PlanePushApiError("public_unavailable", closed.status >= 500 || closed.status === 429);
+      let commented = false;
+      try {
+        commented = (await call("POST", `/repos/${owner}/${name}/issues/${input.number}/comments`, input.token, { body: input.comment })).status === 201;
+      } catch {
+        // fx-swallow-ok: the pull request is already closed; a comment that could not be posted is reported as `commented: false`, never as a failed close
+        commented = false;
+      }
+      return { result: "closed", commented };
     },
 
     async openPullRequest(input: { codeRepo: string; branch: string; base: string; title: string; body: string; token: string }): Promise<{ number: number; url: string }> {

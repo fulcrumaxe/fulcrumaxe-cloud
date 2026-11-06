@@ -160,6 +160,80 @@ describe("branchExists and openPullRequest", () => {
   });
 });
 
+// D#6 CHECKFIX-SUCCESS-AS-FAILED: the public pull request of a run the cloud's scope check refused is closed, then one plain comment; only an OPEN pull request is touched, and the branch never.
+describe("closeRefusedPullRequest", () => {
+  const PR = "/repos/acme/widgets/pulls/41";
+  const COMMENTS = "/repos/acme/widgets/issues/41/comments";
+  const BRANCH = "fx/p-11111111-1111-4111-8111-111111111111";
+  /** A GitHub that holds one pull request and answers the three calls the way the real one does (GET state, PATCH to closed, POST a comment as 201). */
+  function fakeGh(over: { state?: string; merged?: boolean; getStatus?: number; patchStatus?: number; commentStatus?: number; headRef?: string; headRepo?: string | null } = {}) {
+    let state = over.state ?? "open";
+    return async (r: GhRequest): Promise<GhReply | undefined> => {
+      if (r.path === PR && r.method === "GET") return over.getStatus ? ghError(over.getStatus, "x") : json(200, { number: 41, state, merged: over.merged === true, head: { ref: over.headRef ?? BRANCH, repo: over.headRepo === null ? null : { full_name: over.headRepo ?? "Acme/Widgets" } } });
+      if (r.path === PR && r.method === "PATCH") {
+        if (over.patchStatus) return ghError(over.patchStatus, "x");
+        state = (JSON.parse(r.body) as { state: string }).state;
+        return json(200, { number: 41, state, merged: false });
+      }
+      if (r.path === COMMENTS && r.method === "POST") return over.commentStatus ? ghError(over.commentStatus, "x") : json(201, { id: 1, body: (JSON.parse(r.body) as { body: string }).body });
+      return undefined;
+    };
+  }
+  const run = (t: Awaited<ReturnType<typeof setup>>) => t.api.closeRefusedPullRequest({ codeRepo: "acme/widgets", number: 41, branch: BRANCH, token: "ghs_x", comment: "Closed by the scope check." });
+
+  it("reads the state, closes an open pull request and leaves one comment, in that order, with JSON bodies and the token", async () => {
+    const s = fakeGh();
+    const t = await setup((r) => s(r) as never);
+    await expect(run(t)).resolves.toEqual({ result: "closed", commented: true });
+    expect(t.server.seen.map((x) => `${x.method} ${x.path}`)).toEqual([`GET ${PR}`, `PATCH ${PR}`, `POST ${COMMENTS}`]);
+    expect(JSON.parse(t.server.seen[1]!.body)).toEqual({ state: "closed" });
+    expect(JSON.parse(t.server.seen[2]!.body)).toEqual({ body: "Closed by the scope check." });
+    expect(t.server.seen.every((x) => x.headers["authorization"] === "Bearer ghs_x")).toBe(true);
+    // Nothing touches a branch or its content.
+    expect(t.server.seen.some((x) => x.path.includes("/git/") || x.method === "DELETE")).toBe(false);
+  });
+
+  it("a pull request that is closed, merged or gone is left alone: no close, no comment (so a repeat never closes or comments twice)", async () => {
+    for (const over of [{ state: "closed" }, { state: "closed", merged: true }, { state: "open", merged: true }]) {
+      const t = await setup((r) => fakeGh(over)(r) as never);
+      await expect(run(t)).resolves.toEqual({ result: "not_open" });
+      expect(t.server.seen.map((x) => x.method)).toEqual(["GET"]);
+      await server?.close();
+      server = undefined;
+    }
+    const gone = await setup((r) => fakeGh({ getStatus: 404 })(r) as never);
+    await expect(run(gone)).resolves.toEqual({ result: "not_open" });
+  });
+
+  it("a pull request that is not from the recorded branch of this repository is not ours: no close, no comment (another branch, another repository, a deleted head repository)", async () => {
+    for (const over of [{ headRef: "fx/p-22222222-2222-4222-8222-222222222222" }, { headRef: "main" }, { headRepo: "someone/fork" }, { headRepo: null }]) {
+      const t = await setup((r) => fakeGh(over)(r) as never);
+      await expect(run(t)).resolves.toEqual({ result: "not_ours" });
+      expect(t.server.seen.map((x) => x.method)).toEqual(["GET"]);
+      await server?.close();
+      server = undefined;
+    }
+  });
+
+  it("a comment GitHub refuses after the close is reported as commented: false, never as a failed close", async () => {
+    const t = await setup((r) => fakeGh({ commentStatus: 403 })(r) as never);
+    await expect(run(t)).resolves.toEqual({ result: "closed", commented: false });
+  });
+
+  it("a server error or rate limit on the read or the close throws a TRANSIENT public_unavailable; another refusal throws a plain one", async () => {
+    for (const over of [{ getStatus: 503 }, { getStatus: 429 }, { patchStatus: 502 }]) {
+      const t = await setup((r) => fakeGh(over)(r) as never);
+      await expect(run(t)).rejects.toMatchObject({ code: "public_unavailable", transient: true });
+      await server?.close();
+      server = undefined;
+    }
+    const refused = await setup((r) => fakeGh({ patchStatus: 422 })(r) as never);
+    await expect(run(refused)).rejects.toMatchObject({ code: "public_unavailable", transient: false });
+    await expect(refused.api.closeRefusedPullRequest({ codeRepo: "acme/widgets", number: 0, branch: BRANCH, token: "ghs_x", comment: "c" })).rejects.toMatchObject({ code: "public_unavailable" });
+    await expect(refused.api.closeRefusedPullRequest({ codeRepo: "not a repo", number: 41, branch: BRANCH, token: "ghs_x", comment: "c" })).rejects.toMatchObject({ code: "public_unavailable" });
+  });
+});
+
 describe("construction", () => {
   it("accepts only a plain https origin", () => {
     const deps = { appCredentials: () => ({ appId: "1", privateKeyPem: "x", webhookSecret: "x" }), requester: vi.fn(), cache: new InstallationTokenCache() };
