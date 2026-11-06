@@ -40,12 +40,16 @@ const gateQueuedSql = (e: string): string => `EXISTS (
       CROSS JOIN LATERAL (SELECT COALESCE(max(r.seq), 0) AS seq FROM work_item_driver_events r
                            WHERE r.account_id = ${e}.account_id AND r.work_item_id = ${e}.work_item_id AND r.kind = 'merge_dequeued' AND r.head_sha = h.head_sha
                              AND NOT (COALESCE(r.code, '') = ANY(${SUCCESS_CODES_SQL}))) rm
-     WHERE EXISTS (SELECT 1 FROM work_item_driver_events f
+     WHERE NOT EXISTS (SELECT 1 FROM work_item_driver_events r2
+                        WHERE r2.account_id = ${e}.account_id AND r2.work_item_id = ${e}.work_item_id AND r2.kind = 'merge_dequeued' AND r2.head_sha = h.head_sha
+                          AND NOT (COALESCE(r2.code, '') = ANY(${SUCCESS_CODES_SQL}))
+                          AND r2.seq > COALESCE((SELECT max(q.seq) FROM work_item_driver_events q WHERE q.account_id = ${e}.account_id AND q.work_item_id = ${e}.work_item_id AND q.kind = 'merge_enqueued' AND q.head_sha = h.head_sha), 0))
+       AND (EXISTS (SELECT 1 FROM work_item_driver_events f
                     WHERE f.account_id = ${e}.account_id AND f.work_item_id = ${e}.work_item_id AND f.head_sha = h.head_sha AND f.seq > rm.seq
                       AND ((f.kind = 'merge_gate' AND f.code = 'merge_enqueued') OR (f.kind = 'merge_enqueued' AND f.dial_version IS NOT NULL)))
         OR EXISTS (SELECT 1 FROM plane_merge_orders o
                      JOIN work_item_driver_events g ON g.account_id = o.account_id AND g.work_item_id = o.work_item_id AND g.kind = 'merge_gate' AND g.code = 'merge_delegated' AND g.head_sha = o.reviewed_head
-                    WHERE o.account_id = ${e}.account_id AND o.work_item_id = ${e}.work_item_id AND o.expected_public_head = h.head_sha AND o.state IN ('enqueued', 'merged') AND g.seq > rm.seq))`;
+                    WHERE o.account_id = ${e}.account_id AND o.work_item_id = ${e}.work_item_id AND o.expected_public_head = h.head_sha AND o.state IN ('enqueued', 'merged') AND g.seq > rm.seq)))`;
 
 /** Clears everything that only means something while an entry holds the slot or waits for work. */
 const CLEAR_SLOT_AND_WORK = `phase = NULL, slot_holder = NULL, lease_until = NULL, slot_taken_at = NULL, work_kind = NULL, work_run_id = NULL`;
