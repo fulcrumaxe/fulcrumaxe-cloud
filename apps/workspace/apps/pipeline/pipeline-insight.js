@@ -184,8 +184,8 @@ const REASON_WORDS = {
   // D#483 S5-j2a1: another merge on this repository (a direct merge or the queue's slot) holds it for now; this one asks again.
   merge_repo_busy: "Another merge on this repository is finishing; this one goes next.",
   // D#483 S5-j2a2: the order check of the merge. `ordered_resource_out_of_order` keeps the queue's sentence (see FIELD_SENTENCES and BLOCKING_SENTENCES).
-  // Same remedy as packages/core stalled.ts: no timer asks again, so the sure way forward is a new push and Check the merge (or a hand merge).
-  ordered_resource_unreadable: "We couldn't read this repository to check the order of its migrations, so the platform didn't merge. Push a new commit to the pull request's branch and press Check the merge to run the check again; or merge it yourself on GitHub.",
+  // Both this and pr_author_unverified are in TRANSIENT_GATE_REASONS: the webhook asks the gate again when a check finishes green or the pull request is reopened or marked ready. No timer does.
+  ordered_resource_unreadable: "We couldn't read this repository to check the order of its migrations, so the platform didn't merge. It is checked again when a check on the pull request next finishes green, or when the pull request is reopened or marked ready. You can press Check the merge to check now; or merge it yourself on GitHub.",
   ordered_resource_path_too_long: "A file path in this pull request is too long to check the order of this repository's migrations, so the platform stopped it. Remove the file, or merge it by hand.",
   merge_hold_expired: "This repository was held for a pull request in GitHub's merge queue for 24 hours; the hold was ended so other merges can go.",
   ordered_resource_waiting: "Waiting for a pull request ahead of it in GitHub's merge queue, so the migration numbers stay in order.",
@@ -193,7 +193,7 @@ const REASON_WORDS = {
   runner_ordered_unsupported: "Update the runner on your machine so it can check migration order.",
   // D#598 P1d-1: the author of the pull request that would merge. A person reviews and merges an outside author's pull request on GitHub.
   pr_author_untrusted: "This pull request was opened by someone who isn't an admin or maintainer of the repository, or the platform's app. The platform won't merge it. A person can review it and merge it on GitHub.",
-  pr_author_unverified: "We couldn't check who opened this pull request, so the platform didn't merge it. It checks again on the next try.",
+  pr_author_unverified: "We couldn't check who opened this pull request, so the platform didn't merge it. It is checked again when a check on the pull request next finishes green, or when the pull request is reopened or marked ready. You can press Check the merge to check now.",
   // Two planes: a paired repository merges its public pull request, so these two say why a person does.
   public_pr_not_open: "The public pull request is not open (not opened yet, closed or merged).",
   // Two planes, a runner_local repository: the merge goes through the customer's own runner, and these say why a person merges instead.
