@@ -187,6 +187,22 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
     expect(await waitOf(who, mine)).toBe('queued');
   });
 
+  it('runner_check_not_built: a pending proposal on a runner_local repository says so; the cloud and runner_verified repositories read queued', async () => {
+    usePlan(limitOf(10));
+    const who = await seedAccountWithMember(admin, { role: 'member' });
+    const wait = async (mode: string): Promise<string | null> => {
+      const repo = await repoFor(who);
+      await admin.query('UPDATE repos SET execution_mode = $1 WHERE id = $2', [mode, repo]);
+      return waitOf(who, await proposalFor(who, repo));
+    };
+    expect(await wait('runner_local')).toBe('runner_check_not_built');
+    expect(await wait('sandbox')).toBe('queued');
+    expect(await wait('runner_verified')).toBe('queued');
+    // The field is in the documented enum.
+    const spec = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')) as unknown;
+    expect(JSON.stringify(spec)).toContain('"runner_check_not_built"');
+  });
+
   it('plan data that is present but invalid does not fail the detail read: pending reads queued', async () => {
     const who = await seedAccountWithMember(admin, { role: 'member' });
     const id = await proposalFor(who, await repoFor(who));
