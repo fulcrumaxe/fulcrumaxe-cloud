@@ -160,6 +160,31 @@ describe('decision_asks (0666)', () => {
       }
     });
 
+    // The bound is in hours, so a clock change inside the window moves neither end. Raised just before each change in New York.
+    it.each([
+      ['a spring-forward', '2026-03-07 12:00:00-05'],
+      ['a fall-back', '2026-10-31 12:00:00-04'],
+    ])('the window bound is the same 15 minutes to 336 hours across %s, in a session zone with daylight saving', async (_name, raisedAt) => {
+      const insert = (dueSql: string) =>
+        admin.query(
+          `INSERT INTO decision_asks (account_id, work_item_id, decision_type, options, proposed, rationale, input_trust_classes, raised_at, answer_due_at, timeout_outcome)
+           VALUES ($1, $2, 'x', $3::jsonb, 'apply', 'r', '[]', $4::timestamptz, $4::timestamptz + ${dueSql}, 'stop_and_flag')`,
+          [refs.accountId, refs.workItemId, JSON.stringify(OPTIONS), raisedAt],
+        );
+      await admin.query('BEGIN');
+      try {
+        await admin.query(`SET LOCAL TIME ZONE 'America/New_York'`);
+        await insert(`interval '15 minutes'`);
+        await insert(`interval '336 hours'`);
+        await admin.query('SAVEPOINT over');
+        await expect(insert(`interval '336 hours 1 minute'`)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+        await admin.query('ROLLBACK TO over');
+        await expect(insert(`interval '14 minutes'`)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      } finally {
+        await admin.query('ROLLBACK');
+      }
+    });
+
     it('takes only the two timeout outcomes, and an array of trust classes', async () => {
       await raise({ outcome: 'proceed_recommended' });
       await expect(raise({ outcome: 'denied' })).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });

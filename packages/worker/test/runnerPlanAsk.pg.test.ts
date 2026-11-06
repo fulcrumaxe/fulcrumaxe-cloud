@@ -328,7 +328,7 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       // The window ends with nobody answering: the ask is flagged overdue and the run is still not approved, not started.
       await admin.query("BEGIN");
       await admin.query("SET LOCAL session_replication_role = replica");
-      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '30 days', answer_due_at = answer_due_at - interval '30 days' WHERE id = $1", [ask.id]);
+      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '720 hours', answer_due_at = answer_due_at - interval '720 hours' WHERE id = $1", [ask.id]);
       await admin.query("COMMIT");
       await runAskWindowTick({ pool: receiptPool, warn: () => undefined });
       expect((await asks(id))[0]).toMatchObject({ state: "overdue", timeout_outcome: "stop_and_flag" });
@@ -342,7 +342,7 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       const [ask] = await asks(id);
       await admin.query("BEGIN");
       await admin.query("SET LOCAL session_replication_role = replica");
-      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '30 days', answer_due_at = answer_due_at - interval '30 days' WHERE id = $1", [ask.id]);
+      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '720 hours', answer_due_at = answer_due_at - interval '720 hours' WHERE id = $1", [ask.id]);
       await admin.query("COMMIT");
       await runAskWindowTick({ pool: receiptPool, warn: () => undefined });
       expect((await asks(id))[0]).toMatchObject({ state: "overdue", timeout_outcome: "stop_and_flag" });
@@ -487,7 +487,7 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       await answer(holder, a1.id, "approve");
       await admin.query("BEGIN");
       await admin.query("SET LOCAL session_replication_role = replica");
-      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '30 days', answer_due_at = answer_due_at - interval '30 days' WHERE id = $1", [a2.id]);
+      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '720 hours', answer_due_at = answer_due_at - interval '720 hours' WHERE id = $1", [a2.id]);
       await admin.query("COMMIT");
       await runAskWindowTick({ pool: receiptPool, warn: () => undefined });
       for (const id of [yes, silent, open]) expect(await declined(id)).toBe(false);
@@ -616,7 +616,7 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
     const makeDue = async (askId: string) => {
       await admin.query("BEGIN");
       await admin.query("SET LOCAL session_replication_role = replica");
-      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '30 days', answer_due_at = answer_due_at - interval '30 days' WHERE id = $1", [askId]);
+      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '720 hours', answer_due_at = answer_due_at - interval '720 hours' WHERE id = $1", [askId]);
       await admin.query("COMMIT");
     };
     function advanceFacade() {

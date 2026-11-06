@@ -102,7 +102,7 @@ describe('recordReversal (DP7-2)', () => {
     // The window ended two days ago; the guard freezes both columns, so it is bypassed for this one admin statement only.
     await admin.query('BEGIN');
     await admin.query('SET LOCAL session_replication_role = replica');
-    await admin.query(`UPDATE decision_asks SET raised_at = raised_at - interval '10 days', answer_due_at = answer_due_at - interval '10 days' WHERE id = $1`, [askId]);
+    await admin.query(`UPDATE decision_asks SET raised_at = raised_at - interval '240 hours', answer_due_at = answer_due_at - interval '240 hours' WHERE id = $1`, [askId]);
     await admin.query('COMMIT');
     const out = await sweepOverdueAsks(receiptPool, { now: () => new Date() }, 500);
     expect(out.proceededAskIds).not.toContain(askId);
