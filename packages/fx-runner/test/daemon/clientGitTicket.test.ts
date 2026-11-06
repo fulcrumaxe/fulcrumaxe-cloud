@@ -27,6 +27,8 @@ describe("the signed git-ticket call", () => {
   it("a 409 stop is a stop, other statuses keep their number, and a reply no schema describes is invalid_reply", async () => {
     expect(await clientAnswering(409, { continue: false, reason: "stale_generation" }).client.gitTicket(RUN, 1)).toEqual({ kind: "stop", reason: "stale_generation" });
     expect(await clientAnswering(401, { error: "unauthorized" }).client.gitTicket(RUN, 1)).toMatchObject({ kind: "error", status: 401 });
+    // The cloud's own body shape for "no ticket key": the closed word reaches the caller, which is what tells it apart from any other 503.
+    expect(await clientAnswering(503, { error: { code: "not_configured", message: "x" } }).client.gitTicket(RUN, 1)).toEqual({ kind: "error", status: 503, code: "not_configured" });
     expect(await clientAnswering(403, { error: "not_cloud_verified" }).client.gitTicket(RUN, 1)).toMatchObject({ kind: "error", status: 403 });
     expect(await clientAnswering(200, { ticket: TICKET }).client.gitTicket(RUN, 1)).toMatchObject({ kind: "error", status: 200, code: "invalid_reply" });
     expect(await clientAnswering(200, { ticket: "not-a-jws", expires_at: "2026-10-08T12:05:00.000Z", proxy_origin: "https://relay.example.test" }).client.gitTicket(RUN, 1)).toMatchObject({ code: "invalid_reply" });

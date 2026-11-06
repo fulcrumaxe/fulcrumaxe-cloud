@@ -129,6 +129,7 @@ const SETUP_LINES = {
   workspace_failed: "The runner could not prepare a working folder for the agent. Check the disk space and git access on that machine, then Build again.",
   workspace_git_refused: "The runner could not safely read the agent's git folder, so nothing was published. Update fx-runner, then Build again.",
   head_not_from_base: "The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.",
+  git_ticket_unavailable: "The cloud is not set up for Cloud-verified runs yet (it cannot sign git access for your runner). An admin needs to finish the setup; your runner is fine.",
   sandbox_stub_committed: "The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.",
 };
 const STAGE_LINES = { workspace_ready: "The secure sandbox is ready", cloned: "Repository cloned", deps_installed: "Dependencies installed", deps_install_failed: "Dependencies did not install", writing_result: "Writing up the result" };

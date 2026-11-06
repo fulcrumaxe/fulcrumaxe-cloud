@@ -17,7 +17,7 @@ export type GitPathCode = "mirror_failed" | "mirror_dir_insecure" | "workspace_f
   | "review_sha_not_in_mirror"
   // D#6 R5a-3 (C27 section 4): path A. `git_stopped` and `git_revoked` are the relay's 409 and 401 (the run ends quietly, as for a lease stop);
   // the rest are the closed setup details of `run_ended`.
-  | "git_stopped" | "git_revoked" | "git_proxy_unpinned" | "git_ticket_refused" | "path_a_no_mirror" | "clone_limited" | "push_too_large" | "push_incomplete";
+  | "git_stopped" | "git_revoked" | "git_proxy_unpinned" | "git_ticket_refused" | "git_ticket_unavailable" | "path_a_no_mirror" | "clone_limited" | "push_too_large" | "push_incomplete";
 
 export class GitPathError extends Error {
   readonly code: GitPathCode;

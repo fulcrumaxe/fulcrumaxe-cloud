@@ -146,6 +146,8 @@ export const GIT_PATH_LINES = {
   review_sha_not_in_mirror: "The runner's copy of the repository does not have the commit to review on any branch, so the review did not start. If the pull request comes from a fork, it cannot be reviewed on your machine. Otherwise, review again.",
   context_spill_unwritable: "The runner could not save the longer text this run's prompt points to, so it did not start the agent with a reference to a file that is not there. Check the disk space and folder permissions on that machine, then Build again.",
   sandbox_unusable: "The sandbox on the runner machine could not start the agent's shell, so the run was stopped before the agent began. Update fx-runner and the Claude Code install on that machine, then Build again.",
+  // The cloud has no git ticket key, so the fault is on the cloud side; the runner needs no change.
+  git_ticket_unavailable: "The cloud is not set up for Cloud-verified runs yet (it cannot sign git access for your runner). An admin needs to finish the setup; your runner is fine.",
 } as const;
 
 /**

@@ -113,6 +113,8 @@ export const RUNNER_SETUP_DETAILS = [
   "context_spill_unwritable",
   // The shell sandbox could not start a Bash call under this job's rules (bubblewrap refused a no-op before the agent began). Additive under C8 section 6; the cloud deploys first.
   "sandbox_unusable",
+  // The cloud answered the git ticket request with 503 not_configured: it has no ticket key. The runner is fine; the cloud side needs setting up. Additive under C8 section 6; the cloud deploys first.
+  "git_ticket_unavailable",
 ] as const;
 /**
  * D#599 HO-1 (additive under C8 section 6; the cloud deploys first): how a handed-off run ended its side of the move. `pushed`: the
