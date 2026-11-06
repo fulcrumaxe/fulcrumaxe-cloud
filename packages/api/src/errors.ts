@@ -399,8 +399,15 @@ export class OverAccountBudgetError extends ApiError {
 }
 
 export class EnvelopeBelowFirstRunError extends ApiError {
-  constructor() {
-    super(409, "envelope_below_first_run", "that limit is below what the first step of the item reserves");
+  /** `minimumUsd` is the smallest limit that would have been accepted; it travels as `data.minimum_usd` so the screen can name it. */
+  constructor(minimumUsd?: number) {
+    super(
+      409,
+      "envelope_below_first_run",
+      "that limit is below what the first step of the item reserves",
+      undefined,
+      minimumUsd !== undefined && Number.isFinite(minimumUsd) && minimumUsd >= 0 ? { minimum_usd: minimumUsd } : undefined,
+    );
   }
 }
 

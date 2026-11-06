@@ -4,9 +4,9 @@
 // e2e/pipeline-inbox.spec.ts. The rules under test: every outcome a person reads is a fixed sentence (never a server code or
 // message), a malformed row is left out, an absent value is never drawn as "null" or "undefined", and the Idempotency-Key
 // survives an unknown outcome only.
-import { describe, expect, it } from "vitest";
-import { ApiFailure } from "../apps/_lib/api.js";
-import { DETAIL_FAILED_SENTENCE, DETAIL_PENDING_SENTENCE, NOT_CHECKED_SENTENCE, VERIFY_WAIT_SENTENCES, unfinishedCheckLine, approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiFailure, api } from "../apps/_lib/api.js";
+import { DETAIL_FAILED_SENTENCE, DETAIL_PENDING_SENTENCE, NOT_CHECKED_SENTENCE, VERIFY_WAIT_SENTENCES, unfinishedCheckLine, approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, amountPlaceholder, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
 
 const BAD = /\b(null|undefined|NaN|\[object)/;
 const base = { id: "p1", title: "Add dark mode", state: "new", sources: ["github_issue"], gh_number: 12, discussion_number: null, task_key: null, category_hint: null, estimate_usd: null, milestone_key: null, milestone_title: null };
@@ -174,11 +174,41 @@ describe("the approve limit", () => {
     expect(LOW_BUDGET_SENTENCE).toBe("Your remaining budget this month is lower than the cost of the first run. Raise the monthly budget to approve this.");
     const refused = new ApiFailure(409, "envelope_below_first_run", "x");
     expect(refusalSentence(refused, { basis: "seed", remaining: 4, firstRun: 10 })).toBe(LOW_BUDGET_SENTENCE);
-    expect(refusalSentence(refused, { basis: "seed", remaining: 10, firstRun: 10 })).toBe(REFUSALS.envelope_below_first_run);
-    expect(refusalSentence(refused, { basis: "seed", remaining: 437, firstRun: 10 })).toBe(REFUSALS.envelope_below_first_run);
+    expect(refusalSentence(refused, { basis: "seed", remaining: 9.5, firstRun: 3.5 })).toBe("That limit is too low to start this item. Enter at least $3.50.");
     expect(refusalSentence(refused, undefined)).toBe(REFUSALS.envelope_below_first_run);
     expect(refusalSentence(refused, { basis: "seed" })).toBe(REFUSALS.envelope_below_first_run);
     expect(LOW_BUDGET_SENTENCE).not.toMatch(BAD);
+  });
+  it("a refusal below the first run names the minimum: the server's figure first, else the estimate's, rounded up to the cent, else the short sentence", () => {
+    const refused = new ApiFailure(409, "envelope_below_first_run", "server text that must never be shown");
+    refused.minimumUsd = 6.1234;
+    expect(refusalSentence(refused, undefined)).toBe("That limit is too low to start this item. Enter at least $6.13.");
+    expect(refusalSentence(refused, { basis: "seed", remaining: 90, firstRun: 3 })).toBe("That limit is too low to start this item. Enter at least $6.13.");
+    refused.minimumUsd = 6.1;
+    expect(refusalSentence(refused)).toBe("That limit is too low to start this item. Enter at least $6.10.");
+    const noFigure = new ApiFailure(409, "envelope_below_first_run", "x");
+    expect(refusalSentence(noFigure, { basis: "seed", remaining: 90, firstRun: 7.25 })).toBe("That limit is too low to start this item. Enter at least $7.25.");
+    expect(refusalSentence(noFigure, { basis: "seed", remaining: 90 })).toBe(REFUSALS.envelope_below_first_run);
+    expect(refusalSentence(noFigure)).toBe(REFUSALS.envelope_below_first_run);
+    // a figure that is not a number is ignored, never drawn
+    const junk = new ApiFailure(409, "envelope_below_first_run", "x");
+    junk.minimumUsd = "7";
+    expect(refusalSentence(junk)).toBe(REFUSALS.envelope_below_first_run);
+    // the over-budget variant stays fixed, whatever figure came with it
+    refused.minimumUsd = 6.1;
+    expect(refusalSentence(refused, { basis: "seed", remaining: 2, firstRun: 6.1 })).toBe(LOW_BUDGET_SENTENCE);
+    // no other code takes the figure
+    const other = new ApiFailure(409, "over_account_budget", "x");
+    other.minimumUsd = 6.1;
+    expect(refusalSentence(other)).toBe(REFUSALS.over_account_budget);
+    expect(refusalSentence(refused)).not.toMatch(BAD);
+  });
+  it("the limit field's hint names the minimum only when it is known and the account can still reach it", () => {
+    expect(amountPlaceholder({ basis: "seed", remaining: 90, firstRun: 7.25 })).toBe("at least $7.25");
+    expect(amountPlaceholder({ basis: "seed", remaining: 90, firstRun: 7.251 })).toBe("at least $7.26");
+    expect(amountPlaceholder({ basis: "seed", remaining: 3, firstRun: 7.25 })).toBe("");
+    expect(amountPlaceholder({ basis: "seed", remaining: 90 })).toBe("");
+    expect(amountPlaceholder(undefined)).toBe("");
   });
   it("prefillAmount is total x (1 + margin), to four decimals, capped at the remaining budget, like the server's", () => {
     expect(prefillAmount(100, 20, 437)).toBe(120);
@@ -205,5 +235,28 @@ describe("the approve limit", () => {
     expect(checkAmount("437", { basis: "seed", remaining: 437 })).toEqual({ ok: true, amount: 437 });
     // With the budget unknown, the server decides.
     expect(checkAmount("9999", undefined)).toEqual({ ok: true, amount: 9999 });
+  });
+});
+
+describe("the shared client keeps the minimum a refused limit names", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const answer = (body) => vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 409, headers: { get: () => null }, text: async () => JSON.stringify(body) })));
+  const post = () => api("POST", "/api/v1/proposals/p1/approve", { amount_usd: 2 }, undefined, { idempotencyKey: "00000000-0000-4000-8000-000000000001" }).catch((e) => e);
+
+  it("carries data.minimum_usd as a number on the failure, and nothing else the server wrote", async () => {
+    answer({ error: { code: "envelope_below_first_run", message: "m" }, data: { minimum_usd: 8.5, note: "x" } });
+    const e = await post();
+    expect([e.status, e.code, e.minimumUsd]).toEqual([409, "envelope_below_first_run", 8.5]);
+    expect(Object.keys(e)).not.toContain("note");
+    expect(refusalSentence(e)).toBe("That limit is too low to start this item. Enter at least $8.50.");
+  });
+
+  it("ignores a figure that is not a plain non-negative number", async () => {
+    for (const v of ["8.5", null, -1, Infinity, {}]) {
+      answer({ error: { code: "envelope_below_first_run", message: "m" }, data: { minimum_usd: v } });
+      const e = await post();
+      expect(e.minimumUsd).toBeUndefined();
+      expect(refusalSentence(e)).toBe(REFUSALS.envelope_below_first_run);
+    }
   });
 });

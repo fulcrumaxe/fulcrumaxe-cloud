@@ -24,6 +24,7 @@ interface Identity {
 }
 interface ErrBody {
   error: { code: string; message: string };
+  data?: { minimum_usd?: unknown };
 }
 interface EnvelopeBody {
   envelope_id: string;
@@ -331,6 +332,9 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
       expect(res.status).toBe(409);
       expect(await code(res)).toBe('envelope_below_first_run');
       expect(await counts(who)).toEqual(before);
+      // The refusal names the smallest limit that would be accepted: the same figure the estimate answers.
+      const again = await approve(who, id, { amount: round4(est.first_run_usd - 0.01) });
+      expect((await body<ErrBody>(again)).data).toEqual({ minimum_usd: est.first_run_usd });
       // Exactly the first run's reservation is enough.
       expect((await approve(who, id, { amount: est.first_run_usd })).status).toBe(200);
     });
@@ -342,7 +346,8 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
       const before = await counts(who);
       const res = await approve(who, id);
       expect(res.status).toBe(409);
-      expect(await code(res)).toBe('envelope_below_first_run');
+      expect(await code(res.clone())).toBe('envelope_below_first_run');
+      expect(typeof (await body<ErrBody>(res)).data?.minimum_usd).toBe('number');
       expect(await counts(who)).toEqual(before);
     });
 
@@ -511,7 +516,8 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
       const est = await body<EstimateBody>(await estimate(who, repo, [a, b]));
       const before = await counts(who);
       const low = await batch(who, repo, [a, b], { amount: round4(est.first_run_usd - 0.01) });
-      expect([low.status, await code(low)]).toEqual([409, 'envelope_below_first_run']);
+      expect([low.status, await code(low.clone())]).toEqual([409, 'envelope_below_first_run']);
+      expect((await body<ErrBody>(low)).data).toEqual({ minimum_usd: est.first_run_usd });
       const high = await batch(who, repo, [a, b], { amount: est.remaining_budget_usd + 1 });
       expect([high.status, await code(high)]).toEqual([409, 'over_account_budget']);
       expect(await counts(who)).toEqual(before);

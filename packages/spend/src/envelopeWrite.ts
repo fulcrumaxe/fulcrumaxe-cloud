@@ -19,7 +19,11 @@ export async function remainingAccountBudgetUsd(client: PoolClient, accountId: s
 }
 
 export class EnvelopeWriteError extends Error {
-  constructor(readonly code: 'over_account_budget' | 'envelope_not_found' | 'invalid_amount' | 'version_conflict' | 'envelope_below_first_run') {
+  /** Set with `envelope_below_first_run`: the smallest amount the write would have accepted. */
+  constructor(
+    readonly code: 'over_account_budget' | 'envelope_not_found' | 'invalid_amount' | 'version_conflict' | 'envelope_below_first_run',
+    readonly minimumUsd?: number,
+  ) {
     super(code);
     this.name = 'EnvelopeWriteError';
   }
@@ -49,7 +53,7 @@ export interface EnvelopeWrite {
  */
 export async function writeEnvelopeVersion(client: PoolClient, w: EnvelopeWrite): Promise<{ envelopeId: string; version: number }> {
   if (!Number.isFinite(w.amountUsd) || w.amountUsd < 0) throw new EnvelopeWriteError('invalid_amount');
-  if (w.minAmountUsd !== undefined && w.amountUsd < w.minAmountUsd) throw new EnvelopeWriteError('envelope_below_first_run');
+  if (w.minAmountUsd !== undefined && w.amountUsd < w.minAmountUsd) throw new EnvelopeWriteError('envelope_below_first_run', w.minAmountUsd);
   if (w.amountUsd > (await remainingAccountBudgetUsd(client, w.accountId, w.now))) throw new EnvelopeWriteError('over_account_budget');
   const envelopeId = w.envelopeId ?? randomUUID();
   let version = 1;
