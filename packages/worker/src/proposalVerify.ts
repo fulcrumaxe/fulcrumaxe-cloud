@@ -181,6 +181,10 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
       rec = await deps.record({ envelope: run.envelope, sha: run.head_sha, reader: deps.github(repo) });
     }
     return withTenant(deps.pool, accountId, async (client): Promise<Outcome> => {
+      // Lock the proposal first, and keep the lock to the end of this transaction: a re-queue that committed before this point is seen by the read
+      // below, and one that comes after waits behind the write. Without the lock a re-queue could commit between that read and the write.
+      const held = await client.query<{ held: boolean }>("SELECT proposal_hold_verification($1::uuid) AS held", [p.id]);
+      if (held.rows[0]?.held !== true) return "skipped";
       // Read again in the writing transaction: a proposal that moved on (decided, edited, recorded by another pass) is left alone.
       const fresh = await readProposal(client, accountId, p.id);
       if (!fresh || !eligible(fresh) || fresh.verify_attempts !== p.verify_attempts || fresh.verify_requeues !== p.verify_requeues || requestHash(fresh) !== requestHash(p)) return "skipped";

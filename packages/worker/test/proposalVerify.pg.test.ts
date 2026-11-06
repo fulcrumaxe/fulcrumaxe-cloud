@@ -96,6 +96,37 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
   let sweep: () => Promise<ProposalVerifyCounts>;
   /** Runs once the sweep has read a finished run and before it writes its answer: a proposal can be sent back in that window. */
   let beforeRecord: ((envelope: unknown) => Promise<void>) | null = null;
+  /** Runs inside the writing transaction, right before the answer is written: a proposal can be sent back from another connection in that window. */
+  let beforeWrite: (() => Promise<void>) | null = null;
+  /** The sweep's pool, with a hook on the statement that writes an answer. */
+  const hookedPool = (pool: Pool): Pool =>
+    new Proxy(pool, {
+      get(target, key) {
+        if (key !== "connect") {
+          const v = Reflect.get(target, key, target);
+          return typeof v === "function" ? v.bind(target) : v;
+        }
+        return async () => {
+          const client = await target.connect();
+          return new Proxy(client, {
+            get(c, k) {
+              if (k === "query") {
+                return async (...args: unknown[]) => {
+                  if (typeof args[0] === "string" && args[0].includes("proposal_record_verification") && beforeWrite) {
+                    const hook = beforeWrite;
+                    beforeWrite = null;
+                    await hook();
+                  }
+                  return (c.query as (...a: unknown[]) => unknown)(...args);
+                };
+              }
+              const v = Reflect.get(c, k);
+              return typeof v === "function" ? v.bind(c) : v;
+            },
+          });
+        };
+      },
+    });
 
   beforeAll(async () => {
     adminPool = createPool(process.env.WORKER_DATABASE_URL!);
@@ -110,7 +141,7 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
       createPools: async () => ({ runnerPool: writerPool, platformOpsPool: adminPool, receiptPool: adminPool, close: async () => undefined }),
     });
     sweep = createProposalVerifySweep({
-      pool: writerPool,
+      pool: hookedPool(writerPool),
       resolveSeat: worker.resolveRunSeat,
       starter: createRunStarter({ pool: writerPool, registry: worker.registry, follow: async () => undefined, queued: "refuse" }),
       github: (repo) => ({
@@ -585,6 +616,69 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
     }
     expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0, verified_run_id: null });
     expect((await admin.query("SELECT count(*)::int AS n FROM proposal_claims WHERE proposal_id = $1", [id])).rows[0].n).toBe(0);
+  });
+
+  it("a proposal sent back to be checked after the pass has re-read it is not overwritten: the re-queue waits for the pass's write and leaves the proposal pending", async () => {
+    envelope = GOOD;
+    const { a, repoId } = await target();
+    const id = await proposal(a, repoId, "internal");
+    const { rows } = await admin.query<{ gh_number: number }>("SELECT gh_number FROM proposals WHERE id = $1", [id]);
+    const hash = createHash("sha256").update(JSON.stringify(["proposal-verify", id, 0, "Add is wrong", PLANTED, [`#${rows[0]!.gh_number}`]])).digest("hex");
+    const runId = randomUUID();
+    await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, envelope, head_sha, ended_at) VALUES ($1, $2, $3, 'local', 'succeeded', $4::jsonb, $5, now())`, [runId, a.accountId, PROPOSAL_VERIFIER_ROLE, JSON.stringify(GOOD), SHA]);
+    await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [a.accountId, await keyOf(id, 0), runId, hash]);
+    let requeue: Promise<void> | null = null;
+    let requeueDoneInWindow = true;
+    beforeWrite = async () => {
+      // The pass has re-read the proposal and is about to write its answer. Another connection sends the proposal back now.
+      const c = await adminPool.connect();
+      let done = false;
+      requeue = (async () => {
+        try {
+          await c.query("BEGIN");
+          await c.query("SELECT set_config('app.account_id', $1, true)", [a.accountId]);
+          await c.query("SELECT proposal_requeue_verification($1::uuid)", [id]);
+          await c.query("COMMIT");
+        } finally {
+          done = true;
+          c.release();
+        }
+      })();
+      requeue.catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 700));
+      requeueDoneInWindow = done;
+    };
+    try {
+      expect((await sweep()).recorded).toBeGreaterThanOrEqual(1);
+      await requeue;
+    } finally {
+      beforeWrite = null;
+    }
+    // The re-queue could not commit while the pass held the row, and it ran after the write: the new check is pending, with nothing of the old one.
+    expect(requeueDoneInWindow).toBe(false);
+    expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0, verified_sha: null, verified_run_id: null });
+    expect((await admin.query("SELECT verify_requeues, verifier_category FROM proposals WHERE id = $1", [id])).rows[0]).toEqual({ verify_requeues: 1, verifier_category: null });
+    expect((await admin.query("SELECT count(*)::int AS n FROM proposal_claims WHERE proposal_id = $1", [id])).rows[0].n).toBe(0);
+  });
+
+  it("the hold answers only for the caller's own proposal: another account's proposal, an unknown id and a session with no tenant are not held", async () => {
+    const { a: mine, repoId: mineRepo } = await target();
+    const { a: theirs, repoId: theirRepo } = await target();
+    const own = await proposal(mine, mineRepo);
+    const other = await proposal(theirs, theirRepo);
+    const hold = async (account: string | null, id: string): Promise<boolean> => {
+      await admin.query("BEGIN");
+      try {
+        await admin.query("SELECT set_config('app.account_id', $1, true)", [account ?? ""]);
+        return (await admin.query<{ held: boolean }>("SELECT proposal_hold_verification($1::uuid) AS held", [id])).rows[0]!.held;
+      } finally {
+        await admin.query("ROLLBACK");
+      }
+    };
+    expect(await hold(mine.accountId, own)).toBe(true);
+    expect(await hold(mine.accountId, other)).toBe(false);
+    expect(await hold(mine.accountId, randomUUID())).toBe(false);
+    await expect(hold(null, own)).rejects.toMatchObject({ code: "42501" });
   });
 
   it("the product label: a proposal flipped to the product is checked once by the next pass, one flipped back is listed no more, and a replayed flip starts no second run", async () => {

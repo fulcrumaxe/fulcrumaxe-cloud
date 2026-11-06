@@ -320,6 +320,33 @@ describe("an outside author's new issue becomes a proposal (D#483 S4-d)", () => 
     expect(none).toMatchObject({ result: { result: { applied: "proposal_changed", count: 0 } } });
   });
 
+  it("an edit that leaves the text as it was sends nothing back to be checked; an edit that changes it does, once", async () => {
+    const markers = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    try {
+      const r = await tenant();
+      const { deps } = await github({ stranger: "read" }, [issueItem(130, "stranger")]);
+      await deliver(deps, payload(r, 130, "stranger"));
+      // The proposal has been checked: a verdict on the current text.
+      await admin.query(`UPDATE proposals SET verification = 'refuted', verified_at = now(), verified_sha = $2, verify_attempts = 0 WHERE account_id = $1 AND gh_number = 130`, [r.accountId, "a".repeat(40)]);
+      markers.clear();
+      const state = async () => (await admin.query(`SELECT verification, verified_sha, verify_requeues, updated_at FROM proposals WHERE account_id = $1`, [r.accountId])).rows[0] as { verification: string; verified_sha: string | null; verify_requeues: number; updated_at: Date };
+      const before = await state();
+      // The same title and body again (a label change or a reworded comment can send the event too).
+      const same = await deliver(deps, payload(r, 130, "stranger", { action: "edited" }));
+      expect(same).toMatchObject({ result: { result: { applied: "proposal_changed", count: 0 } } });
+      expect(await state()).toEqual(before);
+      expect(markers.has("pending:proposal-verify-sweep")).toBe(false);
+      // A real change goes back to be checked, with the re-queue counted once.
+      const changed = await deliver(deps, payload(r, 130, "stranger", { action: "edited", body: "A different body" }));
+      expect(changed).toMatchObject({ result: { result: { applied: "proposal_changed", count: 1 } } });
+      expect(await state()).toMatchObject({ verification: "pending", verified_sha: null, verify_requeues: before.verify_requeues + 1 });
+      expect(markers.has("pending:proposal-verify-sweep")).toBe(true);
+    } finally {
+      setPendingHooks(null);
+    }
+  });
+
   it("S4-b2b: a new outsider proposal and an edit that sends one back to pending each mark the verifier's sweep pending; a replay, a rate-limited issue, a close and a trusted author's issue do not", async () => {
     const markers = new Map<string, number>();
     setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
