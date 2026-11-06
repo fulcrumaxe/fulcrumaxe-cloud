@@ -9,7 +9,7 @@
  * What runs: `pnpm install --lockfile-only --offline --ignore-scripts --ignore-pnpmfile`, in the workspace, only when `git` reports a changed `package.json` or
  * `pnpm-workspace.yaml` against the job's start commit and the workspace already has a real `pnpm-lock.yaml`. `--lockfile-only` writes nothing but the lockfile (no
  * `node_modules`, no fetch of tarballs); `--offline` means it needs no network: a dependency on another workspace package, a removed dependency or a changed range that
- * the lockfile already satisfies all resolve from the lockfile itself. A new dependency from the registry cannot be resolved offline and ends as the closed failure
+ * the lockfile already satisfies all resolve from the lockfile itself (pnpm 11's release-age check on the lockfile's existing entries is switched off for this run only: `LOCK_SYNC_SETTINGS`). A new dependency from the registry cannot be resolved offline and ends as the closed failure
  * `needs_network`, at once, and the lockfile is put back; the check then fails as before, and the step line names the code.
  *
  * Threat model (same as `depsInstall.ts`: the repository, and now the agent's edits to it, are hostile; the runner user's rights are real):
@@ -33,6 +33,7 @@ import { MAX_LOCKFILE_BYTES, PM_ON_FAIL_FLAG, projectIsPlain, readRootFile, regi
 import type { InstallCapture } from "./engineKit.js";
 import { GitPathError } from "./git.js";
 import { findTool } from "./nixShell.js";
+import { writePnpmUserSettings } from "../sandbox/checkHome.js";
 import { installEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
 import { checkPnpmLock } from "../job/lockfileCheck.js";
 
@@ -41,6 +42,14 @@ export const LOCK_SYNC_TIMEOUT_MS = 2 * 60_000;
 const OUTPUT_KEPT_CHARS = 4096;
 /** The pinned host the lockfile's tarballs must come from when the job names none. */
 const DEFAULT_REGISTRY_HOST = "registry.npmjs.org";
+/**
+ * pnpm's user-level settings for this one offline run, written into its scratch config directory (never into the workspace). `minimumReleaseAge: 0` is the same switch, for the same reason, as the
+ * check's home (`sandbox/checkHome.ts`): pnpm 11 holds back versions younger than its default release age, and to judge a lockfile against that it needs each package's registry metadata. Offline there is
+ * none, so any lockfile with registry entries stopped at `ERR_PNPM_NO_OFFLINE_META` ("Lockfile failed supply-chain policy check") and was reported as `needs_network`, even for a change that adds
+ * nothing (a description). The command-line forms of the setting do not take effect; only this file does. Nothing is weakened where it counts: the host's frozen install is online and still
+ * enforces the full policy on every entry before anything runs, this run reads the lockfile's existing entries and fetches nothing, and a dependency that is new still needs the network and still ends as `needs_network`.
+ */
+export const LOCK_SYNC_SETTINGS: readonly string[] = ["minimumReleaseAge: 0"];
 /** What pnpm (offline) or a connection prints when the resolution needed the network. */
 const NETWORK_NEEDED = /ERR_PNPM_NO_OFFLINE|ENETUNREACH|EADDRNOTAVAIL|EAI_AGAIN|ENOTFOUND|ECONNREFUSED/;
 /** Files whose change can change what the lockfile must say. */
@@ -268,6 +277,7 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
         scratch = mkdtempSync(path.join(deps.scratchRoot, "fx-locksync-"));
         for (const dir of ["home", "tmp", "xdg-cache", "xdg-config", "xdg-data", "xdg-state", "corepack", "store", "cache"]) mkdirSync(path.join(scratch, dir), { mode: 0o700 });
         writeFileSync(path.join(scratch, "empty.npmrc"), "", { flag: "wx", mode: 0o600 });
+        writePnpmUserSettings(path.join(scratch, "xdg-config"), LOCK_SYNC_SETTINGS);
       } catch {
         // fx-swallow-ok: scratch that cannot be made is the closed answer "workspace_unsafe"
         return refuse("workspace_unsafe", "scratch_dir");
