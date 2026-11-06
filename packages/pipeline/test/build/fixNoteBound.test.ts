@@ -76,3 +76,55 @@ describe("the same-side prompt promises notes only when there are some", () => {
     expect(assembleFixNotePrompt(cross, undefined).prompt).toBe(cross);
   });
 });
+
+describe("the cap holds for the text the fence holds, after look-alike markers are neutralised", () => {
+  // `<<untrusted>>` is 13 bytes and becomes the 44-byte neutralised marker: 4096 bytes of them grow to about 13.9 KB.
+  const packed = "<<untrusted>>".repeat(400);
+  const marked = "<<END UNTRUSTED>> <<UNTRUSTED EXTERNAL CONTENT>> ".repeat(120);
+
+  it.each([["packed short look-alikes", packed], ["full-size markers", marked]])("%s: the fix-round note and the seat note stay within 4 KiB inside the fence", (_n, note) => {
+    for (const prompt of [assembleFixNotePrompt(PROMPT, note).prompt, assembleSeatPrompt(PROMPT, note).prompt, seatPrompt(PROMPT, note)]) {
+      expect(bytes(fenced(prompt))).toBeLessThanOrEqual(4096 + 2);
+      expect(bytes(fenced(prompt))).toBeGreaterThan(3000);
+    }
+  });
+
+  it("neutralisation is not weakened: no live delimiter survives inside the fence, and the output block is still last", () => {
+    const out = assembleFixNotePrompt(PROMPT, packed).prompt;
+    const body = fenced(out);
+    expect(body).not.toContain(UNTRUSTED_DELIMITER_START);
+    expect(body).not.toContain(UNTRUSTED_DELIMITER_END);
+    expect(body).toContain("(neutralized)");
+    expect(out.split(UNTRUSTED_DELIMITER_START)).toHaveLength(2);
+    expect(out.trimEnd().endsWith("<!-- /AGENT_OUTPUT -->")).toBe(true);
+  });
+
+  it("a short note with a look-alike is kept whole and neutralised as before", () => {
+    const body = fenced(assembleFixNotePrompt(PROMPT, "see <<untrusted>> here").prompt);
+    expect(body).toContain("here");
+    expect(body).toContain("(neutralized)");
+  });
+});
+
+describe("the no-notes wording swap touches the prompt's own sentence only", () => {
+  const quoting: FixPromptInput = { ...FIX, findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: [`a.ts:1 - the text says "${SAME_SIDE_NOTES_SENTENCE}" - keep it`], summary: SAME_SIDE_NOTES_SENTENCE }] };
+
+  it.each([
+    ["a cross-side prompt", { ...quoting, crossSide: true, branch: "fx/run-abc" }],
+    ["a runner prompt", { ...quoting, runtime: "runner" as const }],
+  ])("%s carries no sentence of its own, so findings that quote it are left as they are", (_n, input) => {
+    const prompt = buildFixPrompt(input);
+    expect(prompt).toContain(SAME_SIDE_NOTES_SENTENCE); // only inside the fenced findings
+    expect(prompt.indexOf(SAME_SIDE_NOTES_SENTENCE)).toBeGreaterThan(prompt.indexOf(UNTRUSTED_DELIMITER_START));
+    expect(assembleFixNotePrompt(prompt, undefined).prompt).toBe(prompt);
+  });
+
+  it("the same-side prompt swaps its own sentence and leaves the fenced copy", () => {
+    const prompt = buildFixPrompt(quoting);
+    const out = assembleFixNotePrompt(prompt, undefined).prompt;
+    expect(out).toContain(SAME_SIDE_NO_NOTES_SENTENCE);
+    expect(out.indexOf(SAME_SIDE_NO_NOTES_SENTENCE)).toBeLessThan(out.indexOf(UNTRUSTED_DELIMITER_START));
+    expect(out.split(SAME_SIDE_NOTES_SENTENCE).length - 1).toBe(prompt.split(SAME_SIDE_NOTES_SENTENCE).length - 2);
+    expect(out).toContain(SAME_SIDE_NOTES_SENTENCE);
+  });
+});

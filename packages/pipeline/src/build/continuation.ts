@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
+import { sanitize, UNTRUSTED_DELIMITER_END, UNTRUSTED_DELIMITER_START } from "@fx/trust";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
@@ -248,7 +249,20 @@ export const FIX_NOTE_LABEL = "Your earlier session on this work has ended, and 
 export function assembleFixNotePrompt(prompt: string, summary: string | undefined): AssembledPrompt {
   const noted = assembleNotedPrompt(prompt, summary, FIX_NOTE_LABEL);
   // The same-side sandbox prompt says the earlier session's notes follow: with none to give, it says so instead.
-  return noted.sections.some((s) => s.code === "note") ? noted : { ...noted, prompt: noted.prompt.replace(SAME_SIDE_NOTES_SENTENCE, SAME_SIDE_NO_NOTES_SENTENCE) };
+  return noted.sections.some((s) => s.code === "note") ? noted : { ...noted, prompt: swapOwnSentence(noted.prompt, SAME_SIDE_NOTES_SENTENCE, SAME_SIDE_NO_NOTES_SENTENCE) };
+}
+
+/**
+ * Replaces the first copy of `from` that sits outside every untrusted fence. Text inside a fence (a finding, the Spec) is data and may quote the sentence; it is never rewritten, and
+ * a prompt that does not carry the sentence of its own (a runner or cross-side prompt) is returned as it was. A fence delimiter inside fenced text is neutralised, so counting them is sound.
+ */
+function swapOwnSentence(prompt: string, from: string, to: string): string {
+  const count = (text: string, token: string): number => text.split(token).length - 1;
+  for (let at = prompt.indexOf(from); at >= 0; at = prompt.indexOf(from, at + 1)) {
+    const before = prompt.slice(0, at);
+    if (count(before, UNTRUSTED_DELIMITER_START) <= count(before, UNTRUSTED_DELIMITER_END)) return before + to + prompt.slice(at + from.length);
+  }
+  return prompt;
 }
 
 function assembleNotedPrompt(prompt: string, summary: string | undefined, label: string): AssembledPrompt {
@@ -266,7 +280,20 @@ function assembleNotedPrompt(prompt: string, summary: string | undefined, label:
  */
 function boundedNote(summary: string): string {
   const text = sanitizeCheckpointSummary(summary.normalize("NFKC"));
-  return text.trim() === "" ? "" : text;
+  if (text.trim() === "") return "";
+  // The fence neutralises a look-alike of its own marker, and the replacement is longer than the marker (up to about 3.4 times), so the cap is applied to the text as the fence will hold it.
+  // `sanitize` of the cut text gives the same text back (the neutralised markers match again and map to themselves), so the final fenced text is at most 4 KiB.
+  const inner = sanitize(text).slice(UNTRUSTED_DELIMITER_START.length + 1, -(UNTRUSTED_DELIMITER_END.length + 1));
+  return Buffer.byteLength(inner, "utf8") <= MAX_NOTE_BYTES ? text : cutBytes(inner, MAX_NOTE_BYTES);
+}
+
+const MAX_NOTE_BYTES = 4096;
+/** At most `max` bytes of `text`, cut on a character boundary. */
+function cutBytes(text: string, max: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  let end = max;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString("utf8");
 }
 
 /**

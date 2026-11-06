@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CLONE_EXIT_TOO_LARGE, MAX_CLONE_KB } from "@fx/runner";
 import { assembleConflictPrompt, assembleRenumberPrompt, checkoutBranchCommand } from "../../src/review/reviewPrompts.js";
 
 /**
@@ -74,7 +75,7 @@ const renumberInput = { owner: "acme", name: "widgets", issue: 7, pr: 41, headSh
 function bringLine(prompt: string): string {
   const line = prompt.split("\n").find((l) => l.startsWith("Bring your checkout"));
   if (!line) throw new Error("no checkout line in the prompt");
-  const at = line.indexOf("): git fetch");
+  const at = Math.max(line.indexOf("): git fetch"), line.indexOf("): sh -c "));
   if (at < 0) throw new Error("no git command on the checkout line");
   return line.slice(at + 3);
 }
@@ -171,8 +172,39 @@ describe("checkoutBranchCommand", () => {
     const deep = checkoutBranchCommand("b", "main", "a".repeat(40), true);
     const shallow = checkoutBranchCommand("b", "main", "a".repeat(40), false);
     expect(deep).toContain("--depth=2147483647");
+    expect(deep).toContain(`fx-deepen ${MAX_CLONE_KB} `);
     expect(shallow).not.toContain("--depth");
+    expect(shallow).not.toContain("fx-deepen");
     for (const c of [deep, shallow]) expect(c).toContain('"+refs/heads/b:refs/remotes/origin/b"');
     for (const c of [deep, shallow]) expect(c).toContain("git checkout -B b origin/b");
+  });
+});
+
+describe("the deepening fetch is under the clone's size watch", () => {
+  const kb = (dir: string): number => Number(sh(root, `du -sk "${dir}" | cut -f1`));
+  const run = (dir: string, cmd: string) => spawnSync("bash", ["-c", cmd], { cwd: dir, encoding: "utf8", env: ENV });
+
+  it("a deepen that takes the checkout over the limit stops with the clone's refusal code and removes the checkout; one inside the limit goes through", () => {
+    const probe = sandboxClone();
+    const before = kb(probe);
+    expect(run(probe, checkoutBranchCommand(BRANCH, "main", head, true)).status).toBe(0);
+    const after = kb(probe);
+    expect(after).toBeGreaterThan(before); // the full history is bigger than the depth-1 clone, or this test shows nothing
+
+    const over = sandboxClone();
+    const refused = run(over, checkoutBranchCommand(BRANCH, "main", head, true, before));
+    expect(refused.status).toBe(CLONE_EXIT_TOO_LARGE);
+    expect(existsSync(over)).toBe(false);
+
+    const inside = sandboxClone();
+    expect(run(inside, checkoutBranchCommand(BRANCH, "main", head, true, after)).status).toBe(0);
+    expect(git(inside, "rev-parse", "HEAD")).toBe(head);
+  });
+
+  it("an oversize deepen does not go on to check out or reset anything", () => {
+    const dir = sandboxClone();
+    const out = run(dir, `${checkoutBranchCommand(BRANCH, "main", head, true, 1)}; echo after:$?`);
+    expect(out.stdout).not.toContain("Switched to");
+    expect(existsSync(dir)).toBe(false);
   });
 });
