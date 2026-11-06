@@ -198,12 +198,10 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
         // a run's status) and answers their ids; the events are written here, by the code every status change uses, in this transaction.
         let cancelled = 0;
         // D#6 R5b-1 (C26 section 3, C38): only a move that LEAVES the runner modes ends the queued runs. runner_local <-> runner_verified cancels nothing.
-        if (repo.execution_mode === "runner_local") {
-          // The allowance set-aside stays runner_local-only: it keys on the old mode being runner_local, whatever the new one is.
-          // D#6 R7a (C15 section 4): the repo's approved sandbox allowances are set aside, so a repo that comes back is approved again first.
-          await setAsideSandboxAllowances(client, repoId);
-        }
         if (isRunnerMode(repo.execution_mode) && !isRunnerMode(parsed.mode)) {
+          // D#6 R7a (C15 section 4): leaving the runner modes sets the repo's approved sandbox allowances and check aside, so a repo that comes back is
+          // approved again first. runner_local <-> runner_verified runs on the same runner and keeps the set, so it sets nothing aside.
+          await setAsideSandboxAllowances(client, repoId);
           const { rows: moved } = await client.query<{ run_id: string }>("SELECT run_id FROM repo_cancel_pending_runner_runs($1)", [repoId]);
           for (const run of moved) {
             await recordRunStatusMove(client, { accountId: principal.accountId, runId: run.run_id, from: "pending", to: "cancelled", failureReason: CANCEL_REASON });

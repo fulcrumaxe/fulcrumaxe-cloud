@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { allowanceSetSha256, parseAllowanceSet, type AllowanceEntry } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
-import { getSandboxAllowances, setExecutionMode, setSandboxAllowances } from "../src/index.js";
+import { CLOUD_VERIFIED_COPY_SHA256, getSandboxAllowances, setExecutionMode, setSandboxAllowances } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
 const NAME = "Acme/widgets";
@@ -189,6 +189,54 @@ describe("sandbox allowances [pg] (C35 section 3.4, C15 section 4)", () => {
       // Back on a runner, but the set is still set aside: it rides in no job until an admin approves it again.
       expect(await get(f, f.m1, id)).toMatchObject({ body: { execution_mode: "runner_local", in_use: false, set_aside: true } });
       expect(await put(f, f.o1, id, ok())).toMatchObject({ status: 200, body: { changed: true, in_use: true, set_aside: false, approved: { version: 3 } } });
+    });
+
+    // Cloud-verified runs on the same runner as local-only, so the two share one approved set and check; only leaving both sets them aside.
+    describe("the two runner modes share the set", () => {
+      const CHECK = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+      const VERIFIED = { mode: "runner_verified", confirm_repo: NAME, copy_sha256: CLOUD_VERIFIED_COPY_SHA256 };
+      const connectKey = (f: F2Fixture) =>
+        h.admin.query("INSERT INTO model_connections (account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint, status) VALUES ($1, 'anthropic', $2, $3, $4, 1, $5, 'ok')", [f.accountId, Buffer.from("c"), Buffer.from("n"), Buffer.from("w"), `fp-${randomUUID()}`]);
+      const switchTo = (f: F2Fixture, id: string, body: unknown) => respond(() => setExecutionMode(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: f.o1 }, id, body));
+
+      it("local-only to cloud-verified and back keeps the entries and the check in force: no row, no audit line, in_use stays true", async () => {
+        const f = await fresh();
+        const id = await repo(f);
+        await connectKey(f);
+        const withCheck = { ...SET, check: CHECK };
+        expect(await put(f, f.o1, id, ok(withCheck))).toMatchObject({ status: 200, body: { in_use: true } });
+        expect(await switchTo(f, id, VERIFIED)).toMatchObject({ status: 200, body: { execution_mode: "runner_verified", changed: true } });
+        expect(await get(f, f.m1, id)).toMatchObject({ status: 200, body: { execution_mode: "runner_verified", in_use: true, set_aside: false, approved: { version: 1, check: CHECK } } });
+        expect(await switchTo(f, id, { mode: "runner_local", confirm_repo: NAME })).toMatchObject({ status: 200, body: { execution_mode: "runner_local" } });
+        expect(await get(f, f.m1, id)).toMatchObject({ body: { execution_mode: "runner_local", in_use: true, set_aside: false, approved: { version: 1 } } });
+        expect((await stored(id)).map((r) => [r.version, r.set_aside])).toEqual([[1, false]]);
+        expect((await audits(f)).map((r) => r.action)).toEqual(["repo.runner_sandbox_allowances.approved"]);
+      });
+
+      it("leaving cloud-verified for sandbox sets the set and the check aside, and the way back needs a new approval", async () => {
+        const f = await fresh();
+        const id = await repo(f, "runner_verified");
+        await put(f, f.o1, id, ok({ ...SET, check: CHECK }));
+        expect(await switchTo(f, id, { mode: "sandbox", confirm_repo: NAME })).toMatchObject({ status: 200, body: { execution_mode: "sandbox" } });
+        expect(await get(f, f.m1, id)).toMatchObject({ body: { execution_mode: "sandbox", in_use: false, set_aside: true } });
+        expect((await stored(id)).map((r) => [r.version, r.set_aside])).toEqual([[1, false], [2, true]]);
+        await connectKey(f);
+        await switchTo(f, id, VERIFIED);
+        expect(await get(f, f.m1, id)).toMatchObject({ body: { execution_mode: "runner_verified", in_use: false, set_aside: true } });
+        expect(await put(f, f.o1, id, ok({ ...SET, check: CHECK }))).toMatchObject({ status: 200, body: { changed: true, in_use: true, set_aside: false, approved: { version: 3, check: CHECK } } });
+      });
+
+      it("a cloud-verified repo takes the approval (entries, and a check alone) and answers in_use; a sandbox repo still gets 409", async () => {
+        const f = await fresh();
+        const verified = await repo(f, "runner_verified");
+        expect(await put(f, f.o1, verified, ok())).toMatchObject({ status: 200, body: { changed: true, in_use: true, execution_mode: "runner_verified", approved: { version: 1 } } });
+        const checkOnly = await repo(f, "runner_verified");
+        expect(await put(f, f.o1, checkOnly, ok({ entries: [], check: CHECK }))).toMatchObject({ status: 200, body: { in_use: true, approved: { check: CHECK } } });
+        const sandbox = await repo(f, "sandbox");
+        expect(code(await put(f, f.o1, sandbox, ok()))).toBe("not_runner_local");
+        expect(code(await put(f, f.o1, sandbox, ok({ entries: [], check: CHECK })))).toBe("not_runner_local");
+        expect(await stored(sandbox)).toEqual([]);
+      });
     });
 
     it("a mode change on a repo with no allowances writes nothing extra", async () => {

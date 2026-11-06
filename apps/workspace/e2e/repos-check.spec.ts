@@ -238,10 +238,10 @@ test.describe("D#6 R-CHK-3c: check command form (mocked API)", () => {
     await expect(tid(page, "repos-check-approve")).toBeDisabled();
   });
 
-  test("uploading a file over an approved check says it removes the check and needs the name; the PUT drops it", async ({ page }) => {
+  test("uploading a file that declares a different check says it removes the approved check and needs the name; the PUT drops it", async ({ page }) => {
     const w = world({ check: CHECK, entries: [A], timeout: 600, version: 2 });
     const { puts, appErrors } = await setup(page, w);
-    await tid(page, "repos-allow-file").setInputFiles({ name: "runner-sandbox.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ entries: [A], command_timeout_s: 600, check: CHECK })) });
+    await tid(page, "repos-allow-file").setInputFiles({ name: "runner-sandbox.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ entries: [A], command_timeout_s: 600, check: { ...CHECK, timeout_s: 60 } })) });
     await expect(tid(page, "repos-allow-drops-check")).toContainText("Approving it removes the approved check");
     await expect(tid(page, "repos-allow-approve")).toBeDisabled();
     await axe(page);

@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { CheckSchema, type Check, MAX_ALLOWANCE_ENTRIES, MAX_CHECK_TIMEOUT_S, MAX_COMMAND_TIMEOUT_S, allowanceSetSha256, parseAllowanceSet } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { isRunnerMode } from "@fx/runner";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
 
@@ -47,7 +48,7 @@ function view(repoId: string, repo: RepoRow, latest: StoredRow | null, canChange
     repo_id: repoId,
     execution_mode: repo.execution_mode,
     // The set is signed into a job only while the repo runs on a runner and the newest approval was not set aside.
-    in_use: inForce && repo.execution_mode === "runner_local",
+    in_use: inForce && isRunnerMode(repo.execution_mode),
     set_aside: latest?.set_aside === true,
     approved:
       latest === null
@@ -126,7 +127,7 @@ export async function getSandboxAllowances(deps: RunnerCloudDeps, principal: Ses
  *  - The set is read strictly and held to the floor in runner-protocol (400 `sandbox_allowance_refused`, with the closed `reason` and the entry's
  *    `index`; nothing is written). A set with entries needs a timeout of 1 to 1800 seconds and a set without entries takes none.
  *  - Approving a set with entries is the step that widens a sandbox, so the repository's own full name must be typed back and match exactly
- *    (400 `confirmation_mismatch`, as C14 section 2 does for the execution mode), and the repo must be on a runner (409 `not_runner_local`).
+ *    (400 `confirmation_mismatch`, as C14 section 2 does for the execution mode), and the repo must be on a runner, local-only or cloud-verified (409 `not_runner_local`).
  *    Approving an empty set is the safe direction: it needs no name and is allowed whatever the mode. Uploading a smaller set and approving it
  *    is the undo, and it applies from the next job; a job already claimed keeps the set it was signed with.
  *  - The definer appends the next version and writes one audit row with the set's sha256, in this transaction. Approving the set already in
@@ -155,7 +156,7 @@ export async function setSandboxAllowances(deps: RunnerCloudDeps, principal: Ses
         if (widening) {
           const full = repo.gh_owner && repo.gh_name ? `${repo.gh_owner}/${repo.gh_name}` : null;
           if (full === null || typeof typed !== "string" || typed !== full) throw new RunnerHttpError(400, "confirmation_mismatch", "type the repository's full name to confirm");
-          if (repo.execution_mode !== "runner_local") throw new RunnerHttpError(409, "not_runner_local", "allowances are for repositories on a runner");
+          if (!isRunnerMode(repo.execution_mode)) throw new RunnerHttpError(409, "not_runner_local", "allowances are for repositories on a runner");
         }
         const { rows } = await client.query<{ changed: boolean }>("SELECT changed FROM repo_runner_sandbox_allowances_write($1, 'approve', $2::jsonb, $3, $4, $5::text[], $6::boolean, $7::integer)", [
           repoId,
@@ -185,7 +186,7 @@ export async function setSandboxAllowances(deps: RunnerCloudDeps, principal: Ses
 }
 
 /**
- * Leaving `runner_local` sets the repo's approved allowances aside, in the transaction of the switch: they stay on record and are ignored, and
+ * Leaving the runner modes (to `sandbox`) sets the repo's approved allowances aside, in the transaction of the switch: they stay on record and are ignored, and
  * a repo that comes back is approved again before any job carries them (correction C15 section 4). Writes nothing when there are none.
  */
 export async function setAsideSandboxAllowances(client: PoolClient, repoId: string): Promise<void> {

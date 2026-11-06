@@ -143,3 +143,17 @@ describe("keepFocus", () => {
     expect(f.doc.activeElement).toBeNull();
   });
 });
+
+describe("the check form follows the runner modes", () => {
+  it("a draft can be approved on local-only and on cloud-verified, never on sandbox", () => {
+    const d = draft();
+    for (const mode of ["runner_local", "runner_verified"]) {
+      const m = model(view({ execution_mode: mode, suggested_check: { status: "ok", check: CHECK } }), { draft: d, typed: NAME });
+      expect(m.onRunner, mode).toBe(true);
+      expect(m.approveDisabled, mode).toBe(false);
+    }
+    const off = model(view({ execution_mode: "sandbox", suggested_check: { status: "ok", check: CHECK } }), { draft: d, typed: NAME });
+    expect(off.onRunner).toBe(false);
+    expect(off.approveDisabled).toBe(true);
+  });
+});

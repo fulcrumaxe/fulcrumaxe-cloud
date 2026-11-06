@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { api } from "../apps/_lib/api.js";
-import { ADMIN_ONLY, MAX_FILE_BYTES, approveError, diffSets, entryRows, panelModel, parseUpload } from "../apps/repos/repos-allowances.js";
+import { ADMIN_ONLY, MAX_FILE_BYTES, RUNNER_MODES, approveError, diffSets, entryRows, panelModel, parseUpload } from "../apps/repos/repos-allowances.js";
 
 const SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "apps", "repos", "repos-allowances.js"), "utf8");
 const NAME = "acme/widgets";
@@ -61,6 +61,22 @@ describe("panel states", () => {
     const m = panelModel(state({ view: view({ execution_mode: "cloud" }), upload: { set: set([B]) }, typed: NAME }));
     expect(m.notRunner).toBe(true);
     expect(m.approveDisabled).toBe(true); // the server would answer 409; the button does not offer it
+  });
+});
+
+describe("the runner modes", () => {
+  const pending = { upload: { set: set([A, B]) }, typed: NAME };
+  it("local-only and cloud-verified both take a set with entries; sandbox does not", () => {
+    for (const mode of ["runner_local", "runner_verified"]) {
+      const m = panelModel(state({ view: view({ execution_mode: mode }), ...pending }));
+      expect(m.notRunner, mode).toBe(false);
+      expect(m.approveDisabled, mode).toBe(false);
+    }
+    expect(panelModel(state({ view: view({ execution_mode: "sandbox" }), ...pending })).notRunner).toBe(true);
+  });
+  it("the list is the runner package's own", () => {
+    const runnerModes = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "runner", "src", "runnerModes.ts"), "utf8");
+    expect(RUNNER_MODES).toEqual([...runnerModes.match(/RUNNER_MODES = \[([^\]]*)\]/)[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]));
   });
 });
 
@@ -118,13 +134,13 @@ describe("the picked file", () => {
   it("a good file becomes a clean set with only the four fields", () => {
     const r = ok({ entries: [{ ...A, extra: 1 }], command_timeout_s: 60 });
     expect(r.ok).toBe(false); // an extra key is refused, never passed through
-    expect(ok({ entries: [A], command_timeout_s: 60 })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 }, declaresCheck: false });
-    expect(ok({ entries: [] })).toEqual({ ok: true, set: { entries: [] }, declaresCheck: false });
+    expect(ok({ entries: [A], command_timeout_s: 60 })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 }, declaresCheck: false, declaredCheck: null });
+    expect(ok({ entries: [] })).toEqual({ ok: true, set: { entries: [] }, declaresCheck: false, declaredCheck: null });
   });
   it("a declared check is never sent from the file, and the panel is told it was there (D#6 R-CHK-3c)", () => {
     const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
-    expect(ok({ entries: [A], command_timeout_s: 60, check })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 }, declaresCheck: true });
-    expect(ok({ entries: [], check })).toEqual({ ok: true, set: { entries: [] }, declaresCheck: true });
+    expect(ok({ entries: [A], command_timeout_s: 60, check })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 }, declaresCheck: true, declaredCheck: check });
+    expect(ok({ entries: [], check })).toEqual({ ok: true, set: { entries: [] }, declaresCheck: true, declaredCheck: check });
     // Only an object is a check; anything else in that place is still a malformed file.
     for (const bad of ["bash", 7, [], true]) expect(ok({ entries: [A], command_timeout_s: 60, check: bad })).toEqual({ ok: false, code: "malformed" });
   });
@@ -156,6 +172,41 @@ describe("an upload over an approved check (D#6 R-CHK-3c)", () => {
     expect(m.diff.same).toBe(true);
     expect(m.approveDisabled).toBe(false);
     expect(m.restores).toBe(false);
+  });
+  it("a file that declares the very check already approved keeps it: no removal warning, the approved check rides in the body, the name is still asked", () => {
+    const up = parseUpload(JSON.stringify({ entries: [A], command_timeout_s: 600, check }));
+    const m = panelModel(state({ view: withCheck(), upload: up, typed: "" }));
+    expect(m.keepsCheck).toBe(true);
+    expect(m.dropsCheck).toBe(false);
+    expect(m.body).toEqual({ entries: [A], command_timeout_s: 600, check });
+    expect(m.approveDisabled).toBe(true); // the same set and check: nothing changed, so there is nothing to approve
+    const aside = panelModel(state({ view: { ...withCheck(), set_aside: true, in_use: false }, upload: up, typed: NAME }));
+    expect(aside.restores).toBe(true);
+    expect(aside.approveDisabled).toBe(false);
+    expect(panelModel(state({ view: { ...withCheck(), set_aside: true, in_use: false }, upload: up, typed: "" })).approveDisabled).toBe(true);
+  });
+  it("a file with no entries that declares the approved check still asks for the name (runner_local) and is refused on a sandbox repo", () => {
+    const up = parseUpload(JSON.stringify({ entries: [], check }));
+    expect(up.declaredCheck).toEqual(check); // what the file picker handler must carry through
+    const local = panelModel(state({ view: withCheck(), upload: up, typed: "" }));
+    expect(local.widening).toBe(false);
+    expect(local.keepsCheck).toBe(true);
+    expect(local.needsName).toBe(true);
+    expect(local.notRunner).toBe(false);
+    expect(local.body).toEqual({ entries: [], check });
+    const sandbox = panelModel(state({ view: { ...withCheck(), execution_mode: "sandbox" }, upload: up, typed: NAME }));
+    expect(sandbox.keepsCheck).toBe(true);
+    expect(sandbox.notRunner).toBe(true);
+    expect(sandbox.approveDisabled).toBe(true);
+  });
+  it("a file with another check, or none, still removes the approved one", () => {
+    for (const declared of [{ ...check, timeout_s: 60 }, { ...check, dev_shell: false }, { ...check, argv: ["bash", "other.sh"] }, null]) {
+      const up = parseUpload(JSON.stringify({ entries: [A], command_timeout_s: 600, ...(declared ? { check: declared } : {}) }));
+      const m = panelModel(state({ view: withCheck(), upload: up, typed: NAME }));
+      expect(m.keepsCheck, JSON.stringify(declared)).toBe(false);
+      expect(m.dropsCheck, JSON.stringify(declared)).toBe(true);
+      expect(m.body.check).toBeUndefined();
+    }
   });
   it("no approved check, nothing to remove: the old rules hold", () => {
     const m = panelModel(state({ upload: { set: set([]) } }));
