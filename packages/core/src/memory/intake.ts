@@ -132,6 +132,15 @@ export function normalizedMemoryHash(text: string): string {
 /** How many of a repository's most recent person-declined entries (rejected, retired by a person, deleted, replaced by an edit) the dial compares a new proposal against. */
 const DECLINED_LOOKUP_MAX = 400;
 
+/**
+ * True when a person declined this text (case and whitespace aside) in the repository, at account scope, or at `role` scope: the same look-back the auto-approve dial
+ * uses, read through memory_declined_read (person decisions only, bounded to the most recent). The dial and the repo-file import both ask it, so they cannot drift.
+ */
+export async function wasDeclined(client: PoolClient, repoRef: string | null, repoId: string, role: string | null, hash: string): Promise<boolean> {
+  const declined = await client.query<{ body: string }>('SELECT body FROM memory_declined_read($1::text, $2::uuid, $3::text, $4::integer)', [repoRef, repoId, role, DECLINED_LOOKUP_MAX]);
+  return declined.rows.some((r) => normalizedMemoryHash(r.body) === hash);
+}
+
 const intakeLockSql = `SELECT pg_advisory_xact_lock(hashtextextended('memory_intake:' || $1::text, 0))`;
 /** The per-account intake lock (transaction-scoped, re-entrant within one transaction). */
 export async function lockMemoryIntake(client: PoolClient, accountId: string): Promise<void> {
@@ -291,13 +300,7 @@ async function maybeAutoApprove(
   // floor for honest repeats, not a boundary: a reworded text has another hash and is treated as new, and a deleted entry is purged after 30 days, so
   // that no is forgotten then. Looked up only here, for the rare proposal the dial could really approve, and bounded to the most recent person decisions.
   const ref = stored.scope === 'repo' ? stored.scopeRef : await repoRef();
-  const declined = await client.query<{ body: string }>('SELECT body FROM memory_declined_read($1::text, $2::uuid, $3::text, $4::integer)', [
-    ref,
-    dial.repoId,
-    ROLE_RE.test(input.role) ? input.role : null,
-    DECLINED_LOOKUP_MAX,
-  ]);
-  if (declined.rows.some((r) => normalizedMemoryHash(r.body) === stored.hash)) return 'previously_declined';
+  if (await wasDeclined(client, ref, dial.repoId, ROLE_RE.test(input.role) ? input.role : null, stored.hash)) return 'previously_declined';
   await client.query('SAVEPOINT memory_auto_approve_one');
   try {
     await withReversalWindow(client, 'memory_auto_approve', () =>

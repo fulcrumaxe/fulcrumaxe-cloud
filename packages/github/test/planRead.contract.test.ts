@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PLAN_READ_PERMISSIONS, getInstallationToken, InstallationTokenCache } from "../src/installationToken.js";
 import { createPlanReadClient, PLAN_READ_USER_AGENT, type PlanReadClient, type PlanReadDeps } from "../src/planReadClient.js";
 import { ALLOWED_GRAPHQL_DOCUMENTS, assertSingleQueryDocument, DISCUSSIONS_PAGE_QUERY, DISCUSSION_COMMENTS_QUERY, REPO_HEAD_QUERY } from "../src/planQueries.js";
-import { listDiscussionComments, listDiscussions, listIssuesAndPulls, PlanSourceTooLargeError, readAuthorPermission, readRepoFile, readRepoHead } from "../src/planReaders.js";
+import { listDiscussionComments, listDiscussions, listIssuesAndPulls, PlanSourceTooLargeError, readAuthorPermission, readRepoFile, readRepoHead, readRepoInstructionFile } from "../src/planReaders.js";
 import { createPlanSourceFactory } from "../src/planSource.js";
 import { httpsRoundTrip } from "./helpers/localTlsServer.js";
 import { newFakeState, startPlanGithub, type FakeGithubState, type FakeItem, type PlanGithub } from "./helpers/planGithubFake.js";
@@ -348,6 +348,39 @@ describe("the readers", () => {
     expect(await readRepoFile(client, REPO, ".fulcrumaxe/roadmap.json", g.state.headSha, 100)).toBeNull();
     const asked = g.server.seen.find((s) => s.path.includes("roadmap.json"))!;
     expect(asked.headers["accept"]).toBe("application/vnd.github.raw+json");
+  });
+
+  it("readRepoInstructionFile: the text and the blob sha at the commit through the object media type; a missing path is null", async () => {
+    const { gh: g, client } = await setup({ files: new Map([["CLAUDE.md", "# Build\nrun the tests é"]]) });
+    expect(await readRepoInstructionFile(client, REPO, "CLAUDE.md", g.state.headSha)).toEqual({ sha: "b".repeat(40), text: "# Build\nrun the tests é" });
+    expect(await readRepoInstructionFile(client, REPO, "AGENTS.md", g.state.headSha)).toBeNull();
+    const asked = g.server.seen.find((s) => s.path.endsWith("/CLAUDE.md"))!;
+    expect(asked.headers["accept"]).toBe("application/vnd.github.object+json");
+    expect(asked.method).toBe("GET");
+  });
+
+  it("readRepoInstructionFile: a directory, a symlink and a submodule answer 200 with other metadata and are null, not text", async () => {
+    for (const body of [{ type: "dir", sha: "b".repeat(40) }, { type: "symlink", sha: "b".repeat(40), target: "elsewhere", encoding: "base64", content: "eA==" }, { type: "submodule", sha: "b".repeat(40) }, { type: "file", sha: "b".repeat(40), encoding: "none", content: "" }]) {
+      const client = { request: async () => ({ status: 200, headers: {}, text: JSON.stringify(body) }) } as unknown as PlanReadClient;
+      expect(await readRepoInstructionFile(client, REPO, "CLAUDE.md", "c".repeat(40))).toBeNull();
+    }
+  });
+
+  it("readRepoInstructionFile: any status other than 200 is github_unavailable even when the body looks like a file", async () => {
+    const file = JSON.stringify({ type: "file", sha: "b".repeat(40), encoding: "base64", content: "eA==" });
+    for (const status of [201, 202, 203, 304, 500, 503]) {
+      const client = { request: async () => ({ status, headers: {}, text: file }) } as unknown as PlanReadClient;
+      expect(await code(readRepoInstructionFile(client, REPO, "CLAUDE.md", "c".repeat(40)))).toBe("github_unavailable");
+    }
+  });
+
+  it("readRepoInstructionFile: a server error is github_unavailable and a file over the response cap is plan_file_too_large, never a missing file", async () => {
+    const { gh: g, client } = await setup({ files: new Map([["CLAUDE.md", "x".repeat(2_000_000)]]) });
+    expect(await code(readRepoInstructionFile(client, REPO, "CLAUDE.md", g.state.headSha))).toBe("plan_file_too_large");
+    await gh?.close();
+    gh = undefined;
+    const second = await setup({ files: new Map([["CLAUDE.md", "a"]]), faults: { contentsStatus: 500 } });
+    expect(await code(readRepoInstructionFile(second.client, REPO, "CLAUDE.md", second.gh.state.headSha))).toBe("github_unavailable");
   });
 
   it("readRepoFile: a file over the size cap is plan_file_too_large, both when length is declared and when it is streamed", async () => {
