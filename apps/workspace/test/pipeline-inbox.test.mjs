@@ -60,7 +60,7 @@ describe("S4-h: the check on a proposal", () => {
     expect(checkSentences({ verification: "check_failed", verify_retry: false })).toEqual([]);
     expect(checkSentences({ verification: "refuted" })).toEqual([]);
   });
-  it("unfinishedCheckLine names a pending check's wait: one plain sentence each for daily_limit and daily_spend, the pending sentence otherwise", () => {
+  it("unfinishedCheckLine names a pending check's wait: one plain sentence each for daily_limit, daily_spend and runner_check_not_built, the pending sentence otherwise", () => {
     const pending = { verification: "pending" };
     expect(unfinishedCheckLine(pending, "daily_limit")).toBe("Waiting: today's limit for checking outside proposals is reached — it is checked tomorrow.");
     expect(unfinishedCheckLine(pending, "daily_spend")).toBe("Waiting: this repository's daily checking budget is used — it is checked tomorrow.");
@@ -69,6 +69,8 @@ describe("S4-h: the check on a proposal", () => {
     expect(unfinishedCheckLine({ verification: "check_failed" }, "daily_limit")).toBe(DETAIL_FAILED_SENTENCE);
     expect(unfinishedCheckLine({ verification: "not_checked" }, "daily_spend")).toBe(NOT_CHECKED_SENTENCE);
     expect(unfinishedCheckLine({ verification: "verified" }, "daily_spend")).toBe("");
+    expect(unfinishedCheckLine(pending, "runner_check_not_built")).toBe("This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.");
+    expect(unfinishedCheckLine({ verification: "not_checked" }, "runner_check_not_built")).toBe(NOT_CHECKED_SENTENCE);
     for (const s of Object.values(VERIFY_WAIT_SENTENCES)) expect(s).not.toMatch(BAD);
   });
   it("approveBlock names why Approve is off in Being checked and Not checked only", () => {

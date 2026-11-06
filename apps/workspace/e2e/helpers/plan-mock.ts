@@ -105,7 +105,7 @@ export interface PlanMock {
   /** Answers to GET /repos: when true the list fails with a 500. */
   reposFail: boolean;
   /** D#483 S4-h: what the detail route answers for a proposal id: its claims and evidence, or a Reply for a refusal. An id not here answers 404. */
-  details: Record<string, { claims: unknown[]; evidence: unknown[] } | Reply>;
+  details: Record<string, { claims: unknown[]; evidence: unknown[]; verify_wait?: string | null } | Reply>;
   /**
    * D#483 S5-e1: what the estimate route answers, by proposal id; null (the default) leaves the route unanswered (404), as before it existed.
    * `meta` is the set-level figures. An id missing from `estimates` is answered 404 like an unknown proposal.
@@ -207,7 +207,7 @@ export async function installMock(page: Page, m: PlanMock) {
         const d = m.details[one[1]!];
         if (!row || !d) return send(route, refusal(404, "not_found"));
         if ("status" in d) return send(route, d);
-        return send(route, { status: 200, json: { proposal: { ...row, claims: d.claims, evidence: d.evidence } } });
+        return send(route, { status: 200, json: { proposal: { ...row, claims: d.claims, evidence: d.evidence, verify_wait: d.verify_wait ?? null } } });
       }
       const plan = /^\/api\/v1\/repos\/([^/]+)\/plan$/.exec(p);
       if (plan) {

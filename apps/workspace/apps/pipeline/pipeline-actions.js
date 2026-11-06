@@ -687,6 +687,7 @@ export const DETAIL_FAILED_SENTENCE = "The check didn't finish, so there are no 
 export const VERIFY_WAIT_SENTENCES = {
   daily_limit: "Waiting: today's limit for checking outside proposals is reached — it is checked tomorrow.",
   daily_spend: "Waiting: this repository's daily checking budget is used — it is checked tomorrow.",
+  runner_check_not_built: "This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.",
 };
 
 /**

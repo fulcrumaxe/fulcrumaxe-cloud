@@ -95,7 +95,7 @@ export const proposalDetailSchema = proposalSchema.extend({
     .enum(VERIFY_WAITS)
     .nullable()
     .describe(
-      "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `queued`: it waits for the next check pass or its check is running.",
+      "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `runner_check_not_built`: its repository runs work on the owner's own runner, where checking proposals is not built yet, so it waits with no check coming. `queued`: it waits for the next check pass or its check is running.",
     ),
 });
 

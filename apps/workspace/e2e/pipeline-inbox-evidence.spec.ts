@@ -260,6 +260,29 @@ test.describe("D#483 S4-h: opening a proposal", () => {
     await clean(page, errors);
   });
 
+  test("a pending proposal on a repository that runs work on your own runner says why it waits, and Approve stays off", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1, { verification: "pending", title: "On my runner" }), proposal(2, { verification: "pending", title: "On the cloud" })];
+    m.details[String(m.proposals[0].id)] = { claims: [], evidence: [], verify_wait: "runner_check_not_built" };
+    m.details[String(m.proposals[1].id)] = { claims: [], evidence: [], verify_wait: "queued" };
+    const { errors } = await start(page, m);
+    await press(page, filter(page, "being_checked"));
+    const toggle = tid(page, "pl-inbox-toggle");
+    await press(page, toggle.first());
+    await expect(tid(page, "pl-check-status")).toHaveText("This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.");
+    const box = await tid(page, "pl-check-status").boundingBox();
+    const win = await page.locator(WIN).boundingBox();
+    expect(box!.width).toBeGreaterThan(100);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(win!.x + win!.width + 1);
+    await expect(tid(page, "pl-inbox-approve").first()).toHaveAttribute("aria-disabled", "true");
+    await axeClean(page);
+    // A proposal that is only queued keeps the plain pending sentence.
+    await press(page, toggle.first());
+    await press(page, toggle.nth(1));
+    await expect(tid(page, "pl-check-status")).toHaveText("Not checked yet. Claims and evidence show here once the check is done.");
+    await clean(page, errors);
+  });
+
   test("an unfinished check still lists rows it already has", async ({ page }) => {
     const m = newMock();
     m.proposals = [proposal(1, { verification: "check_failed", verify_attempts: 1, verify_retry: true, title: "Partial" })];
