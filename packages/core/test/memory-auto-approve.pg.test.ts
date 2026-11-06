@@ -431,6 +431,95 @@ describe('memory auto-approve dial in the intake (D#601 MEM-10)', () => {
     await expectLeftForPerson(second, 'item');
   });
 
+  /** An entry in a given state written straight into the table, with the audit row of the step that put it there (actor `by`; none when null). */
+  async function seedEntry(scope: string, scopeRef: string | null, body: string, st: string, by: string | null, ageDays = 0, count = 1) {
+    await admin.query(
+      `WITH ins AS (
+         INSERT INTO memory_entries (account_id, scope, scope_ref, kind, body, author_kind, status, content_sha256, updated_at, deleted_at)
+         SELECT $1, $2, $3, 'fact', CASE WHEN $4::int = 1 THEN $5 ELSE $5 || ' #' || g END, 'person', $6,
+                encode(sha256(convert_to(CASE WHEN $4::int = 1 THEN $5 ELSE $5 || ' #' || g END, 'UTF8')), 'hex'), now() - make_interval(days => $8::int), CASE WHEN $6 = 'deleted' THEN now() END
+           FROM generate_series(1, $4::int) g
+         RETURNING id)
+       INSERT INTO audit_log (account_id, actor, action, payload, created_at)
+       SELECT $1, $7, 'memory.' || $6, jsonb_build_object('entry_id', id), now() - make_interval(days => $8::int) FROM ins WHERE $7::text IS NOT NULL`,
+      [a.accountId, scope, scopeRef, count, body, st, by, ageDays],
+    );
+  }
+  const SWEEP = 'system:memory_sweep';
+  const autoOf = async (body: string, scope = 'repo') => {
+    const run = await newRun();
+    await ingest(run, [fact(body, scope)]);
+    return (await eventOf(run)).stored.map((x) => x.auto);
+  };
+
+  it('an old person\'s no still blocks after more than 400 sweep retirements have followed it', async () => {
+    await setDial('announce', 1);
+    const body = text('old person retire');
+    await seedEntry('repo', repoRef, body, 'retired', owner, 200);
+    await seedEntry('repo', repoRef, text('swept'), 'retired', SWEEP, 1, 405);
+    expect(await autoOf(body)).toEqual(['previously_declined']);
+    expect(await receipts()).toHaveLength(0);
+  });
+
+  it('a no at role scope (the run\'s own role) and a no at account scope both block; another role\'s no does not', async () => {
+    await setDial('announce', 1);
+    const roleText = text('role no');
+    const accountText = text('account no');
+    const otherRole = text('other role no');
+    await seedEntry('role', 'executor', roleText, 'rejected', owner);
+    await seedEntry('account', null, accountText, 'deleted', owner);
+    await seedEntry('role', 'reviewer', otherRole, 'rejected', owner);
+    expect(await autoOf(roleText)).toEqual(['previously_declined']);
+    expect(await autoOf(accountText)).toEqual(['previously_declined']);
+    expect(await autoOf(otherRole)).toEqual(['approved']);
+  });
+
+  it('a sweep retirement alone is not a no: the same text is approved again', async () => {
+    await setDial('announce', 1);
+    const body = text('swept only');
+    await seedEntry('repo', repoRef, body, 'retired', SWEEP, 100);
+    expect(await autoOf(body)).toEqual(['approved']);
+    expect(await receipts()).toHaveLength(1);
+  });
+
+  /** One more audit row for the entry with this body, `ageDays` old: the history of an entry that was retired, restored and retired again. */
+  async function addAudit(body: string, actor: string, action: string, ageDays: number) {
+    await admin.query(
+      `INSERT INTO audit_log (account_id, actor, action, payload, created_at)
+       SELECT $1, $3, $4, jsonb_build_object('entry_id', id), now() - make_interval(days => $5::int) FROM memory_entries WHERE account_id = $1 AND body = $2`,
+      [a.accountId, body, actor, action, ageDays],
+    );
+  }
+
+  it('the latest retire decides: a sweep retire followed by a person\'s restore and retire still blocks', async () => {
+    await setDial('announce', 1);
+    const body = text('sweep then person');
+    await seedEntry('repo', repoRef, body, 'retired', SWEEP, 30);
+    await addAudit(body, owner, 'memory.restored', 20);
+    await addAudit(body, owner, 'memory.retired', 10);
+    expect(await autoOf(body)).toEqual(['previously_declined']);
+    expect(await receipts()).toHaveLength(0);
+  });
+
+  it('the latest retire decides: a person\'s retire followed by a restore and a later sweep retire does not block', async () => {
+    await setDial('announce', 1);
+    const body = text('person then sweep');
+    await seedEntry('repo', repoRef, body, 'retired', owner, 30);
+    await addAudit(body, owner, 'memory.restored', 20);
+    await addAudit(body, SWEEP, 'memory.retired', 10);
+    expect(await autoOf(body)).toEqual(['approved']);
+    expect(await receipts()).toHaveLength(1);
+  });
+
+  it('a retired entry with no audit row counts as a no: the look-back fails toward a person', async () => {
+    await setDial('announce', 1);
+    const body = text('retired without a row');
+    await seedEntry('repo', repoRef, body, 'retired', null, 50);
+    expect((await admin.query(`SELECT count(*)::int AS n FROM audit_log WHERE account_id = $1 AND action = 'memory.retired'`, [a.accountId])).rows[0].n).toBe(0);
+    expect(await autoOf(body)).toEqual(['previously_declined']);
+    expect(await receipts()).toHaveLength(0);
+  });
+
   it('a no in another repository does not count: the dial is per repository', async () => {
     await setDial('announce', 1);
     const other = (await admin.query<{ id: string }>(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, 987654, 'team') RETURNING id`, [a.accountId, a.installationId])).rows[0]!.id;
