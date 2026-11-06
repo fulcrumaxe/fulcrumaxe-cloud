@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { DoneCheck, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, type DoneCheck, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import type { CheckOutcome } from "../../src/daemon/checkStep.js";
 import { createJobHandler, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
@@ -21,6 +21,7 @@ import type { SandboxPort, StartDetachedOptions } from "../../src/sandbox/port.j
 import { fakeGitPath } from "../helpers/fakeGitPath.js";
 import { ledgerOptions } from "../helpers/ledgerOptions.js";
 import { jobFor, KEYRING, signRaw } from "../helpers/signedJob.js";
+import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 
 /**
@@ -378,4 +379,33 @@ describe("the journal line per step", () => {
     const result = await r.handle(await r.claim(withCheck()));
     expect(result.status).toBe("completed");
   });
+});
+
+/** A confined read-only role cannot change a manifest, so the runner does not try to bring a lockfile up to date for it; its result still reaches the cloud. */
+const CONFINED = ["proposal-verifier", "discovery-analyst"] as const;
+it("the roles below are exactly the confined read-only roles", () => expect([...CONFINED].sort()).toEqual([...CONFINED_READ_ROLES].sort()));
+for (const ROLE of CONFINED) {
+  describe(`a ${ROLE} job with a lockfile update wired`, () => {
+    const verifierJob = () => jobFor({ role: ROLE, task: jobFor().task, role_tools_sha256: roleToolsDigest(ROLE), review: { head_sha: HEAD } });
+
+    it("never runs the lockfile update, and its done carries the agent's envelope", async () => {
+      const steps: string[] = [];
+      const lockfile = { outcome: { kind: "refused", reason: "workspace_unsafe" } as unknown as LockSyncOutcome, inputs: [] as Array<{ base: string; registryHost: string | undefined }> };
+      const r = rig({ lockfile, steps });
+      const result = await r.handle(await r.claim(verifierJob()));
+      expect(result.status).toBe("completed");
+      expect(lockfile.inputs).toEqual([]);
+      expect(r.order).not.toContain("lockfile");
+      expect(steps.some((s) => s.includes("lockfile"))).toBe(false);
+      expect(bodies("/done")).toHaveLength(1);
+      expect(bodies("/done")[0]!.agentOutput).toEqual({ verdict: "done" });
+    });
+  });
+}
+
+it("an executor job still gets its lockfile update (the guard above names the confined read-only roles only)", async () => {
+  const lockfile = { outcome: { kind: "none" } as LockSyncOutcome, inputs: [] as Array<{ base: string; registryHost: string | undefined }> };
+  const r = rig({ lockfile });
+  await r.handle(await r.claim(withCheck()));
+  expect(r.order).toContain("lockfile");
 });

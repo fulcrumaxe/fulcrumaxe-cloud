@@ -59,6 +59,8 @@ export interface VerifyRecord {
   evidence: ReadonlyArray<{ kind: string; ref: string; excerpt: string; commit_sha: string }>;
   /** The verifier's parsed category (S5-b1a-3), or null when the output was refused whole. The definer keeps it only with a named run. */
   category?: string | null;
+  /** Why a `check_failed` was reached from a finished run's output (pipeline's `failure`); never a value from the output. */
+  failure?: string;
 }
 /** One repository through the read-only plan client: its default branch's head, and a file at a commit (null when absent). */
 export interface VerifyRepoReader {
@@ -125,6 +127,12 @@ interface RunRow {
   request_hash: string;
 }
 
+/**
+ * A run that SUCCEEDED but gave no answer is a failed check that looks like nothing happened. Say which of three things it was, as a fixed code (never a
+ * value from the output): no output stored, output the parser refused, or a cite that could not be read from GitHub.
+ */
+const noteNoAnswer = (code: string): void => reportError(new Error(code), { stage: "proposal_verify.result", code });
+
 const FAILED: VerifyRecord = { verification: "check_failed", verified_sha: null, claims: [], evidence: [] };
 
 /** The daily external counter, defined once in @fx/core (the read side's `verify_wait` derives from it too). */
@@ -178,7 +186,12 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
     let rec: VerifyRecord = FAILED;
     // Only a run that finished, for this text, at a pinned sha, has an answer to read. Anything else is a failed check.
     if (run.status === "succeeded" && run.request_hash === requestHash(p) && run.head_sha !== null && SHA_RE.test(run.head_sha)) {
-      rec = await deps.record({ envelope: run.envelope, sha: run.head_sha, reader: deps.github(repo) });
+      if (run.envelope === null || run.envelope === undefined) {
+        noteNoAnswer("verify_result_missing");
+      } else {
+        rec = await deps.record({ envelope: run.envelope, sha: run.head_sha, reader: deps.github(repo) });
+        if (rec.verification === "check_failed") noteNoAnswer(rec.failure === "read_failed" ? "verify_result_unread" : "verify_result_refused");
+      }
     }
     return withTenant(deps.pool, accountId, async (client): Promise<Outcome> => {
       // Lock the proposal first, and keep the lock to the end of this transaction: a re-queue that committed before this point is seen by the read

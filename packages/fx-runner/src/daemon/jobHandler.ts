@@ -17,7 +17,7 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
@@ -564,7 +564,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             clearStubs(workspace);
             // The agent could not touch the lockfile; the runner does it, so the check's frozen install and the published change both see a lockfile that matches the manifests.
             // Note: `clearStubs(workspace)` above runs once BEFORE `stop()`. It is a host-side unlink of the sandbox's placeholders, not a git call; a second clear runs after the stop.
-            const syncsLockfile = deps.lockfileSync !== undefined && started.base !== undefined;
+            // A confined read-only role (the claim verifier, the discovery analyst) cannot change a file, so there is no manifest edit to bring the lockfile up to date for.
+            const syncsLockfile = deps.lockfileSync !== undefined && started.base !== undefined && !CONFINED_READ_ROLES.has(job.role);
             // The agent's process tree must be gone before the runner reads or writes the workspace on the host (the lockfile update, the check's reads): its hook fires on the
             // result event, and a tool call's background process may still be running (CWE-367). `stop` ends the whole group and waits; the sandbox itself stays, so the check
             // below still launches under its rules. It runs for the check whether or not a lockfile update is wired.
@@ -576,7 +577,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               } else {
                 // A process of the stopped tree may have made a placeholder after the first clear.
                 clearStubs(workspace);
-                if (deps.lockfileSync !== undefined && started.base !== undefined) {
+                if (syncsLockfile && deps.lockfileSync !== undefined && started.base !== undefined) {
                   const domains = (job.sandbox_allowances?.entries ?? []).filter((entry) => entry.kind === "domain").map((entry) => entry.value);
                   const synced = await deps.lockfileSync.run({ workspace, base: started.base, registryHost: registryHostOf(domains), signal: stopRun }).catch(() => undefined);
                   if (synced === undefined) step("lockfile update ended (lockfile_sync_failed)");

@@ -10,6 +10,7 @@ import { buildVerifierPrompt } from "../../pipeline/src/discovery/verifierPrompt
 import { recordFromOutput } from "../../pipeline/src/discovery/verifierResult.js";
 import { createSandboxTargetHarness } from "../../runner/test/helpers/sandboxTargetFakes.js";
 import { createFakeRunnerLimits } from "../../runner/test/helpers/runnerTargetFakes.js";
+import { configureErrorReporter } from "@fx/telemetry";
 import { createProposalVerifySweep, type ProposalVerifyCounts, type VerifySettings } from "../src/proposalVerify.js";
 import { createSeatResolver } from "../src/seat.js";
 import { createRunStarter } from "../src/starter.js";
@@ -27,6 +28,8 @@ const GOOD = { category: "bug", claims: [{ text: "add returns the sum", verdict:
 
 const contents: ContentsRequester = async (req) => {
   if (req.method !== "GET" || req.accept !== "application/vnd.github.object+json" || !/^[0-9a-f]{40}$/.test(req.query.ref)) return { status: 422, text: '{"message":"Validation Failed"}' };
+  // GitHub answering a server error for a file the run cited: a read that FAILED, which is never "not found".
+  if (req.path.endsWith("/contents/src/boom.ts") && req.query.ref === SHA) return { status: 502, text: '{"message":"Bad Gateway"}' };
   if (!req.path.endsWith("/contents/src/a.ts") || req.query.ref !== SHA) return { status: 404, text: '{"message":"Not Found","status":"404"}' };
   return { status: 200, text: JSON.stringify({ type: "file", encoding: "base64", size: FILE.length, name: "a.ts", path: "src/a.ts", content: Buffer.from(FILE).toString("base64") }) };
 };
@@ -139,6 +142,44 @@ describe("the proposal verifier sweep on a runner [pg]", { timeout: 120_000 }, (
     await admin.query("UPDATE agent_runs SET status = 'failed', envelope = $2::jsonb WHERE id = $1", [run!.id, JSON.stringify(GOOD)]);
     await sweep();
     expect(await row(id)).toMatchObject({ verification: "check_failed", verify_attempts: 1, verified_run_id: null });
+  });
+
+  it("a runner run that SUCCEEDED but left no usable answer records check_failed AND says which of the causes it was, as a fixed code with no value from the output", async () => {
+    const cases: Array<[string, unknown, string]> = [
+      ["no output stored", null, "verify_result_missing"],
+      ["output the parser refuses", { category: "bug", claims: [], summary: "SECRET-TEXT-IN-OUTPUT" }, "verify_result_refused"],
+      ["a cite GitHub could not answer", { category: "bug", claims: [{ text: "boom", verdict: "supported", cites: [{ path: "src/boom.ts", start_line: 1, end_line: 2 }] }] }, "verify_result_unread"],
+    ];
+    const lines: string[] = [];
+    configureErrorReporter({ service: "worker-test", write: (l) => lines.push(l) });
+    try {
+      for (const [label, envelope, code] of cases) {
+        const { a, repoId } = await target("runner_verified");
+        const id = await proposal(a, repoId);
+        await sweep();
+        const [run] = await runsOf(id);
+        lines.length = 0;
+        await admin.query("UPDATE agent_runs SET status = 'succeeded', envelope = $2::jsonb WHERE id = $1", [run!.id, envelope === null ? null : JSON.stringify(envelope)]);
+        await sweep();
+        expect(await row(id), label).toMatchObject({ verification: "check_failed", verify_attempts: 1, verified_run_id: null });
+        const reported = lines.filter((l) => l.includes("proposal_verify.result"));
+        expect(reported, label).toHaveLength(1);
+        expect(reported[0], label).toContain(`"error_code":"${code}"`);
+        expect(lines.join("\n"), label).not.toContain("SECRET-TEXT-IN-OUTPUT");
+      }
+      // A good answer says nothing.
+      const { a, repoId } = await target("runner_verified");
+      const id = await proposal(a, repoId);
+      await sweep();
+      const [run] = await runsOf(id);
+      lines.length = 0;
+      await admin.query("UPDATE agent_runs SET status = 'succeeded', envelope = $2::jsonb WHERE id = $1", [run!.id, JSON.stringify(GOOD)]);
+      await sweep();
+      expect(await row(id)).toMatchObject({ verification: "verified" });
+      expect(lines.filter((l) => l.includes("proposal_verify.result"))).toEqual([]);
+    } finally {
+      configureErrorReporter({ service: "app" });
+    }
   });
 
   it("never for a repository GitHub says is public, or whose visibility cannot be read: nothing starts, nothing is reserved, no attempt is used", async () => {
