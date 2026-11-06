@@ -84,10 +84,16 @@ describe("decision snapshot for a fix round [pg]", { timeout: 120_000 }, () => {
     const review: AdvanceReviewDeps = {
       load: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: "x", stage: "pr_opened", repoId: "r", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "feature", specVersion: 1, debaterEnabled: false } })),
       recordRound: vi.fn(async (_p, _r, input) => ({ decision: "all_passed", round: 0, recorded: input.verdicts.map((v: { role: string; runId: string; verdict: string }) => ({ ...v, outcome: "passed" })) })),
-      resume,
+      resume: async () => { throw new Error("a fix round never resumes a session"); },
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),
     };
-    const starter: RunStarter = { async start() { return { runId: randomUUID() }; } };
+    // D#600 CX-7: a fix round is a fresh session, started through the starter; the stand-in above (named `resume` for the assertions) writes the keyed run row. `review.resume` must stay unused.
+    const starter: RunStarter = {
+      async start(input) {
+        const r = (await resume(writerPool, registry, input)) as { id: string; status: string; reason?: string };
+        return r.status === "refused_spend" ? { runId: r.id, refused: r.reason ?? "refused_spend" } : { runId: r.id };
+      },
+    };
     const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "main", stacked: false }) } };
     return createAdvanceModule(pool, deps);
   }

@@ -46,9 +46,17 @@ describe("the cross-side sandbox fix prompt", () => {
     expect(prompt).not.toContain("fx/issue-12");
   });
 
-  it("is unchanged when the round is on the same side, and a runner round has no variant", () => {
-    expect(buildFixPrompt(FIX)).toBe(buildFixPrompt({ ...FIX, crossSide: false }));
-    expect(buildFixPrompt(FIX)).toContain("This continues your earlier session");
+  it("D#600 CX-7: a same-side round is a new session too: it differs from the cross-side one in the sentence that says why and in the ancestor check, and a runner round has no variant", () => {
+    const same = buildFixPrompt(FIX);
+    expect(same).toBe(buildFixPrompt({ ...FIX, crossSide: false }));
+    expect(same).toContain("This is a new session; the notes of your earlier one follow below.");
+    expect(same).toContain(`git checkout -B ${RUN_BRANCH} origin/${RUN_BRANCH}`);
+    expect(same).not.toContain("This continues your earlier session");
+    expect(same).not.toContain("reset --hard");
+    expect(same).not.toContain("is-ancestor");
+    expect(same).not.toContain("opened by a run on another machine");
+    expect(prompt).toContain("opened by a run on another machine");
+    expect(prompt).toContain("is-ancestor");
     expect(buildFixPrompt({ ...FIX, runtime: "runner", crossSide: true })).toBe(buildFixPrompt({ ...FIX, runtime: "runner" }));
   });
 

@@ -66,26 +66,31 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
   const upToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: "c".repeat(40), baseRef: "main", stacked: false });
   function harness(given: FixRoundHeadPorts | null, seatResult: SeatResult | { ok: false; reason: string } = SEAT) {
     const heads = given && given.privateHead && !("syncBase" in given) ? { ...given, syncBase: upToDate } : given;
+    // D#600 CX-7: every fix round is a fresh session, written by the starter; `resumed` keeps its name for the assertions and holds the starter's inputs, each with the base the round was signed with.
     const resumed: StartAgentRunInput[] = [];
-    const resume = vi.fn(async (_pool: Pool, _registry: ExecutionTargetRegistry, input: StartAgentRunInput) => {
-      resumed.push(input);
-      const { id } = await insertAgentRun(writerPool, {
-        id: randomUUID(),
-        accountId: input.accountId,
-        workItemId: input.workItemId,
-        parentRunId: input.parentRunId,
-        role: "executor",
-        runtime: "production",
-        executionMode: "sandbox",
-        dispatchRepoId: input.repoId,
-        dispatchPrNumber: input.pr ?? null,
-        idempotency: input.idempotency,
-      });
-      await writeRunStatus(writerPool, { accountId: input.accountId, runId: id, from: "pending", to: "running" });
-      return { id, status: "running" };
+    const resume = vi.fn(async (_pool: Pool, _registry: ExecutionTargetRegistry, _input: StartAgentRunInput) => {
+      throw new Error("a fix round never resumes a session");
     });
+    const starter: RunStarter = {
+      async start(input) {
+        const { id } = await insertAgentRun(writerPool, {
+          id: randomUUID(),
+          accountId: input.accountId,
+          workItemId: input.workItemId,
+          parentRunId: input.parentRunId,
+          role: "executor",
+          runtime: "production",
+          executionMode: "sandbox",
+          dispatchRepoId: input.repoId,
+          dispatchPrNumber: input.pr ?? null,
+          idempotency: input.idempotency,
+        });
+        resumed.push({ ...input, ...(input.continues?.baseSha !== undefined ? { base: { sha: input.continues.baseSha, branch: input.continues.branch } } : {}) });
+        await writeRunStatus(writerPool, { accountId: input.accountId, runId: id, from: "pending", to: "running" });
+        return { runId: id };
+      },
+    };
     const review: AdvanceReviewDeps = { load: vi.fn(), recordRound: vi.fn(), resume, mergeGate: vi.fn() } as never;
-    const starter: RunStarter = { async start() { throw new Error("a same-side round never starts a fresh session"); } };
     const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => seatResult as SeatResult), startAdvance: async () => undefined, triage: null, registry, review, ...(heads ? { fixHeads: heads } : {}) };
     return { module: createAdvanceModule(writerPool, deps), resume, resumed };
   }
@@ -119,7 +124,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
     );
   }
   const who = (t: { a: SeedRefs; w: string }) => ({ accountId: t.a.accountId, userId: t.a.userId, workItemId: t.w, haltEpoch: 0 });
-  const fixReq = (t: { n: number }) => ({ issue: t.n, headSha: ASKED, prompt: "fix it", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID() });
+  const fixReq = (t: { n: number; branch?: string }) => ({ issue: t.n, headSha: ASKED, prompt: "fix it", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(), ...(t.branch !== undefined ? { pr: { number: PR, branch: t.branch } } : {}) });
   const requests = async (w: string) =>
     (await admin.query<{ state: string; origin: string; created_by: string | null; seen_head: string; resolution: string | null; resolved_by: string | null }>(
       "SELECT state, origin, created_by, seen_head, resolution, resolved_by FROM setup_requests WHERE work_item_id = $1 AND kind = 'branch_pushed_by_person' ORDER BY created_at, id", [w])).rows;
@@ -147,7 +152,8 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
       const runId = (out as { runId: string }).runId;
       expect(await stages(runId)).toEqual([BRANCH_MOVED_STAGE]);
       expect(lineFor("run.stage", { stage: BRANCH_MOVED_STAGE })).toBe("The pull request's branch had moved; the fix round started from its latest commit.");
-      expect(h.resume).toHaveBeenCalledTimes(1);
+      expect(h.resumed).toHaveLength(1);
+      expect(h.resume).not.toHaveBeenCalled();
     });
 
     it("a branch at the head the round was asked for changes nothing: no fact, no line, the round starts as before", async () => {

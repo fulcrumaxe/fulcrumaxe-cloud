@@ -81,7 +81,17 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       await writeRunStatus(writerPool, { accountId: input.accountId, runId: id, from: "pending", to: "running" });
       return { id, status: "running" };
     });
-    return { fn, inputs };
+    return { fn, inputs, starter: asStarter(fn) };
+  }
+
+  /** D#600 CX-7: a fix round is started as a fresh session by the starter; this one writes the same keyed run row the resume stand-ins above do. */
+  function asStarter(fn: (pool: Pool, registry: ExecutionTargetRegistry, input: StartAgentRunInput) => Promise<{ id: string; status: string }>): RunStarter {
+    return {
+      async start(input) {
+        const r = await fn(writerPool, registry, input);
+        return r.status === "refused_spend" ? { runId: r.id, refused: "refused_spend" } : { runId: r.id };
+      },
+    };
   }
 
   function review(over: Partial<AdvanceReviewDeps> = {}): AdvanceReviewDeps {
@@ -545,13 +555,13 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
 
   // ---- the fix round -----------------------------------------------------------------------------------------------
 
-  describe("advanceStartFix: a RESUME of the build's session", () => {
-    it("continues the build's session in the build's checkout: the ISSUE's number as pr, the workdir, no clone, the build run as parent, a key naming the head and the approval", async () => {
+  describe("advanceStartFix: a FRESH session on the pull request's branch (D#600 CX-7)", () => {
+    it("starts a fresh session on the pull request's branch: the ISSUE's number as pr, the workdir, a clone, the build run as parent, a key naming the head and the approval", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       const parent = await buildRun(a, w);
       const resume = realResume();
-      const t = build({}, review({ resume: resume.fn }));
+      const t = build({ starter: resume.starter }, review());
       const req = fixRequest(a, { issue: await numberOf(w), prompt: "FIX PROMPT", round: 2 });
       const out = await t.module.advanceStartFix(who(a, w), req);
       expect(out.ok).toBe(true);
@@ -567,7 +577,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         workdir: PREVIEW_WORKDIR,
         repoId: a.repoId,
       });
-      expect(input.cloneRepo).toBeUndefined();
+      expect(input.cloneRepo).toEqual({ owner: "acme", name: "widgets" });
       expect(input.idempotency!.key).toBe(`advance:${w}:fix:${HEAD}:${req.actionId}`);
       // The run row names its parent and the PR.
       const row = (await admin.query("SELECT parent_run_id, dispatch_pr_number::int AS pr FROM agent_runs WHERE id = $1", [(out as { runId: string }).runId])).rows[0];
@@ -579,7 +589,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const w = await item(a, { stage: "review_passed" });
       await buildRun(a, w);
       const failing = await reviewerRun(a, w, "acceptance-tester");
-      const t = build({}, review({ resume: realResume().fn }));
+      const t = build({ starter: realResume().starter }, review());
       const out = await t.module.advanceStartFix(who(a, w), fixRequest(a, { reviewer: "acceptance", failingRunId: failing, round: 1 }));
       expect(out.ok).toBe(true);
       expect(await stageOf(w)).toBe("changes_requested");
@@ -588,35 +598,37 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(await events(w)).toEqual([expect.objectContaining({ kind: "fix_round_started", round: 1, head_sha: HEAD, run_id: (out as { runId: string }).runId })]);
     });
 
-    describe("D#600 CX-2: the unchanged-Spec line is checked against the Spec the continued run is pinned to", () => {
+    describe("D#600 CX-7: a fresh session holds no Spec, so the body prompt always goes (a caller's unchanged-Spec line is never sent)", () => {
       const sha = (t: string): string => createHash("sha256").update(t, "utf8").digest("hex");
       const addV2 = (a: SeedRefs, w: string) => admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 2, 'v2', encode(sha256(convert_to('v2', 'UTF8')), 'hex'), 'system')", [a.accountId, w]);
 
-      it("the held version is the parent run's pinned one: the short prompt goes, and the body prompt rides along for a lost snapshot", async () => {
+      it("the held version is the parent run's pinned one: the short prompt still does not go; the body prompt is the run's prompt", async () => {
         const a = await seedAccount(admin, randomUUID());
         const w = await item(a);
         await buildRun(a, w);
         const resume = realResume();
-        const out = await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v1 unchanged", held: { version: 1, sha256: sha("spec") }, fallbackPrompt: "SPEC v1: spec", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
+        const out = await build({ starter: resume.starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v1 unchanged", held: { version: 1, sha256: sha("spec") }, fallbackPrompt: "SPEC v1: spec", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
         expect(out.ok).toBe(true);
-        expect(resume.inputs[0]).toMatchObject({ prompt: expect.stringMatching(/^Spec v1 unchanged\n\nDECISIONS YOU MAY MEET/), fallbackPrompt: expect.stringMatching(/^SPEC v1: spec\n\nDECISIONS YOU MAY MEET/) });
-        expect(resume.inputs[0]!.fallbackContextSections).toHaveLength(2);
+        expect(resume.inputs[0]!.prompt).toMatch(/^SPEC v1: spec\n\nDECISIONS YOU MAY MEET/);
+        expect(resume.inputs[0]!.prompt).not.toContain("unchanged");
+        expect(resume.inputs[0]!.fallbackPrompt).toBeUndefined();
+        expect(resume.inputs[0]!.contextSections).toHaveLength(2);
       });
 
-      it("D#600 CX-4a: a spill rides to the resume (with the notes added to its uncut prompt), the fallback has its own, and one outside the closed shape is refused", async () => {
+      it("D#600 CX-4a: the body prompt's spill rides to the start (with the notes added to its uncut prompt), the held prompt's is not sent, and one outside the closed shape is refused", async () => {
         const a = await seedAccount(admin, randomUUID());
         const w = await item(a);
         await buildRun(a, w);
         const resume = realResume();
         const sec = [{ code: "spec" as const, bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }];
         const spill = (prompt: string) => ({ files: [{ code: "findings" as const, text: "FULL FINDINGS" }], uncut: { prompt, sections: sec } });
-        const t = build({}, review({ resume: resume.fn }));
+        const t = build({ starter: resume.starter }, review());
         const out = await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v1 unchanged", held: { version: 1, sha256: sha("spec") }, fallbackPrompt: "SPEC v1: spec", fallbackContextSections: sec, contextSpill: spill("UNCUT held"), fallbackContextSpill: spill("UNCUT body") }));
         expect(out.ok).toBe(true);
         // D#7 DP4b-3b: the uncut copy of each prompt carries the same decisions block (and its ledger section) as the prompt that goes out.
         const withDecisions = (prompt: string) => ({ files: [{ code: "findings" as const, text: "FULL FINDINGS" }], uncut: { prompt: expect.stringMatching(new RegExp(`^${prompt}\\n\\nDECISIONS YOU MAY MEET`)), sections: [...sec, expect.objectContaining({ code: "decisions" })] } });
-        expect(resume.inputs[0]!.contextSpill).toEqual(withDecisions("UNCUT held"));
-        expect(resume.inputs[0]!.fallbackContextSpill).toEqual(withDecisions("UNCUT body"));
+        expect(resume.inputs[0]!.contextSpill).toEqual(withDecisions("UNCUT body"));
+        expect(resume.inputs[0]!.fallbackContextSpill).toBeUndefined();
         const bad = { files: [{ code: "../etc", text: "x" }], uncut: { prompt: "p", sections: sec } };
         expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { contextSpill: bad as never }))).toEqual({ ok: false, reason: "invalid_input" });
         expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { fallbackContextSpill: spill("x") }))).toEqual({ ok: false, reason: "invalid_input" });
@@ -628,7 +640,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         await buildRun(a, w);
         await addV2(a, w);
         const resume = realResume();
-        const out = await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v2 unchanged", held: { version: 2, sha256: sha("v2") }, fallbackPrompt: "SPEC v2: v2", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
+        const out = await build({ starter: resume.starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v2 unchanged", held: { version: 2, sha256: sha("v2") }, fallbackPrompt: "SPEC v2: v2", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
         expect(out.ok).toBe(true);
         expect(resume.inputs[0]!.prompt).toMatch(/^SPEC v2: v2\n\nDECISIONS YOU MAY MEET/);
         expect(resume.inputs[0]!.prompt).not.toContain("unchanged");
@@ -641,7 +653,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         const w = await item(a);
         await buildRun(a, w);
         const resume = realResume();
-        const t = build({}, review({ resume: resume.fn }));
+        const t = build({ starter: resume.starter }, review());
         expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "unchanged", held: { version: 1, sha256: sha("spec") } }))).toEqual({ ok: false, reason: "invalid_input" });
         const out = await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "unchanged", held: { version: 1, sha256: sha("other") }, fallbackPrompt: "SPEC v1: spec" }));
         expect(out.ok).toBe(true);
@@ -653,7 +665,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, { stage: "changes_requested" });
       await buildRun(a, w);
-      await build({}, review({ resume: realResume().fn })).module.advanceStartFix(who(a, w), fixRequest(a));
+      await build({ starter: realResume().starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a));
       expect((await admin.query("SELECT 1 FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'changes_requested'", [w])).rowCount).toBe(0);
     });
 
@@ -662,7 +674,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const w = await item(a);
       await buildRun(a, w);
       const resume = realResume();
-      const t = build({}, review({ resume: resume.fn }));
+      const t = build({ starter: resume.starter }, review());
       const req = fixRequest(a);
       const first = await t.module.advanceStartFix(who(a, w), req);
       // The fix run ends; the replay must not start another.
@@ -678,7 +690,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const w = await item(a);
       await buildRun(a, w);
       const resume = realResume();
-      const t = build({}, review({ resume: resume.fn }));
+      const t = build({ starter: resume.starter }, review());
       const req = fixRequest(a);
       const first = await t.module.advanceStartFix(who(a, w), req);
       await writeRunStatus(writerPool, { accountId: a.accountId, runId: (first as { runId: string }).runId, from: "running", to: "succeeded", result: { sessionId: "cc-session-2", envelope: { summary: "no change needed" } } });
@@ -704,7 +716,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const noCommit = await buildRun(a, w, "running");
       await writeRunStatus(writerPool, { accountId: a.accountId, runId: noCommit, from: "running", to: "failed", failureReason: "no_commit" });
       const resume = realResume();
-      expect((await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a))).ok).toBe(true);
+      expect((await build({ starter: resume.starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a))).ok).toBe(true);
       expect(resume.inputs[0]!.parentRunId).toBe(build1);
 
       const a2 = await seedAccount(admin, randomUUID());
@@ -713,7 +725,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const other = await buildRun(a2, w2, "running");
       await writeRunStatus(writerPool, { accountId: a2.accountId, runId: other, from: "running", to: "failed", failureReason: "internal_error" });
       const resume2 = realResume();
-      expect(await build({}, review({ resume: resume2.fn })).module.advanceStartFix(who(a2, w2), fixRequest(a2))).toMatchObject({ ok: true });
+      expect(await build({ starter: resume2.starter }, review()).module.advanceStartFix(who(a2, w2), fixRequest(a2))).toMatchObject({ ok: true });
       expect(resume2.inputs[0]!.parentRunId).toBe(other);
     });
 
@@ -731,7 +743,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       await writeRunStatus(writerPool, { accountId: a.accountId, runId: id, from: "running", to: "succeeded", result: { sessionId: "cc-2", envelope: { verdict: "done" } } });
       expect(await events(w)).toEqual([]);
       const resume = realResume();
-      const t = build({}, review({ resume: resume.fn }));
+      const t = build({ starter: resume.starter }, review());
       expect(await t.module.advanceStartFix(who(a, w), req)).toEqual({ ok: true, runId: id });
       expect(resume.fn).not.toHaveBeenCalled();
       expect(await events(w)).toEqual([expect.objectContaining({ kind: "fix_round_started", round: 2, head_sha: HEAD, run_id: id })]);
@@ -753,7 +765,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId: w, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: input.repoId, idempotency: input.idempotency });
         return { id: "unreachable", status: "running" };
       });
-      const out = await build({}, review({ resume: losing })).module.advanceStartFix(who(a, w), req);
+      const out = await build({ starter: asStarter(losing) }, review()).module.advanceStartFix(who(a, w), req);
       expect(out).toEqual({ ok: true, runId: won });
       expect((await events(w)).filter((e) => e.kind === "fix_round_started")).toEqual([expect.objectContaining({ run_id: won })]);
     });
@@ -774,7 +786,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       await buildRun(a, w);
       const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
       try {
-        const out = await build({}, review({ resume: queuedResume("runner") })).module.advanceStartFix(who(a, w), fixRequest(a));
+        const out = await build({ starter: asStarter(queuedResume("runner")) }, review()).module.advanceStartFix(who(a, w), fixRequest(a));
         expect(out).toEqual({ ok: true, runId: expect.any(String) });
         expect(info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("advance.resumed"))).toHaveLength(1);
       } finally {
@@ -784,29 +796,14 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect((await events(w)).filter((e) => e.kind === "fix_round_started")).toHaveLength(1);
     });
 
-    it("D#6 R3a: a queued fix round that is not a runner's is still cancelled and recorded as a failure, never logged as resumed or reported as started", async () => {
-      const a = await seedAccount(admin, randomUUID());
-      const w = await item(a);
-      await buildRun(a, w);
-      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
-      vi.spyOn(console, "warn").mockImplementation(() => undefined);
-      try {
-        const out = await build({}, review({ resume: queuedResume("production") })).module.advanceStartFix(who(a, w), fixRequest(a));
-        expect(out).toEqual({ ok: false, reason: "resume_failed" });
-        expect(info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("advance.resumed"))).toEqual([]);
-      } finally {
-        vi.restoreAllMocks();
-      }
-      expect((await admin.query("SELECT status FROM agent_runs WHERE account_id = $1 AND role = 'executor' AND status = 'cancelled'", [a.accountId])).rows).toEqual([{ status: "cancelled" }]);
-      expect((await events(w)).filter((e) => e.kind === "fix_round_started")).toEqual([]);
-    });
+    // D#600 CX-7: a queued run that is not a runner's is cancelled by the starter (its `queued` policy, tested in queuedRunnerRuns.pg.test.ts), no longer by this module.
 
     it("a second concurrent resume is refused (already_running) and recorded; nothing is started", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       await buildRun(a, w, "running"); // an executor run of the item is still live
       const resume = realResume();
-      const t = build({}, review({ resume: resume.fn }));
+      const t = build({ starter: resume.starter }, review());
       expect(await t.module.advanceStartFix(who(a, w), fixRequest(a))).toEqual({ ok: false, reason: "already_running" });
       expect(resume.fn).not.toHaveBeenCalled();
       expect(await events(w)).toEqual([expect.objectContaining({ kind: "fix_round_refused", code: "already_running" })]);
@@ -817,7 +814,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const w = await item(a);
       await buildRun(a, w);
       const resume = realResume();
-      const t = build({}, review({ resume: resume.fn }));
+      const t = build({ starter: resume.starter }, review());
       expect((await t.module.advanceStartFix(who(a, w), fixRequest(a, { expectedExecutionMode: "runner_local" }))).ok).toBe(true);
       expect(resume.inputs[0]).toMatchObject({ expectedExecutionMode: "runner_local" });
       expect(t.deps.resolveRunSeat).toHaveBeenCalledWith(expect.objectContaining({ role: "executor", expectedExecutionMode: "runner_local" }));
@@ -828,12 +825,12 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const changed = vi.fn(async () => {
         throw new ExecutionModeChangedError();
       });
-      const t2 = build({}, review({ resume: changed as never }));
+      const t2 = build({ starter: asStarter(changed as never) }, review());
       expect(await t2.module.advanceStartFix(who(a2, w2), fixRequest(a2, { expectedExecutionMode: "runner_local" }))).toEqual({ ok: false, reason: "execution_mode_changed" });
       expect((await events(w2)).at(-1)).toMatchObject({ kind: "fix_round_refused", code: "execution_mode_changed" });
 
       const resume3 = realResume();
-      expect(await build({}, review({ resume: resume3.fn })).module.advanceStartFix(who(a2, w2), fixRequest(a2, { expectedExecutionMode: "Runner Local; DROP" }))).toEqual({ ok: false, reason: "invalid_input" });
+      expect(await build({ starter: resume3.starter }, review()).module.advanceStartFix(who(a2, w2), fixRequest(a2, { expectedExecutionMode: "Runner Local; DROP" }))).toEqual({ ok: false, reason: "invalid_input" });
       expect(resume3.fn).not.toHaveBeenCalled();
     });
 
@@ -841,7 +838,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       await buildRun(a, w);
-      const t = build({}, review({ resume: realResume().fn }));
+      const t = build({ starter: realResume().starter }, review());
       const [x, y] = await Promise.all([t.module.advanceStartFix(who(a, w), fixRequest(a)), t.module.advanceStartFix(who(a, w), fixRequest(a))]);
       const outs = [x, y];
       expect(outs.filter((o) => o.ok)).toHaveLength(1);
@@ -852,7 +849,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       const resume = realResume();
-      expect(await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a))).toEqual({ ok: false, reason: "no_session" });
+      expect(await build({ starter: resume.starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a))).toEqual({ ok: false, reason: "no_session" });
       expect(resume.fn).not.toHaveBeenCalled();
     });
 
@@ -861,7 +858,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const w = await item(a, { stage });
       await buildRun(a, w);
       const resume = realResume();
-      const out = await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a));
+      const out = await build({ starter: resume.starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a));
       expect(out).toEqual({ ok: false, reason: `stage_${stage}` });
       expect(resume.fn).not.toHaveBeenCalled();
       expect(await stageOf(w)).toBe(stage);
@@ -871,7 +868,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, { stage: "review_passed" });
       await buildRun(a, w);
-      const t = build({ resolveRunSeat: async () => ({ ok: false as const, reason: "model_budget_unset" }) }, review({ resume: realResume().fn }));
+      const t = build({ resolveRunSeat: async () => ({ ok: false as const, reason: "model_budget_unset" }), starter: realResume().starter }, review());
       expect(await t.module.advanceStartFix(who(a, w), fixRequest(a))).toEqual({ ok: false, reason: "model_budget_unset" });
       expect(await stageOf(w)).toBe("review_passed");
       expect(await events(w)).toEqual([expect.objectContaining({ kind: "fix_round_refused", code: "model_budget_unset" })]);
@@ -881,11 +878,11 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w1 = await item(a);
       await buildRun(a, w1);
-      expect(await build({}, review({ resume: realResume({ status: "refused_spend" }).fn })).module.advanceStartFix(who(a, w1), fixRequest(a))).toEqual({ ok: false, reason: "refused_spend" });
+      expect(await build({ starter: realResume({ status: "refused_spend" }).starter }, review()).module.advanceStartFix(who(a, w1), fixRequest(a))).toEqual({ ok: false, reason: "refused_spend" });
       const w2 = await item(a);
       await buildRun(a, w2);
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-      const out = await build({}, review({ resume: realResume({ throws: new Error("boom SECRET-TOKEN ghp_x") }).fn })).module.advanceStartFix(who(a, w2), fixRequest(a));
+      const out = await build({ starter: realResume({ throws: new Error("boom SECRET-TOKEN ghp_x") }).starter }, review()).module.advanceStartFix(who(a, w2), fixRequest(a));
       expect(out).toEqual({ ok: false, reason: "resume_failed" });
       expect(JSON.stringify(warn.mock.calls)).not.toMatch(/SECRET|ghp_/);
       warn.mockRestore();
@@ -896,7 +893,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, { provenance: "external" });
       await buildRun(a, w);
-      expect(await build({}, review({ resume: realResume().fn })).module.advanceStartFix(who(a, w), fixRequest(a))).toEqual({ ok: false, reason: "external_requires_human" });
+      expect(await build({ starter: realResume().starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a))).toEqual({ ok: false, reason: "external_requires_human" });
     });
 
     it.each([
@@ -913,7 +910,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       const resume = realResume();
-      expect(await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a, over))).toEqual({ ok: false, reason: "invalid_input" });
+      expect(await build({ starter: resume.starter }, review()).module.advanceStartFix(who(a, w), fixRequest(a, over))).toEqual({ ok: false, reason: "invalid_input" });
       expect(resume.fn).not.toHaveBeenCalled();
     });
 

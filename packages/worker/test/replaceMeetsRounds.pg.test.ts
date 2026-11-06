@@ -328,7 +328,7 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
                 return { runId: id };
               },
             }
-          : { async start() { throw new Error("a same-side round never starts a fresh session"); } }, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review: { ...web.createReviewDeps(), resume } as never, fixHeads: heads };
+          : { async start(input: StartAgentRunInput) { return { runId: (await resume(writerPool, registry, input)).id }; } }, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review: { ...web.createReviewDeps(), resume: async () => { throw new Error("a fix round never resumes a session"); } } as never, fixHeads: heads };
       const module = createAdvanceModule(writerPool, deps);
       const stepWho = { accountId, userId, workItemId, haltEpoch: 0 };
       /** What the workflow does for the answered stop: load the review (the trigger arrives with it), then ask for the person's round. `round` is the 1-based round asked. */

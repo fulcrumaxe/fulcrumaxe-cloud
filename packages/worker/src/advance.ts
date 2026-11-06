@@ -15,9 +15,10 @@ import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, recordBuildBranch, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, RUNNER_REPLACE_ROUND_KIND, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, recordBuildBranch, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, RUNNER_REPLACE_ROUND_KIND, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
-import { recordRunFollowUps } from "@fx/pipeline";
+import { assembleFixNotePrompt, recordRunFollowUps } from "@fx/pipeline";
+import { readExecutorNote, withNoteSection } from "./fixRoundNote.js";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
@@ -1828,6 +1829,17 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}) });
     if (!seat.ok) return refuse(seat.reason);
     const effective = await readExecutionMode(runnerPool, who.accountId, state.repoId, who.workItemId);
+    // D#600 CX-7 (owner ruling R-600-1): every fix round starts a fresh executor session on the pull request's branch, never a resume of the build's session (the resumed
+    // transcript's prompt cache has long expired by the time a review ends). The refusals that need nothing from the base sync come here, before it: a merge must never land on
+    // GitHub, nor the board move to Changes requested, for a round that is then refused.
+    const parentRun = await withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ execution_mode: string | null; spec_version_id: string | null }>("SELECT execution_mode, spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2 AND work_item_id = $3", [parent, who.accountId, who.workItemId]);
+      return r.rows[0];
+    });
+    if (parentRun === undefined) return refuse("no_session");
+    // The fresh session is pinned to the Spec version of the run before it. A runner job needs a Spec, so a build made before the pin has none to hand on (D#6 R4d-5c, C36): nothing is written.
+    // A sandbox run is started without a pin, as it always was.
+    if (parentRun.spec_version_id === null && isRunnerMode(effective)) return refuse("no_spec_version");
     let headMoved = false;
     let baseSynced = false;
     let baseTip: string | null = null;
@@ -1862,6 +1874,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           : same(found.recorded) || same(found.bound) || (itemBranch !== null && req.pr.branch === itemBranch)
             ? req.pr
             : null;
+      // A fresh session continues a branch it did not make, so the pull request's pair is required on either side (the web step always sends it). A round that sent none is refused
+      // here, ahead of the head check and the sync, which would otherwise run on the pair the item recorded. A sandbox round with no known pull request at all is the
+      // `base_sync_unavailable` case below, as it always was.
+      if (req.pr === undefined && (runnerSide || pr !== null)) return refuse("pr_unbound");
       if (pr !== null && found.coords?.gh_owner && found.coords.gh_name) {
         const head = await checkPrivateHead(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, askedHead: req.headSha });
         if (!head.ok) return refuse(head.reason);
@@ -1919,81 +1935,62 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const key = `advance:${who.workItemId}:${keyBase}${runNotesStepSuffix(notes.map((n) => n.id))}`;
     const noteText = renderRunNotes(notes);
     const withNotes = (text: string): string => [text, ...(baseSynced ? [BASE_SYNCED_PROMPT_LINE] : []), ...(noteText ? [noteText] : [])].join("\n\n");
-    // A prompt that says "Spec unchanged" is sent only when the run this round continues is pinned to exactly that version and hash. The pin is the one the
-    // session was built from, not the latest Spec: a mismatch (or no pin) sends the body.
-    let useFallback = false;
-    if (req.held !== undefined) {
-      const pinned = await withTenant(runnerPool, who.accountId, async (client) => {
-        const r = await client.query<{ version: number; body_sha256: string }>(
-          "SELECT sv.version, sv.body_sha256 FROM agent_runs r JOIN spec_versions sv ON sv.id = r.spec_version_id AND sv.account_id = r.account_id WHERE r.id = $1 AND r.account_id = $2 AND sv.erased_at IS NULL",
-          [parent, who.accountId],
-        );
-        return r.rows[0] ?? null;
-      });
-      useFallback = !(pinned !== null && Number(pinned.version) === req.held.version && pinned.body_sha256 === req.held.sha256);
-    }
     // D#7 DP4b-3b: what THIS round may decide, from the dials and the catalogue as they stand now, and the snapshot written with the run. Every prompt that can go out
-    // (the round's, the body-carrying fallback, the uncut copy of each) carries the same block, so the keys the run reads are the keys in its own row.
+    // carries the same block, so the keys the run reads are the keys in its own row.
     const dec = await decisionStartFor(runnerPool, who.accountId, who.workItemId);
-    const prompt = dec.prompt(withNotes(useFallback ? req.fallbackPrompt! : req.prompt));
-    const sections = dec.sections(sectionsOf(useFallback ? req.fallbackContextSections : req.contextSections));
-    // The fresh session a lost snapshot falls back to has no Spec: it gets the body-carrying prompt whatever the check said.
-    const fallbackPrompt = req.fallbackPrompt === undefined || useFallback ? undefined : dec.prompt(withNotes(req.fallbackPrompt));
-    const fallbackSections = fallbackPrompt === undefined ? undefined : dec.sections(sectionsOf(req.fallbackContextSections));
 
-    // D#599 PL-2: a round whose effective side is not the side the build's session ran on cannot continue that session: a session belongs to the
-    // side that made it. It starts a fresh executor session instead, carrying the fix prompt, the pinned Spec version and the fenced notes above.
-    // Same-side rounds are unchanged (R1b). Continuing the PR's branch from the other side is PL-2b (the push-branch rules are not touched here).
-    const parentRun = await withTenant(runnerPool, who.accountId, async (client) => {
-      const r = await client.query<{ execution_mode: string | null; spec_version_id: string | null }>("SELECT execution_mode, spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2 AND work_item_id = $3", [parent, who.accountId, who.workItemId]);
-      return r.rows[0];
-    });
-    const freshPrompt = req.fallbackPrompt === undefined ? prompt : dec.prompt(withNotes(req.fallbackPrompt));
-    const freshSections = req.fallbackPrompt === undefined ? sections : dec.sections(sectionsOf(req.fallbackContextSections));
+    // The fresh session carries the fix prompt WITH the Spec body (the pinned version: the new run inherits the parent's pin), the findings, the fenced run notes above, and the
+    // previous executor run's closing note (at most 4 KiB, sanitised, between fences, ahead of the output block).
+    const buildNote = await withTenant(runnerPool, who.accountId, (client) => readExecutorNote(client, who.accountId, parent, who.workItemId));
+    // The caller's `fallbackPrompt` is the round with the Spec body; a caller that sends one prompt sent the body in it.
+    const noted = assembleFixNotePrompt(req.fallbackPrompt ?? req.prompt, buildNote);
+    const freshPrompt = dec.prompt(withNotes(noted.prompt));
+    const freshSections = dec.sections(withNoteSection(sectionsOf(req.fallbackPrompt === undefined ? req.contextSections : req.fallbackContextSections), noted.sections));
     // D#600 CX-4a: the files for the prompt that goes out, with the notes added to the uncut prompt as they are to the cut one.
     const spillWithNotes = (s: ContextSpill | undefined): ContextSpill | undefined => dec.spill(s === undefined ? undefined : { ...s, uncut: { ...s.uncut, prompt: withNotes(s.uncut.prompt) } });
-    const spill = spillWithNotes(useFallback ? req.fallbackContextSpill : req.contextSpill);
-    const fallbackSpill = fallbackPrompt === undefined ? undefined : spillWithNotes(req.fallbackContextSpill);
-    const freshSpill = req.fallbackPrompt === undefined ? spill : spillWithNotes(req.fallbackContextSpill);
-    const crossSide = parentRun !== undefined && sideOfMode(parentRun.execution_mode) !== sideOfMode(effective);
+    const freshSpill = spillWithNotes(req.fallbackPrompt === undefined ? req.contextSpill : req.fallbackContextSpill);
+    // A cross-side round differs from a same-side one only in how its sandbox is bound to the pull request below.
+    const crossSide = sideOfMode(parentRun.execution_mode) !== sideOfMode(effective);
 
     let out: { id: string; status: string };
     try {
-      if (crossSide) {
+      {
         if (!deps.starter) return refuse("starter_unavailable");
+        // The pair is required on either side (see the check ahead of the sync): this is the guard for a round that reached here with none.
+        if (req.pr === undefined) return refuse("pr_unbound");
         const coords = await withTenant(runnerPool, who.accountId, async (client) => {
           const r = await client.query<{ gh_owner: string | null; gh_name: string | null }>("SELECT gh_owner, gh_name FROM repos WHERE id = $1 AND account_id = $2", [state.repoId, who.accountId]);
           return r.rows[0];
         });
         if (!coords?.gh_owner || !coords.gh_name) return refuse("no_repo");
-        // D#599 PL-2b-2: the round carries on from the pull request the other side opened. A runner round continues its branch with no session (the issuer
-        // reads GitHub and binds the pull request); a sandbox round is bound to the pull request the item recorded, in its own create transaction.
+        // D#599 PL-2b-2: the round carries on from the pull request's branch. A runner round continues it with no session (the issuer reads GitHub and binds the
+        // pull request); a sandbox round on the other side is bound to the pull request the item recorded, in its own create transaction. A same-side sandbox round
+        // needs no binding row (the branch is the item's own, found on GitHub), only the base it was synced to.
         let continues: { branch: string; prNumber?: number; baseSha?: string } | undefined;
         let bindTransaction: StartAgentRunInput["inCreateTransaction"];
-        if (req.pr !== undefined) {
-          const bound = req.pr;
-          if (isRunnerMode(effective)) {
-            if (ITEM_PR_BRANCH.test(bound.branch)) continues = { branch: bound.branch, prNumber: bound.number, ...(baseTip === null ? {} : { baseSha: baseTip }) };
-            else if (RUNNER_RUN_BRANCH.test(bound.branch)) {
-              // Defence in depth: a run branch is trusted only as the pair the item itself recorded (a runner's done, or a sandbox round bound to it).
-              const known = await withTenant(runnerPool, who.accountId, async (client) => ({
-                recorded: await readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }),
-                bound: await readSandboxBoundPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }),
-              }));
-              const matches = (p: { number: number; branch: string } | null) => p !== null && p.number === bound.number && p.branch === bound.branch;
-              if (!matches(known.recorded) && !matches(known.bound)) return refuse("pr_unbound");
-              continues = { branch: bound.branch, ...(republishes && syncedBranch === bound.branch ? { baseSha: baseTip! } : {}) };
-            }
-            else return refuse("pr_branch_unsupported");
-          } else {
-            const recorded = await withTenant(runnerPool, who.accountId, (client) => readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }));
-            if (recorded === null || recorded.number !== bound.number || recorded.branch !== bound.branch) return refuse("pr_unbound");
-            bindTransaction = async (client, runId) => {
-              await recordSandboxContinuesBound(client, { accountId: who.accountId, runId, prNumber: bound.number, branch: bound.branch });
-              // The branch recorded is the one the sync was made on (`bound` is that same pair); a round that republishes never starts without its base.
-              if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) });
-            };
+        const bound = req.pr;
+        if (isRunnerMode(effective)) {
+          if (ITEM_PR_BRANCH.test(bound.branch)) continues = { branch: bound.branch, prNumber: bound.number, ...(baseTip === null ? {} : { baseSha: baseTip }) };
+          else if (RUNNER_RUN_BRANCH.test(bound.branch)) {
+            // Defence in depth: a run branch is trusted only as the pair the item itself recorded (a runner's done, or a sandbox round bound to it).
+            const known = await withTenant(runnerPool, who.accountId, async (client) => ({
+              recorded: await readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }),
+              bound: await readSandboxBoundPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }),
+            }));
+            const matches = (p: { number: number; branch: string } | null) => p !== null && p.number === bound.number && p.branch === bound.branch;
+            if (!matches(known.recorded) && !matches(known.bound)) return refuse("pr_unbound");
+            continues = { branch: bound.branch, ...(republishes && syncedBranch === bound.branch ? { baseSha: baseTip! } : {}) };
           }
+          else return refuse("pr_branch_unsupported");
+        } else {
+          const recorded = await withTenant(runnerPool, who.accountId, (client) => readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }));
+          const sameSideOwn = !crossSide && itemBranch !== null && bound.branch === itemBranch;
+          if (!sameSideOwn && (recorded === null || recorded.number !== bound.number || recorded.branch !== bound.branch)) return refuse("pr_unbound");
+          bindTransaction = async (client, runId) => {
+            if (crossSide) await recordSandboxContinuesBound(client, { accountId: who.accountId, runId, prNumber: bound.number, branch: bound.branch });
+            // The branch recorded is the one the sync was made on (`bound` is that same pair); a round that republishes never starts without its base.
+            if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) });
+          };
         }
         const fresh = await starter!.start({
           ...seat.seat,
@@ -2003,15 +2000,16 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           role: "executor",
           product: "team",
           pr: req.issue,
-          // A fresh session holds nothing a continued one did: it gets the prompt that carries the Spec body when the caller sent one.
+          // A fresh session holds nothing the build's did: it gets the prompt that carries the Spec body and the previous run's note.
           prompt: freshPrompt,
           ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
           ...(parentRun.spec_version_id === null ? {} : { specVersionId: parentRun.spec_version_id }),
           ...(freshSections ? { contextSections: freshSections } : {}),
           ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
           ...(freshSpill ? { contextSpill: freshSpill } : {}),
-          ...(continues ? { continues, parentRunId: parent } : {}),
-          // D#598 P1g-3a-3: the fresh-session start of a confirmed Replace's round carries the same marker as a resumed one, in the same create transaction.
+          ...(continues ? { continues } : {}),
+          parentRunId: parent,
+          // D#598 P1g-3a-3: the fresh-session start of a confirmed Replace's round carries the marker in the same create transaction.
           inCreateTransaction: dec.inCreateTransaction(
             answered
               ? async (client: PoolClient, runId: string) => {
@@ -2027,46 +2025,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
         });
         console.info(JSON.stringify({ event: "advance.fix_fresh_session", work_item_id: who.workItemId, run_id: fresh.runId, refused: fresh.refused ?? null }));
-        if (fresh.refused) return refuse(fresh.refused);
+        // A spending-limit denial or a wait for capacity keeps its own code (the driver pauses on it); any other denial ends as `refused_spend`, as a fix round always has.
+        if (fresh.refused) return refuse(SPEND_DENIALS.includes(fresh.refused) || CAPACITY_WAIT_REASONS.includes(fresh.refused) ? fresh.refused : "refused_spend");
         out = { id: fresh.runId, status: "started" };
-      } else {
-        // The build ran in the sandbox this PR owns, in the checkout it made; a resume continues both: same sandbox, same
-        // session, same working directory, no clone. `pr` is the ISSUE's number, as the build used it (it names the sandbox).
-        // A fix round the target queued for a runner has no hook and may sit pending for days. That is accepted: the fix wait is
-        // a status poll that credits queued time, and the runner's `done` judges the continuation on the same PR branch.
-        out = await acceptQueuedRunnerRun(
-          runnerPool,
-          who.accountId,
-          await gatedResume(review.resume)(runnerPool, deps.registry, {
-            ...seat.seat,
-            accountId: who.accountId,
-            repoId: state.repoId,
-            workItemId: who.workItemId,
-            role: "executor",
-            product: "team",
-            pr: req.issue,
-            parentRunId: parent,
-            prompt,
-            ...(republishes ? { base: { sha: baseTip!, branch: syncedBranch! } } : {}),
-            ...(conflict && req.conflictRound ? { conflictRound: req.conflictRound } : {}),
-            // D#598 P1g-3a-3: the round a person's confirmed Replace started is marked here, in its create transaction: the one server fact its end and its public update read.
-            inCreateTransaction: dec.inCreateTransaction(
-              sandboxRepublish || answered
-                ? async (client: PoolClient, runId: string) => {
-                    if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) });
-                    if (answered) await insertRunEvent(client, who.accountId, runId, RUNNER_REPLACE_ROUND_KIND, {});
-                  }
-                : undefined,
-            ),
-            ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
-            ...(sections ? { contextSections: sections } : {}),
-            ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
-            ...(spill ? { contextSpill: spill } : {}),
-            ...(fallbackPrompt !== undefined ? { fallbackPrompt, ...(fallbackSections ? { fallbackContextSections: fallbackSections } : {}), ...(fallbackSpill ? { fallbackContextSpill: fallbackSpill } : {}) } : {}),
-            workdir: PREVIEW_WORKDIR,
-            idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
-          }),
-        );
       }
     } catch (err) {
       // D#483 S5-k3b-2c: our servers are full: the round waits (no refusal fact), and asks again.
@@ -2092,11 +2053,6 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // D#6 R4d-5c (C36): the build this fix round continues has no Spec version to inherit (built before the pin): nothing was written, no job issued.
       if (err instanceof NoSpecVersionError) return refuse("no_spec_version");
       return refuse("resume_failed");
-    }
-    if (out.status === "refused_spend") {
-      // D#483 S5-k1d: the admit's own reason, when it is a spending-limit denial, so the driver can wait for the limit; any other denial keeps the code it always had.
-      const why = (out as { reason?: unknown }).reason;
-      return refuse(typeof why === "string" && SPEND_DENIALS.includes(why) ? why : "refused_spend");
     }
     console.info(JSON.stringify({ event: "advance.resumed", work_item_id: who.workItemId, run_id: out.id, status: out.status, round: req.round }));
     await attachRunNotes(runnerPool, who.accountId, who.workItemId, out.id, { ids: notes.map((n) => n.id) });

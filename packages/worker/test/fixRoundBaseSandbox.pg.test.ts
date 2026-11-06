@@ -61,20 +61,28 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
   const conflict = async (): Promise<BranchSyncOutcome> => ({ kind: "conflict", baseSha: BASE, baseRef: "main", stacked: false });
 
   function harness(heads: FixRoundHeadPorts | null, seatResult: SeatResult | { ok: false; reason: string } = SEAT) {
+    // D#600 CX-7: every fix round is a fresh session, so the run row is written by the starter. `resumed` keeps the name the assertions below use: it holds the starter's inputs,
+    // each with the base the round was signed with (the runner's `continues.baseSha`, or the sandbox's base event written in the create transaction).
     const resumed: StartAgentRunInput[] = [];
-    const resume = vi.fn(async (_pool: Pool, _registry: ExecutionTargetRegistry, input: StartAgentRunInput) => {
-      resumed.push(input);
-      const { id } = await insertAgentRun(writerPool, {
-        id: randomUUID(), accountId: input.accountId, workItemId: input.workItemId, parentRunId: input.parentRunId, role: "executor", runtime: "production",
-        executionMode: "sandbox", dispatchRepoId: input.repoId, dispatchPrNumber: input.pr ?? null, idempotency: input.idempotency,
-        // The real resume passes this on to the run's create transaction.
-        inCreateTransaction: input.inCreateTransaction,
-      });
-      await writeRunStatus(writerPool, { accountId: input.accountId, runId: id, from: "pending", to: "running" });
-      return { id, status: "running" };
+    const resume = vi.fn(async (_pool: Pool, _registry: ExecutionTargetRegistry, _input: StartAgentRunInput) => {
+      throw new Error("a fix round never resumes a session");
     });
+    const starter: RunStarter = {
+      async start(input) {
+        const { id } = await insertAgentRun(writerPool, {
+          id: randomUUID(), accountId: input.accountId, workItemId: input.workItemId, parentRunId: input.parentRunId, role: "executor", runtime: "production",
+          executionMode: "sandbox", dispatchRepoId: input.repoId, dispatchPrNumber: input.pr ?? null, idempotency: input.idempotency,
+          // The real start passes this on to the run's create transaction.
+          inCreateTransaction: input.inCreateTransaction,
+        });
+        const event = (await admin.query<{ payload: { base_sha: string; branch: string } }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [id, FIX_BASE_EVENT])).rows[0]?.payload;
+        const base = input.continues?.baseSha !== undefined ? { sha: input.continues.baseSha, branch: input.continues.branch } : event ? { sha: event.base_sha, branch: event.branch } : undefined;
+        resumed.push({ ...input, ...(base ? { base } : {}) });
+        await writeRunStatus(writerPool, { accountId: input.accountId, runId: id, from: "pending", to: "running" });
+        return { runId: id } as never;
+      },
+    };
     const review: AdvanceReviewDeps = { load: vi.fn(), recordRound: vi.fn(), resume, mergeGate: vi.fn() } as never;
-    const starter: RunStarter = { async start() { throw new Error("a same-side round never starts a fresh session"); } };
     const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => seatResult as SeatResult), startAdvance: async () => undefined, triage: null, registry, review, ...(heads ? { fixHeads: { publicHead: async () => "d".repeat(40), ...heads } } : {}) };
     return { module: createAdvanceModule(writerPool, deps), resume, resumed };
   }
@@ -116,7 +124,7 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
   /** What the review step sends: for a sandbox round, the pull request it just found on GitHub by the item's issue branch (never the agent's own report). */
   const fixReq = (t: { n: number; branch: string }, over: { pr?: false } = {}) => ({
     issue: t.n, headSha: ASKED, prompt: "fix it", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(),
-    ...(t.branch === `fx/issue-${t.n}` && over.pr !== false ? { pr: { number: PR, branch: t.branch } } : {}),
+    ...(over.pr !== false ? { pr: { number: PR, branch: t.branch } } : {}),
   });
   const facts = async (w: string) =>
     (await admin.query<{ kind: string; code: string | null; head_sha: string | null; pr_number: number | null }>("SELECT kind, code, head_sha, pr_number FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [w])).rows;
@@ -401,7 +409,7 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
     const ROUND_BASE = "1".repeat(40);
     const conflictReq = (t: { n: number; branch: string }, over: Record<string, unknown> = {}) => ({
       kind: "conflict" as const, issue: t.n, headSha: ASKED, prompt: "merge main", round: 1, actionId: randomUUID(), baseSha: ROUND_BASE,
-      ...(t.branch === `fx/issue-${t.n}` ? { pr: { number: PR, branch: t.branch } } : {}), ...over,
+      pr: { number: PR, branch: t.branch }, ...over,
     });
     const fixBaseOf = async (runId: string) => (await admin.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [runId, FIX_BASE_EVENT])).rows.map((r) => r.payload);
     // The real port's contract (packages/github branchSync.ts): a stacked change with a public copy is answered "stacked"; `readOnly` stops before the merge; anything else would merge.

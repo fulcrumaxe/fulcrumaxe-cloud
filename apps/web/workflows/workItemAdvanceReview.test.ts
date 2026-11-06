@@ -964,7 +964,7 @@ describe("fix rounds", () => {
     expect(req.reviewer).toBe("code");
     expect(req.prompt).toContain("src/a.ts:3 - off by one - use <=");
     expect(req.prompt).toContain("SPEC BODY");
-    expect(req.prompt).toContain("Do not clone it again");
+    expect(req.prompt).toContain("This is a new session");
     expect(req.prompt.trimEnd().endsWith("<!-- /AGENT_OUTPUT -->")).toBe(true);
     // The second review is of the NEW head.
     expect(t.started.filter((s) => s.headSha === H2).map((s) => s.role).sort()).toEqual(["acceptance-tester", "code-reviewer"]);

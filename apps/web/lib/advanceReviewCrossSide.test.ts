@@ -107,19 +107,20 @@ describe("startFixBody", () => {
     expect(sent.prompt).toContain("Do not push");
   });
 
-  it("a same-side sandbox round sends the pull request GitHub just showed (for the base sync) and the unchanged prompt", async () => {
+  it("a same-side sandbox round sends the pull request GitHub just showed (for the base sync) and the new-session prompt (D#600 CX-7)", async () => {
     const t = worker();
     await startFixBody(t.w, who, ctx({ executionMode: "sandbox", prExecutionMode: "sandbox" }), { ...pr, branch: "fx/issue-12" }, ACTION, 1, failing);
     const sent = t.advanceStartFix.mock.calls[0]![1] as { pr?: unknown; prompt: string };
     expect(sent.pr).toEqual({ number: 41, branch: "fx/issue-12" });
-    expect(sent.prompt).toContain("This continues your earlier session");
+    expect(sent.prompt).toContain("This is a new session; the notes of your earlier one follow below.");
+    expect(sent.prompt).not.toContain("opened by a run on another machine");
   });
 
-  it("a same-side runner round sends no pull request", async () => {
+  it("D#600 CX-7: a same-side runner round sends the pull request too: a fresh session must be told which branch to continue", async () => {
     const t = worker();
     await startFixBody(t.w, who, ctx({ executionMode: "runner_local", prExecutionMode: "runner_local" }), pr, ACTION, 1, failing);
     const sent = t.advanceStartFix.mock.calls[0]![1] as { pr?: unknown };
-    expect("pr" in sent).toBe(false);
+    expect(sent.pr).toEqual({ number: pr.number, branch: pr.branch });
   });
 });
 

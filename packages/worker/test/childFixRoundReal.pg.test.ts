@@ -92,9 +92,15 @@ describe("a planned PR child's review fix round, through loadReviewContext and s
         const c = r.ctx;
         return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, branch: c.branch, ...(c.child ? { child: true as const } : {}), tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted, debaterEnabled: debaterEnabledFor(c.debaterMode, c.tier), personRequestPending: c.personRequestPending, executionMode: c.executionMode } } as never;
       },
-      recordRound: vi.fn(), resume, mergeGate: vi.fn(),
+      recordRound: vi.fn(), resume: async () => { throw new Error("a fix round never resumes a session"); }, mergeGate: vi.fn(),
     } as never;
-    const starter: RunStarter = { async start() { throw new Error("a same-side round never starts a fresh session"); } };
+    // D#600 CX-7: a fix round is a fresh session, started through the starter; the stand-in above (named `resume` for the assertions) writes the keyed run row. `review.resume` must stay unused.
+    const starter: RunStarter = {
+      async start(input) {
+        const r = await resume(writerPool, registry, input);
+        return { runId: r.id };
+      },
+    };
     const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: heads };
     return { module: createAdvanceModule(writerPool, deps), resumed };
   }

@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DoneReply } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, DoneReply } from "@fulcrumaxe/runner-protocol";
 import { RunnerTarget, SandboxTarget, createJobIssuer, createJobSigner, createPgJobContext, insertAgentRun, writeRunStatus, type ExecutionTargetRegistry } from "@fx/runner";
 import { resumeAgentRun } from "@fx/pipeline";
 import { startBuildForItem } from "@fx/pipeline/testing/build";
@@ -154,7 +154,8 @@ describe("a runner follow-on run keeps its parent's Spec version [pg]", { timeou
     const claimNext = async (expectRunId: string) => {
       key = newKey();
       const runnerId = await insertRunner(admin, a.accountId, a.userId, { jwk: key.jwk, jkt: key.jkt, credentialMode: "api_key" });
-      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = '{}' WHERE id = $1", [runnerId, [a.repoId]]);
+      // A fresh-session fix round is a job in the cross-side shape (a null session), which only a runner that said hello with the current protocol is offered (D#600 CX-7).
+      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = '{}', protocol_version = $3 WHERE id = $1", [runnerId, [a.repoId], CURRENT_PROTOCOL_VERSION]);
       const claim = await toResponse(() => claimRun(deps, signed(key, CLAIM_PATH, {})));
       const claimed = claim.body as { run_id?: string; lease_generation?: number };
       if (claim.status !== 200 || claimed.run_id !== expectRunId) throw new Error(`claim: ${claim.status} ${JSON.stringify(claim.body)}`);
@@ -189,6 +190,8 @@ describe("a runner follow-on run keeps its parent's Spec version [pg]", { timeou
       reviewer: "code" as const,
       failingRunId: randomUUID(),
       expectedExecutionMode: "runner_local",
+      // D#600 CX-7: every fix round is a fresh session on the pull request's branch, so the pair the review step found goes with the request.
+      pr: { number: 1, branch: buildBranch },
       ...over,
     });
     const who = { accountId: a.accountId, userId: a.userId, workItemId: spec.workItemId, haltEpoch: 0 };
@@ -327,16 +330,16 @@ describe("a runner follow-on run keeps its parent's Spec version [pg]", { timeou
       expect(await pinOf(id)).toBeNull();
       return { a, workItemId, buildRunId: id, issue: nextNumber - 1 };
     }
-    const fixReq = (issue: number, mode: string) => ({ issue, headSha: "b".repeat(40), prompt: "fix", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(), expectedExecutionMode: mode, ...(mode === "sandbox" ? { pr: { number: 41, branch: `fx/issue-${issue}` } } : {}) });
+    const fixReq = (issue: number, mode: string) => ({ issue, headSha: "b".repeat(40), prompt: "fix", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(), expectedExecutionMode: mode, pr: mode === "sandbox" ? { number: 41, branch: `fx/issue-${issue}` } : { number: 41, branch: `fx/${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}-g1` } });
 
-    it("the advance fix round is refused no_spec_version: no new run row, no job; the stage write it already made is the only change", async () => {
+    it("the advance fix round is refused no_spec_version: no new run row, no job, and the board has not moved", async () => {
       const u = await unpinnedWorld("runner_local");
       const before = await count(u.a);
       const out = await advanceModule().advanceStartFix({ accountId: u.a.accountId, userId: u.a.userId, workItemId: u.workItemId, haltEpoch: 0 }, fixReq(u.issue, "runner_local"));
       expect(out).toEqual({ ok: false, reason: "no_spec_version" });
       expect(await count(u.a)).toBe(before);
       expect(await count(u.a, "job_signed IS NOT NULL")).toBe(0);
-      expect(await stageOf(u.workItemId)).toBe("changes_requested"); // recordStage ran before the start, as it always did
+      expect(await stageOf(u.workItemId)).toBe("pr_opened"); // the refusal comes before the stage write
       expect((await admin.query("SELECT code FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'fix_round_refused'", [u.workItemId])).rows).toEqual([{ code: "no_spec_version" }]);
     });
 

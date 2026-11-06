@@ -64,11 +64,11 @@ describe("callers of a queued runner run (D#6 C29)", () => {
     expect([...source.matchAll(/queued: "(accept|refuse)"/g)]).toHaveLength(2);
   });
 
-  it("acceptQueuedRunnerRun: the advance starter's accept branch, the fix-round resume and retry, the check-failed fix round, nobody else", () => {
+  it("acceptQueuedRunnerRun: the advance starter's accept branch, the retry, the check-failed fix round, nobody else", () => {
     expect(callSites("acceptQueuedRunnerRun")).toEqual({
-      // The review fix round's resume in advance.ts. checkFix.ts is the fix round after a failed approved check (D#6 C47 R-CHK-3a): the same `resumeAgentRun` result, wrapped the same way
+      // D#600 CX-7: the review fix round is a fresh session started through the advance starter (the accept branch below), no longer a resume in advance.ts.
+      // checkFix.ts is the fix round after a failed approved check (D#6 C47 R-CHK-3a): still a `resumeAgentRun` result (that round needs the failed run's own kept workspace), wrapped the same way
       // (a queued runner run stays pending for a claim; anything else queued is cancelled), by a driver whose wait is the same status poll that credits queued time.
-      "packages/worker/src/advance.ts": 1,
       "packages/worker/src/checkFix.ts": 1,
       "packages/worker/src/retry.ts": 1,
       "packages/worker/src/starter.ts": 1,

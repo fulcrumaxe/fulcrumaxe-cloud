@@ -135,14 +135,15 @@ describe("buildReviewPrompt", () => {
 describe("buildFixPrompt", () => {
   const FIX = { owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, version: 3, spec: "Acceptance: the footer shows the year.", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
 
-  it("continues the session: no clone, the branch of the ISSUE, the commit being fixed, the bot identity, no new pull request", () => {
+  it("D#600 CX-7: starts a new session: the branch of the ISSUE fetched fresh, the commit being fixed, the bot identity, no new pull request", () => {
     const p = buildFixPrompt(FIX);
-    expect(p).toContain("Do not clone it again");
-    expect(p).toContain("git fetch origin \"+refs/heads/fx/issue-7:refs/remotes/origin/fx/issue-7\" && git checkout fx/issue-7 && git reset --hard origin/fx/issue-7");
+    expect(p).toContain("This is a new session");
+    expect(p).not.toContain("continues your earlier session");
+    expect(p).toContain("git fetch origin \"+refs/heads/fx/issue-7:refs/remotes/origin/fx/issue-7\" && git checkout -B fx/issue-7 origin/fx/issue-7");
     expect(p).toContain(`You are fixing commit ${HEAD}`);
     expect(p).toContain("git push origin fx/issue-7");
     expect(p).toContain("fulcrumaxe-bot");
-    expect(p).toContain("Do not open a new pull request");
+    expect(p).toContain("never open a pull request");
     expect(p).toContain("src/a.ts:3 - off by one");
     expect(p).toContain("one problem");
     expect(p.split(MARKER)).toHaveLength(2);
@@ -224,7 +225,7 @@ describe("the recorded branch of a runner run (D#6 C25 section 1.2)", () => {
 
   it("the fix prompt checks out and pushes the recorded branch, not fx/issue-<n>", () => {
     const p = buildFixPrompt({ owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, branch: RUN_BRANCH, version: 3, spec: "S", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["a"], summary: "s" }] });
-    expect(p).toContain(`git fetch origin "+refs/heads/${RUN_BRANCH}:refs/remotes/origin/${RUN_BRANCH}" && git checkout ${RUN_BRANCH} && git reset --hard origin/${RUN_BRANCH}`);
+    expect(p).toContain(`git fetch origin "+refs/heads/${RUN_BRANCH}:refs/remotes/origin/${RUN_BRANCH}" && git checkout -B ${RUN_BRANCH} origin/${RUN_BRANCH}`);
     expect(p).toContain(`git push origin ${RUN_BRANCH}`);
     expect(p).toContain(`"branch":"${RUN_BRANCH}"`);
     expect(p).not.toContain("fx/issue-7");
