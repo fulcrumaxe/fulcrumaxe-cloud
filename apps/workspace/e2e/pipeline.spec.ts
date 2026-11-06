@@ -542,11 +542,22 @@ test.describe("D#519 MQ5-c2: queue chip and merge-stop sentences", () => {
     });
   }
 
-  test("ordered_resource_unreadable: the step row says to push and press Check the merge, and promises no retry", async ({ page }) => {
+  test("ordered_resource_unreadable: the step row names what asks again and promises no next try", async ({ page }) => {
     const current = { json: activity({ steps: [gate(["ordered_resource_unreadable"])] }) };
     await openWith(page, current);
     const row = tid(page, "pl-step").last();
-    await expect(row).toContainText("press Check the merge to run the check again");
+    await expect(row).toContainText("next finishes green");
+    await expect(row).toContainText("press Check the merge to check now");
+    await expect(row).not.toContainText("next try");
+    expect(await tid(page, "pl-live").innerText()).not.toMatch(NO_BAD);
+  });
+
+  test("pr_author_unverified: the step row names what asks again and promises no next try", async ({ page }) => {
+    const current = { json: activity({ steps: [gate(["pr_author_unverified"])] }) };
+    await openWith(page, current);
+    const row = tid(page, "pl-step").last();
+    await expect(row).toContainText("next finishes green");
+    await expect(row).toContainText("press Check the merge to check now");
     await expect(row).not.toContainText("next try");
     expect(await tid(page, "pl-live").innerText()).not.toMatch(NO_BAD);
   });

@@ -148,9 +148,10 @@ describe("recorded pipeline steps", () => {
     });
 
     // D#483 S5-j2a2: the order check's stops. The queue's own sentence for a migration out of order is reused as it is.
-    it("an unreadable order check says what to do (push, then Check the merge, or merge by hand) and never promises a retry nothing makes", () => {
+    it("an unreadable order check names what really asks again (a check finishing green, a reopen or ready, the Check the merge press), or a hand merge, and promises no next try", () => {
       const text = reasonWord("ordered_resource_unreadable");
-      expect(text).toMatch(/Push a new commit/);
+      expect(text).toMatch(/finishes green/);
+      expect(text).toMatch(/reopened or marked ready/);
       expect(text).toMatch(/press Check the merge/);
       expect(text).toMatch(/merge it yourself on GitHub/);
       expect(text).not.toMatch(/next try|checks again/i);
@@ -1323,8 +1324,16 @@ describe("D#598 P1d-1: the author stops", () => {
       "This pull request was opened by someone who isn't an admin or maintainer of the repository, or the platform's app. The platform won't merge it. A person can review it and merge it on GitHub.",
       "Opened by someone outside the repository's admins and maintainers",
     ],
-    pr_author_unverified: ["We couldn't check who opened this pull request, so the platform didn't merge it. It checks again on the next try.", "Couldn't check who opened the pull request"],
+    pr_author_unverified: ["We couldn't check who opened this pull request, so the platform didn't merge it. It is checked again when a check on the pull request next finishes green, or when the pull request is reopened or marked ready. You can press Check the merge to check now.", "Couldn't check who opened the pull request"],
   };
+
+  it("pr_author_unverified names what really asks again (a check finishing green, a reopen or ready, the Check the merge press) and promises no next try", () => {
+    const text = reasonWord("pr_author_unverified");
+    expect(text).toMatch(/finishes green/);
+    expect(text).toMatch(/reopened or marked ready/);
+    expect(text).toMatch(/press Check the merge/);
+    expect(text).not.toMatch(/next try|checks again/i);
+  });
 
   for (const [code, [long, short]] of Object.entries(COPY)) {
     it(`${code}: the long sentence on the step row, the short line on the card, no null or undefined anywhere`, () => {
