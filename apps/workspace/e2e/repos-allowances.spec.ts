@@ -105,6 +105,24 @@ test.describe("D#6 R7d: sandbox allowance panel (mocked API)", () => {
     expect(appErrors).toEqual([]);
   });
 
+  test("a file that declares the approved check keeps it: no removal warning, and the PUT carries the approved check beside the new set and confirm_repo", async ({ page }) => {
+    const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+    const withCheck = (version: number, entries: unknown[], t: number) => approvedView({ approved: { version, entries, command_timeout_s: t, check, set_sha256: "ab".repeat(32), approved_at: approvedAt } });
+    const { mock, appErrors } = await setup(page, { view: withCheck(1, [A], 600) });
+    await tid(page, "repos-allow-file").setInputFiles(file({ entries: [A, B], command_timeout_s: 900, check }));
+    await expect(tid(page, "repos-allow-pending").locator("[data-testid=repos-allow-entry]")).toHaveCount(2);
+    await expect(tid(page, "repos-allow-drops-check")).toHaveCount(0);
+    await expect(tid(page, "repos-allow-diff")).toHaveText("Changes: 1 entry added, timeout 600 to 900.");
+    await expect(tid(page, "repos-allow-approve")).toBeDisabled();
+    await tid(page, "repos-allow-name").fill(NAME);
+    await expect(tid(page, "repos-allow-approve")).toBeEnabled();
+    mock.view = withCheck(2, [A, B], 900);
+    await tid(page, "repos-allow-approve").click();
+    await expect(tid(page, "repos-allow-done")).toHaveText("Approved. It applies from the next job.");
+    expect(mock.puts.map((p) => JSON.parse(p))).toEqual([{ set: { entries: [A, B], command_timeout_s: 900, check }, confirm_repo: NAME }]);
+    expect(appErrors).toEqual([]);
+  });
+
   test("while the approve is in flight the button reads Approving and is off; an error keeps the set pending with a sentence of the app's own", async ({ page }) => {
     const { mock, appErrors } = await setup(page);
     let release: () => void = () => {};

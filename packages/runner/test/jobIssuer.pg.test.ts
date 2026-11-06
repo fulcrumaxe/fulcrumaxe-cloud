@@ -832,6 +832,25 @@ describe("JobIssuer [pg]", () => {
       expect((await issued(w, "code-reviewer")).sandbox_allowances?.command_timeout_s).toBe(900);
     });
 
+    it("a runner_verified repo's job carries the approved domain and check exactly as a runner_local repo's does (the runner's install and check need them)", async () => {
+      const CHECK = ["bash", "scripts/check.sh"];
+      const verified = await world();
+      await db.admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [verified.repoId]);
+      const local = await world();
+      for (const w of [verified, local]) {
+        await db.admin.query(
+          "INSERT INTO repo_runner_sandbox_allowances (account_id, repo_id, version, entries, command_timeout_s, set_sha256, set_aside, approved_by, check_argv, check_dev_shell, check_timeout_s) VALUES ($1, $2, 1, $3::jsonb, 900, $4, false, $5, $6, true, 5400)",
+          [w.accountId, w.repoId, JSON.stringify([NPM]), "e".repeat(64), w.userId, CHECK],
+        );
+      }
+      const verifiedJob = await issued(verified);
+      expect(verifiedJob.sandbox_allowances).toEqual({ entries: [NPM], command_timeout_s: 900 });
+      expect(verifiedJob.check).toBeDefined();
+      const localJob = await issued(local);
+      expect(localJob.sandbox_allowances).toEqual(verifiedJob.sandbox_allowances);
+      expect(localJob.check).toEqual(verifiedJob.check);
+    });
+
     it("no approval, an empty set and a set set aside leave the key out entirely: the job's canonical JSON has no trace of it", async () => {
       const none = await world();
       const empty = await world();

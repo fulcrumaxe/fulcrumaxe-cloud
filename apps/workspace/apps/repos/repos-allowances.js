@@ -35,8 +35,11 @@ export function parseUpload(text, limits = LIMITS) {
   let data;
   try { data = JSON.parse(text); } catch { return { ok: false, code: "not_json" }; }
   // D#6 R-CHK-3c: a check in the file is never sent from here (the check form is where one is reviewed and approved), but the panel is told it was there.
-  let declaresCheck = false;
-  if (data && typeof data === "object" && !Array.isArray(data) && data.check !== null && typeof data.check === "object" && !Array.isArray(data.check)) { declaresCheck = true; data = { ...data }; delete data.check; }
+  // The declared check is kept for comparison only: a file whose check equals the one already approved keeps that approved check (see panelModel).
+  let declaresCheck = false, declaredCheck = null;
+  if (data && typeof data === "object" && !Array.isArray(data) && data.check !== null && typeof data.check === "object" && !Array.isArray(data.check)) {
+    declaresCheck = true; declaredCheck = readCheck(data.check); data = { ...data }; delete data.check;
+  }
   const keys = data && typeof data === "object" && !Array.isArray(data) ? Object.keys(data).sort().join() : "";
   if (keys !== "entries" && keys !== "command_timeout_s,entries") return { ok: false, code: "malformed" };
   const t = data.command_timeout_s;
@@ -48,7 +51,7 @@ export function parseUpload(text, limits = LIMITS) {
     if (!ok) return { ok: false, code: "malformed" };
     entries.push({ kind: e.kind, value: e.value, access: e.access, reason: e.reason });
   }
-  return { ok: true, set: t === undefined ? { entries } : { entries, command_timeout_s: t }, declaresCheck };
+  return { ok: true, set: t === undefined ? { entries } : { entries, command_timeout_s: t }, declaresCheck, declaredCheck };
 }
 
 const keyOf = (e) => [e.kind, e.value, e.access].join("\n");
@@ -68,6 +71,10 @@ export function diffSets(approved, pending) {
 /** Rows for display: every field is non-empty text. */
 export const entryRows = (entries) => (Array.isArray(entries) ? entries : []).map((e) => Object.fromEntries(FIELDS.map((f) => [f, shown(e && e[f])])));
 
+/** The execution modes that run on a runner: the list in packages/runner/src/runnerModes.ts (a test pins the two together). */
+export const RUNNER_MODES = ["runner_local", "runner_verified"];
+export const isRunnerMode = (mode) => typeof mode === "string" && RUNNER_MODES.includes(mode);
+
 /** The panel's state, reduced to what the view shows. `s.typed` is the repo name typed so far, `s.phase` is idle | saving | done | error. */
 export function panelModel(s) {
   const v = s.view;
@@ -80,16 +87,19 @@ export function panelModel(s) {
   const diff = pending ? diffSets(approved, pending) : null;
   const canChange = v.can_change === true;
   const widening = !!pending && pending.entries.length > 0;
-  const dropsCheck = !!pending && hasCheck;
+  // A file that declares the very check already approved keeps it (the approved check rides along in the PUT); any other file removes it.
+  const keepsCheck = !!pending && hasCheck && !!s.upload.declaredCheck && sameCheck(s.upload.declaredCheck, v.approved.check);
+  const dropsCheck = !!pending && hasCheck && !keepsCheck;
   const name = typeof s.repoName === "string" ? s.repoName : "";
-  const needsName = widening || dropsCheck; // removing an approved check is confirmed the same way as widening
+  const needsName = widening || dropsCheck || keepsCheck; // removing an approved check is confirmed the same way as widening; the server asks for the name whenever a check is in the set
   const nameOk = !needsName || (name !== "" && s.typed === name);
-  const notRunner = widening && v.execution_mode !== "runner_local";
+  const notRunner = (widening || keepsCheck) && !isRunnerMode(v.execution_mode);
   const setAside = v.set_aside === true;
   // A set-aside set still reads as approved, but the server treats approving it again as a new version, so an identical file is a change then.
   const restores = !!diff && diff.same && setAside && !dropsCheck;
   return {
-    kind: "ready", canChange, approved, pending, diff, widening, dropsCheck, declaresCheck: !!(s.upload && s.upload.declaresCheck), notRunner, setAside, restores, inUse: v.in_use === true,
+    kind: "ready", canChange, approved, pending, diff, widening, dropsCheck, keepsCheck,
+    body: pending && keepsCheck ? { ...pending, check: { argv: v.approved.check.argv, dev_shell: v.approved.check.dev_shell, timeout_s: v.approved.check.timeout_s } } : pending, declaresCheck: !!(s.upload && s.upload.declaresCheck), notRunner, setAside, restores, inUse: v.in_use === true,
     approvedRows: approved ? entryRows(approved.entries) : null, pendingRows: pending ? entryRows(pending.entries) : null,
     needsName, nameKnown: name !== "",
     approveDisabled: !canChange || !pending || (diff.same && !setAside && !dropsCheck) || s.phase === "saving" || !nameOk || notRunner,
@@ -144,7 +154,7 @@ export function createAllowancePanel({ call, isCancelled, runnerOutdated = () =>
       try { result = parseUpload(await file.text(), (s.view && s.view.limits) || LIMITS); } catch { result = { ok: false, code: "unreadable" }; }
     }
     input.value = "";
-    s.upload = result.ok ? { set: result.set, declaresCheck: result.declaresCheck } : null;
+    s.upload = result.ok ? { set: result.set, declaresCheck: result.declaresCheck, declaredCheck: result.declaredCheck } : null;
     s.uploadError = result.ok ? "" : UPLOAD_ERRORS[result.code];
     s.typed = "";
     render();
@@ -157,7 +167,7 @@ export function createAllowancePanel({ call, isCancelled, runnerOutdated = () =>
     s.phase = "saving"; s.notice = "";
     render();
     try {
-      const res = await call("PUT", id, m.needsName ? { set: s.upload.set, confirm_repo: s.typed } : { set: s.upload.set });
+      const res = await call("PUT", id, m.needsName ? { set: m.body, confirm_repo: s.typed } : { set: m.body });
       if (mine !== gen || isCancelled()) return;
       const next = pickView(res);
       if (next) s.view = next;
@@ -295,7 +305,7 @@ export function checkModel({ view, draft, typed, repoName, phase, runnerOutdated
   const suggested = !approved && sug && sug.status === "ok" ? readCheck(sug.check) : null;
   const canChange = view.can_change === true, setAside = view.set_aside === true;
   const problem = draft ? draftProblem(draft, view.limits && view.limits.max_check_timeout_s ? { ...DEFAULT_LIMITS, max_timeout_s: view.limits.max_check_timeout_s } : DEFAULT_LIMITS) : "";
-  const onRunner = view.execution_mode === "runner_local";
+  const onRunner = isRunnerMode(view.execution_mode);
   const unchanged = !!draft && sameCheck(draft, approved) && !setAside;
   return {
     kind: approved ? (setAside ? "set_aside" : "approved") : suggested ? "suggested" : "none",
