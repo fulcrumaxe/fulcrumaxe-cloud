@@ -479,6 +479,11 @@ describe("what git reports of the relay's answer is mapped to a closed code", ()
       [{ kind: "error", status: 401 }, "git_revoked"],
       [{ kind: "error", status: 403, code: "not_cloud_verified" }, "git_ticket_refused"],
       [{ kind: "error", status: 503 }, "git_ticket_refused"],
+      // The cloud has no ticket key: its own setting, so a code of its own. Only the 503 with that exact word; no other status or word borrows it.
+      [{ kind: "error", status: 503, code: "not_configured" }, "git_ticket_unavailable"],
+      [{ kind: "error", status: 503, code: "internal" }, "git_ticket_refused"],
+      [{ kind: "error", status: 500, code: "not_configured" }, "git_ticket_refused"],
+      [{ kind: "error", status: 401, code: "not_configured" }, "git_revoked"],
       [{ kind: "error", status: 0 }, "git_ticket_refused"],
     ];
     for (const [answer, code] of answers) {

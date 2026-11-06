@@ -85,7 +85,11 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
   async function mint(lease: PushLease): Promise<{ ticket: string; origin: string }> {
     const reply = await deps.mintTicket(lease.runId, lease.leaseGeneration);
     if (reply.kind === "stop") throw new GitPathError("git_stopped");
-    if (reply.kind === "error") throw new GitPathError(reply.status === 401 ? "git_revoked" : "git_ticket_refused");
+    if (reply.kind === "error") {
+      if (reply.status === 401) throw new GitPathError("git_revoked");
+      // 503 not_configured is the cloud saying it has no ticket key: a cloud-side setting, so the card must not blame the runner. Any other failure stays a refusal.
+      throw new GitPathError(reply.status === 503 && reply.code === "not_configured" ? "git_ticket_unavailable" : "git_ticket_refused");
+    }
     if (!gitProxyPinned(deps.cloudOrigin, reply.proxyOrigin, pinned)) throw new GitPathError("git_proxy_unpinned");
     return { ticket: reply.ticket, origin: reply.proxyOrigin };
   }
@@ -155,7 +159,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
         await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? 64 * 1024 : LISTING_CAP, platform, deps.sandboxedPurge);
         return { base: tip };
       } catch (error) {
-        if (error instanceof GitPathError && !["git_stopped", "git_revoked", "clone_limited", "git_proxy_unpinned", "git_ticket_refused"].includes(error.code)) return null;
+        if (error instanceof GitPathError && !["git_stopped", "git_revoked", "clone_limited", "git_proxy_unpinned", "git_ticket_refused", "git_ticket_unavailable"].includes(error.code)) return null;
         throw error;
       }
     },

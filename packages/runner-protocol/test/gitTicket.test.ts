@@ -123,11 +123,22 @@ describe("what the dashboard shows for a runner_setup event", () => {
     expect(runnerSetupText("head_not_from_base")).toBe("The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.");
     expect(runnerSetupText("sandbox_stub_committed")).toBe("The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.");
     expect(runnerSetupText("workspace_git_refused")).toBe("The runner could not safely read the agent's git folder, so nothing was published. Update fx-runner, then Build again.");
-    expect(Object.keys(GIT_PATH_LINES).sort()).toEqual(["context_spill_unwritable", "git_version_unsupported", "head_not_from_base", "mirror_dir_insecure", "mirror_failed", "push_failed", "push_ref_refused", "review_sha_not_in_mirror", "sandbox_stub_committed", "sandbox_unusable", "snapshot_refused", "workspace_failed", "workspace_git_refused"]);
+    expect(Object.keys(GIT_PATH_LINES).sort()).toEqual(["context_spill_unwritable", "git_ticket_unavailable", "git_version_unsupported", "head_not_from_base", "mirror_dir_insecure", "mirror_failed", "push_failed", "push_ref_refused", "review_sha_not_in_mirror", "sandbox_stub_committed", "sandbox_unusable", "snapshot_refused", "workspace_failed", "workspace_git_refused"]);
     for (const [detail, line] of Object.entries(GIT_PATH_LINES)) {
       expect(RUNNER_SETUP_DETAILS as readonly string[], detail).toContain(detail);
       expect(runnerSetupText(detail)).toBe(line);
       expect(line).not.toMatch(/undefined|null|NaN|\{|\}/);
+    }
+  });
+
+  it("the cloud-side ticket failure blames the cloud, not the runner, and still understands the older code", () => {
+    const line = runnerSetupText("git_ticket_unavailable");
+    expect(line).toBe("The cloud is not set up for Cloud-verified runs yet (it cannot sign git access for your runner). An admin needs to finish the setup; your runner is fine.");
+    expect(line).not.toMatch(/Check the runner's setup/);
+    // A runner from before this code still sends git_ticket_refused: it keeps the plain setup sentence.
+    expect(runnerSetupText("git_ticket_refused")).toBe("Your runner could not start the agent (git_ticket_refused). Check the runner's setup, then retry.");
+    for (const detail of ["git_ticket_unavailable", "git_ticket_refused"]) {
+      expect(LocalOnlyEvent.safeParse({ seq: 0, ts: "2026-01-01T00:00:00.000Z", type: "run_ended", reason: "runner_setup", detail }).success, detail).toBe(true);
     }
   });
 

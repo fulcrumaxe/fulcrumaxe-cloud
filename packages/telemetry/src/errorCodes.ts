@@ -275,6 +275,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "context_spill_unwritable",
   // The shell sandbox could not start a Bash call under the job's rules; the run ended before the agent began.
   "sandbox_unusable",
+  // The cloud has no git ticket key (503 not_configured on the git ticket route); the run ended before the agent began.
+  "git_ticket_unavailable",
   // D#6 R5b-3: the key file holds something that is not a key, or is a link, or belongs to another user or is open to other users.
   "api_key_format",
   "api_key_unsafe",

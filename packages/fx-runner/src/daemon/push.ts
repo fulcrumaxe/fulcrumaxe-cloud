@@ -181,7 +181,7 @@ export async function planChunks(git: Git, mirrorDir: string, base: string, sha:
 }
 
 /** Codes that end a path A push at once: retrying cannot help, or must not happen. */
-const NO_RETRY: ReadonlySet<string> = new Set(["git_stopped", "git_revoked", "clone_limited", "push_too_large", "git_ticket_refused", "git_proxy_unpinned", "push_ref_refused", "push_rejected", "continuation_branch_missing"]);
+const NO_RETRY: ReadonlySet<string> = new Set(["git_stopped", "git_revoked", "clone_limited", "push_too_large", "git_ticket_refused", "git_ticket_unavailable", "git_proxy_unpinned", "push_ref_refused", "push_rejected", "continuation_branch_missing"]);
 
 /** Path A's way into the network: each `open` is a git (and the remote address) good for one network command or one push chunk, with a fresh ticket. */
 export interface PushTransport {

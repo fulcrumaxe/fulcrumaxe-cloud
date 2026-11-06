@@ -157,7 +157,7 @@ describe("path A's ends are reported as closed codes, or not at all when the clo
     expect(sent().some((p) => p.endsWith("/done"))).toBe(false);
   });
 
-  for (const code of ["push_incomplete", "clone_limited", "git_ticket_refused"] as const) {
+  for (const code of ["push_incomplete", "clone_limited", "git_ticket_refused", "git_ticket_unavailable"] as const) {
     it(`${code} is a setup detail, with no size and no done`, async () => {
       const r = rig({ gitA: fakeGitPath({ publish: throwing(code) }) });
       const claimed = await r.claim("verified");
