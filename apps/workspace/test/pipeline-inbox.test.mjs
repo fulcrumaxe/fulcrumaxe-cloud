@@ -53,7 +53,7 @@ describe("S4-h: the check on a proposal", () => {
   });
   it("checkSentences speaks from the row's own fields only", () => {
     expect(checkSentences({ provenance: "internal", verification: "verified" })).toEqual([]);
-    expect(checkSentences({ provenance: "external", verification: "verified" })).toEqual(["From someone without write access. Read it before approving."]);
+    expect(checkSentences({ provenance: "external", verification: "verified" })).toEqual(["From someone without admin or maintain access. Read it before approving."]);
     expect(checkSentences({ verification: "partly_verified" })).toEqual(["Part of this was confirmed. Read the parts that weren't before you approve it."]);
     expect(checkSentences({ verification: "check_failed", verify_retry: true, verify_attempts_max: 3 })).toEqual(["The check didn't finish. We'll try again at the next check."]);
     expect(checkSentences({ verification: "check_failed", verify_retry: false, verify_attempts_max: 3 })).toEqual(["The check didn't finish after 3 tries, so this proposal stays unconfirmed."]);
