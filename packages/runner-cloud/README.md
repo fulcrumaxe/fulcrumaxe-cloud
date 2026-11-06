@@ -158,8 +158,11 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
 - The Spec's file scope (SCOPE-IN-JOB): a build or check-fix job carries `scope`, the patterns of the run's own pinned Spec version (`acceptance_files`, brace groups
   expanded, at most 1024 entries of 512 characters), read from our rows when the job is issued and signed with it. Reviews and read-only roles carry none, and
   neither does a run whose pinned Spec has no list the parser reads. Such a job is gated at protocol 15 (`SCOPE_JOB_MIN_PROTOCOL`): an older runner is never offered
-  it and the run reads `waiting_for_runner_update` naming 15. This release only carries the field; the runner does not act on it yet, and `done` still holds the pull
-  request to the list read from our own rows.
+  it and the run reads `waiting_for_runner_update` naming 15. A runner that finds a changed file outside the list skips the
+  check, still pushes the branch, and reports the check with the reason `out_of_scope` and a count in its summary, never a path. `done` reads that as a hint only: it skips the
+  early `check_failed` return and runs the commit and scope-list tests as always (`no_commit`, `scope_unknown` stand), then ends the run `check_failed` with no pull request opened (opening one
+  to read its files and closing it again would move the item through the webhook). The stored check carries `out_of_scope`, the branch is recorded for the fix round, and one log line
+  `runner.done.scope_hint` is left. A file really outside the list is thus met by the check-fix round, not by a `scope_violation` record.
 - `repo_runner_sandbox_allowances` is append-only (0770): one row per approval, newest wins, each with the set's sha256 and one audit row.
   Leaving `runner_local` sets the approved set aside in the same transaction (kept on record, ignored), so a repo that comes back is approved
   again first. Ruling: Chromium's `--no-sandbox` for test browsers is not an allowance kind in R7a or R7b; the self-build run (R7e) records it as a

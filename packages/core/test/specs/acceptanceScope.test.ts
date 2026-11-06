@@ -229,6 +229,6 @@ describe("one parser (D#6 R4d-5a F1)", () => {
         if (/(?:function\s+parseAcceptanceScope\b|(?:const|let)\s+parseAcceptanceScope\s*=)/.test(readFileSync(file, "utf8"))) defs.push(path.relative(root, file));
       }
     }
-    expect(defs).toEqual(["packages/core/src/specs/acceptanceScope.ts"]);
+    expect(defs).toEqual(["packages/runner-protocol/src/acceptanceScope.ts"]);
   });
 });

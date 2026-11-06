@@ -374,6 +374,75 @@ describe("done route [pg]", () => {
       expect(finished).toHaveLength(0);
     });
 
+    // D#6 SCOPE-IN-JOB: the reason `out_of_scope` (a result with no exit status and no cap kill) is a hint that the runner found files outside its job's list and did not run the check. The cloud skips
+    // the early check_failed return and judges the pull request from its own rows; the hint never softens a verdict and never turns into a pass.
+    describe("a scope hint from the runner (out_of_scope)", () => {
+      const hint = (over: Partial<DoneCheck> = {}): DoneCheck => ({ exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: "the check was not run: 2 changed files are outside the Spec's file list", reason: "out_of_scope", ...over });
+      const callWith = (s: Scene, check: DoneCheck, lines?: string[]) => s.call({ body: { run_id: s.runId, lease_generation: s.gen, check }, ...(lines === undefined ? {} : { deps: { log: (l: string) => lines.push(l) } }) });
+
+      it("the run never succeeds without its check: check_failed, and NO pull request is opened or closed (nothing for the webhook to see), the hint stored as the check, the branch recorded", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+        const lines: string[] = [];
+        const res = await callWith(s, hint(), lines);
+        expect(parsedDone(res)).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect(s.repo.pulls).toHaveLength(0);
+        expect(labels(s.fake)).toEqual(["A2", "A1 RunBranchState"]);
+        expect(verdictOf()).toEqual({ outcome: "failed", failureReason: "check_failed", prNumber: null, branch: s.branch });
+        expect(finished[0]!.check).toEqual(hint());
+        expect(lines.map((l) => JSON.parse(l)).filter((l) => l.event === "runner.done.scope_hint")).toEqual([{ event: "runner.done.scope_hint", run_id: s.runId }]);
+        expect(noted).toEqual([]);
+      });
+
+      it("a file really outside the list ends the same way (check_failed, no pull request, no refusal record): the check-fix round meets it", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts"), file("secrets/key.pem", "ADDED")] });
+        expect(parsedDone(await callWith(s, hint()))).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect(s.repo.pulls).toHaveLength(0);
+        expect(noted).toEqual([]);
+        expect(finished[0]!.check).toEqual(hint());
+      });
+
+      it("a Spec whose list cannot be read is scope_unknown, and a branch with no commit is no_commit: the hint changes neither", async () => {
+        const unreadable = await scene({ check: APPROVED, scope: ["a?b"] });
+        expect(parsedDone(await callWith(unreadable, hint())).failure_reason).toBe("scope_unknown");
+        expect(unreadable.repo.pulls).toHaveLength(0);
+        finished.length = 0;
+        const none = await scene({ check: APPROVED, aheadBy: 0 });
+        expect(parsedDone(await callWith(none, hint())).failure_reason).toBe("no_commit");
+        expect(none.repo.pulls).toHaveLength(0);
+      });
+
+      it("it is not read as a hint when anything else is off: an exit status or a cap kill keeps the early check_failed with GitHub never asked", async () => {
+        for (const bad of [hint({ exit_code: 0 }), hint({ exit_code: 1 }), hint({ timed_out: true, duration_ms: 5_400_000 }), hint({ duration_ms: -1 })]) {
+          const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+          const res = await callWith(s, bad);
+          if (res.status === 400) continue;
+          expect(parsedDone(res), JSON.stringify(bad)).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+          expect(labels(s.fake), JSON.stringify(bad)).toEqual([]);
+        }
+      });
+
+      it("a job that carried no check ignores it: the result is not the cloud's to record and the run is judged as before", async () => {
+        const s = await scene({ files: [file("src/app.ts")] });
+        expect(parsedDone(await callWith(s, hint()))).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+        expect(finished[0]).not.toHaveProperty("check");
+      });
+
+      it("a hint never lends a fix round the passing-check exception: a continuation whose head did not move stays no_commit", async () => {
+        const BR = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+        const s = await scene({ continues: { branch: BR }, dispatchBase: "c".repeat(40), branchOid: "c".repeat(40), aheadBy: 1, check: APPROVED });
+        expect(parsedDone(await callWith(s, hint())).failure_reason).toBe("no_commit");
+        expect(s.repo.pulls).toHaveLength(0);
+      });
+
+      it("a pull request already open for the branch is left exactly as it was", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+        expect(parsedDone(await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report() } }))).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+        expect(parsedDone(await callWith(s, hint()))).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect(s.repo.pulls).toHaveLength(1);
+        expect(s.repo.pulls[0]!.state).toBe("open");
+      });
+    });
+
     it("a runner that sends no reason is judged as before: a failing exit records no reason, a pass still passes", async () => {
       const failing = await scene({ check: APPROVED });
       await failing.call({ body: { run_id: failing.runId, lease_generation: failing.gen, check: report({ exit_code: 1 }) } });

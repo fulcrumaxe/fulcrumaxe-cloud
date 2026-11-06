@@ -27,4 +27,5 @@ export * from "./excludeRules.js";
 export * from "./verifierGuard.js";
 export * from "./wake.js";
 export * from "./pinRules.js";
+export * from "./acceptanceScope.js";
 export * from "./activityRow.js";
