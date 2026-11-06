@@ -129,7 +129,7 @@ export function normalizedMemoryHash(text: string): string {
   return createHash('sha256').update(text.normalize('NFKC').replace(/[\p{Cc}\u2028\u2029]/gu, ' ').replace(HIDDEN_RE, '').toLowerCase().replace(/\s+/g, ' ').trim(), 'utf8').digest('hex');
 }
 
-/** How many of a repository's most recent declined entries (rejected, retired, deleted, replaced by an edit) the dial compares a new proposal against. */
+/** How many of a repository's most recent person-declined entries (rejected, retired by a person, deleted, replaced by an edit) the dial compares a new proposal against. */
 const DECLINED_LOOKUP_MAX = 400;
 
 const intakeLockSql = `SELECT pg_advisory_xact_lock(hashtextextended('memory_intake:' || $1::text, 0))`;
@@ -286,18 +286,17 @@ async function maybeAutoApprove(
   const dial = await readDial();
   if (!dial.raised) return undefined;
   // A person's explicit no is left standing: the same text (case and whitespace aside) that a person rejected, retired, deleted or replaced by an edit
-  // anywhere in this repository (its repo-scope entries and the entries of its work items) waits for a person instead of being approved. This is a floor
-  // for honest repeats, not a boundary: a reworded text has another hash and is treated as new, and a deleted entry is purged after 30 days, so that no is
-  // forgotten then. Looked up only here, for the rare proposal the dial could really approve, and bounded to the most recent entries.
+  // in this repository (its repo-scope entries and the entries of its work items), at account scope, or at the run's role scope waits for a person instead
+  // of being approved. The database reader leaves out entries a time sweep retired, so sweep rows cannot push a person's no out of the window. This is a
+  // floor for honest repeats, not a boundary: a reworded text has another hash and is treated as new, and a deleted entry is purged after 30 days, so
+  // that no is forgotten then. Looked up only here, for the rare proposal the dial could really approve, and bounded to the most recent person decisions.
   const ref = stored.scope === 'repo' ? stored.scopeRef : await repoRef();
-  const declined = await client.query<{ body: string }>(
-    `SELECT body FROM memory_entries
-      WHERE account_id = $1 AND status IN ('rejected', 'retired', 'deleted', 'superseded')
-        AND ((scope = 'repo' AND scope_ref = $2::text)
-          OR (scope = 'item' AND scope_ref IN (SELECT id::text FROM work_items WHERE account_id = $1 AND repo_id = $3::uuid)))
-      ORDER BY updated_at DESC LIMIT $4`,
-    [input.accountId, ref, dial.repoId, DECLINED_LOOKUP_MAX],
-  );
+  const declined = await client.query<{ body: string }>('SELECT body FROM memory_declined_read($1::text, $2::uuid, $3::text, $4::integer)', [
+    ref,
+    dial.repoId,
+    ROLE_RE.test(input.role) ? input.role : null,
+    DECLINED_LOOKUP_MAX,
+  ]);
   if (declined.rows.some((r) => normalizedMemoryHash(r.body) === stored.hash)) return 'previously_declined';
   await client.query('SAVEPOINT memory_auto_approve_one');
   try {
