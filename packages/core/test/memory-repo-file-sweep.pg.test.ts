@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
@@ -267,6 +268,105 @@ describe('repo instruction file sweep (D#601 MEM-5b) [pg]', () => {
     const second = await sweep(read, { pool: stale as Pool });
     expect(reads).toBe(1);
     expect(second).toMatchObject({ listed: 1, imported: 0, skipped: 1 });
+  });
+
+  /** A repository the connect path does not cover: another product, or one with no installation. */
+  async function uncovered(kind: 'other_product' | 'no_installation', account: SeedRefs = A): Promise<string> {
+    n += 1;
+    const repoId = randomUUID();
+    const gh = 8_900_000 + n + Math.floor(Math.random() * 1e6);
+    let installId: string | null = null;
+    if (kind === 'other_product') {
+      installId = randomUUID();
+      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')`, [installId, account.accountId, gh]);
+    }
+    await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, $5, 'acme', $6)`, [repoId, account.accountId, installId, gh, kind === 'other_product' ? 'sitekit' : 'team', `plain${n}`]);
+    return repoId;
+  }
+
+  it('one filter for the push and the connect mark: only a team repository with an installation is marked, whichever path asks', async () => {
+    const covered = await repo();
+    const otherProduct = await uncovered('other_product');
+    const detached = await uncovered('no_installation');
+    expect(await mark([otherProduct, detached], ['CLAUDE.md', 'AGENTS.md'])).toBe(0);
+    expect((await admin.query('SELECT 1 FROM repo_instruction_files')).rowCount).toBe(0);
+    expect(await mark([covered, otherProduct, detached], ['CLAUDE.md'])).toBe(1);
+    expect((await admin.query('SELECT repo_id FROM repo_instruction_files')).rows).toEqual([{ repo_id: covered }]);
+  });
+
+  it('the list leaves out the files of a soft-deleted account and lists them again once it is restored', async () => {
+    const gone = await seedAccount(admin, randomUUID());
+    const live = await repo();
+    const dead = await repo(gone);
+    await mark([live]);
+    await mark([dead], ['CLAUDE.md'], gone);
+    const listed = async () => (await runner.query<{ repo_id: string }>('SELECT repo_id FROM repo_instruction_list_due(200)')).rows.map((r) => r.repo_id);
+    expect((await listed()).sort()).toEqual([live, dead].sort());
+    await admin.query('UPDATE accounts SET deleted_at = now() WHERE id = $1', [gone.accountId]);
+    expect(await listed()).toEqual([live]);
+    await admin.query('UPDATE accounts SET deleted_at = NULL WHERE id = $1', [gone.accountId]);
+    expect((await listed()).sort()).toEqual([live, dead].sort());
+  });
+
+  it('the list\'s own account join leaves out a soft-deleted account even where the lister\'s row policy on accounts would let it through', async () => {
+    const gone = await seedAccount(admin, randomUUID());
+    const live = await repo();
+    const dead = await repo(gone);
+    await mark([live]);
+    await mark([dead], ['CLAUDE.md'], gone);
+    await admin.query('UPDATE accounts SET deleted_at = now() WHERE id = $1', [gone.accountId]);
+    // The policy is a second layer (0874). Loosen it inside a transaction that is rolled back, so only the function's own join is left to keep the account out.
+    await admin.query('BEGIN');
+    try {
+      await admin.query('DROP POLICY setup_request_lister_select ON accounts');
+      await admin.query('CREATE POLICY setup_request_lister_select ON accounts FOR SELECT TO setup_request_lister USING (true)');
+      const seen = (await admin.query<{ repo_id: string }>('SELECT repo_id FROM repo_instruction_list_due(200)')).rows.map((r) => r.repo_id);
+      expect(seen).toContain(live);
+      expect(seen).not.toContain(dead);
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+  });
+
+  describe('migration 0999: the one-time mark for repositories connected before the triggers', () => {
+    const backfillSql = readFileSync(new URL('../../db/migrations/0999_repo_instruction_files_backfill.sql', import.meta.url), 'utf8');
+    const rows = async (repoId: string) => (await admin.query(`SELECT path, due_at IS NOT NULL AS due, file_sha, last_error FROM repo_instruction_files WHERE repo_id = $1 ORDER BY path`, [repoId])).rows;
+
+    it('marks both files of every connected team repository that has no row, leaves other products and uninstalled repositories alone, and the sweep then reads them', async () => {
+      const a = await repo();
+      const b = await repo(B);
+      const otherProduct = await uncovered('other_product');
+      const detached = await uncovered('no_installation');
+      await admin.query(backfillSql);
+      expect(await rows(a)).toEqual([{ path: 'AGENTS.md', due: true, file_sha: null, last_error: null }, { path: 'CLAUDE.md', due: true, file_sha: null, last_error: null }]);
+      expect((await rows(b)).map((r) => r.path)).toEqual(['AGENTS.md', 'CLAUDE.md']);
+      expect(await rows(otherProduct)).toEqual([]);
+      expect(await rows(detached)).toEqual([]);
+      const due = Number((await admin.query(`SELECT extract(epoch FROM due_at - now()) AS s FROM repo_instruction_files WHERE repo_id = $1 AND path = 'CLAUDE.md'`, [a])).rows[0].s);
+      expect(due).toBeGreaterThan(50);
+      expect(due).toBeLessThanOrEqual(60);
+      // The migration covers every connected repository in this shared database; keep to this test's own so the sweep's ten-a-tick limit is not spent on others.
+      await admin.query('DELETE FROM repo_instruction_files WHERE repo_id <> ALL($1::uuid[])', [[a, b]]);
+      await dueNow();
+      const counts = await sweep(reading('# Build\nRun pnpm test before you push.'));
+      expect(counts.imported).toBe(4);
+      expect((await state(a, 'CLAUDE.md')).file_sha).toBe(sha('c'));
+    });
+
+    it('is idempotent and never touches a row that exists: a settled file keeps its sha, a failed one its error and its cleared due time', async () => {
+      const r = await repo();
+      const failed = await repo();
+      await mark([r], ['CLAUDE.md']);
+      await admin.query(`UPDATE repo_instruction_files SET due_at = NULL, file_sha = $2, source_commit = $3 WHERE repo_id = $1`, [r, sha('d'), COMMIT]);
+      await mark([failed], ['AGENTS.md']);
+      await admin.query(`UPDATE repo_instruction_files SET due_at = NULL, last_error = 'plan_file_too_large', error_streak = 1 WHERE repo_id = $1`, [failed]);
+      await admin.query(backfillSql);
+      expect(await rows(r)).toEqual([{ path: 'AGENTS.md', due: true, file_sha: null, last_error: null }, { path: 'CLAUDE.md', due: false, file_sha: sha('d'), last_error: null }]);
+      expect(await rows(failed)).toEqual([{ path: 'AGENTS.md', due: false, file_sha: null, last_error: 'plan_file_too_large' }, { path: 'CLAUDE.md', due: true, file_sha: null, last_error: null }]);
+      const before = (await admin.query('SELECT repo_id, path, due_at FROM repo_instruction_files ORDER BY repo_id, path')).rows;
+      await admin.query(backfillSql);
+      expect((await admin.query('SELECT repo_id, path, due_at FROM repo_instruction_files ORDER BY repo_id, path')).rows).toEqual(before);
+    });
   });
 
   it('the app login can read its own files and not another account\'s, and cannot delete them', async () => {

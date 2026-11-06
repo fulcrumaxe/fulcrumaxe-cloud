@@ -7,7 +7,21 @@ import { mintInstallState } from "@fx/api/src/github/installUrl.js";
 import { RateLimitedError } from "@fx/api/src/errors.js";
 import type { InstallOutcome } from "@fx/github";
 import { captureReports } from "../../../../../../test/captureReports";
-import { installCallbackHandler, type InstallCallbackDeps } from "./handler";
+import { setPendingHooks } from "@fx/core/src/pendingWork";
+import { defaultInstallCallbackDeps, installCallbackHandler, type InstallCallbackDeps } from "./handler";
+
+// The production deps build their pools with createPool; a pool that records its statements lets the wiring test below see the SQL the connect mark runs.
+const recorded = vi.hoisted(() => ({ statements: [] as Array<{ sql: string; params: unknown[] }> }));
+vi.mock("@fx/db/src/pool", () => {
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      recorded.statements.push({ sql, params });
+      return { rows: [], rowCount: /INSERT INTO repo_instruction_files/.test(sql) ? 2 : 0 };
+    },
+    release: () => undefined,
+  };
+  return { createPool: () => ({ connect: async () => client, query: client.query }) };
+});
 
 /** D#2 H17a: the route layer only. The recording and the GitHub checks are in packages/github's tests. */
 const SECRET = "x".repeat(32);
@@ -96,6 +110,28 @@ describe("GET /api/github/install/{kind}/callback", () => {
     expect(complete).toHaveBeenCalledTimes(1);
     const recorderDeps = (complete.mock.calls[0] as unknown as [{ onDiscoveryQueued?: unknown }])[0];
     expect(recorderDeps.onDiscoveryQueued).toBe(onDiscoveryQueued);
+  });
+
+  // D#601 MEM-5b: a connect marks both instruction files of each repository the callback queued, through the production deps.
+  it("the production discovery hook marks CLAUDE.md and AGENTS.md of the repositories it queued, and wakes the drain", async () => {
+    vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://u:p@127.0.0.1:1/none");
+    vi.stubEnv("DATABASE_URL_APP_USER", "postgres://u:p@127.0.0.1:1/none");
+    const written = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => written.get(k) ?? null, set: async (k, v) => void written.set(k, v), delete: async (k) => void written.delete(k) } });
+    recorded.statements.length = 0;
+    const repoId = randomUUID();
+    try {
+      const hook = defaultInstallCallbackDeps().onDiscoveryQueued;
+      expect(hook).toBeTypeOf("function");
+      await hook!(accountId, [{ id: randomUUID(), repoId }]);
+    } finally {
+      setPendingHooks(null);
+      vi.unstubAllEnvs();
+    }
+    const marks = recorded.statements.filter((s) => /INSERT INTO repo_instruction_files/.test(s.sql));
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.params).toEqual([accountId, [repoId], ["CLAUDE.md", "AGENTS.md"], 60]);
+    expect(written.has("pending:proposal-verify-sweep")).toBe(true);
   });
 
   it("no session: failed, nothing recorded", async () => {

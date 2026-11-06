@@ -6,6 +6,19 @@ import { MAX_GITHUB_WEBHOOK_BODY_BYTES, defaultGithubWebhookDeps, githubWebhookH
 import { setPendingHooks } from "@fx/core/src/pendingWork";
 import { setIntakeAllowlistForTests } from "../../../../lib/github/intakeTrust";
 
+// The production deps build their pools with createPool; a pool that records its statements lets the wiring tests below see the SQL the marks run.
+const recorded = vi.hoisted(() => ({ statements: [] as Array<{ sql: string; params: unknown[] }> }));
+vi.mock("@fx/db/src/pool", () => {
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      recorded.statements.push({ sql, params });
+      return { rows: [], rowCount: /INSERT INTO repo_instruction_files/.test(sql) ? 1 : 0 };
+    },
+    release: () => undefined,
+  };
+  return { createPool: () => ({ connect: async () => client, query: client.query }) };
+});
+
 /**
  * Route-layer plumbing only: raw body threading, HMAC verification
  * (D#2 H13a body criterion 1), header extraction, unhandled-event
@@ -409,5 +422,56 @@ describe("the webhook's discovery hook", () => {
       setPendingHooks(null);
       vi.unstubAllEnvs();
     }
+  });
+});
+
+// D#601 MEM-5b: the production deps mark the repo instruction files. The SQL and the payload rules are repoInstructionWake.test.ts and the pg suite; this pins the
+// wiring in defaultGithubWebhookDeps: a default-branch push that changed CLAUDE.md marks it, and a connect (discovery queued) marks both files.
+describe("the webhook's repo instruction file marks", () => {
+  const ACCOUNT = "11111111-1111-4111-8111-111111111111";
+  const REPO = "22222222-2222-4222-8222-222222222222";
+  const pushEvent = (modified: string[]) => ({
+    accountId: ACCOUNT,
+    repoId: REPO,
+    eventName: "push" as const,
+    payload: { ref: "refs/heads/main", repository: { full_name: "acme/widgets", default_branch: "main" }, commits: [{ added: [], modified, removed: [] }] },
+  });
+  const marks = () => recorded.statements.filter((s) => /INSERT INTO repo_instruction_files/.test(s.sql));
+
+  async function withDeps(run: (deps: GithubWebhookHandlerDeps) => Promise<void>): Promise<void> {
+    vi.stubEnv("DATABASE_URL_APP_USER", "postgres://u:p@127.0.0.1:1/none");
+    vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://u:p@127.0.0.1:1/none");
+    const written = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => written.get(k) ?? null, set: async (k, v) => void written.set(k, v), delete: async (k) => void written.delete(k) } });
+    recorded.statements.length = 0;
+    try {
+      await run(defaultGithubWebhookDeps());
+    } finally {
+      setPendingHooks(null);
+      vi.unstubAllEnvs();
+    }
+  }
+
+  it("a push to the default branch that changed CLAUDE.md marks that file for the repository, through onRepoEvent", async () => {
+    await withDeps(async (deps) => {
+      await deps.onRepoEvent!(pushEvent(["CLAUDE.md"]) as never);
+    });
+    expect(marks()).toHaveLength(1);
+    expect(marks()[0]!.params).toEqual([ACCOUNT, [REPO], ["CLAUDE.md"], 60]);
+  });
+
+  it("a push that changed neither file marks nothing", async () => {
+    await withDeps(async (deps) => {
+      await deps.onRepoEvent!(pushEvent(["src/a.ts"]) as never);
+    });
+    expect(marks()).toEqual([]);
+  });
+
+  it("a queued discovery (a connect) marks both files of the repositories it queued", async () => {
+    await withDeps(async (deps) => {
+      await deps.onDiscoveryQueued!(ACCOUNT, [{ id: "33333333-3333-4333-8333-333333333333", repoId: REPO }]);
+    });
+    expect(marks()).toHaveLength(1);
+    expect(marks()[0]!.params).toEqual([ACCOUNT, [REPO], ["CLAUDE.md", "AGENTS.md"], 60]);
   });
 });

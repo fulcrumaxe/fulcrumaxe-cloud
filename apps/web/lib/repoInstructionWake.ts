@@ -11,12 +11,14 @@ import { readDefaultBranchPush } from "./planeParityWake";
  * paths name CLAUDE.md or AGENTS.md at the root marks that file. Both only write the due row (and the pending-work hint): no outbound call. The existing
  * setup-request-check sweep reads the files.
  */
-/** A push lists at most 20 commits; a push at that size may have hidden commits, so both files are marked rather than guessed at. */
-const PUSH_COMMITS_CAP = 20;
+/** A push event's payload carries up to 2048 commits (the events REST list shows fewer, which is not this payload); a push at that size may have hidden commits, so both files are marked rather than guessed at. */
+const PUSH_COMMITS_CAP = 2048;
 
 /** The instruction files a default-branch push changed (added, modified or removed). Pure. */
 export function instructionFilesChangedByPush(eventName: string, payload: unknown): RepoInstructionFile[] {
   if (readDefaultBranchPush(eventName, payload) === null) return [];
+  // A forced push lists only the before..after compare, so the commits it dropped never appear: the files may differ from before whatever the list holds. Both are marked.
+  if ((payload as { forced?: unknown }).forced === true) return [...REPO_INSTRUCTION_FILES];
   const commits = (payload as { commits?: unknown }).commits;
   if (!Array.isArray(commits)) return [];
   if (commits.length >= PUSH_COMMITS_CAP) return [...REPO_INSTRUCTION_FILES];
