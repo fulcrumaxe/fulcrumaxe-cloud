@@ -14,3 +14,10 @@ export function testLaunch(): LaunchPlace {
   shared ??= mkdtempSync(path.join(tmpRoot(), "fxr-launch-"));
   return { root: path.join(shared, "launch"), home: homedir(), processCwd: () => process.cwd(), uid: process.getuid?.() };
 }
+
+/**
+ * The start-up bubblewrap probe, answered "usable" (D#6 CHECK-NESTED-SANDBOX): for a test about what the engine does with a job, not about the probe. The real probe starts a
+ * nested bubblewrap, which cannot create namespaces inside the runner's own check sandbox, so it would end every run there as `sandbox_unusable`. The probe has its own tests
+ * (`engines/claude/sandboxUnusable.test.ts` over a script, `bashSandbox.bwrap.test.ts` over the real tool, which skips where nesting is refused).
+ */
+export const shellSandboxUsable = async (): Promise<boolean> => false;

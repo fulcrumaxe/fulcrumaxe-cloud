@@ -23,7 +23,7 @@ export interface Rig {
 }
 
 /** An engine over a fake binary, with every directory under one temporary root and a spawn wrapper that counts calls. */
-export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credentials"]; envOptions?: EngineConfig["envOptions"]; onLocalEvent?: EngineConfig["onLocalEvent"]; onNearLimit?: EngineConfig["onNearLimit"]; sandbox?: Record<string, unknown> } = {}): Rig {
+export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credentials"]; envOptions?: EngineConfig["envOptions"]; onLocalEvent?: EngineConfig["onLocalEvent"]; onNearLimit?: EngineConfig["onNearLimit"]; sandbox?: Record<string, unknown>; realSandboxProbe?: boolean } = {}): Rig {
   const fake = over.fake ?? makeFake();
   const root = mkdtempSync(path.join(tmpdir(), "r4b12_rig-"));
   const workdir = path.join(root, "workspace");
@@ -39,6 +39,9 @@ export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credent
     logDir: path.join(root, "logs"),
     sessionsFile: path.join(root, "sessions.json"),
     spawn: counting,
+    // The start-up bubblewrap probe is answered here (the shell sandbox is usable) so these tests need no nested sandbox: inside the runner's own check sandbox
+    // bubblewrap cannot create namespaces and the real probe would end every run as sandbox_unusable. The probe itself is tested with `realSandboxProbe`.
+    ...(over.realSandboxProbe === true ? {} : { bashSandboxUnusable: async () => false }),
     ...(over.onLocalEvent === undefined ? {} : { onLocalEvent: over.onLocalEvent }),
     ...(over.onNearLimit === undefined ? {} : { onNearLimit: over.onNearLimit }),
     ...(over.envOptions === undefined ? {} : { envOptions: over.envOptions }),

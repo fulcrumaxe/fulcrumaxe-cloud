@@ -4,7 +4,7 @@ import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/c
 import { ensureLaunchRoot, LaunchRefused, type LaunchPlace } from "../../launchDir.js";
 import { runCapture, runForeground, runForegroundLaunched, runInstall, type SpawnFn } from "./capture.js";
 import { authState } from "./authStatus.js";
-import { createClaudeEngine } from "./engine.js";
+import { createClaudeEngine, type EngineConfig } from "./engine.js";
 import { type InstructionCanaryResult, guardJobBuild } from "../../instructionCanaryState.js";
 import { canaryArgvFingerprint, runInstructionCanary } from "./instructionCanary.js";
 import { EngineRefusal } from "./refusal.js";
@@ -38,7 +38,7 @@ export function canaryGuardedSource(input: { binaryPath: string; stateDir: strin
  * the runner's launch root with the two places a launch may never be (D#6 RUNNER-CWD-1): every program this kit starts that has no directory of
  * its own (the CLI's short questions, git, the sandbox probe, the tmux client) starts in a fresh empty directory under it.
  */
-export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?: boolean; launch: LaunchPlace }): EngineKit {
+export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?: boolean; launch: LaunchPlace; /** Test seam, handed to every engine this kit makes (`EngineConfig.bashSandboxUnusable`); the program's entry point never sets it. */ bashSandboxUnusable?: EngineConfig["bashSandboxUnusable"] }): EngineKit {
   const starter = { spawn: spawnFn };
   const launch = options.launch;
   // The instruction canary's model turn runs in its own scratch directory (holding the canary file), made under the launch root too; no launch root, no check (inconclusive).
@@ -89,6 +89,7 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
         sessionsFile: sessionsFile(input.stateDir),
         spawn: spawnFn,
         launch,
+        ...(options.bashSandboxUnusable === undefined ? {} : { bashSandboxUnusable: options.bashSandboxUnusable }),
         ...(input.limits === undefined ? {} : { limits: input.limits }),
         onLocalEvent: input.onLocalEvent,
         ...(input.onNearLimit === undefined ? {} : { onNearLimit: input.onNearLimit }),

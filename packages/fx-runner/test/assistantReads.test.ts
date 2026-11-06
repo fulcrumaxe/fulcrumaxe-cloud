@@ -11,6 +11,10 @@ import { READ_TOOLS } from "../src/assistant/readTools.js";
 import { CORRECTION_TOOL_ARGS, startProxy, type Proxy } from "../src/assistant/proxy.js";
 import { saveRegistration } from "../src/config.js";
 import { startAssistantCloud, tlsFetch, type AssistantCloud } from "./helpers/assistantCloud.js";
+import { unixSocketsRefused } from "./helpers/needsHostSockets.js";
+
+/** The proxy listens on a Unix socket; inside the runner's check or a job the sandbox refuses that family, so the proxy tests skip there (the fence tests need no socket and run). */
+const noUnixSockets = unixSocketsRefused();
 
 const UID = process.getuid!();
 const ITEM = "44444444-4444-4444-8444-444444444444";
@@ -45,7 +49,7 @@ beforeEach(async () => {
   const code = await runCli({ argv: ["assistant", "link"], home: undefined, stateDirOverride: state, uid: UID, now: () => new Date(clock), sleep: async (ms) => void (clock += ms), fetchFn: approving, stdout: () => undefined, stderr: () => undefined });
   expect(code).toBe(0);
   cloud.seen.length = 0;
-  proxy = await startProxy({ stateDir: state, uid: UID, fetchFn: tlsFetch(cloud.ca), now: () => new Date(clock) });
+  if (!noUnixSockets) proxy = await startProxy({ stateDir: state, uid: UID, fetchFn: tlsFetch(cloud.ca), now: () => new Date(clock) });
 });
 afterEach(async () => {
   await proxy?.close();
@@ -154,7 +158,7 @@ describe("the fence is the hosted one", () => {
   });
 });
 
-describe("the read tools through the proxy and the strict fake, over real TLS", () => {
+describe.skipIf(noUnixSockets)("the read tools through the proxy and the strict fake, over real TLS", () => {
   const body = (extra: object) => ({ id: ITEM, title: HOSTILE, stage: "in_progress", ...extra });
 
   it("fences hostile repo text in every read reply and the corrections list, and never returns the token", async () => {
