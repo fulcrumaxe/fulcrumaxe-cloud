@@ -86,13 +86,20 @@ function filesPhrase(r: ScopeRefusal): string {
   return list === '' ? `${total} ${plural(total, 'file', 'files')}` : `${total} ${plural(total, 'file', 'files')}: ${list}${more > 0 ? ` (and ${more} more)` : ''}`;
 }
 
-/** The sentence the card shows at Needs a person. Fixed words around the counts and paths; no model text and no text from GitHub. */
-export function scopeRefusalSentence(r: ScopeRefusal): string {
-  // A public copy the cloud closed too is what "Build again" would stop at (it asks for the pull request to be reopened first), so the card says that in the same words.
+/**
+ * The sentence the card shows at Needs a person. Fixed words around the counts and paths; no model text and no text from GitHub.
+ *
+ * `recordEnded` is derived state, never stored on the card: true only when the item's public push record for the refused public copy is itself `scope_refused` (the caller reads it), which is
+ * what lets Build again publish a new public pull request. Otherwise a closed public copy is what Build again would stop at (it asks for the pull request to be reopened first), so the card
+ * says that, in the same words as before.
+ */
+export function scopeRefusalSentence(r: ScopeRefusal, opts: { recordEnded?: boolean } = {}): string {
   const tail =
     r.publicPr === undefined
       ? " The pull request was closed and its branch was kept; nothing was merged. Add the files to the Spec's file list, or build again without touching them."
-      : " The pull request was closed and its branch was kept; nothing was merged. The public copy was closed too. To build again, reopen it on GitHub first, then add the files to the Spec's list or build without them.";
+      : opts.recordEnded === true
+        ? " The pull request was closed and its branch was kept; nothing was merged. The public copy was closed too and stays closed. Build again starts fresh and opens a new public pull request; add the files to the Spec's list first or build without them."
+        : " The pull request was closed and its branch was kept; nothing was merged. The public copy was closed too. To build again, reopen it on GitHub first, then add the files to the Spec's list or build without them.";
   if (r.reason === 'scope_unknown') {
     if (r.detail === 'renamed') return `The change renames a file${r.paths.length > 0 ? ` (${r.paths.join(', ')})` : ''}, which the Spec's file list check cannot judge.${tail}`;
     return `The change contains a kind of file change the Spec's file list check cannot judge${r.paths.length > 0 ? ` (${r.paths.join(', ')})` : ''}.${tail}`;

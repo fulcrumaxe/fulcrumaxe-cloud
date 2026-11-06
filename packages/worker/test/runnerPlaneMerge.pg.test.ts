@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { PLANE_MERGE_LEASE_SECONDS, PLANE_MERGE_MAX_ATTEMPTS, PLANE_MERGE_ORDER_DEADLINE_MINUTES } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { withScopeRefusedSchema } from "@fx/db/test/helpers/scopeRefusedSchema.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { pairingDigest } from "@fx/core/src/repos/planePushRecord.js";
 import { mergeQueue } from "@fx/pipeline";
@@ -104,6 +105,29 @@ describe("plane merge order store [pg]", () => {
       expect(r.order.deadlineAt.getTime()).toBe(T0 + minutes(PLANE_MERGE_ORDER_DEADLINE_MINUTES));
       expect(r.superseded).toEqual([]);
       expect((await row(r.order.id)).plane_push_id).toBe(r.order.planePushId);
+    });
+
+    // D#6 REFUSAL-BUILD-AGAIN-FRESH: an item can hold a refused record (scope_refused, final) next to its live one; the order is placed against the live (newest) record.
+    it("places the order against the item's newest record when an older, scope-refused one exists beside it", async () => {
+      const w = await item(A, { head: "c".repeat(40) });
+      const restore = await withScopeRefusedSchema(admin); // the later schema, applied by hand for this check
+      try {
+        await admin.query("UPDATE plane_pushes SET state = 'scope_refused' WHERE work_item_id = $1", [w]);
+        const digest = pairingDigest({ codeRepo: "acme/widgets-public", overlayGlobs: GLOBS, identifierRulesPath: null, planDataRulesPath: null });
+        const live = (
+          await admin.query<{ id: string }>(
+            `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, pr_number, pr_url, source_head)
+             VALUES ($1, $2, $3, 'acme/widgets-public', $4, 'pr_opened', $5, $5, 8, 'https://github.com/acme/widgets-public/pull/8', $6) RETURNING id`,
+            [A.accountId, w, A.repoId, digest, HEAD, REVIEWED],
+          )
+        ).rows[0]!.id;
+        const r = await place(A, w);
+        expect(r.kind).toBe("placed");
+        if (r.kind !== "placed") return;
+        expect(r.order).toMatchObject({ planePushId: live, prNumber: 8, expectedPublicHead: HEAD });
+      } finally {
+        await restore();
+      }
     });
 
     it("is idempotent for the same heads and pairing: the open order is returned, nothing is added", async () => {

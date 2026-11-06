@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { withScopeRefusedSchema } from '@fx/db/test/helpers/scopeRefusedSchema.js';
 import { withTenant } from '../src/tenancy/withTenant.js';
 import {
   PlanePushRecordError,
@@ -10,6 +11,7 @@ import {
   derivePlanePush,
   pairingDigest,
   readPlanePush,
+  readRetryFacts,
   recordVerifiedOutcome,
   stampPlanePush,
 } from '../src/repos/planePushRecord.js';
@@ -95,6 +97,112 @@ describe('plane push record (D#598 P1f-1)', () => {
     expect(rebuilt).toMatchObject({ state: 'building', code: null, refusals: [] });
     expect(rebuilt.pairingDigest).not.toBe(first.pairingDigest);
     await pair(a);
+  });
+
+  // D#6 REFUSAL-BUILD-AGAIN-FRESH, expand step (no migration): the stamp names the live-row predicate so one statement runs on today's full index and on the partial index of the later step.
+  describe('the stamp on the schema as it is today (full unique index)', () => {
+    it('the item index is the full one, and stamp, re-stamp and replay all run on it (no 42P10) and keep one row', async () => {
+      const index = (await admin.query(`SELECT indexdef FROM pg_indexes WHERE indexname = 'plane_pushes_item_repo_key'`)).rows[0].indexdef as string;
+      expect(index).not.toMatch(/WHERE/i);
+      await pair(a);
+      const it1 = await item(a);
+      const row = (await stamp(a, it1))!;
+      expect((await stamp(a, it1))!.id).toBe(row.id);
+      expect((await stamp(a, it1, true))!.id).toBe(row.id);
+      expect(await count(it1)).toBe(1);
+      // A replay for an item with no row yet inserts the first one, and a second replay adds none.
+      const it2 = await item(a);
+      const first = (await stamp(a, it2, true))!;
+      expect(first).toMatchObject({ state: 'building' });
+      expect((await stamp(a, it2, true))!.id).toBe(first.id);
+      expect(await count(it2)).toBe(1);
+    });
+  });
+
+  // The later (contract) step's three schema changes, applied by hand for these tests only: the code must already handle such a row.
+  describe('a scope-refused record (the later schema applied by hand)', () => {
+    let restore: () => Promise<void>;
+    beforeAll(async () => {
+      restore = await withScopeRefusedSchema(admin);
+    });
+    afterAll(async () => {
+      await restore();
+    });
+    const OPEN = { state: 'pr_opened' as const, headSha: SHA1, tipSha: SHA2, prNumber: 9, prUrl: 'https://github.com/acme/pub/pull/9' };
+    const opened = async (): Promise<{ workItemId: string; id: string; branch: string }> => {
+      await pair(a);
+      const workItemId = await item(a);
+      const row = (await stamp(a, workItemId))!;
+      await run(a, (c) => recordVerifiedOutcome(c, { accountId: a.accountId, id: row.id, outcome: OPEN }));
+      return { workItemId, id: row.id, branch: row.branch };
+    };
+    const refuse = (id: string) => admin.query(`UPDATE plane_pushes SET state = 'scope_refused' WHERE id = $1`, [id]);
+
+    it('the same statement now runs on the partial index (it is the partial one here), and stamps a live row the same way', async () => {
+      const index = (await admin.query(`SELECT indexdef FROM pg_indexes WHERE indexname = 'plane_pushes_item_repo_key'`)).rows[0].indexdef as string;
+      expect(index).toMatch(/WHERE .*state.*scope_refused/);
+      await pair(a);
+      const it1 = await item(a);
+      const row = (await stamp(a, it1))!;
+      expect((await stamp(a, it1))!.id).toBe(row.id);
+      expect((await stamp(a, it1, true))!.id).toBe(row.id);
+      expect(await count(it1)).toBe(1);
+    });
+
+    it('the next build inserts a new record (new id, new branch) and leaves the refused one as it was; re-stamping returns the new one; a replayed old step adds nothing', async () => {
+      const o = await opened();
+      await refuse(o.id);
+      expect(await stamp(a, o.workItemId, true)).toMatchObject({ id: o.id, state: 'scope_refused' });
+      expect(await count(o.workItemId)).toBe(1);
+      const fresh = (await stamp(a, o.workItemId))!;
+      expect(fresh.id).not.toBe(o.id);
+      expect(fresh.branch).toBe(`fx/p-${fresh.id}`);
+      expect(fresh.branch).not.toBe(o.branch);
+      expect(fresh).toMatchObject({ state: 'building', prNumber: null, prUrl: null, headSha: null, tipSha: null, code: null });
+      expect(await count(o.workItemId)).toBe(2);
+      const old = (await admin.query(`SELECT state, pr_number, head_sha FROM plane_pushes WHERE id = $1`, [o.id])).rows[0];
+      expect(old).toMatchObject({ state: 'scope_refused', pr_number: 9, head_sha: SHA1 });
+      // The newest record is what every reader gets.
+      expect(await run(a, (c) => readPlanePush(c, a.accountId, o.workItemId))).toMatchObject({ id: fresh.id });
+      // Build again once more, or a replay of the fresh step: the same new record, no third.
+      expect((await stamp(a, o.workItemId))!.id).toBe(fresh.id);
+      expect((await stamp(a, o.workItemId, true))!.id).toBe(fresh.id);
+      expect(await count(o.workItemId)).toBe(2);
+      // The fresh record publishes like any first one, and a second refusal of it adds a third record.
+      await run(a, (c) => recordVerifiedOutcome(c, { accountId: a.accountId, id: fresh.id, outcome: { ...OPEN, prNumber: 12, prUrl: 'https://github.com/acme/pub/pull/12' } }));
+      await refuse(fresh.id);
+      expect((await stamp(a, o.workItemId))!.id).not.toBe(fresh.id);
+      expect(await count(o.workItemId)).toBe(3);
+    });
+
+    it('a late outcome of the refused run cannot move the record out of scope_refused', async () => {
+      const o = await opened();
+      await refuse(o.id);
+      expect(await run(a, (c) => recordVerifiedOutcome(c, { accountId: a.accountId, id: o.id, outcome: { state: 'refused', code: 'push_failed' } }))).toBeNull();
+      expect((await admin.query(`SELECT state FROM plane_pushes WHERE id = $1`, [o.id])).rows[0].state).toBe('scope_refused');
+    });
+
+    it('two records created in one instant: every newest-first reader picks the higher id', async () => {
+      await pair(a);
+      const workItemId = await item(a);
+      const low = '00000000-0000-4000-8000-000000000001';
+      const high = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+      const digest = pairingDigest({ codeRepo: 'acme/pub', overlayGlobs: ['docs/ops/'], identifierRulesPath: null, planDataRulesPath: null });
+      // One transaction, so both rows carry the same created_at (the clock trigger uses now()).
+      await admin.query('BEGIN');
+      try {
+        for (const [id, state] of [[low, 'scope_refused'], [high, 'building']] as const) {
+          await admin.query(`INSERT INTO plane_pushes (id, account_id, work_item_id, repo_id, code_repo, pairing_digest, state) VALUES ($1, $2, $3, $4, 'acme/pub', $5, $6)`, [id, a.accountId, workItemId, a.repoId, digest, state]);
+        }
+        await admin.query('COMMIT');
+      } catch (error) {
+        await admin.query('ROLLBACK');
+        throw error;
+      }
+      expect(await run(a, (c) => readPlanePush(c, a.accountId, workItemId))).toMatchObject({ id: high, state: 'building' });
+      expect(await run(a, (c) => stampPlanePush(c, { accountId: a.accountId, workItemId, repoId: a.repoId }))).toMatchObject({ id: high });
+      expect(await run(a, (c) => readRetryFacts(c, workItemId))).toMatchObject({ state: 'building' });
+    });
   });
 
   it('records a verified outcome for each state, and a settled row is not moved back by a late one', async () => {

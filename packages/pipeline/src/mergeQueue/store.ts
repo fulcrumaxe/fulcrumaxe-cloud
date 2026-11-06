@@ -1122,7 +1122,7 @@ export async function readRepublishOutcome(client: Queryable, round: ConflictRou
        FROM agent_runs r
        LEFT JOIN LATERAL (SELECT x.outcome, x.finished_at FROM plane_push_attempts x JOIN agent_runs p ON p.account_id = x.account_id AND p.id = x.run_id
                            WHERE x.account_id = r.account_id AND x.kind = 'fix_round' AND (p.parent_run_id = r.id OR (r.runtime = 'runner' AND p.id = r.id)) ORDER BY x.attempt_no DESC LIMIT 1) a ON true
-       LEFT JOIN LATERAL (SELECT q.managed_by_person_at, q.state FROM plane_pushes q WHERE q.account_id = r.account_id AND q.work_item_id = r.work_item_id ORDER BY q.created_at DESC, q.id LIMIT 1) pp ON true
+       LEFT JOIN LATERAL (SELECT q.managed_by_person_at, q.state FROM plane_pushes q WHERE q.account_id = r.account_id AND q.work_item_id = r.work_item_id ORDER BY q.created_at DESC, q.id DESC LIMIT 1) pp ON true
       WHERE r.account_id = $1 AND r.id = $2 AND r.status = 'succeeded'`,
     [round.accountId, round.runId],
   );

@@ -70,6 +70,20 @@ describe("scopeRefusalSentence", () => {
     expect(scopeRefusalSentence({ reason: "scope_unknown", prNumber: 1, total: 1, paths: ["a.ts"], detail: "renamed", publicPr: { codeRepo: "acme/widgets-public", number: 41 } })).toMatch(/reopen it on GitHub first/);
   });
 
+  it("promises a fresh Build again only when the public record ended; a missing or false flag keeps the reopen-it-first words", () => {
+    const pub = { ...base, publicPr: { codeRepo: "acme/widgets-public", number: 41 } };
+    const fresh = scopeRefusalSentence(pub, { recordEnded: true });
+    expect(fresh).toMatch(/The public copy was closed too and stays closed\. Build again starts fresh and opens a new public pull request; add the files to the Spec's list first or build without them\.$/);
+    expect(fresh).not.toMatch(/reopen/);
+    for (const opts of [undefined, {}, { recordEnded: false }]) {
+      const s = scopeRefusalSentence(pub, opts);
+      expect(s).toMatch(/To build again, reopen it on GitHub first/);
+      expect(s).not.toMatch(/starts fresh/);
+    }
+    // No public copy: the flag changes nothing.
+    expect(scopeRefusalSentence(base, { recordEnded: true })).toBe(scopeRefusalSentence(base));
+  });
+
   it("is singular for one file and counts the paths it could not list", () => {
     expect(scopeRefusalSentence({ ...base, total: 1, paths: ["tests/a.ts"] })).toMatch(/touched 1 file: tests\/a\.ts outside/);
     const many = Array.from({ length: 14 }, (_, i) => `src/f${i}.ts`);
