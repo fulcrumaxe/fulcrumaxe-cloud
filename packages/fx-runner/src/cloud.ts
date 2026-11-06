@@ -3,7 +3,7 @@
  * the body digest, made with the runner's own key; no cookie, token or header other than the signature is sent.
  */
 import { randomBytes } from "node:crypto";
-import { signRequest } from "@fulcrumaxe/runner-protocol";
+import { CLAIM_PATH, MAX_CLAIM_REPLY_BYTES, signRequest } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "./cliError.js";
 import { BYPASS_ENV_NAME, bypassHeaders } from "./protectionBypass.js";
 import type { RunnerKey } from "./keys.js";
@@ -12,6 +12,11 @@ export const REGISTER_PATH = "/api/runner/register";
 export const REVOKE_PATH = "/api/runner/revoke";
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_REPLY_BYTES = 64 * 1024;
+/**
+ * A claim reply carries a whole signed job, which may be far bigger than any other reply: its bound is worked out from the job schema's own caps
+ * (`MAX_CLAIM_REPLY_BYTES`), so a job the cloud was allowed to sign is never cut short. It is still a hard cap, never unbounded.
+ */
+export const replyCapFor = (path: string): number => (path === CLAIM_PATH ? MAX_CLAIM_REPLY_BYTES : MAX_REPLY_BYTES);
 
 /** `https://host[:port]`, or `http://` only for a machine's own loopback address. Anything else is refused. */
 export function normaliseOrigin(input: string): string {
@@ -123,7 +128,7 @@ async function signedRequest(method: "GET" | "POST", text: string, extra: Record
   } catch {
     throw new CliError("could not reach the cloud; check --cloud-url and your network, then try again");
   }
-  const raw = await readCapped(response, MAX_REPLY_BYTES);
+  const raw = await readCapped(response, replyCapFor(input.path));
   let body: unknown;
   try {
     body = JSON.parse(raw);
