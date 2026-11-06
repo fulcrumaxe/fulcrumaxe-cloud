@@ -52,13 +52,38 @@ export interface IssueProposalInput {
   title: string;
   summary: string | null;
   owner: 'product' | 'internal_loop';
+  /** Absent means `other`. */
+  origin?: ProposalOrigin;
+}
+
+/** Where a proposal's issue came from, for the reader of the Inbox card only (migration 1000). Nothing that decides trust or starts work reads it. */
+export type ProposalOrigin = 'other' | 'agent_run';
+
+/**
+ * `agent_run` when the issue's author is one of the platform App's own bot logins (so it can only have been opened by a sandbox agent run); `other`
+ * otherwise. Fails closed: no login, no source of bot logins, an empty list, or a source that throws all give `other`. Logins compare case-insensitively.
+ */
+export async function proposalOrigin(
+  authorLogin: string | null | undefined,
+  botLogins: (() => Promise<readonly string[]>) | undefined,
+  warn: ((message: string) => void) | undefined = console.warn,
+): Promise<ProposalOrigin> {
+  if (typeof authorLogin !== 'string' || authorLogin === '' || !botLogins) return 'other';
+  try {
+    const mine = (await botLogins()).map((l) => l.toLowerCase());
+    return mine.includes(authorLogin.toLowerCase()) ? 'agent_run' : 'other';
+  } catch {
+    // fx-swallow-ok: fail closed by design; the proposal is written without the label, and a fixed line is logged (no login, no error text)
+    warn('github webhook: reading the platform bot logins failed; the proposal is not labelled as an agent run');
+    return 'other';
+  }
 }
 
 export type ProposeOutcome = { outcome: 'proposed'; created: boolean } | { outcome: 'proposal_rate_limited' };
 
 const CREATE_SQL = `
-  INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, title, summary, provenance, owner_process, state)
-  VALUES ($1::uuid, $2::uuid, $3::text, ARRAY['github_issue'], $4::int, $5::text, $6::text, 'external', $7::text, 'new')
+  INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, title, summary, provenance, owner_process, state, origin)
+  VALUES ($1::uuid, $2::uuid, $3::text, ARRAY['github_issue'], $4::int, $5::text, $6::text, 'external', $7::text, 'new', $8::text)
   ON CONFLICT (repo_id, dedupe_key) DO NOTHING`;
 
 /**
@@ -96,7 +121,7 @@ export async function proposeFromIssue(client: PoolClient, accountId: string, re
     );
   }
   await client.query('SET LOCAL ROLE plan_importer');
-  const res = await client.query(CREATE_SQL, [accountId, repoId, `gh:issue:${input.ghNumber}`, input.ghNumber, input.title, input.summary, input.owner]);
+  const res = await client.query(CREATE_SQL, [accountId, repoId, `gh:issue:${input.ghNumber}`, input.ghNumber, input.title, input.summary, input.owner, input.origin ?? 'other']);
   await client.query('RESET ROLE');
   return { outcome: 'proposed', created: (res.rowCount ?? 0) > 0 };
 }

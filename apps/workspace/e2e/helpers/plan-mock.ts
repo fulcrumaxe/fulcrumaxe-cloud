@@ -45,6 +45,7 @@ export function proposal(n: number, over: Record<string, unknown> = {}): Proposa
     category_hint: null,
     estimate_usd: null,
     provenance: "internal",
+    origin: "other",
     owner_process: "product",
     state: "new",
     decided_at: null,

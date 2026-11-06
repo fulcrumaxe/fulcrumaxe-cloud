@@ -672,6 +672,8 @@ export const FILTERS = [
 
 // D#483 S4-h: what a person reads about a proposal's check. Fixed, owner-approved text; the number in the spent-tries line comes from the row's own cap.
 export const EXTERNAL_SENTENCE = "From someone without admin or maintain access. Read it before approving.";
+// An issue opened by one of our own agent runs (the server sets `origin` from the platform's bot logins). Fixed text; it changes nothing about who decides.
+export const AGENT_RUN_SENTENCE = "Opened by a fulcrumaxe agent run. A person decides.";
 export const PARTLY_SENTENCE = "Part of this was confirmed. Read the parts that weren't before you approve it.";
 export const NOT_CHECKED_SENTENCE = "Not checked yet: add a model key or connect a runner";
 export const BEING_CHECKED_SENTENCE = "You can approve this once it's been checked.";
@@ -739,10 +741,17 @@ export function evidenceLabel(e) {
   return e.kind === "doc_passage" ? { label: "From " + m[1] + ", " + where, commit: "" } : { label: m[1] + ", " + where, commit: sha ? "at commit " + sha : "" };
 }
 
+/** The check lines a row shows: all of them while it is new; once decided only the two about where it came from, and none for the loop's own items. */
+export function rowCheckSentences(p) {
+  if (p.owner_process === "internal_loop") return [];
+  return checkSentences(p).filter((s) => p.state === "new" || s === EXTERNAL_SENTENCE || s === AGENT_RUN_SENTENCE);
+}
+
 /** The sentences under a new proposal about where it came from and how its check went, from its own fields. */
 export function checkSentences(p) {
   const out = [];
   if (p.provenance === "external") out.push(EXTERNAL_SENTENCE);
+  if (p.origin === "agent_run") out.push(AGENT_RUN_SENTENCE);
   if (p.verification === "partly_verified") out.push(PARTLY_SENTENCE);
   if (p.verification === "check_failed") {
     const s = p.verify_retry === true ? RETRY_SENTENCE : spentSentence(p.verify_attempts_max);
@@ -1352,7 +1361,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     const details = detailsFor(p);
     const badges = badgesFor(p);
     const open = opened.has(p.id);
-    const checks = p.owner_process === "internal_loop" ? [] : checkSentences(p).filter((s) => p.state === "new" || s === EXTERNAL_SENTENCE);
+    const checks = rowCheckSentences(p);
     return h(
       "li",
       { class: "pl-inbox-row", "data-testid": "pl-inbox-row", "data-id": p.id, "data-state": p.state },

@@ -21,6 +21,7 @@ import { wakePlaneParity } from "../../../../lib/planeParityWake";
 import { wakeRepoInstructionImport, wakeRepoInstructionImportOnConnect } from "../../../../lib/repoInstructionWake";
 import { intakeAllowlist } from "../../../../lib/github/intakeTrust";
 import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermission";
+import { platformBotLogins } from "../../../../lib/github/authorTrust";
 import { repoHasEngineLoop } from "../../../../lib/github/repoHasEngineLoop";
 import { issueHasLabel, senderPermission } from "../../../../lib/github/senderPermission";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
@@ -127,6 +128,7 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
     },
     allowlist: intakeAllowlist() ?? undefined,
     issueAuthorPermission,
+    botLogins: () => platformBotLogins(),
     senderPermission,
     issueHasLabel,
     repoHasEngineLoop,

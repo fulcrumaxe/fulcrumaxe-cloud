@@ -6,6 +6,7 @@ import { createGithubReposJob, type ReconcileJob, type ReportError } from "@fx/r
 import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/api/gh-proxy/[...path]/handler";
 import { intakeAllowlist } from "./intakeTrust";
 import { issueAuthorPermission } from "./issueAuthorPermission";
+import { platformBotLogins } from "./authorTrust";
 import { repoHasEngineLoop } from "./repoHasEngineLoop";
 import { buildRepoSyncDeps } from "./repoSync";
 
@@ -52,7 +53,7 @@ export function githubReposJobFromEnv(
     importIssues: async (target, gate) => {
       const out = await importMissedIssues(
         {
-          webhook: { appUserPool: appUserPool(), platformOpsPool, allowlist: intakeAllowlist() ?? undefined, issueAuthorPermission, repoHasEngineLoop },
+          webhook: { appUserPool: appUserPool(), platformOpsPool, allowlist: intakeAllowlist() ?? undefined, issueAuthorPermission, botLogins: () => platformBotLogins(), repoHasEngineLoop },
           appCredentials: credentials,
           requester: buildAccessTokenRequester({ resolveUpstream: (host, lookupFn) => resolveChecked(host, lookupFn), forwardPinned: nodeHttpsPinnedRequester }),
           cache: issueImportCache,

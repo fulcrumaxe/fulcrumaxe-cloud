@@ -6,7 +6,7 @@
 // survives an unknown outcome only.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiFailure, api } from "../apps/_lib/api.js";
-import { DETAIL_FAILED_SENTENCE, DETAIL_PENDING_SENTENCE, NOT_CHECKED_SENTENCE, VERIFY_WAIT_SENTENCES, unfinishedCheckLine, approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, amountPlaceholder, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
+import { DETAIL_FAILED_SENTENCE, DETAIL_PENDING_SENTENCE, NOT_CHECKED_SENTENCE, VERIFY_WAIT_SENTENCES, unfinishedCheckLine, approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, amountPlaceholder, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, rowCheckSentences, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
 
 const BAD = /\b(null|undefined|NaN|\[object)/;
 const base = { id: "p1", title: "Add dark mode", state: "new", sources: ["github_issue"], gh_number: 12, discussion_number: null, task_key: null, category_hint: null, estimate_usd: null, milestone_key: null, milestone_title: null };
@@ -51,9 +51,26 @@ describe("S4-h: the check on a proposal", () => {
     expect(evidenceLabel({ kind: "issue", ref: "twelve" }).label).toBe("twelve");
     expect(evidenceLabel({ kind: "issue" }).label).toBe("");
   });
+  it("a decided row keeps only the two lines about where it came from, and the loop's own items none", () => {
+    const AGENT = "Opened by a fulcrumaxe agent run. A person decides.";
+    const EXT = "From someone without admin or maintain access. Read it before approving.";
+    for (const state of ["approved", "rejected", "withdrawn"]) {
+      expect(rowCheckSentences({ state, origin: "agent_run", verification: "partly_verified" })).toEqual([AGENT]);
+      expect(rowCheckSentences({ state, provenance: "external", origin: "agent_run", verification: "check_failed", verify_retry: true })).toEqual([EXT, AGENT]);
+      expect(rowCheckSentences({ state, verification: "partly_verified" })).toEqual([]);
+    }
+    expect(rowCheckSentences({ state: "new", origin: "agent_run", verification: "partly_verified" })).toEqual([AGENT, "Part of this was confirmed. Read the parts that weren't before you approve it."]);
+    expect(rowCheckSentences({ state: "new", owner_process: "internal_loop", origin: "agent_run" })).toEqual([]);
+    expect(rowCheckSentences({ state: "approved", owner_process: "internal_loop", origin: "agent_run" })).toEqual([]);
+  });
+
   it("checkSentences speaks from the row's own fields only", () => {
     expect(checkSentences({ provenance: "internal", verification: "verified" })).toEqual([]);
     expect(checkSentences({ provenance: "external", verification: "verified" })).toEqual(["From someone without admin or maintain access. Read it before approving."]);
+    expect(checkSentences({ provenance: "external", origin: "agent_run", verification: "verified" })).toEqual(["From someone without admin or maintain access. Read it before approving.", "Opened by a fulcrumaxe agent run. A person decides."]);
+    expect(checkSentences({ provenance: "external", origin: "other", verification: "verified" })).toEqual(["From someone without admin or maintain access. Read it before approving."]);
+    expect(checkSentences({ provenance: "external", verification: "verified" })).toEqual(["From someone without admin or maintain access. Read it before approving."]);
+    expect(checkSentences({ origin: "bot", verification: "verified" })).toEqual([]);
     expect(checkSentences({ verification: "partly_verified" })).toEqual(["Part of this was confirmed. Read the parts that weren't before you approve it."]);
     expect(checkSentences({ verification: "check_failed", verify_retry: true, verify_attempts_max: 3 })).toEqual(["The check didn't finish. We'll try again at the next check."]);
     expect(checkSentences({ verification: "check_failed", verify_retry: false, verify_attempts_max: 3 })).toEqual(["The check didn't finish after 3 tries, so this proposal stays unconfirmed."]);

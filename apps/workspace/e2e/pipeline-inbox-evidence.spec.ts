@@ -93,9 +93,17 @@ test.describe("D#483 S4-h: the line about a proposal's check", () => {
       proposal(3, { verification: "check_failed", verify_attempts: 2, verify_retry: true, title: "Will retry" }),
       proposal(4, { verification: "check_failed", verify_attempts: 3, verify_retry: false, title: "Spent" }),
       proposal(5, { verification: "refuted", title: "Refuted" }),
+      proposal(6, { provenance: "external", origin: "agent_run", title: "Our agent" }),
     ];
     const { errors } = await start(page, m);
     await expect(rows(page).filter({ hasText: "From outside" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("From someone without admin or maintain access. Read it before approving.");
+    // One of our own agent runs: the outside-author line stays and one more is added; Approve is not taken away.
+    await expect(rows(page).filter({ hasText: "Our agent" }).locator('[data-testid="pl-inbox-check"]')).toHaveText([
+      "From someone without admin or maintain access. Read it before approving.",
+      "Opened by a fulcrumaxe agent run. A person decides.",
+    ]);
+    await expect(rows(page).filter({ hasText: "Our agent" }).locator('[data-testid="pl-inbox-approve"]')).toHaveAttribute("aria-disabled", "false");
+    await expect(rows(page).filter({ hasText: "From outside" }).getByText("Opened by a fulcrumaxe agent run.")).toHaveCount(0);
     await expect(rows(page).filter({ hasText: "Partly" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("Part of this was confirmed. Read the parts that weren't before you approve it.");
     await press(page, filter(page, "couldnt_confirm"));
     await expect(rows(page).filter({ hasText: "Will retry" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("The check didn't finish. We'll try again at the next check.");
@@ -103,6 +111,25 @@ test.describe("D#483 S4-h: the line about a proposal's check", () => {
     await expect(rows(page).filter({ hasText: "Refuted" }).locator('[data-testid="pl-inbox-check"]')).toHaveCount(0);
     // Approve stays open for a proposal that could not be confirmed: the person reads it and decides.
     await expect(rows(page).filter({ hasText: "Refuted" }).locator('[data-testid="pl-inbox-approve"]')).toHaveAttribute("aria-disabled", "false");
+    await axeClean(page);
+    await clean(page, errors);
+  });
+
+  test("a decided proposal opened by an agent run keeps its origin line and drops the check lines", async ({ page }) => {
+    const m = newMock();
+    const decided = { decided_at: "2026-10-16T06:05:00.000Z" };
+    m.proposals = [
+      proposal(1, { state: "approved", ...decided, roadmap_position: 1, origin: "agent_run", verification: "partly_verified", title: "Agent approved" }),
+      proposal(2, { state: "approved", ...decided, roadmap_position: 2, verification: "partly_verified", title: "Plain approved" }),
+      proposal(3, { state: "rejected", ...decided, reject_note: "Not now", origin: "agent_run", title: "Agent rejected" }),
+    ];
+    const { errors } = await start(page, m);
+    await press(page, filter(page, "approved"));
+    await expect(rows(page)).toHaveCount(2);
+    await expect(rows(page).filter({ hasText: "Agent approved" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("Opened by a fulcrumaxe agent run. A person decides.");
+    await expect(rows(page).filter({ hasText: "Plain approved" }).locator('[data-testid="pl-inbox-check"]')).toHaveCount(0);
+    await press(page, filter(page, "rejected"));
+    await expect(rows(page).filter({ hasText: "Agent rejected" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("Opened by a fulcrumaxe agent run. A person decides.");
     await axeClean(page);
     await clean(page, errors);
   });

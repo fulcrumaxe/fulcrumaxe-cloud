@@ -27,7 +27,7 @@ import { isLabelPermission, setProposalOwnerFromLabel, type LabelPermission } fr
 import { labelNeedsIntake, productLabelDelivery } from './productLabel.js';
 import { markWorkPending } from '@fx/core/src/pendingWork.js';
 import { CHILD_BINDING_KIND, CHILD_BINDING_PR_KIND, recordChildPullRequest } from '@fx/runner';
-import { applyIssueChange, fencedIssueSummary, proposalTitle, proposeFromIssue, type IssueChange, type ProposeOutcome } from './issueProposal.js';
+import { applyIssueChange, fencedIssueSummary, proposalOrigin, proposalTitle, proposeFromIssue, type IssueChange, type ProposalOrigin, type ProposeOutcome } from './issueProposal.js';
 
 /**
  * D#2 H13a body criterion 2: the 8 events this webhook handles.
@@ -244,6 +244,10 @@ export interface ProposeIssueEvent {
   owner?: 'product' | 'internal_loop';
   /** D#483: set when a maintainer's product label brought this issue in; the proposal is then owned by the product even if one already exists. */
   labelPermission?: LabelPermission;
+  /** The issue author's login from the payload. Used only to decide `origin`; never stored. */
+  authorLogin?: string | null;
+  /** Filled in by the delivery: `agent_run` only when the author is one of the platform App's own bot logins. Absent means `other`. */
+  origin?: ProposalOrigin;
 }
 
 /** D#483: a maintainer or admin applied or removed the product label on an issue that already has a proposal or work item; the move is the definer's (proposal_owner_from_label). */
@@ -443,7 +447,7 @@ export function mapEvent(
       );
       if (!allowed) {
         // D#483 S4-d: an author without admin or maintain permission (by the permission lookup, never the association text) is a proposal.
-        return { kind: 'propose_issue', ghNumber: n, title: proposalTitle(p.issue.title, n), summary: fencedIssueSummary(p.issue.body) };
+        return { kind: 'propose_issue', ghNumber: n, title: proposalTitle(p.issue.title, n), summary: fencedIssueSummary(p.issue.body), authorLogin: p.issue.user?.login ?? null };
       }
       return { kind: 'create_work_item', workItemKind: 'issue', ghNumber: n, title: cleanWorkItemTitle(p.issue.title), trust, canCreateWork: allowed };
     }
@@ -932,7 +936,7 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
     case 'propose_issue': {
       // Never reached without an owner: the delivery resolves it (a read of the repository) or ignores the event.
       if (!mapped.owner) return { applied: 'skipped', reason: 'issue.opened: owner process unknown, left for the next discovery' };
-      const out: ProposeOutcome = await proposeFromIssue(client, ctx.accountId, ctx.repoId, { ghNumber: mapped.ghNumber, title: mapped.title, summary: mapped.summary, owner: mapped.owner });
+      const out: ProposeOutcome = await proposeFromIssue(client, ctx.accountId, ctx.repoId, { ghNumber: mapped.ghNumber, title: mapped.title, summary: mapped.summary, owner: mapped.owner, origin: mapped.origin });
       if (out.outcome === 'proposal_rate_limited') return { applied: 'proposal_rate_limited' };
       // A proposal that already existed (an `opened` that landed first) keeps its owner on conflict; the label's hand-over still applies to it.
       const moved = mapped.labelPermission && !out.created ? await setProposalOwnerFromLabel(client, ctx.repoId, mapped.ghNumber, 'product', mapped.labelPermission) : false;
@@ -1155,6 +1159,12 @@ export interface GithubWebhookDbDeps {
    * the proposal is not written now and the next discovery reads the issue.
    */
   repoHasEngineLoop?: (input: { repoId: string; owner: string; name: string }) => Promise<boolean>;
+  /**
+   * The login of every GitHub App bot this platform runs (the merge gate's source, platformBotLogins). Asked only for an issue that is about to
+   * become a proposal, to label one opened by our own agent runs. Absent, or any failure: no label (the proposal is `other`); trust, verification
+   * and the dial never read it.
+   */
+  botLogins?: () => Promise<readonly string[]>;
   /** D#483: the real permission of the person who applied or removed the product label, asked for that one delivery and never stored. Absent, or a failure: the label is not honoured. */
   senderPermission?: (input: { repoId: string; owner: string; name: string; login: string }) => Promise<RepoPermission>;
   /** D#483: whether the issue has the label now (a live read). A label delivery acts only if this agrees with its action, so a replayed old payload moves nothing. Absent, or a failure: the label is not honoured. */
@@ -1326,6 +1336,7 @@ export async function handleGithubWebhookEvent(
 
   let mapped = mapEvent(intakeName, intakePayload, { allowlist: deps.allowlist ?? [], allowWritePermission: deps.allowWritePermission, authorPermission, labelSenderPermission: labelPermission });
   if (mapped.kind === 'propose_issue') mapped = await withProposalOwner(deps, tenant.repoId, repoOwner, repoName, mapped, labelIntake ? labelPermission : null);
+  if (mapped.kind === 'propose_issue') mapped = { ...mapped, origin: await proposalOrigin(mapped.authorLogin, deps.botLogins, deps.warn) };
 
   const result = await withTenant(deps.appUserPool, tenant.accountId, (client) =>
     applyMappedEvent(
