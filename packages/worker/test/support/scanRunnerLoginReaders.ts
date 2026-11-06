@@ -110,6 +110,14 @@ export const PROVISIONERS: readonly string[] = [
 export const NAMES_ONLY: readonly string[] = [path.join("apps", "web", "env-manifest.ts")];
 
 /**
+ * The only files outside the worker package and its own tests that may import a worker-internal module, and only because each tests
+ * key material it generates against the product's own signer code, offline. Neither module read here (`gitTicketSigner.ts`) touches
+ * the runner-login or receipt-login variable; this exception reaches only the "imports/re-exports a worker internal module" check
+ * below, never the others, so a file here that also names or reads either variable is still a violation.
+ */
+export const WORKER_IMPORT_ALLOWED: readonly string[] = [path.join("scripts", "ops", "git-ticket-keys-setup.test.mjs")];
+
+/**
  * A STRUCTURAL ALLOW-LIST for a file that may only name variables. Returns why `text` is not such a
  * file; an empty list means it is. Nothing is banned by word. A file passes only if every top-level
  * statement is one of:
@@ -413,7 +421,7 @@ export function scanRunnerLoginReaders(root: string): string[] {
         if (bad) found.push(`${rel}: ${bad}`);
         continue;
       }
-      const why = violationIn(source, rel.startsWith(WORKER_DIR), top === "apps");
+      const why = violationIn(source, rel.startsWith(WORKER_DIR) || WORKER_IMPORT_ALLOWED.includes(rel), top === "apps");
       if (why) found.push(`${rel}: ${why}`);
     }
   }

@@ -102,11 +102,18 @@ const FAILED_FILE = /(?:^|[\s:])(?:FAIL {1,3}(?:\|[^|\s]+\|\s+)?|FAILED +)(\S+?\
 /** How many failed test files, and how many bytes of their names, the summary names. */
 const FAILED_FILES_MAX = 40;
 const FAILED_FILES_BYTES = 1500;
+/**
+ * How many *different* failed-file names are remembered for counting (far more than `FAILED_FILES_MAX`, which is only how many are named). `line()` is fed the
+ * check's whole, untrusted output, so this must stay a fixed bound: past it, a further new name is counted in `more` rather than remembered, so a reprint of it
+ * can be counted twice (same as a name never remembered at all).
+ */
+const FAILED_FILES_COUNTED = 1000;
 
 /**
  * Picks the failed test files out of the whole output of a check, line by line as it arrives (the summary keeps only the end of the output, and a long run's failures
  * are printed far above it). Closed shape: only a plain relative file name (`NAMED_FILE`, the workspace prefix removed first) is ever kept, first-seen order, at most
- * `FAILED_FILES_MAX` of them; the rest are counted.
+ * `FAILED_FILES_COUNTED` of them; the rest are counted. `summary()` names only the first `FAILED_FILES_MAX` of the remembered names, and `list()` only its own first
+ * `CHECK_FAILED_FILES_MAX`, so a different name is counted once whether or not it is among the names shown.
  */
 export function createFailedFiles(workspace: string): { line: (text: string) => void; summary: () => string; list: () => { files: string[]; more: number } } {
   const seen = new Set<string>();
@@ -118,7 +125,7 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
       let file = match[1] ?? "";
       if (file.startsWith(`${workspace}/`)) file = file.slice(workspace.length + 1);
       if (!NAMED_FILE.test(file) || seen.has(file)) return;
-      if (seen.size < FAILED_FILES_MAX) seen.add(file);
+      if (seen.size < FAILED_FILES_COUNTED) seen.add(file);
       else more += 1;
     },
     /**
@@ -139,6 +146,7 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
       const shown: string[] = [];
       let bytes = 0;
       for (const file of seen) {
+        if (shown.length >= FAILED_FILES_MAX) break;
         const name = redactShapes(file);
         bytes += Buffer.byteLength(name) + 2;
         if (bytes > FAILED_FILES_BYTES) break;

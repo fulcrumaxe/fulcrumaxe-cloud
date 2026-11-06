@@ -4,6 +4,7 @@ import {
   NAMES_ONLY,
   PROVISIONERS,
   SCANNED_TOPS,
+  WORKER_IMPORT_ALLOWED,
   fold,
   listFiles,
   namesOnlyViolations,
@@ -102,7 +103,7 @@ export function scanReceiptLoginReaders(root: string): string[] {
         if (bad) found.push(`${rel}: ${bad}`);
         continue;
       }
-      const why = receiptViolationIn(source, rel.startsWith(WORKER_DIR), top === "apps");
+      const why = receiptViolationIn(source, rel.startsWith(WORKER_DIR) || WORKER_IMPORT_ALLOWED.includes(rel), top === "apps");
       if (why) found.push(`${rel}: ${why}`);
     }
   }

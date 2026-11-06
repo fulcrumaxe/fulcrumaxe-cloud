@@ -173,6 +173,25 @@ describe("the failed test files the summary names", () => {
     expect(Buffer.byteLength(line)).toBeLessThan(1700);
   });
 
+  it("names exactly 40 of many short names, past the byte budget, and counts the rest", () => {
+    const found = createFailedFiles("/w");
+    for (let i = 0; i < 120; i += 1) found.line(` FAIL  pkg/f${String(i)}.test.ts > t`);
+    const line = found.summary();
+    expect(line.startsWith("failed test files (120): ")).toBe(true);
+    expect(line.match(/, /g)).toHaveLength(39);
+    expect(line).toMatch(/\(and 80 more\)\n$/);
+  });
+
+  it("a file printed again past the 40 named is counted once, not once per print", () => {
+    const found = createFailedFiles("/w");
+    for (let i = 0; i < 45; i += 1) found.line(` FAIL  pkg/f${String(i)}.test.ts > t`);
+    for (let i = 40; i < 45; i += 1) found.line(` FAIL  pkg/f${String(i)}.test.ts > t again`);
+    const line = found.summary();
+    expect(line.startsWith("failed test files (45): ")).toBe(true);
+    expect(line.match(/, /g)).toHaveLength(39);
+    expect(line).toMatch(/\(and 5 more\)\n$/);
+  });
+
   it("the capture hands over whole lines: one cut across two chunks is joined, a last line without a newline is not, and each stream has its own cut", async () => {
     const got: string[] = [];
     const file = script("cut.sh", `printf 'first '; sleep 0.3; printf 'half\\nsecond\\n'; printf 'err ' >&2; sleep 0.3; printf 'half\\n' >&2; printf 'no newline'`);
@@ -207,17 +226,39 @@ describe("the failed test files as a list for done (protocol 13)", () => {
     expect(more).toBe(27 - 20);
   });
 
-  it("a name that holds a credential shape is never listed (the cloud's reader accepts such a name, so this is the only defence) and is counted in the rest", () => {
+  it("a file printed again past the 20 listed is counted once, not once per print", () => {
+    const found = createFailedFiles("/w");
+    for (let i = 0; i < 45; i += 1) found.line(` FAIL  pkg/f${String(i)}.test.ts > t`);
+    for (let i = 40; i < 45; i += 1) found.line(` FAIL  pkg/f${String(i)}.test.ts > t again`);
+    const { files, more } = found.list();
+    expect(files).toHaveLength(20);
+    expect(more).toBe(25);
+  });
+
+  it("a name that holds a credential shape is never listed (the cloud's reader accepts such a name, so this is the only defence) and is counted once in the rest, however often it was printed", () => {
     // Built at run time from short repeats that match the runner's patterns (redact.ts), so no long random-looking literal sits in the source.
     const ghp = `ghp_${"a1".repeat(18)}`;
     const ant = `sk-ant-api03-${"ab".repeat(8)}`;
     const aws = `AKIA${"1A".repeat(8)}`;
     const found = createFailedFiles("/w/space");
     found.line(" FAIL  pkg/ok.test.ts > t");
-    for (const secret of [ghp, ant, aws]) found.line(` FAIL  pkg/${secret}/leak.test.ts > t`);
+    for (const secret of [ghp, ant, aws]) {
+      found.line(` FAIL  pkg/${secret}/leak.test.ts > t`);
+      found.line(` FAIL  pkg/${secret}/leak.test.ts > t again`);
+    }
     const { files, more } = found.list();
     expect(files).toEqual(["pkg/ok.test.ts"]);
     expect(more).toBe(3);
+  });
+
+  it("remembers at most a bounded number of different names for counting, so untrusted output cannot grow it without limit, and still returns", () => {
+    const found = createFailedFiles("/w");
+    for (let i = 0; i < 1005; i += 1) found.line(` FAIL  pkg/f${String(i)}.test.ts > t`);
+    const line = found.summary();
+    const total = Number(/\((\d+)\):/.exec(line)?.[1]);
+    expect(total).toBeGreaterThanOrEqual(1000);
+    const { more } = found.list();
+    expect(more).toBeGreaterThanOrEqual(1000 - 20);
   });
 
   it("a failing check sends them in the body; a passing check, and a failure that printed no test file, send none", async () => {
