@@ -146,14 +146,17 @@ export const CLONE_PINNED_SCRIPT = [
 
 /**
  * CX7-FOLLOWUPS: the conflict round deepens the clone to full history after the clone's own size watch has ended. This is the same watch (`SIZE_WATCH` and `SIZE_CHECK` above) over
- * that fetch, as one line an agent can run with `sh -c`: `$1` is the limit in KiB, the rest are the fetch's refspecs. Over the limit the fetch is killed, the checkout is removed and the
+ * that fetch, as one line an agent can run with `sh -c`: `$1` is the limit in KiB, the rest are the fetch's refspecs (a limit that is not 1 to 15 digits exits 2 before anything is fetched). Over the limit the fetch is killed, the checkout is removed and the
  * exit code is `CLONE_EXIT_TOO_LARGE`, as for an oversize clone. No single quote may appear in it: the prompt wraps it in single quotes.
  */
 export const DEEPEN_SCRIPT = [
   'dir=$(git rev-parse --show-toplevel) || exit $?',
   'max=$1',
+  // The limit must be plain digits, at most 15 of them: anything else would make the `-gt` tests below fail or error, and a size watch that cannot trip is no watch.
+  'case "$max" in ""|*[!0-9]*|????????????????*) exit 2 ;; esac',
   'shift',
-  'git fetch --depth=2147483647 origin "$@" &',
+  // `--` ends the options, so a refspec that starts with a dash is a refspec (git then refuses it) and never an option such as `--upload-pack`.
+  'git fetch --depth=2147483647 -- origin "$@" &',
   'pid=$!',
   'while kill -0 "$pid" 2>/dev/null; do kb=$(du -sk "$dir" 2>/dev/null | cut -f1); if [ "${kb:-0}" -gt "$max" ]; then kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$dir"; exit ' +
     `${CLONE_EXIT_TOO_LARGE}; fi; sleep 1; done`,

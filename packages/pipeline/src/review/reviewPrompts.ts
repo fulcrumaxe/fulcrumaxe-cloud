@@ -430,6 +430,8 @@ export interface ConflictPromptInput {
  * and, unlike it, is also accepted on a clone that is already complete). A renumber round merges nothing, so it fetches no more than it did. Never a force, never unrelated histories.
  */
 export function checkoutBranchCommand(branch: string, baseRef: string, headSha: string, fullHistory: boolean, maxKb: number = MAX_CLONE_KB): string {
+  // The limit goes into a shell command, and a value the script cannot compare would leave its size watch unable to trip.
+  if (!Number.isSafeInteger(maxKb) || maxKb <= 0) throw new Error("checkoutBranchCommand: the size limit must be a positive integer");
   const refspecs = `"+refs/heads/${branch}:refs/remotes/origin/${branch}" "+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}"`;
   // The deepening fetch runs after the clone's own size watch has ended, so it carries the same watch and limit (`DEEPEN_SCRIPT`); over it the checkout is removed and the exit code is 87.
   const fetch = fullHistory ? `sh -c '${DEEPEN_SCRIPT}' fx-deepen ${maxKb} ${refspecs}` : `git fetch origin ${refspecs}`;
