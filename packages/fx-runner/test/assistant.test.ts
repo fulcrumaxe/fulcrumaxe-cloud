@@ -9,6 +9,10 @@ import { ASSISTANT_DIR, TOKEN_FILE, readAssistantToken, writeAssistantToken } fr
 import { saveRegistration } from "../src/config.js";
 import { cleanEnv } from "../src/job/cleanEnv.js";
 import { startAssistantCloud, tlsFetch, type AssistantCloud } from "./helpers/assistantCloud.js";
+import { unixSocketsRefused } from "./helpers/needsHostSockets.js";
+
+/** The proxy listens on a Unix socket; inside the runner's check or a job the sandbox refuses that family, so the tests that start it skip there and run everywhere else. */
+const itProxy = unixSocketsRefused() ? it.skip : it;
 
 const UID = process.getuid!();
 const ITEM = "44444444-4444-4444-8444-444444444444";
@@ -137,7 +141,7 @@ describe("CC-7a-4 the link flow against the strict cloud fake, over real TLS", (
 });
 
 describe("unlink, the undo path", () => {
-  it("revokes the token on the cloud, then removes the file; the proxy then has nothing to use", async () => {
+  itProxy("revokes the token on the cloud, then removes the file; the proxy then has nothing to use", async () => {
     await link(0);
     cloud.seen.length = 0;
     const r = await run(["assistant", "unlink"]);
@@ -203,7 +207,7 @@ describe("hardening", () => {
     expect(readdirSync(state).filter((n) => n.startsWith("assistant-proxy-"))).toEqual([]);
   });
 
-  it("logs a fixed code and closes cleanly when the server fails after it started", async () => {
+  itProxy("logs a fixed code and closes cleanly when the server fails after it started", async () => {
     const lines: string[] = [];
     proxy = await startProxy({ stateDir: state, uid: UID, fetchFn: tlsFetch(cloud.ca), now: () => new Date(clock), log: (l) => lines.push(l) });
     const dir = path.dirname(proxy.socketPath);
@@ -243,7 +247,7 @@ describe("CC-7a-3 the token file", () => {
     expect(() => writeAssistantToken(state, UID, stored())).toThrow(/assistant_token_unsafe/);
   });
 
-  it("says missing when nothing is stored, a damaged file is unsafe, and the proxy refuses on either without calling the cloud", async () => {
+  itProxy("says missing when nothing is stored, a damaged file is unsafe, and the proxy refuses on either without calling the cloud", async () => {
     expect(() => readAssistantToken(state, UID)).toThrow(/assistant_token_missing/);
     writeAssistantToken(state, UID, stored());
     writeFileSync(path.join(state, ASSISTANT_DIR, TOKEN_FILE), "not json", { mode: 0o600 });
@@ -261,7 +265,7 @@ describe("CC-7a-2 the proxy allowlist", () => {
     expect([...ALLOWED_TOOLS]).toEqual(["list_corrections", "draft_correction", "get_item", "get_run_activity", "get_run", "get_run_events", "get_plan", "get_receipts"]);
   });
 
-  it("refuses every other tool name locally; the cloud receives 0 requests", async () => {
+  itProxy("refuses every other tool name locally; the cloud receives 0 requests", async () => {
     await link(0);
     cloud.seen.length = 0;
     const p = await startP();
@@ -274,7 +278,7 @@ describe("CC-7a-2 the proxy allowlist", () => {
     expect(cloud.seen).toHaveLength(0);
   });
 
-  it("refuses a request without the session secret, and a path other than /tool", async () => {
+  itProxy("refuses a request without the session secret, and a path other than /tool", async () => {
     await link(0);
     cloud.seen.length = 0;
     const p = await startP();
@@ -286,7 +290,7 @@ describe("CC-7a-2 the proxy allowlist", () => {
     expect(cloud.seen).toHaveLength(0);
   });
 
-  it("lists corrections and drafts one through the real routes, adding the token itself", async () => {
+  itProxy("lists corrections and drafts one through the real routes, adding the token itself", async () => {
     await link(0);
     cloud.seen.length = 0;
     const p = await startP();
@@ -304,7 +308,7 @@ describe("CC-7a-2 the proxy allowlist", () => {
 });
 
 describe("CC-7a-6 a dead token", () => {
-  it("answers re-link on a 401 and sends nothing more with that token; a new link works again", async () => {
+  itProxy("answers re-link on a 401 and sends nothing more with that token; a new link works again", async () => {
     await link(0);
     cloud.seen.length = 0;
     const p = await startP();
@@ -321,7 +325,7 @@ describe("CC-7a-6 a dead token", () => {
     expect((await toolCall(p, "list_corrections", { work_item_id: ITEM })).status).toBe(200);
   });
 
-  it("answers re-link without calling the cloud once the token's own time has passed", async () => {
+  itProxy("answers re-link without calling the cloud once the token's own time has passed", async () => {
     await link(0);
     cloud.seen.length = 0;
     const p = await startP();
@@ -332,7 +336,7 @@ describe("CC-7a-6 a dead token", () => {
 });
 
 describe("CC-7a-1 and CC-7a-5 the real child process, and every request body", () => {
-  it("never holds the token in its environment, argv or any file under its working directory, and no request body carries the transcript", async () => {
+  itProxy("never holds the token in its environment, argv or any file under its working directory, and no request body carries the transcript", async () => {
     await link(0);
     cloud.seen.length = 0;
     const token = cloud.issuedToken()!;

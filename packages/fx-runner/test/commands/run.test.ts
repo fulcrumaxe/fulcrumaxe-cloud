@@ -28,7 +28,7 @@ import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { KEY_ID, KEYRING, OTHER_KEYRING, signedJob } from "../helpers/signedJob.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
-import { testLaunch } from "../helpers/launch.js";
+import { shellSandboxUsable, testLaunch } from "../helpers/launch.js";
 import { VERCEL_PROTECTED_BODY } from "../helpers/vercelProtected.js";
 
 let root: string;
@@ -87,7 +87,7 @@ type Signals = EventEmitter & RunHost["signals"];
 const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
-const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch() }), sandbox: fakeSandboxHost() });
+const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost() });
 
 /** A machine with room for everything: the composed-daemon tests are about other things than this machine's free memory. */
 const GB = 1024 ** 3;
@@ -425,7 +425,7 @@ describe("1-cwd. the daemon leaves the directory it was started in before it sta
       order.push(`spawn ${path.basename(command)}`);
       return (spawn as unknown as (...args: unknown[]) => ReturnType<typeof spawn>)(command, ...rest);
     }) as typeof spawn;
-    const run = start({ host: { chdir: (dir) => order.push(`chdir ${dir}`), engine: createClaudeKit(counting, { launch: testLaunch() }) } });
+    const run = start({ host: { chdir: (dir) => order.push(`chdir ${dir}`), engine: createClaudeKit(counting, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }) } });
     await until(() => claims() >= 1);
     const daemonDir = path.join(home, ".cache", "fx-runner", "launch", "daemon");
     expect(order[0]).toBe(`chdir ${realpathSync(daemonDir)}`);
@@ -751,7 +751,7 @@ describe("5. the composed daemon: a signal stops the job within 5 seconds and re
 describe("6b. the instruction-file canary holds claiming (D#601 MEM-7)", () => {
   const claimBodies = (): unknown[] => cloud.seen.filter((s) => s.path === "/api/runner/claim").map((s) => s.body);
   const withCanary = (result: { ok: true } | { ok: false; reason: "instruction_file_loaded" }): Partial<RunHost> => ({
-    engine: { ...createClaudeKit(spawn, { launch: testLaunch() }), instructionCanary: async () => result, instructionCanaryKey: () => "test-key" },
+    engine: { ...createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), instructionCanary: async () => result, instructionCanaryKey: () => "test-key" },
   });
 
   it("a build that loads the file: the claim declares no room, a job the cloud hands over anyway is refused unstarted, the named reason is said and stored for `status`", async () => {
