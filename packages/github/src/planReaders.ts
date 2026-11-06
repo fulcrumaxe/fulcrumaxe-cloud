@@ -62,6 +62,45 @@ export async function readRepoFile(client: PlanReadClient, repo: RepoRef, path: 
   return res.text;
 }
 
+/** The largest contents answer read for an instruction file. A file over it is `plan_file_too_large`; the importer itself keeps only the first 32 KiB. */
+export const INSTRUCTION_FILE_READ_BYTES = 1_500_000;
+
+export interface InstructionFileRead {
+  /** The blob sha GitHub reports for the file at that commit. */
+  sha: string;
+  text: string;
+}
+
+/**
+ * D#601 MEM-5: a regular file at a commit, with its blob sha, through the contents API (the object media type, which carries both). Null when the path is missing, is
+ * not a regular file (a directory, a symlink and a submodule also answer 200), or has no inline content. Anything else GitHub says is a throw, never "no file".
+ */
+export async function readRepoInstructionFile(client: PlanReadClient, repo: RepoRef, path: string, ref: string): Promise<InstructionFileRead | null> {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  const res = await client.request({
+    method: "GET",
+    path: `/repos/${repo.owner}/${repo.name}/contents/${encoded}`,
+    query: { ref },
+    accept: "application/vnd.github.object+json",
+    maxBytes: INSTRUCTION_FILE_READ_BYTES,
+  });
+  if (res.status === 404) return null;
+  if (res.status !== 200) return unexpected();
+  let o: unknown;
+  try {
+    o = JSON.parse(res.text);
+  } catch {
+    // fx-swallow-ok: a non-JSON answer is GitHub misbehaving; it is one fixed code, not a missing file
+    return unexpected();
+  }
+  if (!isRecord(o)) return unexpected();
+  if (o.type !== "file") return null;
+  if (o.encoding !== "base64" || typeof o.content !== "string" || typeof o.sha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(o.sha)) return null;
+  const b64 = o.content.replace(/\n/g, "");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) return unexpected();
+  return { sha: o.sha, text: Buffer.from(b64, "base64").toString("utf8") };
+}
+
 export interface PullSummary {
   number: number;
   title: string;
