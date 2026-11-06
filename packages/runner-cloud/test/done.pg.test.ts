@@ -37,6 +37,11 @@ describe("done route [pg]", () => {
   let begin: Awaited<ReturnType<RunnerLeaseOps["beginRunnerDone"]>> = { kind: "proceed" };
   let finish: "echo" | Awaited<ReturnType<RunnerLeaseOps["finishRunnerDone"]>> = "echo";
   const handed: Array<Record<string, unknown>> = [];
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: the stand-in for the worker's refusal record; `onNote` runs at the moment the route calls it (before the private pull request is closed).
+  const noted: Array<Record<string, unknown>> = [];
+  let note: Awaited<ReturnType<NonNullable<RunnerLeaseOps["noteScopeRefusal"]>>> = { kind: "noted", publicPr: null };
+  let onNote: (() => void) | null = null;
+  let withNote = true;
   let handoff: Awaited<ReturnType<NonNullable<RunnerLeaseOps["completeHandoffOnDone"]>>> = { kind: "none" };
   const never = async () => {
     throw new Error("not used by these tests");
@@ -50,6 +55,12 @@ describe("done route [pg]", () => {
     beginRunnerDone: async (input) => (begun.push({ ...input }), begin),
     finishRunnerDone: async (input) => (finished.push({ ...input }), finish === "echo" ? { kind: "recorded", verdict: input.verdict } : finish),
     completeHandoffOnDone: async (input) => (handed.push({ ...input }), handoff),
+    noteScopeRefusal: async (input) => (onNote?.(), noted.push({ ...input }), note),
+  };
+  const leasesWithoutNote = (): RunnerLeaseOps => {
+    const rest: RunnerLeaseOps = { ...leases };
+    delete rest.noteScopeRefusal;
+    return rest;
   };
 
   beforeAll(async () => {
@@ -68,6 +79,10 @@ describe("done route [pg]", () => {
     finish = "echo";
     handed.length = 0;
     handoff = { kind: "none" };
+    noted.length = 0;
+    note = { kind: "noted", publicPr: null };
+    onNote = null;
+    withNote = true;
   });
 
   interface Scene {
@@ -180,7 +195,7 @@ describe("done route [pg]", () => {
         toResponse(() => {
           const payload = body ?? { run_id: runId, lease_generation: gen };
           const req: RunnerHttpRequest = signed(key, donePath(runId), payload);
-          return doneRun(h.deps({ leases, pullRequests: o.port === "none" ? null : port, ...deps }), req, runId);
+          return doneRun(h.deps({ leases: withNote ? leases : leasesWithoutNote(), pullRequests: o.port === "none" ? null : port, ...deps }), req, runId);
         }),
     };
   }
@@ -635,6 +650,147 @@ describe("done route [pg]", () => {
       const res = await s.call();
       expect(parsedDone(res)).toMatchObject({ failure_reason: "scope_violation", pr_number: 1 });
       expect(s.repo.pulls[0]!.state).toBe("closed");
+    });
+  });
+
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud's own close of a refused run's pull request is recorded BEFORE it happens (so the webhook can tell it from a person's), and the
+  // run's public pull request, when the platform opened one, is closed too.
+  describe("a run the scope check refused records the refusal before it closes anything", () => {
+    const publicCalls: Array<Record<string, unknown>> = [];
+    let publicAnswer: () => Promise<{ result: "closed"; commented: boolean } | { result: "not_open" } | { result: "not_ours" }> = async () => ({ result: "closed", commented: true });
+    const planePush = {
+      mintToken: async () => ({ token: "t", expiresAt: new Date() }),
+      verifyPushed: async () => true,
+      verifyPullRequest: async () => null,
+      revokeToken: async () => true,
+      closeRefusedPullRequest: async (input: Record<string, unknown>) => (publicCalls.push({ ...input }), publicAnswer()),
+    };
+    beforeEach(() => {
+      publicCalls.length = 0;
+      publicAnswer = async () => ({ result: "closed", commented: true });
+    });
+
+    it("records the paths outside the list (count and each path) while the private pull request is still open, then closes it and ends scope_violation", async () => {
+      const s = await scene({ files: [file("src/app.ts"), file("tests/a.ts", "ADDED"), file("tests/b.ts")] });
+      let openAtNote: string | undefined;
+      onNote = () => (openAtNote = s.repo.pulls[0]?.state);
+      const res = await s.call();
+      expect(parsedDone(res)).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+      expect(openAtNote).toBe("open");
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+      expect(noted).toHaveLength(1);
+      expect(noted[0]).toMatchObject({ runId: s.runId, leaseGeneration: 1, refusal: { reason: "scope_violation", prNumber: 1, total: 2, paths: ["tests/a.ts", "tests/b.ts"] } });
+    });
+
+    it("a rename is recorded as scope_unknown with the renamed path; an incomplete file listing has no count", async () => {
+      const renamed = await scene({ files: [file("src/new.ts", "RENAMED")] });
+      await renamed.call();
+      expect(noted[0]).toMatchObject({ refusal: { reason: "scope_unknown", detail: "renamed", total: 1, paths: ["src/new.ts"] } });
+      noted.length = 0;
+      const big = await scene({ files: [file("src/app.ts")] });
+      const original = big.fake.request.bind(big.fake);
+      big.fake.request = async (req) => {
+        const res = await original(req);
+        const body = res.body as { data?: { repository?: { pullRequest?: { files?: { totalCount: number } } } } };
+        if (body.data?.repository?.pullRequest?.files) body.data.repository.pullRequest.files.totalCount = 9;
+        return res;
+      };
+      await big.call();
+      expect(noted[0]).toMatchObject({ refusal: { reason: "scope_violation", total: null, paths: [] } });
+    });
+
+    it("closes the run's public pull request with one plain comment BEFORE the private one, and never when there is none to close", async () => {
+      note = { kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111" } };
+      const s = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      let privateStateAtPublicClose: string | undefined;
+      publicAnswer = async () => ((privateStateAtPublicClose = s.repo.pulls[0]?.state), { result: "closed", commented: true });
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      expect(publicCalls).toHaveLength(1);
+      expect(publicCalls[0]).toMatchObject({ accountId: A.accountId, codeRepo: "acme/widgets-public", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111" });
+      expect(String(publicCalls[0]!.comment)).toMatch(/refused by the scope check/);
+      // The comment is public: no path, no count, nothing from the Spec.
+      expect(String(publicCalls[0]!.comment)).not.toMatch(/outside\/x\.ts|\d/);
+      expect(privateStateAtPublicClose).toBe("open");
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+      publicCalls.length = 0;
+      note = { kind: "noted", publicPr: null };
+      const none = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      await none.call({ deps: { planePush: planePush as never } });
+      expect(publicCalls).toEqual([]);
+    });
+
+    it("a GitHub blip on the public close answers 503 so the runner sends done again; the private pull request stays open and no verdict is recorded", async () => {
+      note = { kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111" } };
+      publicAnswer = async () => {
+        throw Object.assign(new Error("public_unavailable"), { code: "public_unavailable", transient: true });
+      };
+      const s = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      const res = await s.call({ deps: { planePush: planePush as never } });
+      expect(res.status).toBe(503);
+      expect(DoneRetryReply.parse(res.body).retry_after).toBeGreaterThan(0);
+      expect(s.repo.pulls[0]!.state).toBe("open");
+      expect(finished).toEqual([]);
+    });
+
+    it("any other failure of the public close is one log line with the code and no error text, and the verdict is recorded all the same", async () => {
+      note = { kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111" } };
+      publicAnswer = async () => {
+        throw Object.assign(new Error("secret text ghs_abc"), { code: "app_not_installed" });
+      };
+      const lines: string[] = [];
+      const s = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      const res = await s.call({ deps: { planePush: planePush as never, log: (l: string) => lines.push(l) } });
+      expect(parsedDone(res)).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+      const logged = lines.find((l) => l.includes("public_pr_close_failed"));
+      expect(JSON.parse(logged!)).toMatchObject({ event: "runner.done.public_pr_close_failed", code: "app_not_installed" });
+      expect(lines.join("\n")).not.toMatch(/ghs_|secret/);
+    });
+
+    it("a public pull request that is not the recorded branch's is left open: the close answers not_ours, one fixed log line, and the verdict is recorded", async () => {
+      note = { kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111" } };
+      publicAnswer = async () => ({ result: "not_ours" });
+      const lines: string[] = [];
+      const s = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never, log: (l: string) => lines.push(l) } }))).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      expect(JSON.parse(lines.find((l) => l.includes("public_pr_closed"))!)).toMatchObject({ event: "runner.done.public_pr_closed", result: "not_ours", commented: null });
+    });
+
+    it("a pairing that no longer names the public repository skips the public close with one fixed log line, and the private close and verdict go on", async () => {
+      note = { kind: "noted", publicPr: null, publicSkipped: "pairing_changed" };
+      const lines: string[] = [];
+      const s = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never, log: (l: string) => lines.push(l) } }))).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      expect(publicCalls).toEqual([]);
+      expect(JSON.parse(lines.find((l) => l.includes("public_pr_close_skipped"))!)).toMatchObject({ event: "runner.done.public_pr_close_skipped", code: "pairing_changed" });
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+    });
+
+    it("a lease that no longer holds when the refusal is recorded stops the run: nothing is closed and no verdict is recorded", async () => {
+      note = { kind: "fenced", reason: "stale_generation" };
+      const s = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      const res = await s.call({ deps: { planePush: planePush as never } });
+      expect(res.status).toBe(409);
+      expect(StopReply.parse(res.body)).toMatchObject({ continue: false, reason: "stale_generation" });
+      expect(s.repo.pulls[0]!.state).toBe("open");
+      expect(publicCalls).toEqual([]);
+      expect(finished).toEqual([]);
+    });
+
+    it("a worker without the record keeps today's behaviour (the pull request is closed, the verdict is recorded)", async () => {
+      withNote = false;
+      const s = await scene({ files: [file("outside/x.ts", "ADDED")] });
+      expect(parsedDone(await s.call())).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      expect(noted).toEqual([]);
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+    });
+
+    it("a run inside the list records nothing and closes nothing", async () => {
+      note = { kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111" } };
+      const s = await scene({ files: [file("src/app.ts")] });
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toMatchObject({ outcome: "succeeded" });
+      expect(noted).toEqual([]);
+      expect(publicCalls).toEqual([]);
     });
   });
 

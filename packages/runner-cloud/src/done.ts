@@ -1,4 +1,5 @@
-import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
+import type { ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_REPLACE_ROUND_KIND, RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
 import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
@@ -92,6 +93,7 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
 
   const decided = await decide(deps, lease, message.check);
   if (decided.kind === "retry") return retryReply();
+  if (decided.kind === "stop") return stopReply(decided.reason);
 
   const finished = await asRunner(() =>
     leases.finishRunnerDone({
@@ -120,7 +122,7 @@ const retryReply = (): RunnerHttpResponse => ({
   headers: { "retry-after": String(DONE_RETRY_AFTER_SECONDS) },
 });
 
-type Decision = { kind: "verdict"; verdict: RunnerDoneStored; check?: DoneCheck } | { kind: "retry" };
+type Decision = { kind: "verdict"; verdict: RunnerDoneStored; check?: DoneCheck } | { kind: "retry" } | { kind: "stop"; reason: StopReason };
 const verdictOf = (verdict: RunnerDoneStored): Decision => ({ kind: "verdict", verdict });
 const failed = (failureReason: NonNullable<RunnerDoneStored["failureReason"]>, extra: Partial<RunnerDoneStored> = {}): Decision =>
   verdictOf({ outcome: "failed", failureReason, prNumber: null, ...extra });
@@ -185,7 +187,7 @@ const PASSING_CHANGE_TYPES: ReadonlySet<string> = new Set(["ADDED", "MODIFIED", 
 /** D#6 R-CHK-3: a check passes only on exit 0 inside its cap. No exit status (never started) and a kill at the cap both fail, and so does a result the runner gave a reason for (R-CHK-3d: it was not run safely). */
 export const checkPassed = (check: DoneCheck): boolean => check.exit_code === 0 && !check.timed_out && check.reason === undefined;
 
-async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: string; leaseGeneration: number }, runnerReported: DoneCheck | undefined): Promise<Decision> {
+async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }, runnerReported: DoneCheck | undefined): Promise<Decision> {
   const ctx = await withTenant(deps.appUserPool, i.accountId, (client) => loadContext(client, { accountId: i.accountId, runId: i.runId }));
   // A run that passed the fence has a row; if it vanished since, nothing here can be trusted.
   if (!ctx) return failed("internal_error");
@@ -220,9 +222,39 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
   // FIXROUND-NOCOMMIT-CHECK-PASSED: reaching this line with a check in the job means the check passed (a failing or out-of-contract result returned above), so `reported` is a
   // passing result the cloud stores in this same `done` (run_checks and run.check_ended) and the job it signed asked for.
   const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined;
-  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, deps.log ?? ((line) => console.warn(line)), checkPassedOnHead);
+  const log = deps.log ?? ((line: string) => console.warn(line));
+  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log));
   // A check that passed is recorded beside whatever the commit and scope tests decided.
   return judged.kind === "verdict" && ctx.job.check !== undefined && reported !== undefined ? { ...judged, check: reported } : judged;
+}
+
+/** The plain comment left on a public pull request the cloud closed after its scope check refused the run. Fixed words: no path, no count, nothing from the Spec. */
+export const SCOPE_REFUSAL_PUBLIC_COMMENT = "This pull request was closed because the run that produced it was refused by the scope check: it changed files outside the list it was allowed to change. The branch is kept.";
+
+type RefuseScope = (refusal: ScopeRefusal) => Promise<{ kind: "go" } | { kind: "retry" } | { kind: "stop"; reason: StopReason }>;
+
+/**
+ * Before the private pull request of a refused run is closed: (1) the refusal is recorded on the run, under the lease fence (the webhook reads it and leaves the item at In progress);
+ * (2) the run's public pull request, when the platform opened one and no person took the branch over, is closed with one plain comment. A GitHub blip on (2) asks the runner to
+ * send `done` again (nothing is lost: both steps repeat safely); any other failure there is one log line and the verdict is recorded all the same. The branch is never touched.
+ */
+async function refuseScope(deps: RunnerCloudDeps, i: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }, refusal: ScopeRefusal, write: (line: string) => void): Promise<{ kind: "go" } | { kind: "retry" } | { kind: "stop"; reason: StopReason }> {
+  const leases = requireLeases(deps);
+  if (!leases.noteScopeRefusal) return { kind: "go" };
+  const noted = await asRunner(() => leases.noteScopeRefusal!({ ...i, refusal }));
+  if (noted.kind === "fenced") return { kind: "stop", reason: noted.reason };
+  const close = deps.planePush?.closeRefusedPullRequest;
+  if (noted.publicPr === null && noted.publicSkipped !== undefined) write(JSON.stringify({ event: "runner.done.public_pr_close_skipped", run_id: UUID.test(i.runId) ? i.runId.toLowerCase() : null, code: noted.publicSkipped }));
+  if (noted.publicPr === null || !close) return { kind: "go" };
+  try {
+    const closed = await close.call(deps.planePush, { accountId: i.accountId, codeRepo: noted.publicPr.codeRepo, number: noted.publicPr.number, branch: noted.publicPr.branch, comment: SCOPE_REFUSAL_PUBLIC_COMMENT });
+    write(JSON.stringify({ event: "runner.done.public_pr_closed", run_id: UUID.test(i.runId) ? i.runId.toLowerCase() : null, result: closed.result, commented: closed.result === "closed" ? closed.commented : null }));
+  } catch (error) {
+    if ((error as { transient?: unknown } | null)?.transient === true) return { kind: "retry" };
+    // fx-swallow-ok: the public close is best effort beside the verdict; the fixed code is the trace, never the error text
+    write(JSON.stringify({ event: "runner.done.public_pr_close_failed", run_id: UUID.test(i.runId) ? i.runId.toLowerCase() : null, code: typeof (error as { code?: unknown } | null)?.code === "string" ? (error as { code: string }).code : "unknown" }));
+  }
+  return { kind: "go" };
 }
 
 /** The `fx/<run>-g<generation>` branch a fresh run pushes, or a continuation's own branch (C25 section 1.2). */
@@ -232,8 +264,8 @@ export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }
 const headOf = (s: { headOid: string | null } | null): { headOid?: string } => (s !== null && s.headOid !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s.headOid) ? { headOid: s.headOid } : {});
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
-async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean): Promise<Decision> {
-  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead);
+async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope): Promise<Decision> {
+  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse);
   if (decision.kind !== "verdict" || decision.verdict.prNumber === null) return decision;
   return verdictOf({ ...decision.verdict, branch: branchOf(job, i) });
 }
@@ -275,6 +307,7 @@ async function judgeCommit(
   i: { runId: string; leaseGeneration: number },
   write: (line: string) => void,
   checkPassedOnHead: boolean,
+  refuse: RefuseScope,
 ): Promise<Decision> {
   // A fresh run's branch is `<prefix><run>-g<generation>`: a stale generation's branch is never looked at. A continuation works on exactly
   // the branch our issuer put in its signed job (the one recorded for the pull request it fixes).
@@ -297,8 +330,12 @@ async function judgeCommit(
       throw error;
     }
   };
-  const closeAnd = async (failureReason: "scope_violation" | "scope_unknown", extra: Partial<RunnerDoneStored> = {}): Promise<Decision> =>
-    (await close()) === "retry" ? { kind: "retry" } : failed(failureReason, { prNumber: pr!.number, ...extra });
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: the refusal is recorded (and the public copy closed) BEFORE the private pull request is closed, so the close the webhook reports is known to be the cloud's own.
+  const closeAnd = async (failureReason: "scope_violation" | "scope_unknown", found: { total: number | null; paths: string[] }, extra: Partial<RunnerDoneStored> = {}): Promise<Decision> => {
+    const noted = await refuse({ reason: failureReason, prNumber: pr!.number, total: found.total, paths: found.paths, ...(extra.detail === "renamed" || extra.detail === "unknown_change_type" ? { detail: extra.detail } : {}) });
+    if (noted.kind !== "go") return noted;
+    return (await close()) === "retry" ? { kind: "retry" } : failed(failureReason, { prNumber: pr!.number, ...extra });
+  };
 
   try {
     const base = await port.defaultBranch(repo);
@@ -333,10 +370,11 @@ async function judgeCommit(
     stage = "files";
     const changed = await port.changedFiles({ repo, number: pr.number });
     // Order (C23 section 3): the count, then renames and unknown types, then the paths.
-    if (!changed.complete) return closeAnd("scope_violation");
+    if (!changed.complete) return closeAnd("scope_violation", { total: null, paths: [] });
     const odd = changed.files.find((f) => !PASSING_CHANGE_TYPES.has(f.changeType));
-    if (odd) return closeAnd("scope_unknown", { detail: odd.changeType === "RENAMED" ? "renamed" : "unknown_change_type" });
-    if (changed.files.some((f) => !pathInScope(ctx.scope, f.path))) return closeAnd("scope_violation");
+    if (odd) return closeAnd("scope_unknown", { total: 1, paths: [odd.path] }, { detail: odd.changeType === "RENAMED" ? "renamed" : "unknown_change_type" });
+    const outside = changed.files.filter((f) => !pathInScope(ctx.scope, f.path)).map((f) => f.path);
+    if (outside.length > 0) return closeAnd("scope_violation", { total: outside.length, paths: outside });
 
     // After a ready-PR fallback (or a pull request someone marked ready) there is nothing to mark.
     if (pr.draft) {

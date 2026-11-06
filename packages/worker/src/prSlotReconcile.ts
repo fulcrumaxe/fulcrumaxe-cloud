@@ -3,6 +3,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { listDuePrSlotReconciles, PR_SLOT_RECONCILE_LIST_LIMIT } from "@fx/db/src/prSlotReconcileLister.js";
 import { reversalHoldsClose } from "@fx/db/src/reversalCompensation.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { scopeRefusalHoldsClose } from "@fx/core/src/work-items/scopeRefusal.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { IllegalStageTransitionError } from "@fx/core/src/work-items/stages.js";
 import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
@@ -208,6 +209,8 @@ export async function reconcileHolder(pool: Pool, open: PrStateOpen, accountId: 
     if (!same) return "not_held";
     // D#7 DP7-2d: a close a reversal made is recorded by the reversal itself (eventMapper holds back the webhook the same way).
     if (toStage === "closed_unmerged" && (await reversalHoldsClose(client, workItemId, decidingNumber))) return "not_held";
+    // D#6 CHECKFIX-SUCCESS-AS-FAILED: the same for a close the cloud made after its scope check refused a run (the driver records that move). `now.owner/now.name` is the repository the deciding number lives in: the item's own, or the paired public one.
+    if (toStage === "closed_unmerged" && (await scopeRefusalHoldsClose(client, workItemId, `${now.owner}/${now.name}`, decidingNumber))) return "not_held";
     try {
       await recordStage(client, { workItemId, toStage, at, source: "webhook", sourceRef });
     } catch (err) {

@@ -2,7 +2,7 @@ export { createWorker, assertWorkdirAllowed, type CreateWorkerOptions, type Work
 export type { RunActionFacade, RunActionPrincipal, ClaimedRunAction, SettleRunActionInput, RunActionSettleState, PerformResult } from "./runActions.js";
 export type { RunnerLeaseFacade, FailRunnerLeasesInput, FailRunnerLeasesResult, RunnerLeaseFailReason } from "./runnerLeases.js";
 export type { RunnerClaimFacade, ClaimRunnerRunInput, ClaimRunnerRunResult, HeartbeatRunnerRunInput, HeartbeatRunnerRunResult, IngestRunnerEventsInput, IngestRunnerEventsResult, LeaseVerdict } from "./runnerClaims.js";
-export type { RunnerDoneFacade, RunnerDoneVerdict, DoneFailureReason, BeginRunnerDoneResult, FinishRunnerDoneInput, FinishRunnerDoneResult } from "./runnerDone.js";
+export type { NoteScopeRefusalResult, RunnerDoneFacade, RunnerDoneVerdict, DoneFailureReason, BeginRunnerDoneResult, FinishRunnerDoneInput, FinishRunnerDoneResult } from "./runnerDone.js";
 export { PUBLIC_UNAVAILABLE_NOTE, mayRetryPublish, createPublishSettler, type OpenPublicResult, type PrivatePullRequest, type PlanePublish, type PlanePublishDeps, type PublishResult, type RetryFacts } from "./planePublish.js";
 // D#6 PUBLIC-MERGE PR2b: the order store's types only, never the factory that takes a pool (the composition root builds the store; apps/web reaches it as `Worker.planeMerge`).
 export type { PlaneMergeOrder, PlaneMergeState, RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";

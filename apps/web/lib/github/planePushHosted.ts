@@ -10,7 +10,7 @@ import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/a
  * they return. It needs no setting of its own: the App credentials are the ones the other GitHub calls use, and a missing App answers the
  * routes' fixed `not_configured`/`public_unavailable`, never a stack.
  */
-export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): PlanePushHostedPort & Pick<HostedPlanePush, "openPullRequest" | "branchHead" | "pullRequestState" | "pullRequestBase"> {
+export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): PlanePushHostedPort & Pick<HostedPlanePush, "openPullRequest" | "branchHead" | "pullRequestState" | "pullRequestBase" | "closeRefusedPullRequest"> {
   const api = createPlanePushApi({
     appCredentials: loadAppCredentials(env),
     requester: buildAccessTokenRequester({ resolveUpstream: (host, lookupFn) => resolveChecked(host, lookupFn), forwardPinned: nodeHttpsPinnedRequester }),
@@ -36,6 +36,7 @@ export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): P
     verifyPullRequest: (input) => guard(() => hosted.verifyPullRequest(input)),
     pullRequestState: (input) => guard(() => hosted.pullRequestState(input)),
     pullRequestBase: (input) => guard(() => hosted.pullRequestBase(input)),
+    closeRefusedPullRequest: (input) => guard(() => hosted.closeRefusedPullRequest(input)),
     revokeToken: (token) => hosted.revokeToken(token),
     openPullRequest: (input) => guard(() => hosted.openPullRequest(input)),
     // FIXROUND-REFRESH-HEAD: the public branch head a fix round checks before it starts (its own token, revoked before this returns).

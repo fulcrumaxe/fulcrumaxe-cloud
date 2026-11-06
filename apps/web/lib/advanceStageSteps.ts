@@ -187,6 +187,8 @@ const FAILED_RUN_STATUSES = ["failed", "timed_out", "cancelled", "killed_spend",
 export function runnerFailureCode(failureReason: string | null | undefined): string {
   if (failureReason === "runner_lost") return "runner_lost";
   if (failureReason === "usage_limit") return "runner_usage_limit";
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud's scope check refused the run's pull request; the card names the scope result, not a generic failed run.
+  if (failureReason === "scope_violation" || failureReason === "scope_unknown") return failureReason;
   return "run_failed";
 }
 

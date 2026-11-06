@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
-import { createPlanePushApi } from "../src/planePushApi.js";
+import { createPlanePushApi, PlanePushApiError } from "../src/planePushApi.js";
 import { createHostedPlanePush, PLANE_PUSH_TOKEN_MAX_LIFETIME_MS } from "../src/planePushHosted.js";
 import { ghError, type GhReply, type GhRequest } from "./helpers/strictGithub.js";
 import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "./helpers/localTlsServer.js";
@@ -431,5 +431,43 @@ describe("openPullRequest (D#598 P1f-5c)", () => {
       expect(t.revoked.has("ghs_hosted1")).toBe(true);
       await server?.close();
     }
+  });
+});
+
+describe("closeRefusedPullRequest (D#6 CHECKFIX-SUCCESS-AS-FAILED)", () => {
+  /** The hosted layer over a recording stand-in for the API: what matters here is the token's life (minted for the account's own installation, revoked after the call, whatever it did). */
+  function stub(close: () => Promise<unknown>) {
+    const trail: string[] = [];
+    const api = {
+      mintPushToken: async (_repo: string, opts: { ownsInstallation: (id: number) => Promise<boolean> }) => {
+        if (!(await opts.ownsInstallation(42))) throw new PlanePushApiError("code_repo_installation_not_owned");
+        trail.push("mint");
+        return "ghs_close1";
+      },
+      revokeToken: async (token: string) => (trail.push(`revoke ${token}`), true),
+      closeRefusedPullRequest: async (input: Record<string, unknown>) => (trail.push(`close ${String(input.codeRepo)}#${String(input.number)} ${String(input.branch)} ${String(input.token)} ${String(input.comment)}`), close()),
+    };
+    return { trail, hosted: createHostedPlanePush(api as never, { ownsInstallation: async (accountId, id) => accountId === ACCOUNT && id === 42 }) };
+  }
+  const input = { accountId: ACCOUNT, codeRepo: "acme/widgets", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111", comment: "Closed by the scope check." };
+
+  it("closes with a fresh token for the account's own installation and revokes it before returning", async () => {
+    const t = stub(async () => ({ result: "closed", commented: true }));
+    await expect(t.hosted.closeRefusedPullRequest(input)).resolves.toEqual({ result: "closed", commented: true });
+    expect(t.trail).toEqual(["mint", "close acme/widgets#41 fx/p-11111111-1111-4111-8111-111111111111 ghs_close1 Closed by the scope check.", "revoke ghs_close1"]);
+  });
+
+  it("revokes the token when the close throws, and passes the error on unchanged", async () => {
+    const t = stub(async () => {
+      throw new PlanePushApiError("public_unavailable", true);
+    });
+    await expect(t.hosted.closeRefusedPullRequest(input)).rejects.toMatchObject({ code: "public_unavailable", transient: true });
+    expect(t.trail.at(-1)).toBe("revoke ghs_close1");
+  });
+
+  it("another account's installation is refused before any call", async () => {
+    const t = stub(async () => ({ result: "not_open" }));
+    await expect(t.hosted.closeRefusedPullRequest({ ...input, accountId: "22222222-2222-4222-8222-222222222222" })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    expect(t.trail).toEqual([]);
   });
 });

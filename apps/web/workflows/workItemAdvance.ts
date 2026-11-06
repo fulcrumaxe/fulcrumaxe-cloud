@@ -1078,9 +1078,11 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   if (outcome.status !== "succeeded") {
     // The run recorded is the end of the chain: the one whose summary and failure say why (a lost or limited run's child, or the last run when no child could be made).
     const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, outcome.status);
-    await buildStopped(args, outcome.tailRunId, `build_run_${outcome.status}`);
-    await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "build", reason: `run_${outcome.status}`, recorded: recorded.status });
-    return { status: "failed", detail: `build_${outcome.status}` };
+    // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud's scope check refused the run's pull request (a file outside the Spec's list): the stop names that result, not a generic failed run.
+    const scopeWord = outcome.status === "failed" && (outcome.failureReason === "scope_violation" || outcome.failureReason === "scope_unknown") ? outcome.failureReason : null;
+    await buildStopped(args, outcome.tailRunId, scopeWord === null ? `build_run_${outcome.status}` : `build_${scopeWord}`);
+    await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "build", reason: scopeWord ?? `run_${outcome.status}`, recorded: recorded.status });
+    return { status: "failed", detail: scopeWord === null ? `build_${outcome.status}` : `build_${scopeWord}` };
   }
 
   // D#7 DP4b-2: a succeeded run may have asked a question or reported decisions. A question parks the item (this workflow ends, the stage stays); the rest carries on.

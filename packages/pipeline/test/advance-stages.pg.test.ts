@@ -1304,6 +1304,20 @@ describe("markBuildNeedsHuman", () => {
     expect(row.source_ref).toBe(`build_failed:${code}:${runId}`);
   });
 
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud opens a refused run's pull request before it closes it, so the item may already be at PR opened when the driver records the refusal.
+  it.each(["scope_violation", "scope_unknown"])("an item at PR opened whose pull request the cloud refused (%s) goes to Needs a person, naming the run; any other code leaves it at PR opened", async (code) => {
+    const t = await inProgress();
+    await h.admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [t.workItemId]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, "run_failed")).toEqual({ status: "unchanged", stage: "pr_opened" });
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, "no_pull_request")).toEqual({ status: "unchanged", stage: "pr_opened" });
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, code)).toEqual({ status: "recorded", stage: "needs_human" });
+    expect((await h.admin.query("SELECT from_stage, source_ref FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'needs_human'", [t.workItemId])).rows).toEqual([{ from_stage: "pr_opened", source_ref: `build_failed:${code}:${t.runId}` }]);
+    // Only PR opened: an item in review is left alone.
+    const u = await inProgress();
+    await h.admin.query("UPDATE work_items SET stage = 'changes_requested' WHERE id = $1", [u.workItemId]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, u.accountId, u.workItemId, u.runId, code)).toEqual({ status: "unchanged", stage: "changes_requested" });
+  });
+
   it("with no run at all (Check the build on an item that never had an executor run) it still records Needs human, naming no run", async () => {
     const t = await inProgress();
     expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, null, "no_pull_request")).toEqual({ status: "recorded", stage: "needs_human" });

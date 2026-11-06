@@ -7,6 +7,7 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { SCOPE_REFUSAL_EVENT, scopeRefusalPayload } from "@fx/core/src/work-items/scopeRefusal.js";
 import { InstallationTokenCache, applyMappedEvent, createInstallationHttp, type AccessTokenRequester } from "@fx/github";
 import { takeBuildSlot } from "@fx/pipeline";
 import { strictGithubFetch } from "../../github/test/helpers/strictGithub.js";
@@ -278,6 +279,26 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
     expect((await movesOf(first.id)).map((x) => x.source)).toEqual(["webhook"]);
   });
 
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: a pull request the cloud closed itself after its scope check refused a run is not a person's close; the sweep leaves the item to the driver, as the webhook does.
+  it("a closed pull request the cloud refused (its recorded scope refusal names that number) leaves the holder where it is; a person's close of any other number still moves it", async () => {
+    const refused = await item(A, "pr_opened");
+    const runId = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'failed')", [runId, A.accountId, refused.id]);
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, runId, SCOPE_REFUSAL_EVENT, JSON.stringify(scopeRefusalPayload({ reason: "scope_violation", prNumber: 7, repo: "acme/widgets", total: 1, paths: ["tests/a.ts"] }))]);
+    gh.pulls.push({ repo: "acme/widgets", number: 7, branch: `fx/issue-${refused.number}`, state: "closed", merged_at: null, closed_at: "2026-10-10T09:00:00Z" });
+    expect(await reconcileHolder(writerPool, open, A.accountId, refused.id)).toBe("not_held");
+    expect(await stageOf(refused.id)).toBe("pr_opened");
+    expect(await movesOf(refused.id)).toEqual([]);
+
+    const person = await item(A, "pr_opened");
+    const other = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'failed')", [other, A.accountId, person.id]);
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, other, SCOPE_REFUSAL_EVENT, JSON.stringify(scopeRefusalPayload({ reason: "scope_violation", prNumber: 5, repo: "acme/widgets", total: 1, paths: ["tests/a.ts"] }))]);
+    gh.pulls.push({ repo: "acme/widgets", number: 8, branch: `fx/issue-${person.number}`, state: "closed", merged_at: null, closed_at: "2026-10-10T09:00:00Z" });
+    expect(await reconcileHolder(writerPool, open, A.accountId, person.id)).toBe("closed_unmerged");
+    expect(await stageOf(person.id)).toBe("closed_unmerged");
+  });
+
   it("an older closed pull request on the item's branch does not close an item whose current pull request is another one", async () => {
     // The item entered its pull-request stage on 15 Oct (a body-linked pull request on another branch is the one in force); fx/issue-n holds only a pull request closed on 10 Oct.
     const holder = await item(A, "pr_opened", A.repoId, "2026-10-15T00:00:00Z");
@@ -383,6 +404,41 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
       // One read-only list call, on the paired repository, by the public branch; the private repository is never asked.
       expect(gh.calls).toEqual([publicCall(branch)]);
       expect(writes()).toEqual([]);
+    });
+
+    // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud closes the PUBLIC copy of a refused run too. The hold matches the repository the close was found on and that repository's own number.
+    describe("a refused run's scope refusal and the public copy", () => {
+      const refusal = async (itemId: string, event: Parameters<typeof scopeRefusalPayload>[0]) => {
+        const runId = randomUUID();
+        await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'failed')", [runId, A.accountId, itemId]);
+        await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, runId, SCOPE_REFUSAL_EVENT, JSON.stringify(scopeRefusalPayload(event))]);
+      };
+
+      it("the cloud's own close of the public pull request (the record names that repository and number) leaves the holder where it is", async () => {
+        const holder = await item(A, "pr_opened");
+        const branch = await paired(A, holder.id, 414);
+        await refusal(holder.id, { reason: "scope_violation", prNumber: 7, repo: "acme/widgets", publicPr: { codeRepo: "acme/widgets-public", number: 414 }, total: 1, paths: ["tests/a.ts"] });
+        gh.pulls.push({ repo: "acme/widgets-public", number: 414, branch, state: "closed", merged_at: null, closed_at: "2026-10-24T13:23:41Z" });
+        expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("not_held");
+        expect(await stageOf(holder.id)).toBe("pr_opened");
+        expect(await movesOf(holder.id)).toEqual([]);
+      });
+
+      it("a person's close of the public pull request still moves it: a record that names the private pull request only, or the same number on the private repository, does not hold it", async () => {
+        const privateOnly = await item(A, "pr_opened");
+        const branch = await paired(A, privateOnly.id, 414);
+        await refusal(privateOnly.id, { reason: "scope_violation", prNumber: 7, repo: "acme/widgets", total: 1, paths: ["tests/a.ts"] });
+        gh.pulls.push({ repo: "acme/widgets-public", number: 414, branch, state: "closed", merged_at: null, closed_at: "2026-10-24T13:23:41Z" });
+        expect(await reconcileHolder(writerPool, open, A.accountId, privateOnly.id)).toBe("closed_unmerged");
+
+        // The private pull request of the record has the SAME number as the public one that was closed: still a different repository.
+        const sameNumber = await item(A, "pr_opened");
+        const branch2 = await paired(A, sameNumber.id, 415);
+        await refusal(sameNumber.id, { reason: "scope_violation", prNumber: 415, repo: "acme/widgets", total: 1, paths: ["tests/a.ts"] });
+        gh.pulls.push({ repo: "acme/widgets-public", number: 415, branch: branch2, state: "closed", merged_at: null, closed_at: "2026-10-24T13:23:41Z" });
+        expect(await reconcileHolder(writerPool, open, A.accountId, sameNumber.id)).toBe("closed_unmerged");
+        expect(await stageOf(sameNumber.id)).toBe("closed_unmerged");
+      });
     });
 
     it("a merged public pull request moves the item to merged", async () => {

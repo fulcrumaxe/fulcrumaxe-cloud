@@ -644,9 +644,10 @@ export async function readStage(pool: Pool, accountId: string, workItemId: strin
  * C22 section 8) are the two ways a runner's chain of follow-up runs can run out; they are different actions for the customer than
  * `run_failed` (a runner that stopped answering twice, and a plan limit that held for a week). `work_item_ceiling` and `handoff_failed` (D#599
  * HO-2b) are the two ways a move of a running run to the other side can end with nothing to continue: the item already had ten continuations,
- * or the new run could not start. In both the work is saved on the run's branch.
+ * or the new run could not start. In both the work is saved on the run's branch. `scope_violation` and `scope_unknown` (D#6 CHECKFIX-SUCCESS-AS-FAILED) are the cloud's scope check refusing a run's pull request
+ * (a file outside the Spec's list; a rename or change type it cannot judge): the pull request is closed by the cloud, the branch is kept.
  */
-export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed", "push_cap_reached", "check_rounds_used", "check_fix_branch_unknown", "public_branch_moved", "public_head_unavailable", "base_sync_conflict", "base_sync_unavailable", "republish_base_missing", "republish_stacked_unsupported", "republish_stack_parent_ended", "republish_stack_parent_closed", "republish_stack_parent_open", "republish_stack_parent_off_main", "republish_stack_parent_no_pull_request", "check_failed_outside_change"] as const;
+export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed", "push_cap_reached", "check_rounds_used", "check_fix_branch_unknown", "public_branch_moved", "public_head_unavailable", "base_sync_conflict", "base_sync_unavailable", "republish_base_missing", "republish_stacked_unsupported", "republish_stack_parent_ended", "republish_stack_parent_closed", "republish_stack_parent_open", "republish_stack_parent_off_main", "republish_stack_parent_no_pull_request", "check_failed_outside_change", "scope_violation", "scope_unknown"] as const;
 export type BuildFailureCode = (typeof BUILD_FAILURE_CODES)[number];
 
 export type BuildFailureResult = { status: "recorded"; stage: "needs_human" } | { status: "unchanged"; stage: string | null };
@@ -664,7 +665,10 @@ export async function markBuildNeedsHuman(pool: Pool, accountId: string, workIte
   return withTenant(pool, accountId, async (client) => {
     const cur = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [workItemId, accountId]);
     const stage = cur.rows[0]?.stage ?? null;
-    if (stage !== "in_progress") return { status: "unchanged", stage };
+    // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud opens a refused run's pull request before it closes it, so the item may already have moved to PR opened (the opened delivery); the cloud's own close is held
+    // back from the item (the webhook reads the run's recorded refusal), so it is still there. Only the two scope codes may leave PR opened this way: any other stage or code is left alone.
+    const refusedPr = stage === "pr_opened" && (code === "scope_violation" || code === "scope_unknown");
+    if (stage !== "in_progress" && !refusedPr) return { status: "unchanged", stage };
     try {
       const r = await recordStage(client, { workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `build_failed:${code}:${runId ?? attempt ?? "none"}`, ...(runId === null ? {} : { runId }) });
       // A replay of an attempt that was already recorded wrote nothing, and the item did not move.

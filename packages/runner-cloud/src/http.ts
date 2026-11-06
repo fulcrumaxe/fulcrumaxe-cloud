@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
+import type { ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
 
@@ -172,6 +173,11 @@ export interface PlanePushHostedPort {
    * (contents and pull requests write) for the one go. Absent from an older port: the merge-order routes then answer 503 `not_configured`.
    */
   mintMergeToken?(codeRepo: string, accountId: string, kind: "read" | "write"): Promise<{ token: string; expiresAt: Date }>;
+  /**
+   * The public pull request of a run the cloud's scope check refused: closed, with one plain comment (a token minted and revoked per call). `not_open` when it was not open. A throw whose `transient`
+   * is true makes `done` answer 503 so the runner asks again; any other throw is logged and the verdict is recorded anyway. Absent from an older port: nothing is closed.
+   */
+  closeRefusedPullRequest?(input: { accountId: string; codeRepo: string; number: number; branch: string; comment: string }): Promise<{ result: "closed"; commented: boolean } | { result: "not_open" } | { result: "not_ours" }>;
 }
 
 /** D#519 MQ4-e2-b: the runner's verdict on a refused merge call, as the store keeps it on the order it ends (packages/worker `PlaneMergeConflict`, which this package cannot import). */
@@ -360,6 +366,12 @@ export interface RunnerLeaseOps {
    * `retry` means GitHub could not be asked and nothing was written. Absent from an older worker.
    */
   completeHandoffOnDone?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<{ kind: "completed" } | { kind: "none" } | { kind: "retry" } | { kind: "fenced"; reason: StopReason }>;
+  /**
+   * D#6 CHECKFIX-SUCCESS-AS-FAILED: BEFORE `done` closes the private pull request of a run its scope check refused, records that refusal on the run (so the webhook leaves the item at In
+   * progress), under the fence, and answers the run's public pull request when the platform opened one and no person took the branch over. Absent from an older worker: the pull request is
+   * closed without the record, as before.
+   */
+  noteScopeRefusal?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; refusal: ScopeRefusal }): Promise<{ kind: "fenced"; reason: StopReason } | { kind: "noted"; publicPr: { codeRepo: string; number: number; branch: string } | null; publicSkipped?: "pairing_changed" }>;
   /** `done`, second half: records the cloud's verdict under the fence, in one transaction. */
   finishRunnerDone(input: {
     accountId: string;

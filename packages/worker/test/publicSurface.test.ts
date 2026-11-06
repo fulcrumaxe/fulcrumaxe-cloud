@@ -105,6 +105,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "ingestRunnerEvents",
       "listDueRunActions",
       "memoryProposals",
+      "noteScopeRefusal",
       "openPublicPullRequest",
       "performAdvanceWorkItem",
       "performAmendSpec",

@@ -619,6 +619,21 @@ describe("the build for an item at Spec ready", () => {
       expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, FOLLOW_UP, "wait_timeout");
     });
 
+    // D#6 CHECKFIX-SUCCESS-AS-FAILED: a run the cloud's scope check refused is stopped under the scope result's own word, so the card says why; a failed run of any other reason keeps `build_run_failed`.
+    it.each([
+      ["scope_violation", "build_scope_violation"],
+      ["scope_unknown", "build_scope_unknown"],
+      ["internal_error", "build_run_failed"],
+      ["no_commit", "build_run_failed"],
+    ])("a run that ended failed with %s stops the build under %s", async (failureReason, stop) => {
+      const end = chainOutcome({ status: "failed", done: true, failureReason });
+      const w = setup({ item: AT_SPEC, buildOutcomes: [end], outcomeFor: (id) => (id === FOLLOW_UP ? end : undefined) });
+      const result = await workItemAdvanceWorkflow(ARGS);
+      expect(result).toEqual({ status: "failed", detail: stop === "build_run_failed" ? "build_failed" : stop });
+      expect(w.advanceBuildFailed).toHaveBeenCalledTimes(1);
+      expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, { kind: "stopped", dedupeKey: `build:${FOLLOW_UP}`, code: stop, runId: FOLLOW_UP });
+    });
+
     it.each([
       ["runner_lost", "runner_lost"],
       ["usage_limit", "runner_usage_limit"],

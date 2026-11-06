@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { recordStage } from '@fx/core/src/work-items/recordStage.js';
+import { SCOPE_REFUSAL_EVENT, scopeRefusalPayload } from '@fx/core/src/work-items/scopeRefusal.js';
 import {
   applyMappedEvent,
   handleGithubWebhookEvent,
@@ -889,6 +890,151 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
       const look = lookup('admin');
       await run(org('MEMBER'), { issueAuthorPermission: look });
       expect(look.mock.calls[0]![0]).toEqual({ repoId: refs.repoId, owner: 'acme-corp', name: 'widgets', number: expect.any(Number) });
+    });
+  });
+  // D#6 CHECKFIX-SUCCESS-AS-FAILED: a pull request the cloud closed itself after its scope check refused a run is not a person's decision.
+  describe('a close the cloud made after its scope check refused the run', () => {
+    let runnerId: string;
+    const stageOf = async (id: string): Promise<string> => (await admin.query<{ stage: string }>('SELECT stage FROM work_items WHERE id = $1', [id])).rows[0]!.stage;
+
+    beforeAll(async () => {
+      const user = randomUUID();
+      await admin.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [user, `${user}@example.test`]);
+      runnerId = randomUUID();
+      await admin.query(
+        `INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription')`,
+        [runnerId, refs.accountId, user, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: randomBytes(32).toString('base64url') }), randomBytes(32).toString('base64url')],
+      );
+    });
+
+    /** A failed runner executor run of the item whose `done` recorded the pull request, with (or without) the refusal record the route writes before it closes the pull request. */
+    async function refusedRun(workItemId: string, prNumber: number, opts: { record: boolean; repo?: string; publicPr?: { codeRepo: string; number: number } }): Promise<string> {
+      const runId = randomUUID();
+      await admin.query(
+        `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, runner_id, lease_generation, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'runner', 'failed', 'runner_verified', $4, 1, $5)`,
+        [runId, refs.accountId, workItemId, runnerId, refs.repoId],
+      );
+      if (opts.record) {
+        await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)`, [
+          refs.accountId, runId, SCOPE_REFUSAL_EVENT, JSON.stringify(scopeRefusalPayload({ reason: 'scope_violation', prNumber, repo: opts.repo ?? refs.repoFullName, ...(opts.publicPr ? { publicPr: opts.publicPr } : {}), total: 1, paths: ['tests/a.ts'] })),
+        ]);
+      }
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, 'run.status_changed', $3::jsonb)`, [
+        refs.accountId, runId, JSON.stringify({ from: 'running', to: 'failed', failureReason: 'scope_violation', prNumber, branch: `fx/${runId.slice(0, 8)}-g1`, viaRunnerDone: true }),
+      ]);
+      return runId;
+    }
+    // The cloud's own pull request on the private repository names the issue it closes (`Closes #N`): that is how the webhook finds the item of a run that FAILED.
+    const closedUnmerged = (prNumber: number, issue: number): MappedEvent => mapMappedFor({ ...loadFixture<GithubPullRequestPayload>('pull_request.closed.unmerged.json'), pull_request: { ...loadFixture<GithubPullRequestPayload>('pull_request.closed.unmerged.json').pull_request, number: prNumber, body: `Closes #${issue}`, user: { login: 'fulcrumaxe-staging[bot]' }, author_association: 'NONE' } });
+
+    // The cloud opens the pull request before it closes it, so by then the opened delivery has moved the item to PR opened.
+    it('leaves the item at PR opened and says why, so the driver can move it to Needs a person with the scope result named', async () => {
+      const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 7101, stage: 'pr_opened' });
+      await refusedRun(id, 7201, { record: true });
+      const result = await apply(closedUnmerged(7201, 7101));
+      expect(result).toMatchObject({ applied: 'skipped', reason: expect.stringMatching(/scope check refused/) });
+      expect(await stageOf(id)).toBe('pr_opened');
+      const { rows } = await admin.query(`SELECT 1 FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'closed_unmerged'`, [id]);
+      expect(rows).toEqual([]);
+    });
+
+    it('a person closing a pull request the cloud did not refuse still moves the item to closed_unmerged (no record, or a record for another pull request number)', async () => {
+      const bare = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 7102, stage: 'pr_opened' });
+      await refusedRun(bare, 7202, { record: false });
+      expect(await apply(closedUnmerged(7202, 7102))).toMatchObject({ applied: 'transitioned', workItemId: bare, recorded: true });
+      expect(await stageOf(bare)).toBe('closed_unmerged');
+
+      const other = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 7103, stage: 'pr_opened' });
+      const run = await refusedRun(other, 7203, { record: true });
+      // A later pull request of the same item, closed by a person: the record names #7203 only.
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 3, 'run.status_changed', $3::jsonb)`, [
+        refs.accountId, run, JSON.stringify({ from: 'running', to: 'succeeded', prNumber: 7303, branch: `fx/${run.slice(0, 8)}-g2`, viaRunnerDone: true }),
+      ]);
+      expect(await apply(closedUnmerged(7303, 7103))).toMatchObject({ applied: 'transitioned', workItemId: other, recorded: true });
+      expect(await stageOf(other)).toBe('closed_unmerged');
+    });
+    // The cloud also closes the PUBLIC copy of a refused run on a paired repository; that close is delivered by the paired repository with its own number. The hold names the repository and that repository's number.
+    describe('the public copy on a paired repository', () => {
+      /** An item of a private repository with the push record for the public copy (the repository this delivery comes from, refs.repoFullName). */
+      async function pairedItem(ghNumber: number, publicNumber: number): Promise<{ id: string; branch: string; privateRepoId: string }> {
+        const privateRepo = randomUUID();
+        await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, $4, 'team')`, [privateRepo, refs.accountId, refs.installationId, 9900 + ghNumber]);
+        const id = await seedWorkItem(admin, refs.accountId, privateRepo, { ghNumber, stage: 'pr_opened' });
+        const { rows } = await admin.query<{ branch: string }>(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, pr_number, pr_url)
+           VALUES ($1, $2, $3, $4, $5, 'pr_opened', $6, $6, $7, $8) RETURNING branch`,
+          [refs.accountId, id, privateRepo, refs.repoFullName, 'a'.repeat(64), 'b'.repeat(40), publicNumber, `https://github.com/${refs.repoFullName}/pull/${publicNumber}`],
+        );
+        return { id, branch: rows[0]!.branch, privateRepoId: privateRepo };
+      }
+      /** A failed runner run of the item, dispatched on its private repository, with the refusal record (the private repository's full name is not the delivering repository's). */
+      async function refusedOnPrivate(itemId: string, privateRepoId: string, event: { prNumber: number; publicPr?: { codeRepo: string; number: number } }): Promise<void> {
+        const runId = randomUUID();
+        await admin.query(
+          `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, runner_id, lease_generation, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'runner', 'failed', 'runner_verified', $4, 1, $5)`,
+          [runId, refs.accountId, itemId, runnerId, privateRepoId],
+        );
+        await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)`, [
+          refs.accountId, runId, SCOPE_REFUSAL_EVENT, JSON.stringify(scopeRefusalPayload({ reason: 'scope_violation', prNumber: event.prNumber, repo: 'acme-corp/private-widgets', ...(event.publicPr ? { publicPr: event.publicPr } : {}), total: 1, paths: ['tests/a.ts'] })),
+        ]);
+      }
+      const publicClosed = (prNumber: number, headRef: string): MappedEvent => {
+        const payload = loadFixture<GithubPullRequestPayload>('pull_request.closed.unmerged.json');
+        payload.pull_request = { ...payload.pull_request, number: prNumber, body: 'Refs D#1, no closing keyword', head: { ...payload.pull_request.head, ref: headRef } };
+        return mapMappedFor(payload);
+      };
+
+      it('the cloud closing the public copy (the record names that repository and number) leaves the item at PR opened, and so does the opened delivery of it', async () => {
+        const a = await pairedItem(7301, 6955);
+        await refusedOnPrivate(a.id, a.privateRepoId, { prNumber: 42, publicPr: { codeRepo: refs.repoFullName.toUpperCase(), number: 6955 } });
+        expect(await apply(publicClosed(6955, a.branch))).toMatchObject({ applied: 'skipped', reason: expect.stringMatching(/scope check refused/) });
+        expect(await stageOf(a.id)).toBe('pr_opened');
+        const { rows } = await admin.query(`SELECT 1 FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'closed_unmerged'`, [a.id]);
+        expect(rows).toEqual([]);
+      });
+
+      it("a person's close of the public pull request still reaches closed_unmerged: a record without the public copy, or one that names another repository or number, holds nothing", async () => {
+        const bare = await pairedItem(7302, 6956);
+        await refusedOnPrivate(bare.id, bare.privateRepoId, { prNumber: 42 });
+        expect(await apply(publicClosed(6956, bare.branch))).toMatchObject({ applied: 'transitioned', workItemId: bare.id, recorded: true });
+        expect(await stageOf(bare.id)).toBe('closed_unmerged');
+
+        const elsewhere = await pairedItem(7303, 6957);
+        await refusedOnPrivate(elsewhere.id, elsewhere.privateRepoId, { prNumber: 42, publicPr: { codeRepo: 'someone/else-public', number: 6957 } });
+        expect(await apply(publicClosed(6957, elsewhere.branch))).toMatchObject({ applied: 'transitioned', workItemId: elsewhere.id, recorded: true });
+
+        const otherNumber = await pairedItem(7304, 6958);
+        await refusedOnPrivate(otherNumber.id, otherNumber.privateRepoId, { prNumber: 42, publicPr: { codeRepo: refs.repoFullName, number: 6999 } });
+        expect(await apply(publicClosed(6958, otherNumber.branch))).toMatchObject({ applied: 'transitioned', workItemId: otherNumber.id, recorded: true });
+      });
+
+      it("the private pull request's number does not hold a same-numbered close that the paired repository delivers (the hold is scoped to the repository)", async () => {
+        const a = await pairedItem(7305, 6959);
+        await refusedOnPrivate(a.id, a.privateRepoId, { prNumber: 6959 });
+        expect(await apply(publicClosed(6959, a.branch))).toMatchObject({ applied: 'transitioned', workItemId: a.id, recorded: true });
+        expect(await stageOf(a.id)).toBe('closed_unmerged');
+      });
+    });
+
+    it('a record whose private repository is another one does not hold a same-numbered close in this repository', async () => {
+      const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 7110, stage: 'pr_opened' });
+      await refusedRun(id, 7210, { record: true, repo: 'someone/else' });
+      expect(await apply(closedUnmerged(7210, 7110))).toMatchObject({ applied: 'transitioned', workItemId: id, recorded: true });
+      expect(await stageOf(id)).toBe('closed_unmerged');
+    });
+
+    it('the opened delivery of that pull request arriving after the driver moved the item to Needs a person does not put it back at PR opened; another pull request of the item still opens it', async () => {
+      const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 7104, stage: 'needs_human' });
+      await refusedRun(id, 7204, { record: true });
+      const opened = (prNumber: number): MappedEvent => {
+        const fixture = loadFixture<GithubPullRequestPayload>('pull_request.opened.json');
+        return mapMappedFor({ ...fixture, pull_request: { ...fixture.pull_request, number: prNumber, body: 'Closes #7104', user: { login: 'fulcrumaxe-staging[bot]' }, author_association: 'NONE' } });
+      };
+      expect(await apply(opened(7204))).toMatchObject({ applied: 'skipped', reason: expect.stringMatching(/already refused/) });
+      expect(await stageOf(id)).toBe('needs_human');
+      // Any other pull request of the item still opens it as before (needs_human -> pr_opened is a legal move).
+      expect(await apply(opened(7999))).toMatchObject({ applied: 'transitioned', workItemId: id, recorded: true });
+      expect(await stageOf(id)).toBe('pr_opened');
     });
   });
 });
