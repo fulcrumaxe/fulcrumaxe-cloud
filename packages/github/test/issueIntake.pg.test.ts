@@ -117,8 +117,8 @@ describe("an outside author's new issue becomes a proposal (D#483 S4-d)", () => 
     return { work_items: await one("work_items"), agent_runs: await one("agent_runs"), run_action_requests: await one("run_action_requests") };
   };
   const proposals = async (r: SeedRefs) =>
-    (await admin.query(`SELECT dedupe_key, sources, gh_number, title, summary, state, verification, provenance, owner_process FROM proposals WHERE account_id = $1 ORDER BY gh_number`, [r.accountId])).rows as Array<{
-      dedupe_key: string; sources: string[]; gh_number: number; title: string; summary: string | null; state: string; verification: string; provenance: string; owner_process: string;
+    (await admin.query(`SELECT dedupe_key, sources, gh_number, title, summary, state, verification, provenance, owner_process, origin FROM proposals WHERE account_id = $1 ORDER BY gh_number`, [r.accountId])).rows as Array<{
+      dedupe_key: string; sources: string[]; gh_number: number; title: string; summary: string | null; state: string; verification: string; provenance: string; owner_process: string; origin: string;
     }>;
   const events = async (r: SeedRefs, outcome?: string) =>
     (await admin.query(`SELECT gh_number, outcome FROM proposal_intake_events WHERE account_id = $1 ${outcome ? "AND outcome = $2" : ""} ORDER BY gh_number, outcome`, outcome ? [r.accountId, outcome] : [r.accountId])).rows as Array<{ gh_number: number; outcome: string }>;
@@ -259,14 +259,65 @@ describe("an outside author's new issue becomes a proposal (D#483 S4-d)", () => 
     const r = await tenant();
     // The permission lookup answers none for a bot (no collaborator row); the association alone must not turn the issue into work either.
     const { deps } = await github({}, [issueItem(140, "fx-team[bot]"), issueItem(141, "fx-team[bot]")]);
+    deps.botLogins = async () => ["fx-team[bot]"];
     const before = await baseline(r);
     await deliver(deps, payload(r, 140, "fx-team[bot]"));
     await deliver(deps, payload(r, 141, "fx-team[bot]", { association: "CONTRIBUTOR" }));
     expect(await baseline(r)).toEqual(before);
+    // Still external, still waiting for a person, still to be checked: the origin label changes none of that.
     expect(await proposals(r)).toMatchObject([
-      { gh_number: 140, state: "new", provenance: "external" },
-      { gh_number: 141, state: "new", provenance: "external" },
+      { gh_number: 140, state: "new", provenance: "external", verification: "pending", owner_process: "product", origin: "agent_run" },
+      { gh_number: 141, state: "new", provenance: "external", verification: "pending", owner_process: "product", origin: "agent_run" },
     ]);
+    expect((await admin.query(`SELECT count(*)::int n FROM proposals WHERE account_id = $1 AND work_item_id IS NOT NULL`, [r.accountId])).rows[0].n).toBe(0);
+  });
+
+  it("origin is agent_run only for our own bot login (compared without regard to case): a person, another bot, no source and a failing source all give other", async () => {
+    const r = await tenant();
+    const items = [issueItem(150, "stranger"), issueItem(151, "someone-else[bot]"), issueItem(152, "FX-TEAM[BOT]"), issueItem(153, "fx-team[bot]"), issueItem(154, "fx-team[bot]")];
+    const { deps } = await github({}, items);
+    deps.botLogins = async () => ["fx-team[bot]"];
+    await deliver(deps, payload(r, 150, "stranger"));
+    await deliver(deps, payload(r, 151, "someone-else[bot]"));
+    await deliver(deps, payload(r, 152, "FX-TEAM[BOT]"));
+    // No source wired, then a source that throws: both fail closed to `other` and the proposal is still written (the failure is a fixed warning line).
+    const warned: string[] = [];
+    const noSource: GithubWebhookDbDeps = { ...deps, botLogins: undefined, warn: (m) => warned.push(m) };
+    await deliver(noSource, payload(r, 153, "fx-team[bot]"));
+    const failing: GithubWebhookDbDeps = { ...deps, botLogins: async () => { throw new Error("credentials secret-detail"); }, warn: (m) => warned.push(m) };
+    await deliver(failing, payload(r, 154, "fx-team[bot]"));
+    expect((await proposals(r)).map((p) => [p.gh_number, p.origin])).toEqual([[150, "other"], [151, "other"], [152, "agent_run"], [153, "other"], [154, "other"]]);
+    expect(warned).toEqual(["github webhook: reading the platform bot logins failed; the proposal is not labelled as an agent run"]);
+  });
+
+  it("an edit or a close and reopen of the issue never changes the origin; app_user cannot write it", async () => {
+    const r = await tenant();
+    const { deps } = await github({}, [issueItem(160, "fx-team[bot]")]);
+    deps.botLogins = async () => ["fx-team[bot]"];
+    await deliver(deps, payload(r, 160, "fx-team[bot]"));
+    await deliver(deps, payload(r, 160, "fx-team[bot]", { action: "edited", title: "New title", body: "New body" }));
+    await deliver(deps, payload(r, 160, "fx-team[bot]", { action: "closed" }));
+    await deliver(deps, payload(r, 160, "fx-team[bot]", { action: "reopened" }));
+    expect(await proposals(r)).toMatchObject([{ gh_number: 160, title: "New title", state: "new", origin: "agent_run" }]);
+    await expect(withTenant(appUserPool, r.accountId, (c) => c.query(`UPDATE proposals SET origin = 'other' WHERE account_id = $1`, [r.accountId]))).rejects.toMatchObject({ code: "42501" });
+    // The column's grants, read from the catalog: the importer may write it at insert and never after; the tenant login cannot write it at all.
+    const priv = async (role: string, p: string) => (await admin.query(`SELECT has_column_privilege($1, 'proposals', 'origin', $2) AS ok`, [role, p])).rows[0].ok as boolean;
+    expect([await priv("plan_importer", "INSERT"), await priv("plan_importer", "UPDATE"), await priv("app_user", "INSERT"), await priv("app_user", "UPDATE")]).toEqual([true, false, false, false]);
+  });
+
+  it("the origin column only holds its two values: an unknown one is refused by the table's check, and the default is other", async () => {
+    const r = await tenant();
+    const insert = (key: string, origin?: string) =>
+      admin.query(
+        `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, title, provenance, owner_process${origin === undefined ? "" : ", origin"}) VALUES ($1, $2, $3, '{github_issue}', 't', 'internal', 'product'${origin === undefined ? "" : ", $4"}) RETURNING origin`,
+        origin === undefined ? [r.accountId, r.repoId, key] : [r.accountId, r.repoId, key, origin],
+      );
+    await expect(insert("gh:issue:900", "bot")).rejects.toMatchObject({ code: "23514", constraint: "proposals_origin_check" });
+    await expect(insert("gh:issue:901", "")).rejects.toMatchObject({ code: "23514", constraint: "proposals_origin_check" });
+    await expect(insert("gh:issue:902", "AGENT_RUN")).rejects.toMatchObject({ code: "23514", constraint: "proposals_origin_check" });
+    expect((await insert("gh:issue:903")).rows[0].origin).toBe("other");
+    expect((await insert("gh:issue:904", "agent_run")).rows[0].origin).toBe("agent_run");
+    expect((await proposals(r)).map((p) => p.dedupe_key).sort()).toEqual(["gh:issue:903", "gh:issue:904"]);
   });
 
   it("a forged, unsigned or tampered delivery is refused before any write: no row, no GitHub call, no work", async () => {

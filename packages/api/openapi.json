@@ -34027,6 +34027,14 @@
                               "external"
                             ]
                           },
+                          "origin": {
+                            "type": "string",
+                            "enum": [
+                              "other",
+                              "agent_run"
+                            ],
+                            "description": "`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."
+                          },
                           "owner_process": {
                             "type": "string",
                             "enum": [
@@ -34233,6 +34241,7 @@
                           "category_hint",
                           "estimate_usd",
                           "provenance",
+                          "origin",
                           "owner_process",
                           "state",
                           "decided_at",
@@ -34482,6 +34491,14 @@
                             "internal",
                             "external"
                           ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "other",
+                            "agent_run"
+                          ],
+                          "description": "`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."
                         },
                         "owner_process": {
                           "type": "string",
@@ -34828,6 +34845,7 @@
                         "category_hint",
                         "estimate_usd",
                         "provenance",
+                        "origin",
                         "owner_process",
                         "state",
                         "decided_at",
@@ -35078,6 +35096,14 @@
                             "external"
                           ]
                         },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "other",
+                            "agent_run"
+                          ],
+                          "description": "`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."
+                        },
                         "owner_process": {
                           "type": "string",
                           "enum": [
@@ -35284,6 +35310,7 @@
                         "category_hint",
                         "estimate_usd",
                         "provenance",
+                        "origin",
                         "owner_process",
                         "state",
                         "decided_at",
@@ -35666,6 +35693,14 @@
                             "external"
                           ]
                         },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "other",
+                            "agent_run"
+                          ],
+                          "description": "`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."
+                        },
                         "owner_process": {
                           "type": "string",
                           "enum": [
@@ -35872,6 +35907,7 @@
                         "category_hint",
                         "estimate_usd",
                         "provenance",
+                        "origin",
                         "owner_process",
                         "state",
                         "decided_at",
@@ -36125,6 +36161,14 @@
                             "external"
                           ]
                         },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "other",
+                            "agent_run"
+                          ],
+                          "description": "`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."
+                        },
                         "owner_process": {
                           "type": "string",
                           "enum": [
@@ -36331,6 +36375,7 @@
                         "category_hint",
                         "estimate_usd",
                         "provenance",
+                        "origin",
                         "owner_process",
                         "state",
                         "decided_at",
@@ -36574,6 +36619,14 @@
                             "external"
                           ]
                         },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "other",
+                            "agent_run"
+                          ],
+                          "description": "`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."
+                        },
                         "owner_process": {
                           "type": "string",
                           "enum": [
@@ -36780,6 +36833,7 @@
                         "category_hint",
                         "estimate_usd",
                         "provenance",
+                        "origin",
                         "owner_process",
                         "state",
                         "decided_at",
@@ -37329,6 +37383,14 @@
                                   "external"
                                 ]
                               },
+                              "origin": {
+                                "type": "string",
+                                "enum": [
+                                  "other",
+                                  "agent_run"
+                                ],
+                                "description": "`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."
+                              },
                               "owner_process": {
                                 "type": "string",
                                 "enum": [
@@ -37535,6 +37597,7 @@
                               "category_hint",
                               "estimate_usd",
                               "provenance",
+                              "origin",
                               "owner_process",
                               "state",
                               "decided_at",

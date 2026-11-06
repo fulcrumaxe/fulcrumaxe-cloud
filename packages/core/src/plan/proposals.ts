@@ -54,6 +54,8 @@ export interface ProposalRow {
   category_hint: string | null;
   estimate_usd: number | null;
   provenance: 'internal' | 'external';
+  /** `agent_run` when the issue was opened by one of this platform's own agent runs (shown on the card; decides nothing). `other` otherwise. */
+  origin: 'other' | 'agent_run';
   owner_process: ProposalOwner;
   state: ProposalState;
   /** When the decision was made. A resurfaced "Not now" keeps it, so the card can say "You said not now on <date>". */
@@ -152,7 +154,7 @@ export const PROPOSAL_PAGE_SIZE = 50;
 const CURSOR_RE = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z)\|([0-9a-f-]{36})$/i;
 
 export const PROPOSAL_COLUMNS = `p.id, p.repo_id, p.dedupe_key, p.sources, p.gh_number, p.discussion_number,
-  t.task_key, t.milestone_key, m.title AS milestone_title, p.title, p.summary, p.category_hint, p.estimate_usd::float8 AS estimate_usd, p.provenance,
+  t.task_key, t.milestone_key, m.title AS milestone_title, p.title, p.summary, p.category_hint, p.estimate_usd::float8 AS estimate_usd, p.provenance, p.origin,
   p.owner_process, p.state, p.decided_at, p.reject_note, p.reject_kind, p.resurface_after, p.resurfaced_at, p.roadmap_position, p.work_item_id, w.stage AS work_item_stage,
   EXISTS (SELECT 1 FROM start_gate g WHERE g.account_id = p.account_id AND g.work_item_id = p.work_item_id AND g.outcome = 'started' AND g.decided_by = 'policy' AND g.preset = 'balanced') AS auto_started,
   p.created_at, p.updated_at, p.verification, p.verified_at, p.verified_sha, p.verify_attempts,

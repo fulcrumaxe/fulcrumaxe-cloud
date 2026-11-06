@@ -470,6 +470,17 @@ describe("the auto-start sweep [pg]", { timeout: 90_000 }, () => {
       }
     });
 
+    it("an external proposal marked as opened by our own agent run is no different: it asks and nothing starts, whatever the verifier said", async () => {
+      for (const category of ["small", "bug", "doc"]) {
+        const f = await roadmapFixture({ provenance: "external", category });
+        await admin.query("UPDATE proposals SET origin = 'agent_run' WHERE id = $1", [f.proposal]);
+        expect((await admin.query("SELECT origin, provenance, state FROM proposals WHERE id = $1", [f.proposal])).rows).toEqual([{ origin: "agent_run", provenance: "external", state: "new" }]);
+        expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("asked");
+        expect(await written(f.t)).toEqual(NOTHING);
+        expect((await admin.query("SELECT state, work_item_id FROM proposals WHERE id = $1", [f.proposal])).rows).toEqual([{ state: "new", work_item_id: null }]);
+      }
+    });
+
     it("a category outside small, bug and doc asks; a missing one asks; no dial row still starts nothing", async () => {
       for (const category of ["feature", "project", "critical", "question", null]) {
         const f = await roadmapFixture({ category });

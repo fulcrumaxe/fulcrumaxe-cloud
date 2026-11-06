@@ -3889,6 +3889,7 @@ export interface Operations {
         category_hint: string | null;
         estimate_usd: number | null;
         provenance: "internal" | "external";
+        origin: "other" | "agent_run";
         owner_process: "product" | "internal_loop";
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
@@ -3942,6 +3943,7 @@ export interface Operations {
         category_hint: string | null;
         estimate_usd: number | null;
         provenance: "internal" | "external";
+        origin: "other" | "agent_run";
         owner_process: "product" | "internal_loop";
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
@@ -4014,6 +4016,7 @@ export interface Operations {
         category_hint: string | null;
         estimate_usd: number | null;
         provenance: "internal" | "external";
+        origin: "other" | "agent_run";
         owner_process: "product" | "internal_loop";
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
@@ -4081,6 +4084,7 @@ export interface Operations {
         category_hint: string | null;
         estimate_usd: number | null;
         provenance: "internal" | "external";
+        origin: "other" | "agent_run";
         owner_process: "product" | "internal_loop";
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
@@ -4133,6 +4137,7 @@ export interface Operations {
         category_hint: string | null;
         estimate_usd: number | null;
         provenance: "internal" | "external";
+        origin: "other" | "agent_run";
         owner_process: "product" | "internal_loop";
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
@@ -4185,6 +4190,7 @@ export interface Operations {
         category_hint: string | null;
         estimate_usd: number | null;
         provenance: "internal" | "external";
+        origin: "other" | "agent_run";
         owner_process: "product" | "internal_loop";
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
@@ -4276,6 +4282,7 @@ export interface Operations {
           category_hint: string | null;
           estimate_usd: number | null;
           provenance: "internal" | "external";
+          origin: "other" | "agent_run";
           owner_process: "product" | "internal_loop";
           state: "new" | "approved" | "rejected" | "withdrawn";
           decided_at: string | null;

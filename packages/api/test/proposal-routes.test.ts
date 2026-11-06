@@ -749,6 +749,17 @@ describe('proposal routes (D#483 S3-L2a)', () => {
     }
     const get = async (who: Identity | string, urlPath: string) => call(who, 'GET', urlPath);
 
+    it('the list and the detail carry origin: agent_run for a proposal opened by our own agent run, other for the rest', async () => {
+      const a = await person('member');
+      const repo = await repoFor(a, 'team');
+      const agent = await proposalFor(a, repo, { provenance: 'external', origin: 'agent_run' });
+      const plain = await proposalFor(a, repo, { provenance: 'external' });
+      expect((await body<{ proposal: Record<string, unknown> }>(await get(a, `/proposals/${agent}`))).proposal).toMatchObject({ provenance: 'external', origin: 'agent_run' });
+      expect((await body<{ proposal: Record<string, unknown> }>(await get(a, `/proposals/${plain}`))).proposal).toMatchObject({ origin: 'other' });
+      const list = await body<{ proposals: Array<{ id: string; origin: string }> }>(await get(a, '/proposals'));
+      expect(list.proposals.filter((p) => p.id === agent || p.id === plain).map((p) => [p.id === agent ? 'agent' : 'plain', p.origin]).sort()).toEqual([['agent', 'agent_run'], ['plain', 'other']]);
+    });
+
     it('S4i-5: a read token of A gets the same detail body as an A session, a token of B gets 404, and a token without read cannot', async () => {
       const a = await person('member');
       const b = await person('member');

@@ -34,6 +34,7 @@ export const proposalSchema = z.object({
   category_hint: z.string().nullable(),
   estimate_usd: z.number().nullable(),
   provenance: z.enum(["internal", "external"]),
+  origin: z.enum(["other", "agent_run"]).describe("`agent_run` when the issue was opened by one of this platform's own agent runs; the card says so. It decides nothing: such a proposal is checked and approved like any other."),
   owner_process: z.enum(["product", "internal_loop"]),
   state: z.enum(["new", "approved", "rejected", "withdrawn"]),
   decided_at: z.string().nullable(),
