@@ -142,7 +142,7 @@ describe('merge receipt names the dial the gate read, not a version that committ
       await fact('merge_enqueued', 1);
       await removal(HEAD, 'checks_failed');
       await dialRow(admin, 'announce', 2);
-      await fact('merge_gate', 2, 'merge_enqueued');
+      // Production dedupes a second merge_gate fact at this head (key `<head>:merge_enqueued`), so only the gate's versioned r1 enqueue follows the removal.
       await fact('merge_enqueued', 2);
       await fact('merged_via_queue');
       expect(await receipt()).toBe('written');

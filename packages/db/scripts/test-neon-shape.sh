@@ -1201,7 +1201,8 @@ check_invoker_member_role_shape() {
 
 # D#7 AAP-d1 (0837): the SECURITY DEFINER functions owned by one role, each executable by one named invoker role and nobody else.
 # Called as check_invoker_exception_shape <db> <role> <invoker> <quoted, comma-separated exact function names>. Prints the oids, comma
-# separated, when every definer the role owns is one of the named functions, pinned to search_path=pg_catalog, public, pg_temp, with an
+# separated, when every definer the role owns is one of the named functions, pinned to search_path=pg_catalog, public, pg_temp (the one other
+# setting allowed beside it is TimeZone=UTC, 0995; any other setting or zone fails), with an
 # explicit ACL whose only grantees besides the owner are the invoker (no PUBLIC, no grant option); SHAPE_FAIL:<count> when any is not;
 # nothing when the role owns none of them. Only the named functions are judged, so one call per invoker role; a definer named by no call is
 # rejected by the generic owner check.
@@ -4742,7 +4743,8 @@ tz_probe() {
   local want="$1" label="$2" got failed=false
   got="$(check_invoker_exception_shape fx_d94_parity aap_definer aap_invoker "'aap_request_create'")"
   case "$got" in SHAPE_FAIL:*) failed=true ;; esac
-  if { [ "$want" = pass ] && [ "$failed" = true ]; } || { [ "$want" = fail ] && [ "$failed" != true ]; }; then
+  # A pass is an oid, not an empty answer: nothing printed would also be "not a failure".
+  if { [ "$want" = pass ] && { [ "$failed" = true ] || [ -z "$got" ]; }; } || { [ "$want" = fail ] && [ "$failed" != true ]; }; then
     echo "neon-shape: shape check probe FAILED ($label): expected $want, got '$got'" >&2
     exit 1
   fi
