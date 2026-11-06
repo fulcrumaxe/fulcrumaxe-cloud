@@ -40,13 +40,17 @@ export function repoFileErrorCode(err: unknown): RepoFileError {
   return (REPO_FILE_ERRORS as readonly unknown[]).includes(code) ? (code as RepoFileError) : 'github_unavailable';
 }
 
-/** The webhook's and the connect path's mark: these files of these repositories (of this account) are due 60 seconds ahead. Returns how many rows were marked. */
+/**
+ * The webhook's and the connect path's mark: these files of these repositories (of this account) are due 60 seconds ahead. Returns how many rows were marked.
+ * One filter for both callers, the connect path's own (queueDiscoveries): a product 'team' repository that has an installation. A push for any other repository marks nothing.
+ */
 export async function markRepoFilesDue(client: PoolClient, input: { accountId: string; repoIds: readonly string[]; paths: readonly RepoInstructionFile[] }): Promise<number> {
   const paths = input.paths.filter((p) => (REPO_INSTRUCTION_FILES as readonly string[]).includes(p));
   if (input.repoIds.length === 0 || paths.length === 0) return 0;
   const { rowCount } = await client.query(
     `INSERT INTO repo_instruction_files (repo_id, path, account_id, due_at)
-     SELECT r.id, p, r.account_id, now() + make_interval(secs => $4::integer) FROM repos r, unnest($3::text[]) p WHERE r.account_id = $1::uuid AND r.id = ANY($2::uuid[])
+     SELECT r.id, p, r.account_id, now() + make_interval(secs => $4::integer) FROM repos r, unnest($3::text[]) p
+      WHERE r.account_id = $1::uuid AND r.id = ANY($2::uuid[]) AND r.product = 'team' AND r.installation_id IS NOT NULL
      ON CONFLICT (repo_id, path) DO UPDATE SET due_at = LEAST(repo_instruction_files.due_at, EXCLUDED.due_at), error_streak = 0`,
     [input.accountId, [...input.repoIds], paths, REPO_FILE_DUE_AFTER_SECONDS],
   );

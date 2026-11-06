@@ -11,7 +11,7 @@ import { instructionFilesChangedByPush, wakeRepoInstructionImport, wakeRepoInstr
 const clock = { value: Date.parse("2026-11-06T12:00:00Z") };
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const REPO = "22222222-2222-4222-8222-222222222222";
-const push = (commits: unknown, over: { ref?: string } = {}) => ({ ref: over.ref ?? "refs/heads/main", repository: { full_name: "acme/widgets", default_branch: "main" }, commits });
+const push = (commits: unknown, over: { ref?: string; forced?: boolean } = {}) => ({ ref: over.ref ?? "refs/heads/main", repository: { full_name: "acme/widgets", default_branch: "main" }, commits, ...(over.forced === undefined ? {} : { forced: over.forced }) });
 const commit = (c: { added?: string[]; modified?: string[]; removed?: string[] }) => ({ added: [], modified: [], removed: [], ...c });
 
 let region: FakeRegion;
@@ -43,9 +43,29 @@ describe("instructionFilesChangedByPush", () => {
     expect(instructionFilesChangedByPush("pull_request", push([commit({ modified: ["CLAUDE.md"] })]))).toEqual([]);
     for (const bad of [null, "x", {}, push(undefined), push("CLAUDE.md"), push([null, 3, { added: "CLAUDE.md" }])]) expect(instructionFilesChangedByPush("push", bad)).toEqual([]);
   });
-  it("a push listing as many commits as GitHub shows at most may have hidden some, so both files are marked", () => {
-    expect(instructionFilesChangedByPush("push", push(Array.from({ length: 20 }, () => commit({}))))).toEqual(["CLAUDE.md", "AGENTS.md"]);
-    expect(instructionFilesChangedByPush("push", push(Array.from({ length: 19 }, () => commit({}))))).toEqual([]);
+  it("a push listing as many commits as a webhook payload carries at most (2048) may have hidden some, so both files are marked; a smaller list is read as it is", () => {
+    expect(instructionFilesChangedByPush("push", push(Array.from({ length: 2048 }, () => commit({}))))).toEqual(["CLAUDE.md", "AGENTS.md"]);
+    expect(instructionFilesChangedByPush("push", push(Array.from({ length: 2047 }, () => commit({}))))).toEqual([]);
+    expect(instructionFilesChangedByPush("push", push(Array.from({ length: 20 }, () => commit({}))))).toEqual([]);
+    expect(instructionFilesChangedByPush("push", push([...Array.from({ length: 100 }, () => commit({})), commit({ modified: ["AGENTS.md"] })]))).toEqual(["AGENTS.md"]);
+  });
+  it("a forced push to the default branch marks both files whatever its commit list holds (dropped commits never appear in it); an unforced push is read as it is", () => {
+    const both = ["CLAUDE.md", "AGENTS.md"];
+    expect(instructionFilesChangedByPush("push", push([], { forced: true }))).toEqual(both);
+    expect(instructionFilesChangedByPush("push", push([commit({ modified: ["README.md"] })], { forced: true }))).toEqual(both);
+    expect(instructionFilesChangedByPush("push", push([commit({ modified: ["CLAUDE.md"] })], { forced: true }))).toEqual(both);
+    expect(instructionFilesChangedByPush("push", push(undefined, { forced: true }))).toEqual(both);
+    expect(instructionFilesChangedByPush("push", push([], { forced: false }))).toEqual([]);
+    expect(instructionFilesChangedByPush("push", push([]))).toEqual([]);
+    expect(instructionFilesChangedByPush("push", push([commit({ modified: ["README.md"] })], { forced: false }))).toEqual([]);
+  });
+  it("only the boolean true counts as forced: a string or a number is not a forced push", () => {
+    for (const odd of ["true", 1, {}, [true]]) expect(instructionFilesChangedByPush("push", { ...push([commit({ modified: ["README.md"] })]), forced: odd })).toEqual([]);
+  });
+  it("a forced push to a branch other than the default marks nothing", () => {
+    expect(instructionFilesChangedByPush("push", push([], { forced: true, ref: "refs/heads/feature" }))).toEqual([]);
+    expect(instructionFilesChangedByPush("push", push([commit({ modified: ["CLAUDE.md"] })], { forced: true, ref: "refs/heads/feature" }))).toEqual([]);
+    expect(instructionFilesChangedByPush("pull_request", push([], { forced: true }))).toEqual([]);
   });
 });
 
