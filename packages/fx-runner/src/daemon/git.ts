@@ -23,12 +23,15 @@ export class GitPathError extends Error {
   readonly code: GitPathCode;
   /** Only on `push_too_large`: the largest commit's size in whole MB (a number, never text from git). */
   sizeMb?: number;
-  constructor(code: GitPathCode, sizeMb?: number) {
+  /** Only on a workspace-folder refusal: which check said no, a word from a closed list in the daemon's own source (never a path, a name or text from git or the agent). */
+  detail?: string;
+  constructor(code: GitPathCode, sizeMb?: number, detail?: string) {
     // The one setup error that names a requirement: a fixed text, never git's output.
     super(code === "git_version_unsupported" ? `${code}: git ${MIN_GIT_VERSION} or newer is required` : code);
     this.name = "GitPathError";
     this.code = code;
     if (sizeMb !== undefined) this.sizeMb = sizeMb;
+    if (detail !== undefined) this.detail = detail;
   }
 }
 

@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { pinFixture } from "../helpers/pinFixture.js";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -237,7 +237,7 @@ describe("what the update refuses or puts back", () => {
     fakePnpm(`cat > pnpm-lock.yaml <<'EOF'\nlockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      evil:\n        specifier: github:evil/evil\n        version: github.com/evil/evil/abc\nEOF`);
     const r = subject();
     const outcome = await r.run();
-    expect(outcome.kind).toBe("refused");
+    expect(outcome).toMatchObject({ kind: "refused", check: "lockfile_after_content" });
     expect(read("pnpm-lock.yaml")).toBe(original);
     expect(r.said[0]).toMatch(/^fx-runner: lockfile update refused \(lockfile_sync_refused: /);
   });
@@ -275,7 +275,7 @@ describe("what the update refuses or puts back", () => {
     const calls: string[] = [];
     rmSync(path.join(ws, "b/package.json"));
     symlinkSync("../a/package.json", path.join(ws, "b/package.json"));
-    expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+    expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "changed_manifest_not_file" });
     expect(calls).toEqual([]);
   });
 
@@ -290,7 +290,7 @@ describe("what the update refuses or puts back", () => {
     const original = read("pnpm-lock.yaml");
     const calls: string[] = [];
     const r = subject({ calls });
-    expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+    expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "linked_project_dir" });
     expect(calls).toEqual([]);
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
@@ -306,7 +306,7 @@ describe("what the update refuses or puts back", () => {
     expect(git("status", "--porcelain", "--", "packages")).toBe("");
     const original = read("pnpm-lock.yaml");
     const calls: string[] = [];
-    expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+    expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "linked_pnpm_file" });
     expect(calls).toEqual([]);
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
@@ -318,7 +318,7 @@ describe("what the update refuses or puts back", () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const original = read("pnpm-lock.yaml");
     const calls: string[] = [];
-    expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+    expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "changed_manifest_not_file" });
     expect(calls).toEqual([]);
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
@@ -328,7 +328,7 @@ describe("what the update refuses or puts back", () => {
       put(`a/${name}`, name === "package.yaml" ? "name: '@x/a'\n" : "{ name: '@x/a' }\n");
       put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
       const calls: string[] = [];
-      expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+      expect(await subject({ calls }).run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "other_manifest_format" });
       expect(calls).toEqual([]);
       rmSync(path.join(ws, `a/${name}`));
     }
@@ -340,7 +340,7 @@ describe("what the update refuses or puts back", () => {
     writeFileSync(outsideFile, "name: x\n");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     fakePnpm(`ln -s ${outsideFile} b/package.yaml\ncat > pnpm-lock.yaml <<'EOF'\nlockfileVersion: '9.0'\nimporters:\n  b: {}\nEOF`);
-    expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "importer_manifest" });
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
@@ -350,7 +350,7 @@ describe("what the update refuses or puts back", () => {
       writeFileSync(target, "x: 1\n");
       symlinkSync(target, path.join(ws, "a", name));
       put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
-      expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+      expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: name === "pnpm-workspace.yaml" ? "changed_manifest_not_file" : "linked_pnpm_file" });
       rmSync(path.join(ws, "a", name));
     }
   });
@@ -362,7 +362,7 @@ describe("what the update refuses or puts back", () => {
     writeFileSync(outsideFile, pkg("@evil/b"));
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     fakePnpm(`rm b/package.json; ln -s ${outsideFile} b/package.json\ncat > pnpm-lock.yaml <<'EOF'\nlockfileVersion: '9.0'\nimporters:\n  b: {}\nEOF`);
-    expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "importer_manifest" });
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
@@ -383,16 +383,57 @@ describe("what the update refuses or puts back", () => {
     for (const target of ["../docs", "../../outside"]) {
       fakePnpm(`cat > pnpm-lock.yaml <<'EOF'\nlockfileVersion: '9.0'\nimporters:\n  a:\n    dependencies:\n      '@x/b':\n        specifier: link:${target}\n        version: link:${target}\nEOF`);
       const outcome = await subject().run();
-      expect(outcome.kind).toBe("refused");
+      expect(outcome).toEqual(target === "../docs" ? { kind: "refused", reason: "workspace_unsafe", check: "new_project_path" } : { kind: "refused", reason: "unsafe_dependency", check: "lockfile_after_content" });
       expect(read("pnpm-lock.yaml")).toBe(original);
     }
+  });
+
+  it("a lockfile pnpm wrote with an importer that runs through a link is refused with check new_project_path, and the original is put back", async () => {
+    const original = read("pnpm-lock.yaml");
+    const docs = path.join(root, "docs");
+    mkdirSync(docs);
+    symlinkSync(docs, path.join(ws, "docs"));
+    put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
+    fakePnpm(`cat > pnpm-lock.yaml <<'EOF'\nlockfileVersion: '9.0'\nimporters:\n  docs: {}\nEOF`);
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "new_project_path" });
+    expect(read("pnpm-lock.yaml")).toBe(original);
+  });
+
+  it("a lockfile that is a link is refused with check lockfile_read before anything else is looked at", async () => {
+    const target = path.join(root, "elsewhere.yaml");
+    writeFileSync(target, read("pnpm-lock.yaml"));
+    rmSync(path.join(ws, "pnpm-lock.yaml"));
+    symlinkSync(target, path.join(ws, "pnpm-lock.yaml"));
+    put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "lockfile_not_regular", check: "lockfile_read" });
+  });
+
+  it("a pnpm that leaves a link where the lockfile was is refused with check lockfile_after, and the original is put back", async () => {
+    const original = read("pnpm-lock.yaml");
+    const target = path.join(root, "elsewhere.yaml");
+    writeFileSync(target, "x: 1\n");
+    put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
+    fakePnpm(`rm pnpm-lock.yaml\nln -s ${target} pnpm-lock.yaml`);
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "lockfile_not_regular", check: "lockfile_after" });
+    expect(read("pnpm-lock.yaml")).toBe(original);
+    expect(lstatSync(path.join(ws, "pnpm-lock.yaml")).isFile()).toBe(true);
+  });
+
+  it("a pnpm that is a corepack shim is refused with check pnpm_binary", async () => {
+    put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
+    const shim = path.join(root, "corepack");
+    mkdirSync(shim);
+    writeFileSync(path.join(shim, "pnpm"), "#!/bin/sh\nexit 0\n");
+    chmodSync(path.join(shim, "pnpm"), 0o755);
+    vi.stubEnv("PATH", `${shim}:${process.env.PATH ?? ""}`);
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "corepack_shim", check: "pnpm_binary" });
   });
 
   it("a pnpm that would rewrite the lockfile in another format version is refused and the original is put back", async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     fakePnpm(`sed -i "s/^lockfileVersion: .*/lockfileVersion: '10.0'/" pnpm-lock.yaml`);
-    expect(await subject().run()).toEqual({ kind: "refused", reason: "lockfile_version_changed" });
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "lockfile_version_changed", check: "lockfile_version" });
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
@@ -456,8 +497,135 @@ describe("what the update refuses or puts back", () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     rmSync(path.join(ws, ".git"), { recursive: true, force: true });
     const r = subject();
-    expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
-    expect(r.said).toEqual(["fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe)"]);
+    expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "pin" });
+    expect(r.said).toEqual(["fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe, check: pin)"]);
+  });
+});
+
+/**
+ * Run 352e6379 (an executor on this repository, 11-06): the sandbox leaves an empty `.claude-sandbox-noreplace` directory in `.git/info`, `.git/objects/info` and
+ * `.git/objects/info/commit-graphs`. The host read of the workspace refused the `.git/info` one (workspace_git_refused), the lockfile step turned that into
+ * `workspace_unsafe`, and the same check refused the run's publish. A normal pnpm monorepo must pass; each genuine unsafe shape must still refuse, and say which check did.
+ */
+describe("a monorepo shaped like this repository, with the sandbox's stubs in place", () => {
+  const MARKER = ".claude-sandbox-noreplace";
+  const lockNow = (): string => read("pnpm-lock.yaml");
+
+  /** Replaces the fixture with packages/*, apps/*, a nested package, an ignored `node_modules` that holds links, and the sandbox's stubs. */
+  function monorepo(): void {
+    for (const rel of ["a", "b", "package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml"]) rmSync(path.join(ws, rel), { recursive: true, force: true });
+    put(".gitignore", "node_modules/\n");
+    put("pnpm-workspace.yaml", "packages:\n  - apps/*\n  - packages/*\n  - packages/*/examples/*\n");
+    put("package.json", pkg("root", {}, { private: true }));
+    put("packages/core/package.json", pkg("@x/core"));
+    put("packages/ui/package.json", pkg("@x/ui", { "@x/core": "workspace:*" }));
+    put("packages/core/examples/demo/package.json", pkg("@x/demo"));
+    put("apps/web/package.json", pkg("@x/web"));
+    put("apps/web/src/index.ts", "export const x = 1;\n");
+    expect(pnpm(["install", "--lockfile-only", "--offline"]).code).toBe(0);
+    // Links the way a real pnpm install leaves them: inside `node_modules`, which git ignores and the walk does not enter.
+    mkdirSync(path.join(ws, "node_modules", ".pnpm"), { recursive: true });
+    symlinkSync("../packages/core", path.join(ws, "node_modules", "core-link"));
+    symlinkSync("../../../packages/ui", path.join(ws, "node_modules", ".pnpm", "ui-link"));
+    git("add", "-A");
+    git("commit", "-q", "-m", "start");
+    base = git("rev-parse", "HEAD");
+    pinFixture(ws);
+  }
+  /** The empty shapes the sandbox makes in the git folder, as the kept workspace of run 352e6379 held them (the lockfile is the real one at this point). */
+  function sandboxStubs(): void {
+    const gitDir = path.join(ws, ".git");
+    writeFileSync(path.join(gitDir, "commondir"), ".");
+    writeFileSync(path.join(gitDir, "config.worktree"), "");
+    for (const dir of ["modules", "worktrees", "glab-cli"]) mkdirSync(path.join(gitDir, dir));
+    for (const parent of [".git/info", ".git/objects/info", ".git/objects/info/commit-graphs"]) mkdirSync(path.join(ws, parent, MARKER), { recursive: true });
+    writeFileSync(path.join(ws, ".npmrc"), "");
+    writeFileSync(path.join(ws, ".env"), "");
+  }
+
+  it("a dependency added to one package is brought into the lockfile, and the run is not refused", async () => {
+    monorepo();
+    sandboxStubs();
+    put("apps/web/package.json", pkg("@x/web", { "@x/ui": "workspace:*" }));
+    const r = subject();
+    expect(await r.run()).toEqual({ kind: "updated" });
+    expect(r.said).toEqual(["fx-runner: lockfile updated to match the changed manifests (lockfile_sync_updated)"]);
+    expect(lockNow()).toContain("link:../../packages/ui");
+  });
+
+  it("the same change refuses when the marker directory has anything in it, and the line names the check", async () => {
+    monorepo();
+    sandboxStubs();
+    writeFileSync(path.join(ws, ".git", "info", MARKER, "x"), "");
+    put("apps/web/package.json", pkg("@x/web", { "@x/ui": "workspace:*" }));
+    const r = subject();
+    expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "git_dir_info_entry" });
+    expect(r.said).toEqual(["fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe, check: git_dir_info_entry)"]);
+  });
+
+  it("a nested git folder, and a git config changed after the pin, are told apart from a bad git folder", async () => {
+    monorepo();
+    sandboxStubs();
+    put("apps/web/package.json", pkg("@x/web", { "@x/ui": "workspace:*" }));
+    mkdirSync(path.join(ws, "packages", "ui", ".git"));
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "nested_dotgit" });
+    rmSync(path.join(ws, "packages", "ui", ".git"), { recursive: true });
+    execFileSync("git", ["-C", ws, "config", "core.hooksPath", "/tmp"]);
+    expect(await subject().run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "pin" });
+  });
+
+  const CASES: Array<[string, string, () => void]> = [
+    ["a project directory added as a link to another project", "linked_project_dir", () => symlinkSync("../packages/ui", path.join(ws, "apps", "evil"))],
+    ["a link named .npmrc below the root", "linked_pnpm_file", () => symlinkSync("../../.npmrc", path.join(ws, "apps", "web", ".npmrc"))],
+    ["a package.yaml next to a package.json", "other_manifest_format", () => put("packages/ui/package.yaml", "name: '@x/ui'\n")],
+    ["a changed manifest that became a link", "changed_manifest_not_file", () => (rmSync(path.join(ws, "apps/web/package.json")), symlinkSync("../../packages/ui/package.json", path.join(ws, "apps/web/package.json")))],
+    ["a changed manifest behind a linked directory", "changed_manifest_path", () => (rmSync(path.join(ws, "apps/web"), { recursive: true }), symlinkSync("../packages/ui", path.join(ws, "apps/web")))],
+  ];
+  for (const [name, check, make] of CASES) {
+    it(`${name} is refused with check ${check}, and pnpm never starts`, async () => {
+      monorepo();
+      sandboxStubs();
+      put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
+      make();
+      const calls: string[] = [];
+      const r = subject({ calls });
+      expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check });
+      expect(calls).toEqual([]);
+      expect(r.said).toEqual([`fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe, check: ${check})`]);
+    });
+  }
+
+  it("a directory the walk cannot list is refused with check walk_unlistable (the changed list is given, so git's own listing does not hide it)", async () => {
+    monorepo();
+    put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
+    mkdirSync(path.join(ws, "apps", "closed"));
+    chmodSync(path.join(ws, "apps", "closed"), 0o000);
+    try {
+      const r = subject({ changedFiles: async () => ["packages/core/package.json"] });
+      expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "walk_unlistable" });
+    } finally {
+      chmodSync(path.join(ws, "apps", "closed"), 0o755);
+    }
+  });
+
+  it("a scratch directory that cannot be made is refused with check scratch_dir", async () => {
+    monorepo();
+    put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
+    writeFileSync(path.join(root, "not-a-dir"), "");
+    const said: string[] = [];
+    const sync = createLockfileSync({ capture: async () => ({ code: 0, tail: "", timedOut: false, aborted: false }), envOptions: {}, changedFiles: async () => ["packages/core/package.json"], say: (l) => said.push(l), scratchRoot: path.join(root, "not-a-dir", "inner") });
+    expect(await sync.run({ workspace: ws, base })).toEqual({ kind: "refused", reason: "workspace_unsafe", check: "scratch_dir" });
+    expect(said).toEqual(["fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe, check: scratch_dir)"]);
+  });
+
+  it("a repo setting that moves the registry is refused with check settings_files, and a lockfile with another host's tarball with lockfile_content", async () => {
+    monorepo();
+    put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
+    put(".npmrc", "registry=https://evil.example/\n");
+    expect(await subject().run()).toMatchObject({ kind: "refused", check: "settings_files" });
+    rmSync(path.join(ws, ".npmrc"));
+    writeFileSync(path.join(ws, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      evil:\n        specifier: github:evil/evil\n        version: github.com/evil/evil/abc\n");
+    expect(await subject().run()).toMatchObject({ kind: "refused", check: "lockfile_content" });
   });
 });
 

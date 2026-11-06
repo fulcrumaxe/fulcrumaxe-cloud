@@ -56,7 +56,8 @@ export type LockSyncOutcome =
   | { kind: "unchanged" }
   | { kind: "updated" }
   | { kind: "failed"; why: LockSyncFailure }
-  | { kind: "refused"; reason: DepsRefusal };
+  /** `check` names which check said no: a closed word from this file or from the workspace-folder checks (`GitPathError.detail`), never a path or a name. */
+  | { kind: "refused"; reason: DepsRefusal; check?: string };
 
 export interface LockfileSync {
   run(input: { workspace: string; base: string; registryHost?: string | undefined; signal?: AbortSignal | undefined }): Promise<LockSyncOutcome>;
@@ -83,14 +84,14 @@ export function lockSyncArgs(input: { registry: string; storeDir: string; cacheD
 }
 
 /** The changed paths that can change the lockfile, or "unsafe" when one of them runs through a link. */
-function manifestsOf(workspace: string, changed: readonly string[]): string[] | "unsafe" {
+function manifestsOf(workspace: string, changed: readonly string[]): string[] | { unsafe: string } {
   const out: string[] = [];
   for (const rel of changed) {
     const parts = rel.split("/");
     if (!TRIGGER_NAMES.has(parts[parts.length - 1] ?? "") || parts.includes("node_modules") || parts.includes(".git")) continue;
-    if (!projectIsPlain(workspace, parts.slice(0, -1).join("/"))) return "unsafe";
+    if (!projectIsPlain(workspace, parts.slice(0, -1).join("/"))) return { unsafe: "changed_manifest_path" };
     try {
-      if (!lstatSync(path.join(workspace, rel)).isFile()) return "unsafe";
+      if (!lstatSync(path.join(workspace, rel)).isFile()) return { unsafe: "changed_manifest_not_file" };
     } catch {
       // fx-swallow-ok: a manifest the change deleted is still a change; there is nothing to look at
     }
@@ -104,8 +105,8 @@ const NEVER_LINKS: ReadonlySet<string> = new Set(["package.json", "package.yaml"
 /** Other manifest formats pnpm reads. This repository and the product use `package.json` only, so a project directory holding one at all is refused, link or not. */
 const OTHER_MANIFESTS: ReadonlySet<string> = new Set(["package.yaml", "package.json5"]);
 
-/** True when a directory below `root` is a link to a directory that holds a `package.json` (pnpm could take it for a project), when a file pnpm reads is a link (`NEVER_LINKS`), or the walk is too big to judge. `node_modules` and `.git` are not entered. */
-function hasLinkedProject(root: string): boolean {
+/** The closed word of the first reason found when a directory below `root` is a link to a directory that holds a `package.json` (pnpm could take it for a project), when a file pnpm reads is a link (`NEVER_LINKS`), when another manifest format is there, or the walk is too big to judge; undefined when none. `node_modules` and `.git` are not entered. */
+function hasLinkedProject(root: string): string | undefined {
   const stack = [root];
   let seen = 0;
   while (stack.length > 0) {
@@ -115,24 +116,24 @@ function hasLinkedProject(root: string): boolean {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
       // fx-swallow-ok: a directory that cannot be listed cannot be judged; it counts as unsafe
-      return true;
+      return "walk_unlistable";
     }
     for (const entry of entries) {
-      if (++seen > MAX_WALK_ENTRIES) return true;
+      if (++seen > MAX_WALK_ENTRIES) return "walk_too_big";
       if (entry.name === ".git" || entry.name === "node_modules") continue;
       const full = path.join(dir, entry.name);
-      if (OTHER_MANIFESTS.has(entry.name)) return true;
+      if (OTHER_MANIFESTS.has(entry.name)) return "other_manifest_format";
       if (entry.isSymbolicLink()) {
-        if (NEVER_LINKS.has(entry.name)) return true;
+        if (NEVER_LINKS.has(entry.name)) return "linked_pnpm_file";
         try {
-          if (statSync(full).isDirectory() && statSync(path.join(full, "package.json")).isFile()) return true;
+          if (statSync(full).isDirectory() && statSync(path.join(full, "package.json")).isFile()) return "linked_project_dir";
         } catch {
           // fx-swallow-ok: a link that leads nowhere, or to a directory without a manifest, is not a project
         }
       } else if (entry.isDirectory()) stack.push(full);
     }
   }
-  return false;
+  return undefined;
 }
 
 /** `lockfileVersion` and the project directories a pnpm lockfile names (every importer, every `link:` target, relative to the workspace), or null when it cannot be read that way. */
@@ -213,9 +214,9 @@ function putBack(file: string, bytes: Buffer, mode: number): boolean {
 
 export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
   const timeoutMs = deps.timeoutMs ?? LOCK_SYNC_TIMEOUT_MS;
-  const refuse = (reason: DepsRefusal): LockSyncOutcome => {
-    deps.say(`fx-runner: lockfile update refused (lockfile_sync_refused: ${reason})`);
-    return { kind: "refused", reason };
+  const refuse = (reason: DepsRefusal, check?: string): LockSyncOutcome => {
+    deps.say(`fx-runner: lockfile update refused (lockfile_sync_refused: ${reason}${check === undefined ? "" : `, check: ${check}`})`);
+    return { kind: "refused", reason, ...(check === undefined ? {} : { check }) };
   };
   return {
     async run({ workspace, base, registryHost, signal }) {
@@ -224,30 +225,31 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
       const lockPath = path.join(workspace, "pnpm-lock.yaml");
       const before = readRootFile(workspace, "pnpm-lock.yaml", MAX_LOCKFILE_BYTES);
       if (before.kind === "absent") return { kind: "none" };
-      if (before.kind === "refused") return refuse(before.reason);
+      if (before.kind === "refused") return refuse(before.reason, "lockfile_read");
 
       // A git folder of a shape the sandbox does not leave (`workspace_git_refused`) is a workspace not to touch; any other failed read only skips the update.
-      let refusedShape = false;
+      let refusedShape: string | undefined;
       const changed = await deps.changedFiles(workspace, base).catch((error: unknown) => {
-        refusedShape = error instanceof GitPathError && error.code === "workspace_git_refused";
+        if (error instanceof GitPathError && error.code === "workspace_git_refused") refusedShape = error.detail ?? "git_folder";
         return null;
       });
-      if (refusedShape) return refuse("workspace_unsafe");
+      if (refusedShape !== undefined) return refuse("workspace_unsafe", refusedShape);
       if (changed === null) {
         deps.say("fx-runner: lockfile update skipped (lockfile_sync_unknown_changes)");
         return { kind: "none" };
       }
       const manifests = manifestsOf(workspace, changed);
-      if (manifests === "unsafe") return refuse("workspace_unsafe");
+      if (!Array.isArray(manifests)) return refuse("workspace_unsafe", manifests.unsafe);
       if (manifests.length === 0) return { kind: "none" };
 
       const lock = checkPnpmLock(before.text, host);
-      if (!lock.ok) return refuse(lock.reason);
+      if (!lock.ok) return refuse(lock.reason, "lockfile_content");
       const unsafe = settingsRefusal(workspace, registry);
-      if (unsafe !== undefined) return refuse(unsafe);
-      if (!lock.projects.every((project) => projectIsPlain(workspace, project))) return refuse("workspace_unsafe");
+      if (unsafe !== undefined) return refuse(unsafe, "settings_files");
+      if (!lock.projects.every((project) => projectIsPlain(workspace, project))) return refuse("workspace_unsafe", "lockfile_project_path");
       // pnpm finds projects from the workspace globs, which the lockfile does not list yet: a link the change added is caught here, before pnpm can read behind it.
-      if (hasLinkedProject(workspace)) return refuse("workspace_unsafe");
+      const linked = hasLinkedProject(workspace);
+      if (linked !== undefined) return refuse("workspace_unsafe", linked);
       if (signal?.aborted === true) return { kind: "failed", why: "aborted" };
       const factsBefore = lockFacts(before.text);
 
@@ -256,7 +258,7 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
         originalMode = lstatSync(lockPath).mode & 0o777;
       } catch {
         // fx-swallow-ok: a lockfile that cannot be looked at again is the closed answer "workspace_unsafe"
-        return refuse("workspace_unsafe");
+        return refuse("workspace_unsafe", "lockfile_stat");
       }
       const original = Buffer.from(before.text, "utf8");
 
@@ -268,7 +270,7 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
         writeFileSync(path.join(scratch, "empty.npmrc"), "", { flag: "wx", mode: 0o600 });
       } catch {
         // fx-swallow-ok: scratch that cannot be made is the closed answer "workspace_unsafe"
-        return refuse("workspace_unsafe");
+        return refuse("workspace_unsafe", "scratch_dir");
       }
       const clearScratch = (): void => rmSync(scratch, { recursive: true, force: true });
       const empty = path.join(scratch, "empty.npmrc");
@@ -309,7 +311,7 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
       }
       if (/(^|\/)corepack(\/|$)/.test(real)) {
         clearScratch();
-        return refuse("corepack_shim");
+        return refuse("corepack_shim", "pnpm_binary");
       }
 
       const restore = (): boolean => {
@@ -339,23 +341,24 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
       const after = readRootFile(workspace, "pnpm-lock.yaml", MAX_LOCKFILE_BYTES);
       if (after.kind !== "text") {
         restore();
-        return refuse("lockfile_not_regular");
+        return refuse("lockfile_not_regular", "lockfile_after");
       }
       if (after.text === before.text) return { kind: "unchanged" };
       const verdict = checkPnpmLock(after.text, host);
       if (!verdict.ok) {
         restore();
-        return refuse(verdict.reason);
+        return refuse(verdict.reason, "lockfile_after_content");
       }
       // The new lockfile may name a project pnpm reached through a link, or a `link:` target that is one: judge every one of them as plain paths inside the workspace.
       const factsAfter = lockFacts(after.text);
-      if (factsAfter === null || factsBefore === null || !factsAfter.projects.every((project) => projectIsInside(workspace, project)) || !factsAfter.importers.every((importer) => manifestIsRegular(workspace, importer))) {
+      const afterCheck = factsAfter === null || factsBefore === null ? "lockfile_facts" : !factsAfter.projects.every((project) => projectIsInside(workspace, project)) ? "new_project_path" : !factsAfter.importers.every((importer) => manifestIsRegular(workspace, importer)) ? "importer_manifest" : undefined;
+      if (afterCheck !== undefined || factsAfter === null || factsBefore === null) {
         restore();
-        return refuse("workspace_unsafe");
+        return refuse("workspace_unsafe", afterCheck ?? "lockfile_facts");
       }
       if (factsAfter.version !== factsBefore.version) {
         restore();
-        return refuse("lockfile_version_changed");
+        return refuse("lockfile_version_changed", "lockfile_version");
       }
       try {
         chmodSync(lockPath, originalMode);

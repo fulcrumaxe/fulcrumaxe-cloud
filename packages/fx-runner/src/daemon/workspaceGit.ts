@@ -15,7 +15,7 @@
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { GitPathError } from "./git.js";
-import { STUB_COMMONDIR_CONTENTS, STUB_COMMONDIR_MAX_BYTES, STUB_EMPTY_DIRS, STUB_EMPTY_FILE } from "./sandboxStubs.js";
+import { STUB_COMMONDIR_CONTENTS, STUB_COMMONDIR_MAX_BYTES, STUB_EMPTY_DIRS, STUB_EMPTY_FILE, STUB_INFO_MARKER } from "./sandboxStubs.js";
 
 type Kind = "none" | "file" | "dir" | "link" | "other";
 
@@ -32,8 +32,9 @@ function kindOf(target: string): Kind {
   }
 }
 
-const refuse = (): never => {
-  throw new GitPathError("push_ref_refused");
+/** `detail` names the check that said no (a closed word written at the call site, shown on the runner's terminal so the next refusal can be told apart from this one). */
+const refuse = (detail?: string): never => {
+  throw new GitPathError("push_ref_refused", undefined, detail);
 };
 
 /** The most entries walked under `refs` and `objects`. A workspace borrows the mirror's objects, so its own stay small. */
@@ -104,7 +105,7 @@ function assertReftableShape(gitDir: string): void {
 /** Refuses a link, or an entry that is neither a file nor a directory, anywhere under `dir`. */
 function assertPlainTree(dir: string, budget: { left: number }): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (--budget.left < 0 || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory())) refuse();
+    if (--budget.left < 0 || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory())) refuse("git_dir_tree");
     if (entry.isDirectory()) assertPlainTree(path.join(dir, entry.name), budget);
   }
 }
@@ -131,8 +132,18 @@ function closed<T>(step: () => T): T {
 }
 
 const refuseWorkspace = (): never => {
-  throw new GitPathError("workspace_git_refused");
+  throw new GitPathError("workspace_git_refused", undefined, "git_dir_sandbox_stub");
 };
+
+/** True for a real directory (never a link) with nothing in it. */
+function isEmptyRealDir(dir: string): boolean {
+  try {
+    return lstatSync(dir).isDirectory() && readdirSync(dir).length === 0;
+  } catch {
+    // fx-swallow-ok: a directory that cannot be looked at is not the empty marker; the caller refuses
+    return false;
+  }
+}
 
 /** Accepts the sandbox's entries inside `.git` in the exact shapes it makes, and refuses every other shape of them with `workspace_git_refused`. */
 function assertSandboxStubs(gitDir: string): void {
@@ -196,24 +207,26 @@ export function assertHostReadableGit(workspace: string, mirrorObjects: string):
 }
 
 function checkGitDirShape(gitDir: string, mirrorObjects: string | null, requireAlternates: boolean, tolerateSandboxStubs: boolean): void {
-  if (!path.isAbsolute(gitDir)) return refuse();
-  if (kindOf(path.join(gitDir, ".git")) !== "none") refuse();
+  if (!path.isAbsolute(gitDir)) return refuse("git_dir_path");
+  if (kindOf(path.join(gitDir, ".git")) !== "none") refuse("git_dir_inner_dotgit");
   if (tolerateSandboxStubs) assertSandboxStubs(gitDir);
-  else if (kindOf(path.join(gitDir, "commondir")) !== "none") refuse();
-  if (kindOf(path.join(gitDir, "HEAD")) !== "file") refuse();
-  if (!["file", "none"].includes(kindOf(path.join(gitDir, "config")))) refuse();
-  if (!["file", "none"].includes(kindOf(path.join(gitDir, "packed-refs")))) refuse();
+  else if (kindOf(path.join(gitDir, "commondir")) !== "none") refuse("git_dir_commondir");
+  if (kindOf(path.join(gitDir, "HEAD")) !== "file") refuse("git_dir_head");
+  if (!["file", "none"].includes(kindOf(path.join(gitDir, "config")))) refuse("git_dir_config");
+  if (!["file", "none"].includes(kindOf(path.join(gitDir, "packed-refs")))) refuse("git_dir_packed_refs");
   const refs = path.join(gitDir, "refs");
   const objects = path.join(gitDir, "objects");
-  if (kindOf(refs) !== "dir" || kindOf(objects) !== "dir") refuse();
+  if (kindOf(refs) !== "dir" || kindOf(objects) !== "dir") refuse("git_dir_refs_objects");
   const info = path.join(objects, "info");
-  if (!["dir", "none"].includes(kindOf(info))) refuse();
+  if (!["dir", "none"].includes(kindOf(info))) refuse("git_dir_objects_info");
   // `.git/info` holds the exclude and attributes files git reads on every listing: a plain directory of plain files, no link out of the workspace.
+  // The one other entry accepted is the shell sandbox's empty marker directory (`STUB_INFO_MARKER`), and only where the sandbox's stubs are tolerated.
   const repoInfo = path.join(gitDir, "info");
-  if (!["dir", "none"].includes(kindOf(repoInfo))) refuse();
+  if (!["dir", "none"].includes(kindOf(repoInfo))) refuse("git_dir_info");
   if (kindOf(repoInfo) === "dir") {
     for (const entry of closed(() => readdirSync(repoInfo, { withFileTypes: true }))) {
-      if (!entry.isFile() || entry.isSymbolicLink()) refuse();
+      if (tolerateSandboxStubs && entry.name === STUB_INFO_MARKER && isEmptyRealDir(path.join(repoInfo, entry.name))) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) refuse("git_dir_info_entry");
     }
   }
   closed(() => assertReftableShape(gitDir));
@@ -223,14 +236,14 @@ function checkGitDirShape(gitDir: string, mirrorObjects: string | null, requireA
   const alternates = path.join(info, "alternates");
   const kind = kindOf(alternates);
   if (kind === "none") {
-    if (requireAlternates) refuse();
+    if (requireAlternates) refuse("git_dir_alternates");
     return;
   }
-  if (kind !== "file") refuse();
+  if (kind !== "file") refuse("git_dir_alternates");
   const lines = closed(() => {
     const text = readSmallRegular(alternates, MAX_ALTERNATES_BYTES);
     return text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
   });
   // Git reads a relative line against `objects/`, not the daemon's directory, so only an absolute line is ever compared.
-  if (lines.length !== 1 || !path.isAbsolute(lines[0]!) || (mirrorObjects !== null && !same(lines[0]!, mirrorObjects))) refuse();
+  if (lines.length !== 1 || !path.isAbsolute(lines[0]!) || (mirrorObjects !== null && !same(lines[0]!, mirrorObjects))) refuse("git_dir_alternates");
 }

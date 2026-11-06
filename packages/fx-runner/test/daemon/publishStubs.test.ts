@@ -5,7 +5,7 @@
  * does not grow from the run's base is not published, and an empty placeholder is never pushed.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -144,6 +144,37 @@ describe("B2: any other shape of those entries is refused with workspace_git_ref
       expectNothingPushed(r, before);
     });
   }
+});
+
+describe("B2b: the sandbox's empty marker directory in .git/info is accepted, and nothing looser is", () => {
+  const MARKER = ".claude-sandbox-noreplace";
+  it("is part of the stubs the sandbox leaves, and the workspace passes with it", async () => {
+    const r = await rig();
+    expect(statSync(path.join(r.gitDir, "info", MARKER)).isDirectory()).toBe(true);
+    expect(() => assertWorkspaceGit(r.workspace, path.join(r.mirror, "objects"))).not.toThrow();
+  });
+  const VARIANTS: Array<[string, string, (r: Rig) => void]> = [
+    ["a file inside the marker directory", "git_dir_info_entry", (r) => writeFileSync(path.join(r.gitDir, "info", MARKER, "x"), "")],
+    ["the marker directory as a symlink", "git_dir_info_entry", (r) => (rmSync(path.join(r.gitDir, "info", MARKER), { recursive: true }), symlinkSync(path.join(r.workspace, "src"), path.join(r.gitDir, "info", MARKER)))],
+    ["any other directory in .git/info", "git_dir_info_entry", (r) => mkdirSync(path.join(r.gitDir, "info", "other"))],
+    ["an empty directory with the marker's name plus a suffix", "git_dir_info_entry", (r) => mkdirSync(path.join(r.gitDir, "info", `${MARKER}2`))],
+  ];
+  for (const [name, detail, change] of VARIANTS) {
+    it(`${name} is refused and names the check`, async () => {
+      const r = await rig();
+      mkdirSync(path.join(r.workspace, "src"));
+      commitFile(r, "agent.txt", "work\n");
+      change(r);
+      const before = remoteRefs();
+      await expect(r.publish()).rejects.toMatchObject({ code: "push_ref_refused", detail });
+      expectNothingPushed(r, before);
+    });
+  }
+  it("the snapshot-side check (stubs not tolerated) still refuses the marker", async () => {
+    const r = await rig();
+    rmSync(path.join(r.gitDir, "commondir")); // refused first, and for its own reason, without this
+    expect(() => assertGitDirShape(r.gitDir, path.join(r.mirror, "objects"), false)).toThrow(expect.objectContaining({ code: "push_ref_refused", detail: "git_dir_info_entry" }));
+  });
 });
 
 describe("B3: the agent's own branch name never reaches the remote", () => {
