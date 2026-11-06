@@ -294,7 +294,7 @@ describe("the sandbox reaper's wiring (C82 sections 2 and 3)", () => {
     const inventories: { now: number }[] = [];
     const w: SandboxReapWorker = {
       sweepSandboxReap: async (input) => (sweeps.push(input), { cursor: null, wrapped: true, callsUsed: 0, deleted: 0, stopped: 0, skipped: 0, candidates: [], alerts: [], orphans: 0 }),
-      sandboxInventory: async (input) => (inventories.push(input), { accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [] }),
+      sandboxInventory: async (input) => (inventories.push(input), { accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [], callsUsed: 0 }),
     };
     return { w, sweeps, inventories };
   }
@@ -381,7 +381,7 @@ describe("the reaper's kill switch also reads a database setting (C85)", () => {
     const inventories: number[] = [];
     const w: SandboxReapWorker = {
       sweepSandboxReap: async (input) => (seen.push(`${input.pass}:${input.mode}`), { cursor: null, wrapped: true, callsUsed: 0, deleted: 0, stopped: 0, skipped: 0, candidates: [], alerts: [], orphans: 0 }),
-      sandboxInventory: async () => (inventories.push(1), { accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [] }),
+      sandboxInventory: async () => (inventories.push(1), { accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [], callsUsed: 0 }),
     };
     return { w, seen, inventories };
   };

@@ -82,12 +82,14 @@ export interface SandboxInventorySummary {
   stoppedEphemeral: number;
   orphans: number;
   alerts: string[];
+  /** Provider list calls made; the job charges them to its budget. */
+  callsUsed: number;
 }
 
 /** The only two things the reaper jobs may ask of the worker. A type-level test keeps this list from growing. */
 export interface SandboxReapWorker {
   sweepSandboxReap(input: SandboxReapSweepInput): Promise<SandboxReapSweepResult>;
-  sandboxInventory(input: { now: number }): Promise<SandboxInventorySummary>;
+  sandboxInventory(input: { now: number; maxCalls: number }): Promise<SandboxInventorySummary>;
 }
 
 export interface SandboxReapJobDeps {
@@ -105,8 +107,8 @@ export interface SandboxReapJobDeps {
 
 /** Provider calls one terminal or ephemeral pass may make (C81 criterion 11). */
 export const SANDBOX_REAP_CALLS_PER_RUN = 60;
-/** The inventory reads at most this many list pages in all (two prefixes, `INVENTORY_MAX_PAGES_PER_PREFIX` of @fx/runner each). */
-export const SANDBOX_INVENTORY_CALLS_PER_RUN = 200;
+/** The inventory reads at most this many list pages in all: three prefixes (`ex-`, `rn-`, `pp-`), `INVENTORY_MAX_PAGES_PER_PREFIX` (100) of @fx/runner each. */
+export const SANDBOX_INVENTORY_CALLS_PER_RUN = 3 * 100;
 
 export const SANDBOX_REAP_TERMINAL_JOB = 'sandbox_reap_terminal';
 export const SANDBOX_REAP_EPHEMERAL_JOB = 'sandbox_reap_ephemeral';

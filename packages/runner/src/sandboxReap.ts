@@ -366,6 +366,8 @@ export interface SandboxInventoryDeps {
 export interface SandboxInventoryInput {
   /** Epoch milliseconds; the facade takes it as a clock input and does not use it to decide anything. */
   now: number;
+  /** The most provider list calls this run may make; none given means only the page cap bounds it. The job passes what its budget has left. */
+  maxCalls?: number;
 }
 
 export interface SandboxInventoryResult {
@@ -379,6 +381,8 @@ export interface SandboxInventoryResult {
   orphans: number;
   /** Fixed codes, each at most once. */
   alerts: string[];
+  /** Provider list calls made, for the job to charge against its budget. */
+  callsUsed: number;
 }
 
 /** The provider's statuses folded to the two the inventory counts: a stopped, failed or aborted sandbox is stopped, any other is live. */
@@ -424,7 +428,9 @@ export async function sandboxInventory(deps: SandboxInventoryDeps, input: Sandbo
   const alerts: string[] = [];
   const listed = new Map<string, "live" | "stopped">();
   let complete = true;
-  for (const prefix of ["ex-", "rn-", "pp-"] as const) {
+  let callsUsed = 0;
+  const maxCalls = input.maxCalls ?? Infinity;
+  prefixes: for (const prefix of ["ex-", "rn-", "pp-"] as const) {
     const kind = prefix === "ex-" ? "executor" : prefix === "rn-" ? "ephemeral" : "publish";
     let cursor: string | undefined;
     let pages = 0;
@@ -433,6 +439,13 @@ export async function sandboxInventory(deps: SandboxInventoryDeps, input: Sandbo
         complete = false;
         break;
       }
+      // Out of the job's call budget: stop here. Like the page cap, this leaves the list incomplete, so nothing is written.
+      if (callsUsed >= maxCalls) {
+        complete = false;
+        alerts.push("sandbox_inventory_budget_exhausted");
+        break prefixes;
+      }
+      callsUsed++;
       // A provider failure throws: the job reports it under a code for its class and the previous inventory stands.
       let page: Awaited<ReturnType<NonNullable<SandboxPort["listSandboxes"]>>>;
       try {
@@ -475,5 +488,5 @@ export async function sandboxInventory(deps: SandboxInventoryDeps, input: Sandbo
     if ((rows[0]?.over_cap ?? 0) > 0) alerts.push("sandbox_cap_exceeded");
   }
   log(JSON.stringify({ event: "sandbox_inventory", accounts, live, stopped_executor: stoppedExecutor, stopped_ephemeral: stoppedEphemeral, total: listed.size, orphans, complete }));
-  return { accounts, live, stoppedExecutor, stoppedEphemeral, orphans, alerts };
+  return { accounts, live, stoppedExecutor, stoppedEphemeral, orphans, alerts, callsUsed };
 }

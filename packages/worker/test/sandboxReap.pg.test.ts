@@ -140,7 +140,7 @@ describe("the sandbox reaper through the worker [pg]", () => {
     const kept = await candidate(); // an executor sandbox the inventory then counts
     const inventory = await worker.sandboxInventory({ now: Date.now() });
     expect(JSON.parse(JSON.stringify(inventory))).toEqual(inventory);
-    expect(Object.keys(inventory).sort()).toEqual(["accounts", "alerts", "live", "orphans", "stoppedEphemeral", "stoppedExecutor"]);
+    expect(Object.keys(inventory).sort()).toEqual(["accounts", "alerts", "callsUsed", "live", "orphans", "stoppedEphemeral", "stoppedExecutor"]);
     expect((await admin.query(`SELECT stopped_executor, idle_executor FROM sandbox_inventory WHERE account_id = $1`, [kept.accountId])).rows).toEqual([{ stopped_executor: 1, idle_executor: 1 }]);
     expect(opsQueries).toEqual([]);
     expect(sdk.waking).toEqual([]);

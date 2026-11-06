@@ -107,3 +107,52 @@ describe("a normal answer still writes", () => {
     expect((calls[0]![0] as string[]).length).toBe(5);
   });
 });
+
+describe("the inventory keeps to the job's call budget", () => {
+  const seedMany = (fake: ReturnType<typeof createReaperSdkFake>, n: number): void => {
+    fake.pageLimit = 1;
+    for (let i = 1; i <= n; i++) fake.seed(EX(i), "running");
+  };
+
+  it("stops at the budget, writes nothing, and reports a coded partial result", async () => {
+    const fake = createReaperSdkFake();
+    seedMany(fake, 10); // 10 pages for ex-, then one each for rn- and pp-
+    const { pool, calls } = poolStub();
+    const lines: string[] = [];
+    const result = await sandboxInventory({ pool, port: realPort(fake), log: (l) => void lines.push(l) }, { now: 1, maxCalls: 4 });
+    expect(fake.listQueries.length).toBe(4);
+    expect(result.callsUsed).toBe(4);
+    expect(result.alerts).toContain("sandbox_inventory_budget_exhausted");
+    expect(calls).toEqual([]); // the previous inventory rows stand
+    expect(result.accounts).toBe(0);
+    expect(lines.some((l) => l.includes("sandbox_inventory.incomplete"))).toBe(true);
+  });
+
+  it("a budget that covers every page reads it all, writes, and raises no code", async () => {
+    const fake = createReaperSdkFake();
+    seedMany(fake, 3); // 3 + 1 + 1 pages
+    const { pool, calls } = poolStub();
+    const result = await sandboxInventory({ pool, port: realPort(fake), log: () => undefined }, { now: 1, maxCalls: 5 });
+    expect(result.callsUsed).toBe(5);
+    expect(result.alerts).toEqual([]);
+    expect(calls.length).toBe(1);
+  });
+
+  it("a budget of zero makes no provider call", async () => {
+    const fake = createReaperSdkFake();
+    seedMany(fake, 2);
+    const { pool, calls } = poolStub();
+    const result = await sandboxInventory({ pool, port: realPort(fake), log: () => undefined }, { now: 1, maxCalls: 0 });
+    expect(fake.listQueries).toEqual([]);
+    expect(result.callsUsed).toBe(0);
+    expect(result.alerts).toEqual(["sandbox_inventory_budget_exhausted"]);
+    expect(calls).toEqual([]);
+  });
+
+  it("with no budget given, every page is read and counted", async () => {
+    const fake = createReaperSdkFake();
+    seedMany(fake, 3);
+    const result = await sandboxInventory({ pool: poolStub().pool, port: realPort(fake), log: () => undefined }, { now: 1 });
+    expect(result.callsUsed).toBe(5);
+  });
+});

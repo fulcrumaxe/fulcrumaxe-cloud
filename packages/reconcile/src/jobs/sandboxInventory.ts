@@ -15,7 +15,8 @@ export function sandboxInventoryJob(worker: SandboxReapWorker | null, deps: Sand
     async run(ctx) {
       const gate = sandboxJobGate(SANDBOX_INVENTORY_JOB, ctx, worker, deps);
       if (gate !== null || worker === null) return gate ?? { cursor: ctx.cursor, wrapped: false, code: 'not_configured' };
-      const result = await worker.sandboxInventory({ now: (deps.now ?? Date.now)() });
+      const result = await worker.sandboxInventory({ now: (deps.now ?? Date.now)(), maxCalls: ctx.calls.limit - ctx.calls.used });
+      ctx.calls.take(result.callsUsed);
       for (const alert of result.alerts) deps.reportError(new Error(`sandbox inventory: ${alert}`), { stage, route: RECONCILE_ROUTE, code: alert });
       return { cursor: null, wrapped: true };
     },
