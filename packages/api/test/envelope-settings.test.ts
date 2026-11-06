@@ -245,7 +245,8 @@ describe('envelope edits, the weekly auto-start envelope and the default margin 
       expect(floor).toBeGreaterThan(0.0001);
       const refused = await call(t.owner, 'PUT', `/envelopes/${envelope}`, { amount_usd: Math.max(0.0001, floor - 0.0001) });
       expect(refused.status).toBe(409);
-      expect(await code(refused)).toBe('envelope_below_first_run');
+      expect(await code(refused.clone())).toBe('envelope_below_first_run');
+      expect(((await refused.json()) as { data?: unknown }).data).toEqual({ minimum_usd: floor });
       expect(await envelopeRows(envelope)).toHaveLength(1);
       expect(await audits(t.owner.accountId, 'envelope.changed')).toHaveLength(0);
       // Exactly the reservation is allowed.

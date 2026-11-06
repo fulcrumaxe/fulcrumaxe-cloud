@@ -757,6 +757,9 @@ export const approveBlock = (p) => (p.inbox_section === "being_checked" ? BEING_
 /** Shown instead of "Enter a higher one" when the remaining monthly budget is below the first run's cost. Fixed text. */
 export const LOW_BUDGET_SENTENCE = "Your remaining budget this month is lower than the cost of the first run. Raise the monthly budget to approve this.";
 
+/** The start of the refusal for a limit under the first run's cost; the minimum, when known, ends it. */
+const TOO_LOW_PREFIX = "That limit is too low to start this item.";
+
 /** The sentence a person reads after a refusal or a failed call, by the code the server (or the network) answered with. */
 export const REFUSALS = {
   not_new: "This proposal isn't waiting for a decision any more, so nothing was changed. The list has been refreshed.",
@@ -768,7 +771,7 @@ export const REFUSALS = {
   work_item_wrong_repo: "The work item for this proposal belongs to another repository, so nothing was changed.",
   work_item_wrong_stage: "The work item for this proposal has already moved past Triaged, so nothing was changed.",
   amount_required: "Set a limit for this item: we can't estimate it yet",
-  envelope_below_first_run: "That limit is too low to start this item. Enter a higher one.",
+  envelope_below_first_run: TOO_LOW_PREFIX + " Enter a higher one.",
   over_account_budget: "That limit is more than this account can still spend this month.",
   insufficient_role: "Only an owner or an admin can decide proposals.",
   session_required: "Sign in again to do this.",
@@ -791,6 +794,11 @@ export function refusalSentence(e, est) {
   const code = e && typeof e.code === "string" ? e.code : "";
   // A higher limit cannot help when what the account has left is itself below the first run's cost.
   if (code === "envelope_below_first_run" && est && isNum(est.remaining) && isNum(est.firstRun) && est.remaining < est.firstRun) return LOW_BUDGET_SENTENCE;
+  // The floor the server named in its answer, else the one the estimate read gave; with neither the sentence stays as it was.
+  if (code === "envelope_below_first_run") {
+    const floor = isNum(e.minimumUsd) ? e.minimumUsd : est && isNum(est.firstRun) ? est.firstRun : null;
+    if (floor !== null) return TOO_LOW_PREFIX + " Enter at least " + dollarsUp(floor) + ".";
+  }
   if (has(REFUSALS, code)) return REFUSALS[code];
   if (e && e.kind === "server_error") return REFUSALS.server_error;
   return INBOX_GENERIC;
@@ -803,12 +811,21 @@ export const AMOUNT_SENTENCE = REFUSALS.amount_required;
 const AMOUNT_RE = /^\d+(\.\d{1,4})?$/;
 const round4 = (n) => Math.round(n * 1e4) / 1e4;
 const dollars = (n) => "$" + n.toFixed(2);
+/** A minimum in dollars, rounded UP to the cent so that typing exactly what it says is enough. */
+const dollarsUp = (n) => dollars(Math.ceil(n * 100 - 1e-6) / 100);
 
 /** The pre-fill the server computes (total x (1 + margin), capped at the remaining budget), from the figures the estimate route returns. */
 export function prefillAmount(total, marginPct, remaining) {
   const want = round4(total * (1 + (isNum(marginPct) ? marginPct : 0) / 100));
   const cap = Math.floor(Math.max(0, remaining) * 1e4 + 1e-9) / 1e4;
   return want > cap ? cap : want;
+}
+
+/** The hint inside an empty limit field: the smallest limit the server said would start the item. "" while it is not known, or when what the account has left is below it (no limit would do). */
+export function amountPlaceholder(est) {
+  if (!est || !isNum(est.firstRun)) return "";
+  if (isNum(est.remaining) && est.remaining < est.firstRun) return "";
+  return "at least " + dollarsUp(est.firstRun);
 }
 
 /**
@@ -1256,6 +1273,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
         class: "pl-inbox-amount",
         inputMode: "decimal",
         autocomplete: "off",
+        placeholder: amountPlaceholder(est) || null,
         value: amounts.get(p.id) || "",
         "aria-describedby": est && est.basis === "none" ? aid + "-line" : null,
         "data-focus": p.id + ":amount",

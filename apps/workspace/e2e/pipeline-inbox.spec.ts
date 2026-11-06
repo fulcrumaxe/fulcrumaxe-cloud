@@ -791,14 +791,45 @@ test.describe("D#483 S5-e1: the limit a person gives an item as they approve it"
     await clean(page, errors);
   });
 
+  test("the limit field hints the minimum, and the refusal names the figure the server sent (rounded up to the cent)", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    m.estimates = { [proposal(1).id]: { basis: "seed", total_usd: 5 } };
+    m.estimateMeta = { margin_pct: 20, remaining_budget_usd: 90, first_run_usd: 7.25 };
+    const { errors } = await start(page, m);
+    await expect(amount(page)).toHaveAttribute("placeholder", "at least $7.25");
+    await amount(page).fill("2");
+    m.decide = [refusal(409, "envelope_below_first_run", undefined, { minimum_usd: 12.341 })];
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-sentence")).toHaveText("That limit is too low to start this item. Enter at least $12.35.");
+    await expect(amount(page)).toHaveValue("2");
+    await axeClean(page);
+    await clean(page, errors);
+  });
+
+  test("with no figure from the estimate or the server the refusal keeps its short sentence and the field has no hint", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    m.estimates = { [proposal(1).id]: { basis: "none", total_usd: null } };
+    m.estimateMeta = { margin_pct: 20, remaining_budget_usd: 90 } as never;
+    const { errors } = await start(page, m);
+    await expect(amount(page)).not.toHaveAttribute("placeholder", /./);
+    await amount(page).fill("2");
+    m.decide = [refusal(409, "envelope_below_first_run")];
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-sentence")).toHaveText("That limit is too low to start this item. Enter a higher one.");
+    await clean(page, errors);
+  });
+
   test("the server's refusals read as their own sentences, keep the typed limit and let the person try again", async ({ page }) => {
     const m = newMock();
     m.proposals = [proposal(1)];
     m.estimates = { [proposal(1).id]: { basis: "none", total_usd: null } };
+    m.estimateMeta = { margin_pct: 20, remaining_budget_usd: 90, first_run_usd: 7.75 };
     const { errors } = await start(page, m);
     await amount(page).fill("1");
     const cases: [number, string, string][] = [
-      [409, "envelope_below_first_run", "That limit is too low to start this item. Enter a higher one."],
+      [409, "envelope_below_first_run", "That limit is too low to start this item. Enter at least $7.75."],
       [409, "over_account_budget", "That limit is more than this account can still spend this month."],
       [400, "amount_required", AMOUNT_SENTENCE],
     ];

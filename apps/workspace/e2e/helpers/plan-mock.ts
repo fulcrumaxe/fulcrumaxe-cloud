@@ -77,10 +77,10 @@ export function proposal(n: number, over: Record<string, unknown> = {}): Proposa
 }
 
 export interface Reply { status: number; json?: unknown; headers?: Record<string, string>; abort?: boolean }
-export const refusal = (status: number, code: string, headers?: Record<string, string>): Reply => ({
+export const refusal = (status: number, code: string, headers?: Record<string, string>, data?: Record<string, unknown>): Reply => ({
   status,
   headers,
-  json: { error: { code, message: "server text that must never be shown", request_id: "req_1" } },
+  json: { error: { code, message: "server text that must never be shown", request_id: "req_1" }, ...(data ? { data } : {}) },
 });
 
 export interface PlanMock {

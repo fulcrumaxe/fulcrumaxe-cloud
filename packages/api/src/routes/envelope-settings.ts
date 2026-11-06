@@ -101,7 +101,7 @@ function mapError(error: unknown): unknown {
   }
   if (error instanceof EnvelopeWriteError) {
     if (error.code === "over_account_budget") return new OverAccountBudgetError();
-    if (error.code === "envelope_below_first_run") return new EnvelopeBelowFirstRunError();
+    if (error.code === "envelope_below_first_run") return new EnvelopeBelowFirstRunError(error.minimumUsd);
     if (error.code === "version_conflict") return new ApiError(409, "setting_changed", "the setting changed while you saved; reload and try again");
     if (error.code === "envelope_not_found") return new NotFoundError("envelope not found");
     return new ApiError(422, "invalid_input", "amount_usd must be a valid amount", [{ path: "amount_usd", code: error.code }]);

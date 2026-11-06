@@ -93,7 +93,7 @@ export function prefill(totalUsd: number, marginPct: number | null, remainingUsd
 export function mapEnvelopeError(err: unknown): unknown {
   if (err instanceof EnvelopeWriteError) {
     if (err.code === "over_account_budget") return new OverAccountBudgetError();
-    if (err.code === "envelope_below_first_run") return new EnvelopeBelowFirstRunError();
+    if (err.code === "envelope_below_first_run") return new EnvelopeBelowFirstRunError(err.minimumUsd);
     if (err.code === "invalid_amount") return new ApiError(422, "invalid_input", "amount_usd must be a positive number", [{ path: "amount_usd", code: err.code }]);
   }
   return err;
@@ -242,7 +242,7 @@ export const proposalEnvelopeRoutes: RouteEntry[] = [
       "Session only, owner or admin; a token is refused. `Idempotency-Key` is required: a replay with the same key answers the same envelope and work items and creates nothing. " +
       "Every proposal must be `new` and product-owned, and belong to this repository; one that is not refuses the whole set (409) and nothing is written. " +
       "The set shares ONE `batch` envelope of `amount_usd`, or, when it is omitted, of the pre-fill (the sum of the estimates times (1 + margin), capped at the remaining budget). " +
-      "A set holding a proposal that cannot be priced needs an explicit `amount_usd` (400 `amount_required`). A limit below the first run's reservation is refused 409 `envelope_below_first_run`, and one above the remaining budget 409 `over_account_budget`. " +
+      "A set holding a proposal that cannot be priced needs an explicit `amount_usd` (400 `amount_required`). A limit below the first run's reservation is refused 409 `envelope_below_first_run` (the smallest limit that would be accepted is in `data.minimum_usd`), and one above the remaining budget 409 `over_account_budget`. " +
       "Each work item is created and its start requested exactly as a single approve does it. If a start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
     // principals omitted -> session-only: an API token can never approve.
     minRole: "admin",

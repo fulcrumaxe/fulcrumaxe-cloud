@@ -289,7 +289,7 @@ describe('approval envelopes', () => {
       const f = await fixture(null);
       const w = (amountUsd: number, minAmountUsd?: number) =>
         asPerson(f.accountId, f.userId, (c) => writeEnvelopeVersion(c, { accountId: f.accountId, scope: 'item', amountUsd, ...(minAmountUsd !== undefined && { minAmountUsd }) }));
-      await expect(w(1.99, 2)).rejects.toMatchObject({ code: 'envelope_below_first_run' });
+      await expect(w(1.99, 2)).rejects.toMatchObject({ code: 'envelope_below_first_run', minimumUsd: 2 });
       // The floor is checked before the account budget, so a limit that is both low and over budget names the floor.
       await expect(w(0, 2)).rejects.toMatchObject({ code: 'envelope_below_first_run' });
       expect((await admin.query('SELECT count(*)::int AS n FROM approval_envelopes WHERE account_id = $1', [f.accountId])).rows[0].n).toBe(0);
