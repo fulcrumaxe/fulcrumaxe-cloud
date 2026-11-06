@@ -671,7 +671,7 @@ export const FILTERS = [
 ];
 
 // D#483 S4-h: what a person reads about a proposal's check. Fixed, owner-approved text; the number in the spent-tries line comes from the row's own cap.
-export const EXTERNAL_SENTENCE = "From someone without write access. Read it before approving.";
+export const EXTERNAL_SENTENCE = "From someone without admin or maintain access. Read it before approving.";
 export const PARTLY_SENTENCE = "Part of this was confirmed. Read the parts that weren't before you approve it.";
 export const NOT_CHECKED_SENTENCE = "Not checked yet: add a model key or connect a runner";
 export const BEING_CHECKED_SENTENCE = "You can approve this once it's been checked.";

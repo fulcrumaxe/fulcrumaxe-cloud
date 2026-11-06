@@ -95,7 +95,7 @@ test.describe("D#483 S4-h: the line about a proposal's check", () => {
       proposal(5, { verification: "refuted", title: "Refuted" }),
     ];
     const { errors } = await start(page, m);
-    await expect(rows(page).filter({ hasText: "From outside" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("From someone without write access. Read it before approving.");
+    await expect(rows(page).filter({ hasText: "From outside" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("From someone without admin or maintain access. Read it before approving.");
     await expect(rows(page).filter({ hasText: "Partly" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("Part of this was confirmed. Read the parts that weren't before you approve it.");
     await press(page, filter(page, "couldnt_confirm"));
     await expect(rows(page).filter({ hasText: "Will retry" }).locator('[data-testid="pl-inbox-check"]')).toHaveText("The check didn't finish. We'll try again at the next check.");

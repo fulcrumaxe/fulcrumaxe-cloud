@@ -255,6 +255,20 @@ describe("an outside author's new issue becomes a proposal (D#483 S4-d)", () => 
     expect((await proposals(r)).map((p) => p.gh_number)).toEqual([60, 61, 62, 63]);
   });
 
+  it("an issue authored by our own App's bot login stays a proposal: agents propose and a person approves, whatever the association says", async () => {
+    const r = await tenant();
+    // The permission lookup answers none for a bot (no collaborator row); the association alone must not turn the issue into work either.
+    const { deps } = await github({}, [issueItem(140, "fx-team[bot]"), issueItem(141, "fx-team[bot]")]);
+    const before = await baseline(r);
+    await deliver(deps, payload(r, 140, "fx-team[bot]"));
+    await deliver(deps, payload(r, 141, "fx-team[bot]", { association: "CONTRIBUTOR" }));
+    expect(await baseline(r)).toEqual(before);
+    expect(await proposals(r)).toMatchObject([
+      { gh_number: 140, state: "new", provenance: "external" },
+      { gh_number: 141, state: "new", provenance: "external" },
+    ]);
+  });
+
   it("a forged, unsigned or tampered delivery is refused before any write: no row, no GitHub call, no work", async () => {
     const r = await tenant();
     const { deps } = await github({ stranger: "read" }, [issueItem(70, "stranger")]);

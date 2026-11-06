@@ -88,7 +88,7 @@ uses, not for this resolution step.
 
 - `owned_by_internal_loop` — the repo's own development loop owns the item; refused.
 - `engine_loop_repo` — the default branch holds the engine loop's project file; the person decides.
-- `external_needs_approval` — the proposal came from someone without write access; the person decides.
+- `external_needs_approval` — the proposal came from someone without admin or maintain access; the person decides.
 - `not_checked` — the verifier has not confirmed the proposal (pending, refuted, failed or not run); the person decides.
 - `category_unknown` — no category yet, or the category is a question or outside the known set; the person decides.
 - `free_preview` — the account is still on the free preview; refused.
@@ -107,7 +107,7 @@ uses, not for this resolution step.
 - `parent_envelope_reached` — the parent's envelope does not cover the first run; wait.
 - `owned_by_internal_loop` — the parent is owned by the repo's own loop; refused.
 - `engine_loop_repo` — the parent's repo holds the engine loop's project file; ask.
-- `external_needs_approval` — the parent came from someone without write access; ask.
+- `external_needs_approval` — the parent came from someone without admin or maintain access; ask.
 - `dial` — every guardrail passed and the `launch_sub_item` dial gave the answer.
 
 ### A person's approval of a split parent
