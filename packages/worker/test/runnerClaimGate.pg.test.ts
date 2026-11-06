@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { BASE_SHA_JOB_MIN_PROTOCOL, BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CHILD_BRANCH_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CHILD_BRANCH_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, SCOPE_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -137,6 +137,17 @@ describe("the claim's protocol gate [pg]", () => {
     expect((await claim(previous)).kind).toBe("idle");
     expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
     const current = await runnerAt(CHILD_BRANCH_JOB_MIN_PROTOCOL);
+    expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
+  });
+
+  // D#6 SCOPE-IN-JOB: a job that carries the Spec's scope is never claimed by a runner whose strict parse predates the key (the owner's runner is rebuilt from main to take it).
+  it("a job with a signed scope is not given to a runner one version below the scope floor, and is claimed at it", async () => {
+    expect(SCOPE_JOB_MIN_PROTOCOL).toBe(15);
+    const older = await runnerAt(14);
+    const job = await pending(SCOPE_JOB_MIN_PROTOCOL, { scope: ["packages/web/**", "src/a.ts"] });
+    expect((await claim(older)).kind).toBe("idle");
+    expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
+    const current = await runnerAt(SCOPE_JOB_MIN_PROTOCOL);
     expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
   });
 

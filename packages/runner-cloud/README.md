@@ -155,6 +155,11 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   never offered it, the claim definer and the `job_signed` guard both refuse, and the run reads `runner_too_old_for_check`. `GET` also answers
   `suggested_check` for an owner or admin: the `check` of the declared file at the default branch tip, read through the read-only plan client and parsed
   with the same schema. It only pre-fills a form; nothing from the branch is ever run, and an agent that edits the file changes nothing that runs.
+- The Spec's file scope (SCOPE-IN-JOB): a build or check-fix job carries `scope`, the patterns of the run's own pinned Spec version (`acceptance_files`, brace groups
+  expanded, at most 1024 entries of 512 characters), read from our rows when the job is issued and signed with it. Reviews and read-only roles carry none, and
+  neither does a run whose pinned Spec has no list the parser reads. Such a job is gated at protocol 15 (`SCOPE_JOB_MIN_PROTOCOL`): an older runner is never offered
+  it and the run reads `waiting_for_runner_update` naming 15. This release only carries the field; the runner does not act on it yet, and `done` still holds the pull
+  request to the list read from our own rows.
 - `repo_runner_sandbox_allowances` is append-only (0770): one row per approval, newest wins, each with the set's sha256 and one audit row.
   Leaving `runner_local` sets the approved set aside in the same transaction (kept on record, ignored), so a repo that comes back is approved
   again first. Ruling: Chromium's `--no-sandbox` for test browsers is not an allowance kind in R7a or R7b; the self-build run (R7e) records it as a

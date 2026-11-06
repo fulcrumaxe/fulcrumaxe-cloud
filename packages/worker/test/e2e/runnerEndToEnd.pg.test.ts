@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { jwkThumbprint, verifyJob, type JobKeyring } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, jwkThumbprint, verifyJob, type JobKeyring } from "@fulcrumaxe/runner-protocol";
 import { RunnerTarget, SandboxTarget, createJobIssuer, createJobSigner, createPgJobContext, type ExecutionTargetRegistry } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -167,7 +167,7 @@ describe("the runner build path, end to end [pg]", { timeout: 180_000 }, () => {
     await admin.query("UPDATE accounts SET model_budget_usd_month = 4242 WHERE id = $1", [a.accountId]);
     await admin.query("UPDATE repos SET execution_mode = 'runner_local', gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [a.repoId]);
     runnerKey = newKey();
-    const runnerId = await insertRunner(admin, a.accountId, a.userId, { jwk: runnerKey.jwk, jkt: runnerKey.jkt, credentialMode: "subscription" });
+    const runnerId = await insertRunner(admin, a.accountId, a.userId, { jwk: runnerKey.jwk, jkt: runnerKey.jkt, credentialMode: "subscription", protocolVersion: CURRENT_PROTOCOL_VERSION });
     rig = createRunnerRig({
       cloudOrigin: cloud.origin,
       key: { privateKey: runnerKey.privateKey, publicJwk: runnerKey.jwk, jkt: jwkThumbprint(runnerKey.jwk) },

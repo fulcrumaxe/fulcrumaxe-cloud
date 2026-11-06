@@ -268,6 +268,14 @@ export type JobPins = z.infer<typeof JobPinsSchema>;
 export const JobConflictRoundSchema = z.object({ from_sha: z.string().regex(/^[0-9a-f]{40}$/), base_sha: z.string().regex(/^[0-9a-f]{40}$/), base_ref: branchName }).strict();
 export type JobConflictRound = z.infer<typeof JobConflictRoundSchema>;
 
+/** D#6 SCOPE-IN-JOB: the most entries and the longest entry a job's `scope` holds. They match the Spec parser's own caps (`MAX_SCOPE_PATTERNS` after brace expansion, and its entry length, in @fx/core), so a list the cloud can read always fits. */
+export const MAX_JOB_SCOPE_ENTRIES = 1024;
+export const MAX_JOB_SCOPE_ENTRY_CHARS = 512;
+/** The characters the Spec parser lets an entry hold (@fx/core `ENTRY_CHARS`): a path, `*`, `**`, a brace group and the Next.js brackets. No space, backslash or control character. */
+const JOB_SCOPE_ENTRY = /^[A-Za-z0-9_.@+=,:*()[\]{}/-]+$/;
+/** The Spec's file patterns as the cloud's matcher holds them (`AcceptanceScope.entries`, brace groups already expanded): a non-empty list of bounded strings. This schema only bounds them; the matcher is the cloud's own `pathInScope`. */
+export const JobScopeSchema = z.array(z.string().min(1).max(MAX_JOB_SCOPE_ENTRY_CHARS).regex(JOB_SCOPE_ENTRY)).min(1).max(MAX_JOB_SCOPE_ENTRIES);
+
 export const JobSchema = z
   .object({
     schema_version: z.literal(1),
@@ -301,6 +309,10 @@ export const JobSchema = z
     // canonical JSON and signature are unchanged. The signature covers it. The cloud signs it only for a runner of `CHECK_JOB_MIN_PROTOCOL` or later: an older runner's strict
     // parse would refuse the key, and one that ignored it would report `done` for a run nobody checked. Only an owner or admin sets it; nothing is read from the branch.
     check: CheckSchema.optional(),
+    // D#6 SCOPE-IN-JOB: the file patterns of the Spec version this run is pinned to (its `acceptance_files`), present only on a pushing-role job (a build or a check-fix round) whose pinned Spec has a readable list and omitted
+    // (never null, never empty) on every other job, so their canonical JSON and signature are unchanged. The signature covers it. The cloud signs it only for a runner of `SCOPE_JOB_MIN_PROTOCOL`
+    // or later: an older runner's strict parse would refuse the key. It is a hint for the runner to look early; the cloud still holds the finished pull request to the list it reads from its own rows.
+    scope: JobScopeSchema.optional(),
     // D#605 FL-4: the sandbox engine this job cannot run without, present only on a job that needs a microVM and omitted (never null) on every
     // other job, so their canonical JSON and signature are unchanged. The cloud's claim hands such a job only to a runner whose reported engine
     // is `microvm`, whatever the person's routing says. Set by the cloud when it signs the job; no person-set rule can write or clear it.
