@@ -54,14 +54,14 @@ describe("a later event brings in an open issue whose opened delivery was lost [
   }
   const loginOf = new Map<number, string>();
 
-  type Over = { state?: string; pull?: boolean; login?: string; createdAt?: string | null };
+  type Over = { state?: string; pull?: boolean; login?: string; createdAt?: string | null; bodyExtra?: string };
   function body(r: { ghInstallationId: number; ghRepoId: number }, event: GithubWebhookEventName, action: string, n: number, over: Over = {}): GithubWebhookPayload {
     const login = over.login ?? "boss";
     loginOf.set(n, login);
     const issue = {
       number: n,
       title: `Issue ${n}`,
-      body: `Body ${n}`,
+      body: `Body ${n}${over.bodyExtra ?? ""}`,
       state: over.state ?? "open",
       ...(over.createdAt === null ? {} : { created_at: over.createdAt ?? new Date(Date.now() + 60_000).toISOString() }),
       user: { login },
@@ -120,7 +120,7 @@ describe("a later event brings in an open issue whose opened delivery was lost [
     const r = await tenant();
     const { d } = deps({ boss: "admin" });
     expect(await send(d, "issues", body(r, "issues", "labeled", 30, { login: "stranger" }))).toMatchObject({ result: { applied: "proposed", created: true } });
-    expect(await send(d, "issues", body(r, "issues", "edited", 30, { login: "stranger" }))).toMatchObject({ result: { applied: "proposal_changed", count: 1 } });
+    expect(await send(d, "issues", body(r, "issues", "edited", 30, { login: "stranger", bodyExtra: " (edited)" }))).toMatchObject({ result: { applied: "proposal_changed", count: 1 } });
     expect(await send(d, "issue_comment", body(r, "issue_comment", "created", 30, { login: "stranger" }))).toMatchObject({ result: { applied: "skipped" } });
     expect(await proposals(r, 30)).toEqual([{ state: "new", provenance: "external" }]);
     expect(await items(r, 30)).toEqual([]);

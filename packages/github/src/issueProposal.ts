@@ -107,7 +107,8 @@ export type IssueChange =
 
 /**
  * `closed` and `reopened` move the issue's proposal between `withdrawn` and `new` (derived from the issue, as the importer does); `edited`
- * refreshes a `new` proposal's cleaned title and fenced summary and sends it back to be checked. A decided proposal (approved or
+ * refreshes a `new` proposal's cleaned title and fenced summary and sends it back to be checked, but only when that text differs from what is
+ * stored (an edit that leaves the text as it was costs no verifier run, which is capped per day). A decided proposal (approved or
  * rejected) is a person's decision and is never touched, and an issue with no proposal (a trusted author's, which became a work item)
  * changes nothing. Answers how many proposals changed.
  */
@@ -117,7 +118,8 @@ export async function applyIssueChange(client: PoolClient, repoId: string, input
     await client.query('SET LOCAL ROLE plan_importer');
     const res = await client.query<{ id: string }>(
       `UPDATE proposals SET title = $3, summary = $4, updated_at = now()
-        WHERE repo_id = $1 AND dedupe_key = $2 AND state = 'new' AND 'github_issue' = ANY (sources) RETURNING id`,
+        WHERE repo_id = $1 AND dedupe_key = $2 AND state = 'new' AND 'github_issue' = ANY (sources)
+          AND (title, summary) IS DISTINCT FROM ($3::text, $4::text) RETURNING id`,
       [repoId, key, input.title, input.summary],
     );
     await client.query('RESET ROLE');
