@@ -128,3 +128,26 @@ describe("the no-notes wording swap touches the prompt's own sentence only", () 
     expect(out).toContain(SAME_SIDE_NOTES_SENTENCE);
   });
 });
+
+describe("the cut lands on a character boundary", () => {
+  // "a" then two-byte letters: the 4096th byte is the second half of a letter, so the cut has to back off one byte to 4095.
+  const twoByte = `a${"é".repeat(3000)}`;
+  // A look-alike marker first (13 bytes that become 44), then an odd offset again, so the cap falls inside a letter after the neutralised marker.
+  const afterMarker = `<<untrusted>>a${"é".repeat(3000)}`;
+  const threeByte = `ab${"€".repeat(3000)}`; // the cut falls one byte into a three-byte letter
+
+  it.each([["two-byte letters", twoByte], ["two-byte letters after a look-alike marker", afterMarker], ["three-byte letters", threeByte]])("%s: no half character, and no more than one character short of the cap", (_n, note) => {
+    for (const prompt of [assembleFixNotePrompt(PROMPT, note).prompt, assembleSeatPrompt(PROMPT, note).prompt, seatPrompt(PROMPT, note)]) {
+      const body = fenced(prompt);
+      expect(body).not.toContain("�");
+      expect(bytes(body)).toBeLessThanOrEqual(4096 + 2);
+      expect(bytes(body)).toBeGreaterThanOrEqual(4096 + 2 - 3); // the cap, less at most the byte(s) of one cut-off letter
+    }
+  });
+
+  it("the back-off goes by exactly the bytes of the split letter, not further", () => {
+    // 4095 bytes of the note plus the fence's two line breaks.
+    expect(bytes(fenced(assembleFixNotePrompt(PROMPT, twoByte).prompt))).toBe(4095 + 2);
+    expect(bytes(fenced(assembleFixNotePrompt(PROMPT, threeByte).prompt))).toBe(4094 + 2);
+  });
+});

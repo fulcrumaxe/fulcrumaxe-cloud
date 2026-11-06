@@ -1,9 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CLONE_EXIT_TOO_LARGE, MAX_CLONE_KB } from "@fx/runner";
+import { CLONE_EXIT_TOO_LARGE, DEEPEN_SCRIPT, MAX_CLONE_KB } from "@fx/runner";
 import { assembleConflictPrompt, assembleRenumberPrompt, checkoutBranchCommand } from "../../src/review/reviewPrompts.js";
 
 /**
@@ -178,6 +178,14 @@ describe("checkoutBranchCommand", () => {
     for (const c of [deep, shallow]) expect(c).toContain('"+refs/heads/b:refs/remotes/origin/b"');
     for (const c of [deep, shallow]) expect(c).toContain("git checkout -B b origin/b");
   });
+
+  it.each([["NaN", Number.NaN], ["infinity", Number.POSITIVE_INFINITY], ["zero", 0], ["negative", -5], ["fractional", 1.5], ["beyond the safe integers", 2 ** 60], ["a string", "9" as unknown as number], ["null", null as unknown as number]])(
+    "a size limit that is %s is refused, never put into the command",
+    (_n, bad) => {
+      expect(() => checkoutBranchCommand("b", "main", "a".repeat(40), true, bad)).toThrow(/positive integer/);
+      expect(() => checkoutBranchCommand("b", "main", "a".repeat(40), false, bad)).toThrow(/positive integer/);
+    },
+  );
 });
 
 describe("the deepening fetch is under the clone's size watch", () => {
@@ -206,5 +214,98 @@ describe("the deepening fetch is under the clone's size watch", () => {
     const out = run(dir, `${checkoutBranchCommand(BRANCH, "main", head, true, 1)}; echo after:$?`);
     expect(out.stdout).not.toContain("Switched to");
     expect(existsSync(dir)).toBe(false);
+  });
+});
+
+
+describe("the deepening script on its own", () => {
+  const script = (dir: string, args: string[], env: NodeJS.ProcessEnv = ENV, timeout = 60_000) =>
+    spawnSync("sh", ["-c", DEEPEN_SCRIPT, "fx-deepen", ...args], { cwd: dir, encoding: "utf8", env, timeout });
+  const refspecs = [`+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}`, "+refs/heads/main:refs/remotes/origin/main"];
+  /** A directory first on PATH whose `git` is a stand-in for the fetch only; every other git command is the real one. */
+  function stubGit(fetchBody: string): NodeJS.ProcessEnv {
+    const bin = mkdtempSync(path.join(root, "bin-"));
+    const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!/bin/sh\nif [ "$1" = fetch ]; then\n${fetchBody}\nfi\nexec "${real}" "$@"\n`);
+    chmodSync(path.join(bin, "git"), 0o755);
+    return { ...ENV, PATH: `${bin}:${process.env.PATH ?? ""}` };
+  }
+
+  it.each([["--upload-pack"], ["--receive-pack"], ["--exec"]])("an argument that starts with a dash (%s=...) is never an option: the script's own stop at the end of options makes it a refspec git refuses", (flag) => {
+    const dir = sandboxClone();
+    const marker = path.join(root, `ran-${n++}`);
+    const hook = path.join(root, `hook-${n++}.sh`);
+    writeFileSync(hook, `#!/bin/sh\ntouch "${marker}"\nexit 1\n`);
+    chmodSync(hook, 0o755);
+    const out = script(dir, ["100000", `${flag}=${hook}`, ...refspecs]);
+    expect(existsSync(marker)).toBe(false);
+    expect(out.status).not.toBe(0);
+    expect(out.status).not.toBe(CLONE_EXIT_TOO_LARGE);
+    expect(existsSync(dir)).toBe(true);
+    expect(git(dir, "rev-parse", "--is-shallow-repository")).toBe("true");
+  });
+
+  it("the script puts the end-of-options marker before the repository, and holds no single quote", () => {
+    expect(DEEPEN_SCRIPT).toContain("fetch --depth=2147483647 -- origin ");
+    expect(DEEPEN_SCRIPT).not.toContain("'");
+  });
+
+  it.each([["empty", ""], ["letters", "abc"], ["an exponent", "1e9"], ["a sign", "-1"], ["a trailing blank", "5 "], ["a decimal", "1.5"], ["sixteen digits", "1000000000000000"], ["a shell word", "1;touch x"]])(
+    "a limit that is %s exits 2 before anything is fetched, so the watch is never silently off",
+    (_n, limit) => {
+      const dir = sandboxClone();
+      const out = script(dir, [limit, ...refspecs]);
+      expect(out.status).toBe(2);
+      expect(existsSync(dir)).toBe(true);
+      expect(git(dir, "rev-parse", "--is-shallow-repository")).toBe("true");
+    },
+  );
+
+  it("fifteen digits is accepted", () => {
+    const dir = sandboxClone();
+    expect(script(dir, ["999999999999999", ...refspecs]).status).toBe(0);
+    expect(git(dir, "rev-parse", "--is-shallow-repository")).toBe("false");
+  });
+
+  it("a fetch that grows the checkout past the limit while it runs is killed with the clone's refusal code, and the checkout is removed", () => {
+    const dir = sandboxClone();
+    const env = stubGit(`dd if=/dev/zero of="$(command git rev-parse --show-toplevel)/.git/big" bs=1024 count=200 2>/dev/null\nexec sleep 60`);
+    const started = Date.now();
+    const out = script(dir, ["50", ...refspecs], env);
+    expect(out.status).toBe(CLONE_EXIT_TOO_LARGE);
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("a fetch that fails passes its own exit code on, and the checkout is left where it was", () => {
+    const dir = sandboxClone();
+    const out = script(dir, ["100000", ...refspecs], stubGit("exit 42"));
+    expect(out.status).toBe(42);
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("a real fetch that fails (a branch the remote does not have) stops the line before any checkout", () => {
+    const dir = sandboxClone();
+    const out = spawnSync("bash", ["-c", checkoutBranchCommand(BRANCH, "no-such-branch", head, true)], { cwd: dir, encoding: "utf8", env: ENV });
+    expect(out.status).not.toBe(0);
+    expect(out.status).not.toBe(CLONE_EXIT_TOO_LARGE);
+    expect(out.stdout).not.toContain("Switched to");
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("run from a subdirectory, the cleanup removes the checkout's top level and nothing around it", () => {
+    const dir = sandboxClone();
+    const sub = path.join(dir, "deep", "er");
+    mkdirSync(sub, { recursive: true });
+    const neighbour = path.join(root, `neighbour-${n++}.txt`);
+    writeFileSync(neighbour, "keep");
+    const sibling = path.join(root, `sibling-${n++}`);
+    mkdirSync(sibling);
+    const out = script(sub, ["1", ...refspecs]);
+    expect(out.status).toBe(CLONE_EXIT_TOO_LARGE);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(neighbour)).toBe(true);
+    expect(existsSync(sibling)).toBe(true);
+    expect(existsSync(root)).toBe(true);
   });
 });
