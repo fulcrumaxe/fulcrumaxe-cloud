@@ -29,6 +29,7 @@ import { SpillRefused, prepareSpill, removeSpill, type SpillHandle } from "../jo
 import { checkNote, DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import type { DepsInstaller } from "./depsInstall.js";
 import type { LockfileSync } from "./lockfileSync.js";
+import { outOfScopeCount, type ChangedFiles } from "./scopeStep.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
@@ -149,6 +150,10 @@ export interface JobHandlerDeps {
   checkLaunch?: (handle: SandboxHandle, argv: readonly string[], devShell: boolean) => CheckLaunch | CheckRefused | undefined;
   baseFile?: CheckStepInput["baseFile"];
   checkHome?: string;
+  /**
+   * D#6 SCOPE-IN-JOB: lists the files the workspace changed against a base (`createChangedFiles`), for the job's `scope` test that runs before the check. Absent: no scope test, the check runs as before.
+   */
+  changedFiles?: ChangedFiles;
   /**
    * One journal line per step of a run (`stepLog.ts`): the agent's turn starting and ending, the check starting and ending, and what the cloud answered to the run's end. Fixed words, the run id,
    * numbers and closed codes only. Absent: no lines.
@@ -608,6 +613,14 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             const pin = mirror === undefined ? null : await git.checkBase?.(job, started.base).catch(() => null);
             if (mirror === undefined || pin === null || pin === undefined) {
               checkHeld.outcome = closed("the check was not run: the default branch's copy of its files could not be found", "base_missing"); step("check not run (base_missing)");
+              return;
+            }
+            // D#6 SCOPE-IN-JOB: a job that carries the Spec's file list tests the files this run changed (against the same merge-base the check is pinned to) with the shared matcher before it spends a
+            // check on them. Any file outside the list: the check is not run, the branch is pushed below as for any run, and the cloud, which judges the pull request itself, is told the count only. Anything the
+            // runner cannot read (no list it understands, no listing) is not a verdict: the check runs as it did before the field existed.
+            const outside = await outOfScopeCount({ scope: job.scope, changedFiles: deps.changedFiles, workspace, base: pin });
+            if (outside !== null && outside > 0) {
+              checkHeld.outcome = closed(`the check was not run: ${String(outside)} changed ${outside === 1 ? "file is" : "files are"} outside the Spec's file list`, "out_of_scope"); step(`check not run (out_of_scope, ${String(outside)} ${outside === 1 ? "file" : "files"})`);
               return;
             }
             step(`check started (time limit ${String(check.timeout_s)} s)`);

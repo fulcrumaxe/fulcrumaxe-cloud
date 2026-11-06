@@ -53,7 +53,7 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean } = {}) {
+function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> } } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -84,6 +84,12 @@ function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: A
     recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs: over.heartbeatMs ?? 1e9, flushMs: 1e9, runJobFn: runJob,
     ...(over.steps === undefined ? {} : { onStep: (line: string) => over.steps!.push(line) }),
     ...(over.shell === false ? {} : { nix: withShell }),
+    ...(over.changed === undefined ? {} : { changedFiles: async (workspace: string, base: string) => {
+      order.push("changed_files");
+      over.changed!.calls.push({ workspace, base });
+      if (over.changed!.files === "throws") throw new Error("boom at /home/someone/secret");
+      return over.changed!.files;
+    } }),
     ...(over.lockfile === undefined ? {} : { lockfileSync: { run: async (input: { base: string; registryHost?: string | undefined }) => {
       order.push("lockfile");
       over.lockfile!.stubSeen?.push(existsSync(path.join(held, ".npmrc")));
@@ -379,6 +385,109 @@ describe("the journal line per step", () => {
     const r = rig();
     const result = await r.handle(await r.claim(withCheck()));
     expect(result.status).toBe("completed");
+  });
+});
+
+describe("a job with a check and the Spec's file scope (D#6 SCOPE-IN-JOB)", () => {
+  const SCOPE = ["src/**", "package.json", "docs/*.md"];
+  const scoped = (scope: string[] | null = SCOPE) => jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 }, check: CHECK, ...(scope === null ? {} : { scope }) });
+  const changed = (files: string[] | null | "throws") => ({ files, calls: [] as Array<{ workspace: string; base: string }> });
+
+  it("every changed file inside the list: the check runs as before, after the file listing that was read against the check's merge-base pin", async () => {
+    const c = changed(["src/a/b.ts", "package.json", "docs/x.md"]);
+    const steps: string[] = [];
+    const r = rig({ changed: c, steps });
+    await r.handle(await r.claim(scoped()));
+    expect(r.order).toEqual(["agent", "changed_files", "check", "sandbox_deleted", "publish", "hook"]);
+    expect(c.calls).toEqual([{ workspace: expect.any(String), base: PIN }]);
+    expect(bodies("/done")[0]!.check).toEqual(PASSED);
+    expect(runEnded()).toEqual([]);
+    expect(steps.some((l) => l.includes("out_of_scope"))).toBe(false);
+  });
+
+  it("a changed file outside the list: the check is not run, the branch is still pushed, and done reports the reason out_of_scope with a count and no path", async () => {
+    const c = changed(["src/a.ts", "infra/prod/secret-plan.tf", "docs/deep/x.md"]);
+    const steps: string[] = [];
+    const r = rig({ changed: c, steps });
+    const result = await r.handle(await r.claim(scoped()));
+    expect(result.status).toBe("completed");
+    expect(r.order).not.toContain("check");
+    expect(r.order).toContain("publish");
+    // A check that did not pass leaves the public-push hook alone, as for any failed check.
+    expect(r.order).not.toContain("hook");
+    expect(bodies("/done")).toHaveLength(1);
+    expect(bodies("/done")[0]!.check).toEqual({ exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: "the check was not run: 2 changed files are outside the Spec's file list", reason: "out_of_scope" });
+    expect(runEnded().map((e) => e.reason)).toEqual(["check_failed"]);
+    expect(steps.some((l) => l.includes("check not run (out_of_scope, 2 files)"))).toBe(true);
+    // Nothing from the changed paths is written anywhere the cloud or the journal sees.
+    expect(JSON.stringify(cloud.seen)).not.toContain("secret-plan");
+    expect(steps.join("\n")).not.toContain("secret-plan");
+  });
+
+  it("one file outside the list reads in the singular", async () => {
+    const r = rig({ changed: changed(["README.md"]) });
+    await r.handle(await r.claim(scoped()));
+    expect((bodies("/done")[0]!.check as DoneCheck).summary).toBe("the check was not run: 1 changed file is outside the Spec's file list");
+  });
+
+  it("uses the shared matcher: the root lockfile follows a manifest in the list, and is outside when no manifest is", async () => {
+    const withManifest = rig({ changed: changed(["package.json", "pnpm-lock.yaml"]) });
+    await withManifest.handle(await withManifest.claim(scoped(["package.json"])));
+    expect(withManifest.order).toContain("check");
+    const without = rig({ changed: changed(["src/a.ts", "pnpm-lock.yaml"]) });
+    await without.handle(await without.claim(scoped(["src/**"])));
+    expect(without.order).not.toContain("check");
+    expect(bodies("/done").at(-1)!.check).toMatchObject({ reason: "out_of_scope" });
+  });
+
+  it("a job with no scope lists nothing and runs the check", async () => {
+    const c = changed(["anywhere/at/all.ts"]);
+    const r = rig({ changed: c });
+    await r.handle(await r.claim(scoped(null)));
+    expect(c.calls).toEqual([]);
+    expect(r.order).toContain("check");
+  });
+
+  it("a list the shared parser does not read as known is no scope: the check runs and nothing is listed", async () => {
+    const c = changed(["anywhere/at/all.ts"]);
+    const r = rig({ changed: c });
+    await r.handle(await r.claim(scoped(["**"])));
+    expect(c.calls).toEqual([]);
+    expect(r.order).toContain("check");
+  });
+
+  it("a listing that is cut, absent or throws is no answer: the check runs", async () => {
+    for (const files of [null, "throws"] as const) {
+      const r = rig({ changed: changed(files) });
+      await r.handle(await r.claim(scoped()));
+      expect(r.order, String(files)).toContain("check");
+    }
+    const unwired = rig();
+    expect(unwired.deps.changedFiles).toBeUndefined();
+    await unwired.handle(await unwired.claim(scoped()));
+    expect(unwired.order).toContain("check");
+  });
+
+  it("no changed file at all runs the check", async () => {
+    const r = rig({ changed: changed([]) });
+    await r.handle(await r.claim(scoped()));
+    expect(r.order).toContain("check");
+  });
+
+  it("a merge-base that cannot be found stays base_missing, before any listing", async () => {
+    const c = changed(["infra/x.tf"]);
+    const r = rig({ changed: c, pin: null });
+    await r.handle(await r.claim(scoped()));
+    expect(c.calls).toEqual([]);
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "base_missing" });
+  });
+
+  it("an agent that cannot be stopped is not listed either: agent_not_stopped stays the reason", async () => {
+    const c = changed(["infra/x.tf"]);
+    const r = rig({ changed: c, lockfile: { outcome: { kind: "none" } as LockSyncOutcome, inputs: [], stopFails: true } });
+    await r.handle(await r.claim(scoped()));
+    expect(c.calls).toEqual([]);
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "agent_not_stopped" });
   });
 });
 

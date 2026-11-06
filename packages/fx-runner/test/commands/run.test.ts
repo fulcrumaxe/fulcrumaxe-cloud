@@ -910,6 +910,17 @@ describe("the lockfile update wiring (BUILD-LOCKFILE-ON-DEP-ADD)", () => {
   });
 });
 
+describe("the scope test wiring (SCOPE-IN-JOB)", () => {
+  it("the daemon hands the job handler the guarded listing of changed files, and the handler tests the job's scope after the check's merge-base pin and before the check starts", () => {
+    const text = readFileSync(path.join(PACKAGE_DIR, "src", "commands", "run.ts"), "utf8");
+    expect(text).toMatch(/baseFile: createBaseFile\(host\.engine\.captureLarge, envOptions\), changedFiles: createChangedFiles\(host\.engine\.captureLarge, envOptions\)/);
+    const handler = readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "jobHandler.ts"), "utf8");
+    const at = handler.indexOf("outOfScopeCount({");
+    expect(at).toBeGreaterThan(handler.indexOf("git.checkBase?.(job, started.base)"));
+    expect(at).toBeLessThan(handler.indexOf("check started (time limit"));
+  });
+});
+
 describe("the command line wiring", () => {
   const run = async (host: RunHost | undefined) => {
     let err = "";

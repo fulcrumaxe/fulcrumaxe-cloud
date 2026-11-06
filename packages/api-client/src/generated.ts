@@ -814,7 +814,7 @@ export interface Operations {
           timed_out: boolean;
           skipped_tests: (number) | (null);
           summary: string;
-          reason: ("sandbox_unavailable" | "sandbox_refused" | "pin_failed" | "protected_unreadable" | "protected_changed" | "not_restored" | "start_failed" | "not_set_up" | "base_missing" | "agent_not_stopped" | "other") | (null);
+          reason: ("sandbox_unavailable" | "sandbox_refused" | "pin_failed" | "protected_unreadable" | "protected_changed" | "not_restored" | "start_failed" | "not_set_up" | "base_missing" | "agent_not_stopped" | "out_of_scope" | "other") | (null);
           failed_files?: Array<string>;
           failed_files_more?: number;
         }) | (null);

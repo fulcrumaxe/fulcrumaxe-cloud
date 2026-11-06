@@ -696,8 +696,10 @@ export const CHECK_SKIPPED_MAX = 100_000_000;
  * D#6 R-CHK-3d: why a check could not run safely (or was stopped from counting), as a closed code beside the summary. Optional, so a protocol 8 runner that omits it still works: the
  * cloud then records no reason. On the wire it is only a short lowercase word (a newer runner may name a reason this build does not know); the cloud maps any word outside this set
  * to `other` before it stores or shows anything, and a check that carries a reason never counts as passed. `other` is the generic code.
+ * D#6 SCOPE-IN-JOB: `out_of_scope` is the runner saying it found changed files outside the job's `scope` and did not spend a check on them. It is a hint, never a verdict: the cloud still judges the
+ * pull request against the list from its own rows, and a run the runner reported this way never ends as a pass. The summary of such a result holds a count only, never a path.
  */
-export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", "pin_failed", "protected_unreadable", "protected_changed", "not_restored", "start_failed", "not_set_up", "base_missing", "agent_not_stopped", "other"] as const;
+export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", "pin_failed", "protected_unreadable", "protected_changed", "not_restored", "start_failed", "not_set_up", "base_missing", "agent_not_stopped", "out_of_scope", "other"] as const;
 export type CheckNotRunReason = (typeof CHECK_NOT_RUN_REASONS)[number];
 /** The closed code for a word off the wire or out of a row: a known code as it is, anything else `other`. */
 export const checkNotRunReason = (word: unknown): CheckNotRunReason => (typeof word === "string" && (CHECK_NOT_RUN_REASONS as readonly string[]).includes(word) ? (word as CheckNotRunReason) : "other");

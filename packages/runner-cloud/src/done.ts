@@ -53,6 +53,8 @@ export const DISPATCH_BASE_KIND = "runner.dispatch_base";
  *     ready (the runner's pull request token cannot make that call) comes AFTER the scope check passed, so the pull request is left open as a
  *     draft, the run is `succeeded` with its number, and the failure is only logged (C37). Someone with write access marks it ready.
  *     A verdict that names a pull request also records the branch the run was judged on (C25 section 1.2), so a later fix round finds it.
+ *  3a. D#6 SCOPE-IN-JOB: a `done` whose check result says `out_of_scope` (the runner skipped the check on its own test of the job's `scope`) skips the early `check_failed` return and goes through step 3 up to
+ *     and including the scope-list test (`no_commit`, `scope_unknown` stand). It then ends `failed check_failed` WITHOUT opening a pull request (the check never ran), the stored check naming `out_of_scope`.
  *  4. GitHub unreachable (transport, 5xx, 429, rate limit, timeout) is 503 `{retry_after}` and NOTHING is written; the runner keeps
  *     heartbeating and sends `done` again.
  *  5. `finish` records the verdict under the fence in one transaction. The reply is 200 `{continue:false, outcome, failure_reason, pr_number}`.
@@ -206,13 +208,18 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
   // result cannot be told from a check nobody ran, so it is not judged either way (`internal_error`: no fix round is spent on a runner that skipped the step). A result for a job that
   // carried no check is not the cloud's to record. A failed check ends the run `check_failed` BEFORE GitHub is asked anything: no commit test, no scope test, no pull request.
   let reported = runnerReported;
+  let scopeHint = false;
   if (ctx.job.check !== undefined) {
     if (reported === undefined) return failed("internal_error");
     // What is stored is the normalised result; a field outside the contract fails the check whatever the exit status said (it is never a pass).
     const norm = normaliseCheck(reported);
     // D#6 CHECK-FAILFILES-TO-CLOUD: a malformed list of failing test files is dropped here and the check goes on without it; the fixed code is the only trace.
     if (norm.failedFilesDropped) (deps.log ?? ((line) => console.warn(line)))(JSON.stringify({ event: CHECK_FAILED_FILES_DROPPED, run_id: i.runId }));
-    if (norm.outOfContract !== null || !checkPassed(norm.check)) {
+    // D#6 SCOPE-IN-JOB: a result the runner gave the reason `out_of_scope` (and nothing else: no exit status, no cap kill) says it did not run the check because it found changed files outside the list in
+    // its job. It does not end the run here: the commit and scope-list tests below run first, from our own rows, exactly as for a run whose check passed, and then the run ends `check_failed`
+    // without a pull request (see `judgeCommit`). A hint on a result with any other field out of contract is not read as one.
+    scopeHint = norm.outOfContract === null && norm.check.reason === "out_of_scope" && norm.check.exit_code === null && !norm.check.timed_out;
+    if (norm.outOfContract !== null || (!checkPassed(norm.check) && !scopeHint)) {
       // The runner pushed the work to the run branch before reporting; recording it (with no pull request) is what lets the fix round continue from its tip.
       const branch = branchOf(ctx.job, i);
       return { ...(failed("check_failed", RUNNER_RUN_BRANCH.test(branch) ? { branch } : {}) as Extract<Decision, { kind: "verdict" }>), check: norm.check };
@@ -221,12 +228,16 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
   }
   // FIXROUND-NOCOMMIT-CHECK-PASSED: reaching this line with a check in the job means the check passed (a failing or out-of-contract result returned above), so `reported` is a
   // passing result the cloud stores in this same `done` (run_checks and run.check_ended) and the job it signed asked for.
-  const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined;
+  // A check the runner did not run on a scope hint did not pass on the head, so it never lends the fix round its no-commit exception either.
+  const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined && !scopeHint;
   const log = deps.log ?? ((line: string) => console.warn(line));
-  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log));
-  // A check that passed is recorded beside whatever the commit and scope tests decided.
+  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log), scopeHint);
+  // A check that passed (or that the runner reported it did not run on its scope hint) is recorded beside whatever the commit and scope tests decided.
   return judged.kind === "verdict" && ctx.job.check !== undefined && reported !== undefined ? { ...judged, check: reported } : judged;
 }
+
+/** D#6 SCOPE-IN-JOB: the one log line (stdout, one JSON object, the run id only) left when a run ends `check_failed` on a runner's `out_of_scope` hint. */
+export const SCOPE_HINT_EVENT = "runner.done.scope_hint";
 
 /** The plain comment left on a public pull request the cloud closed after its scope check refused the run. Fixed words: no path, no count, nothing from the Spec. */
 export const SCOPE_REFUSAL_PUBLIC_COMMENT = "This pull request was closed because the run that produced it was refused by the scope check: it changed files outside the list it was allowed to change. The branch is kept.";
@@ -264,8 +275,8 @@ export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }
 const headOf = (s: { headOid: string | null } | null): { headOid?: string } => (s !== null && s.headOid !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s.headOid) ? { headOid: s.headOid } : {});
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
-async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope): Promise<Decision> {
-  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse);
+async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope, scopeHint = false): Promise<Decision> {
+  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse, scopeHint);
   if (decision.kind !== "verdict" || decision.verdict.prNumber === null) return decision;
   return verdictOf({ ...decision.verdict, branch: branchOf(job, i) });
 }
@@ -308,6 +319,7 @@ async function judgeCommit(
   write: (line: string) => void,
   checkPassedOnHead: boolean,
   refuse: RefuseScope,
+  scopeHint: boolean,
 ): Promise<Decision> {
   // A fresh run's branch is `<prefix><run>-g<generation>`: a stale generation's branch is never looked at. A continuation works on exactly
   // the branch our issuer put in its signed job (the one recorded for the pull request it fixes).
@@ -362,6 +374,14 @@ async function judgeCommit(
 
     // C34 section 2.2: a Spec with no list (absent or empty) says so; an unreadable one keeps today's detail-less answer.
     if (ctx.scope.kind === "unknown") return failed("scope_unknown", ctx.scope.reason === "absent" ? { detail: "no_file_list" } : {});
+    // D#6 SCOPE-IN-JOB: the runner skipped the check because it thought changed files were outside the job's list. The check never ran, so the run cannot succeed, and the cloud opens NO pull request for it:
+    // opening one only to read its files (and closing it again) would reach the webhook as a pull request that opened and then closed, and move the item. It ends `check_failed` with no pull request, the
+    // stored check naming `out_of_scope`, the branch recorded for the fix round. The tests above this line (no commit, scope unreadable) are judged first and stand; a file really outside the list is
+    // therefore met by the check-fix round, not by a refusal record. The hint can never produce a pass.
+    if (scopeHint) {
+      write(JSON.stringify({ event: SCOPE_HINT_EVENT, run_id: UUID.test(i.runId) ? i.runId.toLowerCase() : null }));
+      return failed("check_failed", RUNNER_RUN_BRANCH.test(branch) ? { branch } : {});
+    }
     // The pull request's text is made from the run's work item. A run with none cannot be given a pull request at all.
     if (ctx.text === null) return failed("internal_error");
 
