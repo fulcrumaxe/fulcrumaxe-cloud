@@ -893,6 +893,15 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const scopeRefusal = ex && ex.status === 'failed'
         ? parseScopeRefusal((await client.query<{ payload: unknown }>(`SELECT payload FROM run_events WHERE run_id = $1::uuid AND kind = $2::text ORDER BY seq DESC LIMIT 1`, [ex.id, SCOPE_REFUSAL_EVENT])).rows[0]?.payload)
         : null;
+      // D#6 REFUSAL-BUILD-AGAIN-FRESH: the card promises a fresh Build again only when the item's public record for that exact pull request really ended (derived from the record, not from the event).
+      const recordEnded = scopeRefusal?.publicPr
+        ? (
+            await client.query(
+              `SELECT 1 FROM plane_pushes WHERE work_item_id = $1::uuid AND state = 'scope_refused' AND pr_number = $2::int AND lower(code_repo) = lower($3::text) LIMIT 1`,
+              [workItemId, scopeRefusal.publicPr.number, scopeRefusal.publicPr.codeRepo],
+            )
+          ).rows.length > 0
+        : false;
       const memoryEnd: RunEndedWhy | undefined = exEnd?.reason === 'resource_limit' ? { reason: 'resource_limit', detail: null, size_mb: null, memory_limit_bytes: memoryLimitOf(exEnd.memory_limit_bytes) } : undefined;
       const summary = ex?.summary?.trim() ? safeModelText(ex.summary, ACTIVITY_LIMITS.maxNoticeChars) : null;
       notice = rebuildSentence
@@ -906,7 +915,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           : noVerdictSentence
           ? { kind: 'needs_human', reason: noVerdictSentence }
           : scopeRefusal
-          ? { kind: 'needs_human', reason: scopeRefusalSentence(scopeRefusal) }
+          ? { kind: 'needs_human', reason: scopeRefusalSentence(scopeRefusal, { recordEnded }) }
           : memoryEnd
           ? { kind: 'needs_human', reason: `The executor run ${ex!.status.replace(/_/g, ' ')} without a pull request.`, ended: memoryEnd }
           : {

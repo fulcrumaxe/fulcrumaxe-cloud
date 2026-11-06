@@ -166,7 +166,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   const { rows: pushes } = await client.query(
     `SELECT id, code, code_repo, branch, pairing_digest, state, head_sha, replace_authorized_head, pr_number, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes
       WHERE account_id = $1 AND work_item_id = $2 AND repo_id = $3
-      ORDER BY COALESCE(lower(code_repo) = lower($4::text), false) DESC, created_at DESC, id LIMIT 1`,
+      ORDER BY COALESCE(lower(code_repo) = lower($4::text), false) DESC, created_at DESC, id DESC LIMIT 1`,
     [accountId, r.work_item_id, r.dispatch_repo_id, p?.code_repo ?? null],
   );
   const push = pushes[0];
@@ -806,7 +806,8 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
               (SELECT rp.code_repo FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pairing_repo,
               (SELECT rp.pr_footer FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pr_footer
          FROM plane_pushes p JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id
-        WHERE p.account_id = $1 AND p.work_item_id = $2`,
+        WHERE p.account_id = $1 AND p.work_item_id = $2
+        ORDER BY p.created_at DESC, p.id DESC LIMIT 1`,
       [accountId, workItemId],
     ),
   );

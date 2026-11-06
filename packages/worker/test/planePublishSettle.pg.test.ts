@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { withScopeRefusedSchema } from "@fx/db/test/helpers/scopeRefusedSchema.js";
 import { publicChangeSentence } from "@fx/core/src/repos/publicChangeCopy.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { createFakeSandbox, type AgentRuntime, type NetworkPolicyRule, type PlanePublishLine } from "@fx/runner";
@@ -451,6 +452,30 @@ describe("settling a paired sandbox build, and opening the public pull request a
   describe("open the public pull request again (pushed_pr_not_opened)", () => {
     const stuck = () => setState("pushed_pr_not_opened");
     const reopen = (over: Partial<PlanePublishDeps> = {}) => worker(over).openPublicPullRequest({ accountId: A.accountId, workItemId: A.workItemId });
+
+    // D#6 REFUSAL-BUILD-AGAIN-FRESH: the retry acts on the item's newest record, never on an older scope-refused one beside it.
+    it("opens the pull request of the newest record when an older, scope-refused one exists beside it", async () => {
+      output = () => say({ phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });
+      await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
+      const older = await planeRow();
+      expect(older.state).toBe("pushed_pr_not_opened");
+      const restore = await withScopeRefusedSchema(admin); // the later schema, applied by hand for this check
+      try {
+        await admin.query("UPDATE plane_pushes SET state = 'scope_refused' WHERE id = $1", [older.id]);
+        const newer = (
+          await admin.query<{ id: string; branch: string }>(
+            `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, source_head)
+             VALUES ($1, $2, $3, $4, $5, 'pushed_pr_not_opened', $6, $7, $8) RETURNING id, branch`,
+            [A.accountId, A.workItemId, older.repo_id, older.code_repo, older.pairing_digest, HEAD, TIP, older.source_head],
+          )
+        ).rows[0]!;
+        expect(await reopen()).toMatchObject({ kind: "opened" });
+        expect(gh.opened.map((o) => o.branch)).toEqual([newer.branch]);
+        expect((await admin.query("SELECT state FROM plane_pushes WHERE id = $1", [older.id])).rows[0].state).toBe("scope_refused");
+      } finally {
+        await restore();
+      }
+    });
 
     it("sandbox-run row: opens the pull request with the fixed text, records pr_opened, and writes a pr_open attempt with no sandbox and no run row", async () => {
       output = () => say({ phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });

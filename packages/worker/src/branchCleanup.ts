@@ -150,7 +150,7 @@ async function readState(client: PoolClient, accountId: string, workItemId: stri
        FROM plane_pushes p WHERE p.account_id = $1 AND p.work_item_id = $2 ORDER BY p.created_at DESC, p.id DESC LIMIT 1`,
     [accountId, workItemId],
   );
-  const publicState: PublicPrState = pub[0]?.managed ? "person_managed" : pub[0] && (pub[0].state === "pr_merged" || pub[0].state === "pr_closed") ? "done" : "open";
+  const publicState: PublicPrState = pub[0]?.managed ? "person_managed" : pub[0] && (pub[0].state === "pr_merged" || pub[0].state === "pr_closed" || pub[0].state === "scope_refused") ? "done" : "open";
   const seen = new Set<string>();
   const out: Candidate[] = [];
   for (const r of rows) {

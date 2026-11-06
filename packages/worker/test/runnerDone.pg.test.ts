@@ -5,6 +5,7 @@ import { CHECK_NOT_RUN_REASONS, DoneReply, DoneRetryReply, NOT_RECORDED_MEASURE,
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
+import { withScopeRefusedSchema } from "@fx/db/test/helpers/scopeRefusedSchema.js";
 import { RUNNER_DISPATCH_BASE_KIND, readRecordedRunnerBranch, recordContextLedger } from "@fx/runner";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLAIM_PATH, DISPATCH_BASE_KIND, claimRun, createRunPullRequestPort, donePath, doneRun, eventsPath, heartbeatRun, HEARTBEAT_PATH, ingestEvents, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
@@ -1262,6 +1263,27 @@ describe("runner done [pg]", () => {
       expect(activity.notice!.reason).toMatch(/branch was kept/);
       // The public copy was closed too, so the card says what Build again needs first.
       expect(activity.notice!.reason).toMatch(/The public copy was closed too\. To build again, reopen it on GitHub first/);
+
+      // D#6 REFUSAL-BUILD-AGAIN-FRESH (expand step): the card promises a fresh Build again only once the item's record for THAT public pull request has really ended. The later schema is applied by hand.
+      const restore = await withScopeRefusedSchema(admin);
+      try {
+        const card = async () => (await getWorkItemActivity({ pool: appPool, principal: { accountId: A.accountId, userId: A.userId, role: "owner" } }, A.workItemId)).notice!.reason;
+        // A refused record with the same number in ANOTHER repository is not the one the card names.
+        await admin.query(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, pr_number, pr_url)
+           VALUES ($1, $2, $3, 'acme/other-public', $4, 'scope_refused', 41, 'https://github.com/acme/other-public/pull/41')`,
+          [A.accountId, A.workItemId, A.repoId, "e".repeat(64)],
+        );
+        expect(await card(), "another repository ended").toMatch(/To build again, reopen it on GitHub first/);
+        const own = "UPDATE plane_pushes SET state = 'scope_refused', pr_number = $2::int, pr_url = 'https://github.com/acme/widgets-public/pull/' || $2::text WHERE work_item_id = $1 AND code_repo = 'acme/widgets-public'";
+        await admin.query(own, [A.workItemId, 42]);
+        expect(await card(), "another pull request ended").toMatch(/To build again, reopen it on GitHub first/);
+        await admin.query(own, [A.workItemId, 41]);
+        expect(await card()).toMatch(/The public copy was closed too and stays closed\. Build again starts fresh and opens a new public pull request/);
+        expect(await card()).not.toMatch(/reopen/);
+      } finally {
+        await restore();
+      }
     });
 
     it("the role list the route judges is the protocol's: every eligible role other than the executor and the docs-writer ends succeeded without GitHub", async () => {

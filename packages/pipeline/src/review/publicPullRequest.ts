@@ -63,7 +63,7 @@ export const readPublicPullRequest: (pool: Pool) => PublicPullRequestLookup = (p
          FROM plane_pushes p
          JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id AND w.repo_id = p.repo_id
          JOIN repo_pairing rp ON rp.account_id = p.account_id AND rp.repo_id = p.repo_id AND lower(rp.code_repo) = lower(p.code_repo)
-        WHERE p.account_id = $1 AND p.work_item_id = $2 AND p.pr_number IS NOT NULL AND p.state NOT IN ('pr_closed', 'pr_merged')
+        WHERE p.account_id = $1 AND p.work_item_id = $2 AND p.pr_number IS NOT NULL AND p.state NOT IN ('pr_closed', 'pr_merged', 'scope_refused')
         ORDER BY p.created_at DESC, p.id DESC LIMIT 1`,
       [accountId, workItemId],
     );

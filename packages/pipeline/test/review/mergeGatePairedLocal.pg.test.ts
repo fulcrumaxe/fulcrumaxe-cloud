@@ -18,6 +18,7 @@ import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
+import { withScopeRefusedSchema } from "@fx/db/test/helpers/scopeRefusedSchema.js";
 import { QUEUE_DOCS, fakeGitHubLocal, type QueueState } from "./helpers/fakeGitHubLocal.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
@@ -464,6 +465,13 @@ describe("the public pull request lookup tells 'paired, nothing open' from 'not 
   it("closed, merged, never opened and a re-pointed pairing are paired with no pull request; no pairing is null", async () => {
     expect(await read(await world({ state: "pr_closed" }))).toEqual({ paired: true, pr: null });
     expect(await read(await world({ state: "pr_merged" }))).toEqual({ paired: true, pr: null });
+    // D#6 REFUSAL-BUILD-AGAIN-FRESH: a scope-refused record's public pull request was closed by the cloud; it is never the item's open one. (The later schema, applied by hand for this check.)
+    const restore = await withScopeRefusedSchema(h.admin);
+    try {
+      expect(await read(await world({ state: "scope_refused" }))).toEqual({ paired: true, pr: null });
+    } finally {
+      await restore();
+    }
     expect(await read(await world({ noPr: true }))).toEqual({ paired: true, pr: null });
     const moved = await world();
     await h.admin.query("UPDATE repo_pairing SET code_repo = 'other-co/elsewhere' WHERE repo_id = $1", [moved.repoId]);

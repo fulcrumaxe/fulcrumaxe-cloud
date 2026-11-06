@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { withScopeRefusedSchema } from "@fx/db/test/helpers/scopeRefusedSchema.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { localOnlyGithub } from "@fx/runner-cloud";
 import { InstallationTokenCache, createInstallationHttp, type AccessTokenRequester, type BranchDeleteOutcome, type RunnerGitTicketSigner } from "@fx/github";
@@ -424,6 +425,18 @@ describe("branch cleanup sweep [pg]", () => {
       await paired(A, 71, "runner_local", "pr_closed");
       expect(await sweep({ withPr: true })).toMatchObject({ prsClosed: 1, recorded: 1 });
       expect(gh.prs.get(3)!.state).toBe("closed");
+    });
+
+    // D#6 REFUSAL-BUILD-AGAIN-FRESH: a scope-refused record's public pull request is closed (by the cloud), exactly as a person's close.
+    it("a scope-refused public record counts as a closed public pull request: the copy is closed too", async () => {
+      const restore = await withScopeRefusedSchema(admin); // the later schema, applied by hand for this check
+      try {
+        await paired(A, 74, "runner_local", "scope_refused");
+        expect(await sweep({ withPr: true })).toMatchObject({ prsClosed: 1, recorded: 1 });
+        expect(gh.prs.get(3)!.state).toBe("closed");
+      } finally {
+        await restore();
+      }
     });
 
     it("an already closed copy is recorded as such and nothing is sent to close it (the branch is still removed)", async () => {

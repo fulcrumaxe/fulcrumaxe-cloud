@@ -306,7 +306,7 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         // The push record, locked: the same row serialises every order placement of the item.
         const { rows } = await client.query<{ id: string; repo_id: string; code_repo: string; pairing_digest: string; pr_number: number | null; head_sha: string | null; source_head: string | null; state: string; managed: boolean }>(
           `SELECT p.id, p.repo_id, p.code_repo, p.pairing_digest, p.pr_number, p.head_sha, ${sourceHeadSql("p")} AS source_head, p.state, p.managed_by_person_at IS NOT NULL AS managed
-             FROM plane_pushes p WHERE p.account_id = $1 AND p.work_item_id = $2 FOR UPDATE OF p`,
+             FROM plane_pushes p WHERE p.account_id = $1 AND p.work_item_id = $2 ORDER BY p.created_at DESC, p.id DESC FOR UPDATE OF p`,
           [input.accountId, input.workItemId],
         );
         const push = rows[0];

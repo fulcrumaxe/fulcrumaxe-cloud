@@ -29,6 +29,7 @@ export const PLANE_PUSH_STATES = [
   'managed_by_person',
   'pr_closed',
   'pr_merged',
+  'scope_refused',
 ] as const;
 export type PlanePushState = (typeof PLANE_PUSH_STATES)[number];
 
@@ -36,7 +37,7 @@ export type PlanePushState = (typeof PLANE_PUSH_STATES)[number];
 export type PlanePushOutcomeState = 'scanning' | 'pushed' | 'pr_opened' | 'refused' | 'pushed_pr_not_opened' | 'no_public_change';
 
 /** The states a P1f outcome never overwrites: a pull request exists, or someone has taken the branch over. */
-const SETTLED: readonly PlanePushState[] = ['pr_opened', 'updating', 'updated', 'waiting_person_pushed', 'managed_by_person', 'pr_closed', 'pr_merged'];
+const SETTLED: readonly PlanePushState[] = ['pr_opened', 'updating', 'updated', 'waiting_person_pushed', 'managed_by_person', 'pr_closed', 'pr_merged', 'scope_refused'];
 /** The states a new build may re-stamp (a fresh attempt at the same item). */
 export const RESTAMPABLE: readonly PlanePushState[] = ['building', 'scanning', 'refused', 'no_public_change'];
 
@@ -204,6 +205,11 @@ export interface StampInput {
  * A second build of the same item (Build again) re-stamps the digest and sets the state back to `building` only while the row is in a
  * state a new attempt may replace (`building`, `scanning`, `refused`, `no_public_change`). A row that has pushed, or has a pull request,
  * keeps its record: the branch exists and nothing here may pretend otherwise. The row is returned either way.
+ *
+ * D#6 REFUSAL-BUILD-AGAIN-FRESH, expand step: the insert names the LIVE-row predicate (`WHERE state <> 'scope_refused'`). Postgres infers the item's unique index from it against today's
+ * full index and against the partial index a later migration will swap in, so this statement runs on both shapes (a statement without the predicate fails 42P10 on the partial one). Once
+ * a row can be `scope_refused` (final, written by a later step) the refused row stays as the record of what was refused and the build gets a NEW row: its own id, so its own public branch
+ * `fx/p-<id>`, never the refused content. The newest row is the one returned.
  */
 export async function stampPlanePush(client: Queryable, input: StampInput): Promise<PlanePushRow | null> {
   const { rows: pairs } = await client.query<{ code_repo: string; overlay_globs: string[]; identifier_rules_path: string | null; plan_data_rules_path: string | null }>(
@@ -213,19 +219,28 @@ export async function stampPlanePush(client: Queryable, input: StampInput): Prom
   const pair = pairs[0];
   if (!pair) return null;
   const digest = pairingDigest({ codeRepo: pair.code_repo, overlayGlobs: pair.overlay_globs, identifierRulesPath: pair.identifier_rules_path, planDataRulesPath: pair.plan_data_rules_path });
-  const onConflict =
-    input.replay === true
-      ? 'ON CONFLICT (account_id, work_item_id, lower(code_repo)) DO NOTHING'
-      : `ON CONFLICT (account_id, work_item_id, lower(code_repo)) DO UPDATE
-        SET pairing_digest = EXCLUDED.pairing_digest, state = 'building', code = NULL, refusals = '[]'::jsonb
-      WHERE plane_pushes.state = ANY ($6::text[])`;
-  await client.query(
-    `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest)
-     VALUES ($1, $2, $3, $4, $5)
-     ${onConflict}`,
-    input.replay === true ? [input.accountId, input.workItemId, input.repoId, pair.code_repo, digest] : [input.accountId, input.workItemId, input.repoId, pair.code_repo, digest, RESTAMPABLE],
-  );
-  const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_pushes WHERE account_id = $1 AND work_item_id = $2 AND lower(code_repo) = lower($3)`, [
+  // The record of an item is its LIVE row: one that is not `scope_refused`. A refused row is final; a fresh build inserts a new one beside it (new id, so a new public
+  // branch). A replay of a step that already started its run inserts only when the item has no row at all, so a replayed old step never starts a second record after a refusal.
+  const live = 'ON CONFLICT (account_id, work_item_id, lower(code_repo)) WHERE state <> \'scope_refused\'';
+  if (input.replay === true) {
+    await client.query(
+      `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest)
+       SELECT $1::uuid, $2::uuid, $3::uuid, $4::text, $5::text
+        WHERE NOT EXISTS (SELECT 1 FROM plane_pushes WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND lower(code_repo) = lower($4::text))
+       ${live} DO NOTHING`,
+      [input.accountId, input.workItemId, input.repoId, pair.code_repo, digest],
+    );
+  } else {
+    await client.query(
+      `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest)
+       VALUES ($1, $2, $3, $4, $5)
+       ${live} DO UPDATE
+         SET pairing_digest = EXCLUDED.pairing_digest, state = 'building', code = NULL, refusals = '[]'::jsonb
+       WHERE plane_pushes.state = ANY ($6::text[])`,
+      [input.accountId, input.workItemId, input.repoId, pair.code_repo, digest, RESTAMPABLE],
+    );
+  }
+  const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_pushes WHERE account_id = $1 AND work_item_id = $2 AND lower(code_repo) = lower($3) ORDER BY created_at DESC, id DESC LIMIT 1`, [
     input.accountId,
     input.workItemId,
     pair.code_repo,
@@ -235,7 +250,7 @@ export async function stampPlanePush(client: Queryable, input: StampInput): Prom
 
 /** The item's record for one paired repo, or null when it has none (an unpaired item). */
 export async function readPlanePush(client: Queryable, accountId: string, workItemId: string): Promise<PlanePushRow | null> {
-  const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_pushes WHERE account_id = $1 AND work_item_id = $2 ORDER BY created_at DESC, id LIMIT 1`, [accountId, workItemId]);
+  const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_pushes WHERE account_id = $1 AND work_item_id = $2 ORDER BY created_at DESC, id DESC LIMIT 1`, [accountId, workItemId]);
   return rows[0] ? toRow(rows[0]) : null;
 }
 
@@ -401,7 +416,7 @@ export async function readRetryFacts(client: Queryable, workItemId: string): Pro
             (SELECT (array_agg(a.runtime ORDER BY a.attempt_no DESC))[1] FROM plane_push_attempts a WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind = 'push') AS last,
             (SELECT r.job_signed IS NULL AND r.runtime = 'production' FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor'
               ORDER BY r.created_at DESC, r.id LIMIT 1) AS sandbox_side
-       FROM plane_pushes p WHERE p.work_item_id = $1 ORDER BY p.created_at DESC, p.id LIMIT 1`,
+       FROM plane_pushes p WHERE p.work_item_id = $1 ORDER BY p.created_at DESC, p.id DESC LIMIT 1`,
     [workItemId],
   );
   const r = rows[0];
