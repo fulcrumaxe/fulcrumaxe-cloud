@@ -343,7 +343,7 @@ describe("D#2 SANDBOX-REAPER-1b: the safety net and the inventory [pg]", () => {
       const base = await inventory(); // whatever other tests of this file left is replaced; read back only these two accounts
       expect(await rowsFor(a.accountId)).toEqual([{ account_id: a.accountId, live: 2, stopped_executor: 2, stopped_ephemeral: 1, idle_executor: 2, oldest_idle_at: expect.any(Date) }]);
       expect(await rowsFor(b.accountId)).toEqual([{ account_id: b.accountId, live: 0, stopped_executor: 1, stopped_ephemeral: 1, idle_executor: 1, oldest_idle_at: expect.any(Date) }]);
-      expect(base).toEqual({ accounts: 2, live: 2, stoppedExecutor: 3, stoppedEphemeral: 2, orphans: 0, alerts: [] });
+      expect(base).toEqual({ accounts: 2, live: 2, stoppedExecutor: 3, stoppedEphemeral: 2, orphans: 0, alerts: [], callsUsed: expect.any(Number) });
       expect(logged("sandbox_inventory")).toEqual([{ event: "sandbox_inventory", accounts: 2, live: 2, stopped_executor: 3, stopped_ephemeral: 2, total: 7, orphans: 0, complete: true }]);
     });
 

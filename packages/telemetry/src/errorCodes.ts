@@ -441,6 +441,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_inventory_no_answer",
   "sandbox_inventory_bad_answer",
   "sandbox_inventory_write_failed",
+  "sandbox_inventory_budget_exhausted",
   // Memory store (D#601 MEM-1, MEM-2): the codes MemoryInputError carries, and the reasons the proposal intake refuses with. (invalid_message is listed above.)
   "invalid_transition",
   "secret_detected",

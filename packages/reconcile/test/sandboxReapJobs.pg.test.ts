@@ -28,11 +28,11 @@ const JOBS = ['sandbox_reap_terminal', 'sandbox_reap_ephemeral', 'sandbox_reap_i
 function emptySweep(over: Partial<SandboxReapSweepResult> = {}): SandboxReapSweepResult {
   return { cursor: null, wrapped: true, callsUsed: 0, deleted: 0, stopped: 0, skipped: 0, candidates: [], alerts: [], orphans: 0, ...over };
 }
-const emptyInventory = (over: Partial<SandboxInventorySummary> = {}): SandboxInventorySummary => ({ accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [], ...over });
+const emptyInventory = (over: Partial<SandboxInventorySummary> = {}): SandboxInventorySummary => ({ accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [], callsUsed: 0, ...over });
 
 interface FakeWorker extends SandboxReapWorker {
   sweeps: SandboxReapSweepInput[];
-  inventories: { now: number }[];
+  inventories: { now: number; maxCalls: number }[];
   next: SandboxReapSweepResult;
   nextInventory: SandboxInventorySummary;
   failWith?: Error;
@@ -289,14 +289,14 @@ describe('the sandbox reaper jobs (C82)', () => {
     it('SandboxReapWorker exposes exactly the two methods, taking and returning plain data', () => {
       expectTypeOf<keyof SandboxReapWorker>().toEqualTypeOf<'sweepSandboxReap' | 'sandboxInventory'>();
       expectTypeOf<Parameters<SandboxReapWorker['sweepSandboxReap']>[0]>().toEqualTypeOf<SandboxReapSweepInput>();
-      expectTypeOf<Parameters<SandboxReapWorker['sandboxInventory']>[0]>().toEqualTypeOf<{ now: number }>();
+      expectTypeOf<Parameters<SandboxReapWorker['sandboxInventory']>[0]>().toEqualTypeOf<{ now: number; maxCalls: number }>();
       expectTypeOf<Awaited<ReturnType<SandboxReapWorker['sweepSandboxReap']>>>().toEqualTypeOf<SandboxReapSweepResult>();
       expectTypeOf<Awaited<ReturnType<SandboxReapWorker['sandboxInventory']>>>().toEqualTypeOf<SandboxInventorySummary>();
       expect(true).toBe(true);
     });
 
-    it('the inventory job declares the call allowance the runner bounds its listing by (two prefixes, a page cap each)', () => {
-      expect(SANDBOX_INVENTORY_CALLS_PER_RUN).toBe(2 * INVENTORY_MAX_PAGES_PER_PREFIX);
+    it('the inventory job declares the call allowance the runner bounds its listing by (three prefixes, a page cap each)', () => {
+      expect(SANDBOX_INVENTORY_CALLS_PER_RUN).toBe(3 * INVENTORY_MAX_PAGES_PER_PREFIX);
       expect(sandboxInventoryJob(null, { mode: parseSandboxReapMode('on'), reportError: report }).maxCalls).toBe(SANDBOX_INVENTORY_CALLS_PER_RUN);
       expect(sandboxReapJobs(null, { mode: parseSandboxReapMode('on'), reportError: report }).map((j) => [j.name, j.maxCalls])).toEqual([['sandbox_reap_terminal', 60], ['sandbox_reap_ephemeral', 60], ['sandbox_reap_idle', 60]]);
     });
