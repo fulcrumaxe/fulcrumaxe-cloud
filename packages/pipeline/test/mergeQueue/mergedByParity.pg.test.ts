@@ -111,6 +111,8 @@ describe("merged_by and the merge receipt decide 'did our gate queue it' alike [
         else await put(r, it0, "merge_dequeued", heads[s.head ?? "head"], { code: s.code });
       }
       const merged = heads[row.merged];
+      // The fact the receipt's writer requires at the merged head, seeded on every row so a gate row reaches 'written' and a decision-query error ('failed') cannot pass for either answer.
+      await put(r, it0, "merged_by_gate", merged);
       // The receipt, asked as the webhook and the reconcile ask it.
       const receipt = await tenant(r, (c) =>
         recordMergeReceiptOn(c, { accountId: r.accountId, workItemId: it0.workItemId, eventHead: merged, reviewHeads: [merged, it0.head], outcome: "merged", decidedBy: { kind: "merge_enqueued", head: merged } }),
@@ -121,7 +123,7 @@ describe("merged_by and the merge receipt decide 'did our gate queue it' alike [
       const mergedBy = (await r.entry(it0.pr)).mergedBy;
 
       expect(mergedBy).toBe(row.expect);
-      expect(receipt === "not_policy" ? "person" : "gate").toBe(row.expect);
+      expect(receipt).toBe(row.expect === "gate" ? "written" : "not_policy");
     });
   }
 });

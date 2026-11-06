@@ -120,12 +120,15 @@ describe('AAP storage (0837)', () => {
       expect(rows.map((r) => r.proname).sort()).toEqual([...FUNCTIONS, ...PLAIN].sort());
       for (const r of rows) {
         expect(r.owner).toBe('aap_definer');
-        // The three that count days run in UTC (0995), so a day is 24 hours whatever the caller's zone.
+        // The three aap_* functions that count days run in UTC (0995; so does the approvals clock trigger function, pinned below), so a day is 24 hours whatever the caller's zone.
         const inUtc = ['aap_sweep_at', 'aap_request_create', 'aap_request_create_idempotent'].includes(r.proname);
         expect(r.proconfig).toEqual(inUtc ? ['search_path=pg_catalog, public, pg_temp', 'TimeZone=UTC'] : ['search_path=pg_catalog, public, pg_temp']);
         if (PLAIN.includes(r.proname)) expect([r.proname, r.prosecdef, r.grantees]).toEqual([r.proname, false, null]);
         else expect([r.proname, r.prosecdef, r.grantees]).toEqual([r.proname, true, [r.proname === 'aap_sweep' ? 'aap_sweeper' : 'aap_invoker']]);
       }
+      const clock = await admin.query(`SELECT proconfig FROM pg_proc WHERE proname = 'action_approvals_idempotency_clock' AND pronamespace = 'public'::regnamespace`);
+      expect(clock.rows).toHaveLength(1);
+      expect(clock.rows[0].proconfig).toEqual(['search_path=pg_catalog, public, pg_temp', 'TimeZone=UTC']);
     });
 
     it('plain app_user can call none of them and cannot write any of the four tables', async () => {
