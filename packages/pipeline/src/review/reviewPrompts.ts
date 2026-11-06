@@ -1,4 +1,5 @@
 import { agentOutputBlock } from "../plan/envelope.js";
+import { DEEPEN_SCRIPT, MAX_CLONE_KB } from "@fx/runner";
 import { assemblePrompt, type AssembledPrompt, type AssembleOptions, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
 import { isSafeRepoPath } from "../discovery/verifierOutput.js";
@@ -428,9 +429,11 @@ export interface ConflictPromptInput {
  * does). The conflict round also has to merge: the clone's one commit has no parents, so both refs are fetched to their full history first (`--depth=2147483647` is what `--unshallow` means
  * and, unlike it, is also accepted on a clone that is already complete). A renumber round merges nothing, so it fetches no more than it did. Never a force, never unrelated histories.
  */
-export function checkoutBranchCommand(branch: string, baseRef: string, headSha: string, fullHistory: boolean): string {
-  const depth = fullHistory ? " --depth=2147483647" : "";
-  return `git fetch${depth} origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" "+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}" && git checkout -B ${branch} origin/${branch} && git reset --hard ${headSha}`;
+export function checkoutBranchCommand(branch: string, baseRef: string, headSha: string, fullHistory: boolean, maxKb: number = MAX_CLONE_KB): string {
+  const refspecs = `"+refs/heads/${branch}:refs/remotes/origin/${branch}" "+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}"`;
+  // The deepening fetch runs after the clone's own size watch has ended, so it carries the same watch and limit (`DEEPEN_SCRIPT`); over it the checkout is removed and the exit code is 87.
+  const fetch = fullHistory ? `sh -c '${DEEPEN_SCRIPT}' fx-deepen ${maxKb} ${refspecs}` : `git fetch origin ${refspecs}`;
+  return `${fetch} && git checkout -B ${branch} origin/${branch} && git reset --hard ${headSha}`;
 }
 
 /** The executor's conflict-round prompt: fixed text plus structured fields. The paths are listed as fenced data, never as instructions. */
@@ -452,7 +455,7 @@ export function assembleConflictPrompt(input: ConflictPromptInput, options?: Ass
     runner
       ? "The repository is checked out in your working directory. Stay on the pull request's branch: do not create, rename or delete branches."
       : "This is a new session; the repository is checked out in your working directory. Do not clone it again.",
-    `Bring your checkout to the pull request's branch at commit ${input.headSha} (the checkout holds the default branch only, with no history; this fetches the full history of both branches, which the merge needs): ${checkoutBranchCommand(branch, baseRef, input.headSha, true)}`,
+    `Bring your checkout to the pull request's branch at commit ${input.headSha} (the checkout holds the default branch only, with no history; this fetches the full history of both branches, which the merge needs, within the same size limit as the clone: if the command exits 87 the repository is over that limit and the checkout has been removed, so stop and say so in your summary): ${checkoutBranchCommand(branch, baseRef, input.headSha, true)}`,
     `Merge the default branch into this branch: git merge origin/${baseRef} (it is at ${input.baseSha}). Resolve the conflicts in the files listed below, keeping the intent of both sides, then run the repository's checks until they pass.`,
     `Finish with exactly one merge commit (${bot} commit), and no other commit on top. Never rebase, squash, amend or cherry-pick, never force-push, and never change history that is already on the branch.`,
     runner
