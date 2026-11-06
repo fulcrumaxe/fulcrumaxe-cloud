@@ -388,7 +388,7 @@ describe("D#2 SANDBOX-REAPER-1b: the safety net and the inventory [pg]", () => {
       await exRun(w, 1, { provider: "stopped" });
       await inventory();
       h.fakeSandbox.failList(503);
-      await expect(inventory()).rejects.toMatchObject({ status: 503 });
+      await expect(inventory()).rejects.toMatchObject({ code: "sandbox_inventory_provider_error", statusClass: "5xx" });
       expect((await rowsFor(w.accountId)).length).toBe(1);
     });
 

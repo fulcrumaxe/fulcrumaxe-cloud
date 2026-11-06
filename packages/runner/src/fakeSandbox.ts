@@ -338,7 +338,8 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
     async listSandboxes(opts: ListSandboxesOptions): Promise<SandboxListPage> {
       calls.push(`list:${opts.prefix}`);
       if (!LISTABLE_PREFIXES.includes(opts.prefix)) throw new Error("fakeSandbox: listSandboxes accepts only the ex-, rn- and pp- prefixes");
-      if (listFailStatus !== undefined) throw Object.assign(new Error("fakeSandbox: listSandboxes failed"), { status: listFailStatus });
+      // As the real port answers a failed list: a SandboxPortError with the status, never the bare SDK error.
+      if (listFailStatus !== undefined) throw new SandboxPortError("listSandboxes", listFailStatus);
       const all = [...provider.values()].filter((s) => s.name.startsWith(opts.prefix));
       const from = opts.cursor === undefined ? 0 : Number(opts.cursor);
       if (!Number.isSafeInteger(from) || from < 0) throw Object.assign(new Error("fakeSandbox: bad cursor"), { status: 400 });

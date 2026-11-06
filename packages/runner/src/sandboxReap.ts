@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import type { ExecutionRun } from "./executionTarget.js";
 import { parseSandboxName, sandboxNameFor } from "./sandboxNaming.js";
 import type { SandboxHandle, SandboxPort } from "./sandboxPort.js";
-import { DEFAULT_SDK_CALL_TIMEOUT_MS } from "./vercelSandboxPort.js";
+import { DEFAULT_SDK_CALL_TIMEOUT_MS, SandboxPortError } from "./vercelSandboxPort.js";
 
 /**
  * D#2 SANDBOX-REAPER-1a (C81, amended by C82): the end-of-item pass. An executor sandbox (`ex-<account>-<repo>-<issue>`) is
@@ -386,6 +386,37 @@ function inventoryStateOf(status: string): "live" | "stopped" {
   return status === "stopped" || status === "failed" || status === "aborted" ? "stopped" : "live";
 }
 
+/** A failed inventory pass, carrying a fixed code so the reconcile report names the class instead of `other`. */
+export class SandboxInventoryError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly statusClass: string,
+  ) {
+    super(`sandbox inventory failed: ${code}`);
+    this.name = "SandboxInventoryError";
+  }
+}
+
+/** The HTTP status folded to its class: "4xx", "5xx", or "none" when no status came back. */
+function statusClassOf(status: unknown): string {
+  if (typeof status === "number" && status >= 400 && status < 500) return "4xx";
+  if (typeof status === "number" && status >= 500 && status < 600) return "5xx";
+  return "none";
+}
+
+/** The code for a failed provider list: one per real failure class, by the port's operation and status. */
+export function inventoryListFailureCode(err: unknown): string {
+  if (!(err instanceof SandboxPortError)) return "sandbox_inventory_bad_answer";
+  if (err.operation === "getToken") return "sandbox_inventory_credentials";
+  const status = err.status;
+  if (status === 401 || status === 403) return "sandbox_inventory_denied";
+  if (status === 404 || status === 410) return "sandbox_inventory_not_found";
+  if (status === 429) return "sandbox_inventory_rate_limited";
+  if (typeof status === "number" && status >= 500 && status < 600) return "sandbox_inventory_provider_error";
+  if (typeof status === "number" && status >= 400 && status < 500) return "sandbox_inventory_rejected";
+  return "sandbox_inventory_no_answer";
+}
+
 export async function sandboxInventory(deps: SandboxInventoryDeps, input: SandboxInventoryInput): Promise<SandboxInventoryResult> {
   if (!Number.isFinite(input.now)) throw new TypeError("sandboxInventory: now must be a number");
   if (!deps.port.listSandboxes) throw new Error("sandboxInventory: the sandbox port cannot list");
@@ -402,8 +433,17 @@ export async function sandboxInventory(deps: SandboxInventoryDeps, input: Sandbo
         complete = false;
         break;
       }
-      // A provider failure throws (SandboxPortError): the job reports it and the previous inventory stands.
-      const page = await deps.port.listSandboxes({ prefix, ...(cursor !== undefined && { cursor }) });
+      // A provider failure throws: the job reports it under a code for its class and the previous inventory stands.
+      let page: Awaited<ReturnType<NonNullable<SandboxPort["listSandboxes"]>>>;
+      try {
+        page = await deps.port.listSandboxes({ prefix, ...(cursor !== undefined && { cursor }) });
+        if (!Array.isArray(page?.sandboxes)) throw new TypeError("sandbox list answer has no sandboxes array");
+      } catch (err) {
+        const code = inventoryListFailureCode(err);
+        const statusClass = statusClassOf(err instanceof SandboxPortError ? err.status : undefined);
+        log(JSON.stringify({ event: "sandbox_inventory.failed", step: "list", prefix, operation: err instanceof SandboxPortError ? err.operation : "shape", status_class: statusClass, code }));
+        throw new SandboxInventoryError(code, statusClass);
+      }
       // Ours by shape only: a listed name that is not exactly what `sandboxNameFor` builds is neither counted nor sent to the database.
       for (const s of page.sandboxes) if (parseSandboxName(s.name)?.kind === kind) listed.set(s.name, inventoryStateOf(s.status));
       if (page.next === null) break;
@@ -421,7 +461,14 @@ export async function sandboxInventory(deps: SandboxInventoryDeps, input: Sandbo
   if (!complete) {
     log(JSON.stringify({ event: "sandbox_inventory.incomplete", listed: listed.size }));
   } else {
-    const { rows } = await deps.pool.query<{ accounts: number; orphans: number; over_cap: number }>("SELECT accounts, orphans, over_cap FROM sandbox_inventory_write($1::text[], $2::text[], $3)", [[...listed.keys()], states, SANDBOX_IDLE_CAP_PER_ACCOUNT]);
+    let rows: { accounts: number; orphans: number; over_cap: number }[];
+    try {
+      ({ rows } = await deps.pool.query<{ accounts: number; orphans: number; over_cap: number }>("SELECT accounts, orphans, over_cap FROM sandbox_inventory_write($1::text[], $2::text[], $3)", [[...listed.keys()], states, SANDBOX_IDLE_CAP_PER_ACCOUNT]));
+    } catch {
+      // fx-swallow-ok: the failure is re-thrown as a coded error; the database's own message is not kept
+      log(JSON.stringify({ event: "sandbox_inventory.failed", step: "write", operation: "sandbox_inventory_write", status_class: "none", code: "sandbox_inventory_write_failed" }));
+      throw new SandboxInventoryError("sandbox_inventory_write_failed", "none");
+    }
     accounts = rows[0]?.accounts ?? 0;
     orphans = rows[0]?.orphans ?? 0;
     if (orphans > 0) alerts.push("sandbox_orphan_found");
