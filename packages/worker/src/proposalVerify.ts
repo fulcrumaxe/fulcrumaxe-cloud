@@ -13,7 +13,7 @@ import type { SeatRequest, SeatResult } from "./seat.js";
  *
  *  1. The cross-account list (migration 0889) names proposals waiting to be checked: `pending`, or `check_failed` with attempts left.
  *  2. For each, under its own tenant, the run for its current attempt is looked up by its idempotency key,
- *     `proposal-verify:<id>:<text_hash_8>:<attempts>` (`verifyKey`): the text is part of the key, so an edited proposal sent back to `pending`
+ *     `proposal-verify:<id>:<text_hash_8>:<attempts>[:<requeues>]` (`verifyKey`): the text is part of the key, so an edited proposal sent back to `pending`
  *     (attempts at 0 again) starts a fresh key space instead of meeting a run made for its old text.
  *     - No run yet: an external proposal over its repository's daily limit waits ("daily limit") with nothing reserved, and so does any
  *       proposal whose run would take its repository's verifier spend today past `perRepoDailyUsd` ("daily cap"). Both limits are
@@ -113,6 +113,7 @@ interface ProposalRow {
   analysis_refs: string[] | null;
   verification: string;
   verify_attempts: number;
+  verify_requeues: number;
   gh_owner: string | null;
   gh_name: string | null;
 }
@@ -140,7 +141,7 @@ const requestHash = (p: ProposalRow): string =>
 
 async function readProposal(client: PoolClient, accountId: string, proposalId: string): Promise<ProposalRow | undefined> {
   const { rows } = await client.query<ProposalRow>(
-    `SELECT p.id, p.repo_id, p.title, p.summary, p.provenance, p.gh_number, p.discussion_number, p.analysis_refs, p.verification, p.verify_attempts, r.gh_owner, r.gh_name
+    `SELECT p.id, p.repo_id, p.title, p.summary, p.provenance, p.gh_number, p.discussion_number, p.analysis_refs, p.verification, p.verify_attempts, p.verify_requeues, r.gh_owner, r.gh_name
        FROM proposals p JOIN repos r ON r.account_id = p.account_id AND r.id = p.repo_id
       WHERE p.account_id = $1 AND p.id = $2 AND p.state = 'new' AND p.owner_process = 'product'`,
     [accountId, proposalId],
@@ -182,7 +183,7 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
     return withTenant(deps.pool, accountId, async (client): Promise<Outcome> => {
       // Read again in the writing transaction: a proposal that moved on (decided, edited, recorded by another pass) is left alone.
       const fresh = await readProposal(client, accountId, p.id);
-      if (!fresh || !eligible(fresh) || fresh.verify_attempts !== p.verify_attempts || requestHash(fresh) !== requestHash(p)) return "skipped";
+      if (!fresh || !eligible(fresh) || fresh.verify_attempts !== p.verify_attempts || fresh.verify_requeues !== p.verify_requeues || requestHash(fresh) !== requestHash(p)) return "skipped";
       const named = rec.verification === "verified" || rec.verification === "partly_verified";
       await client.query("SELECT * FROM proposal_record_verification($1::uuid, $2::text, $3::text, $4::uuid, $5::jsonb, $6::jsonb, $7::text)", [
         p.id,

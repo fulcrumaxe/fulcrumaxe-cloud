@@ -6,7 +6,7 @@ import { proposalVerifyKey, verifySourceRefs, type VerifyKeyInput } from '../src
  * before they existed. The literals below were computed with the key function as it stood before the change (sha256 of the JSON of
  * [title, summary, refs], first 8 hex), so this test fails if the old shape moves.
  */
-const old: VerifyKeyInput = { id: '11111111-1111-4111-8111-111111111111', title: 'Add dark mode', summary: 'Some summary', gh_number: 12, discussion_number: 7, verify_attempts: 2, analysis_refs: null };
+const old: VerifyKeyInput = { id: '11111111-1111-4111-8111-111111111111', title: 'Add dark mode', summary: 'Some summary', gh_number: 12, discussion_number: 7, verify_attempts: 2, verify_requeues: 0, analysis_refs: null };
 
 describe('verifySourceRefs and proposalVerifyKey with analysis refs', () => {
   it('are byte-identical for a row with no analysis_refs (null or empty)', () => {
@@ -14,7 +14,12 @@ describe('verifySourceRefs and proposalVerifyKey with analysis refs', () => {
       expect(verifySourceRefs(row)).toEqual(['#12', '#7']);
       expect(proposalVerifyKey(row)).toBe('proposal-verify:11111111-1111-4111-8111-111111111111:17ad5799:2');
     }
-    expect(proposalVerifyKey({ id: 'x', title: 'T', summary: null, gh_number: null, discussion_number: null, verify_attempts: 0, analysis_refs: null })).toBe('proposal-verify:x:72504fea:0');
+    expect(proposalVerifyKey({ id: 'x', title: 'T', summary: null, gh_number: null, discussion_number: null, verify_attempts: 0, verify_requeues: 0, analysis_refs: null })).toBe('proposal-verify:x:72504fea:0');
+  });
+
+  it('add the re-check count after the attempt from the first re-queue on, and only then', () => {
+    expect(proposalVerifyKey({ ...old, verify_requeues: 1 })).toBe('proposal-verify:11111111-1111-4111-8111-111111111111:17ad5799:2:1');
+    expect(proposalVerifyKey({ ...old, verify_requeues: 2 })).not.toBe(proposalVerifyKey({ ...old, verify_requeues: 1 }));
   });
 
   it('include the refs, after the item numbers, and a different key', () => {

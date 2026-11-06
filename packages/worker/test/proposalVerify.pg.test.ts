@@ -3,6 +3,8 @@ import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CLAUDE_CLI_VERSION, CLONE_PINNED_SCRIPT, FX_AGENT_SETTINGS_PATH, VERIFIER_WORKDIR, PROPOSAL_VERIFIER_ROLE, agentSettingsFor, createTestConnectionStatusPort, type SdkCommand, type SdkSandbox, type VercelSandboxSdk } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
+import { setProposalOwnerFromLabel } from "../../core/src/plan/ownerFromLabel.js";
 import { discoverySettings, resetPlanDataCache } from "@fx/plan-data";
 import { verifyWait } from "../../core/src/plan/proposalVerifyLimits.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -92,6 +94,8 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
   /** While set, every head read waits on it: a pass can be held part-way, with its lock taken. */
   let headGate: Promise<void> | null = null;
   let sweep: () => Promise<ProposalVerifyCounts>;
+  /** Runs once the sweep has read a finished run and before it writes its answer: a proposal can be sent back in that window. */
+  let beforeRecord: ((envelope: unknown) => Promise<void>) | null = null;
 
   beforeAll(async () => {
     adminPool = createPool(process.env.WORKER_DATABASE_URL!);
@@ -119,7 +123,10 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
       }),
       settings: () => settings(),
       prompt: buildVerifierPrompt,
-      record: recordFromOutput,
+      record: async (input) => {
+        await beforeRecord?.(input.envelope);
+        return recordFromOutput(input);
+      },
     });
   });
   afterAll(async () => {
@@ -144,11 +151,11 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
     return rows[0]!.id;
   }
   /** The key the sweep must use for the proposal's current text: `proposal-verify:<id>:<first 8 hex of sha256 of [title, summary, refs]>:<attempts>`. */
-  async function keyOf(id: string, attempts: number): Promise<string> {
+  async function keyOf(id: string, attempts: number, requeues = 0): Promise<string> {
     const { rows } = await admin.query<{ title: string; summary: string | null; gh_number: number | null; discussion_number: number | null }>("SELECT title, summary, gh_number, discussion_number FROM proposals WHERE id = $1", [id]);
     const p = rows[0]!;
     const refs = [p.gh_number, p.discussion_number].filter((x): x is number => x !== null).map((x) => `#${x}`);
-    return `proposal-verify:${id}:${createHash("sha256").update(JSON.stringify([p.title, p.summary, refs])).digest("hex").slice(0, 8)}:${attempts}`;
+    return `proposal-verify:${id}:${createHash("sha256").update(JSON.stringify([p.title, p.summary, refs])).digest("hex").slice(0, 8)}:${attempts}${requeues > 0 ? `:${requeues}` : ""}`;
   }
   const row = async (id: string) =>
     (await admin.query("SELECT state, verification, verify_attempts, verified_sha, verified_run_id FROM proposals WHERE id = $1", [id])).rows[0] as {
@@ -329,7 +336,7 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
       throw err;
     }
     expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0 });
-    const newKey = await keyOf(id, 0);
+    const newKey = await keyOf(id, 0, 1);
     expect(newKey).not.toBe(oldKey);
 
     await sweep();
@@ -550,6 +557,80 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
     } finally {
       dailyUsd = 50;
       limit = savedLimit;
+    }
+  });
+
+  it("a proposal sent back to be checked while the pass is recording an earlier run's answer is left alone: that answer is not written onto the new check", async () => {
+    envelope = GOOD;
+    const { a, repoId } = await target();
+    const id = await proposal(a, repoId, "internal");
+    const { rows } = await admin.query<{ gh_number: number }>("SELECT gh_number FROM proposals WHERE id = $1", [id]);
+    const hash = createHash("sha256").update(JSON.stringify(["proposal-verify", id, 0, "Add is wrong", PLANTED, [`#${rows[0]!.gh_number}`]])).digest("hex");
+    const runId = randomUUID();
+    await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, envelope, head_sha, ended_at) VALUES ($1, $2, $3, 'local', 'succeeded', $4::jsonb, $5, now())`, [runId, a.accountId, PROPOSAL_VERIFIER_ROLE, JSON.stringify({ ...GOOD, category: "doc" }), SHA]);
+    await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [a.accountId, await keyOf(id, 0), runId, hash]);
+    // Only this proposal's run carries the marker category, so the other proposals a shared pass records are not touched.
+    beforeRecord = async (env) => {
+      if ((env as { category?: string }).category !== "doc") return;
+      beforeRecord = null;
+      await admin.query("BEGIN");
+      await admin.query("SELECT set_config('app.account_id', $1, true)", [a.accountId]);
+      await admin.query("SELECT proposal_requeue_verification($1::uuid)", [id]);
+      await admin.query("COMMIT");
+    };
+    try {
+      expect((await sweep()).skipped).toBeGreaterThanOrEqual(1);
+    } finally {
+      beforeRecord = null;
+    }
+    expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0, verified_run_id: null });
+    expect((await admin.query("SELECT count(*)::int AS n FROM proposal_claims WHERE proposal_id = $1", [id])).rows[0].n).toBe(0);
+  });
+
+  it("the product label: a proposal flipped to the product is checked once by the next pass, one flipped back is listed no more, and a replayed flip starts no second run", async () => {
+    envelope = GOOD;
+    const t = await target();
+    const num = ++n;
+    const { rows } = await admin.query<{ id: string }>(
+      `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, title, summary, provenance, owner_process) VALUES ($1, $2, $3, '{github_issue}', $4, 'Add is wrong', 'a body', 'internal', 'internal_loop') RETURNING id`,
+      [t.a.accountId, t.repoId, `gh:issue:${num}`, num],
+    );
+    const id = rows[0]!.id;
+    const appPool = createPool(process.env.WORKER_DATABASE_URL_APP_USER!);
+    const flip = (to: "product" | "internal_loop") => withTenant(appPool, t.a.accountId, (c) => setProposalOwnerFromLabel(c, t.repoId, num, to, "maintain"));
+    const listed = async () => (await writerPool.query("SELECT proposal_id FROM proposal_verify_list_due(200)")).rows.map((r) => r.proposal_id);
+    try {
+      await sweep();
+      expect(await runsOf(id)).toEqual([]);
+      expect(await listed()).not.toContain(id);
+
+      expect(await flip("product")).toBe(true);
+      expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0 });
+      expect(await listed()).toContain(id);
+      await sweep();
+      await ended(id);
+      await sweep();
+      expect(await runsOf(id)).toHaveLength(1);
+      expect(await row(id)).toMatchObject({ verification: "partly_verified" });
+
+      // A replayed flip changes nothing; a flip back and forth sends it to be checked again, on a new key, and a pass after it starts exactly one run.
+      expect(await flip("product")).toBe(false);
+      await sweep();
+      expect(await runsOf(id)).toHaveLength(1);
+      expect(await flip("internal_loop")).toBe(true);
+      expect(await listed()).not.toContain(id);
+      await sweep();
+      expect(await runsOf(id)).toHaveLength(1);
+      expect(await flip("product")).toBe(true);
+      await sweep();
+      await ended(id);
+      await sweep();
+      // The second hand-over has its own run, on its own key; the first run's answer is not read again.
+      const runs = await runsOf(id);
+      expect(runs.map((r) => r.idempotency_key.split(":").slice(3).join(":"))).toEqual(["0:1", "0:2"]);
+      expect(await row(id)).toMatchObject({ verification: "partly_verified", verified_run_id: runs[1]!.id });
+    } finally {
+      await appPool.end();
     }
   });
 
