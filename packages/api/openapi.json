@@ -41118,7 +41118,7 @@
       "get": {
         "operationId": "getMemoryQueue",
         "summary": "Memory proposals waiting for a decision",
-        "description": "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched. `auto_approved` lists the entries the person's own autonomy setting approved in the last 7 days that are still approved (newest first, each with its place and the run that proposed it): the screen shows them as \"Approved by your autonomy setting\" with Undo, which is the retire step. It is read from the approval's audit row each time, so lowering the setting changes nothing already listed.",
+        "description": "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched. `file_notices` names each repository file whose last import was cut at 32 KiB, with the fixed sentence to show beside it. `auto_approved` lists the entries the person's own autonomy setting approved in the last 7 days that are still approved (newest first, each with its place and the run that proposed it): the screen shows them as \"Approved by your autonomy setting\" with Undo, which is the retire step. It is read from the approval's audit row each time, so lowering the setting changes nothing already listed.",
         "security": [
           {
             "session": []
@@ -41491,13 +41491,48 @@
                     },
                     "auto_approved_truncated": {
                       "type": "boolean"
+                    },
+                    "file_notices": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repo_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "repo": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string",
+                            "enum": [
+                              "CLAUDE.md",
+                              "AGENTS.md"
+                            ]
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "repo_id",
+                          "repo",
+                          "path",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
                     "cards",
                     "truncated",
                     "auto_approved",
-                    "auto_approved_truncated"
+                    "auto_approved_truncated",
+                    "file_notices"
                   ],
                   "additionalProperties": false
                 }

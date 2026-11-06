@@ -173,6 +173,24 @@ describe("GET /api/cron/setup-request-check", () => {
   });
 });
 
+describe("GET /api/cron/setup-request-check: the repo instruction file import (D#601 MEM-5b)", () => {
+  it("passes the file reader to the worker only when one is bound, with the tick's deadline; with none the worker input names no repoFiles", async () => {
+    await markWorkPending("setup-request-check", { since: clock.value - 120_000 });
+    const seen: Array<Record<string, unknown>> = [];
+    const worker = { sweepSetupRequestChecks: vi.fn(async (input: Record<string, unknown>) => (seen.push(input), { listed: 0, passed: 0, notYet: 0, skipped: 0, failed: 0, nextDueAt: null })) };
+    const base = { cronSecret: SECRET, getWorker: async () => worker, envSource: productionVercelEnvSource, log: () => undefined, now: () => clock.value };
+    await setupRequestCheckHandler(req(`Bearer ${SECRET}`), base as never);
+    const repoFiles = { read: vi.fn(), liveSecrets: () => [] };
+    await markWorkPending("setup-request-check", { since: clock.value - 120_000 });
+    await setupRequestCheckHandler(req(`Bearer ${SECRET}`), { ...base, repoFiles } as never);
+    expect(seen.map((i) => "repoFiles" in i)).toEqual([false, true]);
+    expect(seen[1]!.repoFiles).toBe(repoFiles);
+    expect("planeParity" in seen[1]!).toBe(false);
+    expect(seen[1]!.deadlineAt).toBe(clock.value + 60_000);
+    expect("deadlineAt" in seen[0]!).toBe(false);
+  });
+});
+
 describe("GET /api/cron/setup-request-check: the plane parity check (D#598 P1d-3)", () => {
   it("passes the parity check to the worker only when one is bound; with none, the worker input names no planeParity", async () => {
     await markWorkPending("setup-request-check", { since: clock.value - 120_000 });

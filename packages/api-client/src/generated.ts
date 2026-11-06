@@ -4706,6 +4706,12 @@ export interface Operations {
         approved_age: string;
       }>;
       auto_approved_truncated: boolean;
+      file_notices: Array<{
+        repo_id: string;
+        repo: string;
+        path: "CLAUDE.md" | "AGENTS.md";
+        text: string;
+      }>;
     };
   };
   openMemoryCard: {

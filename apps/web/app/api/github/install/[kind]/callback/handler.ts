@@ -17,6 +17,7 @@ import {
 } from "@fx/github";
 import { appUserPool } from "@fx/api/src/sse/pools.js";
 import { wakeDiscoveryDrain } from "../../../../../../lib/discoveryWake";
+import { wakeRepoInstructionImportOnConnect } from "../../../../../../lib/repoInstructionWake";
 import { buildSyncRepos } from "../../../../../../lib/github/repoSync";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "../../../../../../lib/shell/session-guard";
 
@@ -56,7 +57,7 @@ export function defaultInstallCallbackDeps(): InstallCallbackDeps {
     appCredentials,
     env: process.env,
     limitSession: (subject) => pgSessionLimiter(appUserPool(), SESSION_LIMITS.githubReturn)(subject),
-    ...(cachedAppUserPool ? { appUserPool: cachedAppUserPool, onDiscoveryQueued: (_accountId, runs) => wakeDiscoveryDrain(runs), syncRepos: buildSyncRepos({ platformOpsPool: cachedPool, appUserPool: cachedAppUserPool, appCredentials }) } : {}),
+    ...(cachedAppUserPool ? { appUserPool: cachedAppUserPool, onDiscoveryQueued: async (accountId, runs) => { await wakeDiscoveryDrain(runs); await wakeRepoInstructionImportOnConnect(cachedAppUserPool!, accountId, runs.map((r) => r.repoId)); }, syncRepos: buildSyncRepos({ platformOpsPool: cachedPool, appUserPool: cachedAppUserPool, appCredentials }) } : {}),
   };
 }
 

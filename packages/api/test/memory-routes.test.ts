@@ -156,6 +156,23 @@ describe('D#601 MEM-4a2: memory routes', () => {
       expect((await call(aMember, 'GET', '/memory/queue?kind=fact')).status).toBe(422);
     });
 
+    it('MEM-5b: the queue names a repository file whose last import was cut at 32 KiB, in the fixed words, to its own account only; a file read whole is not named', async () => {
+      await admin.query(`INSERT INTO repo_instruction_files (repo_id, path, account_id, file_sha, truncated) VALUES ($1, 'CLAUDE.md', $2, $3, true), ($1, 'AGENTS.md', $2, $3, false)`, [a.repoId, a.accountId, 'b'.repeat(40)]);
+      try {
+        const q = await ok<{ file_notices: Array<Record<string, unknown>> }>(await call(aMember, 'GET', '/memory/queue'), 'getMemoryQueue');
+        expect(q.file_notices).toEqual([{ repo_id: a.repoId, repo: 'acme/widgets', path: 'CLAUDE.md', text: 'File truncated at 32 KiB' }]);
+        expect((await ok<{ file_notices: unknown[] }>(await call(aMember, 'GET', `/memory/queue?repo_id=${a.repoId}`), 'getMemoryQueue')).file_notices).toHaveLength(1);
+        const installId = randomUUID();
+        const otherRepo = randomUUID();
+        await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')`, [installId, a.accountId, 9_100_000 + Math.floor(Math.random() * 1e6)]);
+        await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, 'team', 'acme', 'other')`, [otherRepo, a.accountId, installId, 9_200_000 + Math.floor(Math.random() * 1e6)]);
+        expect((await ok<{ file_notices: unknown[] }>(await call(aMember, 'GET', `/memory/queue?repo_id=${otherRepo}`), 'getMemoryQueue')).file_notices).toEqual([]);
+        expect((await ok<{ file_notices: unknown[] }>(await call(bAdmin, 'GET', '/memory/queue'), 'getMemoryQueue')).file_notices).toEqual([]);
+      } finally {
+        await admin.query(`DELETE FROM repo_instruction_files WHERE repo_id = $1`, [a.repoId]);
+      }
+    });
+
     it('another account sees none of it, and names none of its ids: a repo id of account A is a 404 for B', async () => {
       const body = await ok<{ groups: unknown[] }>(await call(bAdmin, 'GET', '/memory'), 'listMemory');
       expect(body.groups).toEqual([]);

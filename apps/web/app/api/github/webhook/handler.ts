@@ -18,6 +18,7 @@ import { buildSyncRepos } from "../../../../lib/github/repoSync";
 import { wakeMergeQueue } from "../../../../lib/mergeQueue";
 import { wakeGateReask } from "../../../../lib/gateReask";
 import { wakePlaneParity } from "../../../../lib/planeParityWake";
+import { wakeRepoInstructionImport, wakeRepoInstructionImportOnConnect } from "../../../../lib/repoInstructionWake";
 import { intakeAllowlist } from "../../../../lib/github/intakeTrust";
 import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermission";
 import { repoHasEngineLoop } from "../../../../lib/github/repoHasEngineLoop";
@@ -116,11 +117,14 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
     // D#519 MQ3-b: a pull request or CI event for a repo with a live merge-queue entry wakes the queue. The merge gate asks itself again when the public pull
     // request opens or its checks finish green (D#6). The two are independent: one failing does not skip the other.
     onRepoEvent: async (event) => {
-      const results = await Promise.allSettled([wakeMergeQueue(cachedAppUserPool!, event), wakeGateReask(cachedAppUserPool!, event), wakePlaneParity(cachedAppUserPool!, event)]);
+      const results = await Promise.allSettled([wakeMergeQueue(cachedAppUserPool!, event), wakeGateReask(cachedAppUserPool!, event), wakePlaneParity(cachedAppUserPool!, event), wakeRepoInstructionImport(cachedAppUserPool!, event)]);
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) throw failed.reason;
     },
-    onDiscoveryQueued: markDiscoveryDrainPending,
+    onDiscoveryQueued: async (accountId, runs) => {
+      await markDiscoveryDrainPending();
+      await wakeRepoInstructionImportOnConnect(cachedAppUserPool!, accountId, runs.map((r) => r.repoId));
+    },
     allowlist: intakeAllowlist() ?? undefined,
     issueAuthorPermission,
     senderPermission,

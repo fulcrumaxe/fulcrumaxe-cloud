@@ -2,6 +2,8 @@ import type { NextRequest, NextResponse } from "next/server";
 import { productionVercelEnvSource } from "../../../../lib/setupRequestEnvSource";
 import { getWorker } from "../../../../lib/worker";
 import { computeParityForJob } from "../../../../lib/planeParityCompute";
+import { readRepoFileForImport } from "../../../../lib/github/planSource";
+import { liveInstallationTokens } from "@fx/github";
 import { setupRequestCheckHandler } from "./handler";
 
 /** A pass starts checks for 40 seconds at most (checkSweep.ts), well under the minute until the cron fires again. */
@@ -18,6 +20,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     getWorker,
     envSource: productionVercelEnvSource,
     planeParity: computeParityForJob,
+    repoFiles: { read: readRepoFileForImport, liveSecrets: () => liveInstallationTokens() },
     log: (line) => console.log(line),
   });
 }

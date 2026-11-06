@@ -144,7 +144,7 @@ export async function loadList(filters = {}, get = api, signal) {
 export async function loadQueue(get = api, signal) {
   const body = await get("GET", "/api/v1/memory/queue", undefined, signal);
   const ok = (c) => c && c.entry && isUuid(c.entry.id);
-  return { cards: arr(body && body.cards).filter(ok), truncated: !!(body && body.truncated), autoApproved: arr(body && body.auto_approved).filter(ok), autoTruncated: !!(body && body.auto_approved_truncated) };
+  return { cards: arr(body && body.cards).filter(ok), truncated: !!(body && body.truncated), autoApproved: arr(body && body.auto_approved).filter(ok), autoTruncated: !!(body && body.auto_approved_truncated), fileNotices: arr(body && body.file_notices).filter((n) => n && typeof n.repo === "string" && typeof n.path === "string" && typeof n.text === "string") };
 }
 
 /** The installed repositories (id and owner/name), so a repo with no memory yet still has its header. A failure is an empty list, not an error. */

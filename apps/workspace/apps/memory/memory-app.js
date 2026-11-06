@@ -135,7 +135,7 @@ function mountApp(contentEl) {
   const ac = new AbortController();
   let phase = "loading"; // loading | ready | error
   let list = { groups: [], truncated: false };
-  let queue = { cards: [], truncated: false, autoApproved: [], autoTruncated: false };
+  let queue = { cards: [], truncated: false, autoApproved: [], autoTruncated: false, fileNotices: [] };
   let repos = [];
   let counts = null; // { repos, items } or null when the route failed
   let places = new Map(); // "scope|label" -> { kind, id }
@@ -399,6 +399,7 @@ function mountApp(contentEl) {
       "section",
       { class: "mem-scope", "aria-label": g.label, "data-testid": "mem-group", "data-scope": g.scope },
       h("h3", { class: "mem-h3", "data-testid": "mem-group-head" }, h("bdi", null, g.label), " ", badgeFor(place)),
+      ...(g.scope === "repo" ? queue.fileNotices.filter((n) => n.repo === g.label).map((n) => h("p", { class: "mem-muted", "data-testid": "mem-file-notice" }, h("bdi", null, n.path), ": ", n.text)) : []),
       g.entries.length === 0 ? h("p", { class: "mem-muted", "data-testid": "mem-group-empty" }, COPY.emptyScope) : h("ul", { class: "mem-rows" }, g.entries.map(entryRow))
     );
   }

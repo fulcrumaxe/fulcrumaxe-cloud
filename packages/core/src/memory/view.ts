@@ -17,6 +17,7 @@ import {
   type MemoryStatus,
 } from './index.js';
 import { MEMORY_GATED_AUTHOR_KINDS } from './batch.js';
+import { truncatedRepoFiles, type RepoFileNotice } from './repoFileSweep.js';
 import { MEMORY_ROLE_EVIDENCE_MIN_REPOS, evidenceRepoCounts } from './evidence.js';
 import { MEMORY_RUN_COUNT_MAX_IDS, memoryRunCounts } from './runCounts.js';
 import {
@@ -492,4 +493,10 @@ export async function memoryAutoApproved(ctx: ReadCtx, filter: Omit<MemoryScopeF
 }
 interface AutoApprovedRow extends ListRow {
   approved_at: Date;
+}
+
+/** D#601 MEM-5b: the repository files whose last import was cut at 32 KiB, for the review screen (one fixed sentence, the repository and the file named beside it). */
+export async function memoryFileNotices(ctx: ReadCtx, filter: Pick<MemoryScopeFilter, 'repoId'> = {}): Promise<RepoFileNotice[]> {
+  if (filter.repoId !== undefined) assertUuid('repo', filter.repoId);
+  return inSession(ctx, (client) => truncatedRepoFiles(client, filter.repoId === undefined ? undefined : [filter.repoId]));
 }

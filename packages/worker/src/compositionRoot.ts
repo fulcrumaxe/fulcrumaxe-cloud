@@ -80,6 +80,8 @@ import { createRunHandoffs, type RunHandoffs } from "./runHandoffs.js";
 import { createStageResume, type StageResume } from "./stageResume.js";
 import { createGateReask, type GateReask } from "./gateReask.js";
 import { sweepSetupRequestChecks as runSetupRequestCheckSweep, type CheckSweepCounts } from "@fx/core/src/setup-requests/checkSweep.js";
+import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
+import { sweepRepoInstructionFiles, type RepoFileRead, type RepoFileSweepCounts } from "@fx/core/src/memory/repoFileSweep.js";
 import { sweepPlaneParity, type ParityCompute, type ParitySweepCounts } from "@fx/core/src/repos/planeParityChecks.js";
 import { sweepBranchCleanups as runBranchCleanupSweep, type BranchCleanupCounts, type BranchCleanupGithub } from "./branchCleanup.js";
 import type { PrCloseOpen } from "./privatePrClose.js";
@@ -242,7 +244,7 @@ export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade
    * the cron only: the list is one definer (migration 0874) and the rest runs per request under its own tenant. `envSource` is where a
    * provider's variable names come from; the caller binds it.
    */
-  sweepSetupRequestChecks(input: { envSource: VercelEnvSource; planeParity?: ParityCompute; deadlineAt?: number }): Promise<CheckSweepCounts & { parity?: ParitySweepCounts }>;
+  sweepSetupRequestChecks(input: { envSource: VercelEnvSource; planeParity?: ParityCompute; repoFiles?: { read: RepoFileRead; liveSecrets: LiveSecretsSource }; deadlineAt?: number }): Promise<CheckSweepCounts & { parity?: ParitySweepCounts; repoFiles?: RepoFileSweepCounts }>;
   /**
    * D#598 P1f-5d: one pass of the branch cleanup sweep (a cron of its own, behind its own pending-work marker): removes the private branches of closed or
    * merged paired items whose head still is the recorded one. `github` is the GitHub client opener (apps/web binds it); the signing key is read here. For the cron only.
@@ -536,6 +538,22 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       await purgeAap({ pool: pools.receiptPool, ready: pools.aapReady, warn: (line) => console.warn(line) });
       return { ...result, nextAskDueAt };
     };
+    const sweepSetupRequestChecks: Worker["sweepSetupRequestChecks"] = async (input) => {
+      const counts = await runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource });
+      const deadline = input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {};
+      const parity = input.planeParity ? await sweepPlaneParity({ pool: pools.runnerPool, compute: input.planeParity, ...deadline }) : undefined;
+      // D#601 MEM-5b: the repo instruction file import runs after the parity pass, in whatever time the tick has left.
+      const repoFiles = input.repoFiles ? await sweepRepoInstructionFiles({ pool: pools.runnerPool, ...input.repoFiles, ...deadline }) : undefined;
+      if (!parity && !repoFiles) return counts;
+      const extra = [parity, repoFiles].filter((c): c is NonNullable<typeof c> => c !== undefined);
+      return {
+        ...counts,
+        listed: counts.listed + extra.reduce((n, c) => n + c.listed, 0),
+        nextDueAt: [counts.nextDueAt, ...extra.map((c) => c.nextDueAt)].reduce<number | null>((a, b) => (a === null ? b : b === null ? a : Math.min(a, b)), null),
+        ...(parity ? { parity } : {}),
+        ...(repoFiles ? { repoFiles } : {}),
+      };
+    };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
     return {
       ...planePublish,
@@ -550,7 +568,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       sweepRunHandoffs: runHandoffs.sweepRunHandoffs,
       sweepParkedStages: stageResume.sweepParkedStages,
       wakeMergeGate: gateReask.wakeMergeGate,
-      sweepSetupRequestChecks: async (input) => { const counts = await runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }); if (!input.planeParity) return counts; const parity = await sweepPlaneParity({ pool: pools.runnerPool, compute: input.planeParity, ...(input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {}) }); return { ...counts, listed: counts.listed + parity.listed, nextDueAt: [counts.nextDueAt, parity.nextDueAt].reduce<number | null>((a, b) => (a === null ? b : b === null ? a : Math.min(a, b)), null), parity }; },
+      sweepSetupRequestChecks,
       approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal, ...(afterReceipt ? { afterReceipt } : {}), ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}), ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}) }),
       requestReversal: (input) => requestReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { receiptId: input.receiptId, ...(input.confirmEstimateUsd === undefined ? {} : { confirmEstimateUsd: input.confirmEstimateUsd }) }),
       retryReversal: (input) => retryReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { reversalId: input.reversalId }),

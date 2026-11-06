@@ -80,5 +80,13 @@
       "approved_age": "2 hours ago"
     }
   ],
-  "auto_approved_truncated": false
+  "auto_approved_truncated": false,
+  "file_notices": [
+    {
+      "repo_id": "2b9c3f40-5d6e-4f70-8182-93a4056c7d8e",
+      "repo": "acme/widgets",
+      "path": "CLAUDE.md",
+      "text": "File truncated at 32 KiB"
+    }
+  ]
 }
