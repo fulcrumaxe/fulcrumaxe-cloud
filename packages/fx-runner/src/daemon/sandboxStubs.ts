@@ -18,6 +18,14 @@ export const STUB_EMPTY_FILE = "config.worktree";
 /** `.git/modules`, `.git/worktrees`, `.git/glab-cli`: real, empty directories. */
 export const STUB_EMPTY_DIRS: readonly string[] = Object.freeze(["modules", "worktrees", "glab-cli"]);
 
+/**
+ * `.git/info/.claude-sandbox-noreplace`: an empty real directory. A newer sandbox leaves one of these in each directory it protects against replacement
+ * (read off the kept workspace of run 352e6379: in `.git/info`, `.git/objects/info` and `.git/objects/info/commit-graphs`). The last two are plain directories
+ * inside `objects`, which the walk of `objects` already accepts; the one in `.git/info` is accepted by name, as an empty real directory, and nothing else
+ * that is not a file is.
+ */
+export const STUB_INFO_MARKER = ".claude-sandbox-noreplace";
+
 /** The empty files the sandbox makes for its protected paths: the workspace root's, as listed in the workspace's own `.git/info/exclude`, and the shell start-up files. */
 export const SANDBOX_PROTECTED_FILES: readonly string[] = Object.freeze([
   "bunfig.toml",

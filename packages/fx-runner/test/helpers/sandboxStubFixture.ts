@@ -10,6 +10,13 @@ import path from "node:path";
  */
 export const OBSERVED_GIT_STUBS = { commondir: ".", configWorktree: "", emptyDirs: ["modules", "worktrees", "glab-cli"] } as const;
 
+/**
+ * A later sandbox also leaves an empty `.claude-sandbox-noreplace` directory in each of these (read off the kept workspace of run 352e6379, 11-06): the
+ * one in `.git/info` stopped every host read of the workspace with `workspace_git_refused` until `STUB_INFO_MARKER` was accepted. `commit-graphs` is a
+ * directory the sandbox made too (the clone does not make it).
+ */
+export const OBSERVED_NOREPLACE_PARENTS: readonly string[] = [".git/info", ".git/objects/info", ".git/objects/info/commit-graphs"];
+
 /** The 0-byte files at the workspace root (also named in the workspace's `.git/info/exclude`, under "claude-code scrub-mode stubs"). */
 export const OBSERVED_ROOT_STUBS: readonly string[] = [
   "bunfig.toml",
@@ -36,6 +43,7 @@ export function addSandboxStubs(workspace: string): void {
   writeFileSync(path.join(gitDir, "commondir"), OBSERVED_GIT_STUBS.commondir);
   writeFileSync(path.join(gitDir, "config.worktree"), OBSERVED_GIT_STUBS.configWorktree);
   for (const name of OBSERVED_GIT_STUBS.emptyDirs) mkdirSync(path.join(gitDir, name));
+  for (const parent of OBSERVED_NOREPLACE_PARENTS) mkdirSync(path.join(workspace, parent, ".claude-sandbox-noreplace"), { recursive: true });
   for (const name of OBSERVED_ROOT_STUBS) writeFileSync(path.join(workspace, name), "");
 }
 

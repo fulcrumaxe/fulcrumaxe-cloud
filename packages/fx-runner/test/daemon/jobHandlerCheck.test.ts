@@ -186,6 +186,7 @@ describe("a job with a check", () => {
     for (const [outcome, line] of [
       [{ kind: "failed", why: "needs_network" }, "lockfile update ended (failed: needs_network)"],
       [{ kind: "refused", reason: "other_host_tarball" }, "lockfile update ended (refused: other_host_tarball)"],
+      [{ kind: "refused", reason: "workspace_unsafe", check: "git_dir_info_entry" }, "lockfile update ended (refused: workspace_unsafe, check: git_dir_info_entry)"],
       ["throws", "lockfile update ended (lockfile_sync_failed)"],
     ] as const) {
       const steps: string[] = [];

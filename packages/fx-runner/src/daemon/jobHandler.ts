@@ -581,7 +581,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
                   const domains = (job.sandbox_allowances?.entries ?? []).filter((entry) => entry.kind === "domain").map((entry) => entry.value);
                   const synced = await deps.lockfileSync.run({ workspace, base: started.base, registryHost: registryHostOf(domains), signal: stopRun }).catch(() => undefined);
                   if (synced === undefined) step("lockfile update ended (lockfile_sync_failed)");
-                  else if (synced.kind !== "none") step(`lockfile update ended (${synced.kind}${synced.kind === "failed" ? `: ${synced.why}` : synced.kind === "refused" ? `: ${synced.reason}` : ""})`);
+                  else if (synced.kind !== "none") step(`lockfile update ended (${synced.kind}${synced.kind === "failed" ? `: ${synced.why}` : synced.kind === "refused" ? `: ${synced.reason}${synced.check === undefined ? "" : `, check: ${synced.check}`}` : ""})`);
                 }
               }
             }

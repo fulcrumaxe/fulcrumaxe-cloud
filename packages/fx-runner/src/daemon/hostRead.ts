@@ -93,16 +93,22 @@ export function assertConfigKeys(listing: string): void {
 
 /** Pin, shape and config-key checks; `listConfig` returns the output of `git config --file <file> --list --null --no-includes`. */
 async function vet(workspace: string, listConfig: (file: string) => Promise<string>, walk: boolean): Promise<void> {
+  // The check that said no is kept as a closed word (the stage, or the more exact word a shape check carried), so a refusal can be told apart in the runner's log.
+  let stage = "pin";
   try {
     const mirrorObjects = checkPin(workspace);
+    stage = "git_dir_shape";
     assertHostReadableGit(workspace, mirrorObjects);
+    stage = "nested_dotgit";
     if (walk) assertNoOutsideGitfiles(workspace);
+    stage = "config_keys";
     assertConfigKeys(await listConfig(`${workspace}/.git/config`));
     // Read again after git ran: the folder must still be the pinned one.
+    stage = "pin_after_read";
     checkPin(workspace);
-  } catch {
+  } catch (error) {
     // fx-swallow-ok: replaced by the closed code; the underlying error may carry a path
-    refused();
+    throw new GitPathError("workspace_git_refused", undefined, error instanceof GitPathError && error.detail !== undefined ? error.detail : stage);
   }
 }
 
