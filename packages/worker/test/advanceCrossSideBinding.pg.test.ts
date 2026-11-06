@@ -156,7 +156,7 @@ describe("advance: a round that carries on from a pull request the other side op
       expect(m.resumed).toEqual([]);
       expect(m.started).toHaveLength(1);
       expect(m.started[0]!.continues).toBeUndefined();
-      expect(m.started[0]!.parentRunId).toBeUndefined();
+      expect(m.started[0]!.parentRunId).toBe(build.id);
       expect(typeof m.started[0]!.inCreateTransaction).toBe("function");
       expect(await boundEvents(runId)).toEqual([{ pr_number: 41, branch: build.branch, side: "sandbox" }]);
       expect((await admin.query("SELECT execution_mode, runtime FROM agent_runs WHERE id = $1", [runId])).rows[0]).toEqual({ execution_mode: "sandbox", runtime: "production" });
@@ -295,25 +295,86 @@ describe("advance: a round that carries on from a pull request the other side op
     });
   });
 
-  it("a round with no pull request named is exactly the PL-2 fresh session: no continuation, no binding", async () => {
+  it("D#600 CX-7: a round with no pull request named is refused pr_unbound: a fresh session must be told which branch to continue, so nothing is started and nothing is bound", async () => {
     const t = await setup("sandbox");
     const m = module();
     await builtRun(t, "sandbox");
     await place(t, "runner");
-    const fix = await m.module.advanceStartFix(t.who, fixReq(t));
-    expect(fix.ok).toBe(true);
-    expect(m.started[0]!.continues).toBeUndefined();
-    // D#7 DP4b-3b: the hook is the decision snapshot write only; the binding is still not written here (asserted below).
-    expect(m.started[0]!.inCreateTransaction).toBeTypeOf("function");
+    expect(await m.module.advanceStartFix(t.who, fixReq(t))).toEqual({ ok: false, reason: "pr_unbound" });
+    expect(m.started).toEqual([]);
+    expect(m.resumed).toEqual([]);
   });
 
-  it("a same-side round names no pull request to the starter and still resumes", async () => {
+  /** The pull request's branch on GitHub as the round would read and merge it: counted, so a refused round can show it never touched it. */
+  const countedHeads = () => {
+    const privateHead = vi.fn(async () => HEAD);
+    const syncBase = vi.fn(async () => ({ kind: "up_to_date" as const, baseSha: "c".repeat(40), baseRef: "main", stacked: false }));
+    return { heads: { privateHead, syncBase } as unknown as AdvanceModuleDeps["fixHeads"], privateHead, syncBase };
+  };
+  const stageOf = async (w: string) => (await admin.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1", [w])).rows[0]!.stage;
+
+  it("D#600 CX-7: a round refused for want of a pull request pair is refused before the branch is read or merged and before the board moves", async () => {
+    const t = await setup("runner_local");
+    const counted = countedHeads();
+    const m = module({ fixHeads: counted.heads });
+    await runnerBuildWithPr(t); // the item recorded a pair, so a round that sent none would otherwise have a branch to sync
+    expect(await m.module.advanceStartFix(t.who, fixReq(t))).toEqual({ ok: false, reason: "pr_unbound" });
+    expect(counted.privateHead).not.toHaveBeenCalled();
+    expect(counted.syncBase).not.toHaveBeenCalled();
+    expect(await stageOf(t.w)).toBe("pr_opened");
+    expect(m.started).toEqual([]);
+    expect((await admin.query("SELECT code FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'fix_round_refused'", [t.w])).rows).toEqual([{ code: "pr_unbound" }]);
+
+    // A runner item that recorded no pair has no branch to sync at all, and the board still does not move for the refusal.
+    const bare = await setup("runner_local");
+    const bareModule = module({ fixHeads: counted.heads });
+    await builtRun(bare, "runner_local");
+    expect(await bareModule.module.advanceStartFix(bare.who, fixReq(bare))).toEqual({ ok: false, reason: "pr_unbound" });
+    expect(await stageOf(bare.w)).toBe("pr_opened");
+  });
+
+  it("D#600 CX-7: a runner round whose build left no Spec version is refused before the branch is read or merged and before the board moves", async () => {
+    const t = await setup("runner_local");
+    const counted = countedHeads();
+    const m = module({ fixHeads: counted.heads });
+    // A runner build from before the pin: it recorded its pull request, and has no Spec version to hand on.
+    const id = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, cc_session_id, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'runner', 'running', 'runner_local', 'cc-1', $4)", [id, t.a.accountId, t.w, t.a.repoId]);
+    await writeRunStatus(writerPool, { accountId: t.a.accountId, runId: id, from: "running", to: "succeeded", runnerDone: { prNumber: 41, branch: RUN_BRANCH(id) } });
+    const build = { id, branch: RUN_BRANCH(id) };
+    expect(await m.module.advanceStartFix(t.who, fixPr(t, { number: 41, branch: build.branch }))).toEqual({ ok: false, reason: "no_spec_version" });
+    expect(counted.privateHead).not.toHaveBeenCalled();
+    expect(counted.syncBase).not.toHaveBeenCalled();
+    expect(await stageOf(t.w)).toBe("pr_opened");
+    expect(m.started).toEqual([]);
+    expect((await admin.query("SELECT code FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'fix_round_refused'", [t.w])).rows).toEqual([{ code: "no_spec_version" }]);
+  });
+
+  it("D#600 CX-7: a cross-side round on the item's own branch still needs the pair the runner recorded (the own-branch allowance is for a same-side round only)", async () => {
+    const t = await setup("runner_local");
+    const m = module();
+    const build = await runnerBuildWithPr(t);
+    await place(t, "cloud");
+    // The branch GitHub shows for the item is its own issue branch, which is not the pair the runner recorded.
+    expect(await m.module.advanceStartFix(t.who, fixPr(t, { number: 41, branch: `fx/issue-${t.n}` }))).toEqual({ ok: false, reason: "pr_unbound" });
+    expect(m.started).toEqual([]);
+    expect(await boundEvents(build.id)).toEqual([]);
+    expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE work_item_id = $1 AND status IN ('pending', 'running')", [t.w])).rows[0].n).toBe(0);
+    // Control: the recorded pair itself is accepted on the same item.
+    const ok = await m.module.advanceStartFix(t.who, fixPr(t, { number: 41, branch: build.branch }));
+    expect(ok.ok).toBe(true);
+  });
+
+  it("D#600 CX-7: a same-side round names the pull request to the starter and starts a fresh session, never a resume", async () => {
     const t = await setup("sandbox");
     const m = module();
-    await builtRun(t, "sandbox");
+    const build = await builtRun(t, "sandbox");
     const fix = await m.module.advanceStartFix(t.who, fixPr(t, { number: 41, branch: `fx/issue-${t.n}` }));
     expect(fix.ok).toBe(true);
-    expect(m.started).toEqual([]);
-    expect(m.resumed).toHaveLength(1);
+    expect(m.resumed).toEqual([]);
+    expect(m.started).toHaveLength(1);
+    expect(m.started[0]!.parentRunId).toBe(build);
+    // The branch is the item's own: no cross-side binding row is written for a round that stayed on its side.
+    expect(await boundEvents((fix as { runId: string }).runId)).toEqual([]);
   });
 });

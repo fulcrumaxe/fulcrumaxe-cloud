@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { startFixBody, startReviewerBody, type ReviewCtx } from "./advanceReviewSteps";
 
-/** D#600 CX-2: the fix round sends the unchanged-Spec line only where the session is certainly the one that built, and every start carries the section list. */
+/** D#600 CX-7 (CX-2 before it): every fix round is a fresh session, so it carries the Spec body, and every start carries the section list. */
 const WHO = { accountId: "a", userId: "u", workItemId: "w", haltEpoch: 0 };
 const HEAD = "b".repeat(40);
 const SPEC = "Acceptance: the footer shows the year.";
@@ -23,24 +23,26 @@ function fixture(executionMode: string) {
 }
 
 describe("startFixBody: the Spec in a fix round", () => {
-  it("a sandbox round resumes the build's session, so it sends the unchanged line with the stored hash and not the body", async () => {
+  it("D#600 CX-7: a sandbox round is a fresh session, so it carries the Spec body and never the unchanged line", async () => {
     const f = fixture("sandbox");
     expect(await startFixBody(f.worker, WHO, f.ctx, PR, "act", 1, [{ role: "code-reviewer", runId: "x" }])).toMatchObject({ ok: true });
     const req = f.started.mock.calls[0]!.at(-1) as { prompt: string; contextSections: Array<{ code: string }> };
-    expect(req.prompt).toContain(`Spec v3 unchanged (sha256 ${SHA})`);
-    expect(req.prompt).not.toContain(SPEC);
+    expect(req.prompt).toContain(SPEC);
+    expect(req.prompt).toContain("SPEC (version 3):");
+    expect(req.prompt).not.toContain("unchanged (sha256");
     expect(req.contextSections.map((s) => s.code)).toEqual(["boundary", "spec", "findings", "output"]);
   });
 
-  it("a sandbox round also sends the held version and the body-carrying prompt, for the fresh session a lost snapshot starts and for the worker's pin check", async () => {
-    const f = fixture("sandbox");
-    await startFixBody(f.worker, WHO, f.ctx, PR, "act", 1, [{ role: "code-reviewer", runId: "x" }]);
-    const req = f.started.mock.calls[0]!.at(-1) as { held: unknown; fallbackPrompt: string; fallbackContextSections: Array<{ code: string }> };
-    expect(req.held).toEqual({ version: 3, sha256: SHA });
-    expect(req.fallbackPrompt).toContain(SPEC);
-    expect(req.fallbackPrompt).toContain("SPEC (version 3):");
-    expect(req.fallbackPrompt).not.toContain("unchanged (sha256");
-    expect(req.fallbackContextSections.map((s) => s.code)).toEqual(["boundary", "spec", "findings", "output"]);
+  it("D#600 CX-7: no round sends a held version or a second prompt: the worker's pin check and its fallback are gone with the resume", async () => {
+    for (const mode of ["sandbox", "runner_local"]) {
+      const f = fixture(mode);
+      await startFixBody(f.worker, WHO, f.ctx, PR, "act", 1, [{ role: "code-reviewer", runId: "x" }]);
+      const req = f.started.mock.calls[0]!.at(-1) as Record<string, unknown>;
+      expect(req, mode).not.toHaveProperty("held");
+      expect(req, mode).not.toHaveProperty("fallbackPrompt");
+      expect(req, mode).not.toHaveProperty("fallbackContextSections");
+      expect(req.pr, mode).toEqual({ number: 41, branch: "fx/issue-7" });
+    }
   });
 
   it("D#600 CX-10a: a fix prompt records its assembly time alone (whole milliseconds), with no cold flag", async () => {
@@ -51,7 +53,7 @@ describe("startFixBody: the Spec in a fix round", () => {
     expect(Number.isInteger(req.contextAssembly.ms)).toBe(true);
   });
 
-  it("a runner round may be a follow-up in a fresh session, so it keeps the Spec body", async () => {
+  it("a runner round keeps the Spec body too", async () => {
     const f = fixture("runner_local");
     await startFixBody(f.worker, WHO, f.ctx, PR, "act", 1, [{ role: "code-reviewer", runId: "x" }]);
     const req = f.started.mock.calls[0]!.at(-1) as { prompt: string };

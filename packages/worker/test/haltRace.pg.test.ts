@@ -402,27 +402,28 @@ describe("halt marker [pg]", { timeout: 60_000 }, () => {
     expect((await admin.query("SELECT count(*)::int AS n FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2", [a.accountId, `advance:${wi}:review:late`])).rows[0].n).toBe(0);
   });
 
-  it("6: a halt that commits after advanceStartFix's stage write but before the resume's insert ends item_halted, not resume_failed; no run starts", async () => {
+  it("6: a halt that commits after advanceStartFix's stage write but before the fresh session's insert ends item_halted, not resume_failed; no run starts", async () => {
     const a = await seedAccount(admin, randomUUID());
     const wi = await item(a, "review_passed");
     const { registry: reg } = registry();
     const executor = await liveRun(a, wi, "executor");
     await admin.query("UPDATE agent_runs SET status = 'succeeded', cc_session_id = 's1' WHERE id = $1", [executor]);
     const before = await runCount(wi);
-    let resumed = 0;
-    // The resume's create is a real insert (so the real trigger and the real error mapping), made after the halt commits.
-    const review = {
-      resume: async () => {
-        resumed++;
+    let started = 0;
+    // D#600 CX-7: a fix round is a fresh session. The start's create is a real insert (so the real trigger and the real error mapping), made after the halt commits.
+    const racing: RunStarter = {
+      async start() {
+        started++;
         await markHalted(wi);
         const { id } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId: wi, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: a.repoId });
-        return { id, status: "pending" };
+        return { runId: id };
       },
     };
-    const t = advance(starter(a).starter, reg, { review: review as never });
-    const fix = await t.module.advanceStartFix(whoOf(a, wi, 0), { actionId: randomUUID(), failingRunId: randomUUID(), issue: 7, headSha: "a".repeat(40), prompt: "fix", round: 1, reviewer: "code" });
-    expect(resumed).toBe(1);
+    const n = Number((await admin.query("SELECT gh_number FROM work_items WHERE id = $1", [wi])).rows[0].gh_number);
+    const t = advance(racing, reg, { fixHeads: upToDateHeads("a".repeat(40)) });
+    const fix = await t.module.advanceStartFix(whoOf(a, wi, 0), { actionId: randomUUID(), failingRunId: randomUUID(), issue: n, headSha: "a".repeat(40), prompt: "fix", round: 1, reviewer: "code", pr: { number: 41, branch: `fx/issue-${n}` } });
     expect(fix).toEqual({ ok: false, reason: "item_halted" });
+    expect(started).toBe(1);
     expect((await marker(wi)).halted_at).not.toBeNull();
     expect(await runCount(wi)).toBe(before);
   });

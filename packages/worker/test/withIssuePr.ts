@@ -4,7 +4,7 @@ import type { FixRoundHeadPorts } from "../src/fixRoundHeads.js";
 /**
  * FIXROUND-BASE-SYNC-SANDBOX: a sandbox review fix round arrives with the pull request the review step just found on GitHub (`{ number, branch: fx/issue-<n> }`),
  * and its branch is synced with its base first. Tests that start such rounds without caring about the sync wrap their module with this: it adds that pull
- * request (the item's own issue branch) to a sandbox-mode round that has none, and `upToDateHeads` is the GitHub port that finds nothing to merge.
+ * request (the item's own issue branch) to a round that has none, and `upToDateHeads` is the GitHub port that finds nothing to merge.
  */
 export const upToDateHeads = (head: string): FixRoundHeadPorts => ({ privateHead: async () => head, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "main", stacked: false }) });
 
@@ -20,7 +20,8 @@ export function withIssuePr<M extends { advanceStartFix: (who: never, req: never
       [who.workItemId],
     );
     const row = r.rows[0];
-    return inner(who, row && row.execution_mode === "sandbox" ? { ...req, pr: { number: 41, branch: `fx/issue-${row.gh_number}` } } : req);
+    // D#600 CX-7: every fix round is a fresh session on the pull request's branch, so a round of either side carries the pair.
+    return inner(who, row ? { ...req, pr: { number: 41, branch: `fx/issue-${row.gh_number}` } } : req);
   };
   return { ...module, advanceStartFix } as M;
 }

@@ -43,13 +43,13 @@ describe("the conflictRound input has one origin", () => {
     expect(call).toContain("conflictRound: { fromSha: round.fromSha, baseSha: round.baseSha, baseRef: round.baseRef }");
   });
 
-  it("is forwarded by the fix start only for a conflict request (both the fresh-session start and the resume), and refused on any other kind", () => {
+  it("is forwarded by the fix start only for a conflict request (its one start, always a fresh session since D#600 CX-7), and refused on any other kind", () => {
     const src = text("packages/worker/src/advance.ts");
     const forwards = src.match(/\.\.\.\(conflict && req\.conflictRound \? \{ conflictRound: req\.conflictRound \} : \{\}\)/g) ?? [];
-    expect(forwards).toHaveLength(2);
+    expect(forwards).toHaveLength(1);
     expect(src).toContain("(req.conflictRound === undefined || (conflict && SHA_RE.test(req.conflictRound.fromSha)");
     // No other place in the file reads the request's field.
-    expect(src.match(/req\.conflictRound/g)).toHaveLength(2 * 2 + 3);
+    expect(src.match(/req\.conflictRound/g)).toHaveLength(1 * 2 + 3);
   });
 
   it("is read at issue time only from the run it was carried on, never from the database", () => {

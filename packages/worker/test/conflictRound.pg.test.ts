@@ -74,8 +74,14 @@ describe("advance: the conflict fix-round kind [pg]", { timeout: 60_000 }, () =>
       return { id, status: "running" };
     });
     const syncBase = vi.fn(async (): Promise<BranchSyncOutcome> => ({ kind: "conflict", baseSha: "f".repeat(40), baseRef: "main", stacked: false }));
-    const review: AdvanceReviewDeps = { load: vi.fn(), recordRound: vi.fn(), resume, mergeGate: vi.fn() } as never;
-    const starter: RunStarter = { async start() { throw new Error("a same-side round never starts a fresh session"); } };
+    const review: AdvanceReviewDeps = { load: vi.fn(), recordRound: vi.fn(), resume: async () => { throw new Error("a fix round never resumes a session"); }, mergeGate: vi.fn() } as never;
+    // D#600 CX-7: a fix round is a fresh session, started through the starter; the stand-in above (named `resume` for the assertions) writes the keyed run row. `review.resume` must stay unused.
+    const starter: RunStarter = {
+      async start(input) {
+        const r = (await resume(writerPool, registry, input)) as { id: string; status: string; reason?: string };
+        return r.status === "refused_spend" ? { runId: r.id, refused: r.reason ?? "refused_spend" } : { runId: r.id };
+      },
+    };
     const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: { privateHead: async () => HEAD, publicHead: async () => "d".repeat(40), syncBase } };
     return { module: createAdvanceModule(writerPool, deps), inputs, resume, syncBase, resolveRunSeat: deps.resolveRunSeat };
   }
@@ -246,17 +252,17 @@ describe("advance: the conflict fix-round kind [pg]", { timeout: 60_000 }, () =>
     expect(h.resume).not.toHaveBeenCalled();
   });
 
-  it("C6-b7 (sandbox): the round is resolved on the item's own execution mode and resumes the hosted sandbox on the issue's number", async () => {
+  it("C6-b7 (sandbox): the round is resolved on the item's own execution mode and starts a fresh hosted-sandbox session on the issue's number (CX-7)", async () => {
     const a = await seedAccount(admin, randomUUID());
     const t = await item(a);
     const h = harness();
     await h.module.advanceStartFix(who(a, t.id), conflictReq(t, { expectedExecutionMode: "sandbox" }));
     expect(h.resolveRunSeat).toHaveBeenCalledWith(expect.objectContaining({ role: "executor", workItemId: t.id, expectedExecutionMode: "sandbox" }));
     expect(h.inputs[0]).toMatchObject({ pr: t.n, workdir: expect.any(String), expectedExecutionMode: "sandbox" });
-    expect(h.inputs[0]).not.toHaveProperty("cloneRepo");
+    expect(h.inputs[0]).toHaveProperty("cloneRepo");
   });
 
-  it("MQ5-b1: a renumber round is a conflict round in every check (resumes the build's session, no base sync, stage kept) under its own attempt key", async () => {
+  it("MQ5-b1: a renumber round is a conflict round in every check (starts a fresh session, no base sync, stage kept) under its own attempt key", async () => {
     const a = await seedAccount(admin, randomUUID());
     const t = await item(a);
     const h = harness();

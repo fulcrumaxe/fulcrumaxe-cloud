@@ -82,7 +82,7 @@ describe("advance: run notes at run boundaries [pg]", { timeout: 60_000 }, () =>
     const starter: RunStarter = {
       async start(input) {
         prompts.push(input.prompt);
-        return { runId: (await keyedRun(input)).id };
+        return { runId: (await keyedRun(input, input.parentRunId ?? undefined)).id };
       },
     };
     const deps: AdvanceModuleDeps = {
@@ -96,10 +96,7 @@ describe("advance: run notes at run boundaries [pg]", { timeout: 60_000 }, () =>
       review: {
         load: vi.fn(),
         recordRound: vi.fn(),
-        resume: vi.fn(async (_pool: Pool, _registry: ExecutionTargetRegistry, input: StartAgentRunInput) => {
-          prompts.push(input.prompt);
-          return keyedRun(input, input.parentRunId ?? undefined);
-        }),
+        resume: vi.fn(async () => { throw new Error("a fix round never resumes a session"); }),
         mergeGate: vi.fn(),
       } as never,
     };
@@ -243,8 +240,9 @@ describe("advance: run notes at run boundaries [pg]", { timeout: 60_000 }, () =>
 
     it("a spending limit gates it like any fix round: the denial is a pause (no refusal fact), and the note waits for the next ask", async () => {
       const { t, correctionId, req } = await pressed("rename it");
-      const resume = vi.fn(async (_p: Pool, _r: ExecutionTargetRegistry, input: StartAgentRunInput) => ({ ...(await keyedRun(input, input.parentRunId ?? undefined)), status: "refused_spend", reason: "model_budget_exceeded" }));
-      const gated = createAdvanceModule(writerPool, { starter: { start: vi.fn() } as never, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, build: startBuildForItem, fixHeads: upToDateHeads(HEAD), review: { load: vi.fn(), recordRound: vi.fn(), resume, mergeGate: vi.fn() } as never });
+      // D#600 CX-7: the denial arrives from the fresh-session start, which leaves the keyed run row and names the admit's reason.
+      const starter: RunStarter = { start: async (input) => ({ runId: (await keyedRun(input, input.parentRunId ?? undefined)).id, refused: "model_budget_exceeded" }) };
+      const gated = createAdvanceModule(writerPool, { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, build: startBuildForItem, fixHeads: upToDateHeads(HEAD), review: { load: vi.fn(), recordRound: vi.fn(), resume: vi.fn(), mergeGate: vi.fn() } as never });
       expect(await withIssuePr(gated, admin).advanceStartFix(t.who, req)).toEqual({ ok: false, reason: "model_budget_exceeded" });
       expect((await admin.query("SELECT 1 FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('fix_round_refused', 'fix_round_started')", [t.w])).rowCount).toBe(0);
       expect((await applied(t, correctionId)).status).toBe("accepted");

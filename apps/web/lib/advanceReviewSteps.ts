@@ -398,7 +398,7 @@ const REVIEWER_OF_ROLE: Readonly<Record<string, "code" | "security" | "acceptanc
 
 /**
  * The executor's fix round: its prompt is built HERE from the reviewers' findings (read from their runs) and the approved
- * Spec, and the run is a RESUME of the build's sandbox and session through the worker, never a fresh start.
+ * Spec, and the run is a FRESH session on the pull request's branch (D#600 CX-7), never a resume of the build's session.
  */
 export async function startFixBody(
   worker: ReviewWorker | null,
@@ -427,9 +427,6 @@ export async function startFixBody(
   // D#599 PL-2b-2: the round is on the other side of the one that opened the pull request (the pull request lookup follows the newest executor run's side).
   const crossSide = roundIsCrossSide(ctx.prExecutionMode, ctx.executionMode);
   let assembled: AssembledPrompt;
-  // The same round with the Spec body: what a fresh session needs (a lost snapshot starts one), and what the worker sends instead when the session's pinned Spec is not the one held.
-  let withBody: AssembledPrompt | null = null;
-  let heldSpec: { version: number; sha256: string } | null = null;
   // D#600 CX-10a: a fix prompt has no map: the span is the assembler calls alone and `cold` stays unset.
   const assemblyStarted = performance.now();
   try {
@@ -438,15 +435,8 @@ export async function startFixBody(
     const spillOptions = { spill: true };
     const replace = ctx.replaceRound === true;
     const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(ctx.child ? { child: true } : {}), ...(crossSide ? { crossSide } : {}), ...(person && !replace ? { person } : {}), ...(replace ? { replace } : {}) };
-    // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
-    // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.
-    if (runtime === "sandbox" && spec.sha256 !== undefined) {
-      heldSpec = { version: spec.version, sha256: spec.sha256 };
-      assembled = assembleFixPrompt({ ...base, heldSpec }, spillOptions);
-      withBody = assembleFixPrompt(base, spillOptions);
-    } else {
-      assembled = assembleFixPrompt(base, spillOptions);
-    }
+    // D#600 CX-7 (R-600-1): every fix round starts a fresh session, which holds no Spec, so the prompt always carries the body (the new run is pinned to the version of the run before it).
+    assembled = assembleFixPrompt(base, spillOptions);
   } catch (err) {
     if (err instanceof ReviewPromptInputError) return { ok: false, runId: null, reason: `bad_${err.field.toLowerCase()}` };
     throw err;
@@ -459,7 +449,6 @@ export async function startFixBody(
     contextSections: assembled.sections,
     contextAssembly: { ms: assemblyMs },
     ...(assembled.spill ? { contextSpill: assembled.spill } : {}),
-    ...(heldSpec && withBody ? { held: heldSpec, fallbackPrompt: withBody.prompt, fallbackContextSections: withBody.sections, ...(withBody.spill ? { fallbackContextSpill: withBody.spill } : {}) } : {}),
     round,
     actionId,
     ...(retry > 0 ? { retry } : {}),
@@ -469,9 +458,9 @@ export async function startFixBody(
     ...(first ? { failingRunId: first.runId } : {}),
     ...(person ? { person: true } : {}),
     expectedExecutionMode: ctx.executionMode,
-    // The pull request the pipeline just found on GitHub: a cross-side round works on its branch. The worker checks it against the item's own record.
-    // A same-side sandbox round carries it too: the worker syncs that branch with its base before the round (and refuses a sandbox round that has none).
-    ...(crossSide || promptRuntimeOf(ctx.executionMode) === "sandbox" ? { pr: { number: pr.number, branch: pr.branch } } : {}),
+    // The pull request the pipeline just found on GitHub. Every round is a fresh session that continues its branch (D#600 CX-7), so the pair always goes: the worker checks it
+    // against the item's own record and syncs that branch with its base before the round.
+    pr: { number: pr.number, branch: pr.branch },
   });
   // A spending-limit denial comes back as its named pause (the driver waits and asks again); every other refusal keeps the code it came with.
   return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: startWaitFor(started.reason) ?? started.reason };

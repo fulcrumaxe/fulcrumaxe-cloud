@@ -109,10 +109,16 @@ describe("a parked fix round resumes through the real fix start [pg]", { timeout
     const review: AdvanceReviewDeps = {
       load: vi.fn(async () => ({ ok: false as const, reason: "unused" })),
       recordRound: vi.fn(async () => ({ decision: "all_passed", round: 0, recorded: [] })) as never,
-      resume,
+      resume: async () => { throw new Error("a fix round never resumes a session"); },
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),
     };
-    const starter: RunStarter = { async start() { return { runId: randomUUID() }; } };
+    // D#600 CX-7: the parked fix round resumes as a fresh session, started through the starter; the stand-in above (named `resume`) writes the keyed run row. `review.resume` must stay unused.
+    const starter: RunStarter = {
+      async start(input) {
+        const r = (await resume(runnerPool, registry, input)) as { id: string; status: string; reason?: string };
+        return r.status === "refused_spend" ? { runId: r.id, refused: r.reason ?? "refused_spend" } : { runId: r.id };
+      },
+    };
     const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: upToDateHeads(HEAD) };
     return createAdvanceModule(runnerPool, deps);
   }
@@ -200,11 +206,11 @@ describe("a parked fix round resumes through the real fix start [pg]", { timeout
 
     expect(second.inputs).toHaveLength(1);
     const input = second.inputs[0]!;
-    // the session it continues is the parked fix run's; the sandbox is the one the issue number names; there is no clone and no new branch or pull request
+    // D#600 CX-7: a new session that follows the parked fix run (its parent); the sandbox is the one the issue number names; the repository is cloned and the prompt names the branch
     expect(input.parentRunId).toBe(w.parkedRunId);
     expect(input.pr).toBe(w.ghNumber);
     expect(input.workdir).toBe(PREVIEW_WORKDIR);
-    expect(input.cloneRepo).toBeUndefined();
+    expect(input.cloneRepo).toEqual({ owner: expect.any(String), name: expect.any(String) });
     expect(input.continues).toBeUndefined();
     expect(input.role).toBe("executor");
     expect(input.expectedExecutionMode).toBe("sandbox");

@@ -20,6 +20,8 @@ export {
   readEnded,
   seatPrompt,
   assembleSeatPrompt,
+  assembleFixNotePrompt,
+  FIX_NOTE_LABEL,
   classifySpendKill,
   REFUSED_BY_CODES,
   PARK_REASONS,

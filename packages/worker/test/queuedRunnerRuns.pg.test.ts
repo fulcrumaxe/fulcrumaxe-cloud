@@ -156,7 +156,7 @@ describe("queued runner runs [pg]", { timeout: 60_000 }, () => {
 
   // ---- 5: the fix round -----------------------------------------------------------------------------
 
-  it("5: a fix round on a runner_local repo is accepted: it returns the run, which stays pending with a job that continues the build's branch and session", async () => {
+  it("5: a fix round on a runner_local repo is accepted: it returns the run, which stays pending with a job that starts a fresh session on the build's branch", async () => {
     const { a, workItemId } = await world("runner_local", "pr_opened");
     const { registry } = chain();
     const issue = Number((await admin.query("SELECT gh_number FROM work_items WHERE id = $1", [workItemId])).rows[0].gh_number);
@@ -176,14 +176,17 @@ describe("queued runner runs [pg]", { timeout: 60_000 }, () => {
     const HEAD = "b".repeat(40);
     // FIXROUND-REFRESH-HEAD: the branch on GitHub is at the head the round is asked for.
     const m = advanceOver(registry, async () => undefined, { review, fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "c".repeat(40), baseRef: "main", stacked: false }) } });
-    const out = await m.advanceStartFix({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 }, { issue, headSha: HEAD, prompt: "fix the failing test", round: 1, actionId: randomUUID(), reviewer: "code", failingRunId: randomUUID() });
+    const out = await m.advanceStartFix({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 }, { issue, headSha: HEAD, prompt: "fix the failing test", round: 1, actionId: randomUUID(), reviewer: "code", failingRunId: randomUUID(), pr: { number: 41, branch: BRANCH } });
     if (!out.ok) throw new Error(`fix refused: ${out.reason}`);
 
     expect(await row(out.runId)).toMatchObject({ status: "pending", runtime: "runner" });
     expect(await statusEvents(out.runId)).toEqual([]);
     const job = ((await row(out.runId)).job_signed as { job: { task: { kind: string }; continues: unknown } }).job;
     expect(job.task.kind).toBe("fix");
-    expect(job.continues).toEqual({ parent_run_id: parent, session_id: "cc-session-1", branch: BRANCH });
+    // D#600 CX-7: a fresh session (no session id) on the build's branch, never the build's own session.
+    expect(job.continues).toEqual({ parent_run_id: parent, session_id: null, branch: BRANCH });
+    // An older runner is not offered the job: the claim gate holds it for protocol 3 or later, and the run page reads that as "waiting for a runner update" (readModel), not a silent stall.
+    expect(Number((await admin.query("SELECT min_protocol_version AS v FROM agent_runs WHERE id = $1", [out.runId])).rows[0].v)).toBe(3);
     expect(queuedLines()).toEqual([{ event: "run.queued", run_id: out.runId, account_id: a.accountId }]);
     // Not recorded as a refused round: the round is recorded as started.
     const events = (await admin.query("SELECT kind, run_id FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [workItemId])).rows;
