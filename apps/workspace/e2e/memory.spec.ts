@@ -53,6 +53,7 @@ interface Mock {
   rows: Row[];
   listStatus: number;
   queueStatus: number;
+  fileNotices: Array<{ repo_id: string; repo: string; path: string; text: string }>;
   countsStatus: number;
   batchError: { status: number; code: string; message: string } | null;
   editError: { status: number; code: string } | null;
@@ -115,6 +116,7 @@ const initial = (): Mock => ({
   ],
   listStatus: 200,
   queueStatus: 200,
+  fileNotices: [],
   countsStatus: 200,
   batchError: null,
   editError: null,
@@ -164,7 +166,7 @@ async function mockApi(page: Page, mock: Mock) {
     }
     if (path === "/queue") {
       if (mock.queueStatus !== 200) return respond(mock.queueStatus, err("internal_error"));
-      return respond(200, { cards: mock.cards.map(cardDto), truncated: false });
+      return respond(200, { cards: mock.cards.map(cardDto), truncated: false, file_notices: mock.fileNotices });
     }
     if (path === "/pending-counts") {
       if (mock.countsStatus !== 200) return respond(mock.countsStatus, err("internal_error"));
@@ -262,6 +264,19 @@ test.describe("D#601 MEM-4a3: Memory app (mocked routes)", () => {
     expect(text).not.toMatch(/\bnull\b|\bundefined\b|NaN/);
     expect(errors).toEqual([]);
     expect(await tt()).toEqual([]);
+  });
+
+  test("MEM-5b Acceptance 3: a repository whose last file import was cut shows \"File truncated at 32 KiB\" and names the file", async ({ page }) => {
+    await setup(page, (m) => {
+      m.fileNotices = [
+        { repo_id: REPO_ID, repo: REPO_NAME, path: "CLAUDE.md", text: "File truncated at 32 KiB" },
+        { repo_id: "9f1e2d3c-4b5a-4c6d-8e7f-0a1b2c3d4e5f", repo: "other/place", path: "AGENTS.md", text: "File truncated at 32 KiB" },
+      ];
+    });
+    await expect(tid(page, "mem-card").first()).toBeVisible();
+    await expect(tid(page, "mem-file-notice")).toHaveCount(1);
+    await expect(tid(page, "mem-file-notice")).toHaveText("CLAUDE.md: File truncated at 32 KiB");
+    await expect(page.locator(`${WIN} [data-testid="mem-group"][data-scope="repo"]`).first().locator('[data-testid="mem-file-notice"]')).toHaveCount(1);
   });
 
   test("states: nothing yet is words, not a blank; an empty queue says so", async ({ page }) => {

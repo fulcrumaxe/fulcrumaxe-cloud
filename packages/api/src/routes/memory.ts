@@ -18,7 +18,7 @@ import { MEMORY_REVERT_ACTIONS, MEMORY_REVERT_MAX, restorePreviousMemory, revert
 import { MEMORY_EXPORT_FORMATS, buildMemoryExport } from "@fx/core/src/memory/export.js";
 import { memoryHistory } from "@fx/core/src/memory/history.js";
 import { formatMemoryHistoryActor, formatMemoryHistoryAction } from "@fx/core/src/memory/format.js";
-import { MEMORY_LIST_MAX, listMemory, memoryAutoApproved, memoryMoveRef, memoryPendingCounts, memoryQueue, type MemoryScopeFilter } from "@fx/core/src/memory/view.js";
+import { MEMORY_LIST_MAX, listMemory, memoryAutoApproved, memoryFileNotices, memoryMoveRef, memoryPendingCounts, memoryQueue, type MemoryScopeFilter } from "@fx/core/src/memory/view.js";
 import { ApiError } from "../errors.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 
@@ -161,7 +161,7 @@ const autoApprovedSchema = z.object({
   scope_label: z.string(),
   approved_age: z.string(),
 });
-export const memoryQueueResponseSchema = z.object({ cards: z.array(cardSchema), truncated: z.boolean(), auto_approved: z.array(autoApprovedSchema), auto_approved_truncated: z.boolean() });
+export const memoryQueueResponseSchema = z.object({ cards: z.array(cardSchema), truncated: z.boolean(), auto_approved: z.array(autoApprovedSchema), auto_approved_truncated: z.boolean(), file_notices: z.array(z.object({ repo_id: z.string().uuid(), repo: z.string(), path: z.enum(["CLAUDE.md", "AGENTS.md"]), text: z.string().min(1) })) });
 const openResponseSchema = z.object({ opened: z.boolean() });
 const decideResponseSchema = z.object({ outcome: z.enum(["decided", "already_decided"]), entry: entrySchema });
 const runsResponseSchema = z.object({ total: z.number().int().min(0), truncated: z.boolean(), runs: z.array(z.object({ id: z.string().uuid(), recorded_at: z.string() })) });
@@ -301,7 +301,7 @@ export const memoryRoutes: RouteEntry[] = [
     operationId: "getMemoryQueue",
     summary: "Memory proposals waiting for a decision",
     description:
-      "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched. `auto_approved` lists the entries the person's own autonomy setting approved in the last 7 days that are still approved (newest first, each with its place and the run that proposed it): the screen shows them as \"Approved by your autonomy setting\" with Undo, which is the retire step. It is read from the approval's audit row each time, so lowering the setting changes nothing already listed.",
+      "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched. `file_notices` names each repository file whose last import was cut at 32 KiB, with the fixed sentence to show beside it. `auto_approved` lists the entries the person's own autonomy setting approved in the last 7 days that are still approved (newest first, each with its place and the run that proposed it): the screen shows them as \"Approved by your autonomy setting\" with Undo, which is the retire step. It is read from the approval's audit row each time, so lowering the setting changes nothing already listed.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",
@@ -313,6 +313,7 @@ export const memoryRoutes: RouteEntry[] = [
         const q = input.query as z.infer<typeof queueQuerySchema>;
         const queue = await memoryQueue(mctx(ctx), filterOf(q));
         const auto = await memoryAutoApproved(mctx(ctx), filterOf(q));
+        const notices = await memoryFileNotices(mctx(ctx), filterOf(q));
         return {
           cards: queue.cards.map((c) => ({
             entry: entryDto(c.entry),
@@ -337,6 +338,7 @@ export const memoryRoutes: RouteEntry[] = [
             approved_age: c.approvedAge,
           })),
           auto_approved_truncated: auto.truncated,
+          file_notices: notices.map((n) => ({ repo_id: n.repoId, repo: n.repo, path: n.path, text: n.text })),
         };
       } catch (err) {
         throw mapMemoryError(err);

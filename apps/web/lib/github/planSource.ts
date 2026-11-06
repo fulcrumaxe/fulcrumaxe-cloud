@@ -1,9 +1,10 @@
 import { resolveChecked } from "@fx/net-guard";
 import { platformOpsPool } from "@fx/api/src/sse/pools.js";
 import type { PlanImportDeps } from "@fx/api/src/routes/plan.js";
-import { createPlanReadClient, createPlanSourceFactory, createRepoInstallationResolver, loadAppCredentials, readRepoHead, type PlanReadDeps, type PlanReadTarget, type PlanSourceShape } from "@fx/github";
+import { createPlanReadClient, createPlanSourceFactory, createRepoInstallationResolver, loadAppCredentials, readRepoHead, readRepoInstructionFile, type PlanReadDeps, type PlanReadTarget, type PlanSourceShape } from "@fx/github";
 import { fileReaderFromContents } from "@fx/pipeline";
 import type { VerifyRepoReader } from "@fx/worker";
+import type { RepoFileRead } from "@fx/core/src/memory/repoFileSweep.js";
 import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/api/gh-proxy/[...path]/handler";
 
 /**
@@ -40,3 +41,15 @@ export function openVerifyReader(target: PlanReadTarget): VerifyRepoReader {
   const files = fileReaderFromContents((req) => client.request(req), repo);
   return { headSha: async () => (await readRepoHead(client, repo)).sha, readFile: (path, sha) => files.readFile(path, sha) };
 }
+
+/**
+ * D#601 MEM-5b: the repo instruction file import's reader. One read-only client per file: the default branch's head commit, then the file at that commit through the
+ * contents API (a regular file only, 1.5 MB at most). A failure is a `PlanReadError` whose fixed `code` the sweep records.
+ */
+export const readRepoFileForImport: RepoFileRead = async (job) => {
+  verifyClients ??= createPlanReadClient(planReadDeps());
+  const client = verifyClients({ repoId: job.repoId, owner: job.owner, name: job.name });
+  const repo = { owner: job.owner, name: job.name };
+  const commit = (await readRepoHead(client, repo)).sha;
+  return { commit, file: await readRepoInstructionFile(client, repo, job.path, commit) };
+};

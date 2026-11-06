@@ -195,9 +195,16 @@ describe("the calls", () => {
     expect(COPY.autoTitle).toBe("Approved by your autonomy setting");
   });
 
+  it("MEM-5b: the queue read carries the truncated-file notices, drops malformed ones, and an older answer reads as none", async () => {
+    const n = { repo_id: "r", repo: "acme/widgets", path: "CLAUDE.md", text: "File truncated at 32 KiB" };
+    const q = await loadQueue(fakeGet(() => ({ cards: [], truncated: false, file_notices: [n, {}, null, { repo: 1, path: "x", text: "y" }] })));
+    expect(q.fileNotices).toEqual([n]);
+    expect((await loadQueue(fakeGet(() => ({ cards: [], truncated: false })))).fileNotices).toEqual([]);
+  });
+
   it("an empty or malformed answer reads as empty, never as a crash", async () => {
     expect(await loadList({}, fakeGet(() => null))).toEqual({ groups: [], truncated: false });
-    expect(await loadQueue(fakeGet(() => ({ cards: [{}, null, { entry: { id: "x" } }] })))).toEqual({ cards: [], truncated: false, autoApproved: [], autoTruncated: false });
+    expect(await loadQueue(fakeGet(() => ({ cards: [{}, null, { entry: { id: "x" } }] })))).toEqual({ cards: [], truncated: false, autoApproved: [], autoTruncated: false, fileNotices: [] });
     expect(await loadRuns("a", fakeGet(() => ({})))).toEqual({ total: 0, runs: [], truncated: false });
   });
 });
