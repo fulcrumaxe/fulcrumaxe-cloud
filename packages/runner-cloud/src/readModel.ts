@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
+import { CHECK_JOB_MIN_PROTOCOL, LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS, runnerIgnoringWorkSql, runnerIsLive, runnerLastHeardAt, runnerLiveSql } from "@fx/runner";
 import { UNNAMED_MEMBER } from "./memberRole.js";
@@ -591,7 +591,8 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
   // D#599 PL-2b-2: a job in the cross-side shape is never offered to a runner whose stored protocol is below the job's minimum (the claim definer's gate). When every live
   // covering runner is below it, no free slot or cap changes anything: the run waits for an update. Re-derived on each read, so an updated runner's hello clears it.
   // A job that carries the repo's check is told apart: the person needs to hear that it is the check an old runner cannot run (D#6 R-CHK-1).
-  if (row.min_protocol_version != null && (row.runner_max_protocol ?? 0) < Number(row.min_protocol_version)) return row.job_has_check === true ? "runner_too_old_for_check" : "waiting_for_runner_update";
+  // The check sentence is told only while the runner is below the check's own floor: a runner that can run the check but is below a later floor (the Spec scope's, D#6 SCOPE-IN-JOB) is told the plain update line with that version.
+  if (row.min_protocol_version != null && (row.runner_max_protocol ?? 0) < Number(row.min_protocol_version)) return row.job_has_check === true && (row.runner_max_protocol ?? 0) < CHECK_JOB_MIN_PROTOCOL ? "runner_too_old_for_check" : "waiting_for_runner_update";
   // The claim checks the account's caps before the runner's own slots, so a held account is told first: a free slot on the runner does not help.
   if (heldByAccountCap(row, caps)) return "waiting_for_account_cap";
   if (!row.runner_slot_free) return "waiting_for_runner_slot";

@@ -13,6 +13,7 @@ import {
   SPILL_JOB_MIN_PROTOCOL,
   CHECK_JOB_MIN_PROTOCOL,
   CONFLICT_ATTEST_JOB_MIN_PROTOCOL,
+  SCOPE_JOB_MIN_PROTOCOL,
   JobConflictRoundSchema,
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
@@ -33,6 +34,7 @@ import {
 import { resolveRunContextBudget } from "@fx/core/src/context/contextBudget.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { runnerToolsForRole } from "../agentConfig.js";
 import { RUNNER_RUN_BRANCH, SPEC_PINNED_RUNNER_ROLES, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
@@ -143,6 +145,11 @@ export interface JobContext {
    * are none. Read from the database only: nothing here comes from the repository's contents.
    */
   sandboxAllowances?: AllowanceSet | null;
+  /**
+   * D#6 SCOPE-IN-JOB: the file patterns (`AcceptanceScope.entries`, braces expanded) of the Spec version the run is pinned to, read from our own database, or null/absent when the run has no pin or the
+   * pinned Spec has no list the parser reads. Only the run's own pin counts, never the newest version: it is the same list `done` holds the pull request to.
+   */
+  scope?: readonly string[] | null;
 }
 
 export interface JobContextPort {
@@ -200,9 +207,18 @@ export function createPgJobContext(pool: Pool): JobContextPort {
         // The approved check is part of the same row, so it is set aside with it (D#6 R-CHK-1). The three columns are all null or all set (a database CHECK).
         const check = latest?.check_argv ? { argv: latest.check_argv, dev_shell: latest.check_dev_shell, timeout_s: latest.check_timeout_s } : null;
         const sandboxAllowances = latest && !latest.set_aside ? ({ entries: latest.entries as AllowanceSet["entries"], ...(latest.command_timeout_s === null ? {} : { command_timeout_s: latest.command_timeout_s }), ...(check ? { check } : {}) } as AllowanceSet) : null;
+        // D#6 SCOPE-IN-JOB: the pinned version's list, parsed by the same parser `done` uses; anything it does not read as known carries no scope (the cloud's `done` then decides alone, as before).
+        const { rows: scopeRows } = await client.query<{ acceptance_files: unknown }>(
+          `SELECT sv.frontmatter -> 'acceptance_files' AS acceptance_files FROM agent_runs ar
+             JOIN spec_versions sv ON sv.account_id = ar.account_id AND sv.id = ar.spec_version_id AND sv.erased_at IS NULL
+            WHERE ar.account_id = $1 AND ar.id = $2`,
+          [run.accountId, run.id],
+        );
+        const parsedScope = scopeRows.length === 1 ? parseAcceptanceScope(scopeRows[0]!.acceptance_files) : null;
+        const scope = parsedScope !== null && parsedScope.kind === "known" ? parsedScope.entries : null;
         // The item's branch is the build identity's. A continuation (`start`) re-runs a planned PR child's launch checks now; every other job only reads what exists.
         const identity = row.work_item_id === null ? null : await resolveBuildIdentity(client, run.accountId, row.work_item_id, options.start === true ? "start" : "observe");
-        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, itemBranch: identity?.ok ? identity.identity.branch : null, identityRefusal: identity !== null && !identity.ok && (identity.isChild || identity.reason !== "no_issue_link") ? identity.reason : null, sandboxAllowances };
+        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, itemBranch: identity?.ok ? identity.identity.branch : null, identityRefusal: identity !== null && !identity.ok && (identity.isChild || identity.reason !== "no_issue_link") ? identity.reason : null, sandboxAllowances, scope };
       });
     },
   };
@@ -437,6 +453,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         if (SPEC_PINNED_RUNNER_ROLES.has(role)) check = set.set.check;
       }
 
+      // D#6 SCOPE-IN-JOB: the Spec's file patterns ride next to the check, for the same roles: the ones that push (a build, a check-fix round). A review or a read-only role changes nothing, so it carries none.
+      const scope = SPEC_PINNED_RUNNER_ROLES.has(role) && context.scope && context.scope.length > 0 ? [...context.scope] : undefined;
+
       // D#600 CX-5c: the item's excludes as they stand now (its own rules over the repository's), read when the job is issued, so a fix round gets the rules of its own issue and not those of the
       // first start. Paths and globs only. A read that fails refuses the job (nothing is recorded): a job never goes out without the list it should have carried (fail closed).
       let excludes: string[] = [];
@@ -501,6 +520,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(review ? { review } : {}),
         ...(sandboxAllowances ? { sandbox_allowances: sandboxAllowances } : {}),
         ...(check ? { check } : {}),
+        // D#6 SCOPE-IN-JOB: omitted (never null, never empty) when the role pushes nothing or the pinned Spec has no readable list, so such a job's signed bytes are unchanged.
+        ...(scope ? { scope } : {}),
         // D#601 MEM-3b: the memory the pipeline recalled, as it split it. Omitted when the run has none (never null, never an empty pair), so such a job's signed bytes are unchanged.
         ...(run.jobMemory && (run.jobMemory.person !== "" || run.jobMemory.fenced !== "") ? { memory: { person: run.jobMemory.person, fenced: run.jobMemory.fenced } } : {}),
         // D#600 CX-5c: omitted when the item has none (never null, never empty), so such a job's signed bytes are unchanged.
@@ -540,7 +561,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
         // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for pins (CX-5c2): the strict parse again. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason. And for a continuation's `base_sha` (R2-b): the strict parse again, and a runner that ignored it would pick its own diff base.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, continues !== null && isChildItemBranch(continues.branch) ? CHILD_BRANCH_JOB_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, candidate.conflict_round ? CONFLICT_ATTEST_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, continues !== null && isChildItemBranch(continues.branch) ? CHILD_BRANCH_JOB_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, candidate.conflict_round ? CONFLICT_ATTEST_JOB_MIN_PROTOCOL : 0, candidate.scope ? SCOPE_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

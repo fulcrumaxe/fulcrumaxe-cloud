@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DoneReply } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, DoneReply } from "@fulcrumaxe/runner-protocol";
 import { RunnerTarget, SandboxTarget, createJobIssuer, createJobSigner, createPgJobContext, type ExecutionTargetRegistry } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -115,7 +115,7 @@ describe("a Spec the product wrote is a scope the done check reads [pg]", { time
     const out = await startBuildForItem(writerPool, a.accountId, workItemId, randomUUID(), ports(a.accountId, workItemId));
     if (out.status !== "started") throw new Error(`build not started: ${out.reason}`);
     const key: TestKey = newKey();
-    const runnerId = await insertRunner(admin, a.accountId, a.userId, { jwk: key.jwk, jkt: key.jkt, credentialMode: "api_key" });
+    const runnerId = await insertRunner(admin, a.accountId, a.userId, { jwk: key.jwk, jkt: key.jkt, credentialMode: "api_key", protocolVersion: CURRENT_PROTOCOL_VERSION });
     await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = '{}' WHERE id = $1", [runnerId, [a.repoId]]);
     const fake = new FakeGithub();
     const repo = fake.addRepo("acme", "widgets");

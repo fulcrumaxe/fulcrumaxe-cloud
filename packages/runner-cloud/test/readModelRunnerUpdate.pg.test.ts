@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BASE_SHA_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SCOPE_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
@@ -131,6 +131,57 @@ describe("waiting_for_runner_update [pg]", () => {
     // The same floor on a job with no check in it is the older, plainer reason.
     expect(await reason(w, await run(w, CHECK_JOB_MIN_PROTOCOL))).toBe("waiting_for_runner_update");
     await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [old, CHECK_JOB_MIN_PROTOCOL]);
+    expect(await reason(w, id)).toBeNull();
+  });
+
+  // D#6 SCOPE-IN-JOB: a job that carries the Spec's scope is gated at the scope floor, and an older runner gets the plain update line naming that version.
+  it("a job with a scope (gated at the scope floor) with a runner one version below waits as waiting_for_runner_update naming that version; updating clears it", async () => {
+    const w = await world();
+    const old = await runner(w, { protocol: SCOPE_JOB_MIN_PROTOCOL - 1 });
+    const id = await run(w, SCOPE_JOB_MIN_PROTOCOL);
+    expect(await reason(w, id)).toBe("waiting_for_runner_update");
+    const wait = await getRunWait(deps(), w.f.accountId, id);
+    expect(wait).toEqual({ reason: "waiting_for_runner_update", limited_by: null, min_protocol: SCOPE_JOB_MIN_PROTOCOL });
+    expect(waitText(wait.reason!, wait.limited_by, wait.min_protocol ?? null)).toBe(`Waiting for a runner update (version ${SCOPE_JOB_MIN_PROTOCOL} or later) before this run can start`);
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [old, SCOPE_JOB_MIN_PROTOCOL]);
+    expect(await reason(w, id)).toBeNull();
+  });
+
+  it("a job with a check and a scope: a runner that can run the check but not read the scope is told the plain update line, one below the check floor still gets the check sentence", async () => {
+    const w = await world();
+    const checked = randomUUID();
+    await h.admin.query(
+      `INSERT INTO agent_runs (id, account_id, role, runtime, status, initiated_by, approved_by, dispatch_repo_id, min_protocol_version, job_signed)
+       VALUES ($1, $2, 'executor', 'runner', 'pending', $3, $3, $4, $5, $6::jsonb)`,
+      [checked, w.f.accountId, w.f.a1, w.repoId, SCOPE_JOB_MIN_PROTOCOL, JSON.stringify({ job: { check: { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 }, scope: ["src/a.ts"] }, signature: "x" })],
+    );
+    const r = await runner(w, { protocol: SCOPE_JOB_MIN_PROTOCOL - 1 });
+    expect(await reason(w, checked)).toBe("waiting_for_runner_update");
+    expect(await getRunWait(deps(), w.f.accountId, checked)).toEqual({ reason: "waiting_for_runner_update", limited_by: null, min_protocol: SCOPE_JOB_MIN_PROTOCOL });
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [r, CHECK_JOB_MIN_PROTOCOL - 1]);
+    expect(await reason(w, checked)).toBe("runner_too_old_for_check");
+  });
+
+  // D#6 SCOPE-IN-JOB: a runner exactly at the check's floor can run the check, so the check sentence is not told; it is told the plain update line with the later floor.
+  it("a job with the check and the Spec scope (floor 15) with a runner exactly at the check floor waits as waiting_for_runner_update naming 15, with no check sentence; one below the check floor still gets the check reason", async () => {
+    const w = await world();
+    const atCheckFloor = await runner(w, { protocol: CHECK_JOB_MIN_PROTOCOL });
+    const id = randomUUID();
+    await h.admin.query(
+      `INSERT INTO agent_runs (id, account_id, role, runtime, status, initiated_by, approved_by, dispatch_repo_id, min_protocol_version, job_signed)
+       VALUES ($1, $2, 'executor', 'runner', 'pending', $3, $3, $4, $5, $6::jsonb)`,
+      [id, w.f.accountId, w.f.a1, w.repoId, SCOPE_JOB_MIN_PROTOCOL, JSON.stringify({ job: { check: { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 }, scope: ["src/**"] }, signature: "x" })],
+    );
+    expect(CHECK_JOB_MIN_PROTOCOL).toBe(8);
+    expect(SCOPE_JOB_MIN_PROTOCOL).toBe(15);
+    expect(await reason(w, id)).toBe("waiting_for_runner_update");
+    const wait = await getRunWait(deps(), w.f.accountId, id);
+    expect(wait).toEqual({ reason: "waiting_for_runner_update", limited_by: null, min_protocol: 15 });
+    expect(waitText(wait.reason!, wait.limited_by, wait.min_protocol ?? null)).toBe("Waiting for a runner update (version 15 or later) before this run can start");
+    // Below the check's own floor the check sentence is still the one told.
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [atCheckFloor, CHECK_JOB_MIN_PROTOCOL - 1]);
+    expect(await reason(w, id)).toBe("runner_too_old_for_check");
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [atCheckFloor, SCOPE_JOB_MIN_PROTOCOL]);
     expect(await reason(w, id)).toBeNull();
   });
 

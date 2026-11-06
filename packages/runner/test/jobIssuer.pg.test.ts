@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, pinLedgerNotes, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, SCOPE_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, pinLedgerNotes, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -987,6 +987,96 @@ describe("JobIssuer [pg]", () => {
         for (const check of [{ ...CHECK, timeout_s: 10801 }, { ...CHECK, argv: ["a\nb"] }, { ...CHECK, argv: [] }]) {
           const context: JobContextPort = { load: async (r, o) => ({ ...(await real.load(r, o)), sandboxAllowances: { entries: [], check } }) };
           expect(await codeOf(issuer({ context }).issuer.issue({ run })), JSON.stringify(check)).toBe("sandbox_allowances_invalid");
+        }
+        expect(await stored(run.id)).toBeNull();
+      });
+    });
+
+    // D#6 SCOPE-IN-JOB: the pinned Spec version's file patterns ride in the signed job for the roles that push, and gate the job at the scope protocol.
+    describe("the Spec scope", () => {
+      const LIST = ["packages/web/**", "src/a.ts", "src/{b,c}.ts"];
+      const EXPANDED = ["packages/web/**", "src/a.ts", "src/b.ts", "src/c.ts"];
+      const setFrontmatter = (w: { workItemId: string }, files: unknown) => db.admin.query("UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1", [w.workItemId, JSON.stringify({ acceptance_files: files })]);
+      const minProtocol = async (runId: string) => (await db.admin.query<{ v: number | null }>("SELECT min_protocol_version AS v FROM agent_runs WHERE id = $1", [runId])).rows[0]!.v;
+      const issue = async (w: Awaited<ReturnType<typeof world>>, role = "executor") => {
+        const run = await runnerRun(w, role);
+        await issuer().issuer.issue({ run });
+        return { run, job: verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW }) };
+      };
+
+      it("a build carries the pinned Spec's patterns (braces expanded), signed, and is gated at the scope protocol", async () => {
+        const w = await world();
+        await setFrontmatter(w, LIST);
+        const { run, job } = await issue(w);
+        expect(job.scope).toEqual(EXPANDED);
+        expect(await minProtocol(run.id)).toBe(SCOPE_JOB_MIN_PROTOCOL);
+        // The signature covers it: the stored job verifies, and the same bytes with the list changed do not.
+        const tampered = JSON.parse(JSON.stringify(await stored(run.id)));
+        tampered.job.scope = ["**/x"];
+        expect(() => verifyJob(tampered, { "job-key-1": publicKey }, { now: NOW })).toThrow();
+      });
+
+      it("a check-fix round carries it too", async () => {
+        const w = await world();
+        await setFrontmatter(w, LIST);
+        const { parent, run } = await fixPair(w);
+        // The child inherits its parent's pin (C36), which is the version holding the list.
+        await issuer().issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
+        const job = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
+        expect(job.task.kind).toBe("fix");
+        expect(job.scope).toEqual(EXPANDED);
+        expect(await minProtocol(run.id)).toBe(SCOPE_JOB_MIN_PROTOCOL);
+      });
+
+      it("a review or read-only job carries none, and keeps its floor", async () => {
+        const w = await world();
+        await setFrontmatter(w, LIST);
+        for (const role of ["project-manager", "technical-architect", "code-reviewer", "security-reviewer", "acceptance-tester", "debater"]) {
+          const { run, job } = await issue(w, role);
+          expect("scope" in job, role).toBe(false);
+          expect(canonicalJson((await stored(run.id)).job), role).not.toContain('"scope"');
+          expect(await minProtocol(run.id), role).toBeNull();
+        }
+      });
+
+      it("a Spec with no list, an empty one, or one the parser refuses leaves the key out and the job open to any runner", async () => {
+        for (const files of [undefined, [], ["/abs/path"], ["a/**/b"], "src/a.ts", [1]]) {
+          const w = await world();
+          if (files !== undefined) await setFrontmatter(w, files);
+          const { run, job } = await issue(w);
+          expect("scope" in job, JSON.stringify(files)).toBe(false);
+          expect(await minProtocol(run.id), JSON.stringify(files)).toBeNull();
+        }
+      });
+
+      it("reads the run's own pinned version, not the newest: a later version with another list changes nothing", async () => {
+        const w = await world();
+        await setFrontmatter(w, LIST);
+        const run = await runnerRun(w, "executor");
+        await db.admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 2, 'v2', $3, 'system', $4::jsonb)", [w.accountId, w.workItemId, createHash("sha256").update("v2").digest("hex"), JSON.stringify({ acceptance_files: ["other/**"] })]);
+        await issuer().issuer.issue({ run });
+        const job = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
+        expect(job.scope).toEqual(EXPANDED);
+      });
+
+      it("the job's caps are the Spec parser's: a list the cloud reads as known always fits the job", async () => {
+        const core = await import("@fx/core/src/specs/acceptanceScope.js");
+        const { MAX_JOB_SCOPE_ENTRIES } = await import("@fulcrumaxe/runner-protocol");
+        expect(MAX_JOB_SCOPE_ENTRIES).toBe(core.MAX_SCOPE_PATTERNS);
+        // The longest entry the parser takes (512 characters) is the longest the job takes.
+        const longest = `${"a/".repeat(255)}bc`;
+        expect(longest.length).toBe(512);
+        expect(core.parseAcceptanceScope([longest]).kind).toBe("known");
+        expect(core.parseAcceptanceScope([`${longest}x`]).kind).toBe("unknown");
+      });
+
+      it("a context port's hand-made list that the schema refuses is job_invalid, and no job is written", async () => {
+        const w = await world();
+        const run = await runnerRun(w, "executor");
+        const real = createPgJobContext(db.runWriterPool);
+        for (const scope of [["a b"], [""], ["x".repeat(513)], Array.from({ length: 1025 }, (_, n) => `f${n}.ts`)]) {
+          const context: JobContextPort = { load: async (r, o) => ({ ...(await real.load(r, o)), scope }) };
+          expect(await codeOf(issuer({ context }).issuer.issue({ run })), JSON.stringify(scope).slice(0, 30)).toBe("job_invalid");
         }
         expect(await stored(run.id)).toBeNull();
       });
