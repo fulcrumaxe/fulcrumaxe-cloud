@@ -133,6 +133,14 @@ describe("auto-update, secrets and paths", () => {
     expect(dockerfile).toMatch(/install -d -o ubuntu -g ubuntu \/vercel \/vercel\/sandbox \/fx\b/);
   });
 
+  it("installs postgresql-18 (the flake's major) and links initdb, pg_ctl, postgres and psql onto PATH, without creating a cluster", () => {
+    expect(dockerfile).toMatch(/apt-get install [^\n]*\bpostgresql-18\b/);
+    expect(dockerfile).toContain("create_main_cluster = false");
+    expect(dockerfile).toMatch(/for b in initdb pg_ctl postgres psql\b[^;]*; do ln -s "\/usr\/lib\/postgresql\/18\/bin\/\$b" "\/usr\/local\/bin\/\$b"/);
+    // The link directory must be on PATH.
+    expect(instructions("ENV").some((l) => /^ENV\s+PATH=[^\n]*:\/usr\/local\/bin:/.test(l.trim()))).toBe(true);
+  });
+
   it("keeps the preset user, sudo and home", () => {
     expect(dockerfile).toContain("'ubuntu ALL=(ALL) NOPASSWD:ALL'");
     expect(dockerfile).toMatch(/^ENV HOME=\/vercel$/m);

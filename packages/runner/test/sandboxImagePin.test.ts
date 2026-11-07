@@ -175,8 +175,8 @@ describe("the Dockerfile and what the runner runs, together", () => {
     expect(text.indexOf('echo "$NODE_SHA256 ')).toBeLessThan(text.indexOf("*/lib/node_modules/npm"));
     expect(text).toContain("ln -s ../lib/node_modules/npm/bin/npm-cli.js /opt/fx/bin/npm");
     expect(text).toContain("ln -s ../lib/node_modules/npm/bin/npx-cli.js /opt/fx/bin/npx");
-    // The links must not point out of the root-owned tree.
-    for (const l of dockerLines.filter((x) => /\bln -s\b/.test(x))) expect(l, l).toMatch(/ln -s \.\.\/[\w./-]+ \/opt\/fx\/bin\/\w+/);
+    // The links into /opt/fx must not point out of the root-owned tree (the postgres links go the other way, into /usr/local/bin).
+    for (const l of dockerLines.filter((x) => /\bln -s\b/.test(x) && x.includes("/opt/fx"))) expect(l, l).toMatch(/ln -s \.\.\/[\w./-]+ \/opt\/fx\/bin\/\w+/);
   });
 
   it("the runner's shell commands (clone, counters, prompt wrapper, hook) run under /bin/sh, which the base image has", () => {
