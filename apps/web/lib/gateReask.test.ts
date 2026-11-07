@@ -59,4 +59,15 @@ describe("wakeGateReask", () => {
     expect(await wakeGateReask({} as never, event(opened), { worker: null })).toBe(0);
     expect(asked).toEqual([]);
   });
+  it("D#6 CLOUD-POSTS-FX-GATE1 PR 1d: every delivery also goes to the queue entry's fx-gate1 wake with the same pool; both run, and either one's failure is thrown", async () => {
+    asked.length = 0;
+    const pool = { tag: "pool" } as never;
+    const seen: unknown[] = [];
+    expect(await wakeGateReask(pool, event(opened), { worker, queueEntry: async (p, e) => (seen.push([p, e.eventName]), null) })).toBe(2);
+    expect(seen).toEqual([[pool, "pull_request"]]);
+    await expect(wakeGateReask(pool, event(opened), { worker, queueEntry: async () => Promise.reject(new Error("entry read failed")) })).rejects.toThrow("entry read failed");
+    expect(asked).toHaveLength(2);
+    await expect(wakeGateReask(pool, event(opened), { worker: { wakeMergeGate: async () => Promise.reject(new Error("gate failed")) }, queueEntry: async () => (seen.push("ran"), null) })).rejects.toThrow("gate failed");
+    expect(seen).toContain("ran");
+  });
 });

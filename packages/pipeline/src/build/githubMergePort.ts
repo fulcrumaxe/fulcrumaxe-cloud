@@ -63,8 +63,8 @@ export interface GitHubHttp {
  * D#6 R3c: a GitHub client for a `runner_local` repo. It is `localOnlyGithub`'s shape: `request` only ever forwards the allowlist's
  * REST calls (anything else rejects before a request is made), and `graphql` runs one of the fixed documents by name.
  */
-// D#6 CLOUD-POSTS-FX-GATE1: the attester's fixed documents (A15 to A17), held only by the review round's code-repository client.
-export type LocalGraphqlOperation = "PullRequestFiles" | "CommitChecks" | "Gate1CheckRuns" | "Gate1LabelEvents" | "Gate1Status";
+// D#6 CLOUD-POSTS-FX-GATE1: the attester's fixed documents (A15 to A18), held only by the review round's code-repository client (A17 also by the go phase's).
+export type LocalGraphqlOperation = "PullRequestFiles" | "CommitChecks" | "Gate1CheckRuns" | "Gate1LabelEvents" | "Gate1Status" | "Gate1QueueEntries";
 export interface LocalGitHubHttp extends GitHubHttp {
   graphql(op: LocalGraphqlOperation, variables: Readonly<Record<string, unknown>>): Promise<GitHubHttpResponse>;
 }

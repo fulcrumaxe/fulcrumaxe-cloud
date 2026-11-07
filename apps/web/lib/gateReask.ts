@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import type { GateWake } from "@fx/worker";
 import type { GithubWebhookPayload, GithubWebhookEventName } from "@fx/github";
 import { getWorker, type AppWorker } from "./worker";
+import { wakeGate1QueueEntry } from "./gate1QueueEntry";
 
 /**
  * The webhook's wake for the merge gate. When the public pull request of a paired item opens, or a check of a pull request finishes green, an item that sits at
@@ -53,10 +54,20 @@ export function readGateWake(eventName: string, payload: unknown): GateWake | nu
 
 export interface GateReaskWakeDeps {
   worker?: Pick<AppWorker, "wakeMergeGate"> | null;
+  /** D#6 CLOUD-POSTS-FX-GATE1 PR 1d: the queue entry's fx-gate1 (gate1QueueEntry.ts); injected in tests. */
+  queueEntry?: (pool: Pool, event: { accountId: string; eventName: GithubWebhookEventName; payload: GithubWebhookPayload }) => Promise<unknown>;
 }
 
 /** The webhook's trigger: how many gates it started. The caller (the delivery) has already committed, and a throw here is logged there as a fixed line. */
-export async function wakeGateReask(_pool: Pool, event: { accountId: string; repoId: string; eventName: GithubWebhookEventName; payload: GithubWebhookPayload }, deps: GateReaskWakeDeps = {}): Promise<number> {
+export async function wakeGateReask(pool: Pool, event: { accountId: string; repoId: string; eventName: GithubWebhookEventName; payload: GithubWebhookPayload }, deps: GateReaskWakeDeps = {}): Promise<number> {
+  // PR 1d: a finished check suite on a merge-queue entry commit also asks the cloud's fx-gate1 attester. Independent of the gate's wake: both run, then a failure of either is thrown.
+  const [entry, gates] = await Promise.allSettled([(deps.queueEntry ?? wakeGate1QueueEntry)(pool, event), reask(event, deps)]);
+  if (entry.status === "rejected") throw entry.reason;
+  if (gates.status === "rejected") throw gates.reason;
+  return gates.value;
+}
+
+async function reask(event: { accountId: string; repoId: string; eventName: GithubWebhookEventName; payload: GithubWebhookPayload }, deps: GateReaskWakeDeps): Promise<number> {
   const wake = readGateWake(event.eventName, event.payload);
   if (wake === null) return 0;
   const worker = deps.worker === undefined ? await getWorker() : deps.worker;
