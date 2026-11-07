@@ -1,5 +1,5 @@
 import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
-import type { ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
+import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_REPLACE_ROUND_KIND, RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
 import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
@@ -231,7 +231,7 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
   // A check the runner did not run on a scope hint did not pass on the head, so it never lends the fix round its no-commit exception either.
   const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined && !scopeHint;
   const log = deps.log ?? ((line: string) => console.warn(line));
-  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log), scopeHint);
+  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log), (close) => holdCloudClose(deps, i, close, log), scopeHint);
   // A check that passed (or that the runner reported it did not run on its scope hint) is recorded beside whatever the commit and scope tests decided.
   return judged.kind === "verdict" && ctx.job.check !== undefined && reported !== undefined ? { ...judged, check: reported } : judged;
 }
@@ -254,11 +254,41 @@ async function refuseScope(deps: RunnerCloudDeps, i: { accountId: string; runner
   if (!leases.noteScopeRefusal) return { kind: "go" };
   const noted = await asRunner(() => leases.noteScopeRefusal!({ ...i, refusal }));
   if (noted.kind === "fenced") return { kind: "stop", reason: noted.reason };
+  return closePublicCopy(deps, i, noted, SCOPE_REFUSAL_PUBLIC_COMMENT, write);
+}
+
+/** The plain comment left on a public pull request the cloud closed because it could not read the private pull request's files. Fixed words: nothing from the Spec, no error text. */
+export const CLOUD_CLOSE_PUBLIC_COMMENT = "This pull request was closed because the platform could not finish checking the run that produced it. The branch is kept.";
+
+type HoldCloudClose = (close: CloudClose) => Promise<{ kind: "go" } | { kind: "retry" } | { kind: "stop"; reason: StopReason }>;
+
+/**
+ * D#6 SCOPE-REFUSAL-FOLLOWUPS: the same two steps as `refuseScope`, for a private pull request the cloud closes for another cause (today: it could not read the files of the pull request it
+ * opened, so it closes it unjudged). (1) The close is recorded on the run under the fence BEFORE the close, so the webhook and the stale sweep hold it and the item is not moved to
+ * `closed_unmerged` as if a person had closed it; (2) the run's public copy, when the platform opened one, is closed with one plain comment. An older worker without the record: the close goes ahead
+ * as it always did.
+ */
+async function holdCloudClose(deps: RunnerCloudDeps, i: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }, close: CloudClose, write: (line: string) => void): Promise<{ kind: "go" } | { kind: "retry" } | { kind: "stop"; reason: StopReason }> {
+  const leases = requireLeases(deps);
+  if (!leases.noteCloudClose) return { kind: "go" };
+  const noted = await asRunner(() => leases.noteCloudClose!({ ...i, close }));
+  if (noted.kind === "fenced") return { kind: "stop", reason: noted.reason };
+  return closePublicCopy(deps, i, noted, CLOUD_CLOSE_PUBLIC_COMMENT, write);
+}
+
+/** Step (2) of both: closes the public copy the record named (head-ref and pairing checks are the port's and the record's). */
+async function closePublicCopy(
+  deps: RunnerCloudDeps,
+  i: { accountId: string; runnerId: string; runId: string; leaseGeneration: number },
+  noted: { publicPr: { codeRepo: string; number: number; branch: string } | null; publicSkipped?: "pairing_changed" },
+  comment: string,
+  write: (line: string) => void,
+): Promise<{ kind: "go" } | { kind: "retry" } | { kind: "stop"; reason: StopReason }> {
   const close = deps.planePush?.closeRefusedPullRequest;
   if (noted.publicPr === null && noted.publicSkipped !== undefined) write(JSON.stringify({ event: "runner.done.public_pr_close_skipped", run_id: UUID.test(i.runId) ? i.runId.toLowerCase() : null, code: noted.publicSkipped }));
   if (noted.publicPr === null || !close) return { kind: "go" };
   try {
-    const closed = await close.call(deps.planePush, { accountId: i.accountId, codeRepo: noted.publicPr.codeRepo, number: noted.publicPr.number, branch: noted.publicPr.branch, comment: SCOPE_REFUSAL_PUBLIC_COMMENT });
+    const closed = await close.call(deps.planePush, { accountId: i.accountId, codeRepo: noted.publicPr.codeRepo, number: noted.publicPr.number, branch: noted.publicPr.branch, comment });
     write(JSON.stringify({ event: "runner.done.public_pr_closed", run_id: UUID.test(i.runId) ? i.runId.toLowerCase() : null, result: closed.result, commented: closed.result === "closed" ? closed.commented : null }));
   } catch (error) {
     if ((error as { transient?: unknown } | null)?.transient === true) return { kind: "retry" };
@@ -275,8 +305,8 @@ export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }
 const headOf = (s: { headOid: string | null } | null): { headOid?: string } => (s !== null && s.headOid !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s.headOid) ? { headOid: s.headOid } : {});
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
-async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope, scopeHint = false): Promise<Decision> {
-  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse, scopeHint);
+async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope, holdClose: HoldCloudClose, scopeHint = false): Promise<Decision> {
+  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse, holdClose, scopeHint);
   if (decision.kind !== "verdict" || decision.verdict.prNumber === null) return decision;
   return verdictOf({ ...decision.verdict, branch: branchOf(job, i) });
 }
@@ -319,6 +349,7 @@ async function judgeCommit(
   write: (line: string) => void,
   checkPassedOnHead: boolean,
   refuse: RefuseScope,
+  holdClose: HoldCloudClose,
   scopeHint: boolean,
 ): Promise<Decision> {
   // A fresh run's branch is `<prefix><run>-g<generation>`: a stale generation's branch is never looked at. A continuation works on exactly
@@ -414,7 +445,12 @@ async function judgeCommit(
     // runner's token may not make that mutation, and closing a checked pull request for it would throw away good work. It stays open as a
     // draft (nothing is closed), the run succeeded, and the log line above is the only trace.
     if (stage === "ready" && pr) return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: pr.number, ...headOf(branchHead) });
-    if (pr && (await close()) === "retry") return { kind: "retry" };
+    // SCOPE-REFUSAL-FOLLOWUPS: this close is the cloud's own. It is recorded (and the public copy closed) BEFORE the private pull request is closed, so the close the webhook reports is not read as a person's.
+    if (pr) {
+      const held = await holdClose({ cause: "internal_error", prNumber: pr.number });
+      if (held.kind !== "go") return held;
+      if ((await close()) === "retry") return { kind: "retry" };
+    }
     return failed("internal_error", { prNumber: pr?.number ?? null });
   }
 }

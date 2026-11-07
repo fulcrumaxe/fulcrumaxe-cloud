@@ -41,6 +41,10 @@ describe("done route [pg]", () => {
   const noted: Array<Record<string, unknown>> = [];
   let note: Awaited<ReturnType<NonNullable<RunnerLeaseOps["noteScopeRefusal"]>>> = { kind: "noted", publicPr: null };
   let onNote: (() => void) | null = null;
+  // D#6 SCOPE-REFUSAL-FOLLOWUPS: the stand-in for the worker's record of a close the cloud makes for another cause (a pull request whose files it could not read).
+  const cloudNoted: Array<Record<string, unknown>> = [];
+  let cloudNote: Awaited<ReturnType<NonNullable<RunnerLeaseOps["noteCloudClose"]>>> = { kind: "noted", publicPr: null };
+  let onCloudNote: (() => void) | null = null;
   let withNote = true;
   let handoff: Awaited<ReturnType<NonNullable<RunnerLeaseOps["completeHandoffOnDone"]>>> = { kind: "none" };
   const never = async () => {
@@ -56,10 +60,12 @@ describe("done route [pg]", () => {
     finishRunnerDone: async (input) => (finished.push({ ...input }), finish === "echo" ? { kind: "recorded", verdict: input.verdict } : finish),
     completeHandoffOnDone: async (input) => (handed.push({ ...input }), handoff),
     noteScopeRefusal: async (input) => (onNote?.(), noted.push({ ...input }), note),
+    noteCloudClose: async (input) => (onCloudNote?.(), cloudNoted.push({ ...input }), cloudNote),
   };
   const leasesWithoutNote = (): RunnerLeaseOps => {
     const rest: RunnerLeaseOps = { ...leases };
     delete rest.noteScopeRefusal;
+    delete rest.noteCloudClose;
     return rest;
   };
 
@@ -82,6 +88,9 @@ describe("done route [pg]", () => {
     noted.length = 0;
     note = { kind: "noted", publicPr: null };
     onNote = null;
+    cloudNoted.length = 0;
+    cloudNote = { kind: "noted", publicPr: null };
+    onCloudNote = null;
     withNote = true;
   });
 
@@ -860,6 +869,197 @@ describe("done route [pg]", () => {
       expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toMatchObject({ outcome: "succeeded" });
       expect(noted).toEqual([]);
       expect(publicCalls).toEqual([]);
+    });
+  });
+
+  // D#6 SCOPE-REFUSAL-FOLLOWUPS: the only other close of the cloud's own private pull request is the one after a permanent refusal reading its files (internal_error). It is recorded first,
+  // exactly as a scope refusal is, and the public copy is closed with it. Every other failed verdict leaves the private pull request as it was, so the public copy stays open on purpose.
+  describe("a pull request the cloud closes unjudged (internal_error) is recorded before it is closed", () => {
+    const publicCalls: Array<Record<string, unknown>> = [];
+    let publicAnswer: () => Promise<{ result: "closed"; commented: boolean } | { result: "not_open" } | { result: "not_ours" }> = async () => ({ result: "closed", commented: true });
+    const planePush = {
+      mintToken: async () => ({ token: "t", expiresAt: new Date() }),
+      verifyPushed: async () => true,
+      verifyPullRequest: async () => null,
+      revokeToken: async () => true,
+      closeRefusedPullRequest: async (input: Record<string, unknown>) => (publicCalls.push({ ...input }), publicAnswer()),
+    };
+    const PUBLIC = { codeRepo: "acme/widgets-public", number: 41, branch: "fx/p-11111111-1111-4111-8111-111111111111" };
+    beforeEach(() => {
+      publicCalls.length = 0;
+      publicAnswer = async () => ({ result: "closed", commented: true });
+      cloudNote = { kind: "noted", publicPr: PUBLIC };
+    });
+    const filesRefused = (s: Scene) => {
+      s.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", message: "gone" }] } } };
+    };
+
+    it("records the close while the private pull request is still open, then closes it and ends internal_error with its number; no scope record is written", async () => {
+      const s = await scene();
+      let openAtNote: string | undefined;
+      onCloudNote = () => (openAtNote = s.repo.pulls[0]?.state);
+      filesRefused(s);
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toEqual({ continue: false, outcome: "failed", failure_reason: "internal_error", pr_number: 1 });
+      expect(openAtNote).toBe("open");
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+      expect(cloudNoted).toEqual([expect.objectContaining({ runId: s.runId, leaseGeneration: 1, close: { cause: "internal_error", prNumber: 1 } })]);
+      expect(noted).toEqual([]);
+    });
+
+    it("closes the public copy with one plain comment BEFORE the private pull request", async () => {
+      const s = await scene();
+      let privateStateAtPublicClose: string | undefined;
+      publicAnswer = async () => ((privateStateAtPublicClose = s.repo.pulls[0]?.state), { result: "closed", commented: true });
+      filesRefused(s);
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toMatchObject({ outcome: "failed", failure_reason: "internal_error", pr_number: 1 });
+      expect(publicCalls).toEqual([expect.objectContaining({ accountId: A.accountId, codeRepo: PUBLIC.codeRepo, number: 41, branch: PUBLIC.branch })]);
+      // Public words: fixed, no path, no number, no error text.
+      expect(String(publicCalls[0]!.comment)).toMatch(/could not finish checking/);
+      expect(String(publicCalls[0]!.comment)).not.toMatch(/\d|gone|FORBIDDEN/);
+      expect(privateStateAtPublicClose).toBe("open");
+    });
+
+    it("the READY fallback pull request is recorded and closed the same way", async () => {
+      const s = await scene({ drafts: false });
+      filesRefused(s);
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toMatchObject({ failure_reason: "internal_error", pr_number: 1 });
+      expect(cloudNoted).toHaveLength(1);
+      expect(s.repo.pulls[0]).toMatchObject({ draft: false, state: "closed" });
+    });
+
+    it("a GitHub blip on the public close answers 503 so the runner sends done again; the private pull request stays open and no verdict is recorded", async () => {
+      publicAnswer = async () => {
+        throw Object.assign(new Error("public_unavailable"), { code: "public_unavailable", transient: true });
+      };
+      const s = await scene();
+      filesRefused(s);
+      const res = await s.call({ deps: { planePush: planePush as never } });
+      expect(res.status).toBe(503);
+      expect(s.repo.pulls[0]!.state).toBe("open");
+      expect(finished).toEqual([]);
+    });
+
+    it("a private close GitHub cannot reach is 503 after the record: the record repeats safely on the runner's next done", async () => {
+      const s = await scene();
+      filesRefused(s);
+      s.fake.before = (req) => {
+        if (req.method === "PATCH") s.fake.inject = { label: /^A5$/, reply: { status: 502, body: {} } };
+      };
+      expect((await s.call({ deps: { planePush: planePush as never } })).status).toBe(503);
+      expect(cloudNoted).toHaveLength(1);
+      expect(finished).toEqual([]);
+    });
+
+    it("any other failure of the public close is one log line with the code, and the private close and verdict go on", async () => {
+      publicAnswer = async () => {
+        throw Object.assign(new Error("secret text ghs_abc"), { code: "app_not_installed" });
+      };
+      const lines: string[] = [];
+      const s = await scene();
+      filesRefused(s);
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never, log: (l: string) => lines.push(l) } }))).toMatchObject({ failure_reason: "internal_error", pr_number: 1 });
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+      expect(JSON.parse(lines.find((l) => l.includes("public_pr_close_failed"))!)).toMatchObject({ code: "app_not_installed" });
+      expect(lines.join("\n")).not.toMatch(/ghs_|secret/);
+    });
+
+    it("a public copy that is not the recorded branch's is left open (not_ours)", async () => {
+      publicAnswer = async () => ({ result: "not_ours" });
+      const s = await scene();
+      filesRefused(s);
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toMatchObject({ failure_reason: "internal_error" });
+    });
+
+    it("a lease that no longer holds when the close is recorded stops the run: nothing is closed and no verdict is recorded", async () => {
+      cloudNote = { kind: "fenced", reason: "stale_generation" };
+      const s = await scene();
+      filesRefused(s);
+      const res = await s.call({ deps: { planePush: planePush as never } });
+      expect(res.status).toBe(409);
+      expect(s.repo.pulls[0]!.state).toBe("open");
+      expect(publicCalls).toEqual([]);
+      expect(finished).toEqual([]);
+    });
+
+    it("a worker without the record keeps today's behaviour (the pull request is closed, the verdict is recorded)", async () => {
+      withNote = false;
+      const s = await scene();
+      filesRefused(s);
+      expect(parsedDone(await s.call({ deps: { planePush: planePush as never } }))).toMatchObject({ failure_reason: "internal_error", pr_number: 1 });
+      expect(cloudNoted).toEqual([]);
+      expect(publicCalls).toEqual([]);
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+    });
+
+    // The verdicts below leave the private pull request exactly as it was, so the public copy mirrors it and stays open on purpose: nothing is recorded and nothing is closed.
+    describe("the other failed verdicts leave the private and the public pull request open", () => {
+      const BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+      const untouched = (): void => {
+        expect(cloudNoted).toEqual([]);
+        expect(noted).toEqual([]);
+        expect(publicCalls).toEqual([]);
+      };
+      const run = (s: Scene, body?: object) => s.call({ deps: { planePush: planePush as never }, ...(body ? { body } : {}) });
+
+      it("no_commit on a republish (a fix round whose head did not move)", async () => {
+        const s = await scene({ continues: { branch: BRANCH }, dispatchBase: "c".repeat(40), branchOid: "c".repeat(40), aheadBy: 4 });
+        expect(parsedDone(await run(s)).failure_reason).toBe("no_commit");
+        untouched();
+      });
+
+      it("no_commit on a first build (nothing was pushed)", async () => {
+        const s = await scene({ pushed: false });
+        expect(parsedDone(await run(s)).failure_reason).toBe("no_commit");
+        untouched();
+      });
+
+      it("check_failed", async () => {
+        const s = await scene({ check: { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 } });
+        const res = await run(s, { run_id: s.runId, lease_generation: s.gen, check: { exit_code: 1, duration_ms: 5, timed_out: false, skipped_tests: 0, summary: "FAIL" } });
+        expect(parsedDone(res).failure_reason).toBe("check_failed");
+        untouched();
+      });
+
+      it("pr_rejected (GitHub refused to open one, or a foreign pull request holds the branch)", async () => {
+        const refused = await scene();
+        refused.fake.inject = { label: /^A4$/, reply: { status: 422, body: { message: "Validation Failed", errors: [{ message: "No commits between main and x" }] } } };
+        expect(parsedDone(await run(refused)).failure_reason).toBe("pr_rejected");
+        const foreign = await scene();
+        foreign.fake.addForeignPull(foreign.repo, { head: foreign.branch, author: { login: "octocat", type: "User" } });
+        expect(parsedDone(await run(foreign)).failure_reason).toBe("pr_rejected");
+        expect(foreign.repo.pulls[0]!.state).toBe("open");
+        untouched();
+      });
+
+      it("internal_error where no pull request exists to close (a refusal at the read step, a continuation with no recorded head)", async () => {
+        const read = await scene();
+        read.fake.inject = { label: /^A2$/, reply: { status: 404, body: { message: "Not Found" } } };
+        expect(parsedDone(await run(read))).toMatchObject({ failure_reason: "internal_error", pr_number: null });
+        const unrecorded = await scene({ continues: { branch: BRANCH }, dispatchBase: "unrecorded", branchOid: "d".repeat(40) });
+        expect(parsedDone(await run(unrecorded))).toMatchObject({ failure_reason: "internal_error", pr_number: null });
+        untouched();
+      });
+
+      it("scope_unknown for a Spec with no file list (no pull request is opened)", async () => {
+        const s = await scene({ scope: [] });
+        expect(parsedDone(await run(s)).failure_reason).toBe("scope_unknown");
+        untouched();
+      });
+
+      it("a refusal to mark ready (the run succeeds and the pull request stays open as a draft)", async () => {
+        const s = await scene();
+        s.fake.inject = { label: /^A1 MarkReady$/, reply: { status: 200, body: { data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], message: "Resource not accessible by integration" }] } } };
+        expect(parsedDone(await run(s))).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+        expect(s.repo.pulls[0]).toMatchObject({ draft: true, state: "open" });
+        untouched();
+      });
+
+      it("taken_over", async () => {
+        const s = await scene();
+        await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 5, 'runner.event', $3::jsonb)", [A.accountId, s.runId, JSON.stringify({ seq: 3, ts: "2026-10-10T12:00:00.000Z", type: "taken_over" })]);
+        expect(parsedDone(await run(s)).failure_reason).toBe("taken_over");
+        untouched();
+      });
     });
   });
 

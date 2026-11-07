@@ -7,6 +7,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { hasLivePlannedChildSql, specOfItemSql } from "@fx/core/src/work-items/stages.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { CLOUD_CLOSE_EVENT } from "@fx/core/src/work-items/scopeRefusal.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
 import { EXCLUDE_PROMPT_LINE, effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
@@ -667,7 +668,11 @@ export async function markBuildNeedsHuman(pool: Pool, accountId: string, workIte
     const stage = cur.rows[0]?.stage ?? null;
     // D#6 CHECKFIX-SUCCESS-AS-FAILED: the cloud opens a refused run's pull request before it closes it, so the item may already have moved to PR opened (the opened delivery); the cloud's own close is held
     // back from the item (the webhook reads the run's recorded refusal), so it is still there. Only the two scope codes may leave PR opened this way: any other stage or code is left alone.
-    const refusedPr = stage === "pr_opened" && (code === "scope_violation" || code === "scope_unknown");
+    // SCOPE-REFUSAL-FOLLOWUPS: the same for a run that failed `internal_error` after the cloud closed the pull request it had opened (the run recorded `run.cloud_pr_closed` first): the held close leaves the item at PR opened
+    // when the opened delivery came first, and nothing else would move it. Only a `run_failed` of a run that recorded such a close counts; any other run is left alone.
+    const cloudClosed =
+      stage === "pr_opened" && code === "run_failed" && runId !== null && (await client.query("SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [accountId, runId, CLOUD_CLOSE_EVENT])).rows.length > 0;
+    const refusedPr = (stage === "pr_opened" && (code === "scope_violation" || code === "scope_unknown")) || cloudClosed;
     if (stage !== "in_progress" && !refusedPr) return { status: "unchanged", stage };
     try {
       const r = await recordStage(client, { workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `build_failed:${code}:${runId ?? attempt ?? "none"}`, ...(runId === null ? {} : { runId }) });

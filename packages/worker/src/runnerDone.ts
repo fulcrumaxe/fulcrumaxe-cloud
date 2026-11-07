@@ -4,7 +4,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextFigure, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { normaliseCheck } from "@fx/runner-cloud";
 import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
-import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalPayload, type ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
+import { CLOUD_CLOSE_EVENT, SCOPE_REFUSAL_EVENT, cloudClosePayload, parseCloudClose, parseScopeRefusal, scopeRefusalPayload, type CloudClose, type ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { guarded, RunActionInputError } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -79,6 +79,11 @@ export interface RunnerDoneFacade {
    * request, when its item has one the platform opened and no person has taken the branch over, so the route can close it too. Nothing the runner sent is in either.
    */
   noteScopeRefusal(input: HeartbeatRunnerRunInput & { refusal: ScopeRefusal }): Promise<NoteScopeRefusalResult>;
+  /**
+   * D#6 SCOPE-REFUSAL-FOLLOWUPS: the same, for a close the cloud makes for another reason than the scope check (`done` closing a pull request whose files it could not read). Records
+   * `run.cloud_pr_closed` and answers the public pull request exactly as `noteScopeRefusal` does; the webhook and the stale sweep hold both events alike.
+   */
+  noteCloudClose(input: HeartbeatRunnerRunInput & { close: CloudClose }): Promise<NoteScopeRefusalResult>;
   /** Fences a runner's `done`, extends its lease, and says whether to go on, stop, or answer the stored verdict again. */
   beginRunnerDone(input: HeartbeatRunnerRunInput): Promise<BeginRunnerDoneResult>;
   /** Records the cloud's verdict for the run under the fence, in one transaction. */
@@ -225,7 +230,10 @@ async function recordRunnerCheck(client: PoolClient, input: FinishRunnerDoneInpu
   });
 }
 
-const sameNamedPublicPr = (recorded: ScopeRefusal | null, now: { codeRepo: string; number: number }): boolean =>
+/** A stored closure record of either kind (`run.scope_refused`, `run.cloud_pr_closed`), read back; null when it is neither. */
+const recordedClosure = (payload: unknown): { publicPr?: { codeRepo: string; number: number } } | null => parseScopeRefusal(payload) ?? parseCloudClose(payload);
+
+const sameNamedPublicPr = (recorded: { publicPr?: { codeRepo: string; number: number } } | null, now: { codeRepo: string; number: number }): boolean =>
   recorded?.publicPr !== undefined && recorded.publicPr.number === now.number && recorded.publicPr.codeRepo.toLowerCase() === now.codeRepo.toLowerCase();
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -233,41 +241,58 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
   const now = deps.now ?? Date.now;
   const limits = deps.limits ?? runnerLimits;
 
+  /**
+   * Records, under the lease fence and BEFORE the cloud closes the run's private pull request, the fact that the cloud is closing it (`kind`), and answers the run's public pull request when the
+   * platform opened one and still holds it. The scope refusal and every other cloud close share this one path, so the hold they set and the public close they ask for cannot drift apart.
+   */
+  const noteClosure = (input: HeartbeatRunnerRunInput, kind: string, prNumber: number | null, build: (repo: string | null, publicPr: { codeRepo: string; number: number } | null) => Record<string, unknown>): Promise<NoteScopeRefusalResult> =>
+    guarded(async () => {
+      requireLease(input);
+      if (prNumber === null) throw new RunActionInputError();
+      const at = new Date(now());
+      return withTenant(runnerPool, input.accountId, async (client): Promise<NoteScopeRefusalResult> => {
+        const held = await leaseVerdict(client, input, at, 0, limits(input.accountId).maxRunWallClockMs);
+        if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
+        // The repositories the event names are the cloud's own facts, read here from its rows: the run's dispatch repository (where the private pull request lives) and, on a paired
+        // repository, the public copy the platform opened and still holds. Nothing in them comes from the request, so a runner cannot point the hold at another repository.
+        const run = await client.query<{ work_item_id: string | null; dispatch_repo_id: string | null; repo: string | null }>(
+          `SELECT r.work_item_id, r.dispatch_repo_id, CASE WHEN g.gh_owner IS NULL OR g.gh_name IS NULL THEN NULL ELSE g.gh_owner || '/' || g.gh_name END AS repo
+             FROM agent_runs r LEFT JOIN repos g ON g.account_id = r.account_id AND g.id = r.dispatch_repo_id
+            WHERE r.account_id = $1 AND r.id = $2`,
+          [input.accountId, input.runId],
+        );
+        const facts = run.rows[0];
+        const row = facts?.work_item_id && facts.dispatch_repo_id ? await readPlanePush(client, input.accountId, facts.work_item_id) : null;
+        // Only the pull request the platform opened and still holds: a person who took the branch over keeps it, and a closed or merged one needs nothing.
+        const open = row !== null && row.repoId === facts?.dispatch_repo_id && row.state === "pr_opened" && row.managedByPersonAt === null && row.prNumber !== null;
+        // The public close also needs the repository's pairing to still name that public repository: a pairing removed or pointed elsewhere since the push means the record is no longer the platform's to act on.
+        const paired = open && (await client.query("SELECT 1 FROM repo_pairing WHERE account_id = $1 AND repo_id = $2 AND lower(code_repo) = lower($3)", [input.accountId, row.repoId, row.codeRepo])).rows.length > 0;
+        const publicPr = paired ? { codeRepo: row.codeRepo, number: row.prNumber!, branch: row.branch } : null;
+        // Whatever repository fields the request carried are dropped: the event names only what the rows above say.
+        const payload = build(facts?.repo ? facts.repo : null, publicPr === null ? null : { codeRepo: publicPr.codeRepo, number: publicPr.number });
+        const known = await client.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 AND payload->>'prNumber' = $4::text LIMIT 1", [input.accountId, input.runId, kind, String(prNumber)]);
+        if (known.rows.length === 0) await insertRunEvent(client, input.accountId, input.runId, kind, payload);
+        // A repeat (the runner sent `done` again) closes only the public pull request the FIRST record named: a copy the record does not name would be closed with nothing holding its close.
+        const named = known.rows.length === 0 ? publicPr : publicPr !== null && sameNamedPublicPr(recordedClosure(known.rows[0]!.payload), publicPr) ? publicPr : null;
+        return { kind: "noted", publicPr: named, ...(open && !paired ? { publicSkipped: "pairing_changed" as const } : {}) };
+      });
+    });
+
   return {
-    noteScopeRefusal: (input) =>
-      guarded(async () => {
-        requireLease(input);
-        // The payload is cleaned by the one function that writes it; a refusal that does not survive it is not recorded.
-        const refusal = parseScopeRefusal(scopeRefusalPayload(input.refusal));
-        if (refusal === null) throw new RunActionInputError();
-        const at = new Date(now());
-        return withTenant(runnerPool, input.accountId, async (client): Promise<NoteScopeRefusalResult> => {
-          const held = await leaseVerdict(client, input, at, 0, limits(input.accountId).maxRunWallClockMs);
-          if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
-          // The repositories the event names are the cloud's own facts, read here from its rows: the run's dispatch repository (where the private pull request lives) and, on a paired
-          // repository, the public copy the platform opened and still holds. Nothing in them comes from the request, so a runner cannot point the hold at another repository.
-          const run = await client.query<{ work_item_id: string | null; dispatch_repo_id: string | null; repo: string | null }>(
-            `SELECT r.work_item_id, r.dispatch_repo_id, CASE WHEN g.gh_owner IS NULL OR g.gh_name IS NULL THEN NULL ELSE g.gh_owner || '/' || g.gh_name END AS repo
-               FROM agent_runs r LEFT JOIN repos g ON g.account_id = r.account_id AND g.id = r.dispatch_repo_id
-              WHERE r.account_id = $1 AND r.id = $2`,
-            [input.accountId, input.runId],
-          );
-          const facts = run.rows[0];
-          const row = facts?.work_item_id && facts.dispatch_repo_id ? await readPlanePush(client, input.accountId, facts.work_item_id) : null;
-          // Only the pull request the platform opened and still holds: a person who took the branch over keeps it, and a closed or merged one needs nothing.
-          const open = row !== null && row.repoId === facts?.dispatch_repo_id && row.state === "pr_opened" && row.managedByPersonAt === null && row.prNumber !== null;
-          // The public close also needs the repository's pairing to still name that public repository: a pairing removed or pointed elsewhere since the push means the record is no longer the platform's to act on.
-          const paired = open && (await client.query("SELECT 1 FROM repo_pairing WHERE account_id = $1 AND repo_id = $2 AND lower(code_repo) = lower($3)", [input.accountId, row.repoId, row.codeRepo])).rows.length > 0;
-          const publicPr = paired ? { codeRepo: row.codeRepo, number: row.prNumber!, branch: row.branch } : null;
-          // Whatever repository fields the request carried are dropped: the event names only what the rows above say.
-          const payload = scopeRefusalPayload({ reason: refusal.reason, prNumber: refusal.prNumber, total: refusal.total, paths: refusal.paths, ...(refusal.detail === undefined ? {} : { detail: refusal.detail }), ...(facts?.repo ? { repo: facts.repo } : {}), ...(publicPr === null ? {} : { publicPr: { codeRepo: publicPr.codeRepo, number: publicPr.number } }) });
-          const known = await client.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 AND payload->>'prNumber' = $4::text LIMIT 1", [input.accountId, input.runId, SCOPE_REFUSAL_EVENT, String(refusal.prNumber)]);
-          if (known.rows.length === 0) await insertRunEvent(client, input.accountId, input.runId, SCOPE_REFUSAL_EVENT, payload);
-          // A repeat (the runner sent `done` again) closes only the public pull request the FIRST record named: a copy the record does not name would be closed with nothing holding its close.
-          const named = known.rows.length === 0 ? publicPr : publicPr !== null && sameNamedPublicPr(parseScopeRefusal(known.rows[0]!.payload), publicPr) ? publicPr : null;
-          return { kind: "noted", publicPr: named, ...(open && !paired ? { publicSkipped: "pairing_changed" as const } : {}) };
-        });
-      }),
+    noteScopeRefusal: (input) => {
+      // The payload is cleaned by the one function that writes it; a refusal that does not survive it is not recorded.
+      const refusal = parseScopeRefusal(scopeRefusalPayload(input.refusal));
+      return noteClosure(input, SCOPE_REFUSAL_EVENT, refusal === null ? null : refusal.prNumber, (repo, publicPr) =>
+        scopeRefusalPayload({ reason: refusal!.reason, prNumber: refusal!.prNumber, total: refusal!.total, paths: refusal!.paths, ...(refusal!.detail === undefined ? {} : { detail: refusal!.detail }), ...(repo === null ? {} : { repo }), ...(publicPr === null ? {} : { publicPr }) }),
+      );
+    },
+
+    noteCloudClose: (input) => {
+      const close = parseCloudClose(cloudClosePayload(input.close));
+      return noteClosure(input, CLOUD_CLOSE_EVENT, close === null ? null : close.prNumber, (repo, publicPr) =>
+        cloudClosePayload({ cause: close!.cause, prNumber: close!.prNumber, ...(repo === null ? {} : { repo }), ...(publicPr === null ? {} : { publicPr }) }),
+      );
+    },
 
     beginRunnerDone: (input) =>
       guarded(async () => {

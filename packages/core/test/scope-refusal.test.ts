@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SCOPE_REFUSAL_MAX_PATHS, parseScopeRefusal, scopeRefusalPayload, scopeRefusalSentence, type ScopeRefusal } from "../src/work-items/scopeRefusal.js";
+import { CLOUD_CLOSE_EVENT, SCOPE_REFUSAL_EVENT, SCOPE_REFUSAL_MAX_PATHS, cloudClosePayload, parseCloudClose, parseScopeRefusal, scopeRefusalPayload, scopeRefusalSentence, type CloudClose, type ScopeRefusal } from "../src/work-items/scopeRefusal.js";
 
 /** D#6 CHECKFIX-SUCCESS-AS-FAILED: the refusal record's shape, and the sentence the card shows from it. */
 const base: ScopeRefusal = { reason: "scope_violation", prNumber: 12, total: 2, paths: ["tests/a.ts", "tests/b.ts"] };
@@ -99,5 +99,41 @@ describe("scopeRefusalSentence", () => {
   it("a scope_unknown names the rename or the change type the check cannot judge", () => {
     expect(scopeRefusalSentence({ reason: "scope_unknown", prNumber: 1, total: 1, paths: ["src/new.ts"], detail: "renamed" })).toMatch(/renames a file \(src\/new\.ts\), which the Spec's file list check cannot judge/);
     expect(scopeRefusalSentence({ reason: "scope_unknown", prNumber: 1, total: 1, paths: ["src/x.ts"], detail: "unknown_change_type" })).toMatch(/kind of file change the Spec's file list check cannot judge \(src\/x\.ts\)/);
+  });
+});
+
+// D#6 SCOPE-REFUSAL-FOLLOWUPS: the record of a close the cloud made for a cause other than the scope check.
+describe("cloudClosePayload and parseCloudClose", () => {
+  const close: CloudClose = { cause: "internal_error", prNumber: 12 };
+
+  it("is its own event, so the card (which reads only the scope event) never takes its words from it", () => {
+    expect(CLOUD_CLOSE_EVENT).not.toBe(SCOPE_REFUSAL_EVENT);
+    expect(CLOUD_CLOSE_EVENT).toBe("run.cloud_pr_closed");
+  });
+
+  it("round-trips, with the private repository and the public copy only when they are well-formed", () => {
+    expect(parseCloudClose(cloudClosePayload(close))).toEqual(close);
+    const named: CloudClose = { ...close, repo: "acme/widgets", publicPr: { codeRepo: "acme/widgets-public", number: 41 } };
+    expect(parseCloudClose(cloudClosePayload(named))).toEqual(named);
+    for (const bad of ["widgets", "a/b/c", "acme/ wid", "", "acme/"]) {
+      const out = cloudClosePayload({ ...close, repo: bad, publicPr: { codeRepo: bad, number: 41 } });
+      expect(out).not.toHaveProperty("repo");
+      expect(out).not.toHaveProperty("publicPr");
+    }
+    for (const number of [0, -1, 1.5, Number.NaN]) expect(cloudClosePayload({ ...close, publicPr: { codeRepo: "acme/widgets-public", number } })).not.toHaveProperty("publicPr");
+  });
+
+  it("carries nothing but the cause, the number and the two repository names", () => {
+    const out = cloudClosePayload({ ...close, repo: "acme/widgets", paths: ["x.ts"], total: 3 } as never);
+    expect(Object.keys(out).sort()).toEqual(["cause", "prNumber", "repo"]);
+  });
+
+  it("reads back only what this module wrote: another cause, a scope refusal, a bad number and a non-object are null", () => {
+    expect(parseCloudClose({ ...cloudClosePayload(close), cause: "scope_violation" })).toBeNull();
+    expect(parseCloudClose(scopeRefusalPayload(base))).toBeNull();
+    expect(parseScopeRefusal(cloudClosePayload(close))).toBeNull();
+    for (const prNumber of [0, -3, 1.5, "12"]) expect(parseCloudClose({ ...cloudClosePayload(close), prNumber })).toBeNull();
+    expect(parseCloudClose(null)).toBeNull();
+    expect(parseCloudClose([])).toBeNull();
   });
 });
