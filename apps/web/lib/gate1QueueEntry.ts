@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { attestQueueEntry, loadReviewContext, parseGate1AttestRepos, type GitHubHttp, type QueueEntryOutcome } from "@fx/pipeline";
+import { attestGate1Head, attestQueueEntry, loadReviewContext, parseGate1AttestRepos, type GitHubHttp, type QueueEntryOutcome } from "@fx/pipeline";
 import { MERGE_QUEUE_ENTRY_DOCUMENT, type GithubWebhookEventName, type GithubWebhookPayload } from "@fx/github";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
@@ -49,6 +49,21 @@ export interface Gate1QueueEntryDeps {
   ourLogin?: (repoId: string) => Promise<string>;
 }
 
+/**
+ * The one item that owns a public pull request, or null. Every record naming this public pull request is counted first, person-managed ones included: a
+ * person-managed match, or two items naming one pull request, is not ours to resolve, and nothing is attested. `head` is the head the platform stamped.
+ */
+async function ownItem(pool: Pool, accountId: string, repoFullName: string, prNumber: number): Promise<{ workItemId: string; head: string | null } | null> {
+  return withTenant(pool, accountId, async (client) => {
+    const { rows } = await client.query<{ work_item_id: string; managed: boolean; head_sha: string | null }>(
+      "SELECT DISTINCT work_item_id, (managed_by_person_at IS NOT NULL) AS managed, head_sha FROM plane_pushes WHERE account_id = $1 AND lower(code_repo) = lower($2) AND pr_number = $3 LIMIT 3",
+      [accountId, repoFullName, prNumber],
+    );
+    if (rows.some((r) => r.managed !== false)) return null;
+    return rows.length === 1 ? { workItemId: rows[0]!.work_item_id, head: rows[0]!.head_sha } : null;
+  });
+}
+
 /** The webhook's trigger. Answers what the attester did, or null when the delivery is not for a listed code repository's queue entry of one of our items. */
 export async function wakeGate1QueueEntry(pool: Pool, event: { accountId: string; eventName: GithubWebhookEventName | string; payload: GithubWebhookPayload | unknown }, deps: Gate1QueueEntryDeps = {}): Promise<QueueEntryOutcome | null> {
   const wake = readQueueEntryWake(event.eventName, event.payload);
@@ -56,16 +71,8 @@ export async function wakeGate1QueueEntry(pool: Pool, event: { accountId: string
   // The setting first: an unlisted repository gets no read of ours at all, not even of our own records.
   const repos = deps.repos ?? parseGate1AttestRepos(process.env.FX_GATE1_ATTEST_REPOS);
   if (!repos.has(wake.repoFullName.toLowerCase())) return null;
-  const workItemId = await withTenant(pool, event.accountId, async (client) => {
-    // Every record naming this public pull request is counted first, person-managed ones included: a person-managed match, or two items naming one
-    // pull request, is not ours to resolve, and nothing is attested.
-    const { rows } = await client.query<{ work_item_id: string; managed: boolean }>(
-      "SELECT DISTINCT work_item_id, (managed_by_person_at IS NOT NULL) AS managed FROM plane_pushes WHERE account_id = $1 AND lower(code_repo) = lower($2) AND pr_number = $3 LIMIT 3",
-      [event.accountId, wake.repoFullName, wake.prNumber],
-    );
-    if (rows.some((r) => r.managed !== false)) return null;
-    return rows.length === 1 ? rows[0]!.work_item_id : null;
-  });
+  const found = await ownItem(pool, event.accountId, wake.repoFullName, wake.prNumber);
+  const workItemId = found === null ? null : found.workItemId;
   if (workItemId === null) return null;
   const loaded = await loadReviewContext(pool, event.accountId, workItemId);
   if (!loaded.ok) return null;
@@ -75,7 +82,19 @@ export async function wakeGate1QueueEntry(pool: Pool, event: { accountId: string
   // the queue through its REST reads and the one pinned entry document it already holds.
   const http: GitHubHttp = await openForRepo(deps.open ?? openInstallationHttp, ctx.executionMode, "merge_gate", { repoId: ctx.repoId, owner, name }, { withoutMerge: true, gate1Attest: true });
   const ourLogin = deps.ourLogin ?? readRepoAppLogin;
-  const out = await attestQueueEntry(http, { repos, owner, name, base: wake.base, prNumber: wake.prNumber, baseSha: wake.baseSha, entrySha: wake.entrySha, ourLogin: () => ourLogin(ctx.repoId), ...(ctx.executionMode === "runner_local" ? {} : { entryDocument: MERGE_QUEUE_ENTRY_DOCUMENT }) });
+  // A group head that is a cloud item's own public pull request, stamped at the head the queue holds, and that lacks our success (its review round ended before the
+  // setting went on) is attested by the head attester first. A head that is not one of our items (a team pull request) is left to its own watcher.
+  const attestHead = async (e: { prNumber: number; head: string }): Promise<boolean> => {
+    const item = await ownItem(pool, event.accountId, wake.repoFullName, e.prNumber);
+    if (item === null || item.head !== e.head) return false;
+    const l = await loadReviewContext(pool, event.accountId, item.workItemId);
+    if (!l.ok) return false;
+    const headHttp: GitHubHttp = await openForRepo(deps.open ?? openInstallationHttp, l.ctx.executionMode, "merge_gate", { repoId: l.ctx.repoId, owner, name }, { withoutMerge: true, gate1Attest: true });
+    // A queued head cannot move under its entry (a push dequeues the pull request), so the entry's head stands for the live read.
+    const r = await attestGate1Head(headHttp, { repos, owner, name, number: e.prNumber, sha: e.head, ourLogin: () => ourLogin(l.ctx.repoId), readHead: async () => e.head });
+    return (r.kind === "posted" && r.state === "success") || r.kind === "already";
+  };
+  const out = await attestQueueEntry(http, { attestHead, repos, owner, name, base: wake.base, prNumber: wake.prNumber, baseSha: wake.baseSha, entrySha: wake.entrySha, ourLogin: () => ourLogin(ctx.repoId), ...(ctx.executionMode === "runner_local" ? {} : { entryDocument: MERGE_QUEUE_ENTRY_DOCUMENT }) });
   console.info(JSON.stringify({ event: "gate1_queue_entry", work_item_id: workItemId, outcome: out.kind, ...("reason" in out ? { reason: out.reason } : {}) }));
   return out;
 }

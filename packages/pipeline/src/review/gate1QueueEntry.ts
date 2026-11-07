@@ -226,7 +226,7 @@ async function readRunsHosted(http: GitHubHttp, repo: { owner: string; name: str
  * Reads the entry's facts and acts. A throw (a failed read, a refused post) is not an answer: the next check suite's wake asks again. A fenced client
  * (`runner_local`) reads through A17, A18 and A15; any other client is the hosted `merge_gate` one and needs `entryDocument` (PR 1e).
  */
-export async function attestQueueEntry(http: GitHubHttp, input: { repos: ReadonlySet<string>; owner: string; name: string; base: string; prNumber: number; baseSha: string; entrySha: string; ourLogin: () => Promise<string>; entryDocument?: string }): Promise<QueueEntryOutcome> {
+export async function attestQueueEntry(http: GitHubHttp, input: { repos: ReadonlySet<string>; owner: string; name: string; base: string; prNumber: number; baseSha: string; entrySha: string; ourLogin: () => Promise<string>; entryDocument?: string; attestHead?: (e: { prNumber: number; head: string }) => Promise<boolean> }): Promise<QueueEntryOutcome> {
   if (!gate1AttestEnabled(input.repos, input.owner, input.name)) return { kind: "off" };
   if (!SHA_PATTERN.test(input.entrySha) || !SHA_PATTERN.test(input.baseSha) || !Number.isSafeInteger(input.prNumber) || input.prNumber < 1) fail("malformed entry");
   const local: LocalGitHubHttp | null = isLocalGitHubHttp(http) ? http : null;
@@ -249,7 +249,10 @@ export async function attestQueueEntry(http: GitHubHttp, input: { repos: Readonl
     const groupOurs: Record<string, boolean> = {};
     for (const e of group) {
       if (!SHA_PATTERN.test(e.prHead)) fail("group head");
-      const who = await readGate1CreatorFor(http, { ...repo, sha: e.prHead }, login);
+      let who = await readGate1CreatorFor(http, { ...repo, sha: e.prHead }, login);
+      // A cloud item's head that never met the CI wait's attester (its round ended before the setting went on) is attested now; a head that is not a cloud
+      // item's (a team pull request ahead) is left to its own watcher. Only a posted or already-ours answer is read again.
+      if (!(who.ours && who.state === "SUCCESS") && input.attestHead !== undefined && (await input.attestHead({ prNumber: e.prNumber, head: e.prHead }))) who = await readGate1CreatorFor(http, { ...repo, sha: e.prHead }, login);
       groupOurs[e.prHead] = who.ours && who.state === "SUCCESS";
     }
     d = decideQueueEntry({ ...facts, groupOurs });

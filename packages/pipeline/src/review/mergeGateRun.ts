@@ -22,7 +22,7 @@ import { loadReviewContext, type ReviewContext } from "./context.js";
 import type { PublicPullRequest, PublicPullRequestLookup } from "./publicPullRequest.js";
 import { reviewPlanFor } from "./reviewPlan.js";
 import { securityTriggers } from "./securityTrigger.js";
-import { gate1AttestEnabled, GATE1_CONTEXT } from "./gate1Attest.js";
+import { attestGate1Head, gate1AttestEnabled, GATE1_CONTEXT } from "./gate1Attest.js";
 import { readGate1CreatorFor } from "./gate1Creator.js";
 
 /**
@@ -244,6 +244,12 @@ export async function readReviewJudgement(pool: Pool, optIn: LocalReviewOptInPor
 export interface Gate1StatusCheck {
   repos: ReadonlySet<string>;
   ourLogin: (repoId: string) => Promise<string>;
+  /**
+   * An item already in flight when the setting went on never met the review round's attester. With `attest: true` the gate attests the head it is about to
+   * judge when our success is not on it (the same attester, rules and writes the CI wait uses). Only for a code-repository client that holds the attester's
+   * fence entries (the order phase's, or a hosted one); the go phase's read-only client leaves it off.
+   */
+  attest?: boolean;
 }
 
 export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs; gate1Status?: Gate1StatusCheck };
@@ -339,14 +345,30 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
         ...mergePort,
         getCiSnapshot: async (ref, sha, opts) => {
           let snap = await ci.getCiSnapshot(ref, sha, opts);
+          const hasStatus = (x: typeof snap) => x.statuses.some((s) => s.context === GATE1_CONTEXT);
+          let loginRead: string | null = null;
+          const login = async () => (loginRead ??= await g1.ourLogin(ctx.repoId));
+          let who = hasStatus(snap) ? await readGate1CreatorFor(statusHttp, { ...code, sha }, await login()) : null;
+          // An item in flight before the setting went on never met the CI wait's attester: when our success is not on the head (none, or someone else's), the head
+          // is attested now (only a head the platform pushed), then GitHub is read again. A wait is the gate's own pending answer; a posted failure is the failure path.
+          let waiting = false;
+          if (g1.attest === true && !(who !== null && who.ours && who.state === "SUCCESS") && !publicPr.managedByPerson && publicPr.stampedHead === sha) {
+            const out = await attestGate1Head(statusHttp, { repos: g1.repos, ...code, number: publicPr.number, sha, ourLogin: login, readHead: async () => (await ci.getPullRequest(ref)).headSha });
+            if (out.kind === "posted" || out.kind === "already") {
+              snap = await ci.getCiSnapshot(ref, sha, opts);
+              who = hasStatus(snap) ? await readGate1CreatorFor(statusHttp, { ...code, sha }, await login()) : null;
+            } else if (out.kind !== "off") waiting = true;
+          }
           // Our App only ever posts fx-gate1 as a commit STATUS. A CHECK RUN of that name (any app, any state) is someone else's: it reads as a failed
           // run and the gate stops as foreign, whether or not a status of ours is also there.
           if (snap.checkRuns.some((c) => c.name === GATE1_CONTEXT)) {
             foreign();
             snap = { ...snap, checkRuns: snap.checkRuns.map((c) => (c.name === GATE1_CONTEXT ? { ...c, status: "completed", conclusion: "failure" } : c)) };
           }
-          if (!snap.statuses.some((s) => s.context === GATE1_CONTEXT)) return snap;
-          const who = await readGate1CreatorFor(statusHttp, { ...code, sha }, await g1.ourLogin(ctx.repoId));
+          // The attester said wait: ours is not on the head yet, so the gate waits on it (a pending fx-gate1, even where the branch does not list it as required)
+          // instead of stopping as foreign or passing for want of one.
+          if (waiting) return { ...snap, statuses: hasStatus(snap) ? snap.statuses.map((s) => (s.context === GATE1_CONTEXT ? { ...s, state: "pending" } : s)) : [...snap.statuses, { context: GATE1_CONTEXT, state: "pending" }], ...(hasStatus(snap) ? {} : { statusesTotalCount: snap.statusesTotalCount + 1 }) };
+          if (who === null) return snap;
           if (who.ours && who.state === "SUCCESS") return snap;
           if (!who.ours) foreign();
           return { ...snap, statuses: snap.statuses.map((s) => (s.context === GATE1_CONTEXT ? { ...s, state: "failure" } : s)) };

@@ -45,7 +45,7 @@ function world(o: { runs?: FakeCheckRun[]; heads?: Record<string, { state?: stri
   const run = (over: Partial<Parameters<typeof attestQueueEntry>[1]> = {}) =>
     attestQueueEntry(fake.http, { repos: new Set(["acme/widgets-public"]), owner: "acme", name: "widgets-public", base: "main", prNumber: 12, baseSha: BASE12, entrySha: E12, ourLogin: async () => "fx-cloud-app[bot]", ...over });
   const posts = () => s.posts.filter((p) => p.sha === E12);
-  return { s, fake, run, posts };
+  return { s, g1, fake, run, posts };
 }
 
 describe("decideQueueEntry (pure)", () => {
@@ -192,5 +192,73 @@ describe("attestQueueEntry", () => {
     // A group head GitHub does not know answers object: null.
     await expect(t.run()).rejects.toThrow();
     expect(t.s.posts).toEqual([]);
+  });
+});
+
+describe("attestQueueEntry: a cloud item's group head that never met the head attester (its review round ended before the setting went on)", () => {
+  const FOREIGN = { creator: { __typename: "User", login: "autonomous-agent-7" } };
+  /** The stub stands for the web wake's head attester: it posts OURS on the head the way the real one does, and answers whether it posted (or found ours). */
+  function attesting(t: ReturnType<typeof world>, answers: Record<number, boolean>) {
+    const asked: Array<{ prNumber: number; head: string }> = [];
+    const attestHead = async (e: { prNumber: number; head: string }) => {
+      asked.push(e);
+      if (answers[e.prNumber] === true) {
+        t.s.statuses[e.head] = { "fx-gate1": "success" };
+        t.g1.creators[e.head] = OURS;
+      }
+      return answers[e.prNumber] === true;
+    };
+    return { asked, attestHead };
+  }
+
+  it("a head with only a foreign fx-gate1 is attested first, then the entry is posted; a head that is already ours is never asked about", async () => {
+    const t = world({ heads: { [H11]: FOREIGN, [H12]: {}, [H13]: null } });
+    const a = attesting(t, { 11: true });
+    expect(await t.run({ attestHead: a.attestHead })).toEqual({ kind: "posted", state: "success" });
+    expect(a.asked).toEqual([{ prNumber: 11, head: H11 }]);
+    expect(t.posts()).toEqual([{ sha: E12, body: { state: "success", context: "fx-gate1", description: GATE1_DESCRIPTIONS.success } }]);
+    expect(t.fake.denied).toEqual([]);
+    expect(t.fake.refused).toEqual([]);
+  });
+
+  it("a head with no fx-gate1 at all (the entry's own, say) is attested the same way", async () => {
+    const t = world({ heads: { [H11]: {}, [H12]: null, [H13]: null } });
+    const a = attesting(t, { 12: true });
+    expect(await t.run({ attestHead: a.attestHead })).toEqual({ kind: "posted", state: "success" });
+    expect(a.asked).toEqual([{ prNumber: 12, head: H12 }]);
+  });
+
+  it("a team pull request ahead (not a cloud item: the attester answers false) still waits and nothing is posted; the entry behind is never asked", async () => {
+    const t = world({ heads: { [H11]: FOREIGN, [H12]: {}, [H13]: null } });
+    const a = attesting(t, {});
+    expect(await t.run({ attestHead: a.attestHead })).toEqual({ kind: "wait", reason: "group_head_unattested" });
+    expect(a.asked).toEqual([{ prNumber: 11, head: H11 }]);
+    expect(t.s.posts).toEqual([]);
+  });
+
+  it("an attester that claims success but left the head not ours is not believed: the head is read again, the entry waits", async () => {
+    const t = world({ heads: { [H11]: FOREIGN, [H12]: {}, [H13]: null } });
+    expect(await t.run({ attestHead: async () => true })).toEqual({ kind: "wait", reason: "group_head_unattested" });
+    expect(t.s.posts).toEqual([]);
+  });
+
+  it("no attester given: as before (wait); red or still-running entry runs never ask the attester; an attester that throws posts nothing", async () => {
+    const heads = { [H11]: FOREIGN, [H12]: {}, [H13]: null };
+    expect(await world({ heads }).run()).toEqual({ kind: "wait", reason: "group_head_unattested" });
+    const red = green();
+    red[2] = { ...red[2]!, conclusion: "failure" };
+    const t = world({ heads, runs: red });
+    const a = attesting(t, { 11: true });
+    expect(await t.run({ attestHead: a.attestHead })).toEqual({ kind: "posted", state: "failure", reason: "ci_red" });
+    expect(a.asked).toEqual([]);
+    const running = green();
+    running[0] = { ...running[0]!, status: "in_progress", conclusion: null };
+    const r = world({ heads, runs: running });
+    const b = attesting(r, { 11: true });
+    expect(await r.run({ attestHead: b.attestHead })).toEqual({ kind: "wait", reason: "check_running" });
+    expect(b.asked).toEqual([]);
+    const boom = world({ heads });
+    await expect(boom.run({ attestHead: async () => Promise.reject(new Error("no installation")) })).rejects.toThrow(/no installation/);
+    expect(boom.s.posts).toEqual([]);
   });
 });

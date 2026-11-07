@@ -7,6 +7,7 @@ import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { applyQueueEvent } from "../../src/mergeQueue/index.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { runMergeGateForItem, type Gate1StatusCheck } from "../../src/review/mergeGateRun.js";
+import { ACTIONS_APP_ID, GATE1_DESCRIPTIONS, GATE1_WORKFLOW_CONTEXTS } from "../../src/review/gate1Attest.js";
 import { gate1World } from "./helpers/fakeGitHubLocal.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
@@ -829,6 +830,113 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1e: a hosted cloud item counts fx-gate1 on
       expect(await t.run(g)).toMatchObject({ outcome: "merged" });
       expect(t.creatorReads()).toBe(0);
     }
+  });
+
+  describe("an item in flight when the setting went on: the gate attests the head it is about to judge when our success is missing", () => {
+    const T = "2026-11-07T10:00:00Z";
+    const AFTER = "2026-11-07T10:05:00Z";
+    const ATTEST: Gate1StatusCheck = { ...LISTED, attest: true };
+    const actions = (startedAt: string, conclusion: string | null = "success") => GATE1_WORKFLOW_CONTEXTS.map((name) => ({ name, status: "completed", conclusion, startedAt, app: { id: ACTIONS_APP_ID } }));
+    /** The public head: a team-posted (or no) fx-gate1, the five Actions contexts as given, and `ci:full` labelled at T or not at all. */
+    async function inFlight(o: { creator?: { __typename: string; login: string } | null; runs?: ReturnType<typeof actions>; labeled?: boolean } = {}) {
+      const w = await world({ pubChecks: { [PUB_HEAD]: o.runs ?? actions(AFTER) } });
+      const creator = o.creator === undefined ? AGENT : o.creator;
+      if (creator !== null) w.pub.statuses[PUB_HEAD] = { "fx-gate1": "success" };
+      const g1 = gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator }, ...(o.labeled === false ? {} : { labels: ["ci:full"], labelEvents: [{ event: "labeled" as const, label: "ci:full", createdAt: T }] }) });
+      const run = (gate1Status?: Gate1StatusCheck) =>
+        runMergeGateForItem(
+          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, ...(gate1Status ? { gate1Status } : {}) },
+          { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+        );
+      const attesterReads = () => w.pub.requests.filter((r) => r.path.endsWith("/events") || r.path.endsWith(`/pulls/${PUB_PR}/files`)).length;
+      return { w, g1, run, attesterReads };
+    }
+    const gate1Posts = (w: World) => w.pub.posts.filter((p) => p.sha === PUB_HEAD && (p.body as { context?: string }).context === "fx-gate1").map((p) => p.body);
+
+    it("only a foreign fx-gate1 (a person's, a token's): ours is posted, the status is read again, and the item merges", async () => {
+      const t = await inFlight();
+      expect(await t.run(ATTEST)).toMatchObject({ outcome: "merged", headSha: PUB_HEAD });
+      expect(gate1Posts(t.w)).toEqual([{ state: "success", context: "fx-gate1", description: GATE1_DESCRIPTIONS.success }]);
+      expect(t.w.pub.merges).toEqual([{ sha: PUB_HEAD, method: "squash" }]);
+      expect(t.g1.labelAdds).toBe(0);
+    });
+
+    it("no fx-gate1 on the head at all: attested the same way, then merged", async () => {
+      const t = await inFlight({ creator: null });
+      expect(await t.run(ATTEST)).toMatchObject({ outcome: "merged" });
+      expect(gate1Posts(t.w)).toHaveLength(1);
+    });
+
+    it("the attester says wait (no ci:full yet: the label is added): the gate waits, nothing is posted, nothing is merged, and it is not read as foreign", async () => {
+      for (const creator of [AGENT, null]) {
+        const t = await inFlight({ creator, labeled: false });
+        const out = await t.run(ATTEST);
+        expect(out.outcome, String(creator?.login)).toBe("ready_human_merges");
+        expect(reasonsOf(out)).toContain("ci_not_green");
+        expect(reasonsOf(out)).not.toContain("gate1_status_foreign");
+        expect(t.g1.labelAdds).toBe(1);
+        expect(gate1Posts(t.w)).toEqual([]);
+        expect(t.w.pub.merges).toEqual([]);
+      }
+    });
+
+    it("a run that started before the label, or one still running: wait, nothing posted, nothing merged", async () => {
+      const running = actions(AFTER).map((c, i) => (i === 2 ? { ...c, status: "in_progress", conclusion: null } : c));
+      for (const runs of [actions("2026-11-07T09:55:00Z"), running]) {
+        const t = await inFlight({ runs });
+        expect((await t.run(ATTEST)).outcome).toBe("ready_human_merges");
+        expect(gate1Posts(t.w)).toEqual([]);
+        expect(t.w.pub.merges).toEqual([]);
+      }
+    });
+
+    it("a red full run: the attester posts failure, the gate takes the failure path, nothing is merged", async () => {
+      const t = await inFlight({ runs: actions(AFTER, "failure") });
+      const out = await t.run(ATTEST);
+      expect(out.outcome).toBe("ready_human_merges");
+      expect(reasonsOf(out)).toContain("ci_not_green");
+      expect(gate1Posts(t.w)).toEqual([{ state: "failure", context: "fx-gate1", description: GATE1_DESCRIPTIONS.failure.ci_red }]);
+      expect(t.w.pub.merges).toEqual([]);
+    });
+
+    it("a change to CI files is refused before any label: failure posted, nothing merged", async () => {
+      const t = await inFlight({ labeled: false });
+      t.w.pub.files = [{ filename: ".github/workflows/ci.yml", status: "modified", sha: BLOB, patch: "@@ -1 +1 @@\n+x", changes: 1 }];
+      expect((await t.run(ATTEST)).outcome).toBe("ready_human_merges");
+      expect(t.g1.labelAdds).toBe(0);
+      expect(gate1Posts(t.w)).toEqual([{ state: "failure", context: "fx-gate1", description: GATE1_DESCRIPTIONS.failure.ci_paths }]);
+      expect(t.w.pub.merges).toEqual([]);
+    });
+
+    it("our success already on the head: no attester read at all; unlisted repository, or the flag off (the go phase's read-only form): zero attester calls, as before", async () => {
+      const ours = await inFlight({ creator: OURS });
+      expect(await ours.run(ATTEST)).toMatchObject({ outcome: "merged" });
+      expect(ours.attesterReads()).toBe(0);
+      expect(gate1Posts(ours.w)).toEqual([]);
+      for (const g of [{ repos: new Set(["acme/other"]), ourLogin: LISTED.ourLogin, attest: true }, { repos: new Set<string>(), ourLogin: LISTED.ourLogin, attest: true }, LISTED, undefined]) {
+        const t = await inFlight();
+        const out = await t.run(g);
+        expect(t.attesterReads()).toBe(0);
+        expect(gate1Posts(t.w)).toEqual([]);
+        expect(t.g1.labelAdds).toBe(0);
+        // Listed without the flag: the foreign status still stops; otherwise the gate is as before.
+        if (g === LISTED) expect(reasonsOf(out)).toContain("gate1_status_foreign");
+      }
+    });
+
+    it("a head the platform did not stamp, or a person's branch, is never attested", async () => {
+      for (const o of [{ stamp: "e".repeat(40) }, { managed: true }]) {
+        const w = await world({ ...o, pubChecks: { [PUB_HEAD]: actions(AFTER) } });
+        w.pub.statuses[PUB_HEAD] = { "fx-gate1": "success" };
+        const g1 = gate1World({ creators: { [PUB_HEAD]: AGENT }, labels: ["ci:full"], labelEvents: [{ event: "labeled" as const, label: "ci:full", createdAt: T }] });
+        await runMergeGateForItem(
+          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, gate1Status: ATTEST },
+          { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+        );
+        expect(gate1Posts(w)).toEqual([]);
+        expect(w.pub.merges).toEqual([]);
+      }
+    });
   });
 
   it("no fx-gate1 on the head: no creator read; an unreadable read is a throw, never green", async () => {
