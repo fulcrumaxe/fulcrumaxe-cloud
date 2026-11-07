@@ -170,6 +170,28 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
       await exercise(d.openPublicHttp, plain);
     });
 
+    it("D#6 CLOUD-POSTS-FX-GATE1: FX_GATE1_ATTEST_REPOS reaches the CI wait (unset: an empty list, off); a malformed value stops the build of the deps", async () => {
+      mocks.recordRound.mockResolvedValue({ decision: "ci_pending", round: 0, recorded: [] });
+      mocks.createCiGate.mockImplementation((d: unknown) => ({ gate: true, d }));
+      const { pool } = fakePool(false);
+      const input = { accountId: ACCOUNT, workItemId: ITEM, headSha: "a".repeat(40), prNumber: 7, requiredRoles: [], verdicts: [] } as never;
+      const repos = () => [...(mocks.recordRound.mock.calls.at(-1)![3] as { d: { gate1: { repos: Set<string> } } }).d.gate1.repos];
+      const before = process.env.FX_GATE1_ATTEST_REPOS;
+      try {
+        delete process.env.FX_GATE1_ATTEST_REPOS;
+        await createReviewDeps(async () => ({}) as never).recordRound(pool, {} as never, input);
+        expect(repos()).toEqual([]);
+        process.env.FX_GATE1_ATTEST_REPOS = "fulcrumaxe/fulcrumaxe-cloud";
+        await createReviewDeps(async () => ({}) as never).recordRound(pool, {} as never, input);
+        expect(repos()).toEqual(["fulcrumaxe/fulcrumaxe-cloud"]);
+        process.env.FX_GATE1_ATTEST_REPOS = "fulcrumaxe";
+        expect(() => createReviewDeps(async () => ({}) as never)).toThrow(/FX_GATE1_ATTEST_REPOS/);
+      } finally {
+        if (before === undefined) delete process.env.FX_GATE1_ATTEST_REPOS;
+        else process.env.FX_GATE1_ATTEST_REPOS = before;
+      }
+    });
+
     it("D#6 CLOUD-POSTS-FX-GATE1 PR 0: the code repository's client also holds the fx-gate1 entries; the item's own client does not", async () => {
       mocks.recordRound.mockResolvedValue({ decision: "ci_pending", round: 0, recorded: [] });
       mocks.createCiGate.mockImplementation((d: unknown) => ({ gate: true, d }));

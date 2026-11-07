@@ -209,7 +209,7 @@ export function toCode(text: string): string {
 
 /** The prefix of a `ci_wait_timeout` stop reason that names a required check that never reported (`missing_fx_gate1`). */
 export const CI_MISSING_PREFIX = 'missing_';
-const CI_WAIT_WORDS: ReadonlySet<string> = new Set(['wrong_head', 'incomplete_snapshot', 'check_running', 'status_pending', 'required_missing']);
+const CI_WAIT_WORDS: ReadonlySet<string> = new Set(['wrong_head', 'incomplete_snapshot', 'check_running', 'status_pending', 'required_missing', 'gate1_waiting', 'gate1_attest_off']);
 
 /**
  * The `reasons` of a `ci_wait_timeout` stop: the wait's fixed reason words, then one `missing_<check name as a code>` per required check that never reported

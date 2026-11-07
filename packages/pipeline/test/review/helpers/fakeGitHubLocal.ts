@@ -1,4 +1,4 @@
-import { GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubRequest, type GithubResponse } from "@fx/runner-cloud";
+import { GATE1_ATTEST_DOCUMENTS, GATE1_STATUS_DOCUMENTS, GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubRequest, type GithubResponse } from "@fx/runner-cloud";
 import type { LocalGitHubHttp } from "../../../src/build/githubMergePort.js";
 import { defaultGhId, type FakeRepoState } from "./fakeGitHubRest.js";
 
@@ -61,7 +61,39 @@ export interface LocalFake {
   answers: unknown[];
 }
 
-export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[]; queue?: QueueState; transport?: (inner: GithubClient) => GithubClient } = {}): LocalFake {
+/**
+ * D#6 CLOUD-POSTS-FX-GATE1: the code repository's side the attester reads (A14 to A17), on the review round's client (`gate1Attest`). Given, the fence is
+ * built with `gate1Attest: true`. GitHub's shapes: a label add answers 200 with the labels and adds a `labeled` event only when the label was not on;
+ * events come oldest first, paged backwards (`last`/`before`); check runs carry `startedAt` and upper-case enums, status contexts in the rollup arrive as a
+ * bare `__typename` (the document selects nothing of them); `Status.context(name:)` is the newest status of that context, and GraphQL names an App's bot
+ * by its slug without `[bot]`, typed `Bot`. Not faithful: GitHub's own ordering of same-second events, and permissions (probe 6 checks those).
+ */
+export interface Gate1World {
+  labels: string[];
+  labelEvents: Array<{ event: "labeled" | "unlabeled"; label: string; createdAt: string }>;
+  /** The time a label add is stamped with. */
+  now: string;
+  appSlug: string;
+  /** Who posted `fx-gate1` on a sha. A post through this fake is our App's bot. */
+  creators: Record<string, { __typename: string; login: string }>;
+  labelAdds: number;
+}
+export const gate1World = (over: Partial<Gate1World> = {}): Gate1World => ({ labels: [], labelEvents: [], now: "2026-11-07T10:00:00Z", appSlug: "fx-cloud-app", creators: {}, labelAdds: 0, ...over });
+const G1_DOCS: Record<string, string> = { ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS };
+const page = <T>(all: T[], cursor: unknown, back: boolean) => {
+  const n = all.length;
+  if (back) {
+    const end = typeof cursor === "string" ? Number(Buffer.from(cursor, "base64url").toString()) : n;
+    const start = Math.max(0, end - FILES_PAGE);
+    return { nodes: all.slice(start, end), pageInfo: { hasPreviousPage: start > 0, startCursor: start > 0 ? Buffer.from(String(start)).toString("base64url") : null } };
+  }
+  const start = typeof cursor === "string" ? Number(Buffer.from(cursor, "base64url").toString()) : 0;
+  const end = Math.min(n, start + FILES_PAGE);
+  return { nodes: all.slice(start, end), pageInfo: { hasNextPage: end < n, endCursor: end < n ? Buffer.from(String(end)).toString("base64url") : null } };
+};
+
+export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[]; queue?: QueueState; transport?: (inner: GithubClient) => GithubClient; gate1?: Gate1World } = {}): LocalFake {
+  const g1 = opts.gate1;
   const base = `/repos/${s.owner}/${s.name}`;
   const branch = s.runBranch ?? "fx/run-g1";
   const calls: LocalFake["calls"] = [];
@@ -111,11 +143,13 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
     if (!SHA40.test(sha)) return json(404, { message: `No commit found for SHA: ${sha}` });
     const b = (body ?? {}) as Record<string, unknown>;
     if (Object.keys(b).sort().join(",") !== "context,description,state") deny("A7 body keys");
-    if (b.context !== "fulcrumaxe/review") deny("A7 context");
+    // D#6 CLOUD-POSTS-FX-GATE1: `fx-gate1` only with a gate1 world (the attester's client), only on a full 40-hex sha, and the poster is our App's bot.
+    if (b.context !== "fulcrumaxe/review" && !(b.context === "fx-gate1" && g1 !== undefined)) deny("A7 context");
     if (!STATES.includes(b.state as string) || typeof b.description !== "string" || b.description.length > 140) return json(422, { message: "Validation Failed" });
     if (s.statusPostFails) return json(s.statusPostFails, { message: "Server Error" });
     s.posts.push({ sha, body: b });
     (s.statuses[sha] ??= {})[b.context as string] = b.state as string;
+    if (b.context === "fx-gate1" && g1 !== undefined) g1.creators[sha] = { __typename: "Bot", login: g1.appSlug };
     return json(201, { state: b.state, context: b.context });
   }
 
@@ -138,6 +172,35 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
     if (typeof body !== "object" || body === null || Object.keys(b).sort().join(",") !== "query,variables") deny("graphql body keys");
     const queueOp = Object.keys(QUEUE_DOCS).find((k) => QUEUE_DOCS[k] === b.query);
     const v = b.variables ?? {};
+    const g1Op = Object.keys(G1_DOCS).find((k) => G1_DOCS[k] === b.query);
+    if (g1Op !== undefined) {
+      if (g1 === undefined) deny(`graphql document ${g1Op} without a gate1 world`);
+      const w = g1!;
+      const label = g1Op === "Gate1CheckRuns" ? "A15" : g1Op === "Gate1LabelEvents" ? "A16" : "A17";
+      return {
+        label,
+        op: g1Op,
+        reply: () => {
+          if (v.owner !== s.owner || v.name !== s.name) return json(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository." }] });
+          if (g1Op === "Gate1LabelEvents") {
+            if (v.number !== s.prNumber) return json(200, { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a PullRequest." }] });
+            const all = w.labelEvents.map((e) => ({ __typename: e.event === "labeled" ? "LabeledEvent" : "UnlabeledEvent", createdAt: e.createdAt, label: { name: e.label } }));
+            return json(200, { data: { repository: { pullRequest: { timelineItems: { totalCount: all.length, ...page(all, v.cursor, true) } } } } });
+          }
+          const sha = v.sha as string;
+          // An unknown oid is `object: null`, as GitHub answers.
+          if (sha !== s.headSha && s.checks[sha] === undefined && s.statuses[sha] === undefined) return json(200, { data: { repository: { object: null } } });
+          if (g1Op === "Gate1Status") {
+            const state = s.statuses[sha]?.["fx-gate1"];
+            const creator = w.creators[sha] ?? null;
+            return json(200, { data: { repository: { object: { oid: sha, status: s.statuses[sha] === undefined ? null : { context: state === undefined ? null : { state: state.toUpperCase(), creator } } } } } });
+          }
+          const runs = (s.checks[sha] ?? []).map((c) => ({ __typename: "CheckRun", name: c.name, status: c.status.toUpperCase(), conclusion: c.conclusion === null ? null : c.conclusion.toUpperCase(), startedAt: c.startedAt ?? "2026-11-07T09:00:00Z", checkSuite: { app: c.app === null ? null : { databaseId: c.app?.id ?? 1 } } }));
+          const all = [...runs, ...Object.keys(s.statuses[sha] ?? {}).map(() => ({ __typename: "StatusContext" }))];
+          return json(200, { data: { repository: { object: { oid: sha, statusCheckRollup: all.length === 0 ? null : { contexts: { totalCount: all.length, ...page(all, v.cursor, false) } } } } } });
+        },
+      };
+    }
     if (queueOp !== undefined) {
       const q = opts.queue ?? { graphql: false, rules: false };
       return {
@@ -229,6 +292,18 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
         if (Object.keys(query).length > 0) deny("A10 query");
         label = "A10";
         reply = () => mergePull(req.body);
+      } else if (g1 !== undefined && method === "POST" && path === `${base}/issues/${s.prNumber}/labels`) {
+        // A14: exactly ci:full, added (never replaced): GitHub answers 200 with every label now on the pull request.
+        if (Object.keys(query).length > 0 || JSON.stringify(req.body) !== JSON.stringify({ labels: ["ci:full"] })) deny("A14 body or query");
+        label = "A14";
+        reply = () => {
+          g1.labelAdds += 1;
+          if (!g1.labels.includes("ci:full")) {
+            g1.labels.push("ci:full");
+            g1.labelEvents.push({ event: "labeled", label: "ci:full", createdAt: g1.now });
+          }
+          return json(200, g1.labels.map((name) => ({ name })));
+        };
       } else {
         return deny(`${method} ${path}`);
       }
@@ -239,7 +314,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
     },
   };
 
-  const fenced = localOnlyGithub(opts.transport ? opts.transport(inner) : inner, opts.exclude === undefined ? {} : { exclude: opts.exclude });
+  const fenced = localOnlyGithub(opts.transport ? opts.transport(inner) : inner, { ...(opts.exclude === undefined ? {} : { exclude: opts.exclude }), ...(g1 !== undefined ? { gate1Attest: true } : {}) });
   const note = (e: unknown): never => {
     if (e instanceof LocalOnlyGithubError) refused.push(e.rule);
     throw e;

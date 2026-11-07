@@ -2,7 +2,8 @@ import type { Pool } from "pg";
 import type { PublicPullRequestLookup } from "./publicPullRequest.js";
 import type { CiSnapshot } from "../build/mergeGate.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
-import type { GitHubHttp } from "../build/githubMergePort.js";
+import { isLocalGitHubHttp, type GitHubHttp } from "../build/githubMergePort.js";
+import { attestGate1Head, GATE1_CONTEXT } from "./gate1Attest.js";
 import { loadReviewContext } from "./context.js";
 import { REVIEW_STATUS_CONTEXT } from "./githubReads.js";
 import { createReviewGitHubPort } from "./mergeGateRun.js";
@@ -33,7 +34,11 @@ import { createReviewGitHubPort } from "./mergeGateRun.js";
  * A commit with no check and no status at all, and no required context, has no CI to wait for.
  */
 
-export type CiWaitReason = "wrong_head" | "incomplete_snapshot" | "check_running" | "status_pending" | "required_missing";
+/**
+ * `gate1_waiting` and `gate1_attest_off` (D#6 CLOUD-POSTS-FX-GATE1) only ever follow `required_missing` when `fx-gate1` is the one context missing on a
+ * paired item's public head: the cloud's attester is waiting for a full CI run, or the attester is off (`FX_GATE1_ATTEST_REPOS` unset).
+ */
+export type CiWaitReason = "wrong_head" | "incomplete_snapshot" | "check_running" | "status_pending" | "required_missing" | "gate1_waiting" | "gate1_attest_off";
 
 export interface CiWaitReading {
   /** `head_moved`: the pull request's head is no longer the reviewed one (only when the snapshot follows the PR). Nothing is recorded. */
@@ -47,7 +52,7 @@ export interface CiWaitReading {
 const MAX_MISSING_NAMES = 5;
 const MAX_NAME_LENGTH = 100;
 
-const REASON_ORDER: readonly CiWaitReason[] = ["wrong_head", "incomplete_snapshot", "check_running", "status_pending", "required_missing"];
+const REASON_ORDER: readonly CiWaitReason[] = ["wrong_head", "incomplete_snapshot", "check_running", "status_pending", "required_missing", "gate1_waiting", "gate1_attest_off"];
 
 /** Commit status states that are final. Any other state (pending, expected, one GitHub adds later) is still running. */
 const FINISHED_STATUS_STATES: ReadonlySet<string> = new Set(["success", "failure", "error"]);
@@ -93,6 +98,20 @@ export function readCiWait(snapshot: CiSnapshot, headSha: string, opts: { follow
   return { state: list.length === 0 ? "settled" : "pending", reasons: list };
 }
 
+/** The required contexts (our own review status left out) that have not appeared on the commit, in the snapshot's order. Unknown requirements: none. Pure. */
+export function missingRequired(snapshot: CiSnapshot): string[] {
+  if (snapshot.protectionUnreadable === true || !Array.isArray(snapshot.requiredContexts)) return [];
+  const checkRuns = Array.isArray(snapshot.checkRuns) ? snapshot.checkRuns : [];
+  const statuses = Array.isArray(snapshot.statuses) ? snapshot.statuses : [];
+  return snapshot.requiredContexts.filter((ctx) => ctx !== REVIEW_STATUS_CONTEXT && !checkRuns.some((c) => c.name === ctx) && !statuses.some((s) => s.context === ctx));
+}
+
+/** Whether the only thing the wait is for is `fx-gate1`: the one reason `required_missing`, and `fx-gate1` the one missing context. Pure. */
+export function onlyGate1Missing(reading: CiWaitReading, snapshot: CiSnapshot): boolean {
+  const missing = missingRequired(snapshot);
+  return reading.state === "pending" && reading.reasons.length === 1 && reading.reasons[0] === "required_missing" && missing.length === 1 && missing[0] === GATE1_CONTEXT;
+}
+
 /** What `recordRound` asks before it records anything. A throw is not an answer: the caller's step retries, and nothing is recorded. */
 export interface CiGate {
   read(input: { accountId: string; workItemId: string; prNumber: number; headSha: string }): Promise<CiWaitReading>;
@@ -119,6 +138,11 @@ export function createCiGate(deps: {
   openPublicHttp?: (ctx: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<GitHubHttp>;
   /** Finds the item's public pull request (see publicPullRequest.ts). Both this and `openPublicHttp` must be given for the public read. */
   publicPullRequest?: PublicPullRequestLookup;
+  /**
+   * D#6 CLOUD-POSTS-FX-GATE1: the cloud's own `fx-gate1` for a paired item's public head. `repos` is `FX_GATE1_ATTEST_REPOS` (empty: off); `ourLogin` is the
+   * login of the App that serves the item's repository. Only a runner_local pair's fenced code-repository client attests; every other read is as before.
+   */
+  gate1?: { repos: ReadonlySet<string>; ourLogin: (repoId: string) => Promise<string> };
 }): CiGate {
   return {
     async read(input) {
@@ -137,7 +161,19 @@ export function createCiGate(deps: {
         if (!SHA_PATTERN.test(live)) throw new Error("ci wait: malformed public head sha");
         // No stamp, or a republish in flight (the stamp may still equal the live head): wait before any checks read.
         if (!publicPr.managedByPerson && (publicPr.stampedHead === null || publicPr.pushState === "updating" || publicPr.pushState === "waiting_person_pushed")) return { state: "pending", reasons: ["wrong_head"] };
-        const reading = readCiWaitNamed(await port.getCiSnapshot(ref, live), live);
+        const snapshot = await port.getCiSnapshot(ref, live);
+        let reading = readCiWaitNamed(snapshot, live);
+        // D#6 CLOUD-POSTS-FX-GATE1: only a head the platform pushed, with `fx-gate1` the one thing missing, is attested; after a post GitHub is read again.
+        if (onlyGate1Missing(reading, snapshot) && !publicPr.managedByPerson && publicPr.stampedHead === live) {
+          const gate1 = deps.gate1;
+          if (gate1 === undefined || gate1.repos.size === 0) {
+            reading = { ...reading, state: "pending", reasons: [...reading.reasons, "gate1_attest_off"] };
+          } else if (isLocalGitHubHttp(http)) {
+            const out = await attestGate1Head(http, { repos: gate1.repos, owner: publicPr.owner, name: publicPr.name, number: publicPr.number, sha: live, ourLogin: () => gate1.ourLogin(ctx.repoId), readHead: async () => (await port.getPullRequest(ref)).headSha });
+            if (out.kind === "posted" || out.kind === "already") reading = readCiWaitNamed(await port.getCiSnapshot(ref, live), live);
+            else if (out.kind !== "off") reading = { ...reading, state: "pending", reasons: [...reading.reasons, "gate1_waiting"] };
+          }
+        }
         if (reading.state === "settled" && !publicPr.managedByPerson && publicPr.stampedHead !== live) return { state: "pending", reasons: ["wrong_head"] };
         return reading;
       }

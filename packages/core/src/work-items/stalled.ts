@@ -135,6 +135,8 @@ const CI_WAIT_REASON_WORDS: Readonly<Record<string, string>> = Object.freeze({
   incomplete_snapshot: "GitHub's list of checks was incomplete",
   check_running: 'a check was still running',
   status_pending: 'a status was still pending',
+  gate1_waiting: "the cloud's Gate 1 was still waiting for a full CI run",
+  gate1_attest_off: "the cloud's Gate 1 is turned off for this repository",
 });
 
 /** The card's words for a `ci_wait_timeout` stop: what was still missing, from the fixed reason words and the `missing_<check>` names the stop carries. Pure. */

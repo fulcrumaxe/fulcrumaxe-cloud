@@ -43,6 +43,8 @@ export interface ChangedFile {
   path: string;
   /** The file's previous path when it was renamed. */
   previousPath?: string | null;
+  /** Renamed, but the previous path is not known (the paths-only read of a `runner_local` repository). */
+  previousPathUnknown?: boolean;
   /** The unified diff of the file; GitHub omits it for a binary file and for a diff it will not show. */
   patch?: string | null;
   /** Lines added plus lines removed, as GitHub counts them. */

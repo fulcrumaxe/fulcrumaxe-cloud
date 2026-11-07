@@ -43,6 +43,15 @@ describe('the card words for a ci_wait_timeout stop', () => {
     expect(ciWaitTimeoutWords(['required_missing'])).toContain('a required check never reported');
   });
 
+  it.each([
+    ['gate1_waiting', "the cloud's Gate 1 was still waiting for a full CI run"],
+    ['gate1_attest_off', "the cloud's Gate 1 is turned off for this repository"],
+  ])('the Gate 1 reason %s is kept on the stop and named on the card', (code, words) => {
+    const reasons = ciWaitStopReasons(['required_missing', code], ['fx-gate1']);
+    expect(reasons).toEqual(['required_missing', code, 'missing_fx_gate1']);
+    expect(ciWaitTimeoutWords(reasons)).toContain(`${words} and the required check fx_gate1 never reported`);
+  });
+
   it('a stop with no reasons keeps the plain sentence', () => {
     expect(classifyStall(stopped([]))!.why).toBe(STOP_WORDS.ci_wait_timeout);
   });
