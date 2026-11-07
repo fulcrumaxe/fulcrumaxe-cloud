@@ -102,14 +102,17 @@ const FAILED_FILE = /(?:^|[\s:])(?:FAIL {1,3}(?:\|[^|\s]+\|\s+)?|FAILED +)(\S+?\
 /** How many failed test files, and how many bytes of their names, the summary names. */
 const FAILED_FILES_MAX = 40;
 const FAILED_FILES_BYTES = 1500;
+/** How many names past `FAILED_FILES_MAX` are kept only to recognise a repeat, so `more` counts different files rather than prints. Bounded: past this cap a repeat may be counted again, as the deliberate bound. */
+const FAILED_FILES_COUNTED = 1000;
 
 /**
  * Picks the failed test files out of the whole output of a check, line by line as it arrives (the summary keeps only the end of the output, and a long run's failures
  * are printed far above it). Closed shape: only a plain relative file name (`NAMED_FILE`, the workspace prefix removed first) is ever kept, first-seen order, at most
- * `FAILED_FILES_MAX` of them; the rest are counted.
+ * `FAILED_FILES_MAX` of them; the rest are counted. Memory stays bounded at `FAILED_FILES_MAX + FAILED_FILES_COUNTED` names; no output line is ever stored.
  */
 export function createFailedFiles(workspace: string): { line: (text: string) => void; summary: () => string; list: () => { files: string[]; more: number } } {
   const seen = new Set<string>();
+  const countedPast = new Set<string>();
   let more = 0;
   return {
     line(text) {
@@ -117,9 +120,13 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
       if (match === null) return;
       let file = match[1] ?? "";
       if (file.startsWith(`${workspace}/`)) file = file.slice(workspace.length + 1);
-      if (!NAMED_FILE.test(file) || seen.has(file)) return;
-      if (seen.size < FAILED_FILES_MAX) seen.add(file);
-      else more += 1;
+      if (!NAMED_FILE.test(file) || seen.has(file) || countedPast.has(file)) return;
+      if (seen.size < FAILED_FILES_MAX) {
+        seen.add(file);
+        return;
+      }
+      more += 1;
+      if (countedPast.size < FAILED_FILES_COUNTED) countedPast.add(file);
     },
     /**
      * D#6 CHECK-FAILFILES-TO-CLOUD: the names for `done`'s `check.failed_files`: the first 20 that are plain repo-relative paths of at most 200 characters and carry no credential shape (`normalised` refuses an
