@@ -83,6 +83,7 @@ async function mockApi(page: Page): Promise<Mock> {
     if (p === "/api/v1/work-items") return send(route, { status: 200, json: { data: [{ ...LIST.data[0], stage: "in_progress" }], next_cursor: null } });
     if (p === "/api/v1/repos") return send(route, { status: 200, json: REPOS });
     if (p.endsWith("/timeline")) return send(route, { status: 200, json: TIMELINE });
+    if (p.endsWith("/corrections")) return send(route, { status: 200, json: { data: [] } });
     if (p === "/api/v1/runs") return send(route, { status: 200, json: mock.runs });
     if (p.endsWith("/roles")) return send(route, mock.roles);
     if (p.startsWith("/api/v1/run-actions/")) return send(route, mock.action);

@@ -11,7 +11,12 @@ export interface CorrectionHistoryEntry {
   createdByName: string;
   /** Null while the correction is still proposed. */
   decidedByName: string | null;
-  /** "<name> via assistant" when an assistant proposed it or an assistant's token decided it, else the name; null while proposed. Derived on every read. */
+  /**
+   * Names the decider and says whether the assistant proposed it; null while proposed. `superseded` reads
+   * "replaced by a later correction" with no name. For origin `person`, "via assistant" appears only when
+   * `decidedVia` is `'terminal'`; for origin `agent`, `decidedVia` is ignored and the string instead leads with
+   * "assistant proposed, ...". Derived on every read.
+   */
   attribution: string | null;
 }
 
@@ -35,12 +40,24 @@ export async function listCorrectionHistory(ctx: CorrectionCtx, workItemId: stri
   const nameOf = (id: string | null) => (id === null ? FORMER_MEMBER : (names.get(id) ?? FORMER_MEMBER));
   return items.map((c: Correction) => {
     const decidedByName = c.status === 'proposed' ? null : nameOf(c.decidedBy);
-    const viaAssistant = c.origin === 'agent' || c.decidedVia === 'terminal';
     return {
       correction: c,
       createdByName: nameOf(c.createdBy),
       decidedByName,
-      attribution: decidedByName === null ? null : viaAssistant ? `${decidedByName} via assistant` : decidedByName,
+      attribution: decidedByName === null ? null : attributionOf(c.status, c.origin, c.decidedVia, decidedByName),
     };
   });
+}
+
+function attributionOf(
+  status: Correction['status'],
+  origin: Correction['origin'],
+  decidedVia: Correction['decidedVia'],
+  decidedByName: string,
+): string {
+  if (status === 'superseded') return 'replaced by a later correction';
+  const decision = status === 'rejected' ? 'rejected' : 'accepted';
+  if (origin === 'agent') return `assistant proposed, ${decidedByName} ${decision}`;
+  const viaAssistant = decidedVia === 'terminal';
+  return viaAssistant ? `${decidedByName} ${decision} via assistant` : `${decidedByName} ${decision}`;
 }

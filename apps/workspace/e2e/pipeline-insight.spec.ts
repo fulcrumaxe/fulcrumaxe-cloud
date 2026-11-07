@@ -63,6 +63,7 @@ async function mockApi(page: Page, initial: { status: number; json: unknown }, s
     if (p === "/api/v1/work-items") return send(route, 200, { data: [{ ...LIST.data[0], stage: mock.stage }], next_cursor: null });
     if (p === "/api/v1/repos") return send(route, 200, REPOS);
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
+    if (p.endsWith("/corrections")) return send(route, 200, { data: [] });
     if (p.endsWith("/activity")) return send(route, mock.activity.status, mock.activity.json);
     if (p === "/api/v1/runs") return send(route, 200, mock.runs);
     return send(route, 404, { error: { code: "not_found", message: SERVER_TEXT, request_id: "req_1" } });

@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ACTIVE_STAGES, COLUMNS, KIND_LABELS, POLL_MS, cleanTitle, columnOf, createBoard, getAllPages, groupByColumn, isUuid, itemHeading, kindLabel, sameItems, verdictFor } from "../apps/pipeline/pipeline-storage.js";
+import { ACTIVE_STAGES, COLUMNS, KIND_LABELS, POLL_MS, cleanTitle, columnOf, createBoard, getAllPages, groupByColumn, isUuid, itemHeading, kindLabel, loadCorrections, sameItems, verdictFor } from "../apps/pipeline/pipeline-storage.js";
 
 // The server's rule is read as text, not imported: the app declares no dependency on @fx/core, and the rule is a plain predicate.
 const SERVER_TITLE_SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "core", "src", "work-items", "title.ts"), "utf8");
@@ -134,6 +134,21 @@ describe("loading", () => {
     await board.load();
     expect(board.getState().repos.has(PAGE.data[0].repo_id)).toBe(false);
     expect(itemHeading(PAGE.data[0], board.getState().repos)).toMatchObject({ repo: null, number: "#42" });
+  });
+
+  describe("loadCorrections (D#597 CC-7a)", () => {
+    it("GETs the item's corrections, passing the signal through", async () => {
+      const calls = [];
+      const get = async (...args) => (calls.push(args), { data: [] });
+      const ac = new AbortController();
+      await loadCorrections(ID, get, ac.signal);
+      expect(calls).toEqual([["GET", "/api/v1/work-items/" + ID + "/corrections", undefined, ac.signal]]);
+    });
+
+    it("a rejected read propagates, as the error state the detail turns into its fixed line", async () => {
+      const get = fakeGet({ ["/api/v1/work-items/" + ID + "/corrections"]: fail(500) });
+      await expect(loadCorrections(ID, get)).rejects.toThrow();
+    });
   });
 
   describe("itemHeading", () => {
