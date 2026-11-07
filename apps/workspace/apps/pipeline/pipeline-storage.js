@@ -140,6 +140,45 @@ export async function getAllPages(path, get = api, signal) {
   return rows;
 }
 
+/**
+ * The repositories read, kept apart from the screen so a read that never answers cannot leave a picker on "Loading".
+ * status: "idle" | "loading" | "ready" | "failed". `ask()` starts a read when none is running or answered (it also
+ * retries after a failure; `ask({ force: true })` reads again even after an answer); a read that gives no answer within `timeoutMs` counts as failed, and a late answer
+ * still replaces that failure. Nothing is reported after `destroy()`.
+ */
+export function createRepoLoader({ read, onChange, timeoutMs = 20000, setT = setTimeout, clearT = clearTimeout }) {
+  let state = { status: "idle", rows: [] };
+  let seq = 0;
+  let timer = null;
+  let dead = false;
+  function settle(mine, next) {
+    if (dead || mine !== seq || state.status === "ready") return;
+    if (timer !== null) clearT(timer);
+    timer = null;
+    state = next;
+    onChange(state);
+  }
+  function ask({ force = false } = {}) {
+    if (dead || state.status === "loading" || (state.status === "ready" && !force)) return;
+    const mine = ++seq;
+    state = { status: "loading", rows: [] };
+    timer = setT(() => settle(mine, { status: "failed", rows: [] }), timeoutMs);
+    Promise.resolve()
+      .then(read)
+      .then(
+        (rows) => settle(mine, { status: "ready", rows: Array.isArray(rows) ? rows : [] }),
+        () => settle(mine, { status: "failed", rows: [] })
+      );
+    onChange(state);
+  }
+  function destroy() {
+    dead = true;
+    if (timer !== null) clearT(timer);
+    timer = null;
+  }
+  return { ask, destroy, state: () => state };
+}
+
 export const loadTimeline = (id, get = api, signal) => get("GET", "/api/v1/work-items/" + id + "/timeline", undefined, signal);
 
 /**
