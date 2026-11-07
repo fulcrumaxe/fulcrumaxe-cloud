@@ -52,7 +52,8 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  * What it keeps, so a bug in a caller cannot widen it:
  *   - the host is api.github.com and the path must start with `/repos/<owner>/<name>/` for the repository the client was
  *     opened for: any other path throws before a token is used;
- *   - a path may hold only URL-path characters (no `..`, no query or fragment: query goes in `query`);
+ *   - a path may hold only URL-path characters (no `..`, no query or fragment: query goes in `query`). The one exception is
+ *     `mergeGateCompareAllowed` below: a `merge_gate` client's three-dot compare of a base and an explicit head commit;
  *   - redirects are an error, every call has a timeout, a non-JSON body reads as `null`;
  *   - the optional `log` hears the method, the path with the repository masked, the status and, for an error status,
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
@@ -144,6 +145,24 @@ export class InstallationHttpError extends Error {
     this.name = "InstallationHttpError";
     this.reason = reason;
   }
+}
+
+/**
+ * The one path with `..` in it that any kind may send, and only a `merge_gate` client: GitHub's three-dot compare, `GET compare/<base>...<head>`, where
+ * each side is a commit id or a branch name of plain segments (letters, digits, `_`, `-`, and single dots inside a segment; no empty segment, no leading or
+ * trailing dot, no `%`, at most ten segments). So the only `..` in the path is the separator itself: no `..` segment, no two-dot or four-dot compare, no
+ * trailing slash; and a path ending `.diff` or `.patch` is refused whatever the head is. No body; the query is empty or exactly `per_page=1`. The merge gate
+ * reads a merge base, ahead/behind counts and a pull request's change set this way (the public content check of a paired item, the ordering overlap, the
+ * merge queue's refresh and conflict reads, the merge-only recheck); its token already holds `contents`, so a compare reaches nothing the token could not.
+ * A `runner_local` repository's client is a `merge_gate` client behind runner-cloud's `localOnlyGithub`, whose allowlist holds no compare: it stays refused there.
+ */
+const COMPARE_REF = "[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*){0,9}";
+const MERGE_GATE_COMPARE_RE = new RegExp(`^compare/${COMPARE_REF}\\.\\.\\.${COMPARE_REF}$`);
+export function mergeGateCompareAllowed(method: string, path: string, query: Readonly<Record<string, string>> | undefined, body: unknown, prefix: string): boolean {
+  if (method !== "GET" || body !== undefined || !path.startsWith(prefix) || /\.(?:diff|patch)$/i.test(path)) return false;
+  if (!MERGE_GATE_COMPARE_RE.test(path.slice(prefix.length))) return false;
+  const keys = query === undefined ? [] : Object.keys(query);
+  return keys.length === 0 || (keys.length === 1 && keys[0] === "per_page" && query!["per_page"] === "1");
 }
 
 /** The only REST calls a `runner_pr` client may make (the allowlist A2 to A5 of runner-cloud's `localOnlyGithub`, at path level). */
@@ -267,7 +286,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         const pinnedBody = (kind === "merge_gate" || kind === "read") && req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined ? (kind === "merge_gate" ? pinnedMergeGateBody : pinnedMergeQueueReadBody)(req.body, { owner: target.owner, name: target.name }) : undefined;
         const pinnedGate = pinnedBody !== undefined;
         const allowed = graphql || pinnedGate || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
-        if (!allowed || req.path.includes("..")) throw new InstallationHttpError("path_refused");
+        if (!allowed || (req.path.includes("..") && !(kind === "merge_gate" && mergeGateCompareAllowed(req.method, req.path, req.query, req.body, prefix)))) throw new InstallationHttpError("path_refused");
         // `plane_parity` holds contents:read, so it gets its own EXACT list (no compare, no contents, no other ref).
         if (kind === "plane_parity" && !planeParityAllowed(req.method, req.path, req.query, prefix)) throw new InstallationHttpError("path_refused");
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
