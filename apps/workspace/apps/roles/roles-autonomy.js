@@ -486,6 +486,212 @@ export function mountLimits(host) {
   };
 }
 
+// ---- D#742: the read-only "Merging" section -----------------------------------------------------------------------
+// Mirrors a repo's merge-deciding settings -- today spread across the Repos app's auto-merge, guard, merge-queue and
+// runner sections and the Roles tab's debater entry -- and points at Pipeline for why one pull request did or did
+// not merge. Kept in this file, not a file of its own: a new file would push apps/roles/ past the per-app boot-file
+// ceiling with no headroom left in the account-wide static-request budget (build/budget.mjs) to spend on it. Rules
+// this section keeps:
+//   * Every node is built with h(), so server text never reaches the page as markup.
+//   * Every user-visible string comes from MERGE_COPY. Nothing is composed from server text, an id or a raw enum value.
+//   * Nothing is written from here, for any role: no control, no button, no input.
+//   * In the shape of mountLimits above: mountMerge(host) returns { load(repoId), clear(), destroy() }.
+export const MERGE_COPY = Object.freeze({
+  heading: "Merging",
+  intro:
+    "These are this repository's own settings for merging a pull request on its own. A specific pull request also needs green checks and passing reviews before it merges.",
+  pipelinePointer: "To see why one pull request did or did not merge, look at it in Pipeline.",
+  loading: "Loading the merging settings...",
+  unavailable: "Not available right now.",
+  notInEffect: "Not in effect while a person merges every pull request.",
+  lockedHeading: "Human merge only",
+  lockedLine: "A person merges every pull request in this repo. The settings below do not change that. Only the operator can change it.",
+  autoMerge: Object.freeze({
+    name: "Auto-merge",
+    on: "On",
+    off: "Off",
+    effect: "A pull request that passes its checks and reviews merges on its own, without a person.",
+    where: "Change this in Repos.",
+  }),
+  externalGuard: Object.freeze({
+    name: "Outside contributors' pull requests",
+    blocked: "Never merged automatically",
+    allowed: "May be merged automatically",
+    effect: "This decides whether a pull request from someone outside the repository can merge on its own.",
+    where: "Change this in Repos.",
+  }),
+  mergeQueue: Object.freeze({
+    name: "Merge queue",
+    on: "On",
+    off: "Off",
+    runner: "Your runner merges for this repository",
+    effect: "GitHub decides when a queued pull request merges, once its checks pass.",
+    where: "Change this in the repository's settings on GitHub.",
+  }),
+  debater: Object.freeze({
+    name: "Debater",
+    off: "Off",
+    feature_critical: "On for features and critical work",
+    always: "On for every pull request",
+    effect: "A pull request the Debater reviews waits for its sign-off before it merges.",
+    where: "Change this in the Roles tab.",
+  }),
+  localReview: Object.freeze({
+    name: "Reviews on your machine",
+    on: "On",
+    off: "Off",
+    effect: "A pull request that passes its reviews on your machine merges on its own, without a person.",
+    where: "Change this in Repos.",
+  }),
+});
+
+function autoMergeLine(settings) {
+  const c = MERGE_COPY.autoMerge;
+  if (!settings || typeof settings.auto_merge !== "boolean") return { key: "auto-merge", name: c.name, unavailable: true };
+  return { key: "auto-merge", name: c.name, value: settings.auto_merge ? c.on : c.off, effect: c.effect, where: c.where };
+}
+
+function externalGuardLine(settings) {
+  const c = MERGE_COPY.externalGuard;
+  if (!settings || typeof settings.block_external_auto_merge !== "boolean") return { key: "external-guard", name: c.name, unavailable: true };
+  return { key: "external-guard", name: c.name, value: settings.block_external_auto_merge ? c.blocked : c.allowed, effect: c.effect, where: c.where };
+}
+
+function mergeQueueLine(settings) {
+  const c = MERGE_COPY.mergeQueue;
+  const mq = settings && settings.merge_queue;
+  const state = mq && typeof mq === "object" ? mq.state : undefined;
+  if (state !== "on" && state !== "off" && state !== "runner") return { key: "merge-queue", name: c.name, unavailable: true };
+  return { key: "merge-queue", name: c.name, value: c[state], effect: c.effect, where: c.where };
+}
+
+function debaterLine(roles) {
+  const c = MERGE_COPY.debater;
+  const entry = Array.isArray(roles) ? roles.find((r) => r && r.role === "debater") : null;
+  const mode = entry && entry.mode;
+  if (mode !== "off" && mode !== "feature_critical" && mode !== "always") return { key: "debater", name: c.name, unavailable: true };
+  return { key: "debater", name: c.name, value: c[mode], effect: c.effect, where: c.where };
+}
+
+function localReviewLine(mode) {
+  if (!mode || mode.execution_mode !== "runner_local" || typeof mode.auto_merge !== "boolean") return null;
+  const c = MERGE_COPY.localReview;
+  return { key: "local-review", name: c.name, value: mode.auto_merge ? c.on : c.off, effect: c.effect, where: c.where };
+}
+
+/** The repo's merging settings, as the lines this section shows: pure, no DOM. `data` is `{ settings, roles, mode }`, each the read's
+ * answer or null. `settings` is the repo's /settings answer (or null); `roles` is the /roles answer's `data` array (or null); `mode` is
+ * the execution-mode answer (or null) when its shape is known. */
+export function mergeModel({ settings, roles, mode }) {
+  const locked = !!settings && settings.human_merge_only === true;
+  const rows = [autoMergeLine(settings), externalGuardLine(settings), mergeQueueLine(settings), debaterLine(roles)];
+  const local = localReviewLine(mode);
+  if (local) rows.push(local);
+  return { locked, rows: rows.map((r) => ({ ...r, inEffect: !locked })) };
+}
+
+function mergeLineRow(line) {
+  const parts = [h("span", { class: "au-name" }, line.name)];
+  if (line.unavailable) {
+    parts.push(h("span", { class: "au-muted", "data-testid": "merge-unavailable" }, MERGE_COPY.unavailable));
+  } else {
+    parts.push(h("span", { class: "au-value" }, line.value), h("span", { class: "au-muted" }, line.effect + " " + line.where));
+  }
+  if (!line.inEffect) parts.push(h("span", { class: "au-muted", "data-testid": "merge-not-in-effect" }, MERGE_COPY.notInEffect));
+  return h("li", { class: "au-item au-row", "data-testid": "merge-row", "data-row": line.key, "data-in-effect": line.inEffect ? "true" : "false" }, ...parts);
+}
+
+/** The section's body for a settled read, built with h(): the intro, the locked line (when the repo is human-merge-only), every row of
+ * `model.rows` and the closing Pipeline pointer. Pure: no reads, no state. */
+export function mergeView(model) {
+  const rows = [];
+  if (model.locked) rows.push(h("li", { class: "au-item", "data-testid": "merge-locked" }, h("span", { class: "au-name" }, MERGE_COPY.lockedHeading), h("span", { class: "au-muted" }, MERGE_COPY.lockedLine)));
+  for (const line of model.rows) rows.push(mergeLineRow(line));
+  return [
+    h("p", { class: "au-line", "data-testid": "merge-intro" }, MERGE_COPY.intro),
+    h("ul", { class: "au-list", "data-testid": "merge-rows" }, rows),
+    h("p", { class: "au-line au-muted", "data-testid": "merge-pointer" }, MERGE_COPY.pipelinePointer),
+  ];
+}
+
+const mergeSettingsUrl = (id) => "/api/v1/repos/" + encodeURIComponent(id) + "/settings";
+const mergeRolesUrl = (id) => "/api/v1/repos/" + encodeURIComponent(id) + "/roles";
+const mergeModeUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/execution-mode";
+const isMergeSettings = (v) => typeof v.auto_merge === "boolean" && typeof v.block_external_auto_merge === "boolean";
+const isMergeRoles = (v) => Array.isArray(v.data);
+const isMergeMode = (v) => typeof v.execution_mode === "string" && typeof v.auto_merge === "boolean";
+
+export function mountMerge(host) {
+  let repoId = null;
+  let closed = false;
+  let loaded = false;
+  let seq = 0;
+  let ctl = null;
+  let data = { settings: null, roles: null, mode: null };
+
+  const body = h("div", { class: "au-body", "data-testid": "merge-body" });
+  host.replaceChildren(h("section", { class: "au-section", "aria-labelledby": "merge-h" }, h("h3", { class: "au-h", id: "merge-h" }, MERGE_COPY.heading), body));
+
+  const read = (path, ok, signal) => api("GET", path, undefined, signal).then((v) => (v && ok(v) ? v : null), () => null);
+
+  function render() {
+    if (!loaded) {
+      body.replaceChildren(h("p", { class: "au-line au-muted", "data-testid": "merge-loading" }, MERGE_COPY.loading));
+      return;
+    }
+    body.replaceChildren(...mergeView(mergeModel(data)));
+  }
+
+  function begin() {
+    if (ctl) ctl.abort();
+    ctl = new AbortController();
+    return { mine: ++seq, signal: ctl.signal };
+  }
+
+  async function readAll(mine, signal) {
+    const [settingsRes, rolesRes, modeRes] = await Promise.all([
+      read(mergeSettingsUrl(repoId), isMergeSettings, signal),
+      read(mergeRolesUrl(repoId), isMergeRoles, signal),
+      read(mergeModeUrl(repoId), isMergeMode, signal),
+    ]);
+    if (closed || mine !== seq) return;
+    data = { settings: settingsRes, roles: rolesRes ? rolesRes.data : null, mode: modeRes };
+    loaded = true;
+    render();
+  }
+
+  return {
+    /** Called whenever Autonomy has the open repo. A repo already loaded and unchanged issues no request (a refresh tick is a no-op here). */
+    load(id) {
+      if (id === repoId && loaded) return;
+      if (id !== repoId) {
+        data = { settings: null, roles: null, mode: null };
+        loaded = false;
+      }
+      repoId = id;
+      host.hidden = false;
+      render();
+      const { mine, signal } = begin();
+      return readAll(mine, signal);
+    },
+    clear() {
+      seq++;
+      if (ctl) ctl.abort();
+      repoId = null;
+      loaded = false;
+      data = { settings: null, roles: null, mode: null };
+      host.hidden = true;
+      body.replaceChildren();
+    },
+    destroy() {
+      closed = true;
+      seq++;
+      if (ctl) ctl.abort();
+      host.replaceChildren();
+    },
+  };
+}
+
 export function mountAutonomy(host, ctx) {
   let repos = [];
   let repoId = null;
@@ -510,8 +716,11 @@ export function mountAutonomy(host, ctx) {
   // D#483 S5-h: the build, auto-start, margin and discovery settings. A section of its own, so this view's redraws leave it (and its focus) alone.
   const limitsHost = h("div", { class: "au-limits", "data-testid": "au-limits", hidden: true });
   const limits = mountLimits(limitsHost);
+  // D#742: the read-only "Merging" section, mirroring the repo's merge-deciding settings. A section of its own, for the same reason.
+  const mergeHost = h("div", { class: "au-merge", "data-testid": "au-merge", hidden: true });
+  const merge = mountMerge(mergeHost);
   host.replaceChildren(
-    h("div", { class: "au-app" }, h("div", { class: "roles-head" }, h("h2", { class: "roles-title" }, "Autonomy"), picker), status, body, limitsHost)
+    h("div", { class: "au-app" }, h("div", { class: "roles-head" }, h("h2", { class: "roles-title" }, "Autonomy"), picker), status, body, mergeHost, limitsHost)
   );
 
   const canChange = () => !!(dial && dial.can_change && ask && ask.can_change);
@@ -837,14 +1046,20 @@ export function mountAutonomy(host, ctx) {
       }
       if (mine !== seq) return;
       error = repoId ? "" : "No repos are installed yet.";
-      if (repoId) limits.load(repoId, canChange());
-      else limits.clear();
+      if (repoId) {
+        limits.load(repoId, canChange());
+        merge.load(repoId);
+      } else {
+        limits.clear();
+        merge.clear();
+      }
     } catch (e) {
       if ((e && e.name === "AbortError") || mine !== seq) return;
       dial = null;
       ask = null;
       error = UNAVAILABLE;
       limits.clear();
+      merge.clear();
     }
     loading = false;
     render();
@@ -857,13 +1072,17 @@ export function mountAutonomy(host, ctx) {
     drafts.clear();
     rowErrors.clear();
     limits.clear();
+    merge.clear();
     render();
     setItem(ctx.repoKey, id);
     const { mine, signal } = begin();
     try {
       await loadView(signal);
       error = "";
-      if (mine === seq) limits.load(id, canChange());
+      if (mine === seq) {
+        limits.load(id, canChange());
+        merge.load(id);
+      }
     } catch (e) {
       if ((e && e.name === "AbortError") || mine !== seq) return;
       error = UNAVAILABLE;
@@ -1004,6 +1223,7 @@ export function mountAutonomy(host, ctx) {
       closed = true;
       off();
       limits.destroy();
+      merge.destroy();
       seq++;
       if (ctl) ctl.abort();
       host.replaceChildren();
