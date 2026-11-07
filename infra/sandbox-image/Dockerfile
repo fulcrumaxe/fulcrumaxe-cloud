@@ -50,9 +50,16 @@ FROM docker.io/library/ubuntu@sha256:da6fc2be547864451aa253836dd926da33623312df4
 ENV LANG=C.UTF-8
 ARG DEBIAN_FRONTEND=noninteractive
 # libatomic1: the pnpm release binary links it dynamically (found by running the built image).
+# postgresql-18: the server binaries the repo's pg-backed vitest projects start a throwaway cluster from (initdb, pg_ctl,
+# postgres), the same major as flake.nix's postgresql. The sandbox has no network at run time, so they must be baked in.
+# create_main_cluster=false stops the package creating a cluster; Debian keeps the binaries in /usr/lib/postgresql/18/bin,
+# so the ones tests call by name are linked into /usr/local/bin (already on PATH, behind /opt/fx/bin).
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends ca-certificates sudo git libatomic1 \
+    && install -d /etc/postgresql-common \
+    && printf '%s\n' 'create_main_cluster = false' > /etc/postgresql-common/createcluster.conf \
+    && apt-get install -y --no-install-recommends ca-certificates sudo git libatomic1 postgresql-18 \
+    && for b in initdb pg_ctl postgres psql createdb pg_isready; do ln -s "/usr/lib/postgresql/18/bin/$b" "/usr/local/bin/$b"; done \
     && rm -rf /var/lib/apt/lists/*
 RUN printf '%s\n' \
       'Defaults always_set_home' \
