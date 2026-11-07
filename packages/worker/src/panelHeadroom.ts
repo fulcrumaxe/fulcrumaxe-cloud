@@ -18,12 +18,22 @@ export const ROUND_TERMS_DIFFER = "round_terms_differ";
 /** The fields a round adds up or asks per seat; every other spend field is a term the seats must share. */
 const SUMMED_OR_PER_SEAT: ReadonlySet<string> = new Set(["estimateModelUsd", "estimateComputeUsd", "envelopeFloorUsd", "perSpawnCapUsd"]);
 
-export async function checkRoundHeadroom(runnerPool: Pool, resolveRunSeat: (request: SeatRequest) => Promise<SeatResult>, who: { accountId: string; workItemId: string }, roles: readonly string[]): Promise<RoundHeadroom> {
+/**
+ * The spend terms a read-only headroom check should ask for. A run on the operator's own subscription reserves no model money when it really starts (the execution
+ * target sets `estimateModelUsd: 0` and `modelBrokeredBy: "operator_subscription"`), so the check must not charge the seat's per-run model cap against a monthly
+ * model budget the account never needed to set. Anyone else is asked as the seat resolved.
+ */
+export function headroomSpendFor<T extends Omit<HeadroomParams, "accountId">>(spend: T, operator: boolean): T {
+  return operator ? { ...spend, estimateModelUsd: 0, modelBrokeredBy: "operator_subscription" as const } : spend;
+}
+
+export async function checkRoundHeadroom(runnerPool: Pool, resolveRunSeat: (request: SeatRequest) => Promise<SeatResult>, who: { accountId: string; workItemId: string }, roles: readonly string[], isOperatorAccount?: (accountId: string) => boolean): Promise<RoundHeadroom> {
   const seats: Array<Omit<HeadroomParams, "accountId">> = [];
+  const operator = isOperatorAccount?.(who.accountId) === true;
   for (const role of roles) {
     const seat = await resolveRunSeat({ accountId: who.accountId, role, workItemId: who.workItemId });
     if (!seat.ok) return { ok: false, reason: `seat_${seat.reason}` };
-    seats.push(seat.seat.spend);
+    seats.push(headroomSpendFor(seat.seat.spend, operator));
   }
   if (seats.length === 0) return { ok: true };
   for (const spend of seats) {

@@ -1383,7 +1383,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         return found !== null && (await endedCancelReason(who.accountId, found.runId)) === PROVIDER_CAPACITY ? null : found;
       },
       startedAttempts: (head, tail) => startedSeatAttempts(who, head, tail),
-      headroom: (roles) => checkRoundHeadroom(runnerPool, deps.resolveRunSeat, who, roles),
+      headroom: (roles) => checkRoundHeadroom(runnerPool, deps.resolveRunSeat, who, roles, deps.isOperatorAccount),
       outcome: (runId) => advanceRunOutcome(who.accountId, runId),
       cancel: (runId) => cancelItemRun(who, runId),
       continueRun: async (runId, site) => {

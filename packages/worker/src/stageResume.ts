@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent, type WaitingStage } from "@fx/core/src/work-items/driverEvents.js";
 import { checkHeadroom } from "@fx/spend";
+import { headroomSpendFor } from "./panelHeadroom.js";
 import { STAGE_TERMINAL_STATUSES, stageApprovalGate } from "@fx/core/src/work-items/stageApprovalGate.js";
 import { reportError } from "@fx/telemetry";
 import type { SeatRequest, SeatResult } from "./seat.js";
@@ -79,6 +80,8 @@ export interface StageResumeDeps {
   /** The pipeline's `readFreeBuildSlots`: how many builds could start now for this item's repository. Absent: one start per repository per pass, as before. */
   buildFreeSlots?: ((accountId: string, workItemId: string) => Promise<number>) | null;
   startAdvance: ((args: AdvanceStartArgs) => Promise<void>) | null;
+  /** Accounts that run on our own subscription: their headroom read charges no model money, as their real start does. Absent: none. */
+  isOperatorAccount?: (accountId: string) => boolean;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -206,7 +209,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       log(JSON.stringify({ event: "stage_resume.skipped", stage: entry.stage, work_item_id: c.work_item_id, reason: `seat_${seat.reason}` }));
       return false;
     }
-    const answer = await checkHeadroom(runnerPool, { accountId: c.account_id, ...seat.seat.spend });
+    const answer = await checkHeadroom(runnerPool, { accountId: c.account_id, ...headroomSpendFor(seat.seat.spend, deps.isOperatorAccount?.(c.account_id) === true) });
     if (answer.decision !== "deny") return true;
     const pause = entry.pauseForDenial(answer.reason);
     if (pause === null) {
