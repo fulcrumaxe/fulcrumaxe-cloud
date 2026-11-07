@@ -169,6 +169,27 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
       const d = (mocks.recordRound.mock.calls.at(-1)![3] as { d: { openPublicHttp: Opener } }).d;
       await exercise(d.openPublicHttp, plain);
     });
+
+    it("D#6 CLOUD-POSTS-FX-GATE1 PR 0: the code repository's client also holds the fx-gate1 entries; the item's own client does not", async () => {
+      mocks.recordRound.mockResolvedValue({ decision: "ci_pending", round: 0, recorded: [] });
+      mocks.createCiGate.mockImplementation((d: unknown) => ({ gate: true, d }));
+      const plain = { request: vi.fn(async () => ({ status: 200, body: [] })) };
+      const open = vi.fn(async () => plain as never);
+      const { pool } = fakePool(false);
+      await createReviewDeps(open).recordRound(pool, {} as never, { accountId: ACCOUNT, workItemId: ITEM, headSha: "a".repeat(40), prNumber: 7, requiredRoles: [], verdicts: [] } as never);
+      const d = (mocks.recordRound.mock.calls.at(-1)![3] as { d: { openPublicHttp: Opener; openHttp: Opener } }).d;
+      const label = (name: string) => ({ method: "POST", path: `/repos/acme/${name}/issues/12/labels`, body: { labels: ["ci:full"] } });
+      plain.request.mockClear();
+      await (await d.openPublicHttp(code)).request(label("widgets-public"));
+      expect(plain.request).toHaveBeenCalledTimes(1);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        await expect((await d.openHttp({ ...code, name: "widgets" })).request(label("widgets"))).rejects.toThrow(/local-only github: refused/);
+      } finally {
+        warn.mockRestore();
+      }
+      expect(plain.request).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("the port answers off when the setting is not there", async () => {

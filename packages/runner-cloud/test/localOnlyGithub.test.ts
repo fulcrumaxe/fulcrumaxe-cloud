@@ -74,7 +74,7 @@ const ALLOWED: Array<[string, GithubRequest]> = [
 ];
 
 describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 section 6)", () => {
-  it("holds exactly the entries of the Spec's table, A1 to A8 and A10 to A13 (A9 is a fixed document of A1), and nothing else", () => {
+  it("holds exactly the entries of the Spec's table, A1 to A8 and A10 to A16 (A9 is a fixed document of A1; A14 to A16 are opt-in), and nothing else", () => {
     expect(LOCAL_ONLY_ALLOWLIST).toEqual([
       { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
       { id: "A2", method: "GET", paths: ["/repos/{owner}/{repo}", "/repositories/{id}"], query: [], body: "none" },
@@ -82,12 +82,15 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: boolean }" },
       { id: "A5", method: "PATCH", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: '{ state: "closed" }' },
       { id: "A6", method: "POST", paths: ["/app/installations/{id}/access_tokens"], query: [], body: "none, or { repository_ids: [the repo id] }" },
-      { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }' },
+      { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }; with gate1Attest also { state: success|failure, context: "fx-gate1", description: a fixed one }' },
       { id: "A8", method: "GET", paths: ["/repos/{owner}/{repo}/branches/{branch}/protection"], query: [], body: "none" },
       { id: "A10", method: "PUT", paths: ["/repos/{owner}/{repo}/pulls/{n}/merge"], query: [], body: '{ sha, merge_method: "squash" }' },
       { id: "A11", method: "GET", paths: ["/repos/{owner}/{repo}/rules/branches/{branch}"], query: ["per_page", "page"], body: "none" },
       { id: "A12", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueRead, variables: exactly owner, name, branch }" },
       { id: "A13", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueEntry, variables: exactly owner, name, number }" },
+      { id: "A14", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["ci:full"] }', only: "gate1Attest" },
+      { id: "A15", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1CheckRuns, variables: exactly owner, name, sha, optional cursor }", only: "gate1Attest" },
+      { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });

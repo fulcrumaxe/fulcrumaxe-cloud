@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError } from "@fx/runner-cloud";
+import { FX_GATE1_DESCRIPTIONS, GATE1_ATTEST_DOCUMENTS, GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError } from "@fx/runner-cloud";
 import type { InstallationHttp, InstallationHttpRequest } from "@fx/github";
+import type { LocalGitHubHttp } from "@fx/pipeline";
 import { fenceInstallationHttp, openForRepo } from "../lib/github/localOnlyHttp";
 
 /** D#6 R3c: the review driver's and the merge gate's client for a runner_local repo is the allowlist, in front of the installation client. */
@@ -109,6 +110,61 @@ describe("openForRepo", () => {
     await got.request({ method: "GET", path: "/repos/acme/widgets" });
     await got.request({ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "all", head: "acme:fx/p-1", per_page: 100 } });
     expect(seen.map((r) => r.path)).toEqual(["/repos/acme/widgets", "/repos/acme/widgets/pulls"]);
+  });
+
+  describe("gate1Attest (D#6 CLOUD-POSTS-FX-GATE1 PR 0): the fence's fx-gate1 entries, on the review round's code-repository client only", () => {
+    const label = { method: "POST" as const, path: "/repos/acme/widgets/issues/12/labels", body: { labels: ["ci:full"] } };
+    const gate1 = { method: "POST" as const, path: `/repos/acme/widgets/statuses/${SHA}`, body: { state: "success", context: "fx-gate1", description: FX_GATE1_DESCRIPTIONS.success } };
+    const runs = { owner: "acme", name: "widgets", sha: SHA };
+    const events = { owner: "acme", name: "widgets", number: 12 };
+
+    it("withoutMerge + gate1Attest on merge_gate sends A14, A15, A16 and the fx-gate1 status, and still refuses the squash call", async () => {
+      const { http, seen } = inner();
+      const got = (await openForRepo(vi.fn(async () => http), "runner_local", "merge_gate", TARGET, { withoutMerge: true, gate1Attest: true })) as LocalGitHubHttp;
+      await got.request(label);
+      await got.request(gate1);
+      await (got.graphql as (op: string, v: Record<string, unknown>) => Promise<unknown>)("Gate1CheckRuns", runs);
+      await (got.graphql as (op: string, v: Record<string, unknown>) => Promise<unknown>)("Gate1LabelEvents", events);
+      expect(seen.map((r) => `${r.method} ${r.path}`)).toEqual([`POST ${label.path}`, `POST ${gate1.path}`, "POST /graphql", "POST /graphql"]);
+      expect(seen.slice(2).map((r) => (r.body as { query: string }).query)).toEqual([GATE1_ATTEST_DOCUMENTS.Gate1CheckRuns, GATE1_ATTEST_DOCUMENTS.Gate1LabelEvents]);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        await expect(got.request({ method: "PUT", path: "/repos/acme/widgets/pulls/12/merge", body: { sha: SHA, merge_method: "squash" } })).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        await expect(got.request({ method: "GET", path: `/repos/acme/widgets/commits/${SHA}/check-runs` })).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        await expect(got.request({ method: "GET", path: "/repos/acme/widgets/issues/12/events" })).rejects.toBeInstanceOf(LocalOnlyGithubError);
+      } finally {
+        warn.mockRestore();
+      }
+      expect(seen).toHaveLength(4);
+    });
+
+    it("every other client refuses them before the installation client: plain withoutMerge, the full fence, gate1Attest without withoutMerge, and a read client", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        for (const [kind, options] of [["merge_gate", { withoutMerge: true }], ["merge_gate", {}], ["merge_gate", { gate1Attest: true }], ["read", { withoutMerge: true, gate1Attest: true }]] as const) {
+          const { http, seen } = inner();
+          const got = (await openForRepo(vi.fn(async () => http), "runner_local", kind, TARGET, options)) as LocalGitHubHttp;
+          await expect(got.request(label), `${kind} ${JSON.stringify(options)}`).rejects.toBeInstanceOf(LocalOnlyGithubError);
+          await expect(got.request(gate1), `${kind} ${JSON.stringify(options)}`).rejects.toBeInstanceOf(LocalOnlyGithubError);
+          await expect((got.graphql as (op: string, v: Record<string, unknown>) => Promise<unknown>)("Gate1CheckRuns", runs)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+          await expect((got.graphql as (op: string, v: Record<string, unknown>) => Promise<unknown>)("Gate1LabelEvents", events)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+          expect(seen).toEqual([]);
+        }
+        const { http, seen } = inner();
+        const fenced = fenceInstallationHttp(http);
+        await expect(fenced.request(label)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        expect(seen).toEqual([]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("gate1Attest changes nothing for a sandbox repo", async () => {
+      const { http } = inner();
+      const open = vi.fn(async () => http);
+      expect(await openForRepo(open, "sandbox", "merge_gate", TARGET, { withoutMerge: true, gate1Attest: true })).toBe(http);
+      expect(open).toHaveBeenCalledWith("merge_gate", TARGET);
+    });
   });
 
   it("withoutMerge changes nothing for a sandbox repo, and the default fence keeps the squash call", async () => {

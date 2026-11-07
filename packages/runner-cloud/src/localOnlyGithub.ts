@@ -37,6 +37,15 @@
  *   A13  the fixed GraphQL document `MergeQueueEntry` (the pull request's state, head oid and queue entry), variables exactly owner, name, integer number
  * The enqueue, dequeue and auto-merge documents stay refused: the cloud never writes the merge or the queue for a paired item.
  *
+ * D#6 CLOUD-POSTS-FX-GATE1 PR 0 adds what the cloud's own `fx-gate1` attester needs on a paired item's CODE repository, and nothing more. These
+ * entries are opt-in: they hold only on a client built with `gate1Attest: true` (the review round's code-repository client, which also leaves out
+ * A10); every other client refuses them exactly as before. Nothing here posts or labels by itself: it only lets the exact calls through.
+ *   A14  POST /repos/{owner}/{repo}/issues/{n}/labels, body exactly { labels: ["ci:full"] }
+ *   A15  the fixed GraphQL document `Gate1CheckRuns`: the check runs on one commit by sha (name, status, conclusion, startedAt, app id), no output text
+ *   A16  the fixed GraphQL document `Gate1LabelEvents`: a pull request's labeled and unlabeled events (label name and createdAt), nothing else
+ *   A7   widened on that client only: also context exactly "fx-gate1", state success or failure, description one of `FX_GATE1_DESCRIPTIONS`
+ * The REST check-runs and issue-events reads stay refused on every client.
+ *
  * Calls not listed are refused until a numbered correction adds them with their own negative tests. Reading CI state uses only a
  * fixed GraphQL document that selects state and conclusion, never a check run's output text, summary or annotations.
  */
@@ -146,8 +155,61 @@ export const MERGE_QUEUE_READ_DOCUMENTS = Object.freeze({
   MergeQueueEntry:
     "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }",
 });
-const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS });
-export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS;
+/**
+ * D#6 CLOUD-POSTS-FX-GATE1 PR 0 (A15, A16): the attester's two reads. A15 selects, for the commit named by its sha, only the check runs in its status
+ * rollup (GitHub's latest run per name), with name, status, conclusion, start time and the app that ran it: never output, summary, text or annotations,
+ * and no status context. A16 selects a pull request's label events with the label's name and the time: never an actor, a body or another item type.
+ */
+export const GATE1_ATTEST_DOCUMENTS = Object.freeze({
+  Gate1CheckRuns: `query Gate1CheckRuns($owner: String!, $name: String!, $sha: GitObjectID!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $sha) {
+      ... on Commit {
+        oid
+        statusCheckRollup {
+          contexts(first: 100, after: $cursor) {
+            totalCount
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion startedAt checkSuite { app { databaseId } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}`,
+  Gate1LabelEvents: `query Gate1LabelEvents($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      timelineItems(last: 100, before: $cursor, itemTypes: [LABELED_EVENT, UNLABELED_EVENT]) {
+        totalCount
+        pageInfo { hasPreviousPage startCursor }
+        nodes {
+          __typename
+          ... on LabeledEvent { createdAt label { name } }
+          ... on UnlabeledEvent { createdAt label { name } }
+        }
+      }
+    }
+  }
+}`,
+});
+const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS });
+export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS;
+
+/** D#6 CLOUD-POSTS-FX-GATE1 PR 0: the one label A14 may add, the one extra status context A7 takes on the attester's client, and its only descriptions. */
+export const FX_GATE1_LABEL = "ci:full";
+export const FX_GATE1_STATUS_CONTEXT = "fx-gate1";
+export const FX_GATE1_DESCRIPTIONS = Object.freeze({
+  success: "Gate 1: full public CI green (cloud)",
+  failure: Object.freeze({
+    ci_red: "Gate 1: full public CI failed (cloud)",
+    ci_paths: "Gate 1: the change touches CI files (cloud)",
+    foreign_app: "Gate 1: a required check was not run by GitHub Actions (cloud)",
+  }),
+});
 
 /** One allowed call. `paths` are templates; `query` lists the only query keys; `body` says in words what the body must be. */
 export interface LocalOnlyAllowlistEntry {
@@ -156,6 +218,8 @@ export interface LocalOnlyAllowlistEntry {
   paths: readonly string[];
   query: readonly string[];
   body: string;
+  /** Present on an opt-in entry: it holds only on a client built with that option, and every other client refuses it. */
+  only?: "gate1Attest";
 }
 
 /** The calls R2b-3 makes (C22 section 6) and R3c adds (C35 section 3.3), nothing else. A test holds this list equal to the table in the Spec. */
@@ -167,12 +231,15 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: boolean }" },
     { id: "A5", method: "PATCH", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: '{ state: "closed" }' },
     { id: "A6", method: "POST", paths: ["/app/installations/{id}/access_tokens"], query: [], body: "none, or { repository_ids: [the repo id] }" },
-    { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }' },
+    { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }; with gate1Attest also { state: success|failure, context: "fx-gate1", description: a fixed one }' },
     { id: "A8", method: "GET", paths: ["/repos/{owner}/{repo}/branches/{branch}/protection"], query: [], body: "none" },
     { id: "A10", method: "PUT", paths: ["/repos/{owner}/{repo}/pulls/{n}/merge"], query: [], body: '{ sha, merge_method: "squash" }' },
     { id: "A11", method: "GET", paths: ["/repos/{owner}/{repo}/rules/branches/{branch}"], query: ["per_page", "page"], body: "none" },
     { id: "A12", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueRead, variables: exactly owner, name, branch }" },
     { id: "A13", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueEntry, variables: exactly owner, name, number }" },
+    { id: "A14", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["ci:full"] }', only: "gate1Attest" },
+    { id: "A15", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1CheckRuns, variables: exactly owner, name, sha, optional cursor }", only: "gate1Attest" },
+    { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -273,6 +340,16 @@ const QUEUE_VARIABLES: Readonly<Record<keyof typeof MERGE_QUEUE_READ_DOCUMENTS, 
   MergeQueueRead: (v) => hasExactKeys(v, ["owner", "name", "branch"]) && ownerOrName(v.owner) && ownerOrName(v.name) && str(v.branch, REF_NAME),
   MergeQueueEntry: (v) => hasExactKeys(v, ["owner", "name", "number"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number),
 };
+const optionalCursor = (v: Record<string, unknown>): boolean => v.cursor === undefined || v.cursor === null || str(v.cursor, CURSOR);
+const GATE1_VARIABLES: Readonly<Record<keyof typeof GATE1_ATTEST_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
+  Gate1CheckRuns: (v) => hasExactKeys(v, ["owner", "name", "sha"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha) && optionalCursor(v),
+  Gate1LabelEvents: (v) => hasExactKeys(v, ["owner", "name", "number"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number) && optionalCursor(v),
+};
+const FX_GATE1_FAILURE_DESCRIPTIONS: readonly string[] = Object.values(FX_GATE1_DESCRIPTIONS.failure);
+/** A7's extra shape on the attester's client: `fx-gate1`, with success and the one success text, or failure and one of the failure texts. */
+const gate1StatusFits = (body: Record<string, unknown>): boolean =>
+  body.context === FX_GATE1_STATUS_CONTEXT &&
+  ((body.state === "success" && body.description === FX_GATE1_DESCRIPTIONS.success) || (body.state === "failure" && typeof body.description === "string" && FX_GATE1_FAILURE_DESCRIPTIONS.includes(body.description)));
 
 /** A body for the entry whose document is `documents[name]`: exactly { query, variables }, the query that document byte for byte. */
 function documentBodyFits(body: unknown, documents: Readonly<Record<string, string>>, checks: Readonly<Record<string, (v: Record<string, unknown>) => boolean>>, only?: string): boolean {
@@ -282,7 +359,7 @@ function documentBodyFits(body: unknown, documents: Readonly<Record<string, stri
 }
 
 /** Whether the body has the shape the entry names. */
-function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown): boolean {
+function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: boolean): boolean {
   switch (entry.id) {
     case "A1":
       return documentBodyFits(body, GITHUB_GRAPHQL_DOCUMENTS, VARIABLES);
@@ -290,6 +367,12 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown): boolean {
       return documentBodyFits(body, MERGE_QUEUE_READ_DOCUMENTS, QUEUE_VARIABLES, "MergeQueueRead");
     case "A13":
       return documentBodyFits(body, MERGE_QUEUE_READ_DOCUMENTS, QUEUE_VARIABLES, "MergeQueueEntry");
+    case "A14":
+      return isPlainObject(body) && hasExactKeys(body, ["labels"]) && Array.isArray(body.labels) && body.labels.length === 1 && body.labels[0] === FX_GATE1_LABEL;
+    case "A15":
+      return documentBodyFits(body, GATE1_ATTEST_DOCUMENTS, GATE1_VARIABLES, "Gate1CheckRuns");
+    case "A16":
+      return documentBodyFits(body, GATE1_ATTEST_DOCUMENTS, GATE1_VARIABLES, "Gate1LabelEvents");
     case "A4":
       return (
         isPlainObject(body) &&
@@ -301,9 +384,9 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown): boolean {
         typeof body.draft === "boolean"
       );
     case "A7":
+      if (!isPlainObject(body) || !hasExactKeys(body, ["state", "context", "description"])) return false;
+      if (gate1Attest && gate1StatusFits(body)) return true;
       return (
-        isPlainObject(body) &&
-        hasExactKeys(body, ["state", "context", "description"]) &&
         (body.state === "success" || body.state === "failure" || body.state === "pending" || body.state === "error") &&
         body.context === LOCAL_ONLY_REVIEW_STATUS_CONTEXT &&
         typeof body.description === "string" && body.description.length <= 140
@@ -333,11 +416,12 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
 };
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = []): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean } = {}): string | null {
+  const gate1Attest = options.gate1Attest === true;
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (e.only === undefined || gate1Attest) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -371,12 +455,14 @@ export interface LocalOnlyGithub extends GithubClient {
 /**
  * Wraps `inner`: every call is checked first, and one the allowlist does not hold throws `LocalOnlyGithubError` without reaching `inner`.
  * `exclude` leaves entries out of the list for this client (by id): the client for a paired repository's code repository leaves out A10, so the
- * cloud cannot call merge on it at all and a runner or a person merges there.
+ * cloud cannot call merge on it at all and a runner or a person merges there. `gate1Attest` turns on the opt-in entries (A14 to A16, and A7's
+ * `fx-gate1` shape) for this client only.
  */
-export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[] } = {}): LocalOnlyGithub {
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean } = {}): LocalOnlyGithub {
   const exclude = options.exclude ?? [];
+  const gate1Attest = options.gate1Attest === true;
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req, exclude);
+    const rule = localOnlyViolation(req, exclude, { gate1Attest });
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });

@@ -29,7 +29,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
   // The merge gate's token purpose for one repository (the item's own, or the paired code repository its installation serves), fenced for a runner_local repo.
   const openReviewHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp>;
   // The paired CODE repository of a runner_local item: the same fenced client without the merge call, because the cloud never merges there (the runner or a person does).
-  const openPublicHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }, { withoutMerge: true }) as Promise<GitHubHttp>;
+  // D#6 CLOUD-POSTS-FX-GATE1 PR 0: this client alone also holds the fence's fx-gate1 entries (A14 to A16, A7's fx-gate1 shape); nothing calls them yet.
+  const openPublicHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }, { withoutMerge: true, gate1Attest: true }) as Promise<GitHubHttp>;
   return {
     async load(pool, accountId, workItemId) {
       const r = await loadReviewContext(pool, accountId, workItemId);
