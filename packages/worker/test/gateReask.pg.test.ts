@@ -188,8 +188,13 @@ describe("the merge gate re-ask [pg]", { timeout: 60_000 }, () => {
     expect(await ask(started, w, a.accountId)).toEqual({ started: false, reason: "moved_on" });
     expect(started).toEqual([]);
     const review = PARKED_STAGE_REGISTRY.review!;
-    const listed = await writerPool.query<{ work_item_id: string }>("SELECT work_item_id FROM work_item_list_parked_stage($1, $2::text[], $3::text[], 0, 100)", [review.stage, [...review.itemStages], [...review.pauses]]);
-    expect(listed.rows.map((r) => r.work_item_id)).not.toContain(w);
+    // The lister takes at most eight pauses a call; the review entry has more, so it is listed in chunks as the sweep does.
+    const listed: string[] = [];
+    for (let at = 0; at < review.pauses.length; at += 8) {
+      const part = await writerPool.query<{ work_item_id: string }>("SELECT work_item_id FROM work_item_list_parked_stage($1, $2::text[], $3::text[], 0, 100)", [review.stage, [...review.itemStages], review.pauses.slice(at, at + 8)]);
+      listed.push(...part.rows.map((r) => r.work_item_id));
+    }
+    expect(listed).not.toContain(w);
     const entry = (await admin.query("SELECT state, reason FROM merge_queue_entries WHERE work_item_id = $1", [w])).rows[0];
     expect(entry).toEqual({ state: "stopped", reason: "retarget_failed" });
   });

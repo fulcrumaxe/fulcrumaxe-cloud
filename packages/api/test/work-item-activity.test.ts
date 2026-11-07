@@ -4,10 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
-import { ACTIVITY_LIMITS, REVIEW_LIMIT_WAIT_CODE, readOutcomeCodes } from '@fx/core/src/work-items/activity.js';
+import { ACTIVITY_LIMITS, REVIEW_LIMIT_WAIT_CODE, REVIEW_SELF_CLEARING_WAIT_CODES, readOutcomeCodes } from '@fx/core/src/work-items/activity.js';
 import { requestChanges } from '@fx/core/src/work-items/operatorMoves.js';
 import { maxFixRounds } from '@fx/spend';
-import { RUNNER_DAILY_LIMIT_PAUSE, RUNNER_DAILY_LIMIT_SENTENCE, markBuildNeedsHuman } from '@fx/pipeline';
+import { RUNNER_DAILY_LIMIT_PAUSE, RUNNER_DAILY_LIMIT_SENTENCE, SELF_CLEARING_REVIEW_WAITS, SELF_CLEARING_WAIT_SENTENCES, markBuildNeedsHuman } from '@fx/pipeline';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { activityResponseSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
@@ -387,6 +387,32 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       // An escalation from before the item last reached Needs a person does not count.
       await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now(), 'control_plane', 'later')`, [accountId, itemId]);
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
+    });
+
+    it('review_limit_wait (D#6): a review parked for a refusal that clears by itself says its own fixed sentence, with no reset time; another stage, a stale fact, a later fact or a halt say nothing', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'pr_opened' });
+      let k = 0;
+      const fact = async (kind: string, code: string | null, stage: string | null = 'review') => {
+        await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, attempt, code, dedupe_key) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [accountId, itemId, kind, stage, stage === null ? null : 0, code, `s${k++}`]);
+      };
+      for (const code of SELF_CLEARING_REVIEW_WAITS) {
+        await fact('stage_waiting', code);
+        expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'review_limit_wait', reason: SELF_CLEARING_WAIT_SENTENCES[code] });
+      }
+      expect([...REVIEW_SELF_CLEARING_WAIT_CODES]).toEqual([...SELF_CLEARING_REVIEW_WAITS]);
+      // A code that is not a review wait, or one at another stage, is no notice; a later fact ends it.
+      await fact('stage_waiting', 'a_code_nobody_parks_on');
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await fact('stage_waiting', 'sandbox_reaping', 'build');
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await fact('stage_waiting', 'sandbox_reaping');
+      expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('review_limit_wait');
+      await fact('review_started', null, null);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await fact('stage_waiting', 'worker_unavailable');
+      await admin.query(`UPDATE work_item_driver_events SET created_at = now() - interval '2 hours' WHERE work_item_id = $1 AND dedupe_key = $2`, [itemId, `s${k - 1}`]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
     });
 
     it('review_limit_wait (D#6): a fresh review wait for the runner daily limit that is the newest fact says so with the fixed sentence and the next UTC midnight; later facts, a stale fact, a halt or another stage say nothing', async () => {

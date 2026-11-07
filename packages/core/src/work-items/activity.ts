@@ -159,6 +159,11 @@ export const BUILD_WAIT_FRESH_SECONDS = 180;
  * sweep refreshes the waiting fact every pass (15 minutes), so the wait is current while that fact is the item's newest and younger than three passes.
  */
 export const REVIEW_LIMIT_WAIT_CODE = 'runner_daily_limit';
+/**
+ * The other review waits: a reviewer refused for a cause that clears by itself (packages/pipeline notStartedRefusals.ts SELF_CLEARING_REVIEW_WAITS; a test holds the copies equal).
+ * The notice is the same kind; its `reason` is the fixed code (the API route puts the sentence in) and it has no `resetsAt`, because nothing here is tied to a clock.
+ */
+export const REVIEW_SELF_CLEARING_WAIT_CODES: readonly string[] = Object.freeze(['sandbox_reaping', 'repo_visibility_unknown', 'execution_mode_changed', 'worker_unavailable', 'starter_unavailable']);
 export const REVIEW_LIMIT_WAIT_STAGES: readonly string[] = Object.freeze(['pr_opened', 'changes_requested', 'review_passed', 'needs_human']);
 export const REVIEW_LIMIT_WAIT_FRESH_SECONDS = 2700;
 
@@ -572,7 +577,7 @@ async function readSupersededRoot(client: PoolClient, workItemId: string): Promi
 }
 
 /**
- * The item's review is parked for the runner's daily run limit: its newest driver fact of any kind is the review's waiting fact with that code, and it is current.
+ * The item's review is parked for the runner's daily run limit (or a self-clearing refusal, below): its newest driver fact of any kind is the review's waiting fact with that code, and it is current.
  * Anything written after it (the reviewers started, a stop) ends the notice. `resetsAt` is the next UTC midnight after the fact, the boundary the runner counts days by.
  */
 async function readReviewLimitWait(client: PoolClient, workItemId: string, stage: string, halted: boolean): Promise<ActivityNotice | null> {
@@ -585,7 +590,9 @@ async function readReviewLimitWait(client: PoolClient, workItemId: string, stage
       [workItemId, REVIEW_LIMIT_WAIT_FRESH_SECONDS],
     )
   ).rows[0];
-  if (!fact || !fact.fresh || fact.kind !== 'stage_waiting' || fact.stage !== 'review' || fact.code !== REVIEW_LIMIT_WAIT_CODE) return null;
+  if (!fact || !fact.fresh || fact.kind !== 'stage_waiting' || fact.stage !== 'review' || fact.code === null) return null;
+  if (REVIEW_SELF_CLEARING_WAIT_CODES.includes(fact.code)) return { kind: 'review_limit_wait', reason: fact.code };
+  if (fact.code !== REVIEW_LIMIT_WAIT_CODE) return null;
   return { kind: 'review_limit_wait', reason: '', resetsAt: fact.resets_at.toISOString() };
 }
 

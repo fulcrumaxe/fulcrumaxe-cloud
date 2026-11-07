@@ -193,6 +193,18 @@ const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", 
  * the round records one waiting fact and ends `review_paused:runner_daily_limit` with no re-asking, and the parked-stage sweep starts it again after the next UTC midnight.
  */
 const RUNNER_DAILY_LIMIT_PAUSE = "runner_daily_limit";
+/**
+ * The not-started refusals that clear by themselves (packages/pipeline notStartedRefusals.ts SELF_CLEARING_REVIEW_WAITS and SELF_CLEARING_MAX_PARKS; a test holds the copies equal).
+ * A round whose every refused reviewer was refused for the daily limit or one of these parks like the daily limit does: one waiting fact naming the cause, the workflow ends
+ * `review_paused:<cause>`, the sweep restarts it. Every other refusal (a person to act, or permanent) stops the round with its own code, and decides a mixed round.
+ */
+const SELF_CLEARING_REVIEW_WAITS: readonly string[] = ["sandbox_reaping", "repo_visibility_unknown", "execution_mode_changed", "worker_unavailable", "starter_unavailable"];
+const parkable = (reason: string | null | undefined): boolean => typeof reason === "string" && (reason === RUNNER_DAILY_LIMIT_PAUSE || SELF_CLEARING_REVIEW_WAITS.includes(reason));
+/** The wait a round of refused starts becomes (null: it stops). A cause that never clears is ended by the sweep, which counts the restarts (stageResume.ts). */
+function parkFor(reasons: ReadonlyArray<string | null | undefined>): string | null {
+  if (reasons.length === 0 || !reasons.every(parkable)) return null;
+  return SELF_CLEARING_REVIEW_WAITS.find((c) => reasons.includes(c)) ?? RUNNER_DAILY_LIMIT_PAUSE;
+}
 const BUILD_SPEND_POLL_MS = 300_000;
 const BUILD_SPEND_WAIT_MS = 4 * 3_600_000;
 /**
@@ -1462,11 +1474,11 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   // UTC midnight must not push the resume a day out. The started reviewers are still followed to their verdicts below; the restart finds them by their keys.
   // Any other refusal in the mix keeps the stop.
   const refusedStarts = started.filter((s) => s.runId === null);
-  const limitParked = refusedStarts.length > 0 && refusedStarts.every((s) => s.reason === RUNNER_DAILY_LIMIT_PAUSE);
   const waitAttempt = Math.max(0, ...refusedStarts.map((s) => attemptOf.get(s.role) ?? attempt));
-  if (limitParked) {
-    await waitOnHead(args, "review", RUNNER_DAILY_LIMIT_PAUSE, waitAttempt, pr, rereview);
-    await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "review_start", reason: RUNNER_DAILY_LIMIT_PAUSE });
+  const parkedFor = parkFor(refusedStarts.map((s) => s.reason));
+  if (parkedFor !== null) {
+    await waitOnHead(args, "review", parkedFor, waitAttempt, pr, rereview);
+    await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "review_start", reason: parkedFor });
   }
   const verdicts: Verdict[] = [];
   for (const s of started) {
@@ -1477,7 +1489,7 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
       verdicts.push(got.verdict);
     }
   }
-  if (limitParked) return { verdicts: [], refused: [], refusedWhy: {}, paused: { pause: RUNNER_DAILY_LIMIT_PAUSE, attempt: waitAttempt } };
+  if (parkedFor !== null) return { verdicts: [], refused: [], refusedWhy: {}, paused: { pause: parkedFor, attempt: waitAttempt } };
   // Who was refused, and the worker's closed reason for each (a role setting, the runner's daily limit, ...): the stop's code names the reason, so the card and Needs you can say it.
   const refusedWhy: Record<string, string> = {};
   for (const s of started) if (s.runId === null && s.reason !== null && s.reason !== undefined) refusedWhy[s.role] = s.reason;
@@ -2060,7 +2072,9 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     if (round.decision !== "fix") {
       // incomplete (a required reviewer could not start) or refused: nothing is decided, nothing is merged.
       // The code names the worker's reason when it gave one (`not_started_runner_daily_limit`), the role otherwise: the person reading the card needs the cause, not only the role.
-      await stopped(args, "review", refused.length > 0 ? `not_started_${refusedWhy[refused[0]!] ?? refused[0]}` : round.decision, { head: pr.headSha, pr: pr.number, ...(round.decision === "ci_wait_timeout" && round.ciStop ? { reasons: round.ciStop } : {}) });
+      // In a mixed round the code is a refusal a person or nothing can clear (a parkable one would have parked the round if it stood alone).
+      const decisive = refused.find((r) => !parkable(refusedWhy[r])) ?? refused[0];
+      await stopped(args, "review", decisive !== undefined ? `not_started_${refusedWhy[decisive] ?? decisive}` : round.decision, { head: pr.headSha, pr: pr.number, ...(round.decision === "ci_wait_timeout" && round.ciStop ? { reasons: round.ciStop } : {}) });
       return { status: "needs_human", detail: refused.length > 0 ? `reviewer_not_started:${refused.join(",")}` : round.decision };
     }
 

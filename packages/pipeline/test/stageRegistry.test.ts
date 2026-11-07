@@ -6,6 +6,7 @@ import { WAITING_STAGES as CORE_WAITING_STAGES } from "@fx/core/src/work-items/d
 import { PANEL_PROGRESS_KINDS, PANEL_WHOLE_CODE, CHECK_FIX_PARK, PARKED_STAGE_REGISTRY, UNREGISTERED_STAGES, registeredStages } from "../src/advance/stageRegistry.js";
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, isWaitingStage, stageOfFact } from "../src/advance/waitingStages.js";
 import { CAPACITY_WAIT, RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
+import { SELF_CLEARING_REVIEW_WAITS } from "../src/advance/notStartedRefusals.js";
 import { attemptOfKey } from "../src/advance/attemptKeys.js";
 import { likeToRegex } from "./helpers/likeToRegex.js";
 
@@ -41,12 +42,15 @@ describe("the parked-stage registry", () => {
       expect(PARKED_STAGE_REGISTRY[e.stage]).toBe(e);
       expect(e.pauses.length).toBeGreaterThan(0);
       // The one wait that is not a spend pause: a review parked for the runner's daily limit (resumed by the clock, and only at the review stage).
-      for (const p of e.pauses) expect(e.stage === "review" && p === "runner_daily_limit" ? [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT, p] : [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT]).toContain(p);
+      // And the not-started refusals that clear by themselves (notStartedRefusals.ts), also only at the review stage.
+      for (const p of e.pauses) expect(e.stage === "review" && (p === "runner_daily_limit" || (SELF_CLEARING_REVIEW_WAITS as readonly string[]).includes(p)) ? [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT, p] : [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT]).toContain(p);
       for (const s of [...e.itemStages, ...(e.childItemStages ?? [])]) expect(WAITING_STAGE_POSITIONS[e.stage]).toContain(s);
     }
-    expect(PARKED_STAGE_REGISTRY.review!.pauses).toEqual([...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT, "runner_daily_limit"]);
-    // migration 0845's lister accepts at most eight pauses.
-    for (const e of registeredStages()) expect(e.pauses.length).toBeLessThanOrEqual(8);
+    expect(PARKED_STAGE_REGISTRY.review!.pauses).toEqual([...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT, "runner_daily_limit", ...SELF_CLEARING_REVIEW_WAITS]);
+    // migration 0845's lister accepts at most eight pauses per call: the sweep lists a longer entry in chunks of exactly that size.
+    const migration = readFileSync(join(here, "../../db/migrations/0845_stage_waiting.sql"), "utf8");
+    expect(migration).toContain("cardinality(p_pauses) NOT BETWEEN 1 AND 8");
+    expect(readFileSync(join(here, "../../worker/src/stageResume.ts"), "utf8")).toContain("const LIST_PAUSES_MAX = 8;");
   });
 
   it("the build entry: Spec ready only, and the run-key pattern matches its keys (bare, attempt, attempt with a note pin) and no one else's", () => {
