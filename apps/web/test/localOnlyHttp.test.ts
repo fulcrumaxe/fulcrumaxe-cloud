@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { FX_GATE1_DESCRIPTIONS, GATE1_ATTEST_DOCUMENTS, GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError } from "@fx/runner-cloud";
+import { FX_GATE1_DESCRIPTIONS, GATE1_ATTEST_DOCUMENTS, GATE1_STATUS_DOCUMENTS, GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError } from "@fx/runner-cloud";
 import type { InstallationHttp, InstallationHttpRequest } from "@fx/github";
 import type { LocalGitHubHttp } from "@fx/pipeline";
 import { fenceInstallationHttp, openForRepo } from "../lib/github/localOnlyHttp";
@@ -164,6 +164,31 @@ describe("openForRepo", () => {
       const open = vi.fn(async () => http);
       expect(await openForRepo(open, "sandbox", "merge_gate", TARGET, { withoutMerge: true, gate1Attest: true })).toBe(http);
       expect(open).toHaveBeenCalledWith("merge_gate", TARGET);
+    });
+
+    it("PR 1c, gate1Status (the go phase's client): A17 only; the label, the fx-gate1 post, A15 and A16 are refused; only with withoutMerge on merge_gate", async () => {
+      const status = { owner: "acme", name: "widgets", sha: SHA };
+      const gql = (c: LocalGitHubHttp) => c.graphql as (op: string, v: Record<string, unknown>) => Promise<unknown>;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const { http, seen } = inner();
+        const got = (await openForRepo(vi.fn(async () => http), "runner_local", "merge_gate", TARGET, { withoutMerge: true, gate1Status: true })) as LocalGitHubHttp;
+        await gql(got)("Gate1Status", status);
+        expect(seen.map((r) => (r.body as { query: string }).query)).toEqual([GATE1_STATUS_DOCUMENTS.Gate1Status]);
+        await expect(got.request(label)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        await expect(got.request(gate1)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        await expect(gql(got)("Gate1CheckRuns", runs)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        await expect(gql(got)("Gate1LabelEvents", events)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        expect(seen).toHaveLength(1);
+        for (const [kind, options] of [["merge_gate", { gate1Status: true }], ["read", { withoutMerge: true, gate1Status: true }], ["merge_gate", { withoutMerge: true }]] as const) {
+          const other = inner();
+          const c = (await openForRepo(vi.fn(async () => other.http), "runner_local", kind, TARGET, options)) as LocalGitHubHttp;
+          await expect(gql(c)("Gate1Status", status), `${kind} ${JSON.stringify(options)}`).rejects.toBeInstanceOf(LocalOnlyGithubError);
+          expect(other.seen).toEqual([]);
+        }
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 

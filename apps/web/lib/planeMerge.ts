@@ -2,10 +2,10 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
-import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, mergeQueue, readItemRecordedPullRequest, readPublicPullRequest, readRepoGhId, recordMergeReceipt, runMergeGateForItem, type GitHubHttp, type GoAttestation, type MergeBlockReason } from "@fx/pipeline";
+import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, mergeQueue, parseGate1AttestRepos, readItemRecordedPullRequest, readPublicPullRequest, readRepoGhId, recordMergeReceipt, runMergeGateForItem, type GitHubHttp, type GoAttestation, type MergeBlockReason } from "@fx/pipeline";
 import type { PlaneMergeGoResult, PlaneMergeOrderFacts, PublicPullFacts, PublicQueueFacts } from "@fx/runner-cloud";
 import { mergeGateAuthorTrust } from "./github/authorTrust";
-import { openInstallationHttp } from "./github/installationHttp";
+import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 import { createPrStateReader } from "./github/prState";
 
@@ -47,6 +47,10 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
   const openReviewHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp>;
   // The code repository: the same fenced client without the merge call.
   const openPublicHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }, { withoutMerge: true }) as Promise<GitHubHttp>;
+  // D#6 CLOUD-POSTS-FX-GATE1 PR 1c: the go phase's code-repository client, with the fence's one read of who posted fx-gate1 (A17) and no write of it.
+  const openGoPublicHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }, { withoutMerge: true, gate1Status: true }) as Promise<GitHubHttp>;
+  // FX_GATE1_ATTEST_REPOS, read once when the ops are built (a malformed value throws, so the worker does not start). Unlisted: the gate makes no A17 read.
+  const gate1Status = { repos: parseGate1AttestRepos(process.env.FX_GATE1_ATTEST_REPOS), ourLogin: readRepoAppLogin };
 
   const splitRepo = (codeRepo: string): { owner: string; name: string } => {
     const [owner, name, extra] = codeRepo.split("/");
@@ -79,7 +83,8 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
         queueDocuments: QUEUE_DOCUMENTS,
         localReviewOptIn: createPgLocalReviewOptIn(pool),
         authorTrust: mergeGateAuthorTrust,
-        publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
+        publicPlane: { open: openGoPublicHttp, read: readPublicPullRequest(pool) },
+        gate1Status,
         mergeDelegate: async (_args, { mergeMode: read }) => {
           // D#694 B7-1: the gate read the CODE repository's mode (not the private repo's). A queue repository's order goes only to a runner that can enqueue, and no credential is minted otherwise.
           if (read === "queue" && input.queueCapable !== true) return { delegated: false, reason: "runner_update_required" };

@@ -21,7 +21,9 @@ vi.mock("@fx/pipeline", async (original) => ({
 }));
 
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
+import { GATE1_STATUS_DOCUMENTS } from "@fx/runner-cloud";
 import { createReviewDeps } from "../lib/advanceReview";
+import { readRepoAppLogin } from "../lib/github/installationHttp";
 import { reviewLoadBody } from "../lib/advanceReviewSteps";
 
 const ACCOUNT = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -211,6 +213,27 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
         warn.mockRestore();
       }
       expect(plain.request).toHaveBeenCalledTimes(1);
+    });
+
+    it("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: the order phase's gate gets the fx-gate1 creator check (FX_GATE1_ATTEST_REPOS, our App's login) and its code-repository client sends A17", async () => {
+      const before = process.env.FX_GATE1_ATTEST_REPOS;
+      process.env.FX_GATE1_ATTEST_REPOS = "acme/widgets-public";
+      try {
+        const plain = { request: vi.fn(async (_req: unknown) => ({ status: 200, body: {} })) };
+        const { pool } = fakePool(true);
+        mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: REPO, owner: "acme", name: "widgets", executionMode: "runner_local" } });
+        await createReviewDeps(vi.fn(async () => plain as never)).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
+        const gateDeps = mocks.runMergeGateForItem.mock.calls.at(-1)![0] as { gate1Status?: { repos: ReadonlySet<string>; ourLogin: unknown }; publicPlane: { open: (c: unknown) => Promise<{ graphql(op: string, v: unknown): Promise<unknown> }> } };
+        expect([...(gateDeps.gate1Status?.repos ?? [])]).toEqual(["acme/widgets-public"]);
+        expect(gateDeps.gate1Status?.ourLogin).toBe(readRepoAppLogin);
+        plain.request.mockClear();
+        await (await gateDeps.publicPlane.open(code)).graphql("Gate1Status", { owner: "acme", name: "widgets-public", sha: "c".repeat(40) });
+        expect(plain.request).toHaveBeenCalledTimes(1);
+        expect((plain.request.mock.calls[0]![0] as { body: { query: string } } | undefined)?.body.query).toBe(GATE1_STATUS_DOCUMENTS.Gate1Status);
+      } finally {
+        if (before === undefined) delete process.env.FX_GATE1_ATTEST_REPOS;
+        else process.env.FX_GATE1_ATTEST_REPOS = before;
+      }
     });
   });
 

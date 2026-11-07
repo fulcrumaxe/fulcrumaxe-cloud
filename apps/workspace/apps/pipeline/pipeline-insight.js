@@ -205,6 +205,8 @@ const REASON_WORDS = {
   public_branch_person_managed: "A person took over the public branch, so the merge is theirs. A person merges the public pull request.",
   public_head_unrecorded: "The public pull request's head is not the one the platform pushed. A person looks at it before it merges.",
   public_head_not_reviewed: "The public pull request does not hold exactly what was reviewed. A person looks at it before it merges.",
+  // D#6 CLOUD-POSTS-FX-GATE1: an fx-gate1 the platform's app did not post is not counted.
+  gate1_status_foreign: "The public pull request's Gate 1 check was posted by someone other than the platform, so it isn't counted. A person looks at it before it merges.",
   no_pull_request: "The platform has no pull request on record for this item to merge. A person looks.",
   go_not_applicable: "The merge could not go through your runner for this item. A person merges the public pull request.",
   pairing_changed: "The public repository's pairing changed while the merge waited. A person merges the public pull request.",
@@ -616,6 +618,7 @@ export const BLOCKING_SENTENCES = {
   run_timestamp_invalid: "A review has an invalid time, so it can't be counted yet",
   public_head_unrecorded: "The public pull request's latest commit isn't the one the platform pushed",
   public_head_not_reviewed: "The public pull request doesn't hold exactly what was reviewed",
+  gate1_status_foreign: "The public pull request's Gate 1 check wasn't posted by the platform",
   stacked_on_open_pr: "It builds on a pull request that hasn't merged yet",
   merge_call_refused: "GitHub refused the merge",
   pr_author_untrusted: "Opened by someone outside the repository's admins and maintainers",

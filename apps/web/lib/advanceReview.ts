@@ -98,6 +98,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
             // D#598 P1d-1: who the platform merges for (its own App bots, the intake allowlist); the merge queue's tick reaches the gate through here.
             authorTrust: mergeGateAuthorTrust,
             publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
+            // PR 1c: an fx-gate1 our App did not post never counts for a cloud item (A17, which this code-repository client already holds).
+            gate1Status: gate1,
             mergeDelegate: async ({ accountId, workItemId, sha, reviewedHead }) => {
               // No store means no order can be placed: a human merge with the PR1 reason, never a merge.
               if (orders === undefined) return { delegated: false, reason: "runner_merge_unavailable" };

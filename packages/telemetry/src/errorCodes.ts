@@ -514,6 +514,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "merge_receipt_failed",
   "merge_receipt_no_run",
   "runner_ordered_unsupported",
+  // Cloud Gate 1 (D#6 CLOUD-POSTS-FX-GATE1 PR 1c): the merge gate's stop for an fx-gate1 that our App did not post.
+  "gate1_status_foreign",
   // Merge queue renumber round (D#519 MQ5-b2): the stop when the round changed paths outside the renamed files and their references.
   "renumber_out_of_scope",
   // Plan write-back merge decision (D#598 P5c-b): the three reasons a plan update waits for a person.

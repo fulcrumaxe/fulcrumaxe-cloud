@@ -12,14 +12,14 @@ import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
 import { LocalOnlyGithubError } from "@fx/runner-cloud";
 import { clearMergeQueueModeCache, type GitHubHttp, type LocalGitHubHttp } from "../../src/build/githubMergePort.js";
 import { LOCAL_REVIEW_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
-import { createReviewGitHubPort, runMergeGateForItem, type GoAttestation, type LocalReviewOptInPort, type MergeDelegate } from "../../src/review/mergeGateRun.js";
+import { createReviewGitHubPort, runMergeGateForItem, type Gate1StatusCheck, type GoAttestation, type LocalReviewOptInPort, type MergeDelegate } from "../../src/review/mergeGateRun.js";
 import { securityTriggers } from "../../src/review/securityTrigger.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { withScopeRefusedSchema } from "@fx/db/test/helpers/scopeRefusedSchema.js";
-import { QUEUE_DOCS, fakeGitHubLocal, type QueueState } from "./helpers/fakeGitHubLocal.js";
+import { QUEUE_DOCS, fakeGitHubLocal, gate1World, type QueueState } from "./helpers/fakeGitHubLocal.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
 /** D#598 P1d-1: the platform's own App bot opened the public pull request (the normal case), so the author rule trusts it without a permission read. */
@@ -984,5 +984,141 @@ describe("D#598 P1d-1: a paired item's public pull request is refused when an ou
     const admin = await world({ executionMode: "sandbox", pub: { authorLogin: "carol", collaborators: { carol: "admin" }, ...queued } });
     expect(await run(admin)).toMatchObject({ outcome: "merge_enqueued" });
     expect(admin.pub.mergeQueue!.mutations).toHaveLength(1);
+  });
+});
+
+describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when our App's bot posted it", () => {
+  const LISTED: Gate1StatusCheck = { repos: new Set(["acme/widgets-public"]), ourLogin: async () => "fx-cloud-app[bot]" };
+  const AGENT = { __typename: "User", login: "autonomous-agent-7" };
+  const OURS = { __typename: "Bot", login: "fx-cloud-app" };
+  /** The public head carries `fx-gate1` (state as given) from `creator`; the code repository's client is the go phase's (A17 only) unless `fence` says otherwise. */
+  async function posted(creator: { __typename: string; login: string } | null, o: { state?: string; fence?: "attest" | "status" } = {}) {
+    const w = await world({ pub: creator === null ? {} : { statuses: { [PUB_HEAD]: { "fx-gate1": o.state ?? "success" } } } });
+    const pub = fakeGitHubLocal(w.pub, { exclude: ["A10"], gate1: gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator } }), gate1Fence: o.fence ?? "status" });
+    const calls: DelegateCall[] = [];
+    const run = (gate1Status?: Gate1StatusCheck, go = true) =>
+      runMergeGateForItem(
+        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
+        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(go ? { goPhase: { attestation: attest() } } : {}) },
+      );
+    const a17 = () => pub.calls.filter((c) => c.label === "A17").length;
+    return { w, pub, calls, run, a17 };
+  }
+
+  it("a person's or a token's fx-gate1 (a User), and another app's bot: not green, gate1_status_foreign, nothing delegated, read through A17 on the read-only client", async () => {
+    // Lookalikes: another app, our slug as a User or an Organization, case, a longer or shorter slug, and `[bot]` written into a user login.
+    const lookalikes = [AGENT, { __typename: "Bot", login: "other-app" }, { __typename: "User", login: "fx-cloud-app" }, { __typename: "Organization", login: "fx-cloud-app" }, { __typename: "Bot", login: "FX-cloud-app" }, { __typename: "Bot", login: "fx-cloud-app-evil" }, { __typename: "Bot", login: "fx-cloud-ap" }, { __typename: "User", login: "fx-cloud-app[bot]" }, { __typename: "Bot", login: "fx-cloud-app[bot]x" }];
+    for (const creator of lookalikes) {
+      const t = await posted(creator);
+      const out = await t.run(LISTED);
+      expect(out.outcome, creator.login).toBe("ready_human_merges");
+      expect(reasons(out)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
+      expect(t.calls).toEqual([]);
+      expect(t.a17()).toBeGreaterThan(0);
+      expect(t.pub.refused).toEqual([]);
+      expect(t.w.pub.posts).toEqual([]);
+      expect((await events(t.w)).find((e) => e.kind === "merge_gate")?.reasons).toContain("gate1_status_foreign");
+      expectNoMergeAnywhere(t.w);
+    }
+  });
+
+  it("our App's bot posted it: green, delegated (go phase, and the order phase on the attester's client)", async () => {
+    const go = await posted(OURS);
+    expect(await go.run(LISTED)).toMatchObject({ outcome: "merge_delegated", headSha: PUB_HEAD });
+    expect(go.calls).toHaveLength(1);
+    expect(go.a17()).toBeGreaterThan(0);
+    const order = await posted(OURS, { fence: "attest" });
+    expect(await order.run(LISTED, false)).toMatchObject({ outcome: "merge_delegated" });
+    const foreign = await posted(AGENT, { fence: "attest" });
+    expect(reasons(await foreign.run(LISTED, false))).toContain("gate1_status_foreign");
+  });
+
+  it("our App's bot posted failure, error or pending: not green and nothing delegated, but not foreign; its REST-style login with [bot] is ours too", async () => {
+    for (const state of ["failure", "error", "pending"]) {
+      const t = await posted(OURS, { state });
+      const r = reasons(await t.run(LISTED));
+      expect(r, state).toContain("ci_not_green");
+      expect(r, state).not.toContain("gate1_status_foreign");
+      expect(t.calls).toEqual([]);
+    }
+    const rest = await posted({ __typename: "Bot", login: "fx-cloud-app[bot]" });
+    expect(await rest.run(LISTED)).toMatchObject({ outcome: "merge_delegated" });
+  });
+
+  it("our App's bot posts failure between the CI read and A17 (the snapshot still says success): not green, nothing delegated, not foreign", async () => {
+    const t = await posted(OURS);
+    const isStatusRead = (body: unknown) => (body as { query?: string } | undefined)?.query?.startsWith("query Gate1Status") === true;
+    const pub = fakeGitHubLocal(t.w.pub, {
+      exclude: ["A10"],
+      gate1: gate1World({ creators: { [PUB_HEAD]: OURS } }),
+      gate1Fence: "status",
+      transport: (inner) => ({ request: async (req) => (isStatusRead(req.body) && (t.w.pub.statuses[PUB_HEAD]!["fx-gate1"] = "failure"), inner.request(req)) }),
+    });
+    const calls: DelegateCall[] = [];
+    const out = await runMergeGateForItem(
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), gate1Status: LISTED },
+      { accountId: t.w.accountId, workItemId: t.w.workItemId, prNumber: t.w.priv.prNumber, goPhase: { attestation: attest() } },
+    );
+    expect(reasons(out)).toContain("ci_not_green");
+    expect(reasons(out)).not.toContain("gate1_status_foreign");
+    expect(calls).toEqual([]);
+  });
+
+  it("the snapshot shows fx-gate1 but A17 has no creator on it: foreign (fail closed)", async () => {
+    const t = await posted(OURS);
+    const pub = fakeGitHubLocal(t.w.pub, { exclude: ["A10"], gate1: gate1World({ creators: {} }), gate1Fence: "status" });
+    const out = await runMergeGateForItem(
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async () => ({ delegated: true }), gate1Status: LISTED },
+      { accountId: t.w.accountId, workItemId: t.w.workItemId, prNumber: t.w.priv.prNumber, goPhase: { attestation: attest() } },
+    );
+    expect(reasons(out)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
+  });
+
+  it("a CHECK RUN named fx-gate1 (any app, even a green one) is foreign: alone with no status, and beside our own success status", async () => {
+    const run = { name: "fx-gate1", status: "completed", conclusion: "success" };
+    for (const app of [{ id: 15368 }, { id: 999 }, null]) {
+      // Check run only: no status to read, so no A17 call, and still foreign.
+      const only = await posted(null);
+      only.w.pub.checks[PUB_HEAD] = [green, { ...run, app }];
+      const a = await only.run(LISTED);
+      expect(a.outcome, `only ${JSON.stringify(app)}`).toBe("ready_human_merges");
+      expect(reasons(a)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
+      expect(only.calls).toEqual([]);
+      expect(only.a17()).toBe(0);
+      expectNoMergeAnywhere(only.w);
+      // Our status (SUCCESS, our bot) plus a check run of the same name: still foreign.
+      const both = await posted(OURS);
+      both.w.pub.checks[PUB_HEAD] = [green, { ...run, app }];
+      const b = await both.run(LISTED);
+      expect(b.outcome, `both ${JSON.stringify(app)}`).toBe("ready_human_merges");
+      expect(reasons(b)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
+      expect(both.calls).toEqual([]);
+      expectNoMergeAnywhere(both.w);
+    }
+    // The order phase, on the attester's client: the same.
+    const order = await posted(OURS, { fence: "attest" });
+    order.w.pub.checks[PUB_HEAD] = [green, run];
+    expect(reasons(await order.run(LISTED, false))).toContain("gate1_status_foreign");
+    // Unlisted: the gate is as before (a green run of that name counts like any other).
+    const off = await posted(null);
+    off.w.pub.checks[PUB_HEAD] = [green, run];
+    expect(await off.run(undefined)).toMatchObject({ outcome: "merge_delegated" });
+  });
+
+  it("the repository unlisted, the setting empty, or no check given: no A17 read, and the gate is as before (a foreign fx-gate1 still counts)", async () => {
+    for (const g of [{ repos: new Set(["acme/other"]), ourLogin: LISTED.ourLogin }, { repos: new Set<string>(), ourLogin: LISTED.ourLogin }, undefined]) {
+      const t = await posted(AGENT);
+      expect(await t.run(g)).toMatchObject({ outcome: "merge_delegated" });
+      expect(t.a17()).toBe(0);
+    }
+  });
+
+  it("no fx-gate1 on the head: no A17 read; an unreadable A17 is a throw, never green", async () => {
+    const none = await posted(null);
+    expect(await none.run(LISTED)).toMatchObject({ outcome: "merge_delegated" });
+    expect(none.a17()).toBe(0);
+    const broken = await posted(AGENT);
+    await expect(broken.run({ ...LISTED, ourLogin: async () => Promise.reject(new Error("no installation")) })).rejects.toThrow();
+    expect(broken.calls).toEqual([]);
   });
 });

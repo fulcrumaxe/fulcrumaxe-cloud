@@ -48,6 +48,8 @@ const GATE_REASON_WORDS: Readonly<Record<string, string>> = Object.freeze({
   merge_queue_unreadable: "GitHub's merge queue state could not be read; try again or merge by hand",
   merge_repo_busy: 'another merge on this repository was still finishing',
   ordered_resource_unreadable: "the order of this repository's migrations could not be checked",
+  // D#6 CLOUD-POSTS-FX-GATE1 PR 1c: not transient; the item waits for a person.
+  gate1_status_foreign: "the public pull request's Gate 1 check was posted by someone other than the platform",
 });
 
 /** The label of the card's top button, per stage (the Pipeline app's own words; a test pins the two lists equal). */

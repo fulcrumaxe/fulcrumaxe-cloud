@@ -81,3 +81,40 @@ describe("A17: Gate1Status, on the attester client only", () => {
     expect(Object.isFrozen(GATE1_STATUS_DOCUMENTS)).toBe(true);
   });
 });
+
+describe("PR 1c: the read-only gate1Status client holds A17 and nothing else of the opt-in entries", () => {
+  const GO = { exclude: ["A10"], gate1Status: true } as const;
+  const label: GithubRequest = { method: "POST", path: "/repos/acme/app/issues/12/labels", body: { labels: ["ci:full"] } };
+  const status = (context: string, description: string, state = "success"): GithubRequest => ({ method: "POST", path: `/repos/acme/app/statuses/${SHA}`, body: { state, context, description } });
+  const events = { owner: "acme", name: "app", number: 12 };
+
+  it("sends A17, by name and as text", async () => {
+    expect(await through(graphql(DOC, vars), GO)).toEqual({ result: "sent", reached: true });
+    const r = recorder();
+    await localOnlyGithub(r.client, GO).graphql("Gate1Status", vars);
+    expect(r.seen).toHaveLength(1);
+    expect(localOnlyViolation(graphql(DOC, vars), ["A10"], { gate1Status: true })).toBeNull();
+  });
+
+  it("refuses A14, A7's fx-gate1 shape (success and failure), A15, A16 and the squash call before GitHub", async () => {
+    const cases: GithubRequest[] = [
+      label,
+      status("fx-gate1", "Gate 1: full public CI green (cloud)"),
+      status("fx-gate1", "Gate 1: full public CI failed (cloud)", "failure"),
+      graphql(GATE1_ATTEST_DOCUMENTS.Gate1CheckRuns, vars),
+      graphql(GATE1_ATTEST_DOCUMENTS.Gate1LabelEvents, events),
+      { method: "PUT", path: "/repos/acme/app/pulls/12/merge", body: { sha: SHA, merge_method: "squash" } },
+    ];
+    for (const req of cases) expect(await through(req, GO), `${req.method} ${req.path}`).toEqual({ result: NOT, reached: false });
+    const r = recorder();
+    await expect(localOnlyGithub(r.client, GO).graphql("Gate1CheckRuns", vars)).rejects.toMatchObject({ rule: NOT });
+    await expect(localOnlyGithub(r.client, GO).graphql("Gate1LabelEvents", events)).rejects.toMatchObject({ rule: NOT });
+    expect(r.seen).toEqual([]);
+  });
+
+  it("leaves the rest as the plain code-repository client has it: our review status goes; A17 excluded, or the option false, is refused", async () => {
+    expect(await through(status("fulcrumaxe/review", "Reviews passed"), GO)).toEqual({ result: "sent", reached: true });
+    expect(await through(graphql(DOC, vars), { exclude: ["A10", "A17"], gate1Status: true })).toEqual({ result: NOT, reached: false });
+    expect(await through(graphql(DOC, vars), { exclude: ["A10"], gate1Status: false })).toEqual({ result: NOT, reached: false });
+  });
+});

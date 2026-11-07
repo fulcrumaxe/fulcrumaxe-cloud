@@ -46,6 +46,10 @@ describe("the error-code allowlist", () => {
     }
   });
 
+  it("keeps the cloud Gate 1 stop (D#6 CLOUD-POSTS-FX-GATE1 PR 1c) instead of folding it into other", () => {
+    expect(errorCodeOrOther("gate1_status_foreign")).toBe("gate1_status_foreign");
+  });
+
   it("keeps the take-over codes of the runner's watch (D#6 R4a-7) instead of folding them into other", () => {
     for (const code of ["take_over_cancelled", "take_over_in_progress", "take_over_timeout", "take_over_not_handed"]) expect(errorCodeOrOther(code), code).toBe(code);
   });

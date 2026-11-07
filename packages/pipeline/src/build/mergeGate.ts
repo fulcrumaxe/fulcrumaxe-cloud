@@ -434,6 +434,8 @@ export type MergeBlockReason =
   | "public_branch_person_managed"
   /** Two planes: the public head was built from a private head other than the one the reviewers cleared. */
   | "public_head_not_reviewed"
+  /** D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item's public head carries an `fx-gate1` that our App's bot did not post (a person, a token or another app); it is not counted. */
+  | "gate1_status_foreign"
   /** Two planes: the item's repository is paired and its public pull request is not open (not opened yet, closed or merged). The private copy never merges in its place. */
   | "public_pr_not_open"
   /** Two planes, `runner_local`: everything else is met, but the cloud does not merge such a repository's pull request and no runner step exists yet; a person merges. */
