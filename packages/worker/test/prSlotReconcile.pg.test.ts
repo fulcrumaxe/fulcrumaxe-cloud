@@ -7,7 +7,7 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
-import { SCOPE_REFUSAL_EVENT, scopeRefusalPayload } from "@fx/core/src/work-items/scopeRefusal.js";
+import { CLOUD_CLOSE_EVENT, SCOPE_REFUSAL_EVENT, cloudClosePayload, scopeRefusalPayload } from "@fx/core/src/work-items/scopeRefusal.js";
 import { InstallationTokenCache, applyMappedEvent, createInstallationHttp, type AccessTokenRequester } from "@fx/github";
 import { takeBuildSlot } from "@fx/pipeline";
 import { strictGithubFetch } from "../../github/test/helpers/strictGithub.js";
@@ -294,6 +294,26 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
     const other = randomUUID();
     await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'failed')", [other, A.accountId, person.id]);
     await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, other, SCOPE_REFUSAL_EVENT, JSON.stringify(scopeRefusalPayload({ reason: "scope_violation", prNumber: 5, repo: "acme/widgets", total: 1, paths: ["tests/a.ts"] }))]);
+    gh.pulls.push({ repo: "acme/widgets", number: 8, branch: `fx/issue-${person.number}`, state: "closed", merged_at: null, closed_at: "2026-10-10T09:00:00Z" });
+    expect(await reconcileHolder(writerPool, open, A.accountId, person.id)).toBe("closed_unmerged");
+    expect(await stageOf(person.id)).toBe("closed_unmerged");
+  });
+
+  // D#6 SCOPE-REFUSAL-FOLLOWUPS: the same hold for a close the cloud made because it could not read the pull request's files.
+  it("a closed pull request the cloud closed unjudged (its recorded cloud close names that number) leaves the holder where it is; another number still moves it", async () => {
+    const closedByCloud = await item(A, "pr_opened");
+    const runId = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'failed')", [runId, A.accountId, closedByCloud.id]);
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, runId, CLOUD_CLOSE_EVENT, JSON.stringify(cloudClosePayload({ cause: "internal_error", prNumber: 7, repo: "acme/widgets" }))]);
+    gh.pulls.push({ repo: "acme/widgets", number: 7, branch: `fx/issue-${closedByCloud.number}`, state: "closed", merged_at: null, closed_at: "2026-10-10T09:00:00Z" });
+    expect(await reconcileHolder(writerPool, open, A.accountId, closedByCloud.id)).toBe("not_held");
+    expect(await stageOf(closedByCloud.id)).toBe("pr_opened");
+    expect(await movesOf(closedByCloud.id)).toEqual([]);
+
+    const person = await item(A, "pr_opened");
+    const other = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'failed')", [other, A.accountId, person.id]);
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, other, CLOUD_CLOSE_EVENT, JSON.stringify(cloudClosePayload({ cause: "internal_error", prNumber: 5, repo: "acme/widgets" }))]);
     gh.pulls.push({ repo: "acme/widgets", number: 8, branch: `fx/issue-${person.number}`, state: "closed", merged_at: null, closed_at: "2026-10-10T09:00:00Z" });
     expect(await reconcileHolder(writerPool, open, A.accountId, person.id)).toBe("closed_unmerged");
     expect(await stageOf(person.id)).toBe("closed_unmerged");

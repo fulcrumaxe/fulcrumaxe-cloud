@@ -4,6 +4,7 @@ import { sanitize } from "@fx/trust";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { getRunContext } from "@fx/core/src/runs/contextPanel.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { CLOUD_CLOSE_EVENT } from "@fx/core/src/work-items/scopeRefusal.js";
 import { BACK_TO_DISCUSSION_REF_PREFIX } from "@fx/core/src/work-items/operatorActions.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
@@ -1316,6 +1317,27 @@ describe("markBuildNeedsHuman", () => {
     const u = await inProgress();
     await h.admin.query("UPDATE work_items SET stage = 'changes_requested' WHERE id = $1", [u.workItemId]);
     expect(await markBuildNeedsHuman(h.runWriterPool, u.accountId, u.workItemId, u.runId, code)).toEqual({ status: "unchanged", stage: "changes_requested" });
+  });
+
+  // D#6 SCOPE-REFUSAL-FOLLOWUPS: a run that failed after the cloud closed the pull request it opened (it recorded `run.cloud_pr_closed` first) leaves the item at PR opened when the opened delivery came first.
+  it("an item at PR opened whose run recorded a cloud close goes to Needs a person on run_failed; a run with no such record, another code, and another stage stay where they are", async () => {
+    const t = await inProgress();
+    await h.admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [t.workItemId]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, "run_failed")).toEqual({ status: "unchanged", stage: "pr_opened" });
+    await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [t.accountId, t.runId, CLOUD_CLOSE_EVENT, JSON.stringify({ cause: "internal_error", prNumber: 4 })]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, "no_pull_request")).toEqual({ status: "unchanged", stage: "pr_opened" });
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, null, "run_failed")).toEqual({ status: "unchanged", stage: "pr_opened" });
+    // Another run of the item without the record does not count.
+    const other = randomUUID();
+    await h.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'failed')`, [other, t.accountId, t.workItemId]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, other, "run_failed")).toEqual({ status: "unchanged", stage: "pr_opened" });
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, "run_failed")).toEqual({ status: "recorded", stage: "needs_human" });
+    expect((await h.admin.query("SELECT from_stage, source_ref FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'needs_human'", [t.workItemId])).rows).toEqual([{ from_stage: "pr_opened", source_ref: `build_failed:run_failed:${t.runId}` }]);
+    // Only PR opened: an item in review is left alone even with the record.
+    const u = await inProgress();
+    await h.admin.query("UPDATE work_items SET stage = 'changes_requested' WHERE id = $1", [u.workItemId]);
+    await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [u.accountId, u.runId, CLOUD_CLOSE_EVENT, JSON.stringify({ cause: "internal_error", prNumber: 4 })]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, u.accountId, u.workItemId, u.runId, "run_failed")).toEqual({ status: "unchanged", stage: "changes_requested" });
   });
 
   it("with no run at all (Check the build on an item that never had an executor run) it still records Needs human, naming no run", async () => {

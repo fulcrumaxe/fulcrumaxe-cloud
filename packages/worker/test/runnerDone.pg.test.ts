@@ -11,7 +11,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLAIM_PATH, DISPATCH_BASE_KIND, claimRun, createRunPullRequestPort, donePath, doneRun, eventsPath, heartbeatRun, HEARTBEAT_PATH, ingestEvents, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { getRunInsight } from "@fx/core/src/runs/insight.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
-import { SCOPE_REFUSAL_EVENT, type ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
+import { CLOUD_CLOSE_EVENT, SCOPE_REFUSAL_EVENT, type CloudClose, type ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { applyMappedEvent } from "@fx/github";
 import { markBuildNeedsHuman } from "../../pipeline/src/advance/build.js";
 import { RunActionInputError } from "../src/index.js";
@@ -260,6 +260,80 @@ describe("runner done [pg]", () => {
       await ask();
       expect(await ask()).toEqual({ kind: "noted", publicPr: { codeRepo: "acme/widgets-public", number: 41, branch } });
       expect(await events(id)).toHaveLength(1);
+    });
+  });
+
+  // D#6 SCOPE-REFUSAL-FOLLOWUPS: the record the route writes before it closes a pull request for a cause other than the scope check. Same fence, same repositories, its own event.
+  describe("noteCloudClose", () => {
+    const close = (prNumber = 1): CloudClose => ({ cause: "internal_error" as const, prNumber });
+    const pub = { codeRepo: "acme/widgets-public", number: 41 };
+    const events = async (id: string, kind = CLOUD_CLOSE_EVENT) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2 ORDER BY seq", [id, kind])).rows.map((r) => r.payload as Record<string, unknown>);
+    const pair = (codeRepo = "acme/widgets-public") => admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4) ON CONFLICT (repo_id) DO UPDATE SET code_repo = EXCLUDED.code_repo", [A.repoId, A.accountId, codeRepo, ["private/**"]]);
+    const pushRow = async (state = "pr_opened", managed = false) =>
+      (
+        await admin.query<{ id: string; branch: string }>(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state, managed_by_person_at)
+           VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 41, 'https://github.com/acme/widgets-public/pull/41', $7, ${managed ? "now()" : "NULL"}) RETURNING id, branch`,
+          [A.accountId, A.workItemId, A.repoId, "f".repeat(64), "a".repeat(40), "b".repeat(40), state],
+        )
+      ).rows[0]!;
+
+    it("records the close once per pull request, under the lease, in its own event: no scope record, nothing else written", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      expect(await facade.noteCloudClose({ ...lease(id, g), close: close() })).toEqual({ kind: "noted", publicPr: null });
+      expect(await events(id)).toEqual([{ cause: "internal_error", prNumber: 1, repo: "acme/widgets" }]);
+      expect(await events(id, SCOPE_REFUSAL_EVENT)).toEqual([]);
+      await facade.noteCloudClose({ ...lease(id, g), close: close() });
+      expect(await events(id)).toHaveLength(1);
+      await facade.noteCloudClose({ ...lease(id, g), close: close(2) });
+      expect(await events(id)).toHaveLength(2);
+      await nothingWritten(id);
+    });
+
+    it("is fenced like every lease method, and refuses a record that is not one before touching anything", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      expect(await facade.noteCloudClose({ ...lease(id, g + 1), close: close() })).toEqual({ kind: "fenced", reason: "stale_generation" });
+      const other = await newRunner();
+      expect(await facade.noteCloudClose({ ...lease(id, g, other), close: close() })).toMatchObject({ kind: "fenced" });
+      expect(await facade.noteCloudClose({ ...lease(randomUUID(), g), close: close() })).toMatchObject({ kind: "fenced" });
+      await expect(facade.noteCloudClose({ ...lease(id, g), close: { ...close(), prNumber: 0 } })).rejects.toBeInstanceOf(RunActionInputError);
+      await expect(facade.noteCloudClose({ ...lease(id, g), close: { ...close(), cause: "scope_violation" as never } })).rejects.toBeInstanceOf(RunActionInputError);
+      expect(await events(id)).toEqual([]);
+    });
+
+    it("names the public copy the platform opened and still holds, from its own rows, and drops whatever repositories the request carried", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await pair();
+      const { branch } = await pushRow();
+      expect(await facade.noteCloudClose({ ...lease(id, g), close: { ...close(), repo: "evil/other", publicPr: { codeRepo: "evil/other-public", number: 7 } } })).toEqual({ kind: "noted", publicPr: { ...pub, branch } });
+      expect(await events(id)).toEqual([{ cause: "internal_error", prNumber: 1, repo: "acme/widgets", publicPr: pub }]);
+      // The repeat after a blip on the public close names the same copy again.
+      expect(await facade.noteCloudClose({ ...lease(id, g), close: close() })).toEqual({ kind: "noted", publicPr: { ...pub, branch } });
+      expect(await events(id)).toHaveLength(1);
+    });
+
+    it("names no public copy for a person's takeover, a closed or merged one, an unpaired repository or a pairing pointed elsewhere (the last says why)", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      let n = 10;
+      const ask = () => facade.noteCloudClose({ ...lease(id, g), close: close(++n) });
+      await pair();
+      expect(await ask()).toEqual({ kind: "noted", publicPr: null });
+      await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+      await pushRow("pr_opened", true);
+      expect(await ask()).toEqual({ kind: "noted", publicPr: null });
+      for (const state of ["pr_closed", "pr_merged"]) {
+        await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+        await pushRow(state);
+        expect(await ask(), state).toEqual({ kind: "noted", publicPr: null });
+      }
+      await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+      await pushRow();
+      await pair("acme/another-public");
+      expect(await ask()).toEqual({ kind: "noted", publicPr: null, publicSkipped: "pairing_changed" });
     });
   });
 
@@ -1284,6 +1358,74 @@ describe("runner done [pg]", () => {
       } finally {
         await restore();
       }
+    });
+
+    // D#6 SCOPE-REFUSAL-FOLLOWUPS, end to end: the cloud opens the run's pull request, cannot read its files for good, and closes it unjudged (internal_error). That close is recorded before it happens,
+    // the public copy is closed with a plain comment, the webhook leaves the item alone, and the driver moves it to Needs a person without any scope words.
+    it("a pull request the cloud closes because its files cannot be read (internal_error) is held back from the item like a scope refusal, and the public copy is closed", async () => {
+      await admin.query("UPDATE work_items SET stage = 'in_progress', gh_number = 728 WHERE id = $1", [A.workItemId]);
+      await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+      await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3) ON CONFLICT (repo_id) DO NOTHING", [A.repoId, A.accountId, ["private/**"]]);
+      const publicBranch = (
+        await admin.query<{ branch: string }>(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state)
+           VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 41, 'https://github.com/acme/widgets-public/pull/41', 'pr_opened') RETURNING branch`,
+          [A.accountId, A.workItemId, A.repoId, "f".repeat(64), "a".repeat(40), "b".repeat(40)],
+        )
+      ).rows[0]!.branch;
+      const id = await pending({ specVersion: await spec(["src/**"]), newest: true });
+      const g = await claimRoute(id);
+      const repo = fake.repos.get("acme/widgets")!;
+      fake.pushBranch(repo, BRANCH(id, g), { files: [{ path: "src/a.ts", changeType: "MODIFIED" }] });
+      fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", message: "gone" }] } } };
+      const publicCalls: Array<Record<string, unknown>> = [];
+      const planePush = {
+        mintToken: async () => ({ token: "t", expiresAt: new Date() }),
+        verifyPushed: async () => true,
+        verifyPullRequest: async () => null,
+        revokeToken: async () => true,
+        closeRefusedPullRequest: async (input: Record<string, unknown>) => (publicCalls.push({ ...input }), { result: "closed" as const, commented: true }),
+      };
+      const res = await run(() => doneRun({ ...deps, planePush: planePush as never }, send(donePath(id), { run_id: id, lease_generation: g }), id));
+      expect(DoneReply.parse(res.body)).toEqual({ continue: false, outcome: "failed", failure_reason: "internal_error", pr_number: 1 });
+      expect(repo.pulls[0]).toMatchObject({ state: "closed", head: BRANCH(id, g) });
+
+      // The record is on the run in its own event (no scope event), names both pull requests, and was written before the verdict.
+      expect((await admin.query("SELECT 1 FROM run_events WHERE run_id = $1 AND kind = $2", [id, SCOPE_REFUSAL_EVENT])).rows).toEqual([]);
+      const recorded = (await admin.query("SELECT seq, payload FROM run_events WHERE run_id = $1 AND kind = $2", [id, CLOUD_CLOSE_EVENT])).rows;
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].payload).toEqual({ cause: "internal_error", prNumber: 1, repo: "acme/widgets", publicPr: { codeRepo: "acme/widgets-public", number: 41 } });
+      const verdictSeq = (await admin.query("SELECT seq FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed' AND payload->>'to' = 'failed'", [id])).rows[0].seq;
+      expect(Number(recorded[0].seq)).toBeLessThan(Number(verdictSeq));
+
+      // The public pull request was closed, once. Ending its record (so Build again publishes a fresh one) is a later step, so the row is unchanged.
+      expect(publicCalls).toEqual([expect.objectContaining({ accountId: A.accountId, codeRepo: "acme/widgets-public", number: 41, branch: publicBranch })]);
+      expect((await admin.query("SELECT state, pr_number FROM plane_pushes WHERE work_item_id = $1", [A.workItemId])).rows).toEqual([{ state: "pr_opened", pr_number: 41 }]);
+
+      // The webhook: the opened delivery came first (PR opened); the cloud's own close, private and public, is held back from the item.
+      await admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [A.workItemId]);
+      const installationId = (await admin.query<{ id: string }>("SELECT id FROM installations WHERE account_id = $1 LIMIT 1", [A.accountId])).rows[0]?.id ?? randomUUID();
+      const ctx = { accountId: A.accountId, installationId, repoId: A.repoId, repo: { accountId: A.accountId, repoId: A.repoId, ghRepoId: 1, fullName: "acme/widgets" }, deliveryId: randomUUID() };
+      const deliver = (toStage: "pr_opened" | "closed_unmerged") => withTenant(appPool, A.accountId, (c) => applyMappedEvent(c, { ...ctx, deliveryId: randomUUID() }, { kind: "transition_pr", toStage, at: new Date(), prNumber: 1, linkedIssueNumber: 728, trust: "trusted", isFork: false }));
+      const deliverPublic = (toStage: "pr_opened" | "closed_unmerged") =>
+        withTenant(appPool, A.accountId, (c) =>
+          applyMappedEvent(c, { ...ctx, repo: { ...ctx.repo, fullName: "acme/widgets-public" }, deliveryId: randomUUID() }, { kind: "transition_pr", toStage, at: new Date(), prNumber: 41, linkedIssueNumber: null, trust: "trusted", isFork: false, headRef: publicBranch }),
+        );
+      const stageNow = async () => (await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage as string;
+      expect(await deliver("closed_unmerged")).toMatchObject({ applied: "skipped" });
+      expect(await deliverPublic("closed_unmerged")).toMatchObject({ applied: "skipped" });
+      expect(await stageNow()).toBe("pr_opened");
+
+      // The driver reads the run's end (a failed run) and records the item at Needs a person; a late opened delivery does not put it back.
+      expect(await markBuildNeedsHuman(writerPool, A.accountId, A.workItemId, id, "run_failed")).toEqual({ status: "recorded", stage: "needs_human" });
+      expect(await deliver("pr_opened")).toMatchObject({ applied: "skipped" });
+      expect(await deliverPublic("pr_opened")).toMatchObject({ applied: "skipped" });
+      expect(await stageNow()).toBe("needs_human");
+
+      // The card shows no scope words: the run was not refused by the scope check.
+      const activity = await getWorkItemActivity({ pool: appPool, principal: { accountId: A.accountId, userId: A.userId, role: "owner" } }, A.workItemId);
+      expect(activity.notice).toMatchObject({ kind: "needs_human" });
+      expect(activity.notice!.reason).not.toMatch(/Spec's file list|scope/);
     });
 
     it("the role list the route judges is the protocol's: every eligible role other than the executor and the docs-writer ends succeeded without GitHub", async () => {

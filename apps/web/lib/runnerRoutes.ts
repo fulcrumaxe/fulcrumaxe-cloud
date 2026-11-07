@@ -36,6 +36,7 @@ const leases: RunnerLeaseOps = {
   ingestRunnerEvents: async (input) => (await requireWorker()).ingestRunnerEvents(input),
   beginRunnerDone: async (input) => (await requireWorker()).beginRunnerDone(input),
   noteScopeRefusal: async (input) => (await requireWorker()).noteScopeRefusal(input),
+  noteCloudClose: async (input) => (await requireWorker()).noteCloudClose(input),
   finishRunnerDone: async (input) => (await requireWorker()).finishRunnerDone(input),
   completeHandoffOnDone: async (input) => (await requireWorker()).completeHandoffOnDone(input),
   gitTicketContext: async (input) => (await requireWorker()).gitTicketContext(input),

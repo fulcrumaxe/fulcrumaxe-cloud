@@ -109,18 +109,63 @@ export function scopeRefusalSentence(r: ScopeRefusal, opts: { recordEnded?: bool
 }
 
 /**
- * True when the close of pull request `prNumber` of the repository `repoFullName` is one the cloud made itself for a refused run of this item: a run of the item recorded
- * the refusal event naming exactly this repository and this number, either as the private pull request (`repo` + `prNumber`) or as its public copy (`publicPr`). The webhook
- * and the stale pull-request sweep must not record `closed_unmerged` for it. `repoFullName` is the repository the close was delivered for (compared without case);
- * a same-numbered pull request of any other repository is not held. `client` is a `withTenant` client.
+ * D#6 SCOPE-REFUSAL-FOLLOWUPS: the cloud closes the private pull request of a run for a reason other than the scope check. Today that is one: `done` opened (or reused) the
+ * pull request, could not read its files for good, and closed it unjudged (`internal_error`). It is the cloud's own close, so it is recorded on the run BEFORE the close, exactly as
+ * a scope refusal is, and the webhook and the stale sweep hold it the same way. It is a different event on purpose: the card reads only `run.scope_refused` for its scope words, so a
+ * close with another cause never shows them.
+ */
+export const CLOUD_CLOSE_EVENT = 'run.cloud_pr_closed';
+
+export type CloudCloseCause = 'internal_error';
+
+export interface CloudClose {
+  cause: CloudCloseCause;
+  /** The pull request on the private repository the cloud closed. */
+  prNumber: number;
+  /** The full name of the repository `prNumber` lives in: the run's dispatch repository. Written by the cloud from its own rows. */
+  repo?: string;
+  /** The run's public copy on the paired repository, when the cloud closes it too. */
+  publicPr?: { codeRepo: string; number: number };
+}
+
+/** The event payload, cleaned: only the cause, the number and the two repository names the cloud wrote. */
+export function cloudClosePayload(c: CloudClose): Record<string, unknown> {
+  return {
+    cause: c.cause,
+    prNumber: c.prNumber,
+    ...(typeof c.repo === 'string' && REPO_FULL_NAME.test(c.repo) ? { repo: c.repo } : {}),
+    ...(c.publicPr !== undefined && REPO_FULL_NAME.test(c.publicPr.codeRepo) && Number.isSafeInteger(c.publicPr.number) && c.publicPr.number > 0 ? { publicPr: { codeRepo: c.publicPr.codeRepo, number: c.publicPr.number } } : {}),
+  };
+}
+
+/** Reads a stored payload back; null when it is not one this module wrote. */
+export function parseCloudClose(payload: unknown): CloudClose | null {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const p = payload as Record<string, unknown>;
+  if (p.cause !== 'internal_error') return null;
+  if (typeof p.prNumber !== 'number' || !Number.isSafeInteger(p.prNumber) || p.prNumber <= 0) return null;
+  const repo = typeof p.repo === 'string' && REPO_FULL_NAME.test(p.repo) ? p.repo : undefined;
+  const pub = p.publicPr !== null && typeof p.publicPr === 'object' && !Array.isArray(p.publicPr) ? (p.publicPr as Record<string, unknown>) : undefined;
+  const publicPr =
+    pub !== undefined && typeof pub.codeRepo === 'string' && REPO_FULL_NAME.test(pub.codeRepo) && typeof pub.number === 'number' && Number.isSafeInteger(pub.number) && pub.number > 0
+      ? { codeRepo: pub.codeRepo, number: pub.number }
+      : undefined;
+  return { cause: p.cause, prNumber: p.prNumber, ...(repo === undefined ? {} : { repo }), ...(publicPr === undefined ? {} : { publicPr }) };
+}
+
+/**
+ * True when the close of pull request `prNumber` of the repository `repoFullName` is one the cloud made itself for a run of this item: a run of the item recorded a scope
+ * refusal (`run.scope_refused`) or another cloud close (`run.cloud_pr_closed`) naming exactly this repository and this number, either as the private pull request
+ * (`repo` + `prNumber`) or as its public copy (`publicPr`). The webhook and the stale pull-request sweep must not record `closed_unmerged` for it. `repoFullName` is the
+ * repository the close was delivered for (compared without case); a same-numbered pull request of any other repository is not held. `client` is a `withTenant` client.
  */
 export async function scopeRefusalHoldsClose(client: Pick<PoolClient, 'query'>, workItemId: string, repoFullName: string, prNumber: number): Promise<boolean> {
   const { rows } = await client.query<{ held: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM run_events e JOIN agent_runs r ON r.account_id = e.account_id AND r.id = e.run_id
-                     WHERE r.work_item_id = $1::uuid AND e.kind = $4
+                     WHERE r.work_item_id = $1::uuid AND e.kind = ANY($4::text[])
                        AND ((lower(e.payload->>'repo') = lower($3::text) AND e.payload->>'prNumber' = $2::text)
                          OR (lower(e.payload #>> '{publicPr,codeRepo}') = lower($3::text) AND e.payload #>> '{publicPr,number}' = $2::text))) AS held`,
-    [workItemId, String(prNumber), repoFullName, SCOPE_REFUSAL_EVENT],
+    [workItemId, String(prNumber), repoFullName, [SCOPE_REFUSAL_EVENT, CLOUD_CLOSE_EVENT]],
   );
   return rows[0]?.held === true;
 }

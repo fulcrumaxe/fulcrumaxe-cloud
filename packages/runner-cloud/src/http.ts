@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
-import type { ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
+import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
 
@@ -372,6 +372,11 @@ export interface RunnerLeaseOps {
    * closed without the record, as before.
    */
   noteScopeRefusal?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; refusal: ScopeRefusal }): Promise<{ kind: "fenced"; reason: StopReason } | { kind: "noted"; publicPr: { codeRepo: string; number: number; branch: string } | null; publicSkipped?: "pairing_changed" }>;
+  /**
+   * D#6 SCOPE-REFUSAL-FOLLOWUPS: the same record-then-answer step for a close the cloud makes for another cause than the scope check (a pull request whose files it could not read, closed unjudged):
+   * records `run.cloud_pr_closed` under the fence and answers the run's public pull request. Absent from an older worker: the pull request is closed without the record, as before.
+   */
+  noteCloudClose?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; close: CloudClose }): Promise<{ kind: "fenced"; reason: StopReason } | { kind: "noted"; publicPr: { codeRepo: string; number: number; branch: string } | null; publicSkipped?: "pairing_changed" }>;
   /** `done`, second half: records the cloud's verdict under the fence, in one transaction. */
   finishRunnerDone(input: {
     accountId: string;
