@@ -7,7 +7,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { withScopeRefusedSchema } from "@fx/db/test/helpers/scopeRefusedSchema.js";
 import { publicChangeSentence } from "@fx/core/src/repos/publicChangeCopy.js";
-import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { readRetryFacts, stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { createFakeSandbox, type AgentRuntime, type NetworkPolicyRule, type PlanePublishLine } from "@fx/runner";
 import type { PullRequestRef, RunPullRequestPort, RunPullRequestText } from "@fx/runner-cloud";
 import type { StackBasePort, StackParentFacts } from "@fx/pipeline";
@@ -574,6 +574,88 @@ describe("settling a paired sandbox build, and opening the public pull request a
         expect(await reopen()).toMatchObject({ kind: "refused", code: "report_mismatch" });
         expect(await planeRow()).toMatchObject({ state: "pushed_pr_not_opened", pr_number: null, pr_url: null });
       }
+    });
+
+    // D#6 PUSHED-NOT-OPENED-REFUSAL: the worker re-checks on its own, so a press that got past the table (or a stale page) still opens nothing.
+    it("a branch pushed by a run whose scope refusal was recorded is not turned into a pull request: skipped, nothing asked of GitHub", async () => {
+      output = () => say({ phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });
+      await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
+      expect((await planeRow()).state).toBe("pushed_pr_not_opened");
+      const before = (await attempts()).length;
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 9000, 'run.scope_refused', $3::jsonb)", [A.accountId, executorRunId, JSON.stringify({ reason: "scope_violation", prNumber: 5, total: 1, paths: ["a.ts"] })]);
+      gh.calls.length = 0;
+      expect(await reopen()).toEqual({ kind: "skipped", why: "not_retryable" });
+      expect(gh.calls).toEqual([]);
+      expect(gh.opened).toEqual([]);
+      expect(await attempts()).toHaveLength(before);
+      expect(await planeRow()).toMatchObject({ state: "pushed_pr_not_opened", pr_number: null });
+    });
+
+    it("a refusal recorded on a run that did not write this branch does not hold it", async () => {
+      output = () => say({ phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });
+      await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
+      const other = await executorRun("failed");
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.scope_refused', $3::jsonb)", [A.accountId, other, JSON.stringify({ reason: "scope_violation", prNumber: 5, total: 1, paths: ["a.ts"] })]);
+      expect(await reopen()).toMatchObject({ kind: "opened" });
+    });
+
+    // D#6 PUSHED-NOT-OPENED-REFUSAL (fix round 1): a build again re-stamps the same row and keeps its old attempts, so only the newest finished attempt that pushed a head decides.
+    describe("on a re-stamped row, the newest pushing attempt decides whether the scope refusal holds the branch", () => {
+      const refuse = (runId: string) => admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 9000, 'run.scope_refused', $3::jsonb)", [A.accountId, runId, JSON.stringify({ reason: "scope_violation", prNumber: 5, total: 1, paths: ["a.ts"] })]);
+      let n = 0;
+      beforeEach(() => { n = 0; });
+      const attempt = async (runId: string, o: { outcome: string | null; finished?: boolean; kind?: string }) => {
+        n += 1;
+        await admin.query(
+          `INSERT INTO plane_push_attempts (id, account_id, plane_push_id, run_id, runtime, kind, attempt_no, created_at, finished_at, outcome)
+           SELECT $1, $2, p.id, $3, 'sandbox', $4, $5, now() - ($6 || ' minutes')::interval, CASE WHEN $7::boolean THEN now() ELSE NULL END, $8 FROM plane_pushes p WHERE p.work_item_id = $9`,
+          [randomUUID(), A.accountId, runId, o.kind ?? "push", n, String(100 - n), o.finished ?? true, o.outcome, A.workItemId],
+        );
+      };
+      const facts = () => withTenant(appPool, A.accountId, (c) => readRetryFacts(c, A.workItemId));
+
+      it("a refused build followed by a clean build that pushed: offered, and the pull request opens", async () => {
+        const refusedRun = await executorRun("failed");
+        await refuse(refusedRun);
+        await attempt(refusedRun, { outcome: "pr_failed" });
+        await attempt(await executorRun("succeeded"), { outcome: "pr_failed" });
+        await stuck();
+        expect(await facts()).toMatchObject({ state: "pushed_pr_not_opened", scopeRefused: false });
+        expect(await reopen()).toMatchObject({ kind: "opened" });
+      });
+
+      it("a clean push followed by a refused build that pushed: held, and nothing is asked of GitHub", async () => {
+        await attempt(await executorRun("succeeded"), { outcome: "pr_failed" });
+        const refusedRun = await executorRun("failed");
+        await refuse(refusedRun);
+        await attempt(refusedRun, { outcome: "pr_failed" });
+        await stuck();
+        expect(await facts()).toMatchObject({ scopeRefused: true });
+        gh.calls.length = 0;
+        expect(await reopen()).toEqual({ kind: "skipped", why: "not_retryable" });
+        expect(gh.calls).toEqual([]);
+      });
+
+      it("a refused build followed by a clean attempt that has not finished: still held", async () => {
+        const refusedRun = await executorRun("failed");
+        await refuse(refusedRun);
+        await attempt(refusedRun, { outcome: "pr_failed" });
+        // A runner attempt records `pushed` before it finishes, so an unfinished attempt can carry a pushed-head label.
+        await attempt(await executorRun("running"), { outcome: "pushed", finished: false });
+        await stuck();
+        expect(await facts()).toMatchObject({ scopeRefused: true });
+        expect(await reopen()).toEqual({ kind: "skipped", why: "not_retryable" });
+      });
+
+      it("a refused build followed by a clean attempt that finished without pushing a head: still held", async () => {
+        const refusedRun = await executorRun("failed");
+        await refuse(refusedRun);
+        await attempt(refusedRun, { outcome: "pr_opened" });
+        await attempt(await executorRun("succeeded"), { outcome: "scan_refused" });
+        await stuck();
+        expect(await facts()).toMatchObject({ scopeRefused: true });
+        expect(await reopen()).toEqual({ kind: "skipped", why: "not_retryable" });
+      });
     });
 
     it("the pairing now off: pairing_off, nothing asked of GitHub, nothing recorded (no attempt row, the pushed branch kept)", async () => {

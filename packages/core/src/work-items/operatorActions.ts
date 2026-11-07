@@ -149,7 +149,8 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
     case 'retry_push':
       return f.push && mayRetryPublish(f.push) ? { ok: true } : no('state', 'there is no refused push to try again');
     case 'open_pr':
-      return f.push && mayOpenPublicPullRequest(f.push) ? { ok: true } : no('state', 'there is no pushed branch waiting for a pull request');
+      if (f.push && mayOpenPublicPullRequest(f.push)) return { ok: true };
+      return no('state', f.push?.state === 'pushed_pr_not_opened' && f.push.scopeRefused === true ? 'the build was refused for the files it changed, so its branch is not turned into a pull request' : 'there is no pushed branch waiting for a pull request');
     // D#694 B6-5: Remove from queue only while the item waits in the host's queue; Queue again only after the queue took it out. Both at the pull request's review-passed stage.
     case 'remove_from_queue':
       return f.stage === 'review_passed' && f.merge_queue === 'queued' ? { ok: true } : no('state', 'the pull request is not in the merge queue');
