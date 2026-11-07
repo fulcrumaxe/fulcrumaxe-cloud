@@ -22,6 +22,8 @@ import { loadReviewContext, type ReviewContext } from "./context.js";
 import type { PublicPullRequest, PublicPullRequestLookup } from "./publicPullRequest.js";
 import { reviewPlanFor } from "./reviewPlan.js";
 import { securityTriggers } from "./securityTrigger.js";
+import { gate1AttestEnabled, GATE1_CONTEXT } from "./gate1Attest.js";
+import { readGate1Creator } from "./gate1Creator.js";
 
 /**
  * D#483 P3: the merge gate for one work item whose reviewers have passed, with the real GitHub port.
@@ -235,7 +237,16 @@ export async function readReviewJudgement(pool: Pool, optIn: LocalReviewOptInPor
   return { mode, flagged: await reviewerFlaggedSecurity(pool, input.accountId, input.workItemId, input.headSha, mode === "runner_local_on") };
 }
 
-export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs };
+/**
+ * D#6 CLOUD-POSTS-FX-GATE1 PR 1c: for a cloud item (a paired runner_local item whose code repository is listed in `FX_GATE1_ATTEST_REPOS`), the gate counts
+ * `fx-gate1` only when our App's bot posted it. `ourLogin` is the login of the App that serves the item's repository. Unlisted, or absent: no read, as before.
+ */
+export interface Gate1StatusCheck {
+  repos: ReadonlySet<string>;
+  ourLogin: (repoId: string) => Promise<string>;
+}
+
+export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs; gate1Status?: Gate1StatusCheck };
 
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation; orderId?: string } }): Promise<MergeGateGoResult>;
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult>;
@@ -308,6 +319,35 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
           if (mode === "unknown") return { merged: false, delegated: false, reason: "merge_queue_unreadable" };
           const out = await delegate({ accountId, workItemId, sha, reviewedHead: headSha }, { mergeMode: mode });
           return out.delegated ? { merged: false, delegated: true } : { merged: false, delegated: false, reason: out.reason };
+        },
+      };
+    }
+    // PR 1c: the CI read the gate makes. An `fx-gate1` on the head that our App's bot did not post (A17, read right after the snapshot), or any check run
+    // named `fx-gate1`, is not counted: it reads as failed, and the gate stops with `gate1_status_foreign` (the reason joins the caller's stops, which the
+    // gate reads after its CI read).
+    const g1 = deps.gate1Status;
+    if (runnerLocal && g1 !== undefined && gate1AttestEnabled(g1.repos, publicPr.owner, publicPr.name) && isLocalGitHubHttp(mergeHttp)) {
+      const statusHttp = mergeHttp;
+      const code = { owner: publicPr.owner, name: publicPr.name };
+      const ci = mergePort;
+      const foreign = () => {
+        if (!extraBlockReasons.includes("gate1_status_foreign")) extraBlockReasons.push("gate1_status_foreign");
+      };
+      mergePort = {
+        ...mergePort,
+        getCiSnapshot: async (ref, sha, opts) => {
+          let snap = await ci.getCiSnapshot(ref, sha, opts);
+          // Our App only ever posts fx-gate1 as a commit STATUS. A CHECK RUN of that name (any app, any state) is someone else's: it reads as a failed
+          // run and the gate stops as foreign, whether or not a status of ours is also there.
+          if (snap.checkRuns.some((c) => c.name === GATE1_CONTEXT)) {
+            foreign();
+            snap = { ...snap, checkRuns: snap.checkRuns.map((c) => (c.name === GATE1_CONTEXT ? { ...c, status: "completed", conclusion: "failure" } : c)) };
+          }
+          if (!snap.statuses.some((s) => s.context === GATE1_CONTEXT)) return snap;
+          const who = await readGate1Creator(statusHttp, { ...code, sha }, await g1.ourLogin(ctx.repoId));
+          if (who.ours && who.state === "SUCCESS") return snap;
+          if (!who.ours) foreign();
+          return { ...snap, statuses: snap.statuses.map((s) => (s.context === GATE1_CONTEXT ? { ...s, state: "failure" } : s)) };
         },
       };
     }

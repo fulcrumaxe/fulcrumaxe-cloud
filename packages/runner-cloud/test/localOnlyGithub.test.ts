@@ -74,7 +74,7 @@ const ALLOWED: Array<[string, GithubRequest]> = [
 ];
 
 describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 section 6)", () => {
-  it("holds exactly the entries of the Spec's table, A1 to A8 and A10 to A17 (A9 is a fixed document of A1; A14 to A17 are opt-in), and nothing else", () => {
+  it("holds exactly the entries of the Spec's table, A1 to A8 and A10 to A17 (A9 is a fixed document of A1; A14 to A17 are opt-in, A17 also on the read-only gate1Status client), and nothing else", () => {
     expect(LOCAL_ONLY_ALLOWLIST).toEqual([
       { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
       { id: "A2", method: "GET", paths: ["/repos/{owner}/{repo}", "/repositories/{id}"], query: [], body: "none" },
@@ -91,7 +91,7 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A14", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["ci:full"] }', only: "gate1Attest" },
       { id: "A15", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1CheckRuns, variables: exactly owner, name, sha, optional cursor }", only: "gate1Attest" },
       { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
-      { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest" },
+      { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest", alsoOn: "gate1Status" },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });

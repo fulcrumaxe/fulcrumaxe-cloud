@@ -48,6 +48,8 @@
  * PR 1 adds one more read on that same client only (TL ruling 11-07 00:35):
  *   A17  the fixed GraphQL document `Gate1Status`: for one commit by sha, only the status context named exactly "fx-gate1", its state and its
  *        creator's type and login (whether our App's bot posted it), nothing else
+ * PR 1c (TL ruling 11-07 01:00) lets A17, and only A17, onto one more client: the go phase's code-repository client, built with `gate1Status: true`, so the
+ * merge gate can check that the `fx-gate1` it counts was posted by our App. That option opens no write: not A14, not A7's `fx-gate1` shape, not A15 or A16.
  *
  * Calls not listed are refused until a numbered correction adds them with their own negative tests. Reading CI state uses only a
  * fixed GraphQL document that selects state and conclusion, never a check run's output text, summary or annotations.
@@ -239,6 +241,8 @@ export interface LocalOnlyAllowlistEntry {
   body: string;
   /** Present on an opt-in entry: it holds only on a client built with that option, and every other client refuses it. */
   only?: "gate1Attest";
+  /** An opt-in entry that ALSO holds on a client built with this read-only option (A17 alone). */
+  alsoOn?: "gate1Status";
 }
 
 /** The calls R2b-3 makes (C22 section 6) and R3c adds (C35 section 3.3), nothing else. A test holds this list equal to the table in the Spec. */
@@ -259,7 +263,7 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A14", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["ci:full"] }', only: "gate1Attest" },
     { id: "A15", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1CheckRuns, variables: exactly owner, name, sha, optional cursor }", only: "gate1Attest" },
     { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
-    { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest" },
+    { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest", alsoOn: "gate1Status" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -441,12 +445,13 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
 };
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean } = {}): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean } = {}): string | null {
   const gate1Attest = options.gate1Attest === true;
+  const gate1Status = options.gate1Status === true;
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (e.only === undefined || gate1Attest) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (e.only === undefined || gate1Attest || (gate1Status && e.alsoOn === "gate1Status")) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -481,13 +486,14 @@ export interface LocalOnlyGithub extends GithubClient {
  * Wraps `inner`: every call is checked first, and one the allowlist does not hold throws `LocalOnlyGithubError` without reaching `inner`.
  * `exclude` leaves entries out of the list for this client (by id): the client for a paired repository's code repository leaves out A10, so the
  * cloud cannot call merge on it at all and a runner or a person merges there. `gate1Attest` turns on the opt-in entries (A14 to A16, and A7's
- * `fx-gate1` shape) for this client only.
+ * `fx-gate1` shape) for this client only. `gate1Status` turns on A17 alone (a read), and nothing that writes.
  */
-export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean } = {}): LocalOnlyGithub {
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean } = {}): LocalOnlyGithub {
   const exclude = options.exclude ?? [];
   const gate1Attest = options.gate1Attest === true;
+  const gate1Status = options.gate1Status === true;
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req, exclude, { gate1Attest });
+    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status });
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });

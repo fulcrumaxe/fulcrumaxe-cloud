@@ -78,6 +78,7 @@ export interface Gate1World {
   creators: Record<string, { __typename: string; login: string }>;
   labelAdds: number;
 }
+/** PR 1c: `gate1Fence: "status"` builds the fence as the go phase's client is built (A17 only), over the same gate1 world. */
 export const gate1World = (over: Partial<Gate1World> = {}): Gate1World => ({ labels: [], labelEvents: [], now: "2026-11-07T10:00:00Z", appSlug: "fx-cloud-app", creators: {}, labelAdds: 0, ...over });
 const G1_DOCS: Record<string, string> = { ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS };
 const page = <T>(all: T[], cursor: unknown, back: boolean) => {
@@ -92,7 +93,7 @@ const page = <T>(all: T[], cursor: unknown, back: boolean) => {
   return { nodes: all.slice(start, end), pageInfo: { hasNextPage: end < n, endCursor: end < n ? Buffer.from(String(end)).toString("base64url") : null } };
 };
 
-export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[]; queue?: QueueState; transport?: (inner: GithubClient) => GithubClient; gate1?: Gate1World } = {}): LocalFake {
+export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[]; queue?: QueueState; transport?: (inner: GithubClient) => GithubClient; gate1?: Gate1World; gate1Fence?: "attest" | "status" } = {}): LocalFake {
   const g1 = opts.gate1;
   const base = `/repos/${s.owner}/${s.name}`;
   const branch = s.runBranch ?? "fx/run-g1";
@@ -314,7 +315,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
     },
   };
 
-  const fenced = localOnlyGithub(opts.transport ? opts.transport(inner) : inner, { ...(opts.exclude === undefined ? {} : { exclude: opts.exclude }), ...(g1 !== undefined ? { gate1Attest: true } : {}) });
+  const fenced = localOnlyGithub(opts.transport ? opts.transport(inner) : inner, { ...(opts.exclude === undefined ? {} : { exclude: opts.exclude }), ...(g1 !== undefined ? (opts.gate1Fence === "status" ? { gate1Status: true } : { gate1Attest: true }) : {}) });
   const note = (e: unknown): never => {
     if (e instanceof LocalOnlyGithubError) refused.push(e.rule);
     throw e;

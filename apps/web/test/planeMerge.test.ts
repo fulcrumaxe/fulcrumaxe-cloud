@@ -93,6 +93,34 @@ describe("goPhase", () => {
     expect(input).toEqual({ accountId: ACCOUNT, workItemId: ITEM, prNumber: 7, goPhase: { attestation, orderId: order.id } });
   });
 
+  it("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: the go phase's code-repository client sends A17 and refuses the label and the fx-gate1 post; the gate gets the fx-gate1 creator check", async () => {
+    const saved = process.env.FX_GATE1_ATTEST_REPOS;
+    process.env.FX_GATE1_ATTEST_REPOS = "acme/widgets-public";
+    try {
+      const t = ops();
+      const sha = "c".repeat(40);
+      mocks.runMergeGateForItem.mockImplementation(async (deps: { gate1Status?: { repos: ReadonlySet<string> }; publicPlane: { open: (c: unknown) => Promise<{ request(r: unknown): Promise<unknown>; graphql(op: string, v: unknown): Promise<unknown> }> } }) => {
+        expect([...(deps.gate1Status?.repos ?? [])]).toEqual(["acme/widgets-public"]);
+        const pub = await deps.publicPlane.open({ repoId: REPO, owner: "acme", name: "widgets-public", executionMode: "runner_local" });
+        await pub.graphql("Gate1Status", { owner: "acme", name: "widgets-public", sha });
+        await expect(pub.request({ method: "POST", path: "/repos/acme/widgets-public/issues/12/labels", body: { labels: ["ci:full"] } })).rejects.toThrow(/local-only github: refused/);
+        await expect(pub.request({ method: "POST", path: `/repos/acme/widgets-public/statuses/${sha}`, body: { state: "success", context: "fx-gate1", description: "Gate 1: full public CI green (cloud)" } })).rejects.toThrow(/local-only github: refused/);
+        await expect(pub.graphql("Gate1CheckRuns", { owner: "acme", name: "widgets-public", sha })).rejects.toThrow(/local-only github: refused/);
+        expect(t.plain.request).toHaveBeenCalledTimes(1);
+        return { outcome: "merge_delegated", headSha: PUB, reasons: [], status: "skipped" };
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate: vi.fn(async () => ({ delegated: true as const })) })).toEqual({ kind: "go", mergeMode: "direct" });
+      } finally {
+        warn.mockRestore();
+      }
+    } finally {
+      if (saved === undefined) delete process.env.FX_GATE1_ATTEST_REPOS;
+      else process.env.FX_GATE1_ATTEST_REPOS = saved;
+    }
+  });
+
   it("D#483 S5-j2c1: the runner's ordering fact and its capability reach the gate as they were sent, and nothing else is added", async () => {
     const t = ops();
     mocks.runMergeGateForItem.mockResolvedValue({ outcome: "ready_human_merges", headSha: PUB, reasons: ["ordered_resource_out_of_order"], status: "skipped" });

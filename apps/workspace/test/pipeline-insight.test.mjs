@@ -189,6 +189,15 @@ describe("recorded pipeline steps", () => {
       expect(PERSON_MERGES_REASONS).not.toContain("runner_update_required");
     });
 
+    it("D#6 CLOUD-POSTS-FX-GATE1: a foreign fx-gate1 has a sentence on the reason line and the blocking line, and still blocks", () => {
+      for (const text of [reasonWord("gate1_status_foreign"), blockingSentence("gate1_status_foreign")]) {
+        expect(text).toMatch(/Gate 1 check/);
+        expect(text).not.toMatch(/[_<>]|undefined|null/);
+      }
+      expect(Object.hasOwn(BLOCKING_SENTENCES, "gate1_status_foreign")).toBe(true);
+      expect(PERSON_MERGES_REASONS).not.toContain("gate1_status_foreign");
+    });
+
     it("the runner-merge stops have sentences, never raw codes", () => {
       for (const code of ["runner_merge_timeout", "runner_merge_failed", "runner_report_mismatch", "pairing_changed", "public_branch_person_managed", "public_head_unrecorded", "public_head_not_reviewed", "no_pull_request", "go_not_applicable"]) {
         const word = reasonWord(code);
