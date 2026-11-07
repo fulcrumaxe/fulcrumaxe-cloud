@@ -223,9 +223,11 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
         const { pool } = fakePool(true);
         mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: REPO, owner: "acme", name: "widgets", executionMode: "runner_local" } });
         await createReviewDeps(vi.fn(async () => plain as never)).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
-        const gateDeps = mocks.runMergeGateForItem.mock.calls.at(-1)![0] as { gate1Status?: { repos: ReadonlySet<string>; ourLogin: unknown }; publicPlane: { open: (c: unknown) => Promise<{ graphql(op: string, v: unknown): Promise<unknown> }> } };
+        const gateDeps = mocks.runMergeGateForItem.mock.calls.at(-1)![0] as { gate1Status?: { repos: ReadonlySet<string>; ourLogin: unknown; attest?: boolean }; publicPlane: { open: (c: unknown) => Promise<{ graphql(op: string, v: unknown): Promise<unknown> }> } };
         expect([...(gateDeps.gate1Status?.repos ?? [])]).toEqual(["acme/widgets-public"]);
         expect(gateDeps.gate1Status?.ourLogin).toBe(readRepoAppLogin);
+        // An item in flight when the setting went on is attested by the order phase (this client holds the attester's entries); the go phase's read-only client never is (planeMerge.test.ts).
+        expect(gateDeps.gate1Status?.attest).toBe(true);
         plain.request.mockClear();
         await (await gateDeps.publicPlane.open(code)).graphql("Gate1Status", { owner: "acme", name: "widgets-public", sha: "c".repeat(40) });
         expect(plain.request).toHaveBeenCalledTimes(1);

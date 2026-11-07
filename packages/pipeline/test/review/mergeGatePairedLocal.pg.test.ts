@@ -13,6 +13,7 @@ import { LocalOnlyGithubError } from "@fx/runner-cloud";
 import { clearMergeQueueModeCache, type GitHubHttp, type LocalGitHubHttp } from "../../src/build/githubMergePort.js";
 import { LOCAL_REVIEW_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { createReviewGitHubPort, runMergeGateForItem, type Gate1StatusCheck, type GoAttestation, type LocalReviewOptInPort, type MergeDelegate } from "../../src/review/mergeGateRun.js";
+import { ACTIONS_APP_ID, GATE1_DESCRIPTIONS, GATE1_WORKFLOW_CONTEXTS } from "../../src/review/gate1Attest.js";
 import { securityTriggers } from "../../src/review/securityTrigger.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
@@ -1120,5 +1121,73 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
     const broken = await posted(AGENT);
     await expect(broken.run({ ...LISTED, ourLogin: async () => Promise.reject(new Error("no installation")) })).rejects.toThrow();
     expect(broken.calls).toEqual([]);
+  });
+
+  describe("an item in flight when the setting went on: the order phase attests the head through the attester's fence (A14 to A17, A7 only)", () => {
+    const T = "2026-11-07T10:00:00Z";
+    const AFTER = "2026-11-07T10:05:00Z";
+    const ATTEST: Gate1StatusCheck = { ...LISTED, attest: true };
+    const actions = (startedAt: string, conclusion: string | null = "success") => GATE1_WORKFLOW_CONTEXTS.map((name) => ({ name, status: "completed", conclusion, startedAt, app: { id: ACTIONS_APP_ID } }));
+    async function inFlight(o: { creator?: { __typename: string; login: string } | null; runs?: ReturnType<typeof actions>; labeled?: boolean; fence?: "attest" | "status" } = {}) {
+      const creator = o.creator === undefined ? AGENT : o.creator;
+      const w = await world({ pub: { checks: { [PUB_HEAD]: o.runs ?? actions(AFTER) }, ...(creator === null ? {} : { statuses: { [PUB_HEAD]: { "fx-gate1": "success" } } }) } });
+      const g1 = gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator }, ...(o.labeled === false ? {} : { labels: ["ci:full"], labelEvents: [{ event: "labeled" as const, label: "ci:full", createdAt: T }] }) });
+      const pub = fakeGitHubLocal(w.pub, { exclude: ["A10"], gate1: g1, gate1Fence: o.fence ?? "attest" });
+      const calls: DelegateCall[] = [];
+      const run = (gate1Status?: Gate1StatusCheck) =>
+        runMergeGateForItem(
+          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
+          { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+        );
+      const labels = () => new Set(pub.calls.map((c) => c.label));
+      const gate1Posts = () => w.pub.posts.filter((p) => p.sha === PUB_HEAD && (p.body as { context?: string }).context === "fx-gate1").map((p) => p.body);
+      return { w, g1, pub, calls, run, labels, gate1Posts };
+    }
+
+    it("only a foreign fx-gate1: ours is posted through A7 (fixed body), the status is read again, the merge is delegated; nothing outside the fence's entries", async () => {
+      const t = await inFlight();
+      expect(await t.run(ATTEST)).toMatchObject({ outcome: "merge_delegated" });
+      expect(t.gate1Posts()).toEqual([{ state: "success", context: "fx-gate1", description: GATE1_DESCRIPTIONS.success }]);
+      expect(t.pub.denied).toEqual([]);
+      expect(t.pub.refused).toEqual([]);
+      // The attester's reads are A15 to A17 and its one write A7; no label add (ci:full is already on) and no queue entries document (A18).
+      for (const l of ["A15", "A16", "A17", "A7"]) expect(t.labels().has(l), l).toBe(true);
+      for (const l of ["A14", "A18"]) expect(t.labels().has(l), l).toBe(false);
+      expect(t.calls).toHaveLength(1);
+    });
+
+    it("the attester says wait (no ci:full yet): the label is added through A14 (fixed body), nothing is posted, nothing is delegated, and it is not foreign", async () => {
+      for (const creator of [AGENT, null]) {
+        const t = await inFlight({ creator, labeled: false });
+        const out = await t.run(ATTEST);
+        expect(out.outcome, String(creator?.login)).toBe("ready_human_merges");
+        expect(reasons(out)).toContain("ci_not_green");
+        expect(reasons(out)).not.toContain("gate1_status_foreign");
+        expect(t.labels().has("A14")).toBe(true);
+        expect(t.g1.labelAdds).toBe(1);
+        expect(t.gate1Posts()).toEqual([]);
+        expect(t.calls).toEqual([]);
+      }
+    });
+
+    it("a red full run: failure is posted, nothing is delegated", async () => {
+      const t = await inFlight({ runs: actions(AFTER, "failure") });
+      const out = await t.run(ATTEST);
+      expect(out.outcome).toBe("ready_human_merges");
+      expect(t.gate1Posts()).toEqual([{ state: "failure", context: "fx-gate1", description: GATE1_DESCRIPTIONS.failure.ci_red }]);
+      expect(t.calls).toEqual([]);
+    });
+
+    it("the go phase's read-only client (flag off) and an unlisted repository make no attester call: no A14, A15, A16 and no write", async () => {
+      const go = await inFlight({ fence: "status", labeled: false });
+      expect(reasons(await go.run(LISTED))).toContain("gate1_status_foreign");
+      for (const l of ["A14", "A15", "A16"]) expect(go.labels().has(l), l).toBe(false);
+      expect(go.g1.labelAdds).toBe(0);
+      expect(go.gate1Posts()).toEqual([]);
+      const unlisted = await inFlight({ labeled: false });
+      await unlisted.run({ repos: new Set(["acme/other"]), ourLogin: LISTED.ourLogin, attest: true });
+      for (const l of ["A14", "A15", "A16", "A17"]) expect(unlisted.labels().has(l), l).toBe(false);
+      expect(unlisted.gate1Posts()).toEqual([]);
+    });
   });
 });

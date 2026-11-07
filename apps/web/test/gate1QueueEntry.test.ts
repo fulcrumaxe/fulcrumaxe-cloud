@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ loadReviewContext: vi.fn(), attestQueueEntry: vi.fn() }));
-vi.mock("@fx/pipeline", async (original) => ({ ...(await original<typeof import("@fx/pipeline")>()), loadReviewContext: mocks.loadReviewContext, attestQueueEntry: mocks.attestQueueEntry }));
+const mocks = vi.hoisted(() => ({ loadReviewContext: vi.fn(), attestQueueEntry: vi.fn(), attestGate1Head: vi.fn() }));
+vi.mock("@fx/pipeline", async (original) => ({ ...(await original<typeof import("@fx/pipeline")>()), loadReviewContext: mocks.loadReviewContext, attestQueueEntry: mocks.attestQueueEntry, attestGate1Head: mocks.attestGate1Head }));
 
 import { GATE1_QUEUE_DOCUMENTS } from "@fx/runner-cloud";
 import { MERGE_QUEUE_ENTRY_DOCUMENT } from "@fx/github";
@@ -153,5 +153,86 @@ describe("wakeGate1QueueEntry", () => {
     }
     expect(mocks.attestQueueEntry).not.toHaveBeenCalled();
     expect(await wakeGate1QueueEntry(pool([]).pool, event(payload({}, { head_branch: "main" })), { open: vi.fn(), repos: LISTED })).toBeNull();
+  });
+});
+
+describe("wakeGate1QueueEntry: the head attester handed to the queue entry for a group head that lacks our fx-gate1", () => {
+  const H11 = "11".repeat(20);
+  const ITEM11 = "7a7a7a7a-0000-4000-8000-000000000011";
+  /** The records by public pull request number: the entry's own (12) and the group head ahead (11). */
+  function pools(byPr: Record<number, Array<{ work_item_id: string; managed: boolean; head_sha: string | null }>>) {
+    const statements: Array<{ sql: string; params: unknown[] | undefined }> = [];
+    const client = { query: async (sql: string, params?: unknown[]) => (statements.push({ sql, params }), { rows: /FROM plane_pushes/.test(sql) ? (byPr[params![2] as number] ?? []) : [], rowCount: 0 }), release: () => undefined };
+    return { pool: { connect: async () => client } as never, statements };
+  }
+  const own = { 12: [{ work_item_id: ITEM, managed: false, head_sha: PR_HEAD }] };
+  async function handedHead(byPr: Record<number, Array<{ work_item_id: string; managed: boolean; head_sha: string | null }>>, executionMode = "runner_local") {
+    mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: "r1", owner: "acme", name: "widgets", executionMode } });
+    const inner = { request: vi.fn(async () => ({ status: 200, body: {} })) };
+    const open = vi.fn(async () => inner as never);
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await wakeGate1QueueEntry(pools(byPr).pool, event(), { open, repos: LISTED, ourLogin: async (id) => `bot-for-${id}` });
+    } finally {
+      info.mockRestore();
+    }
+    const input = mocks.attestQueueEntry.mock.calls[0]![1] as { attestHead: (e: { prNumber: number; head: string }) => Promise<boolean> };
+    return { attestHead: input.attestHead, open, inner };
+  }
+  beforeEach(() => {
+    mocks.loadReviewContext.mockReset();
+    mocks.attestQueueEntry.mockReset().mockResolvedValue({ kind: "wait", reason: "group_head_unattested" });
+    mocks.attestGate1Head.mockReset().mockResolvedValue({ kind: "posted", state: "success" });
+  });
+
+  it("a group head that is one of our items, stamped at the queue's head: the head attester runs for that pull request, on a client that holds the attester's entries", async () => {
+    const { attestHead, open } = await handedHead({ ...own, 11: [{ work_item_id: ITEM11, managed: false, head_sha: H11 }] });
+    expect(await attestHead({ prNumber: 11, head: H11 })).toBe(true);
+    expect(mocks.attestGate1Head).toHaveBeenCalledTimes(1);
+    const [, call] = mocks.attestGate1Head.mock.calls[0]!;
+    expect(call).toMatchObject({ repos: LISTED, owner: "acme", name: "widgets-public", number: 11, sha: H11 });
+    expect(await call.ourLogin()).toBe("bot-for-r1");
+    expect(await call.readHead()).toBe(H11);
+    // The second client (after the entry's own) is the attester's: the fence with A14 to A17 (allowGraphql), never the merge call.
+    expect(open).toHaveBeenLastCalledWith("merge_gate", expect.objectContaining({ repoId: "r1", owner: "acme", name: "widgets-public", allowGraphql: true }));
+    // The group head that is already attested ("already") counts too.
+    mocks.attestGate1Head.mockResolvedValue({ kind: "already" });
+    expect(await attestHead({ prNumber: 11, head: H11 })).toBe(true);
+  });
+
+  it("a hosted item's group head is attested through the plain client (no fence)", async () => {
+    const { attestHead, inner } = await handedHead({ ...own, 11: [{ work_item_id: ITEM11, managed: false, head_sha: H11 }] }, "sandbox");
+    expect(await attestHead({ prNumber: 11, head: H11 })).toBe(true);
+    expect(mocks.attestGate1Head.mock.calls[0]![0]).toBe(inner);
+  });
+
+  it("not our item (a team pull request), a person-managed or doubly-recorded one, or a head the platform did not stamp: false, and the head attester is never called", async () => {
+    const cases: Array<Record<number, Array<{ work_item_id: string; managed: boolean; head_sha: string | null }>>> = [
+      {},
+      { 11: [{ work_item_id: ITEM11, managed: true, head_sha: H11 }] },
+      { 11: [{ work_item_id: ITEM11, managed: false, head_sha: H11 }, { work_item_id: ITEM, managed: false, head_sha: H11 }] },
+      { 11: [{ work_item_id: ITEM11, managed: false, head_sha: "9".repeat(40) }] },
+      { 11: [{ work_item_id: ITEM11, managed: false, head_sha: null }] },
+    ];
+    for (const c of cases) {
+      mocks.attestQueueEntry.mockClear();
+      const { attestHead } = await handedHead({ ...own, ...c });
+      expect(await attestHead({ prNumber: 11, head: H11 }), JSON.stringify(c)).toBe(false);
+    }
+    mocks.attestQueueEntry.mockClear();
+    const { attestHead } = await handedHead({ ...own, 11: [{ work_item_id: ITEM11, managed: false, head_sha: H11 }] });
+    mocks.loadReviewContext.mockResolvedValue({ ok: false, reason: "not_found" });
+    expect(await attestHead({ prNumber: 11, head: H11 })).toBe(false);
+    expect(mocks.attestGate1Head).not.toHaveBeenCalled();
+  });
+
+  it("the head attester's wait or a failure it posted is false (the entry then waits); a throw is a throw", async () => {
+    const { attestHead } = await handedHead({ ...own, 11: [{ work_item_id: ITEM11, managed: false, head_sha: H11 }] });
+    for (const out of [{ kind: "wait", reason: "run_before_label" }, { kind: "label_added" }, { kind: "posted", state: "failure", reason: "ci_red" }, { kind: "off" }]) {
+      mocks.attestGate1Head.mockResolvedValue(out);
+      expect(await attestHead({ prNumber: 11, head: H11 }), JSON.stringify(out)).toBe(false);
+    }
+    mocks.attestGate1Head.mockRejectedValue(new Error("gate1 attest: files unreadable"));
+    await expect(attestHead({ prNumber: 11, head: H11 })).rejects.toThrow(/files unreadable/);
   });
 });

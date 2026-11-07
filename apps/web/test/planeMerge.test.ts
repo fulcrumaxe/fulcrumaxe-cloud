@@ -101,6 +101,8 @@ describe("goPhase", () => {
       const sha = "c".repeat(40);
       mocks.runMergeGateForItem.mockImplementation(async (deps: { gate1Status?: { repos: ReadonlySet<string> }; publicPlane: { open: (c: unknown) => Promise<{ request(r: unknown): Promise<unknown>; graphql(op: string, v: unknown): Promise<unknown> }> } }) => {
         expect([...(deps.gate1Status?.repos ?? [])]).toEqual(["acme/widgets-public"]);
+        // The go phase's client is read-only (A17): the gate must not try to attest on it.
+        expect((deps.gate1Status as { attest?: boolean } | undefined)?.attest).toBeUndefined();
         const pub = await deps.publicPlane.open({ repoId: REPO, owner: "acme", name: "widgets-public", executionMode: "runner_local" });
         await pub.graphql("Gate1Status", { owner: "acme", name: "widgets-public", sha });
         await expect(pub.request({ method: "POST", path: "/repos/acme/widgets-public/issues/12/labels", body: { labels: ["ci:full"] } })).rejects.toThrow(/local-only github: refused/);

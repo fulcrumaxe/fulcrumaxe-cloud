@@ -99,7 +99,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
             authorTrust: mergeGateAuthorTrust,
             publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
             // PR 1c: an fx-gate1 our App did not post never counts for a cloud item (A17, which this code-repository client already holds).
-            gate1Status: gate1,
+            // An item whose review round ended before the setting went on is attested here, with the same client the CI wait uses (it holds A14 to A17).
+            gate1Status: { ...gate1, attest: true },
             mergeDelegate: async ({ accountId, workItemId, sha, reviewedHead }) => {
               // No store means no order can be placed: a human merge with the PR1 reason, never a merge.
               if (orders === undefined) return { delegated: false, reason: "runner_merge_unavailable" };
