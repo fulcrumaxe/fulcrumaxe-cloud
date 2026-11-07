@@ -40,12 +40,35 @@ export interface CiWaitReading {
   state: "settled" | "pending" | "head_moved";
   /** Fixed words only, in a fixed order, each at most once. Empty when settled. */
   reasons: CiWaitReason[];
+  /** Only from `readCiWaitNamed`, and only when `required_missing` is a reason: the names of the required checks that have not reported (public check names), sorted, at most MAX_MISSING_NAMES. */
+  missing?: string[];
 }
+
+const MAX_MISSING_NAMES = 5;
+const MAX_NAME_LENGTH = 100;
 
 const REASON_ORDER: readonly CiWaitReason[] = ["wrong_head", "incomplete_snapshot", "check_running", "status_pending", "required_missing"];
 
 /** Commit status states that are final. Any other state (pending, expected, one GitHub adds later) is still running. */
 const FINISHED_STATUS_STATES: ReadonlySet<string> = new Set(["success", "failure", "error"]);
+
+/** The required contexts (other than our own review status) that have not appeared on the commit, in the snapshot's order. Pure. */
+function missingRequiredContexts(snapshot: CiSnapshot): string[] {
+  const checkRuns = Array.isArray(snapshot.checkRuns) ? snapshot.checkRuns : [];
+  const statuses = (Array.isArray(snapshot.statuses) ? snapshot.statuses : []).filter((s) => s.context !== REVIEW_STATUS_CONTEXT);
+  const required = (snapshot.protectionUnreadable === true || !Array.isArray(snapshot.requiredContexts) ? [] : snapshot.requiredContexts).filter((c) => c !== REVIEW_STATUS_CONTEXT);
+  return required.filter((ctx) => !checkRuns.some((c) => c.name === ctx) && !statuses.some((s) => s.context === ctx));
+}
+
+/**
+ * `readCiWait`, plus the NAMES of the required checks that never reported when that is a reason, so a log line and a stop can say which one.
+ * The decision is `readCiWait`'s, untouched; the names are a public check's name only, never a result or a log.
+ */
+export function readCiWaitNamed(snapshot: CiSnapshot, headSha: string, opts: { followsPullRequest?: boolean } = {}): CiWaitReading {
+  const reading = readCiWait(snapshot, headSha, opts);
+  if (!reading.reasons.includes("required_missing")) return reading;
+  return { ...reading, missing: [...new Set(missingRequiredContexts(snapshot).map((n) => n.slice(0, MAX_NAME_LENGTH)))].sort().slice(0, MAX_MISSING_NAMES) };
+}
 
 /**
  * Whether the head's CI and guards have finished, from one snapshot. Pure.
@@ -65,8 +88,7 @@ export function readCiWait(snapshot: CiSnapshot, headSha: string, opts: { follow
   if (checkRuns.some((c) => c.status !== "completed")) reasons.add("check_running");
   if (statuses.some((s) => !FINISHED_STATUS_STATES.has(s.state))) reasons.add("status_pending");
   // Required contexts are UNKNOWN (not empty) when the protection read was refused; the observed signals above are then all there is.
-  const required = (snapshot.protectionUnreadable === true || !Array.isArray(snapshot.requiredContexts) ? [] : snapshot.requiredContexts).filter((c) => c !== REVIEW_STATUS_CONTEXT);
-  if (required.some((ctx) => !checkRuns.some((c) => c.name === ctx) && !statuses.some((s) => s.context === ctx))) reasons.add("required_missing");
+  if (missingRequiredContexts(snapshot).length > 0) reasons.add("required_missing");
   const list = REASON_ORDER.filter((r) => reasons.has(r));
   return { state: list.length === 0 ? "settled" : "pending", reasons: list };
 }
@@ -115,13 +137,13 @@ export function createCiGate(deps: {
         if (!SHA_PATTERN.test(live)) throw new Error("ci wait: malformed public head sha");
         // No stamp, or a republish in flight (the stamp may still equal the live head): wait before any checks read.
         if (!publicPr.managedByPerson && (publicPr.stampedHead === null || publicPr.pushState === "updating" || publicPr.pushState === "waiting_person_pushed")) return { state: "pending", reasons: ["wrong_head"] };
-        const reading = readCiWait(await port.getCiSnapshot(ref, live), live);
+        const reading = readCiWaitNamed(await port.getCiSnapshot(ref, live), live);
         if (reading.state === "settled" && !publicPr.managedByPerson && publicPr.stampedHead !== live) return { state: "pending", reasons: ["wrong_head"] };
         return reading;
       }
       const http = await deps.openHttp({ repoId: ctx.repoId, owner: ctx.owner, name: ctx.name, executionMode: ctx.executionMode });
       const port = createReviewGitHubPort({ pool: deps.pool, http }, ctx, { accountId: input.accountId, workItemId: input.workItemId, prNumber: input.prNumber });
-      return readCiWait(await port.getCiSnapshot({ repoId: ctx.repoId, prNumber: input.prNumber }, input.headSha), input.headSha, { followsPullRequest: ctx.executionMode === "runner_local" });
+      return readCiWaitNamed(await port.getCiSnapshot({ repoId: ctx.repoId, prNumber: input.prNumber }, input.headSha), input.headSha, { followsPullRequest: ctx.executionMode === "runner_local" });
     },
   };
 }

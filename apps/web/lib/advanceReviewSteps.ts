@@ -1,6 +1,6 @@
 import type { AdvanceFacade, AdvancePrSource, AdvanceRunStart } from "@fx/worker";
 import type { InstallationHttp, InstallationHttpKind, InstallationHttpTarget } from "@fx/github";
-import { toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { ciWaitStopReasons, toCode } from "@fx/core/src/work-items/driverEvents.js";
 import {
   ReviewPromptInputError,
   assembleFixPrompt,
@@ -347,6 +347,8 @@ export interface RoundOut {
   nextRound: number | null;
   /** `<role>:<verdict>:<outcome>` per recorded verdict, in the order recorded (passes first). */
   recorded: string[];
+  /** `ci_pending` only: the `reasons` a `ci_wait_timeout` stop would carry (the wait's reason words, then `missing_<check>` names). */
+  ciStop?: string[];
 }
 
 export interface GatheredInput {
@@ -368,13 +370,15 @@ export async function recordRoundBody(worker: ReviewWorker | null, who: StepWho,
   // A halt is its own answer, so the workflow can record one stop and end instead of treating it as a failed round.
   if (out.decision === "refused") return { decision: "reason" in out && (out.reason === "item_halted" || out.reason === "halted_since_approval") ? "halted" : "refused", round: 0, nextRound: null, recorded: [] };
   const done = out as Exclude<typeof out, { decision: "refused"; reason: string }>;
-  return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`) };
+  return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`), ...(done.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(done.ciReasons, done.ciMissing) } : {}) };
 }
 
 /** D#598 P7c: `all_passed` (a merge-only head, carried forward and recorded), `full_review` (run the reviewers), `ci_pending`, `halted` or `refused`. */
 export interface MergeOnlyOut {
   decision: string;
   reason: string | null;
+  /** `ci_pending` only, as for `RoundOut`. */
+  ciStop?: string[];
 }
 
 /** Asks whether a new head is only a merge of the base branch. Any refusal or missing worker is `full_review`: the reviewers run as they always did. */
@@ -385,7 +389,7 @@ export async function recordMergeOnlyBody(worker: ReviewWorker | null, who: Step
     const reason = "reason" in out ? out.reason : null;
     return reason === "item_halted" || reason === "halted_since_approval" ? { decision: "halted", reason } : { decision: "full_review", reason: reason ?? "refused" };
   }
-  return { decision: out.decision, reason: "reason" in out && typeof out.reason === "string" ? out.reason : null };
+  return { decision: out.decision, reason: "reason" in out && typeof out.reason === "string" ? out.reason : null, ...(out.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(out.ciReasons, out.ciMissing) } : {}) };
 }
 
 export interface FixOut {

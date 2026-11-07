@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { advanceActionFor } from './advance.js';
+import { CI_MISSING_PREFIX } from './driverEvents.js';
 import { blockingReasons, isQueuedSql, removedByPerson } from './mergeReadiness.js';
 import { CLOSE_ON_GITHUB_STAGES } from './operatorActions.js';
 import { readReviewHold } from './reviewHold.js';
@@ -99,6 +100,7 @@ export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   removed_from_merge_queue: "A person took this pull request out of GitHub's merge queue and it has not been put back, so the pipeline stopped. Press Queue again to check it and queue it again, or merge it yourself on GitHub.",
   merge_call_refused: "GitHub refused to merge this pull request for a reason the pipeline cannot act on, so it stopped for a person. Clear what blocks it on GitHub and merge it there, or push a new commit to its branch and press Check the merge to have the pipeline try again.",
   ci_not_green: "The checks on this pull request had not passed (one failed, or they had not finished in time), so the pipeline stopped before merging. Fix the failing check, or run it again, on GitHub; when a check finishes the merge is tried again by itself.",
+  ci_wait_timeout: 'The checks on this pull request had not finished after two hours of waiting, so the pipeline stopped for a person. Open the pull request on GitHub, see which check is stuck and run it again, then press Check the merge.',
   job_too_large: "This Spec's job is too large to send to a runner, so the build did not start and nothing was run. Shrink the Spec's file list or the context it pulls in (pinned files, memory, long task text), then Re-spec or Build again.",
   parent_has_children: 'This item still has planned pull requests in progress, so the new Spec does not build it. They stay as they are: decide what happens to them, then start the work again.',
   parent_splits: 'This Spec is split into several pull requests, so this item is not built itself. Each planned pull request is built as its own item once the Spec is approved.',
@@ -108,6 +110,23 @@ export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
 export const DEQUEUED_SENTENCE = "GitHub's merge queue removed this pull request and it has not been put back in the queue.";
 
 const humanise = (code: string): string => code.replace(/_/g, ' ');
+
+const CI_WAIT_REASON_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  wrong_head: 'the checks were for a different version of the pull request',
+  incomplete_snapshot: "GitHub's list of checks was incomplete",
+  check_running: 'a check was still running',
+  status_pending: 'a status was still pending',
+});
+
+/** The card's words for a `ci_wait_timeout` stop: what was still missing, from the fixed reason words and the `missing_<check>` names the stop carries. Pure. */
+export function ciWaitTimeoutWords(reasons: readonly string[]): string {
+  const names = reasons.filter((r) => r.startsWith(CI_MISSING_PREFIX)).map((r) => r.slice(CI_MISSING_PREFIX.length));
+  const parts = reasons.filter((r) => CI_WAIT_REASON_WORDS[r] !== undefined).map((r) => CI_WAIT_REASON_WORDS[r]!);
+  if (names.length > 0) parts.push(`the required ${names.length === 1 ? 'check' : 'checks'} ${names.join(', ')} never reported`);
+  else if (reasons.includes('required_missing')) parts.push('a required check never reported');
+  if (parts.length === 0) return STOP_WORDS.ci_wait_timeout!;
+  return `After two hours of waiting, ${parts.join(' and ')}, so the pipeline stopped for a person. Open the pull request on GitHub, start or run the check again, then press Check the merge.`;
+}
 
 export interface StallFacts {
   stage: string;
@@ -145,7 +164,8 @@ export function classifyStall(f: StallFacts): Stall | null {
   if (!STALL_STAGES.includes(f.stage)) return null;
   if (f.halted || f.liveRun || f.pendingRequest || f.waitingAsk) return null;
   const last = f.last;
-  const sentenceFor = (code: string | null, fallback: string): string => {
+  const sentenceFor = (code: string | null, fallback: string, reasons: readonly string[] = []): string => {
+    if (code === 'ci_wait_timeout') return ciWaitTimeoutWords(reasons);
     if (code !== null && STOP_WORDS[code] !== undefined) return STOP_WORDS[code]!;
     // `not_started_<reason>`: a reviewer was refused at the start (older facts end in the reviewer's role instead of a reason).
     if (code !== null && code.startsWith('not_started_')) return `A reviewer couldn't start (${humanise(code.slice('not_started_'.length))}), so the review stopped before it could finish.`;
@@ -153,7 +173,7 @@ export function classifyStall(f: StallFacts): Stall | null {
   };
 
   if (last !== null && last.kind === 'stopped' && last.code !== 'waiting_on_answer') {
-    return { code: 'stopped', why: sentenceFor(last.code, 'The pipeline stopped'), since: last.at };
+    return { code: 'stopped', why: sentenceFor(last.code, 'The pipeline stopped', last.reasons), since: last.at };
   }
   if (last !== null && last.kind === 'escalated') {
     return { code: 'handed_over', why: sentenceFor(last.code, 'The pipeline handed this to a person'), since: last.at };

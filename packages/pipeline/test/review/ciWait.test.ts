@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { CiSnapshot } from "../../src/build/mergeGate.js";
-import { readCiWait } from "../../src/review/ciWait.js";
+import { readCiWait, readCiWaitNamed } from "../../src/review/ciWait.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 
 /**
@@ -45,6 +45,17 @@ describe("readCiWait", () => {
     expect(readCiWait(snap({ ...base, checkRuns: [run("build", "completed", "success"), run("audit-log-guard", "completed", "success")] }), HEAD).state).toBe("settled");
     // A required context may also be reported as a commit status.
     expect(readCiWait(snap({ ...base, statuses: [{ context: "audit-log-guard", state: "success" }] }), HEAD).state).toBe("settled");
+  });
+
+  it("readCiWaitNamed names the required checks that never reported (sorted, capped, never our own status) and leaves the decision as readCiWait has it", () => {
+    const required = ["zeta", "alpha", REVIEW_STATUS_CONTEXT, "build", "c1", "c2", "c3", "c4"];
+    const s = snap({ requiredContexts: required });
+    const named = readCiWaitNamed(s, HEAD);
+    expect(named).toMatchObject({ state: "pending", reasons: ["required_missing"], missing: ["alpha", "c1", "c2", "c3", "c4"] });
+    expect({ state: named.state, reasons: named.reasons }).toEqual(readCiWait(s, HEAD));
+    // Reported ones are not named; with nothing missing there is no `missing` at all.
+    expect(readCiWaitNamed(snap({ requiredContexts: ["build", "guard"], checkRuns: [run("build", "completed", "success"), run("guard", "queued")] }), HEAD)).toEqual({ state: "pending", reasons: ["check_running"] });
+    expect(readCiWaitNamed(snap(), HEAD)).toEqual({ state: "settled", reasons: [] });
   });
 
   it("a requirement for our own review status does not hold the verdict back (it can only be met after the verdict)", () => {

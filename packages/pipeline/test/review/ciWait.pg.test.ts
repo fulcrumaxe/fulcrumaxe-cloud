@@ -130,7 +130,7 @@ describe("a repo-wide guard that has not run yet", () => {
 
   it("the base branch requires guards that have not appeared on the head: pending until each has reported", async () => {
     const w = await world({ repo: { requiredContexts: GUARDS, checks: { [HEAD]: [{ name: "build", status: "completed", conclusion: "success" }] } } });
-    expect(await record(w, PASS_BOTH)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing"] });
+    expect(await record(w, PASS_BOTH)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing"], ciMissing: ["audit-log-guard", "telemetry-error-codes"] });
     await expectNothingRecorded(w);
     // One guard reports; the other has not started.
     w.gh.checks[HEAD]!.push({ name: "telemetry-error-codes", status: "completed", conclusion: "success" });
