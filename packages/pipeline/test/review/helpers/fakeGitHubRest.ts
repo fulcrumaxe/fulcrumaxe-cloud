@@ -1,5 +1,6 @@
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
 import type { GitHubHttp, GitHubHttpRequest, GitHubHttpResponse } from "../../../src/build/githubMergePort.js";
+import type { Gate1World } from "./fakeGitHubLocal.js";
 
 /**
  * A fake of the part of GitHub's REST API the stage driver touches, written to answer like the real one where our code
@@ -58,6 +59,11 @@ export interface FakeRepoState {
   checks: Record<string, FakeCheckRun[]>;
   /** Commit statuses by sha: context -> state (latest wins). */
   statuses: Record<string, Record<string, string>>;
+  /**
+   * The full status history of a sha, oldest first, each with its REST creator. When set, `commits/{sha}/statuses` (the hosted attester's read) lists
+   * it newest first instead of one entry per context; an `fx-gate1` post is appended to it.
+   */
+  statusLog?: Record<string, Array<{ context: string; state: string; creator: { login: string; type: string } }>>;
   requiredContexts: string[];
   /** The base branch has a classic protection rule that requires no status checks: GitHub answers 404 "Required status checks not enabled" instead of "Branch not protected". */
   protectedWithoutChecks?: boolean;
@@ -176,12 +182,55 @@ function page<T>(all: T[], q: GitHubHttpRequest["query"]): T[] {
   return all.slice((p - 1) * per, p * per);
 }
 
-export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
+/**
+ * `gate1` (D#6 CLOUD-POSTS-FX-GATE1, the hosted attester): adds GitHub's REST shapes for the attester's reads and writes. Issue events come oldest first,
+ * with non-label events mixed in; `commits/{sha}/statuses` lists newest first with a REST `creator` (`login`, `type`; an App's bot login ends in `[bot]`);
+ * a label add answers 200 with every label; an `fx-gate1` post must be exactly `{ state, context, description }` and is credited to our App's bot.
+ */
+function gate1Rest(s: FakeRepoState, g1: Gate1World, req: GitHubHttpRequest, base: string): GitHubHttpResponse | null {
+  if (req.method === "GET" && req.path === `${base}/issues/${s.prNumber}/events`) {
+    const all = [{ id: 1, event: "head_ref_force_pushed", created_at: "2026-11-07T08:00:00Z", actor: { login: "someone" } }, ...g1.labelEvents.map((e, i) => ({ id: i + 2, event: e.event, created_at: e.createdAt, label: { name: e.label, color: "ededed" }, actor: { login: "someone" } }))];
+    return json(200, page(all, req.query));
+  }
+  const list = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/statuses$/.exec(req.path);
+  if (req.method === "GET" && list) {
+    const sha = list[1]!;
+    const creator = (context: string) => (context === "fx-gate1" && g1.creators[sha] ? { login: g1.creators[sha]!.login, type: g1.creators[sha]!.__typename } : { login: "fixture-poster", type: "User" });
+    const log = s.statusLog?.[sha];
+    if (log !== undefined) return json(200, page(log.map((e, i) => ({ id: i + 1, ...e, description: null })).reverse(), req.query));
+    const all = Object.entries(s.statuses[sha] ?? {}).map(([context, state], i) => ({ id: i + 1, context, state, description: null, creator: creator(context) }));
+    return json(200, page(all.reverse(), req.query));
+  }
+  if (req.method === "POST" && req.path === `${base}/issues/${s.prNumber}/labels`) {
+    if (req.query !== undefined || JSON.stringify(req.body) !== JSON.stringify({ labels: ["ci:full"] })) throw new Error("fake: label add body or query");
+    g1.labelAdds += 1;
+    if (!g1.labels.includes("ci:full")) {
+      g1.labels.push("ci:full");
+      g1.labelEvents.push({ event: "labeled", label: "ci:full", createdAt: g1.now });
+    }
+    return json(200, g1.labels.map((name) => ({ name })));
+  }
+  const post = /^\/repos\/[^/]+\/[^/]+\/statuses\/(.+)$/.exec(req.path);
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  if (req.method === "POST" && post && b.context === "fx-gate1") {
+    if (!/^[0-9a-f]{40}$/.test(post[1]!) || Object.keys(b).sort().join(",") !== "context,description,state") throw new Error("fake: fx-gate1 post shape");
+    g1.creators[post[1]!] = { __typename: "Bot", login: `${g1.appSlug}[bot]` };
+    s.statusLog?.[post[1]!]?.push({ context: "fx-gate1", state: b.state as string, creator: { login: `${g1.appSlug}[bot]`, type: "Bot" } });
+  }
+  return null;
+}
+
+export function fakeGitHubRest(s: FakeRepoState, opts: { gate1?: Gate1World } = {}): GitHubHttp {
   const base = `/repos/${s.owner}/${s.name}`;
+  const g1 = opts.gate1;
   return {
     async request(req) {
       s.requests.push(req);
       const path = req.path;
+      if (g1 !== undefined) {
+        const answer = gate1Rest(s, g1, req, base);
+        if (answer !== null) return answer;
+      }
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}`) {
         return json(200, { node_id: `PR_kwDOfake${s.prNumber}`, number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef, repo: { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: s.isPublic !== true } }, user: s.authorLogin === null ? null : { login: s.authorLogin ?? "fixture-author" } });
       }
@@ -201,7 +250,8 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
       const checks = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/check-runs$/.exec(path);
       if (req.method === "GET" && checks) {
         const sha = checks[1]!;
-        const list = (s.checks[sha] ?? []).map((c, i) => ({ id: i + 1, head_sha: sha, name: c.name, status: c.status, conclusion: c.conclusion, app: c.app === undefined ? { id: 1 } : c.app }));
+        if (req.query?.filter !== undefined && req.query.filter !== "latest" && req.query.filter !== "all") return json(422, { message: "Validation Failed" });
+        const list = (s.checks[sha] ?? []).map((c, i) => ({ id: i + 1, head_sha: sha, name: c.name, status: c.status, conclusion: c.conclusion, started_at: c.startedAt ?? "2026-11-07T09:00:00Z", app: c.app === undefined ? { id: 1 } : c.app }));
         return json(200, { total_count: list.length, check_runs: page(list, req.query) });
       }
       const status = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/status$/.exec(path);

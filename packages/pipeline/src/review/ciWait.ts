@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import type { PublicPullRequestLookup } from "./publicPullRequest.js";
 import type { CiSnapshot } from "../build/mergeGate.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
-import { isLocalGitHubHttp, type GitHubHttp } from "../build/githubMergePort.js";
+import type { GitHubHttp } from "../build/githubMergePort.js";
 import { attestGate1Head, GATE1_CONTEXT } from "./gate1Attest.js";
 import { loadReviewContext } from "./context.js";
 import { REVIEW_STATUS_CONTEXT } from "./githubReads.js";
@@ -140,7 +140,7 @@ export function createCiGate(deps: {
   publicPullRequest?: PublicPullRequestLookup;
   /**
    * D#6 CLOUD-POSTS-FX-GATE1: the cloud's own `fx-gate1` for a paired item's public head. `repos` is `FX_GATE1_ATTEST_REPOS` (empty: off); `ourLogin` is the
-   * login of the App that serves the item's repository. Only a runner_local pair's fenced code-repository client attests; every other read is as before.
+   * login of the App that serves the item's repository. The code-repository client attests on both paths (fenced for runner_local, the hosted merge_gate client otherwise).
    */
   gate1?: { repos: ReadonlySet<string>; ourLogin: (repoId: string) => Promise<string> };
 }): CiGate {
@@ -168,7 +168,8 @@ export function createCiGate(deps: {
           const gate1 = deps.gate1;
           if (gate1 === undefined || gate1.repos.size === 0) {
             reading = { ...reading, state: "pending", reasons: [...reading.reasons, "gate1_attest_off"] };
-          } else if (isLocalGitHubHttp(http)) {
+          } else {
+            // Both paths (TL ruling 11-07 01:25): a runner_local pair's fenced client reads through its documents, a hosted pair's merge_gate client through REST.
             const out = await attestGate1Head(http, { repos: gate1.repos, owner: publicPr.owner, name: publicPr.name, number: publicPr.number, sha: live, ourLogin: () => gate1.ourLogin(ctx.repoId), readHead: async () => (await port.getPullRequest(ref)).headSha });
             if (out.kind === "posted" || out.kind === "already") reading = readCiWaitNamed(await port.getCiSnapshot(ref, live), live);
             else if (out.kind !== "off") reading = { ...reading, state: "pending", reasons: [...reading.reasons, "gate1_waiting"] };

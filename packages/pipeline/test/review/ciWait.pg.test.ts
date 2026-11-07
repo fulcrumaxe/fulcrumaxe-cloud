@@ -292,7 +292,7 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
     // A runner_local pair: the code repository is read through its own fence, and its pull request is found by the branch our push record names.
     if (opts.local === true && withPr) pub.runBranch = String((await h.admin.query("SELECT branch FROM plane_pushes WHERE work_item_id = $1", [w.workItemId])).rows[0].branch);
     const pubLocal = opts.local === true ? fakeGitHubLocal(pub, { exclude: ["A10"], ...(opts.gate1World ? { gate1: opts.gate1World } : {}) }) : null;
-    const pubHttp = pubLocal !== null ? pubLocal.http : fakeGitHubRest(pub);
+    const pubHttp = pubLocal !== null ? pubLocal.http : fakeGitHubRest(pub, opts.gate1World ? { gate1: opts.gate1World } : {});
     const gate = createCiGate({
       pool: h.runWriterPool,
       ...(opts.gate1Repos !== undefined ? { gate1: { repos: parseGate1AttestRepos(opts.gate1Repos), ourLogin: async () => "fx-cloud-app[bot]" } } : {}),
@@ -447,6 +447,17 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
       expect(t.pub.posts.filter((p) => p.body.context === "fx-gate1")).toEqual([{ sha: PUB_HEAD, body: { state: "success", context: "fx-gate1", description: "Gate 1: full public CI green (cloud)" } }]);
       expect(t.pubLocal!.denied).toEqual([]);
       expect(t.pubLocal!.refused).toEqual([]);
+    });
+
+    it("a hosted pair attests too, through the merge_gate client's REST reads: label, wait, then a green full run posts and the round records", async () => {
+      const g = gate1World({ now: "2026-11-07T10:00:00Z" });
+      const t = await pairedWorld({ required: REQUIRED, pub: { [PUB_HEAD]: runs("2026-11-07T09:00:00Z") }, gate1World: g, gate1Repos: LISTED });
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing", "gate1_waiting"] });
+      expect(g.labelAdds).toBe(1);
+      t.pub.checks[PUB_HEAD] = runs("2026-11-07T10:05:00Z");
+      expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+      expect(t.pub.posts.filter((p) => p.body.context === "fx-gate1")).toEqual([{ sha: PUB_HEAD, body: { state: "success", context: "fx-gate1", description: "Gate 1: full public CI green (cloud)" } }]);
+      expect(t.pub.requests.some((r) => r.method === "POST" && r.path === "/graphql")).toBe(false);
     });
 
     // The guard in front of the attester: only a head the platform pushed. Green full runs after the label are there, so a missing guard would post.
