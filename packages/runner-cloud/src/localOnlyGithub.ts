@@ -50,6 +50,9 @@
  *        creator's type and login (whether our App's bot posted it), nothing else
  * PR 1c (TL ruling 11-07 01:00) lets A17, and only A17, onto one more client: the go phase's code-repository client, built with `gate1Status: true`, so the
  * merge gate can check that the `fx-gate1` it counts was posted by our App. That option opens no write: not A14, not A7's `fx-gate1` shape, not A15 or A16.
+ * PR 1d (TL ruling 11-07 01:00) adds one read on the attester's client only, for the merge-queue entry commit:
+ *   A18  the fixed GraphQL document `Gate1QueueEntries`: the code repository's merge queue for one branch, and of each entry only its position, the entry's
+ *        head and base commit oids, and its pull request's number and head oid; never a title, a body, an author or a commit's contents
  *
  * Calls not listed are refused until a numbered correction adds them with their own negative tests. Reading CI state uses only a
  * fixed GraphQL document that selects state and conclusion, never a check run's output text, summary or annotations.
@@ -217,8 +220,24 @@ export const GATE1_STATUS_DOCUMENTS = Object.freeze({
   }
 }`,
 });
-const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS });
-export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS;
+/**
+ * D#6 CLOUD-POSTS-FX-GATE1 PR 1d (A18): the queue's entries for one branch, each with its position, head and base commit oids and pull request number and
+ * head oid. The base oid is the sha GitHub writes into the entry's `gh-readonly-queue/<base>/pr-<n>-<sha>` branch name.
+ */
+export const GATE1_QUEUE_DOCUMENTS = Object.freeze({
+  Gate1QueueEntries: `query Gate1QueueEntries($owner: String!, $name: String!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    mergeQueue(branch: $branch) {
+      entries(first: 100) {
+        totalCount
+        nodes { position headCommit { oid } baseCommit { oid } pullRequest { number headRefOid } }
+      }
+    }
+  }
+}`,
+});
+const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS, ...GATE1_QUEUE_DOCUMENTS });
+export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS | keyof typeof GATE1_QUEUE_DOCUMENTS;
 
 /** D#6 CLOUD-POSTS-FX-GATE1 PR 0: the one label A14 may add, the one extra status context A7 takes on the attester's client, and its only descriptions. */
 export const FX_GATE1_LABEL = "ci:full";
@@ -264,6 +283,7 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A15", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1CheckRuns, variables: exactly owner, name, sha, optional cursor }", only: "gate1Attest" },
     { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
     { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest", alsoOn: "gate1Status" },
+    { id: "A18", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1QueueEntries, variables: exactly owner, name, branch }", only: "gate1Attest" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -372,6 +392,9 @@ const GATE1_VARIABLES: Readonly<Record<keyof typeof GATE1_ATTEST_DOCUMENTS, (v: 
 const GATE1_STATUS_VARIABLES: Readonly<Record<keyof typeof GATE1_STATUS_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   Gate1Status: (v) => hasExactKeys(v, ["owner", "name", "sha"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha),
 };
+const GATE1_QUEUE_VARIABLES: Readonly<Record<keyof typeof GATE1_QUEUE_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
+  Gate1QueueEntries: (v) => hasExactKeys(v, ["owner", "name", "branch"]) && ownerOrName(v.owner) && ownerOrName(v.name) && str(v.branch, REF_NAME),
+};
 const FX_GATE1_FAILURE_DESCRIPTIONS: readonly string[] = Object.values(FX_GATE1_DESCRIPTIONS.failure);
 /** A7's extra shape on the attester's client: `fx-gate1`, with success and the one success text, or failure and one of the failure texts. */
 const gate1StatusFits = (body: Record<string, unknown>): boolean =>
@@ -402,6 +425,8 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, GATE1_ATTEST_DOCUMENTS, GATE1_VARIABLES, "Gate1LabelEvents");
     case "A17":
       return documentBodyFits(body, GATE1_STATUS_DOCUMENTS, GATE1_STATUS_VARIABLES, "Gate1Status");
+    case "A18":
+      return documentBodyFits(body, GATE1_QUEUE_DOCUMENTS, GATE1_QUEUE_VARIABLES, "Gate1QueueEntries");
     case "A4":
       return (
         isPlainObject(body) &&

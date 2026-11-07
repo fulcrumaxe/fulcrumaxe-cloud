@@ -1,4 +1,4 @@
-import { GATE1_ATTEST_DOCUMENTS, GATE1_STATUS_DOCUMENTS, GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubRequest, type GithubResponse } from "@fx/runner-cloud";
+import { GATE1_ATTEST_DOCUMENTS, GATE1_QUEUE_DOCUMENTS, GATE1_STATUS_DOCUMENTS, GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubRequest, type GithubResponse } from "@fx/runner-cloud";
 import type { LocalGitHubHttp } from "../../../src/build/githubMergePort.js";
 import { defaultGhId, type FakeRepoState } from "./fakeGitHubRest.js";
 
@@ -77,10 +77,18 @@ export interface Gate1World {
   /** Who posted `fx-gate1` on a sha. A post through this fake is our App's bot. */
   creators: Record<string, { __typename: string; login: string }>;
   labelAdds: number;
+  /**
+   * PR 1d (A18): the code repository's merge queue, by branch. GitHub's shape: no queue on a branch is `mergeQueue: null`; entries come in queue order with a
+   * 1-based position, the entry's head and base commits (null until GitHub builds it) and its pull request's number and head oid. One page of 100, as the
+   * document asks. GitHub names the entry's branch `gh-readonly-queue/<base>/pr-<n>-<base commit oid>` (see `queueBranch`).
+   */
+  queues?: Record<string, Array<{ position: number; entryOid: string | null; baseOid: string | null; prNumber: number; prHead: string }>>;
 }
+/** GitHub's own name for a queue entry's branch: the trailing sha is the entry's BASE commit (the base branch's tip, or the entry ahead), never the PR head. */
+export const queueBranch = (base: string, prNumber: number, baseOid: string): string => `gh-readonly-queue/${base}/pr-${prNumber}-${baseOid}`;
 /** PR 1c: `gate1Fence: "status"` builds the fence as the go phase's client is built (A17 only), over the same gate1 world. */
 export const gate1World = (over: Partial<Gate1World> = {}): Gate1World => ({ labels: [], labelEvents: [], now: "2026-11-07T10:00:00Z", appSlug: "fx-cloud-app", creators: {}, labelAdds: 0, ...over });
-const G1_DOCS: Record<string, string> = { ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS };
+const G1_DOCS: Record<string, string> = { ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS, ...GATE1_QUEUE_DOCUMENTS };
 const page = <T>(all: T[], cursor: unknown, back: boolean) => {
   const n = all.length;
   if (back) {
@@ -177,12 +185,18 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
     if (g1Op !== undefined) {
       if (g1 === undefined) deny(`graphql document ${g1Op} without a gate1 world`);
       const w = g1!;
-      const label = g1Op === "Gate1CheckRuns" ? "A15" : g1Op === "Gate1LabelEvents" ? "A16" : "A17";
+      const label = g1Op === "Gate1CheckRuns" ? "A15" : g1Op === "Gate1LabelEvents" ? "A16" : g1Op === "Gate1QueueEntries" ? "A18" : "A17";
       return {
         label,
         op: g1Op,
         reply: () => {
           if (v.owner !== s.owner || v.name !== s.name) return json(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository." }] });
+          if (g1Op === "Gate1QueueEntries") {
+            const q = w.queues?.[v.branch as string];
+            if (q === undefined) return json(200, { data: { repository: { mergeQueue: null } } });
+            const nodes = q.slice(0, FILES_PAGE).map((e) => ({ position: e.position, headCommit: e.entryOid === null ? null : { oid: e.entryOid }, baseCommit: e.baseOid === null ? null : { oid: e.baseOid }, pullRequest: { number: e.prNumber, headRefOid: e.prHead } }));
+            return json(200, { data: { repository: { mergeQueue: { entries: { totalCount: q.length, nodes } } } } });
+          }
           if (g1Op === "Gate1LabelEvents") {
             if (v.number !== s.prNumber) return json(200, { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a PullRequest." }] });
             const all = w.labelEvents.map((e) => ({ __typename: e.event === "labeled" ? "LabeledEvent" : "UnlabeledEvent", createdAt: e.createdAt, label: { name: e.label } }));
