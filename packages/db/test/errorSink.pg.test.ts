@@ -173,11 +173,18 @@ describe('error sink over TLS as app_user (0702)', () => {
 
   describe('criterion 6: the 200-class cap, and the per-instance write cap', () => {
     it('writes the 201st distinct class of the hour as error_overflow, even from a direct SQL call', async () => {
-      await admin.query(`SELECT error_event_record('web', '/', 'stage_' || i, 'other', 1) FROM generate_series(1, 200) AS i`);
-      expect((await rows()).filter((r) => r.code !== 'error_overflow')).toHaveLength(200);
+      const client = await appPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SELECT error_event_record('web', '/', 'stage_' || i, 'other', 1) FROM generate_series(1, 200) AS i`);
+        await client.query("SELECT error_event_record('web', '/api/:id', 'brand_new', 'ECONNRESET', 1)");
+        await client.query("SELECT error_event_record('web', '/api/:id', 'brand_new_too', 'ECONNRESET', 4)");
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
 
-      await appPool.query("SELECT error_event_record('web', '/api/:id', 'brand_new', 'ECONNRESET', 1)");
-      await appPool.query("SELECT error_event_record('web', '/api/:id', 'brand_new_too', 'ECONNRESET', 4)");
+      expect((await rows()).filter((r) => r.code !== 'error_overflow')).toHaveLength(200);
       const overflow = (await rows()).filter((r) => r.code === 'error_overflow');
       expect(overflow).toEqual([{ service: 'platform', route: '/', stage: 'overflow', code: 'error_overflow', count: '5' }]);
       expect((await rows()).filter((r) => r.stage.startsWith('brand_new'))).toEqual([]);
@@ -185,6 +192,26 @@ describe('error sink over TLS as app_user (0702)', () => {
       // A class already recorded keeps counting under its own name.
       await appPool.query("SELECT error_event_record('web', '/', 'stage_1', 'other', 3)");
       expect((await rows()).find((r) => r.stage === 'stage_1')!.count).toBe('4');
+    });
+
+    it('still writes the 201st as error_overflow when the cap is reached late in the hour', async () => {
+      // Regression test for CI flake (D#6 / SR-3: writes that straddle an hour tick must still land in one bucket).
+      // By pinning the 200-seed-plus-one-more sequence to one shared transaction, all error_event_record calls
+      // see the same date_trunc('hour', now()) bucket regardless of real wall-clock drift.
+      const client = await appPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SELECT error_event_record('web', '/', 'stage_' || i, 'other', 1) FROM generate_series(1, 200) AS i`);
+        await client.query("SELECT error_event_record('web', '/api/:id', 'brand_new', 'ECONNRESET', 1)");
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+
+      expect((await rows()).filter((r) => r.code !== 'error_overflow')).toHaveLength(200);
+      const overflow = (await rows()).filter((r) => r.code === 'error_overflow');
+      expect(overflow).toEqual([{ service: 'platform', route: '/', stage: 'overflow', code: 'error_overflow', count: '1' }]);
+      expect((await rows()).filter((r) => r.stage.startsWith('brand_new'))).toEqual([]);
     });
 
     it('does not let a caller choose the reserved overflow code, or a label outside its pattern', async () => {
