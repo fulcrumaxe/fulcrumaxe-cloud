@@ -59,9 +59,28 @@ export const STALL_ACTION_LABELS: Readonly<Record<string, string>> = Object.free
   review_passed: 'Check the merge',
 });
 
+/** What a person shrinks when a job is too large to send to a runner; the build card and the reviewer-start card both say it. */
+const JOB_TOO_LARGE_SHRINK = "Shrink the Spec's file list or the context it pulls in (pinned files, memory, long task text)";
+
 /** Code words that read badly as a sentence; every other code is shown with its underscores as spaces. */
 export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   not_started_runner_daily_limit: "A reviewer couldn't start because the runner's daily limit was reached, so the review stopped before it could finish.",
+  not_started_account_not_active: "A reviewer couldn't start because the account is not active, so the review stopped before it could finish. Make the account active again, then continue the review from this card.",
+  not_started_model_connection_not_ok: "A reviewer couldn't start because the model connection is not working, so the review stopped before it could finish. Reconnect or replace the model key, then continue the review from this card.",
+  not_started_no_model: "A reviewer couldn't start because no model is set for this reviewer's role, so the review stopped before it could finish. Choose a model for the role in Roles, then continue the review from this card.",
+  not_started_model_budget_unset: "A reviewer couldn't start because the reviewer's role has no model budget, so the review stopped before it could finish. Set one in Roles > Limits, then continue the review from this card.",
+  not_started_no_repo: "A reviewer couldn't start because the repository is no longer connected, so the review stopped before it could finish. Connect it again in Repos, then continue the review from this card.",
+  not_started_no_installation: "A reviewer couldn't start because the GitHub App is not installed on the repository, so the review stopped before it could finish. Install it on GitHub, then continue the review from this card.",
+  not_started_installation_not_writable: "A reviewer couldn't start because the GitHub App has no write access to the repository, so the review stopped before it could finish. Give it write access on GitHub, then continue the review from this card.",
+  not_started_public_repo: "A reviewer couldn't start because the repository is public and the runner does not run work on public repositories, so the review stopped before it could finish. Change where this repository's work runs in Repos, then continue the review from this card.",
+  not_started_limits_exceed_sandbox: "A reviewer couldn't start because the role's run limits are higher than the sandbox allows, so the review stopped before it could finish. Lower them in Roles > Limits, then continue the review from this card.",
+  not_started_job_too_large: `A reviewer couldn't start because its job is too large to send to a runner, so the review stopped before it could finish and nothing was run. ${JOB_TOO_LARGE_SHRINK}, then continue the review from this card.`,
+  not_started_verified_consent_stale: "A reviewer couldn't start because the repository's cloud-verified consent no longer matches the current wording, so the review stopped before it could finish. Accept it again in Repos, then continue the review from this card.",
+  not_started_sandbox_reaping: "A reviewer still couldn't start after about four hours of waiting, because the build's sandbox was still being cleaned up, so the review stopped. Continue the review from this card to try again.",
+  not_started_repo_visibility_unknown: "A reviewer still couldn't start after about four hours of waiting, because GitHub did not say whether the repository is public or private, so the review stopped. Continue the review from this card to try again.",
+  not_started_execution_mode_changed: "A reviewer still couldn't start after about four hours of waiting, because where this repository runs work kept changing, so the review stopped. Continue the review from this card to try again.",
+  not_started_worker_unavailable: "A reviewer still couldn't start after about four hours of waiting, because the pipeline's worker was unavailable, so the review stopped. Continue the review from this card to try again.",
+  not_started_starter_unavailable: "A reviewer still couldn't start after about four hours of waiting, because the service that starts runs was unavailable, so the review stopped. Continue the review from this card to try again.",
   review: 'The review stopped before it could finish.',
   review_quiet_period_unsettled: 'The review was still waiting for the pull request to stop changing when the pipeline gave up waiting.',
   reviewer_not_started: "A reviewer couldn't start, so the review stopped before it could finish.",
@@ -101,7 +120,7 @@ export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   merge_call_refused: "GitHub refused to merge this pull request for a reason the pipeline cannot act on, so it stopped for a person. Clear what blocks it on GitHub and merge it there, or push a new commit to its branch and press Check the merge to have the pipeline try again.",
   ci_not_green: "The checks on this pull request had not passed (one failed, or they had not finished in time), so the pipeline stopped before merging. Fix the failing check, or run it again, on GitHub; when a check finishes the merge is tried again by itself.",
   ci_wait_timeout: 'The checks on this pull request had not finished after two hours of waiting, so the pipeline stopped for a person. Open the pull request on GitHub, see which check is stuck and run it again, then press Check the merge.',
-  job_too_large: "This Spec's job is too large to send to a runner, so the build did not start and nothing was run. Shrink the Spec's file list or the context it pulls in (pinned files, memory, long task text), then Re-spec or Build again.",
+  job_too_large: `This Spec's job is too large to send to a runner, so the build did not start and nothing was run. ${JOB_TOO_LARGE_SHRINK}, then Re-spec or Build again.`,
   parent_has_children: 'This item still has planned pull requests in progress, so the new Spec does not build it. They stay as they are: decide what happens to them, then start the work again.',
   parent_splits: 'This Spec is split into several pull requests, so this item is not built itself. Each planned pull request is built as its own item once the Spec is approved.',
 });

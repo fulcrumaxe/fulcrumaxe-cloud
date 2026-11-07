@@ -101,8 +101,8 @@ describe("C23-3 (pipeline callers): a start answering waiting_for_capacity is a 
     const entries = Object.values(PARKED_STAGE_REGISTRY);
     expect(entries.length).toBeGreaterThan(0);
     for (const e of entries) expect([...e.pauses]).toContain(CAPACITY_WAIT);
-    // migration 0845's lister accepts at most eight pauses.
-    for (const e of entries) expect(e.pauses.length).toBeLessThanOrEqual(8);
+    // migration 0845's lister accepts at most eight pauses a call: an entry with more (the review's) is listed in chunks of eight by the sweep.
+    for (const e of entries) expect(e.stage === "review" ? e.pauses.length > 8 : e.pauses.length <= 8).toBe(true);
   });
 });
 

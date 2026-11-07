@@ -109,6 +109,15 @@ export const STAGE_RESUME_ORPHAN_AFTER_SECONDS = 600;
  * test holds them equal). It is resumed by the clock: once a UTC midnight has passed since the wait the workflow itself recorded. The spend headroom is not read for it.
  */
 export const RUNNER_DAILY_LIMIT_WAIT = "runner_daily_limit";
+/**
+ * The not-started review refusals that clear by themselves (packages/pipeline notStartedRefusals.ts SELF_CLEARING_REVIEW_WAITS; a test holds the two equal). A review parked for one
+ * is restarted at the first pass its waiting fact is old enough to be listed: no headroom read and no clock, the restart's own start asks again and parks again if the cause is still there.
+ */
+export const SELF_CLEARING_REVIEW_WAITS: readonly string[] = Object.freeze(["sandbox_reaping", "repo_visibility_unknown", "execution_mode_changed", "worker_unavailable", "starter_unavailable"]);
+/** The most restarts for one self-clearing cause on one head (packages/pipeline SELF_CLEARING_MAX_PARKS; a test holds the two equal): at a pass every 15 minutes, four hours. */
+export const SELF_CLEARING_MAX_PARKS = 16;
+/** `work_item_list_parked_stage` takes at most eight pauses per call; a stage with more is listed in chunks (each fact has one code, so the chunks never overlap). */
+const LIST_PAUSES_MAX = 8;
 /** D#483 S5-k3b-2b: the parked capacity wait (packages/pipeline reservationPauses.ts CAPACITY_WAIT; a test holds the two equal). */
 export const CAPACITY_WAIT = "waiting_for_capacity";
 const LIST_LIMIT = 200;
@@ -178,6 +187,17 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
     return next <= now();
   }
 
+  /** How many times this sweep has restarted the stage for this cause on this head: its claims (`resume:` keys), one per restart. */
+  async function restartsOf(entry: ParkedStageEntryInput, c: { account_id: string; work_item_id: string; pause: string }, headSha: string): Promise<number> {
+    return withTenant(runnerPool, c.account_id, async (client) => {
+      const r = await client.query<{ n: string }>(
+        "SELECT count(*) AS n FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'stage_waiting' AND stage = $3 AND code = $4 AND head_sha = $5 AND dedupe_key LIKE 'resume:%'",
+        [c.account_id, c.work_item_id, entry.stage, c.pause, headSha],
+      );
+      return Number(r.rows[0]?.n ?? 0);
+    });
+  }
+
   /** One waiting fact on the item (a refresh, or the claim). Deduped by `key`; answers whether this call wrote it. */
   async function fact(entry: ParkedStageEntryInput, accountId: string, workItemId: string, pause: string, attempt: number, key: string, head: Plan["head"] = null): Promise<boolean> {
     // A head-bound stage's refresh and claim carry the head, the pull request and the re-review round the wait was for, so the next pass reads the same wait.
@@ -200,6 +220,17 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
     }
     // D#483 S5-k3b-2b: a parked capacity wait is restarted at once. The restarted workflow's first ask runs the spend check, then the queue: the sweep reads no headroom for it.
     if (c.pause === CAPACITY_WAIT) return true;
+    // A review parked for a refusal that clears by itself: restarted now (its fact has already aged past the settle time the listing asks for).
+    if (entry.stage === "review" && SELF_CLEARING_REVIEW_WAITS.includes(c.pause)) {
+      if (plan.head === null || (await restartsOf(entry, c, plan.head.sha)) < SELF_CLEARING_MAX_PARKS) return true;
+      // The cause never cleared: one stop with its own words ends the parking (a stop after the wait is progress, so the item is not listed again).
+      await withTenant(runnerPool, c.account_id, async (client) => {
+        await recordDriverEvent(client, c.account_id, { workItemId: c.work_item_id, kind: "stopped", code: `not_started_${c.pause}`, dedupeKey: `stop:${plan.actionId}:review:not_started_${c.pause}`, headSha: plan.head!.sha });
+      });
+      counts.skipped += 1;
+      log(JSON.stringify({ event: "stage_resume.skipped", stage: entry.stage, work_item_id: c.work_item_id, reason: "park_limit" }));
+      return false;
+    }
     const seat = await deps.resolveRunSeat({ accountId: c.account_id, role: entry.role, workItemId: c.work_item_id });
     if (!seat.ok) {
       counts.skipped += 1;
@@ -224,17 +255,18 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
     const counts: StageResumeCounts = { stages: entries.length, listed: 0, refreshed: 0, resumed: 0, skipped: 0, failed: 0 };
     const bucket = Math.floor(now() / (STAGE_RESUME_PASS_SECONDS * 1000));
     for (const entry of entries) {
-      let listed: { account_id: string; work_item_id: string; pause: string }[];
+      const listed: { account_id: string; work_item_id: string; pause: string }[] = [];
       try {
-        listed = (
-          await runnerPool.query<{ account_id: string; work_item_id: string; pause: string }>("SELECT account_id, work_item_id, pause FROM work_item_list_parked_stage($1, $2::text[], $3::text[], $4, $5)", [
+        for (let at = 0; at < entry.pauses.length; at += LIST_PAUSES_MAX) {
+          const part = await runnerPool.query<{ account_id: string; work_item_id: string; pause: string }>("SELECT account_id, work_item_id, pause FROM work_item_list_parked_stage($1, $2::text[], $3::text[], $4, $5)", [
             entry.stage,
             [...entry.itemStages],
-            [...entry.pauses],
+            [...entry.pauses.slice(at, at + LIST_PAUSES_MAX)],
             STAGE_RESUME_ORPHAN_AFTER_SECONDS,
             LIST_LIMIT,
-          ])
-        ).rows;
+          ]);
+          listed.push(...part.rows);
+        }
       } catch (err) {
         counts.failed += 1;
         reportError(err, { stage: "advance.stage_resume_list" });

@@ -8,7 +8,7 @@ import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import { STACKED_WAIT_STATES, readConflictState, readMergeQueueState, readQueueWait, readStackedWait } from "@fx/core/src/work-items/mergeReadiness.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { readChildLaunch } from "@fx/core/src/decisions/childLaunch.js";
-import { RUNNER_DAILY_LIMIT_SENTENCE, mergeQueue } from "@fx/pipeline";
+import { RUNNER_DAILY_LIMIT_SENTENCE, SELF_CLEARING_WAIT_SENTENCES, isSelfClearingReviewWait, mergeQueue } from "@fx/pipeline";
 import { setupRequestDeps } from "./setupRequests.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
@@ -208,7 +208,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
       const n = activity.notice;
       // A build the runner ended at its memory limit: the same sentence the run's own line has, naming the cap when the runner sent one. The raw end never leaves.
       if (n !== null && n.kind === "needs_human" && n.ended !== undefined) return { ...activity, notice: { kind: n.kind, reason: runEndedSentence(n.ended) ?? n.reason } };
-      if (n !== null && n.kind === "review_limit_wait") return { ...activity, notice: { kind: n.kind, reason: RUNNER_DAILY_LIMIT_SENTENCE, ...(n.resetsAt === undefined ? {} : { resets_at: n.resetsAt }) } };
+      if (n !== null && n.kind === "review_limit_wait") return { ...activity, notice: { kind: n.kind, reason: isSelfClearingReviewWait(n.reason) ? SELF_CLEARING_WAIT_SENTENCES[n.reason] : RUNNER_DAILY_LIMIT_SENTENCE, ...(n.resetsAt === undefined ? {} : { resets_at: n.resetsAt }) } };
       if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null, n.autoStart !== false) } };
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };
       // The review stops of a cloud-verified item do the same (D#6 R5b-2b-i).

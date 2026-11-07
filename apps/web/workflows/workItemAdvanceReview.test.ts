@@ -810,6 +810,58 @@ describe("what happens after the verdicts are recorded", () => {
     expect(t.worker.advanceRecordEvent.mock.calls.some((c) => c[1].kind === "stage_waiting")).toBe(false);
   });
 
+  // A reviewer refused for a cause that clears by itself parks the round the way the daily limit does: a waiting fact that names the cause, review_paused, no stop, no re-ask.
+  it.each(["sandbox_reaping", "repo_visibility_unknown", "execution_mode_changed", "worker_unavailable", "starter_unavailable"])("a reviewer refused with %s parks the round and names the cause", async (cause) => {
+    const t = setup(fresh({ refuseStart: new Set(["acceptance-tester"]), refuseReason: cause, rounds: [{ decision: "incomplete" }] }));
+    expect(await workItemAdvanceWorkflow({ ...ARGS, startAttempt: 2 })).toEqual({ status: "paused", detail: `review_paused:${cause}` });
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+    expect(world.sleeps).toBe(0);
+    const events = t.worker.advanceRecordEvent.mock.calls.map((c) => c[1]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "stage_waiting", stage: "review", code: cause, attempt: 2, headSha: H1 }));
+    expect(events.some((e) => e.kind === "stopped")).toBe(false);
+  });
+
+  // Several parkable refusals in one round (a self-clearing cause beside the daily limit) still park. The shorter wait is the one recorded: it is asked again at the next pass,
+  // and the daily limit parks the round again by itself if it still holds.
+  it("a self-clearing refusal mixed with the daily limit parks the round on the self-clearing cause", async () => {
+    const t = setup(fresh({ refuseStart: new Set(["code-reviewer", "acceptance-tester"]), refuseReasons: { "code-reviewer": "runner_daily_limit", "acceptance-tester": "sandbox_reaping" }, rounds: [{ decision: "incomplete" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: "review_paused:sandbox_reaping" });
+    const events = t.worker.advanceRecordEvent.mock.calls.map((c) => c[1]);
+    expect(events.filter((e) => e.kind === "stage_waiting")).toHaveLength(1);
+    expect(events.some((e) => e.kind === "stopped")).toBe(false);
+  });
+
+  // A refusal a person has to fix, beside one that clears by itself: the person's one decides, the round stops with its words (a parkable cause never hides it).
+  it("a self-clearing refusal mixed with a person-fixable one stops the round with the person-fixable code and writes no wait", async () => {
+    const t = setup(fresh({ refuseStart: new Set(["code-reviewer", "acceptance-tester"]), refuseReasons: { "code-reviewer": "sandbox_reaping", "acceptance-tester": "model_budget_unset" }, rounds: [{ decision: "incomplete" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_not_started:code-reviewer,acceptance-tester" });
+    const events = t.worker.advanceRecordEvent.mock.calls.map((c) => c[1]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "stopped", code: "not_started_model_budget_unset" }));
+    expect(events.some((e) => e.kind === "stage_waiting")).toBe(false);
+  });
+
+  // Every person-fixable code stops with its own code (the card words are tested with the table), and never waits.
+  it.each(["account_not_active", "model_connection_not_ok", "no_model", "model_budget_unset", "no_repo", "no_installation", "installation_not_writable", "public_repo", "limits_exceed_sandbox", "verified_consent_stale"])(
+    "a reviewer refused with the person-fixable %s stops the round with its own code",
+    async (code) => {
+      const t = setup(fresh({ refuseStart: new Set(["acceptance-tester"]), refuseReason: code, rounds: [{ decision: "incomplete" }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_not_started:acceptance-tester" });
+      const events = t.worker.advanceRecordEvent.mock.calls.map((c) => c[1]);
+      expect(events).toContainEqual(expect.objectContaining({ kind: "stopped", code: `not_started_${code}` }));
+      expect(events.some((e) => e.kind === "stage_waiting")).toBe(false);
+    },
+  );
+
+  // Permanent refusals stop, including a code the table does not know and the assembler's dynamic bad_<field>.
+  it.each(["invalid_input", "spec_changed", "unknown_role", "role_not_runner_eligible", "bad_spec", "a_code_nobody_classified"])("a reviewer refused with the permanent %s stops the round", async (code) => {
+    const t = setup(fresh({ refuseStart: new Set(["acceptance-tester"]), refuseReason: code, rounds: [{ decision: "incomplete" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_not_started:acceptance-tester" });
+    const events = t.worker.advanceRecordEvent.mock.calls.map((c) => c[1]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "stopped", code: `not_started_${code}` }));
+    expect(events.some((e) => e.kind === "stage_waiting")).toBe(false);
+  });
+
   // One role refused for the limit and another for a permanent reason: the permanent one decides, the round stops (a `some` instead of `every` would park it).
   it("a limit refusal mixed with a permanent refusal stops the round and records no waiting fact", async () => {
     const t = setup(fresh({ refuseStart: new Set(["code-reviewer", "acceptance-tester"]), refuseReasons: { "code-reviewer": "runner_daily_limit", "acceptance-tester": "public_repo" }, rounds: [{ decision: "incomplete" }] }));
