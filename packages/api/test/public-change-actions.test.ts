@@ -18,6 +18,8 @@ interface Seed {
   /** Push attempts and the runtime of the latest one. */
   attempts?: { runtime: 'runner' | 'sandbox'; count: number };
   managed?: boolean;
+  /** An executor run of the item wrote the branch (a push attempt names it) and recorded a scope refusal. */
+  scopeRefused?: boolean;
 }
 
 /** D#598 P1f-6b through the real dispatcher against real Postgres: `retry_push` and `open_pr` for every state of a change, each refusal writing nothing. */
@@ -88,6 +90,12 @@ describe('retry_push and open_pr routes (D#598 P1f-6b)', { timeout: 120_000 }, (
         [accountId, pushId, s.attempts!.runtime, s.attempts!.runtime === 'runner' ? k : null, k],
       );
     }
+    if (s.scopeRefused) {
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'runner', 'failed', 'runner_local', $4)`, [runId, accountId, itemId, repoId]);
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.scope_refused', $3::jsonb)`, [accountId, runId, JSON.stringify({ reason: 'scope_violation', prNumber: 5, total: 1, paths: ['a.ts'] })]);
+      await admin.query(`INSERT INTO plane_push_attempts (account_id, plane_push_id, run_id, runtime, lease_generation, kind, attempt_no, outcome, finished_at) VALUES ($1, $2, $3, 'runner', 1, 'push', 1, 'pr_failed', now())`, [accountId, pushId, runId]);
+    }
     return itemId;
   }
   const audits = async (accountId: string) => (await admin.query<{ payload: Record<string, unknown>; actor: string }>(`SELECT payload, actor FROM audit_log WHERE account_id = $1 AND action = 'work_item.sent_back'`, [accountId])).rows;
@@ -142,6 +150,7 @@ describe('retry_push and open_pr routes (D#598 P1f-6b)', { timeout: 120_000 }, (
     ['pr_opened', { state: 'pr_opened' }],
     ['refused', REFUSED],
     ['pushed_pr_not_opened, branch taken over', { state: 'pushed_pr_not_opened', managed: true }],
+    ['pushed_pr_not_opened, build refused for scope', { state: 'pushed_pr_not_opened', scopeRefused: true }],
   ];
   it.each(NOT_OPENABLE)('open_pr on %s answers 409 action_not_available, opens nothing and audits nothing', async (_name, s) => {
     const p = await person('owner');
@@ -151,6 +160,22 @@ describe('retry_push and open_pr routes (D#598 P1f-6b)', { timeout: 120_000 }, (
     expect(await code(res)).toBe('action_not_available');
     expect(opened).toEqual([]);
     expect(await audits(p.accountId)).toEqual([]);
+  });
+
+  it('a scope-refused pushed branch: the card lists no open_pr, and the press opens nothing; an unrefused one still lists it', async () => {
+    const p = await person('owner');
+    const refused = await seed(p.accountId, { state: 'pushed_pr_not_opened', scopeRefused: true });
+    const clean = await seed(p.accountId, { state: 'pushed_pr_not_opened' });
+    const actionsOf = async (id: string): Promise<string[]> => {
+      const res = await handleApiRequest(new Request(`http://localhost/api/v1/work-items/${id}/activity`, { headers: new Headers({ cookie: `${SESSION_COOKIE_NAME}=${await signSession(p)}` }) }), appUserPool, platformOpsPool, ROUTES);
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { public_change: { actions: string[] } }).public_change.actions;
+    };
+    expect(await actionsOf(refused)).toEqual([]);
+    expect(await actionsOf(clean)).toEqual(['open_pr']);
+    expect((await post(p, `/work-items/${refused}/open-pr`)).status).toBe(409);
+    expect(opened).toEqual([]);
+    expect((await pushRow(refused))!.state).toBe('pushed_pr_not_opened');
   });
 
   it('open_pr on pushed_pr_not_opened: 200 with the number, one audit row, called once with ids', async () => {

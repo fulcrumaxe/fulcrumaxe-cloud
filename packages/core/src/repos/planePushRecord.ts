@@ -1,3 +1,4 @@
+import { SCOPE_REFUSAL_EVENT } from '../work-items/scopeRefusal.js';
 import type { PoolClient } from 'pg';
 import { pairingDigest } from '@fulcrumaxe/runner-protocol/pairingDigest';
 
@@ -52,6 +53,8 @@ export interface RetryFacts {
   managedByPerson: boolean;
   /** The refusal code the row carries, when it is refused. */
   code?: string | null;
+  /** True when a run that pushed or updated this row's branch recorded a scope refusal (`run.scope_refused`): the branch holds refused content, so no public pull request is opened from it. */
+  scopeRefused?: boolean;
 }
 
 /** Refusals that repeat on every attempt (the recorded start of the run cannot change), so a retry would only spend attempts: "Try the push again" is not offered for them. */
@@ -66,9 +69,12 @@ export function mayRetryPublish(f: RetryFacts): boolean {
   return f.state === 'refused' && f.lastPushRuntime === 'sandbox' && f.pushAttempts < PUBLISH_ATTEMPT_LIMIT && !f.managedByPerson && !(f.code != null && DETERMINISTIC_PUBLISH_REFUSALS.includes(f.code));
 }
 
-/** Whether "Open the pull request again" applies: the branch is pushed, no pull request exists, and nobody has taken the branch over. */
+/**
+ * Whether "Open the pull request again" applies: the branch is pushed, no pull request exists, nobody has taken the branch over, and the cloud did not refuse the build that made it
+ * for scope (a refused build's branch is never turned into a public pull request).
+ */
 export function mayOpenPublicPullRequest(f: RetryFacts): boolean {
-  return f.state === 'pushed_pr_not_opened' && !f.managedByPerson;
+  return f.state === 'pushed_pr_not_opened' && !f.managedByPerson && f.scopeRefused !== true;
 }
 
 /**
@@ -405,21 +411,40 @@ export async function derivePlanePush(client: Queryable, input: { accountId: str
   return { row, headSha, stale: headSha !== row.headSha };
 }
 
+/** The labels a finished push or fix-round attempt ends with when its outcome recorded a pushed head: the sandbox publish's `pr_failed` and `pr_opened`, and the runner's `pushed`, `pr_failed`, `pr_opened` (a fix round's landed update is `updated`). */
+export const PUSHED_HEAD_ATTEMPT_LABELS = ['pr_failed', 'pr_opened', 'pushed', 'updated'] as const;
+
+/**
+ * True (for a `plane_pushes` row aliased `p`) when the branch the row holds was last written by a run whose scope refusal was recorded: the newest FINISHED push or fix-round
+ * attempt whose outcome recorded a pushed head (ordered `created_at DESC, id DESC`) was made by a run that has a `run.scope_refused` event, or by a run whose parent has one (a
+ * sandbox publish run is the child of the executor run whose scope the cloud checks). The event names the run, not the branch, so the branch is tied to the refusal through the attempt
+ * that wrote its head.
+ * A build again re-stamps the SAME row (`stampPlanePush`, for building, scanning, refused and no_public_change) and keeps its old attempts, so only the newest pushing attempt counts: a
+ * refused build followed by a clean one that pushed is not held, and a clean push followed by a refused one is. An attempt that has not finished, or that pushed nothing, never
+ * decides: a clean attempt still under way after a refused one does not lift the hold. Shared by the facts read here and the worker's own re-check, so the card and the handler cannot disagree.
+ */
+export const SCOPE_REFUSED_BRANCH_SQL = `COALESCE((SELECT EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = a.account_id AND e.kind = '${SCOPE_REFUSAL_EVENT}' AND e.run_id IN (w.id, w.parent_run_id))
+                                                     FROM plane_push_attempts a JOIN agent_runs w ON w.account_id = a.account_id AND w.id = a.run_id
+                                                    WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind IN ('push', 'fix_round') AND a.finished_at IS NOT NULL
+                                                      AND a.outcome IN (${PUSHED_HEAD_ATTEMPT_LABELS.map((l) => `'${l}'`).join(', ')})
+                                                    ORDER BY a.created_at DESC, a.id DESC LIMIT 1), false)`;
+
 /**
  * The facts the two retry predicates need for an item's latest push row (the row `readPublicChange` shows). An item refused before any sandbox was started
  * has no attempt yet; its executor ran in the sandbox, so the retry is a sandbox retry (the worker's reader makes the same reading). Null for an item with no row.
  */
 export async function readRetryFacts(client: Queryable, workItemId: string): Promise<RetryFacts | null> {
-  const { rows } = await client.query<{ state: PlanePushState; code: string | null; managed: boolean; n: number; last: RetryFacts['lastPushRuntime']; sandbox_side: boolean | null }>(
+  const { rows } = await client.query<{ state: PlanePushState; code: string | null; managed: boolean; n: number; last: RetryFacts['lastPushRuntime']; sandbox_side: boolean | null; scope_refused: boolean }>(
     `SELECT p.state, p.code, p.managed_by_person_at IS NOT NULL AS managed,
             (SELECT count(*)::int FROM plane_push_attempts a WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind = 'push') AS n,
             (SELECT (array_agg(a.runtime ORDER BY a.attempt_no DESC))[1] FROM plane_push_attempts a WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind = 'push') AS last,
             (SELECT r.job_signed IS NULL AND r.runtime = 'production' FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor'
-              ORDER BY r.created_at DESC, r.id LIMIT 1) AS sandbox_side
+              ORDER BY r.created_at DESC, r.id LIMIT 1) AS sandbox_side,
+            ${SCOPE_REFUSED_BRANCH_SQL} AS scope_refused
        FROM plane_pushes p WHERE p.work_item_id = $1 ORDER BY p.created_at DESC, p.id DESC LIMIT 1`,
     [workItemId],
   );
   const r = rows[0];
   if (!r) return null;
-  return { state: r.state, code: r.code, managedByPerson: r.managed === true, pushAttempts: r.n, lastPushRuntime: r.last ?? (r.sandbox_side === true ? 'sandbox' : null) };
+  return { state: r.state, code: r.code, managedByPerson: r.managed === true, pushAttempts: r.n, lastPushRuntime: r.last ?? (r.sandbox_side === true ? 'sandbox' : null), scopeRefused: r.scope_refused === true };
 }

@@ -205,6 +205,16 @@ describe('retry_push and open_pr (D#598 P1f-6b)', () => {
     }
   });
 
+  // D#6 PUSHED-NOT-OPENED-REFUSAL: a branch whose build the cloud refused for scope is never turned into a public pull request.
+  it('open_pr is refused, with its own words, for a pushed branch whose build was refused for scope; the other states are unchanged', () => {
+    const refused = push({ state: 'pushed_pr_not_opened', scopeRefused: true });
+    expect(operatorVerdict('open_pr', refused)).toMatchObject({ ok: false, reason: 'state', message: expect.stringContaining('refused for the files') });
+    expect(operatorVerdict('open_pr', push({ state: 'pushed_pr_not_opened', scopeRefused: false }))).toEqual({ ok: true });
+    expect(operatorActionsFor(refused)).toEqual(['build_again', 'back_to_discussion', 'close']);
+    expect(operatorActionsFor(push({ state: 'pushed_pr_not_opened' }))).toEqual(['build_again', 'back_to_discussion', 'close', 'open_pr']);
+    expect(operatorVerdict('retry_push', push({ scopeRefused: true }))).toEqual({ ok: true });
+  });
+
   it('owner or admin only; a live run (a publish run included) answers live, so a second press is already_running', () => {
     expect(operatorVerdict('retry_push', { ...push(), role: 'member' })).toMatchObject({ ok: false, reason: 'role' });
     expect(operatorVerdict('open_pr', { ...push({ state: 'pushed_pr_not_opened' }), role: 'member' })).toMatchObject({ ok: false, reason: 'role' });

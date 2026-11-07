@@ -5,7 +5,7 @@ import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from 
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND } from "@fx/core/src/repos/publicChangeCopy.js";
-import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, recordVerifiedOutcome, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
+import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, SCOPE_REFUSED_BRANCH_SQL, recordVerifiedOutcome, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
 import { REPLACE_ROUND_CODES, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
 import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
 import { resolveBuildIdentity, type BuildIdentity, type BuildPurpose } from "@fx/core/src/work-items/buildIdentity.js";
@@ -800,8 +800,8 @@ async function noteFooterSkipped(pool: Pool, accountId: string, runId: string, f
 
 async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, workItemId: string): Promise<OpenPublicResult> {
   const { rows } = await withTenant(deps.pool, accountId, (c) =>
-    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; source_head: string | null; managed: boolean; title: string; run_id: string | null; pairing_repo: string | null; pr_footer: string | null }>(
-      `SELECT p.id, p.code_repo, p.branch, p.state, p.head_sha, p.tip_sha, p.source_head, p.managed_by_person_at IS NOT NULL AS managed, COALESCE(w.title, '') AS title,
+    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; source_head: string | null; managed: boolean; scope_refused: boolean; title: string; run_id: string | null; pairing_repo: string | null; pr_footer: string | null }>(
+      `SELECT p.id, p.code_repo, p.branch, p.state, p.head_sha, p.tip_sha, p.source_head, p.managed_by_person_at IS NOT NULL AS managed, ${SCOPE_REFUSED_BRANCH_SQL} AS scope_refused, COALESCE(w.title, '') AS title,
               (SELECT r.id FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor' ORDER BY r.created_at DESC, r.id LIMIT 1) AS run_id,
               (SELECT rp.code_repo FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pairing_repo,
               (SELECT rp.pr_footer FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pr_footer
@@ -812,7 +812,7 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
     ),
   );
   const p = rows[0];
-  if (!p || p.state !== "pushed_pr_not_opened" || p.managed || p.head_sha === null || p.tip_sha === null || p.run_id === null) return { kind: "skipped", why: "not_retryable" };
+  if (!p || p.state !== "pushed_pr_not_opened" || p.managed || p.scope_refused || p.head_sha === null || p.tip_sha === null || p.run_id === null) return { kind: "skipped", why: "not_retryable" };
   // The pairing is read now. A pairing that is off or points elsewhere writes nothing to the public repo and records nothing: the pushed branch stays as it is.
   if (p.pairing_repo === null) return { kind: "refused", code: PUBLISH_CODES.pairingOff, attemptNo: null };
   if (p.pairing_repo !== p.code_repo) return { kind: "refused", code: "pairing_changed", attemptNo: null };
