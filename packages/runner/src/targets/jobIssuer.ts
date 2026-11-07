@@ -27,6 +27,8 @@ import {
   canonicalJson,
   sha256Text,
   signJob,
+  HOSTED_CLAIM_REPLY_BUDGET_BYTES,
+  worstCaseClaimReplyBytes,
   type AllowanceSet,
   type Job,
   type SignedJob,
@@ -83,6 +85,8 @@ export type JobIssueErrorCode =
   | "excludes_unreadable"
   | "conflict_round_invalid"
   | "job_invalid"
+  /** The reply that would carry the signed job is over what a hosted function can send (`HOSTED_CLAIM_REPLY_BUDGET_BYTES`). Nothing is recorded. */
+  | "job_too_large"
   | "job_not_recorded";
 
 export class JobIssueError extends Error {
@@ -288,6 +292,8 @@ export interface JobIssuerDeps {
    * no job carries a window.
    */
   contextWindowTokensFor?: (model: string) => number | undefined;
+  /** The most bytes of claim reply a job may need; a job over it is not issued (`job_too_large`). Absent: the hosted budget. Tests lower it to hit the boundary exactly. */
+  claimReplyBudgetBytes?: number;
   /** Tests pass a fixed clock and id source. */
   now?: () => Date;
   newId?: () => string;
@@ -548,6 +554,10 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       } catch {
         throw new JobIssueError("job_invalid");
       }
+
+      // The reply that carries this job must fit a hosted function's response. Measured with the serializer the claim route uses, so the figure is the bytes that would be
+      // sent. Over the budget: nothing is recorded and no job exists to claim; the Spec's file list or context has to shrink.
+      if (worstCaseClaimReplyBytes(signed, candidate.run_id) > (deps.claimReplyBudgetBytes ?? HOSTED_CLAIM_REPLY_BUDGET_BYTES)) throw new JobIssueError("job_too_large");
 
       // Recorded before the job, so a continuation's job never exists without its base; a base recorded for a job that then fails to write is harmless.
       if (continuationHead) await recordRunnerDispatchBase(deps.pool, { accountId: run.accountId, runId: run.id, headOid: continuationHead.oid });

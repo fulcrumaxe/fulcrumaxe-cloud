@@ -582,7 +582,7 @@ export async function startBuildForItem(
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : startWaitFor(started.reason);
         if (!started.ok && pause !== null) return { status: "refused", reason: pause };
-        if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
+        if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" || started.reason === "job_too_large" ? started.reason : `start_${started.reason}` };
         startedRunId = started.runId;
         // D#483 S5-b2c-2 (R1): a child's sandbox build records the branch it will use ON THE RUN, in this transaction, so the webhook can map the pull request it opens to the child. Set
         // once per run (a replay finds its row). A runner run's branch is its own and its done record binds the number.

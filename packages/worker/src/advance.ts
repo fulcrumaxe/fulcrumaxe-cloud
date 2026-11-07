@@ -1231,6 +1231,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (err instanceof RunPrecheckRefusedError) return { ok: false, reason: err.reason };
       // The executor's sandbox is inside a reaper claim (0761): nothing was written, and the step retries after a wait.
       if (err instanceof SandboxReapingError) return { ok: false, reason: "sandbox_reaping" };
+      // The signed job's claim reply would not fit a hosted function's response, so no job was issued (the run it left is already failed). The answer is the closed code, which the card words.
+      if (err instanceof DispatchFailedError && err.originalError instanceof JobIssueError && err.originalError.code === "job_too_large") return { ok: false, reason: "job_too_large" };
       throw err;
     }
     console.info(JSON.stringify({ event: "advance.run_started", work_item_id: req.workItemId, step: req.step, role: req.role, run_id: started.runId, refused: started.refused ?? null }));
@@ -2042,7 +2044,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // D#599 PL-2b-2: the issuer refused the continuation with a closed code (the pull request is closed or not the item's, the branch is protected,
       // GitHub could not be read). The code is fixed text and is the answer; the run it left is already failed.
       const issuerRefusal = err instanceof DispatchFailedError ? err.originalError : err;
-      if (issuerRefusal instanceof JobIssueError && issuerRefusal.code.startsWith("continues_")) return refuse(issuerRefusal.code);
+      if (issuerRefusal instanceof JobIssueError && (issuerRefusal.code.startsWith("continues_") || issuerRefusal.code === "job_too_large")) return refuse(issuerRefusal.code);
       // A reaper claim on the sandbox is transient: the step throws and is retried (the run is keyed, so a replay is safe).
       if (err instanceof SandboxReapingError) throw err;
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");
