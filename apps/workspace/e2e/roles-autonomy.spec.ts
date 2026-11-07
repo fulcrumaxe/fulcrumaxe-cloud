@@ -41,6 +41,14 @@ const DIAL_SET = fx("setDecisionDial", "200-ok.json");
 const DIAL_RESET = DIAL_SET; // the reset answers in the same shape as a dial write
 const ASK_SET = fx("setAskSetting", "200-ok.json");
 const member = <T extends object>(v: T) => ({ ...v, can_change: false });
+// D#742: the Merging section's three reads. The shared listRoles fixture carries no debater entry, so every boot() answers /roles with one
+// appended; /settings and the execution-mode route get their own small, neutral defaults, overridable per test.
+const SETTINGS = fx("getRepoSettings", "200-ok.json");
+const ROLES = fx("listRoles", "200-ok.json");
+const DEBATER_ENTRY = { role: "debater", mode: "off", allowed_modes: ["off", "feature_critical", "always"], model: null, model_floor: null, allowed_models: [], expected_spend: { text: "", monthly_usd: 0, runs_per_month: 0, median_cost_per_run_usd: 0, median_source: "seed", caveat: "" } };
+const ROLES_WITH_DEBATER = { data: [...ROLES.data, DEBATER_ENTRY] };
+const MODE_SANDBOX = { execution_mode: "sandbox", auto_merge: false };
+const MODE_RUNNER_LOCAL = (autoMerge: boolean) => ({ execution_mode: "runner_local", auto_merge: autoMerge });
 
 const WIN = `#windows-container .fulc-window[data-app-id="roles"]`;
 const tid = (page: Page, id: string) => page.locator(`${WIN} [data-testid="${id}"]`);
@@ -50,6 +58,7 @@ const wm = (page: Page, act: "open" | "close") =>
 const askRow = (page: Page, type: string) => page.locator(`${WIN} [data-testid="au-ask"][data-ask="${type}"]`);
 const dialRow = (page: Page, type: string) => page.locator(`${WIN} [data-testid="au-dial"][data-dial="${type}"]`);
 const online = (page: Page) => page.evaluate(() => window.dispatchEvent(new Event("online")));
+const mergeRow = (page: Page, key: string) => page.locator(`${WIN} [data-testid="merge-row"][data-row="${key}"]`);
 
 interface Opts {
   dials?: unknown;
@@ -57,15 +66,20 @@ interface Opts {
   ask?: unknown | ((n: number) => unknown);
   /** Answers a POST; the default echoes the matching fixture. */
   post?: (route: Route, tail: string, body: Record<string, unknown>) => Promise<void> | void;
+  /** D#742: the Merging section's three reads. */
+  settings?: unknown;
+  roles?: unknown;
+  mode?: unknown;
 }
 interface Seen {
   gets: { dials: number; ask: number };
+  merge: { settings: number; roles: number; mode: number };
   posts: { tail: string; body: Record<string, unknown> }[];
   appErrors: string[];
 }
 
 async function boot(page: Page, opts: Opts = {}): Promise<Seen> {
-  const seen: Seen = { gets: { dials: 0, ask: 0 }, posts: [], appErrors: [] };
+  const seen: Seen = { gets: { dials: 0, ask: 0 }, merge: { settings: 0, roles: 0, mode: 0 }, posts: [], appErrors: [] };
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && seen.appErrors.push(m.text()));
   page.on("pageerror", (e) => seen.appErrors.push(`pageerror: ${e.message}`));
   await page.route("**/api/v1/repos**", async (route) => {
@@ -82,7 +96,15 @@ async function boot(page: Page, opts: Opts = {}): Promise<Seen> {
         seen.gets.ask++;
         return json(route, 200, typeof opts.ask === "function" ? (opts.ask as (n: number) => unknown)(seen.gets.ask) : (opts.ask ?? ASK));
       }
-      return json(route, 200, { data: [] }); // the Roles tab's own read
+      if (tail === "settings") {
+        seen.merge.settings++;
+        return json(route, 200, "settings" in opts ? opts.settings : SETTINGS);
+      }
+      if (tail === "roles") {
+        seen.merge.roles++;
+        return json(route, 200, "roles" in opts ? opts.roles : ROLES_WITH_DEBATER);
+      }
+      return json(route, 200, { data: [] });
     }
     const body = route.request().postDataJSON();
     seen.posts.push({ tail, body });
@@ -95,6 +117,10 @@ async function boot(page: Page, opts: Opts = {}): Promise<Seen> {
       "ask-settings": ASK_SET,
     };
     return json(route, 200, reply[tail]);
+  });
+  await page.route("**/api/runners/repos/*/execution-mode", async (route) => {
+    seen.merge.mode++;
+    return json(route, 200, "mode" in opts ? opts.mode : MODE_SANDBOX);
   });
   await bootToDesktop(page);
   await wm(page, "open");
@@ -505,5 +531,91 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-apply")).toBeVisible();
     await askRow(page, "test_strategy_choice").scrollIntoViewIfNeeded();
     await expect(askRow(page, "test_strategy_choice").getByTestId("au-ask-save")).toBeVisible();
+  });
+});
+
+const MERGE_INTRO = "These are this repository's own settings for merging a pull request on its own. A specific pull request also needs green checks and passing reviews before it merges.";
+const MERGE_POINTER = "To see why one pull request did or did not merge, look at it in Pipeline.";
+const MERGE_LOCKED = "A person merges every pull request in this repo. The settings below do not change that. Only the operator can change it.";
+const MERGE_NOT_IN_EFFECT = "Not in effect while a person merges every pull request.";
+const MERGE_KEYS = ["auto-merge", "external-guard", "merge-queue", "debater", "local-review"];
+
+test.describe("D#742: Roles, Autonomy, the Merging section", () => {
+  test("a runner_local repo: all five lines, unlocked, in effect", async ({ page }) => {
+    await boot(page, { mode: MODE_RUNNER_LOCAL(true) });
+    await openAutonomy(page);
+    await expect(tid(page, "merge-intro")).toHaveText(MERGE_INTRO);
+    await expect(tid(page, "merge-pointer")).toHaveText(MERGE_POINTER);
+    await expect(page.locator(`${WIN} [data-testid="merge-row"]`)).toHaveCount(5);
+    await expect(page.locator(`${WIN} [data-testid="merge-locked"]`)).toHaveCount(0);
+    await expect(mergeRow(page, "auto-merge")).toContainText("Auto-merge");
+    await expect(mergeRow(page, "external-guard")).toContainText("Outside contributors");
+    await expect(mergeRow(page, "merge-queue")).toContainText("Merge queue");
+    await expect(mergeRow(page, "debater")).toContainText("Debater");
+    await expect(mergeRow(page, "local-review")).toContainText("Reviews on your machine");
+    for (const key of MERGE_KEYS) {
+      await expect(mergeRow(page, key)).toHaveAttribute("data-in-effect", "true");
+      await expect(mergeRow(page, key)).not.toContainText(MERGE_NOT_IN_EFFECT);
+    }
+  });
+
+  test("a sandbox repo: the local-review line is absent, the other four stay", async ({ page }) => {
+    await boot(page, { mode: MODE_SANDBOX });
+    await openAutonomy(page);
+    await expect(page.locator(`${WIN} [data-testid="merge-row"]`)).toHaveCount(4);
+    await expect(mergeRow(page, "local-review")).toHaveCount(0);
+    await expect(mergeRow(page, "auto-merge")).toBeVisible();
+    await expect(mergeRow(page, "debater")).toBeVisible();
+  });
+
+  test("human_merge_only: the lock renders first, names the operator, and marks every other line without hiding it", async ({ page }) => {
+    await boot(page, { settings: { ...SETTINGS, human_merge_only: true }, mode: MODE_RUNNER_LOCAL(true) });
+    await openAutonomy(page);
+    const locked = tid(page, "merge-locked");
+    await expect(locked).toContainText("Human merge only");
+    await expect(locked).toContainText(MERGE_LOCKED);
+    await expect(page.locator(`${WIN} [data-testid="merge-rows"] > *`).first()).toHaveAttribute("data-testid", "merge-locked");
+    await expect(page.locator(`${WIN} [data-testid="merge-row"]`)).toHaveCount(5);
+    for (const key of MERGE_KEYS) {
+      await expect(mergeRow(page, key)).toHaveAttribute("data-in-effect", "false");
+      await expect(mergeRow(page, key)).toContainText(MERGE_NOT_IN_EFFECT);
+    }
+  });
+
+  test("a plain member sees the same lines as an owner", async ({ page }) => {
+    await boot(page, { dials: member(DIALS), ask: member(ASK), mode: MODE_RUNNER_LOCAL(false) });
+    await openAutonomy(page);
+    await expect(page.locator(`${WIN} [data-testid="merge-row"]`)).toHaveCount(5);
+    await expect(mergeRow(page, "local-review")).toContainText("Off");
+  });
+
+  test("no interactive element in the section, on phone and desktop; it adds nothing to the focus order", async ({ page }) => {
+    await boot(page, { mode: MODE_RUNNER_LOCAL(true), settings: { ...SETTINGS, human_merge_only: true } });
+    await openAutonomy(page);
+    await expect(page.locator(`${WIN} [data-testid="au-merge"] :is(button, input, select, textarea, a, [tabindex])`)).toHaveCount(0);
+    await expect(page.locator(`${WIN} [data-testid="au-merge"] [onclick], ${WIN} [data-testid="au-merge"] [role="button"]`)).toHaveCount(0);
+  });
+
+  test("an unchanged refresh tick issues no new settings or execution-mode request for this section", async ({ page }) => {
+    // /roles is also read by the Roles tab's own (pre-existing) view, mounted beside Autonomy, so its count is not this
+    // section's alone to assert; /settings and /execution-mode are read by nothing else on this page.
+    const seen = await boot(page, { mode: MODE_RUNNER_LOCAL(true) });
+    await openAutonomy(page);
+    await expect(mergeRow(page, "local-review")).toBeVisible();
+    const afterOpen = { ...seen.merge };
+    await page.route("**/api/v1/events", () => {});
+    await page.evaluate(async () => (await import(new URL("core/cloud-live.js", document.baseURI).href)).default.start());
+    await page.clock.runFor(60_000);
+    await online(page);
+    await expect.poll(() => seen.gets).toEqual({ dials: 2, ask: 2 });
+    expect(seen.merge.settings).toBe(afterOpen.settings);
+    expect(seen.merge.mode).toBe(afterOpen.mode);
+  });
+
+  test("no console or page error while the section loads, locks or shows an unavailable line", async ({ page }) => {
+    const seen = await boot(page, { settings: null, roles: null, mode: null });
+    await openAutonomy(page);
+    await expect(page.locator(`${WIN} [data-testid="merge-unavailable"]`).first()).toBeVisible();
+    expect(seen.appErrors).toEqual([]);
   });
 });
