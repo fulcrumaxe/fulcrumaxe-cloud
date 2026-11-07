@@ -173,6 +173,24 @@ describe("the failed test files the summary names", () => {
     expect(Buffer.byteLength(line)).toBeLessThan(1700);
   });
 
+  it("a file printed again past the 40 named is counted once", () => {
+    const found = createFailedFiles("/w");
+    for (let i = 1; i <= 45; i += 1) found.line(` FAIL  pkg/file-${String(i).padStart(2, "0")}.test.ts > t`);
+    // files 41-45 are each printed a second time, and file 45 a third time
+    for (let i = 41; i <= 45; i += 1) found.line(` FAIL  pkg/file-${String(i).padStart(2, "0")}.test.ts > t`);
+    found.line(" FAIL  pkg/file-45.test.ts > t");
+    expect(found.summary()).toMatch(/^failed test files \(45\): .*\(and 5 more\)\n$/);
+    const { files, more } = found.list();
+    expect(files).toHaveLength(20);
+    expect(more).toBe(25);
+  });
+
+  it("1,100 different failed files, each printed once, are all counted past the counting cap", () => {
+    const found = createFailedFiles("/w");
+    for (let i = 1; i <= 1100; i += 1) found.line(` FAIL  pkg/file-${String(i).padStart(4, "0")}.test.ts > t`);
+    expect(found.summary().startsWith("failed test files (1100): ")).toBe(true);
+  });
+
   it("the capture hands over whole lines: one cut across two chunks is joined, a last line without a newline is not, and each stream has its own cut", async () => {
     const got: string[] = [];
     const file = script("cut.sh", `printf 'first '; sleep 0.3; printf 'half\\nsecond\\n'; printf 'err ' >&2; sleep 0.3; printf 'half\\n' >&2; printf 'no newline'`);
