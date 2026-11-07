@@ -27,7 +27,7 @@ import { NEEDS_YOU_APP, createInsightPanel, createPlan } from "./pipeline-insigh
 // One source for the count: the Needs you app's own reads and row rules (D#37 C47). Nothing of them is copied here.
 import { LIVE_EVENTS, entryLabel, readNeedsYouCount } from "../needs-you/needs-you-model.js";
 import { approveView, canApprove, createApprove, createInbox } from "./pipeline-actions.js";
-import { getAllPages } from "./pipeline-storage.js";
+import { createRepoLoader, getAllPages } from "./pipeline-storage.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -487,8 +487,6 @@ function mountTabs(contentEl, launchArg) {
   let repoId = null;
   let repos = [];
   let reposNote = "";
-  let reposAsked = false;
-  let closed = false;
   const boardHost = h("div", { class: "pl-tab-panel", id: "pl-panel-board", role: "tabpanel", "aria-labelledby": "pl-tab-board", "data-tab": "board" });
   const picker = h("select", { class: "pl-repo-picker", id: "pl-repo-picker", "data-testid": "pl-repo-picker" });
   const pickerRow = h("div", { class: "pl-repo-row", "data-testid": "pl-repo-row" }, h("label", { for: "pl-repo-picker" }, "Repository"), picker);
@@ -572,36 +570,35 @@ function mountTabs(contentEl, launchArg) {
     reposBox.hidden = tab === "board" || reposBox.childNodes.length === 0;
   }
   function askReposAgain() {
-    reposAsked = false;
     reposNote = "";
     paintPicker();
-    loadRepos();
+    repoLoader.ask({ force: true });
   }
   picker.addEventListener("change", () => {
     repoId = picker.value || null;
     refresh();
   });
-  // The repositories are read the first time a view that needs them is opened (the Board reads its own).
-  function loadRepos() {
-    if (reposAsked) return;
-    reposAsked = true;
-    getAllPages("/api/v1/repos", api).then(
-      (rows) => {
-        if (closed) return;
-        repos = rows.filter((r) => r && typeof r.id === "string" && typeof r.full_name === "string" && r.full_name !== "");
-        reposNote = repos.length ? "" : "No repositories are connected yet";
-        // One repository leaves nothing to choose.
-        if (repos.length === 1 && repoId === null) repoId = repos[0].id;
-        paintPicker();
-        refresh();
-      },
-      () => {
-        reposAsked = false;
+  // The repositories are read when a view that needs them is opened (the Board reads its own). The loader ends a read that
+  // never answers, so the picker is never left on "Loading repositories…"; opening a view again retries after a failure.
+  const repoLoader = createRepoLoader({
+    read: () => getAllPages("/api/v1/repos", api),
+    onChange(st) {
+      if (st.status === "loading") return;
+      if (st.status === "failed") {
+        repos = [];
         reposNote = "The repositories couldn't be loaded";
         paintPicker();
+        return;
       }
-    );
-  }
+      repos = st.rows.filter((r) => r && typeof r.id === "string" && typeof r.full_name === "string" && r.full_name !== "");
+      reposNote = repos.length ? "" : "No repositories are connected yet";
+      // One repository leaves nothing to choose.
+      if (repos.length === 1 && repoId === null) repoId = repos[0].id;
+      paintPicker();
+      refresh();
+    },
+  });
+  const loadRepos = () => repoLoader.ask();
   paintPicker();
 
   contentEl.replaceChildren(h("div", { class: "pl-shell" }, bar, pickerRow, reposBox, boardHost, views.inbox.host, views.plan.host));
@@ -610,7 +607,12 @@ function mountTabs(contentEl, launchArg) {
   return {
     select: goBoard,
     destroy() {
-      closed = true;
+      repoLoader.destroy();
+      // A picker that outlives the mount (a window fading out) must not stay on "Loading".
+      if (repos.length === 0 && repoLoader.state().status !== "ready") {
+        reposNote = "The repositories couldn't be loaded";
+        paintPicker();
+      }
       board.destroy();
       inbox.destroy();
       plan.destroy();
