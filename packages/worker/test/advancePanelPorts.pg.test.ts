@@ -34,11 +34,12 @@ describe("advance: the panel step's ports [pg]", { timeout: 60_000 }, () => {
   const DISC = "11111111-2222-4333-8444-555555555555";
 
   /** The ports the module hands to the injected panel step, for this item. */
-  async function portsOf(a: SeedRefs, w: string, resolveRunSeat: (r: SeatRequest) => Promise<SeatResult>): Promise<AdvanceStepPorts> {
+  async function portsOf(a: SeedRefs, w: string, resolveRunSeat: (r: SeatRequest) => Promise<SeatResult>, isOperatorAccount?: (accountId: string) => boolean): Promise<AdvanceStepPorts> {
     let captured: AdvanceStepPorts | null = null;
     const deps = {
       starter: { start: async () => ({ runId: randomUUID() }) },
       resolveRunSeat,
+      ...(isOperatorAccount && { isOperatorAccount }),
       startAdvance: async () => undefined,
       triage: null,
       panel: (async (_p: Pool, _a: string, _w: string, ports: AdvanceStepPorts) => {
@@ -164,6 +165,17 @@ describe("advance: the panel step's ports [pg]", { timeout: 60_000 }, () => {
       expect(await ports.headroom(["technical-architect"])).toEqual({ ok: true });
       expect(await ports.headroom(ROLES.slice(0, 2))).toEqual({ ok: true });
       expect(await ports.headroom(ROLES)).toEqual({ ok: false, reason: "model_budget_exceeded" });
+    });
+
+    it("an operator-subscription account with no monthly model budget set is not denied a panel round (its seats reserve no model money)", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      // The resolver prices an operator seat with a per-run cap and a monthly budget of 0 (the account never set one).
+      const unset = seatWith(20, { monthlyModelBudgetUsd: 0 });
+      expect(await (await portsOf(a, w, unset)).headroom(ROLES)).toEqual({ ok: false, reason: "model_budget_exceeded" });
+      expect(await (await portsOf(a, w, unset, () => true)).headroom(ROLES)).toEqual({ ok: true });
+      // Another account is still held to its budget.
+      expect(await (await portsOf(a, w, unset, () => false)).headroom(ROLES)).toEqual({ ok: false, reason: "model_budget_exceeded" });
     });
 
     it("the account's month-to-date counts: a round that would fit an empty month is denied after the month's spend", async () => {

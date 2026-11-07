@@ -152,6 +152,21 @@ describe("the parked-stage sweep for the panel [pg]", { timeout: 90_000 }, () =>
     expect(after.reservations).toBe(before.reservations);
   });
 
+  it("an operator-subscription account with no monthly model budget (0) is restarted by the sweep, because its start reserves no model money; any other account at 0 stays parked", async () => {
+    const p = await parked();
+    await twoPostedOneDenied(p, 1);
+    const l = limits(0);
+    const started: AdvanceStartArgs[] = [];
+    const clock = { t: Date.now() };
+    await sweeper(l, started, clock).sweepParkedStages([entry]);
+    expect(mine(started, p.w)).toEqual([]);
+    const operator = createStageResume(writerPool, { resolveRunSeat: seatFor(l) as never, isOperatorAccount: () => true, startAdvance: async (args) => void started.push(args), now: () => clock.t, log: () => undefined });
+    clock.t += 15 * 60_000;
+    await stale(p.w);
+    await operator.sweepParkedStages([entry]);
+    expect(mine(started, p.w)).toHaveLength(1);
+  });
+
   it("the posted seats' finished runs are expected beside the denied one: they are not read as 'the stage already ran'", async () => {
     const p = await parked();
     await twoPostedOneDenied(p);
