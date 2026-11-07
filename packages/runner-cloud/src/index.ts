@@ -30,6 +30,10 @@ export { planeMergeClaimRun, planeMergeReportRun, planeMergeVerifyRun, settleAut
 export { memoryProposalsRun } from "./memoryProposals.js";
 export { PLANE_PUSH_REPORT_CODES, planePushPairingRun, planePushReportRun, planePushTokenRun } from "./planePush.js";
 export {
+  FX_GATE1_DESCRIPTIONS,
+  FX_GATE1_LABEL,
+  FX_GATE1_STATUS_CONTEXT,
+  GATE1_ATTEST_DOCUMENTS,
   GITHUB_GRAPHQL_DOCUMENTS,
   LOCAL_ONLY_ALLOWLIST,
   LOCAL_ONLY_REVIEW_STATUS_CONTEXT,

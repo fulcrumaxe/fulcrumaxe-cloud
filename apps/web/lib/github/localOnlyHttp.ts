@@ -14,7 +14,7 @@ import type { PrCloseHttp } from "@fx/worker";
  * A refusal is logged as one line with the rule it broke and nothing else (never a path, a name or a body), and thrown unchanged:
  * the caller's catch turns it into a fixed code, so a refused call reads as "GitHub unavailable" and never as a green answer.
  */
-export function fenceInstallationHttp(http: InstallationHttp, options: { exclude?: readonly string[] } = {}): LocalGitHubHttp {
+export function fenceInstallationHttp(http: InstallationHttp, options: { exclude?: readonly string[]; gate1Attest?: boolean } = {}): LocalGitHubHttp {
   const fenced = localOnlyGithub({
     async request(req) {
       if (req.method !== "GET" && req.method !== "POST" && req.method !== "PUT" && req.method !== "PATCH") throw new LocalOnlyGithubError("not_allowlisted");
@@ -60,8 +60,11 @@ const isListOrClose = (req: { method: string; path: string }): boolean =>
  * D#694 B5a: a sandbox (hosted) `merge_gate` client is never opened with `allowGraphql`; its GraphQL reach is the three pinned documents the client
  * itself enforces (mergeGateGraphql.ts in the GitHub package). Only the `runner_local` branch below sets the flag, behind the fence, as before.
  * `withoutMerge` (the paired code repository of a `runner_local` item) takes the merge call out of the fence: the cloud never merges there.
+ * D#6 CLOUD-POSTS-FX-GATE1 PR 0: `gate1Attest` turns on the fence's opt-in entries (A14 to A16, A7's `fx-gate1` shape). It holds only together with
+ * `withoutMerge` on a `merge_gate` client (the review round's code-repository client); anywhere else it is ignored and the fence is as before.
  */
-export async function openForRepo(open: Open, executionMode: string, kind: "read" | "merge_gate", target: InstallationHttpTarget, options: { withoutMerge?: boolean } = {}): Promise<InstallationHttp | LocalGitHubHttp> {
+export async function openForRepo(open: Open, executionMode: string, kind: "read" | "merge_gate", target: InstallationHttpTarget, options: { withoutMerge?: boolean; gate1Attest?: boolean } = {}): Promise<InstallationHttp | LocalGitHubHttp> {
   if (executionMode !== "runner_local") return open(kind, target);
-  return fenceInstallationHttp(await open(kind, { ...target, allowGraphql: true }), options.withoutMerge === true ? { exclude: ["A10"] } : {});
+  if (options.withoutMerge !== true) return fenceInstallationHttp(await open(kind, { ...target, allowGraphql: true }), {});
+  return fenceInstallationHttp(await open(kind, { ...target, allowGraphql: true }), { exclude: ["A10"], ...(options.gate1Attest === true && kind === "merge_gate" ? { gate1Attest: true } : {}) });
 }
