@@ -3,8 +3,8 @@
   "platform": "linux/amd64",
   "image": {
     "repository": "fx-agent",
-    "digest": "sha256:c16078eb560f2a01e25d43c4c49f9545363d8558b145d755c656cadd5849935e",
-    "built_from_commit": "f7fa2e3b"
+    "digest": "sha256:c2242ae8d9f2abe1222adc0708bc383f9ff8af293c2564076198645f40559d7a",
+    "built_from_commit": "d80ed772"
   },
   "artifacts": {
     "node": {
