@@ -183,7 +183,8 @@ export async function listChangedFilesLocal(http: LocalGitHubHttp, repo: { owner
     total = list.totalCount;
     for (const f of list.nodes) {
       if (!isObj(f) || typeof f.path !== "string") return { ok: false, reason: "malformed" };
-      files.push({ path: f.path, previousPath: null, patch: null, changes: 1 });
+      // The document names no previous path, so a rename's old path is unknown and is marked so (the fx-gate1 attester refuses it as a possible CI path).
+      files.push({ path: f.path, previousPath: null, patch: null, changes: 1, ...(f.changeType === "RENAMED" ? { previousPathUnknown: true } : {}) });
     }
     if (list.pageInfo.hasNextPage !== true) return { ok: true, files, truncated: files.length < total };
     if (typeof list.pageInfo.endCursor !== "string") return { ok: false, reason: "malformed" };

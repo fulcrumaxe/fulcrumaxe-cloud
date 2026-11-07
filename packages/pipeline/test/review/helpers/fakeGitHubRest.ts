@@ -36,7 +36,10 @@ export interface FakeCheckRun {
   name: string;
   status: string;
   conclusion: string | null;
-  app?: { id: number };
+  /** The run's app; `null` is a run GitHub reports with no app. Unset is a run from app 1. */
+  app?: { id: number } | null;
+  /** When the run started (GitHub sets it on every run, a queued one included); read only by the fx-gate1 attester's document. */
+  startedAt?: string;
 }
 
 export interface FakeRepoState {
@@ -198,7 +201,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
       const checks = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/check-runs$/.exec(path);
       if (req.method === "GET" && checks) {
         const sha = checks[1]!;
-        const list = (s.checks[sha] ?? []).map((c, i) => ({ id: i + 1, head_sha: sha, name: c.name, status: c.status, conclusion: c.conclusion, app: c.app ?? { id: 1 } }));
+        const list = (s.checks[sha] ?? []).map((c, i) => ({ id: i + 1, head_sha: sha, name: c.name, status: c.status, conclusion: c.conclusion, app: c.app === undefined ? { id: 1 } : c.app }));
         return json(200, { total_count: list.length, check_runs: page(list, req.query) });
       }
       const status = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/status$/.exec(path);

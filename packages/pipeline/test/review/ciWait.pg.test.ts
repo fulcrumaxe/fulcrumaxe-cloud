@@ -11,7 +11,8 @@ import { createFakeExecutionTarget } from "../build/helpers/fakeExecutionTarget.
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
-import { fakeGitHubLocal } from "./helpers/fakeGitHubLocal.js";
+import { fakeGitHubLocal, gate1World, type Gate1World } from "./helpers/fakeGitHubLocal.js";
+import { ACTIONS_APP_ID, GATE1_WORKFLOW_CONTEXTS, parseGate1AttestRepos } from "../../src/review/gate1Attest.js";
 import { startMergeTlsGitHub, type MergeTlsGitHub } from "./helpers/fakeGitHubMergeTls.js";
 
 /**
@@ -269,11 +270,11 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
   const PUB_REPO = { owner: "customer-co", name: "storefront-public" };
   const green = [{ name: "build", status: "completed", conclusion: "success" }];
 
-  async function pairedWorld(opts: { priv?: FakeRepoState["checks"]; pub?: FakeRepoState["checks"]; prNumber?: number | null; stamp?: string | null; state?: string; managed?: boolean; pubHead?: string; pairing?: boolean; pairedWith?: string; local?: boolean; authorized?: string }) {
+  async function pairedWorld(opts: { priv?: FakeRepoState["checks"]; pub?: FakeRepoState["checks"]; prNumber?: number | null; stamp?: string | null; state?: string; managed?: boolean; pubHead?: string; pairing?: boolean; pairedWith?: string; local?: boolean; authorized?: string; required?: string[]; gate1World?: Gate1World; gate1Repos?: string }) {
     const privChecks = opts.priv ?? { [HEAD]: [{ name: "build", status: "queued", conclusion: null }] };
     const w = opts.local === true ? await localWorld({ checks: privChecks }) : await world({ repo: { checks: privChecks } });
     const pubHead = opts.pubHead ?? PUB_HEAD;
-    const pub = freshRepo({ ...PUB_REPO, prNumber: PUB_PR, headSha: pubHead, checks: opts.pub ?? { [pubHead]: green } });
+    const pub = freshRepo({ ...PUB_REPO, prNumber: PUB_PR, headSha: pubHead, checks: opts.pub ?? { [pubHead]: green }, ...(opts.required ? { requiredContexts: opts.required } : {}) });
     const repoId = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [w.workItemId])).rows[0]!.repo_id;
     if (opts.pairing !== false) await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, ARRAY['.autonomous-team/**'])", [repoId, w.accountId, opts.pairedWith ?? "customer-co/storefront-public"]);
     const withPr = opts.prNumber !== null;
@@ -290,10 +291,11 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
     const privHttp = privLocal !== null ? privLocal.http : fakeGitHubRest(w.gh);
     // A runner_local pair: the code repository is read through its own fence, and its pull request is found by the branch our push record names.
     if (opts.local === true && withPr) pub.runBranch = String((await h.admin.query("SELECT branch FROM plane_pushes WHERE work_item_id = $1", [w.workItemId])).rows[0].branch);
-    const pubLocal = opts.local === true ? fakeGitHubLocal(pub, { exclude: ["A10"] }) : null;
+    const pubLocal = opts.local === true ? fakeGitHubLocal(pub, { exclude: ["A10"], ...(opts.gate1World ? { gate1: opts.gate1World } : {}) }) : null;
     const pubHttp = pubLocal !== null ? pubLocal.http : fakeGitHubRest(pub);
     const gate = createCiGate({
       pool: h.runWriterPool,
+      ...(opts.gate1Repos !== undefined ? { gate1: { repos: parseGate1AttestRepos(opts.gate1Repos), ourLogin: async () => "fx-cloud-app[bot]" } } : {}),
       publicPullRequest: readPublicPullRequest(h.runWriterPool),
       openHttp: async (c) => {
         expect(`${c.owner}/${c.name}`).toBe("customer-co/storefront");
@@ -427,6 +429,57 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
     expect(t.pubLocal!.calls.map((c) => c.label)).toEqual(expect.arrayContaining(["A3", "A8", "A9 CommitChecks"]));
     expect(t.pubLocal!.denied).toEqual([]);
     expect(t.pubLocal!.refused).toEqual([]);
+  });
+
+  describe("D#6 CLOUD-POSTS-FX-GATE1: fx-gate1 the only missing context on the public head", () => {
+    const REQUIRED = [...GATE1_WORKFLOW_CONTEXTS, "fx-gate1"];
+    const runs = (startedAt: string) => GATE1_WORKFLOW_CONTEXTS.map((name) => ({ name, status: "completed", conclusion: "success", startedAt, app: { id: ACTIONS_APP_ID } }));
+    const LISTED = "customer-co/storefront-public";
+
+    it("calls the attester, which adds ci:full and waits; after a green full run it posts and the re-read reading is returned (recorded)", async () => {
+      const g = gate1World({ now: "2026-11-07T10:00:00Z" });
+      const t = await pairedWorld({ local: true, required: REQUIRED, pub: { [PUB_HEAD]: runs("2026-11-07T09:00:00Z") }, gate1World: g, gate1Repos: LISTED });
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing", "gate1_waiting"] });
+      expect(g.labelAdds).toBe(1);
+      await expectNothingRecorded(t.w);
+      t.pub.checks[PUB_HEAD] = runs("2026-11-07T10:05:00Z");
+      expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+      expect(t.pub.posts.filter((p) => p.body.context === "fx-gate1")).toEqual([{ sha: PUB_HEAD, body: { state: "success", context: "fx-gate1", description: "Gate 1: full public CI green (cloud)" } }]);
+      expect(t.pubLocal!.denied).toEqual([]);
+      expect(t.pubLocal!.refused).toEqual([]);
+    });
+
+    // The guard in front of the attester: only a head the platform pushed. Green full runs after the label are there, so a missing guard would post.
+    it.each([
+      ["the live head is not the platform's push stamp", { stamp: "e".repeat(40) }],
+      ["the branch is managed by a person", { managed: true }],
+    ])("%s: never calls it, nothing posted or labelled", async (_what, over) => {
+      const g = gate1World({ labels: ["ci:full"], labelEvents: [{ event: "labeled", label: "ci:full", createdAt: "2026-11-07T10:00:00Z" }] });
+      const t = await pairedWorld({ local: true, required: REQUIRED, pub: { [PUB_HEAD]: runs("2026-11-07T10:05:00Z") }, gate1World: g, gate1Repos: LISTED, ...over });
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing"] });
+      expect(t.pubLocal!.calls.map((c) => c.label).filter((l) => ["A14", "A15", "A16", "A17", "A7"].includes(l))).toEqual([]);
+      expect(t.pub.posts).toEqual([]);
+      expect(g.labelAdds).toBe(0);
+      await expectNothingRecorded(t.w);
+    });
+
+    it("a snapshot missing anything else never calls it", async () => {
+      const g = gate1World();
+      const t = await pairedWorld({ local: true, required: [...REQUIRED, "other-guard"], pub: { [PUB_HEAD]: runs("2026-11-07T10:05:00Z") }, gate1World: g, gate1Repos: LISTED });
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing"] });
+      expect(t.pubLocal!.calls.map((c) => c.label).filter((l) => ["A14", "A15", "A16", "A17", "A7"].includes(l))).toEqual([]);
+      expect(g.labelAdds).toBe(0);
+    });
+
+    it("with FX_GATE1_ATTEST_REPOS unset it never calls it (gate1_attest_off); with the repository unlisted it never calls it either", async () => {
+      for (const repos of [undefined, "", "acme/other"]) {
+        const g = gate1World();
+        const t = await pairedWorld({ local: true, required: REQUIRED, pub: { [PUB_HEAD]: runs("2026-11-07T10:05:00Z") }, gate1World: g, ...(repos !== undefined ? { gate1Repos: repos } : {}) });
+        expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: repos === "acme/other" ? ["required_missing"] : ["required_missing", "gate1_attest_off"] });
+        expect(t.pubLocal!.calls.map((c) => c.label).filter((l) => ["A14", "A15", "A16", "A17", "A7"].includes(l)), String(repos)).toEqual([]);
+        expect(t.pub.posts).toEqual([]);
+      }
+    });
   });
 
   it("a paired runner_local item: the public CI still running holds the round although the private copy is green; a green one releases it", async () => {

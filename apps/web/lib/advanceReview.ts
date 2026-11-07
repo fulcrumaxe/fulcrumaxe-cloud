@@ -1,10 +1,10 @@
 import type { AdvanceReviewDeps } from "@fx/worker";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { settleAuthorizedOrder } from "@fx/runner-cloud";
-import { createCiGate, readPublicPullRequest, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
+import { createCiGate, parseGate1AttestRepos, readPublicPullRequest, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { mergeGateAuthorTrust } from "./github/authorTrust";
-import { openInstallationHttp } from "./github/installationHttp";
+import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { createPlaneMergeOps } from "./planeMerge";
@@ -29,8 +29,10 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
   // The merge gate's token purpose for one repository (the item's own, or the paired code repository its installation serves), fenced for a runner_local repo.
   const openReviewHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp>;
   // The paired CODE repository of a runner_local item: the same fenced client without the merge call, because the cloud never merges there (the runner or a person does).
-  // D#6 CLOUD-POSTS-FX-GATE1 PR 0: this client alone also holds the fence's fx-gate1 entries (A14 to A16, A7's fx-gate1 shape); nothing calls them yet.
+  // D#6 CLOUD-POSTS-FX-GATE1: this client alone also holds the fence's fx-gate1 entries (A14 to A17, A7's fx-gate1 shape); the CI wait's attester uses them.
   const openPublicHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }, { withoutMerge: true, gate1Attest: true }) as Promise<GitHubHttp>;
+  // FX_GATE1_ATTEST_REPOS, read once when the worker is built: a malformed value throws here, so the worker does not start (unset: off, no attester call).
+  const gate1 = { repos: parseGate1AttestRepos(process.env.FX_GATE1_ATTEST_REPOS), ourLogin: readRepoAppLogin };
   return {
     async load(pool, accountId, workItemId) {
       const r = await loadReviewContext(pool, accountId, workItemId);
@@ -53,7 +55,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
         },
         // D#598 P7b: the head's CI is read with the merge gate's token purpose (check runs, statuses, branch protection) and, for a runner_local repo, its fence.
         // Two planes: a paired item's CI is read on the public pull request that merges (`openPublicHttp` gets the code repository's coordinates).
-        createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool) }),
+        createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool), gate1 }),
       ),
     // D#598 P7c: a head that is only a merge of the base branch is re-checked from facts (GitHub's commit and compare reads, our own records), with no reviewer run.
     // The reads use the merge gate's token purpose, like the CI wait; the head's CI is waited for before anything is recorded.
@@ -64,7 +66,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       const out = await recordMergeOnlyRecheck(
         pool,
         { accountId: input.accountId, workItemId: input.workItemId, headSha: input.headSha, prNumber: input.prNumber, baseRef: input.baseRef, requiredRoles: input.requiredRoles as VerdictRole[] },
-        { http: await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool) }) },
+        { http: await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool), gate1 }) },
       );
       return out.decision === "full_review" ? { decision: out.decision, reason: out.reason } : { decision: out.decision };
     },

@@ -237,6 +237,12 @@ describe("listChangedFilesLocal (D#6 R3c: paths only, through the PullRequestFil
     if (out.ok) expect(securityTriggers({ files: out.files, truncated: out.truncated })).toContain("diff_unavailable");
   });
 
+  it("a RENAMED file is marked as having an unknown previous path; no other change type is", async () => {
+    const { http } = client([page([{ path: "docs/new.md", changeType: "RENAMED" }, { path: "a.md", changeType: "COPIED" }, { path: "b.md", changeType: "MODIFIED" }])]);
+    const out = await listChangedFilesLocal(http, where);
+    expect(out.ok && out.files.map((f) => f.previousPathUnknown === true)).toEqual([true, false, false]);
+  });
+
   it("follows the cursor through every page", async () => {
     const first = page([{ path: "a.md", changeType: "ADDED" }], { hasNextPage: true, endCursor: "c1", totalCount: 2 });
     const second = page([{ path: "b.md", changeType: "ADDED" }], { totalCount: 2 });
