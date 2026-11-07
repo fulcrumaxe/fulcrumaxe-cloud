@@ -6,7 +6,8 @@ import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL
 import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { applyQueueEvent } from "../../src/mergeQueue/index.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
-import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
+import { runMergeGateForItem, type Gate1StatusCheck } from "../../src/review/mergeGateRun.js";
+import { gate1World } from "./helpers/fakeGitHubLocal.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
@@ -750,5 +751,92 @@ describe("D#483 S5-j2a2: the order check of a paired item reads the code reposit
     const out = await gateOf(w, w.workItemId, w.priv, w.pub);
     expect(out.outcome === "ready_human_merges" && out.reasons).toContain("ordered_resource_unreadable");
     expect(w.pub.merges).toEqual([]);
+  });
+});
+
+describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1e: a hosted cloud item counts fx-gate1 only when our App's bot posted it (REST statuses)", () => {
+  const LISTED: Gate1StatusCheck = { repos: new Set(["acme/widgets-public"]), ourLogin: async () => "fx-cloud-app[bot]" };
+  const AGENT = { __typename: "User", login: "autonomous-agent-7" };
+  const OURS = { __typename: "Bot", login: "fx-cloud-app[bot]" };
+  /** The public head carries `fx-gate1` (state as given) from `creator`, on the plain hosted client (REST creator `{ login, type }`). */
+  async function posted(creator: { __typename: string; login: string } | null, o: { state?: string } = {}) {
+    const w = await world();
+    if (creator !== null) w.pub.statuses[PUB_HEAD] = { "fx-gate1": o.state ?? "success" };
+    const g1 = gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator } });
+    const run = (gate1Status?: Gate1StatusCheck) =>
+      runMergeGateForItem(
+        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, ...(gate1Status ? { gate1Status } : {}) },
+        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+      );
+    const creatorReads = () => w.pub.requests.filter((r) => r.method === "GET" && r.path === `/repos/acme/widgets-public/commits/${PUB_HEAD}/statuses`).length;
+    return { w, run, creatorReads };
+  }
+  const reasonsOf = (out: Awaited<ReturnType<typeof runMergeGateForItem>>) => ("reasons" in out ? out.reasons : []);
+
+  it("a person's or a token's fx-gate1, another app's, and every lookalike: not green, gate1_status_foreign, nothing merged, read through REST (no GraphQL)", async () => {
+    const lookalikes = [AGENT, { __typename: "Bot", login: "other-app[bot]" }, { __typename: "User", login: "fx-cloud-app[bot]" }, { __typename: "Organization", login: "fx-cloud-app" }, { __typename: "Bot", login: "FX-cloud-app[bot]" }, { __typename: "Bot", login: "fx-cloud-app-evil[bot]" }, { __typename: "Bot", login: "fx-cloud-ap[bot]" }, { __typename: "Bot", login: "fx-cloud-app[bot]x" }];
+    for (const creator of lookalikes) {
+      const t = await posted(creator);
+      const out = await t.run(LISTED);
+      expect(out.outcome, creator.login).toBe("ready_human_merges");
+      expect(reasonsOf(out)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
+      expect(t.w.pub.merges).toEqual([]);
+      expect(t.creatorReads()).toBeGreaterThan(0);
+      expect(t.w.pub.requests.some((r) => r.path === "/graphql")).toBe(false);
+      expect((await events(t.w)).find((e) => e.kind === "merge_gate")?.reasons).toContain("gate1_status_foreign");
+    }
+  });
+
+  it("our App's bot posted success (by REST login or bare slug): green, merged", async () => {
+    for (const creator of [OURS, { __typename: "Bot", login: "fx-cloud-app" }]) {
+      const t = await posted(creator);
+      expect(await t.run(LISTED), creator.login).toMatchObject({ outcome: "merged", headSha: PUB_HEAD });
+      expect(t.w.pub.merges).toEqual([{ sha: PUB_HEAD, method: "squash" }]);
+      expect(t.creatorReads()).toBeGreaterThan(0);
+    }
+  });
+
+  it("a CHECK RUN named fx-gate1, from any app (Actions included), is foreign: alone, or next to our own success status", async () => {
+    for (const app of [{ id: 15368 }, { id: 1 }]) {
+      for (const creator of [null, OURS]) {
+        const t = await posted(creator);
+        t.w.pub.checks[PUB_HEAD] = [...green, { name: "fx-gate1", status: "completed", conclusion: "success", app }];
+        const out = await t.run(LISTED);
+        expect(out.outcome, `${app.id} ${creator?.login}`).toBe("ready_human_merges");
+        expect(reasonsOf(out)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
+        expect(t.w.pub.merges).toEqual([]);
+      }
+    }
+    // A check run of another name is not touched.
+    const t = await posted(OURS);
+    t.w.pub.checks[PUB_HEAD] = [...green, { name: "fx-gate1-lint", status: "completed", conclusion: "success" }];
+    expect(await t.run(LISTED)).toMatchObject({ outcome: "merged" });
+  });
+
+  it("our App's bot posted failure, error or pending: not green, not merged, not foreign", async () => {
+    for (const state of ["failure", "error", "pending"]) {
+      const t = await posted(OURS, { state });
+      const r = reasonsOf(await t.run(LISTED));
+      expect(r, state).toContain("ci_not_green");
+      expect(r, state).not.toContain("gate1_status_foreign");
+      expect(t.w.pub.merges).toEqual([]);
+    }
+  });
+
+  it("unlisted, the setting empty, or no check given: no creator read, and the gate is as before (a foreign fx-gate1 still counts)", async () => {
+    for (const g of [{ repos: new Set(["acme/other"]), ourLogin: LISTED.ourLogin }, { repos: new Set<string>(), ourLogin: LISTED.ourLogin }, undefined]) {
+      const t = await posted(AGENT);
+      expect(await t.run(g)).toMatchObject({ outcome: "merged" });
+      expect(t.creatorReads()).toBe(0);
+    }
+  });
+
+  it("no fx-gate1 on the head: no creator read; an unreadable read is a throw, never green", async () => {
+    const none = await posted(null);
+    expect(await none.run(LISTED)).toMatchObject({ outcome: "merged" });
+    expect(none.creatorReads()).toBe(0);
+    const broken = await posted(AGENT);
+    await expect(broken.run({ ...LISTED, ourLogin: async () => Promise.reject(new Error("no installation")) })).rejects.toThrow();
+    expect(broken.w.pub.merges).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({ loadReviewContext: vi.fn(), attestQueueEntry: 
 vi.mock("@fx/pipeline", async (original) => ({ ...(await original<typeof import("@fx/pipeline")>()), loadReviewContext: mocks.loadReviewContext, attestQueueEntry: mocks.attestQueueEntry }));
 
 import { GATE1_QUEUE_DOCUMENTS } from "@fx/runner-cloud";
+import { MERGE_QUEUE_ENTRY_DOCUMENT } from "@fx/github";
 import { readQueueEntryWake, wakeGate1QueueEntry } from "../lib/gate1QueueEntry";
 
 /** D#6 CLOUD-POSTS-FX-GATE1 PR 1d: the check_suite wake for a merge-queue entry commit, and how it finds the item and opens the attester's client. */
@@ -85,9 +86,38 @@ describe("wakeGate1QueueEntry", () => {
     expect((inner.request.mock.calls[0]![0] as unknown as { body: { query: string } }).body.query).toBe(GATE1_QUEUE_DOCUMENTS.Gate1QueueEntries);
     expect(mocks.attestQueueEntry.mock.calls[0]![1]).toMatchObject({ repos: LISTED, owner: "acme", name: "widgets-public", base: "main", prNumber: 12, baseSha: BASE, entrySha: ENTRY });
     expect(mocks.attestQueueEntry.mock.calls[0]![1]).not.toHaveProperty("prHead");
+    // A runner_local item is never handed the entry document: its fenced client reads A18.
+    expect(mocks.attestQueueEntry.mock.calls[0]![1]).not.toHaveProperty("entryDocument");
   });
 
-  it("an unlisted repository (or the setting unset) reads nothing of ours; no item, two items, a sandbox item or an unloadable one asks nothing", async () => {
+  it("PR 1e: a hosted (sandbox) item asks the attester through the plain merge_gate client, with the pinned entry document and no allowGraphql", async () => {
+    mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: "r1", owner: "acme", name: "widgets", executionMode: "sandbox" } });
+    const inner = { request: vi.fn(async () => ({ status: 200, body: [] })) };
+    const open = vi.fn(async () => inner as never);
+    mocks.attestQueueEntry.mockImplementation(async (http: unknown, input: { ourLogin: () => Promise<string> }) => {
+      // The plain installation client as opened: no fence in front of it (so no fixed documents of the fence).
+      expect(http).toBe(inner);
+      expect(await input.ourLogin()).toBe("bot-for-r1");
+      return { kind: "wait", reason: "entry_not_queued" };
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      expect(await wakeGate1QueueEntry(pool([{ work_item_id: ITEM, managed: false }]).pool, event(), { open, repos: LISTED, ourLogin: async (id) => `bot-for-${id}` })).toEqual({ kind: "wait", reason: "entry_not_queued" });
+    } finally {
+      info.mockRestore();
+    }
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith("merge_gate", { repoId: "r1", owner: "acme", name: "widgets-public" });
+    expect(mocks.attestQueueEntry.mock.calls[0]![1]).toMatchObject({ repos: LISTED, owner: "acme", name: "widgets-public", base: "main", prNumber: 12, baseSha: BASE, entrySha: ENTRY, entryDocument: MERGE_QUEUE_ENTRY_DOCUMENT });
+    // The same person-managed rule as runner_local: any person-managed match stops a hosted item too, before anything is loaded or opened.
+    mocks.loadReviewContext.mockClear();
+    const open2 = vi.fn();
+    expect(await wakeGate1QueueEntry(pool([{ work_item_id: ITEM, managed: false }, { work_item_id: ITEM, managed: true }]).pool, event(), { open: open2, repos: LISTED })).toBeNull();
+    expect(mocks.loadReviewContext).not.toHaveBeenCalled();
+    expect(open2).not.toHaveBeenCalled();
+  });
+
+  it("an unlisted repository (or the setting unset) reads nothing of ours; no item, two items or an unloadable one asks nothing", async () => {
     const saved = process.env.FX_GATE1_ATTEST_REPOS;
     delete process.env.FX_GATE1_ATTEST_REPOS;
     try {
@@ -115,7 +145,7 @@ describe("wakeGate1QueueEntry", () => {
       expect(mocks.loadReviewContext).not.toHaveBeenCalled();
       expect(open).not.toHaveBeenCalled();
     }
-    for (const loaded of [{ ok: true, ctx: { repoId: "r1", owner: "acme", name: "widgets", executionMode: "sandbox" } }, { ok: false, reason: "not_found" }]) {
+    for (const loaded of [{ ok: false, reason: "not_found" }]) {
       mocks.loadReviewContext.mockResolvedValueOnce(loaded);
       const open = vi.fn();
       expect(await wakeGate1QueueEntry(pool([{ work_item_id: ITEM, managed: false }]).pool, event(), { open, repos: LISTED })).toBeNull();

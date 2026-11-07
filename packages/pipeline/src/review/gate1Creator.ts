@@ -1,5 +1,5 @@
-import type { LocalGitHubHttp } from "../build/githubMergePort.js";
-import { isOurBot } from "./gate1Attest.js";
+import { isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp } from "../build/githubMergePort.js";
+import { GATE1_CONTEXT, isOurBot } from "./gate1Attest.js";
 
 /**
  * D#6 CLOUD-POSTS-FX-GATE1 PR 1c: who posted the newest `fx-gate1` on one commit, read through the fence's A17 (`Gate1Status`) and nothing else. The merge
@@ -33,3 +33,38 @@ export async function readGate1Creator(http: LocalGitHubHttp, repo: { owner: str
   const ours = ourLogin.replace(/\[bot\]$/, "").length > 0 && isOurBot(ctx.creator, ourLogin);
   return { state: typeof ctx.state === "string" ? ctx.state : null, ours };
 }
+
+/** REST pages of `commits/{sha}/statuses` read before the answer is unknown (a throw, never "none"). */
+const REST_STATUS_PAGES = 5;
+const REST_PER_PAGE = 100;
+const SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * PR 1e: the same answer for a hosted pair, through the plain `merge_gate` client's REST read `commits/{sha}/statuses`, which GitHub lists newest first:
+ * the first `fx-gate1` there is the context's current state. REST names the creator `{ login, type }`, an App's bot as `<slug>[bot]` typed `Bot`; the same
+ * `isOurBot` rule decides. The state is given upper case, as GraphQL gives it. A list that ends without `fx-gate1` has none; one that runs past the pages
+ * read without it is a throw (unknown).
+ */
+export async function readGate1CreatorRest(http: GitHubHttp, repo: { owner: string; name: string; sha: string }, ourLogin: string): Promise<Gate1Creator> {
+  if (!SHA.test(repo.sha)) fail("sha");
+  const path = `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits/${repo.sha}/statuses`;
+  for (let page = 1; page <= REST_STATUS_PAGES; page++) {
+    const res = await http.request({ method: "GET", path, query: { per_page: REST_PER_PAGE, page } });
+    if (res.status !== 200 || !Array.isArray(res.body)) return fail("unreadable");
+    const list = res.body as unknown[];
+    for (const s of list) {
+      if (!isObj(s) || typeof s.context !== "string") return fail("status entry");
+      if (s.context !== GATE1_CONTEXT) continue;
+      if (typeof s.state !== "string") return fail("status state");
+      const c = isObj(s.creator) ? s.creator : null;
+      const ours = ourLogin.replace(/\[bot\]$/, "").length > 0 && c !== null && isOurBot({ __typename: c.type, login: c.login }, ourLogin);
+      return { state: s.state.toUpperCase(), ours };
+    }
+    if (list.length < REST_PER_PAGE) return { state: null, ours: false };
+  }
+  return fail("statuses beyond the pages read");
+}
+
+/** The reader for a client: A17 on a fenced (`runner_local`) client, REST on the hosted `merge_gate` client. */
+export const readGate1CreatorFor = (http: GitHubHttp, repo: { owner: string; name: string; sha: string }, ourLogin: string): Promise<Gate1Creator> =>
+  isLocalGitHubHttp(http) ? readGate1Creator(http, repo, ourLogin) : readGate1CreatorRest(http, repo, ourLogin);
