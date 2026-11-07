@@ -99,6 +99,7 @@ export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   removed_from_merge_queue: "A person took this pull request out of GitHub's merge queue and it has not been put back, so the pipeline stopped. Press Queue again to check it and queue it again, or merge it yourself on GitHub.",
   merge_call_refused: "GitHub refused to merge this pull request for a reason the pipeline cannot act on, so it stopped for a person. Clear what blocks it on GitHub and merge it there, or push a new commit to its branch and press Check the merge to have the pipeline try again.",
   ci_not_green: "The checks on this pull request had not passed (one failed, or they had not finished in time), so the pipeline stopped before merging. Fix the failing check, or run it again, on GitHub; when a check finishes the merge is tried again by itself.",
+  job_too_large: "This Spec's job is too large to send to a runner, so the build did not start and nothing was run. Shrink the Spec's file list or the context it pulls in (pinned files, memory, long task text), then Re-spec or Build again.",
   parent_has_children: 'This item still has planned pull requests in progress, so the new Spec does not build it. They stay as they are: decide what happens to them, then start the work again.',
   parent_splits: 'This Spec is split into several pull requests, so this item is not built itself. Each planned pull request is built as its own item once the Spec is approved.',
 });

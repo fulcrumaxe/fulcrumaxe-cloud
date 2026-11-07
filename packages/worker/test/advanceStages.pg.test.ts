@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { DispatchFailedError, JobIssueError, insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -248,6 +248,18 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(t.inputs[1]).not.toHaveProperty("cloneRepo");
     expect(t.inputs[1]).not.toHaveProperty("workdir");
     expect(t.inputs[1]).not.toHaveProperty("pr");
+  });
+
+  it("a start the job issuer refused as too large answers job_too_large, and any other issuer error still throws", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    await setupRepo(a);
+    const w = await item(a);
+    const base = { accountId: a.accountId, workItemId: w, haltEpoch: 0, role: "executor", prompt: "p", clone: true, pr: 7 };
+    const refusing = (code: "job_too_large" | "job_invalid"): RunStarter => ({ async start() { throw new DispatchFailedError(randomUUID(), new JobIssueError(code)); } });
+    const tooLarge = build({ starter: refusing("job_too_large") });
+    expect(await tooLarge.module.advanceStartRun({ ...base, step: "build:v1:large" })).toEqual({ ok: false, reason: "job_too_large" });
+    const other = build({ starter: refusing("job_invalid") });
+    await expect(other.module.advanceStartRun({ ...base, step: "build:v1:invalid" })).rejects.toBeInstanceOf(DispatchFailedError);
   });
 
   it("a clone with no repository name is refused no_repo before anything starts; a pr that is not a positive whole number is invalid_input", async () => {

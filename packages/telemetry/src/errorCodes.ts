@@ -264,6 +264,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // D#600 CX-5c: the job issuer could not read the item's excludes, so it signed no job (a job never goes out without the list it should carry).
   "excludes_unreadable",
   "conflict_round_invalid",
+  // The claim reply that would carry a signed job is over what a hosted function can send, so the job issuer issued none.
+  "job_too_large",
   // R4a-3b continuation pushes: a fix round's branch is gone (at prepare or before the push), or its push was rejected because the branch moved.
   "continuation_branch_missing",
   "push_rejected",

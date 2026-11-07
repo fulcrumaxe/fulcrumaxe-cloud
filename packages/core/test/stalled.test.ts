@@ -23,6 +23,14 @@ describe('R6: what counts as stalled', () => {
     expect(s!.why).toContain('daily limit');
   });
 
+  it('a build refused because its job is too large to send is stalled, and the card says the job is too large and what to shrink', () => {
+    const s = classifyStall(facts({ stage: 'spec_ready', last: last('build_refused', 'job_too_large') }));
+    expect(s).toMatchObject({ code: 'refused' });
+    expect(s!.why).toContain('too large to send');
+    expect(s!.why).toContain("file list");
+    expect(s!.why).not.toContain('job_too_large');
+  });
+
   it('an older stop that names the role instead of a reason still reads as a sentence', () => {
     const s = classifyStall(facts({ last: last('stopped', 'not_started_security_reviewer') }));
     expect(s!.why).toBe("A reviewer couldn't start (security reviewer), so the review stopped before it could finish.");

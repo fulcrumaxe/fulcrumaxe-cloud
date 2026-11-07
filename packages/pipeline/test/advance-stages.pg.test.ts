@@ -1091,6 +1091,14 @@ describe("the build", () => {
     expect((await h.admin.query("SELECT 1 FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'in_progress'", [t.workItemId])).rowCount).toBe(1);
   });
 
+  it("a job too large to send is refused with its own code (not start_ prefixed), the item stays at spec_ready, and nothing moves", async () => {
+    const t = await atSpecReady();
+    t.world.script = () => ({ refuse: "job_too_large" });
+    expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toEqual({ status: "refused", reason: "job_too_large" });
+    expect(await stageOf(t.workItemId)).toBe("spec_ready");
+    expect((await h.admin.query("SELECT 1 FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'in_progress'", [t.workItemId])).rowCount).toBe(0);
+  });
+
   it("a refused start (no model, spend, another run live) leaves the item at spec_ready, writes nothing, and says why", async () => {
     const t = await atSpecReady();
     t.world.script = () => ({ refuse: "already_running" });

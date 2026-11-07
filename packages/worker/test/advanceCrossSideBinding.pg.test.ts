@@ -275,7 +275,7 @@ describe("advance: a round that carries on from a pull request the other side op
     });
 
     it("the issuer's closed refusal reaches the step as its code, with a fact recorded and no run left live", async () => {
-      for (const code of ["continues_pr_not_open", "continues_pr_mismatch", "continues_branch_protected", "continues_base_unavailable"] as const) {
+      for (const code of ["continues_pr_not_open", "continues_pr_mismatch", "continues_branch_protected", "continues_base_unavailable", "job_too_large"] as const) {
         const t = await setup("sandbox");
         const m = module({ starterThrows: new DispatchFailedError(randomUUID(), new JobIssueError(code)) });
         await builtRun(t, "sandbox");
