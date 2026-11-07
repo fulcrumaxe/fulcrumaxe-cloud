@@ -947,6 +947,23 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect((rd.recordRound as ReturnType<typeof vi.fn>).mock.calls[0]![2]).toMatchObject({ accountId: a.accountId, workItemId: w, headSha: HEAD, prNumber: 41 });
     });
 
+    it("a round that waits for CI logs why: the reasons and the names of the required checks that never reported", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const rd = review({ recordRound: vi.fn(async () => ({ decision: "ci_pending", round: 0, recorded: [], ciReasons: ["required_missing"], ciMissing: ["fx-gate1"] })) });
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      try {
+        await build({}, rd).module.advanceRecordRound(who(a, w), input());
+        const lines = () => info.mock.calls.map((c) => String(c[0])).filter((t) => t.startsWith('{"event":"advance.round"')).map((t) => JSON.parse(t));
+        expect(lines().pop()).toMatchObject({ decision: "ci_pending", ci_reasons: ["required_missing"], ci_missing: ["fx-gate1"] });
+        // A settled round carries no CI fields.
+        await build({}, review()).module.advanceRecordRound(who(a, w), input());
+        expect(lines().pop()).not.toHaveProperty("ci_reasons");
+      } finally {
+        info.mockRestore();
+      }
+    });
+
     it.each([
       ["a head that is not a commit id", { headSha: "x" }],
       ["a PR number of zero", { prNumber: 0 }],

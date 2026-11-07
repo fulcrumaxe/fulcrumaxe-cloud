@@ -207,6 +207,20 @@ export function toCode(text: string): string {
   return withLead.slice(0, 64);
 }
 
+/** The prefix of a `ci_wait_timeout` stop reason that names a required check that never reported (`missing_fx_gate1`). */
+export const CI_MISSING_PREFIX = 'missing_';
+const CI_WAIT_WORDS: ReadonlySet<string> = new Set(['wrong_head', 'incomplete_snapshot', 'check_running', 'status_pending', 'required_missing']);
+
+/**
+ * The `reasons` of a `ci_wait_timeout` stop: the wait's fixed reason words, then one `missing_<check name as a code>` per required check that never reported
+ * (names only: a public check's name, made a plain code, so a hyphen reads as an underscore). Anything else is dropped; at most 5 names.
+ */
+export function ciWaitStopReasons(reasons: readonly string[] | undefined, missing: readonly string[] | undefined): string[] {
+  const words = (reasons ?? []).filter((r) => CI_WAIT_WORDS.has(r));
+  const names = [...new Set((missing ?? []).slice(0, 5).map((n) => toCode(n).slice(0, 64 - CI_MISSING_PREFIX.length)))].map((c) => CI_MISSING_PREFIX + c);
+  return [...new Set(words), ...names];
+}
+
 export function assertDriverEvent(e: DriverEventInput): void {
   if (!(DRIVER_EVENT_KINDS as readonly string[]).includes(e.kind)) throw new Error('driver event: unknown kind');
   if (typeof e.dedupeKey !== 'string' || e.dedupeKey.length < 1 || e.dedupeKey.length > 200) throw new Error('driver event: bad dedupe key');

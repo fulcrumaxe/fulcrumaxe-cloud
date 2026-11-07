@@ -72,7 +72,7 @@ interface World {
   /** (role) -> the verdict the reviewer run ends with. A function of the head the run is for. */
   verdict: (role: string, head: string, step: string) => { status?: string; envelope?: Record<string, unknown> | null; done?: boolean; failureReason?: string };
   /** The decision the worker's round returns, per call. */
-  rounds: Array<{ decision: string; round?: number; nextRound?: number | null }>;
+  rounds: Array<{ decision: string; round?: number; nextRound?: number | null; ciReasons?: string[]; ciMissing?: string[] }>;
   /** The fix start. */
   fix: { ok: boolean; reason?: string };
   /** What the fix run does to the head when it ends. */
@@ -92,7 +92,7 @@ interface World {
   mode?: "runner_local" | "runner_verified" | "sandbox";
   recorded?: { number: number; branch: string } | null;
   /** D#598 P7c: the worker's answer to "is this head only a merge of the base branch?", per call (the last one repeats). Default: a full review. */
-  mergeOnly?: Array<{ decision: string; reason?: string }>;
+  mergeOnly?: Array<{ decision: string; reason?: string; ciReasons?: string[]; ciMissing?: string[] }>;
   /** D#6 R5b-2a: the worker's answer to "may the reviewers start?", per call (1-based). It may change the world (a push, a mode change) as the real check's wait would. */
   /** What the decision step answers after a succeeded fix round (D#7 DP4b-2); `none` when absent. */
   decision?: DecisionStepCode;
@@ -163,7 +163,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     }),
     advanceRecordRound: vi.fn(async (_who: unknown, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">) => {
       const r = w.realDecide ? { decision: decideRound({ requiredRoles: input.requiredRoles as never, verdicts: input.verdicts as never, fixRoundsStarted: 0 }) as string } : rounds.length > 1 ? rounds.shift()! : rounds[0]!;
-      return { decision: r.decision, round: r.round ?? 0, ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
+      return { decision: r.decision, round: r.round ?? 0, ...(r.ciReasons ? { ciReasons: r.ciReasons } : {}), ...(r.ciMissing ? { ciMissing: r.ciMissing } : {}), ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
     }),
     advanceRecordMergeOnly: vi.fn(async (_who: unknown, _input: { headSha: string; prNumber: number; baseRef: string; requiredRoles: string[] }) => {
       const list = w.mergeOnly ?? [{ decision: "full_review", reason: "no_prior_review" }];
@@ -881,6 +881,20 @@ describe("what happens after the verdicts are recorded", () => {
     expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "ci_wait_timeout" }));
     expect(events()).toContain("advance.ci_wait_timeout");
+  });
+
+  it("the timeout stop says what was still missing: the wait's reason words and the required check that never reported", async () => {
+    const pending = { decision: "ci_pending", ciReasons: ["required_missing"], ciMissing: ["fx-gate1"] };
+    const t = setup(fresh({ rounds: [pending] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ci_wait_timeout" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "ci_wait_timeout", reasons: ["required_missing", "missing_fx_gate1"] }));
+    expect(logs.find((l) => l.event === "advance.ci_wait_timeout")).toMatchObject({ ci_reasons: "required_missing,missing_fx_gate1" });
+  });
+
+  it("the delta re-check's timeout stop says the same", async () => {
+    const t = setup(fresh({ mergeOnly: [{ decision: "ci_pending", ciReasons: ["check_running", "required_missing"], ciMissing: ["fx-gate1"] }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ci_wait_timeout" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "ci_wait_timeout", reasons: ["check_running", "required_missing", "missing_fx_gate1"] }));
   });
 
   // Fix round 1 on #325: on a runner_local repo the CI read follows the PR's last commit, so a push during the review answers head_moved.

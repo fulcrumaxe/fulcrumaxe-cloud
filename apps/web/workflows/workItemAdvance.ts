@@ -1521,7 +1521,7 @@ async function waitingOnAnswer(args: AdvanceStartArgs, runId: string): Promise<R
 }
 
 /** A fact of the item: the driver stopped, and why. One per approval and reason. */
-async function stopped(args: AdvanceStartArgs, at: string, code: string, extra: { head?: string; pr?: number; round?: number } = {}): Promise<void> {
+async function stopped(args: AdvanceStartArgs, at: string, code: string, extra: { head?: string; pr?: number; round?: number; reasons?: string[] } = {}): Promise<void> {
   const { accountId, userId, workItemId, actionId } = args;
   if (isHaltReason(code)) code = "halted";
   await advanceLogStep("advance.stopped", { work_item_id: workItemId, at, reason: code });
@@ -1532,6 +1532,7 @@ async function stopped(args: AdvanceStartArgs, at: string, code: string, extra: 
     ...(extra.head ? { headSha: extra.head } : {}),
     ...(extra.pr ? { prNumber: extra.pr } : {}),
     ...(extra.round !== undefined ? { round: extra.round } : {}),
+    ...(extra.reasons !== undefined && extra.reasons.length > 0 ? { reasons: extra.reasons } : {}),
   });
 }
 
@@ -1607,7 +1608,7 @@ async function recordWhenCiSettled(args: AdvanceStartArgs, input: Parameters<typ
     round = await advanceRecordRoundStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
   }
   if (round.decision === "ci_pending") {
-    await advanceLogStep("advance.ci_wait_timeout", { work_item_id: args.workItemId, pr: input.prNumber, head: input.headSha.slice(0, 12) });
+    await advanceLogStep("advance.ci_wait_timeout", { work_item_id: args.workItemId, pr: input.prNumber, head: input.headSha.slice(0, 12), ci_reasons: (round.ciStop ?? []).join(",") });
     return { ...round, decision: "ci_wait_timeout" };
   }
   return round;
@@ -1626,8 +1627,8 @@ async function recheckMergeOnly(args: AdvanceStartArgs, input: Parameters<typeof
     out = await advanceRecordMergeOnlyStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
   }
   if (out.decision === "ci_pending") {
-    await advanceLogStep("advance.ci_wait_timeout", { work_item_id: args.workItemId, pr: input.prNumber, head: input.headSha.slice(0, 12) });
-    return { decision: "ci_wait_timeout", reason: null };
+    await advanceLogStep("advance.ci_wait_timeout", { work_item_id: args.workItemId, pr: input.prNumber, head: input.headSha.slice(0, 12), ci_reasons: (out.ciStop ?? []).join(",") });
+    return { decision: "ci_wait_timeout", reason: null, ...(out.ciStop ? { ciStop: out.ciStop } : {}) };
   }
   return out;
 }
@@ -1970,7 +1971,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       }
       if (delta.decision !== "full_review") {
         // CI never finished, or the step was refused: nothing is decided, nothing is merged.
-        await stopped(args, "review", delta.decision, { head: pr.headSha, pr: pr.number });
+        await stopped(args, "review", delta.decision, { head: pr.headSha, pr: pr.number, ...(delta.decision === "ci_wait_timeout" && delta.ciStop ? { reasons: delta.ciStop } : {}) });
         return { status: "needs_human", detail: delta.decision };
       }
     }
@@ -2059,7 +2060,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     if (round.decision !== "fix") {
       // incomplete (a required reviewer could not start) or refused: nothing is decided, nothing is merged.
       // The code names the worker's reason when it gave one (`not_started_runner_daily_limit`), the role otherwise: the person reading the card needs the cause, not only the role.
-      await stopped(args, "review", refused.length > 0 ? `not_started_${refusedWhy[refused[0]!] ?? refused[0]}` : round.decision, { head: pr.headSha, pr: pr.number });
+      await stopped(args, "review", refused.length > 0 ? `not_started_${refusedWhy[refused[0]!] ?? refused[0]}` : round.decision, { head: pr.headSha, pr: pr.number, ...(round.decision === "ci_wait_timeout" && round.ciStop ? { reasons: round.ciStop } : {}) });
       return { status: "needs_human", detail: refused.length > 0 ? `reviewer_not_started:${refused.join(",")}` : round.decision };
     }
 
