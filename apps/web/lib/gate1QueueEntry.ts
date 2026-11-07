@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { attestQueueEntry, loadReviewContext, parseGate1AttestRepos, type LocalGitHubHttp, type QueueEntryOutcome } from "@fx/pipeline";
-import type { GithubWebhookEventName, GithubWebhookPayload } from "@fx/github";
+import { attestQueueEntry, loadReviewContext, parseGate1AttestRepos, type GitHubHttp, type QueueEntryOutcome } from "@fx/pipeline";
+import { MERGE_QUEUE_ENTRY_DOCUMENT, type GithubWebhookEventName, type GithubWebhookPayload } from "@fx/github";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 
@@ -68,12 +68,14 @@ export async function wakeGate1QueueEntry(pool: Pool, event: { accountId: string
   });
   if (workItemId === null) return null;
   const loaded = await loadReviewContext(pool, event.accountId, workItemId);
-  if (!loaded.ok || loaded.ctx.executionMode !== "runner_local") return null;
+  if (!loaded.ok) return null;
   const ctx = loaded.ctx;
   const [owner, name] = wake.repoFullName.split("/") as [string, string];
-  const http = (await openForRepo(deps.open ?? openInstallationHttp, ctx.executionMode, "merge_gate", { repoId: ctx.repoId, owner, name }, { withoutMerge: true, gate1Attest: true })) as LocalGitHubHttp;
+  // PR 1e: both paths. A runner_local item gets the attester's fenced client (A17, A18, A15, A7); a hosted item the plain merge_gate client, which reads
+  // the queue through its REST reads and the one pinned entry document it already holds.
+  const http: GitHubHttp = await openForRepo(deps.open ?? openInstallationHttp, ctx.executionMode, "merge_gate", { repoId: ctx.repoId, owner, name }, { withoutMerge: true, gate1Attest: true });
   const ourLogin = deps.ourLogin ?? readRepoAppLogin;
-  const out = await attestQueueEntry(http, { repos, owner, name, base: wake.base, prNumber: wake.prNumber, baseSha: wake.baseSha, entrySha: wake.entrySha, ourLogin: () => ourLogin(ctx.repoId) });
+  const out = await attestQueueEntry(http, { repos, owner, name, base: wake.base, prNumber: wake.prNumber, baseSha: wake.baseSha, entrySha: wake.entrySha, ourLogin: () => ourLogin(ctx.repoId), ...(ctx.executionMode === "runner_local" ? {} : { entryDocument: MERGE_QUEUE_ENTRY_DOCUMENT }) });
   console.info(JSON.stringify({ event: "gate1_queue_entry", work_item_id: workItemId, outcome: out.kind, ...("reason" in out ? { reason: out.reason } : {}) }));
   return out;
 }
