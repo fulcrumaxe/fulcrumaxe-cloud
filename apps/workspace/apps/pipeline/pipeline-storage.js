@@ -142,6 +142,32 @@ export async function getAllPages(path, get = api, signal) {
 
 export const loadTimeline = (id, get = api, signal) => get("GET", "/api/v1/work-items/" + id + "/timeline", undefined, signal);
 
+/** A work item's corrections (any member session), for the detail's History (D#597 CC-7a). */
+export const loadCorrections = (id, get = api, signal) => get("GET", "/api/v1/work-items/" + id + "/corrections", undefined, signal);
+
+/**
+ * The History's rows: the item's stage transitions and its decided corrections, merged into one ascending-by-time
+ * sequence. `kindWords` is the caller's word map (pipeline-actions.js's `CORRECTION_KINDS`), passed in rather than
+ * imported so this file stays free of that one (D#597 CC-7a freezes it). A row is either
+ * `{ type: "stage", at, transition }` (the transition object unchanged) or
+ * `{ type: "correction", at, kind, attribution, text }`. `corrections` that is not an array (not yet loaded, or the
+ * read failed) yields the stage rows alone.
+ */
+export function mergeHistoryRows(transitions, corrections, kindWords) {
+  const stageRows = (Array.isArray(transitions) ? transitions : []).map((t, i) => ({ type: "stage", at: t.at, transition: t, ts: Date.parse(t.at) || 0, seq: i }));
+  const correctionRows = (Array.isArray(corrections) ? corrections : [])
+    .filter((c) => c && c.status !== "proposed" && typeof c.attribution === "string" && c.attribution !== "")
+    .map((c, i) => ({ type: "correction", at: c.decided_at, kind: c.kind, attribution: c.attribution, ts: Date.parse(c.decided_at), seq: i }))
+    .filter((r) => Number.isFinite(r.ts));
+  return [...stageRows, ...correctionRows]
+    .sort((a, b) => a.ts - b.ts || (a.type === b.type ? a.seq - b.seq : a.type === "stage" ? -1 : 1))
+    .map((r) =>
+      r.type === "stage"
+        ? { type: "stage", at: r.at, transition: r.transition }
+        : { type: "correction", at: r.at, kind: r.kind, attribution: r.attribution, text: (kindWords[r.kind] || "Correction") + ": " + r.attribution }
+    );
+}
+
 /**
  * The stages at which an item is mid-pipeline: something is about to move it (an agent, a webhook, the merge gate, a
  * person's click), so the board keeps re-reading while one is on it. Done and Needs a person are resting places.

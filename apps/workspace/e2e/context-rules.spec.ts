@@ -452,6 +452,7 @@ async function setupPipeline(page: Page, m: ContextMock) {
     if (url.pathname === "/api/v1/repos") return json(route, 200, REPOS);
     if (url.pathname === "/api/v1/work-items") return json(route, 200, url.searchParams.get("stage") === "needs_human" ? { data: [], next_cursor: null } : LIST);
     if (url.pathname.endsWith("/timeline")) return json(route, 200, TIMELINE);
+    if (url.pathname.endsWith("/corrections")) return json(route, 200, { data: [] });
     return json(route, 404, { error: { code: "not_found", message: "not found", request_id: "r1" } });
   });
   await page.route("**/api/v1/events", (route) => route.fulfill({ status: 200, contentType: "text/event-stream", headers: { "cache-control": "no-store" }, body: "event: idle\ndata: {}\n\n" }));

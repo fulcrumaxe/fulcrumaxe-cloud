@@ -117,6 +117,7 @@ async function mockApi(page: Page): Promise<Mock> {
     if (p === "/api/v1/work-items") return send(route, 200, { data: [{ ...LIST.data[0], stage: "in_progress" }], next_cursor: null });
     if (p === "/api/v1/repos") return send(route, 200, REPOS);
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
+    if (p.endsWith("/corrections")) return send(route, 200, { data: [] });
     if (p.endsWith("/activity")) return send(route, 200, ACTIVITY);
     if (p.endsWith("/receipts")) return send(route, 200, listBody(mock));
     if (p === "/api/v1/runs") return send(route, 200, { data: [], next_cursor: null });

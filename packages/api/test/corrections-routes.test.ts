@@ -5,7 +5,7 @@ import { createPool } from '@fx/db/src/pool.js';
 import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
 import { acceptCorrection } from '@fx/core/src/corrections/accept.js';
-import { markCorrectionApplied } from '@fx/core/src/corrections/index.js';
+import { decideCorrection, markCorrectionApplied } from '@fx/core/src/corrections/index.js';
 import { createRecordingRunActionSignal } from '@fx/core/src/runActions/index.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { generateToken } from '../src/tokens/format.js';
@@ -99,6 +99,28 @@ describe('D#597 CC-2a: correction routes', () => {
     await admin.query(`INSERT INTO work_items (id, account_id, kind, provenance, stage, priority) VALUES ($1, $2, 'feature', 'internal', $3, 2)`, [id, accountId, stage]);
     return id;
   }
+  /** A repo and an item bound to it, for a delegation token (which is bound to one repo). */
+  async function seedRepoItem(accountId: string): Promise<{ repoId: string; itemId: string }> {
+    const repoId = randomUUID();
+    const itemId = randomUUID();
+    await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', 'acme', 'widgets')`, [repoId, accountId, Math.floor(Math.random() * 1_000_000_000) + 1]);
+    await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, priority) VALUES ($1, $2, $3, 'feature', 'internal', 'triaged', 2)`, [itemId, accountId, repoId]);
+    return { repoId, itemId };
+  }
+  /** A delegation token bound to `repoId`, made at run time (no token-shaped value lives in the source). */
+  async function delegationToken(who: Identity, repoId: string): Promise<string> {
+    const plaintext = generateToken();
+    await insertApiToken(appUserPool, {
+      accountId: who.accountId,
+      createdBy: who.userId,
+      tokenHash: hashToken(plaintext),
+      displayHint: 'fxat_...test',
+      scopes: ['corrections:write'],
+      expiresAt: new Date(Date.now() + 86_400_000),
+      delegation: { repoId, clientId: 'test' },
+    });
+    return plaintext;
+  }
   /** An item as the pipeline's card is: a repository, an issue, a discussion and one Spec with a file list (what a Spec amendment can be delivered to). */
   let specNumber = 31000;
   let specDiscussion = 9000;
@@ -190,7 +212,7 @@ describe('D#597 CC-2a: correction routes', () => {
     expect((await row(c.id)).status).toBe('proposed');
   });
 
-  it('priority: accepting changes it, stamps applied, writes the audit row with via assistant, and the history reads "<name> via assistant"', async () => {
+  it('priority: accepting changes it, stamps applied, writes the audit row with via assistant, and the history reads "assistant proposed, <name> accepted" for an assistant-drafted correction, and "<name> accepted" for a person\'s own', async () => {
     const o = await owner();
     await admin.query(`UPDATE users SET name = 'Ada' WHERE id = $1`, [o.userId]);
     const m = await addMember(o.accountId, 'member', 'Bo');
@@ -205,12 +227,73 @@ describe('D#597 CC-2a: correction routes', () => {
     expect(audit).toHaveLength(1);
     expect(audit[0].payload).toMatchObject({ via: 'assistant', correction_id: c.id });
     const list = (await (await call(o, 'GET', `/work-items/${item}/corrections`)).json()) as { data: Corr[] };
-    expect(list.data[0]).toMatchObject({ status: 'applied', created_by_name: 'Bo', decided_by_name: 'Ada', attribution: 'Ada via assistant' });
-    // a person's own correction reads without the suffix
+    expect(list.data[0]).toMatchObject({ status: 'applied', created_by_name: 'Bo', decided_by_name: 'Ada', attribution: 'assistant proposed, Ada accepted' });
+    // a person's own correction, decided via workspace, reads "<name> accepted" with no "via assistant" and no "assistant proposed"
     const p = await propose(o, item, 'priority', '{"priority":"low"}');
     await call(o, 'POST', `/corrections/${p.id}/accept`);
     const again = (await (await call(o, 'GET', `/work-items/${item}/corrections`)).json()) as { data: Corr[] };
-    expect(again.data[1]!.attribution).toBe('Ada');
+    expect(again.data[1]!.attribution).toBe('Ada accepted');
+  });
+
+  it('a person\'s own correction, decided via workspace, rejected reads "<name> rejected"', async () => {
+    const o = await owner();
+    await admin.query(`UPDATE users SET name = 'Ada' WHERE id = $1`, [o.userId]);
+    const item = await seedItem(o.accountId);
+    const c = await propose(o, item, 'priority', '{"priority":"high"}');
+    expect((await call(o, 'POST', `/corrections/${c.id}/reject`)).status).toBe(200);
+    const list = (await (await call(o, 'GET', `/work-items/${item}/corrections`)).json()) as { data: Corr[] };
+    expect(list.data[0]).toMatchObject({ status: 'rejected', attribution: 'Ada rejected' });
+  });
+
+  it('an assistant-drafted correction a person rejects reads "assistant proposed, <name> rejected"', async () => {
+    const o = await owner();
+    await admin.query(`UPDATE users SET name = 'Ada' WHERE id = $1`, [o.userId]);
+    const m = await addMember(o.accountId, 'member');
+    const item = await seedItem(o.accountId);
+    const t = await tokenFor(m, ['corrections:write']);
+    const c = await propose(t, item, 'priority', '{"priority":"low"}');
+    expect((await call(o, 'POST', `/corrections/${c.id}/reject`)).status).toBe(200);
+    const list = (await (await call(o, 'GET', `/work-items/${item}/corrections`)).json()) as { data: Corr[] };
+    expect(list.data[0]).toMatchObject({ attribution: 'assistant proposed, Ada rejected' });
+  });
+
+  it('a person\'s own correction decided from the terminal (a delegation token\'s click) reads "<name> accepted via assistant" / "<name> rejected via assistant"', async () => {
+    const o = await owner();
+    await admin.query(`UPDATE users SET name = 'Ada' WHERE id = $1`, [o.userId]);
+    const { repoId, itemId } = await seedRepoItem(o.accountId);
+    const t = await delegationToken(o, repoId);
+    const a = await propose(o, itemId, 'priority', '{"priority":"high"}');
+    expect((await call(t, 'POST', `/corrections/${a.id}/accept`, { content_hash: a.content_hash })).status).toBe(200);
+    const b = await propose(o, itemId, 'priority', '{"priority":"low"}');
+    expect((await call(t, 'POST', `/corrections/${b.id}/reject`, { content_hash: b.content_hash })).status).toBe(200);
+    const list = (await (await call(o, 'GET', `/work-items/${itemId}/corrections`)).json()) as { data: Corr[] };
+    expect(list.data.find((d) => d.id === a.id)!.attribution).toBe('Ada accepted via assistant');
+    expect(list.data.find((d) => d.id === b.id)!.attribution).toBe('Ada rejected via assistant');
+  });
+
+  it('superseded reads "replaced by a later correction" with no name, for either origin', async () => {
+    const o = await owner();
+    const item = await seedItem(o.accountId);
+    const c = await propose(o, item, 'run_note', 'Mind the flaky test.');
+    const ctx = { pool: appUserPool, principal: { accountId: o.accountId, userId: o.userId } };
+    await decideCorrection(ctx, { id: c.id, to: 'superseded', via: 'workspace' });
+    const list = (await (await call(o, 'GET', `/work-items/${item}/corrections`)).json()) as { data: Corr[] };
+    expect(list.data[0]).toMatchObject({ status: 'superseded', attribution: 'replaced by a later correction' });
+  });
+
+  it('a decider who is gone reads "a former member accepted" / "assistant proposed, a former member rejected", never null', async () => {
+    const o = await owner();
+    const adm = await addMember(o.accountId, 'admin');
+    const item = await seedItem(o.accountId);
+    const p = await propose(o, item, 'priority', '{"priority":"high"}');
+    expect((await call(adm, 'POST', `/corrections/${p.id}/accept`)).status).toBe(200);
+    const t = await tokenFor(o, ['corrections:write']);
+    const q = await propose(t, item, 'priority', '{"priority":"low"}');
+    expect((await call(adm, 'POST', `/corrections/${q.id}/reject`)).status).toBe(200);
+    await admin.query('DELETE FROM users WHERE id = $1', [adm.userId]);
+    const list = (await (await call(o, 'GET', `/work-items/${item}/corrections`)).json()) as { data: Corr[] };
+    expect(list.data.find((d) => d.id === p.id)).toMatchObject({ attribution: 'a former member accepted' });
+    expect(list.data.find((d) => d.id === q.id)).toMatchObject({ attribution: 'assistant proposed, a former member rejected' });
   });
 
   it('a second accept is 409 already_decided and writes nothing more', async () => {
