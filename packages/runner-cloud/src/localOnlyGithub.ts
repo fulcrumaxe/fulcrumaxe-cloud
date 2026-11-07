@@ -45,6 +45,9 @@
  *   A16  the fixed GraphQL document `Gate1LabelEvents`: a pull request's labeled and unlabeled events (label name and createdAt), nothing else
  *   A7   widened on that client only: also context exactly "fx-gate1", state success or failure, description one of `FX_GATE1_DESCRIPTIONS`
  * The REST check-runs and issue-events reads stay refused on every client.
+ * PR 1 adds one more read on that same client only (TL ruling 11-07 00:35):
+ *   A17  the fixed GraphQL document `Gate1Status`: for one commit by sha, only the status context named exactly "fx-gate1", its state and its
+ *        creator's type and login (whether our App's bot posted it), nothing else
  *
  * Calls not listed are refused until a numbered correction adds them with their own negative tests. Reading CI state uses only a
  * fixed GraphQL document that selects state and conclusion, never a check run's output text, summary or annotations.
@@ -196,8 +199,24 @@ export const GATE1_ATTEST_DOCUMENTS = Object.freeze({
   }
 }`,
 });
-const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS });
-export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS;
+/**
+ * D#6 CLOUD-POSTS-FX-GATE1 PR 1 (A17): who posted `fx-gate1` on one commit. `Status.context(name:)` names the one context, fixed in the text: no other
+ * context, no description, no target url, and of the creator only its type and login (a bot's login, which no user account can hold under that type).
+ */
+export const GATE1_STATUS_DOCUMENTS = Object.freeze({
+  Gate1Status: `query Gate1Status($owner: String!, $name: String!, $sha: GitObjectID!) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $sha) {
+      ... on Commit {
+        oid
+        status { context(name: "fx-gate1") { state creator { __typename login } } }
+      }
+    }
+  }
+}`,
+});
+const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS });
+export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS;
 
 /** D#6 CLOUD-POSTS-FX-GATE1 PR 0: the one label A14 may add, the one extra status context A7 takes on the attester's client, and its only descriptions. */
 export const FX_GATE1_LABEL = "ci:full";
@@ -240,6 +259,7 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A14", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["ci:full"] }', only: "gate1Attest" },
     { id: "A15", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1CheckRuns, variables: exactly owner, name, sha, optional cursor }", only: "gate1Attest" },
     { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
+    { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -345,6 +365,9 @@ const GATE1_VARIABLES: Readonly<Record<keyof typeof GATE1_ATTEST_DOCUMENTS, (v: 
   Gate1CheckRuns: (v) => hasExactKeys(v, ["owner", "name", "sha"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha) && optionalCursor(v),
   Gate1LabelEvents: (v) => hasExactKeys(v, ["owner", "name", "number"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number) && optionalCursor(v),
 };
+const GATE1_STATUS_VARIABLES: Readonly<Record<keyof typeof GATE1_STATUS_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
+  Gate1Status: (v) => hasExactKeys(v, ["owner", "name", "sha"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha),
+};
 const FX_GATE1_FAILURE_DESCRIPTIONS: readonly string[] = Object.values(FX_GATE1_DESCRIPTIONS.failure);
 /** A7's extra shape on the attester's client: `fx-gate1`, with success and the one success text, or failure and one of the failure texts. */
 const gate1StatusFits = (body: Record<string, unknown>): boolean =>
@@ -373,6 +396,8 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, GATE1_ATTEST_DOCUMENTS, GATE1_VARIABLES, "Gate1CheckRuns");
     case "A16":
       return documentBodyFits(body, GATE1_ATTEST_DOCUMENTS, GATE1_VARIABLES, "Gate1LabelEvents");
+    case "A17":
+      return documentBodyFits(body, GATE1_STATUS_DOCUMENTS, GATE1_STATUS_VARIABLES, "Gate1Status");
     case "A4":
       return (
         isPlainObject(body) &&
