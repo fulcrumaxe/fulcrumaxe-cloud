@@ -1,12 +1,13 @@
-import type { LocalGitHubHttp } from "../build/githubMergePort.js";
+import { isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp } from "../build/githubMergePort.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
-import { listChangedFilesLocal } from "./githubReads.js";
+import { listChangedFiles, listChangedFilesLocal, type ListFilesResult } from "./githubReads.js";
 
 /**
  * D#6 CLOUD-POSTS-FX-GATE1: the cloud's own `fx-gate1` on a paired item's public pull request head, from a green full-scope run of the public CI on that
- * exact head. The decision is pure (`decideGate1`); `attestGate1Head` reads the facts and acts, and only through the fenced code-repository client of the
- * review round: the files (A1 `PullRequestFiles`), the label events (A16), the check runs (A15), who posted `fx-gate1` (A17), adding `ci:full` (A14) and
- * posting `fx-gate1` (A7, fixed descriptions). No REST check-run, issue-event or log read is made, and no text a pull request controls is read.
+ * exact head. The decision is pure (`decideGate1`); `attestGate1Head` reads the facts through a `Gate1Reads` adapter and acts. On a `runner_local` pair the
+ * reads are the fenced code-repository client's: the files (A1 `PullRequestFiles`), the label events (A16), the check runs (A15), who posted `fx-gate1`
+ * (A17); on a hosted pair they are REST reads of the `merge_gate` client. Both add `ci:full` (A14) and post `fx-gate1` (A7, fixed descriptions) with the
+ * same two calls. No log is read, and no text a pull request controls is read.
  *
  * Proof is GitHub's own records only: the check runs' app id (GitHub Actions) and start times, compared with the time of the last `ci:full` label event.
  * A job that started after the label was added cannot have run at the affected scope (CI reads the label from the API when its scope step runs).
@@ -212,7 +213,98 @@ async function readCheckRuns(http: LocalGitHubHttp, repo: { owner: string; name:
   return { runs, complete: false };
 }
 
-async function postGate1(http: LocalGitHubHttp, repo: { owner: string; name: string; sha: string }, state: "success" | "failure", description: string): Promise<void> {
+type Head = { owner: string; name: string; sha: string; number: number };
+
+/**
+ * What the attester reads, behind one port with two adapters, so the same `decideGate1` runs on both paths (TL ruling 11-07 01:25):
+ *  - `runner_local`: the fenced code-repository client, through its fixed documents (A1, A15, A16, A17) and nothing else;
+ *  - hosted: the plain `merge_gate` client, through REST reads it already allows (no GraphQL document is added or opened).
+ * The writes (the label, the status) are the same two REST calls on both clients.
+ */
+export interface Gate1Reads {
+  oursSucceeded(ourLogin: string): Promise<boolean>;
+  changedFiles(): Promise<ListFilesResult>;
+  labelEvents(): Promise<{ events: Gate1LabelEvent[]; complete: boolean }>;
+  checkRuns(): Promise<{ runs: Gate1CheckRun[]; complete: boolean }>;
+}
+
+export function fencedGate1Reads(http: LocalGitHubHttp, repo: Head): Gate1Reads {
+  return {
+    oursSucceeded: (login) => readOursSucceeded(http, repo, login),
+    changedFiles: () => listChangedFilesLocal(http, { owner: repo.owner, name: repo.name, pr: repo.number }),
+    labelEvents: () => readLabelEvents(http, repo),
+    checkRuns: () => readCheckRuns(http, repo),
+  };
+}
+
+const REST_PER_PAGE = 100;
+/** The issue events list runs oldest first, so it is read to its end; past this many pages the label's state is unknown (a wait). */
+const REST_EVENT_PAGES = 10;
+const restBase = (r: Head) => `/repos/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}`;
+async function restList(http: GitHubHttp, path: string, page: number, extra: Record<string, string> = {}): Promise<unknown> {
+  const res = await http.request({ method: "GET", path, query: { ...extra, per_page: REST_PER_PAGE, page } });
+  return res.status === 200 ? res.body : fail(`GET ${path.split("/").slice(-1)[0]} answered ${res.status}`);
+}
+
+/**
+ * The hosted adapter. Files: `pulls/{n}/files`, which names a rename's previous path, so both paths are checked. Label events: `issues/{n}/events`, every
+ * page (a list cut short reads as no event at all, a wait). Check runs: `commits/{sha}/check-runs?filter=latest` (app id, start time). Who posted
+ * `fx-gate1`: `commits/{sha}/statuses`, newest first, whose first `fx-gate1` is the context's current state; REST types the creator `Bot`.
+ */
+export function hostedGate1Reads(http: GitHubHttp, repo: Head): Gate1Reads {
+  const base = restBase(repo);
+  return {
+    async oursSucceeded(login) {
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const list = await restList(http, `${base}/commits/${repo.sha}/statuses`, page);
+        if (!Array.isArray(list)) return fail("statuses list");
+        for (const s of list as unknown[]) {
+          if (!isObj(s) || typeof s.context !== "string") return fail("statuses entry");
+          if (s.context !== GATE1_CONTEXT) continue;
+          const c = isObj(s.creator) ? s.creator : null;
+          return s.state === "success" && c !== null && isOurBot({ __typename: c.type, login: c.login }, login);
+        }
+        if (list.length < REST_PER_PAGE) return false;
+      }
+      return false;
+    },
+    changedFiles: () => listChangedFiles(http, { owner: repo.owner, name: repo.name, pr: repo.number }),
+    async labelEvents() {
+      const events: Gate1LabelEvent[] = [];
+      for (let page = 1; page <= REST_EVENT_PAGES; page++) {
+        const list = await restList(http, `${base}/issues/${repo.number}/events`, page);
+        if (!Array.isArray(list)) return fail("events list");
+        for (const e of list as unknown[]) {
+          if (!isObj(e) || typeof e.event !== "string") return fail("events entry");
+          if (e.event !== "labeled" && e.event !== "unlabeled") continue;
+          if (!isObj(e.label) || typeof e.label.name !== "string" || typeof e.created_at !== "string") return fail("label event");
+          events.push({ event: e.event, label: e.label.name, createdAt: e.created_at });
+        }
+        if (list.length < REST_PER_PAGE) return { events, complete: true };
+      }
+      return { events: [], complete: false };
+    },
+    async checkRuns() {
+      const runs: Gate1CheckRun[] = [];
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const body = await restList(http, `${base}/commits/${repo.sha}/check-runs`, page, { filter: "latest" });
+        if (!isObj(body) || typeof body.total_count !== "number" || !Array.isArray(body.check_runs)) return fail("check-runs list");
+        for (const c of body.check_runs as unknown[]) {
+          if (!isObj(c) || c.head_sha !== repo.sha || typeof c.name !== "string" || typeof c.status !== "string" || (c.conclusion !== null && typeof c.conclusion !== "string") || (c.started_at !== null && typeof c.started_at !== "string")) return fail("check run");
+          const app = isObj(c.app) ? c.app.id : null;
+          runs.push({ name: c.name, appId: typeof app === "number" ? app : null, status: c.status, conclusion: c.conclusion as string | null, startedAt: c.started_at as string | null });
+        }
+        if (body.check_runs.length < REST_PER_PAGE || runs.length >= body.total_count) return { runs, complete: true };
+      }
+      return { runs, complete: false };
+    },
+  };
+}
+
+/** The adapter for a client: the fenced one's documents for a `runner_local` client, REST for the hosted `merge_gate` client. */
+export const gate1ReadsFor = (http: GitHubHttp, repo: Head): Gate1Reads => (isLocalGitHubHttp(http) ? fencedGate1Reads(http, repo) : hostedGate1Reads(http, repo));
+
+async function postGate1(http: GitHubHttp, repo: { owner: string; name: string; sha: string }, state: "success" | "failure", description: string): Promise<void> {
   const res = await http.request({ method: "POST", path: `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/statuses/${repo.sha}`, body: { state, context: GATE1_CONTEXT, description } });
   if (res.status !== 201) fail(`status post answered ${res.status}`);
 }
@@ -222,15 +314,16 @@ async function postGate1(http: LocalGitHubHttp, repo: { owner: string; name: str
  * or malformed read, a refused post) is not an answer: the caller's step retries. `readHead` is the caller's own read of the pull request's live head:
  * the file list is the head's at the moment it is read, so a head that moved away from `sha` by then answers `wait` before any label or post.
  */
-export async function attestGate1Head(http: LocalGitHubHttp, input: { repos: ReadonlySet<string>; owner: string; name: string; number: number; sha: string; ourLogin: () => Promise<string>; readHead: () => Promise<string> }): Promise<Gate1AttestOutcome> {
+export async function attestGate1Head(http: GitHubHttp, input: { repos: ReadonlySet<string>; owner: string; name: string; number: number; sha: string; ourLogin: () => Promise<string>; readHead: () => Promise<string> }): Promise<Gate1AttestOutcome> {
   // TL ruling 11-07 00:45: the setting is checked before ANY attester call; the fence alone opens A14 to A17 for every paired runner_local code repository.
   if (!gate1AttestEnabled(input.repos, input.owner, input.name)) return { kind: "off" };
   if (!SHA_PATTERN.test(input.sha) || !Number.isSafeInteger(input.number) || input.number < 1) fail("malformed head");
   const repo = { owner: input.owner, name: input.name, sha: input.sha, number: input.number };
-  const oursSucceeded = await readOursSucceeded(http, repo, await input.ourLogin());
+  const reads = gate1ReadsFor(http, repo);
+  const oursSucceeded = await reads.oursSucceeded(await input.ourLogin());
   if (oursSucceeded) return { kind: "already" };
   // The files come before the label: a change to CI files is refused before `ci:full` could start the label's re-run workflow.
-  const files = await listChangedFilesLocal(http, { owner: repo.owner, name: repo.name, pr: repo.number });
+  const files = await reads.changedFiles();
   if (!files.ok) fail(`files ${files.reason}`);
   const paths: string[] = files.ok ? files.files.flatMap((f) => (typeof f.previousPath === "string" ? [f.path, f.previousPath] : [f.path])) : [];
   const renameUnknown = files.ok && files.files.some((f) => f.previousPathUnknown === true);
@@ -238,12 +331,12 @@ export async function attestGate1Head(http: LocalGitHubHttp, input: { repos: Rea
   const base: Gate1Facts = { oursSucceeded, changedPaths: paths, changedPathsComplete: files.ok && !files.truncated, renameUnknown, labelEvents: [], labelEventsComplete: false, checkRuns: [], checkRunsComplete: false };
   const early = decideGate1(base);
   if (early.verdict === "fail" || (early.verdict === "wait" && early.reason === "files_incomplete")) return act(http, repo, early);
-  const labels = await readLabelEvents(http, repo);
-  const checks = await readCheckRuns(http, repo);
+  const labels = await reads.labelEvents();
+  const checks = await reads.checkRuns();
   return act(http, repo, decideGate1({ ...base, labelEvents: labels.events, labelEventsComplete: labels.complete, checkRuns: checks.runs, checkRunsComplete: checks.complete }));
 }
 
-async function act(http: LocalGitHubHttp, repo: { owner: string; name: string; sha: string; number: number }, d: Gate1Decision): Promise<Gate1AttestOutcome> {
+async function act(http: GitHubHttp, repo: { owner: string; name: string; sha: string; number: number }, d: Gate1Decision): Promise<Gate1AttestOutcome> {
   switch (d.verdict) {
     case "already":
       return { kind: "already" };
