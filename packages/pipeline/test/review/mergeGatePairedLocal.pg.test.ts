@@ -932,6 +932,15 @@ describe("a paired item and the merge queue: the mode is read on the public repo
     const plain = createReviewGitHubPort({ pool: h.runWriterPool, http: w.pubLocal.http, queueDocuments: QUEUE_DOCUMENTS }, { owner: "acme", name: "widgets-public", executionMode: "runner_local" } as never, { accountId: w.accountId, workItemId: w.workItemId, prNumber: PUB_PR, recordedBranch: w.pubBranch });
     await expect(plain.getQueueEntry!({ repoId: w.repoId, prNumber: PUB_PR })).rejects.toThrow(/allowlist/);
   });
+
+  it("a paired world without queueDocuments is unreadable and the delegate is never invoked", async () => {
+    const w = await world({});
+    const b = delegating(w, {});
+    const out = await b.run();
+    expect(reasons(out)).toEqual(["merge_queue_unreadable"]);
+    expect(b.calls).toEqual([]);
+    expectNoMergeAnywhere(w);
+  });
 });
 
 describe("D#598 P1d-1: a paired item's public pull request is refused when an outsider opened it", () => {

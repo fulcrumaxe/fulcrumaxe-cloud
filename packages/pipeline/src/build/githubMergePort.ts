@@ -647,7 +647,11 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       // A runner_local repo is unchanged by this feature: its merge belongs to the runner (the gate stops before any merge call there).
       if (deps.local && !deps.pairedQueueReads) return { mode: "direct", source: "runner_local" };
       const docs = deps.queueDocuments;
-      if (docs === undefined) return { mode: "direct", source: "queue_not_configured" };
+      // A plain repo has no queue feature wired and merges directly as before; a paired read with no documents is a wiring gap that must stop the gate rather than merge directly.
+      if (docs === undefined) {
+        if (deps.pairedQueueReads === true) return { mode: "unknown", source: "queue_not_configured" };
+        return { mode: "direct", source: "queue_not_configured" };
+      }
       try {
         if (typeof baseRef !== "string" || baseRef === "") return { mode: "unknown", source: "base_ref_missing" };
         const key = await queueKey(pr, baseRef);
