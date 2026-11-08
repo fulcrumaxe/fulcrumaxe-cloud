@@ -10,9 +10,9 @@ Sources:
 ## Overview
 
 - [README](../README.md) — repo layout, getting set up, commands, the database migration scheme, and CI.
-- [Architecture](architecture.md) — workspace project dependency graph and how a request moves from browser to Postgres.
-- [Status](status.md) — every workspace project classified as implemented-and-tested, implemented, or scaffold.
-- [Testing](testing.md) — how test fakes of GitHub, Node networking and Postgres TLS stay as strict as the real services.
+- [Architecture](architecture.md) — the two repository planes, workspace project dependency graph, how a request moves from browser to Postgres, the pipeline (merge gate, merge queue, the cloud's own `fx-gate1`, where an agent runs, verdict envelopes) and the assistant.
+- [Status](status.md) — what the pipeline does today, what is built but off until configured, and every workspace project with its test evidence.
+- [Testing](testing.md) — what `scripts/check.sh` runs, how CI scopes a pull request, the repository-wide guard tests, e2e projects, and how test fakes stay as strict as the real services.
 - [Decisions](decisions.md) — a log of specific technical decisions, why they were made, and where they still hold at HEAD.
 
 ## Packages
