@@ -1,6 +1,6 @@
 # Operations
 
-How to get a working dev environment, what `scripts/check.sh` runs, and what CI and Dependabot do around it. See [the security model](security.md) for the guarantees these checks protect.
+How to get a working dev environment, what CI runs and where, and the settings an operator has to know about. What `scripts/check.sh` runs is on [the testing page](testing.md#the-check). See [the security model](security.md) for the guarantees these checks protect.
 
 Sources:
 - `flake.nix`
@@ -10,6 +10,11 @@ Sources:
 - `.github/dependabot.yml`
 - `packages/db/test/globalSetup.ts`
 - `packages/db/scripts/check-migration-order.sh`
+- `scripts/ci/affected.mjs`
+- `apps/web/env-manifest.ts`
+- `packages/github/src/handledEventNames.js`
+- `infra/sandbox-image/versions.lock.json`
+- `packages/runner/src/sandboxRuntime.ts`
 - `package.json`
 
 ## Dev shell
@@ -22,25 +27,38 @@ Sources:
 
 ## `scripts/check.sh`
 
-Runs in order, exiting non-zero on the first failure (`set -euo pipefail`):
-
-1. `pnpm install --frozen-lockfile` — installs from the committed lockfile exactly, never resolving new versions.
-2. `pnpm lint` (`eslint .`, per `package.json`).
-3. `pnpm typecheck` (`pnpm -r --if-present run typecheck` — runs each workspace package's own typecheck script, skipping any package that doesn't define one).
-4. `bash scripts/check-globalsetup-env.sh` — fails, naming the offending file and line, if any `packages/*/test/globalSetup.ts` or `apps/*/test/globalSetup.ts` writes to `process.env.*` or builds a port with `Math.random()`. `vitest.workspace.ts` runs every project's `globalSetup` in one shared orchestrator process before any project's workers fork, so a `process.env` write in one project's setup can be silently overwritten by another's before the first project's own tests ever read it back; this script is a static guard against that class of bug recurring.
-5. `pnpm test` (`vitest run`), with `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` explicitly unset and `FX_FORBID_MODEL_CALLS=1` set — see [the zero-model-token test rule](security.md#the-zero-model-token-test-rule).
-6. `bash packages/db/scripts/test-neon-shape.sh` — proves the migration chain applies under a role shaped like Neon's non-superuser connection owner, both as a fresh install and as an incremental upgrade of an already-migrated database, and (D#94) that the current PR's own new migration files apply safely as an upgrade against the resolved base ref's chain.
-7. `bash packages/db/scripts/check-migration-order.sh` — refuses a new `packages/db/migrations/*.sql` file that doesn't sort strictly after every migration already on the base ref (`MIGRATION_ORDER_BASE`, default `origin/main`), refuses a rename/edit of an existing migration file, and refuses two files sharing a four-digit prefix; fails closed (exit 2) if the base ref can't be resolved. See `packages/db/migrations/README.md` for the numbering rule (R1-R3) this enforces.
-8. `pnpm --filter web build` — a real Next.js production build of `apps/web`.
-9. `pnpm test:guard` (`vitest run packages/test-guard/test/guard-violation.fixture.test.ts`) — the guard's own fixture test, which deliberately trips `installModelCallGuard` to prove the guard itself still catches a violation rather than having silently become a no-op.
+The same script runs on a workstation, in CI and as the platform's own check step. It has a full mode and an affected mode (`FX_CHECK_AFFECTED`), and stops at the first failure. The steps, the mode rules and the repository-wide guards are on [the testing page](testing.md#the-check). The test step runs with the model credentials unset and `FX_FORBID_MODEL_CALLS=1` (see [the zero-model-token test rule](security.md#the-zero-model-token-test-rule)).
 
 ## CI
 
-`.github/workflows/ci.yml` triggers on push to `main` and on every pull request, running a single `check` job on a `self-hosted` runner (chosen because private-repo Actions minutes on a hosted runner are capped; node/pnpm/PostgreSQL all come from the same `flake.nix` devShell a developer uses locally, rather than a separately assembled CI image). The job declares `permissions: contents: read` — it only needs to read the checked-out tree, and since `scripts/check.sh` runs `pnpm install` (which executes arbitrary lockfile lifecycle scripts), a broader token would hand a malicious postinstall write access it has no reason to need. The checkout step passes `persist-credentials: false`, so the job's `GITHUB_TOKEN` is never left as a git credential helper on the (persistent, not ephemeral) self-hosted machine for a later job to find — the job never pushes, comments or calls the GitHub API, so there is no reason for it to be there at all. It also passes `fetch-depth: 2` (D#94) — one commit of parent history, just enough for `check-migration-order.sh` to resolve `HEAD^1` as the merge/push commit's own base tip, without fetching the repo's full history. `FX_FORBID_MODEL_CALLS: "1"` is also set at the job-env level, on top of `scripts/check.sh`'s own narrower `env -u ... FX_FORBID_MODEL_CALLS=1` around the test step, so every step in the job runs under the same guarantee. `MIGRATION_ORDER_BASE: HEAD^1` is set for the same run so `check-migration-order.sh` (and `test-neon-shape.sh`'s D#94 parity check) resolve the base each PR actually merges onto, rather than the `origin/main` default those scripts fall back to locally. The one step, `nix develop --command bash scripts/check.sh`, is exactly what a developer runs on a workstation — CI cannot drift from local behavior by having its own separate setup.
+`.github/workflows/ci.yml` runs on pushes to `main`, on pull requests (opened, synchronize, reopened) and on `merge_group` for GitHub's merge queue. Its jobs:
+
+- `pr-gates` (public pull requests only): the PR link policy and the publish denylist.
+- `check`: `nix develop .#ci --command bash scripts/check.sh`, in the scope `scripts/ci/affected.mjs` chose for the pull request. A push to `main` and a merge-queue run are always full.
+- `workspace-e2e`: Playwright for `apps/workspace`, once per viewport project (`desktop`, `phone`, `tablet`).
+- `e2e-runner`: `pnpm test:e2e-runner`.
+
+Runners: a public repository runs on GitHub-hosted `ubuntu-latest`; the private repository runs on a self-hosted runner (the `CI_RUNS_ON` repository variable can name another). Node, pnpm and PostgreSQL come from the same `flake.nix` dev shell a developer uses, so CI has no separate image. Every job has a timeout. A repository variable `CI_DISABLED=true` skips the jobs, and `CI_FORCE_FULL=true` forces every pull request run to full scope.
+
+Forcing a full run on one pull request: add the `ci:full` label. `.github/workflows/ci-full-label.yml` re-runs the latest CI run for the head, and the scope step reads the label from the API (not from the event payload, which a re-run replays stale). While the label is on, a push runs full too.
+
+Permissions and credentials: the top-level token is `contents: read`. The jobs that read labels or the pull request body add `pull-requests: read`; nothing in the workflow can write to the repository. Checkouts pass `persist-credentials: false`, so no job leaves a token in `.git/config`. `check` fetches two commits of history (`fetch-depth: 2`) so `check-migration-order.sh` can resolve `HEAD^1`, and `MIGRATION_ORDER_BASE: HEAD^1` points that script and `test-neon-shape.sh`'s parity check at the base each run actually merges onto. `FX_FORBID_MODEL_CALLS: "1"` is set at the workflow level.
 
 ## Dependabot
 
 `.github/dependabot.yml` configures one `package-ecosystem: "github-actions"` update stream, on the repo root, checked weekly. It does not configure an `npm`/`pnpm` ecosystem entry, so Dependabot does not open update PRs for JavaScript/TypeScript dependencies — only for the versions pinned in `.github/workflows/*.yml`.
+
+## Settings an operator sets
+
+The full list, with what happens when one is missing, is `apps/web/env-manifest.ts`. The ones that change what the pipeline does:
+
+- `FX_GATE1_ATTEST_REPOS`: comma-separated `owner/name` code repositories where the cloud posts `fx-gate1` itself (see [the architecture](architecture.md#the-clouds-own-fx-gate1)). Unset, the cloud never posts it, and a paired item whose public pull request lacks only `fx-gate1` waits and then ends at Needs a person. Only a listed repository is ever labelled or attested, so a customer repository is never touched. A malformed value stops the worker at start with an error.
+- `FX_HUMAN_MERGE_ONLY_REPO_IDS`: GitHub ids of repositories that only a person may merge. A malformed value locks every repository to human merges (fail closed).
+- `FX_OPERATOR_SUBSCRIPTION`, `FX_OPERATOR_ACCOUNT_IDS`: the operator's own Claude subscription for allow-listed accounts; removing the first turns the feature off (see [the security model](security.md#the-operator-subscription-exception)).
+
+The GitHub App has to be subscribed to the `check_run`, `check_suite` and `status` events as well as the issue and pull request ones: they wake the merge queue and the gate to look again when CI finishes, and map to no work item change. The events the cloud handles are listed in `packages/github/src/handledEventNames.js`; an App created before those three were added needs them added by hand in its settings.
+
+The sandbox image is pinned by digest, `image.repository@image.digest` in `infra/sandbox-image/versions.lock.json`; `packages/runner/src/sandboxRuntime.ts` reads it and refuses to start with an empty or malformed digest. Changing the image (it now carries Postgres 18 server binaries and a Playwright Chromium for the review sandbox) means publishing it and recording the new digest in that file.
 
 ## The database tests' self-provisioned cluster
 
@@ -52,4 +70,4 @@ Applying this same migration chain to a real hosted Postgres (Neon) connection, 
 
 ## Out of scope for these docs
 
-This repository also carries a separate autonomous-team engine that runs its own development loop — `backend/`, `hooks/`, most of `scripts/`, `templates/`, `testsupport/`, `tests/`, `archive/`, `.autonomous-team/` and `.claude/`. None of that is part of the product these docs cover, so it is left out here. `scripts/ci/check-pages.py` and `scripts/run-pr-tests.sh` fall under that same "most of `scripts/`" exclusion: they are the autonomous team's own PR-review routing (the `docs` suite `check-pages.py` implements is one of that system's Gate 1 suites, invoked per-PR, not a step `scripts/check.sh` runs) rather than part of this product's build or CI.
+This repository also carries tooling that supports how the project is developed (engine scripts, hooks, templates and team state). None of that is part of the product these docs cover, so it is left out here. `scripts/ci/check-pages.py` and `scripts/run-pr-tests.sh` are part of that tooling: the pages check is one of the per-pull-request review suites, not a step `scripts/check.sh` runs.
