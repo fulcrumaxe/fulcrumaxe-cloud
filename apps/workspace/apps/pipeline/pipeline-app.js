@@ -599,6 +599,12 @@ function mountTabs(contentEl, launchArg) {
     },
   });
   const loadRepos = () => repoLoader.ask();
+  // INBOX-PICKER-HANG-2: coming back to a page that sat in the background asks again. A read that is still inside its deadline is left alone; one whose timer was
+  // lost while the page was away is replaced, so a picker never waits on a request that is no longer in flight.
+  const onVisible = () => {
+    if (!document.hidden && tab !== "board") loadRepos();
+  };
+  document.addEventListener("visibilitychange", onVisible);
   paintPicker();
 
   contentEl.replaceChildren(h("div", { class: "pl-shell" }, bar, pickerRow, reposBox, boardHost, views.inbox.host, views.plan.host));
@@ -607,6 +613,7 @@ function mountTabs(contentEl, launchArg) {
   return {
     select: goBoard,
     destroy() {
+      document.removeEventListener("visibilitychange", onVisible);
       repoLoader.destroy();
       // A picker that outlives the mount (a window fading out) must not stay on "Loading".
       if (repos.length === 0 && repoLoader.state().status !== "ready") {

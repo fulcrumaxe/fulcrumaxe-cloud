@@ -291,3 +291,6 @@ export async function listDriverEvents(client: PoolClient, workItemId: string, l
     .map((r) => ({ kind: r.kind, code: r.code, reasons: r.reasons, head_sha: r.head_sha, pr_number: r.pr_number, round: r.round, run_id: r.run_id, at: r.created_at.toISOString() }))
     .reverse();
 }
+
+/** SPEC-REFUSED-SILENT: the `stopped` code a first (panel) Spec leaves when the project manager file list could not be read, even after the step one automatic retry. */
+export const SPEC_LIST_UNREADABLE_CODE = "spec_list_unreadable";

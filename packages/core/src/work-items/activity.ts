@@ -18,6 +18,7 @@ import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } fro
 import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalSentence } from './scopeRefusal.js';
 import { openPrStopSentence } from './baseSync.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
+import { SPEC_LIST_UNREADABLE_CODE } from './driverEvents.js';
 import { buildStartsByItself } from './stageApprovalGate.js';
 import { readUnverifiable } from './unverifiable.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
@@ -185,6 +186,7 @@ export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasN
 export const LIGHT_SPEC_REFUSAL_CODES: readonly string[] = Object.freeze([
   'invalid_spec_output',
   'invalid_file_scope',
+  'spec_list_unreadable', // SPEC_LIST_UNREADABLE_CODE: a first panel Spec's list, recorded by the worker (the app test reads this list as quoted strings)
   'invalid_planned_prs',
   'planned_prs_too_large',
   'planned_split_missing',
@@ -553,6 +555,23 @@ async function readSpecRefusal(client: PoolClient, workItemId: string): Promise<
 }
 
 /**
+ * SPEC-REFUSED-SILENT: the stop a first (panel) Spec leaves at Discussing when its file list could not be read: a `stopped` fact after the item's latest move into
+ * Discussing, with nothing live. Fixed code only (the app owns the words); null when there is none, or the item is not at Discussing.
+ */
+async function readSpecListStop(client: PoolClient, workItemId: string, stage: string): Promise<string | null> {
+  if (stage !== 'discussing') return null;
+  const found = await client.query(
+    `SELECT 1 FROM work_item_driver_events e
+      WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped' AND e.code = $2::text
+        AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'discussing'), '-infinity'::timestamptz)
+        AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled'))
+      LIMIT 1`,
+    [workItemId, SPEC_LIST_UNREADABLE_CODE],
+  );
+  return found.rowCount === 1 ? SPEC_LIST_UNREADABLE_CODE : null;
+}
+
+/**
  * A request the pipeline retired in favour of its tracked item (a closed move sourced `superseded:<root>`). Returns the root's id when it is a work item of the
  * SAME account as this one, '' when the record names none that is (a malformed id, or one of another account: never linked), and null when the item was not retired so.
  */
@@ -828,6 +847,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     } else if (item.stage === 'triaged' && (refusalCode = await readSpecRefusal(client, workItemId)) !== null) {
       // A follow-up child has no issue to edit: every refusal but "too large" reads "approve again to retry" (D#483 S5-b2d-2b).
       notice = { kind: 'spec_refused', reason: item.follow_up && refusalCode !== 'follow_up_too_large' ? 'follow_up_spec_failed' : refusalCode };
+    } else if (item.stage === 'discussing' && (refusalCode = await readSpecListStop(client, workItemId, item.stage)) !== null) {
+      notice = { kind: 'spec_refused', reason: refusalCode };
     } else if ((item.stage === 'merged' || item.stage === 'closed_unmerged') && (publicPrStop = await readPublicPrStop(client, workItemId)) !== null) {
       // A fix round ended on a public pull request that was closed or merged on GitHub: the item cannot move, so the record of the stop is the notice (D#598 P1g-1).
       notice = { kind: 'public_update_stopped', reason: publicPrStop };

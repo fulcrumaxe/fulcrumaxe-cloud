@@ -298,6 +298,7 @@ export const SPEC_REFUSED_TAIL = " Nothing was saved. Edit the issue on GitHub a
 export const SPEC_REFUSED_SENTENCES = Object.freeze({
   invalid_spec_output: "The Spec writer's output was incomplete, so no Spec was published." + SPEC_REFUSED_TAIL,
   invalid_file_scope: "The Spec writer didn't give a readable list of the files the change may touch, so no Spec was published." + SPEC_REFUSED_TAIL,
+  spec_list_unreadable: "The Spec could not be published: it did not list the files it allows. Press Try the Spec again.",
   invalid_planned_prs: "The Spec writer's list of planned pull requests couldn't be read, so no Spec was published." + SPEC_REFUSED_TAIL,
   planned_prs_too_large: "The Spec writer planned more pull requests than one Spec may hold, so no Spec was published." + SPEC_REFUSED_TAIL,
   planned_split_missing: "The Spec writer said the work should be split into several pull requests but gave no list of them, so no Spec was published." + SPEC_REFUSED_TAIL,

@@ -1172,6 +1172,7 @@ describe("the short-Spec refusal notice (spec_refused)", () => {
     follow_up_too_large: "This follow-up is too large for one pull request. Close it and raise it as its own item.",
     item_halted: "This item is halted, so no Spec was published. Approve it again when you want it to continue, or close it.",
     publish_failed: "The Spec couldn't be saved just now, so it was not published." + TAIL,
+    spec_list_unreadable: "The Spec could not be published: it did not list the files it allows. Press Try the Spec again.",
     empty_agent_output: "The Spec writer finished without giving an answer, so no Spec was published. Approve again to try once more, or close it.",
     clone_failed: "The Spec writer couldn't get a copy of the repository, so no Spec was published. Approve again to try once more, or close it.",
   };

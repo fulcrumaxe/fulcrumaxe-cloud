@@ -145,9 +145,15 @@ export async function getAllPages(path, get = api, signal) {
  * status: "idle" | "loading" | "ready" | "failed". `ask()` starts a read when none is running or answered (it also
  * retries after a failure; `ask({ force: true })` reads again even after an answer); a read that gives no answer within `timeoutMs` counts as failed, and a late answer
  * still replaces that failure. Nothing is reported after `destroy()`.
+ *
+ * INBOX-PICKER-HANG-2: the deadline above is a timer, and a timer can be lost (a throttled or frozen page, a window parked and brought back) while the read behind it
+ * never settles. A loader that trusted only its timer would stay "loading" for good, and the "a read is already running" guard would turn every later `ask()`
+ * into a no-op, so the picker would say "Loading repositories…" with no request in flight. The guard therefore also reads the clock: a read that has been running
+ * for `timeoutMs` or more is over, whether or not its timer fired, and the next `ask()` starts a fresh one.
  */
-export function createRepoLoader({ read, onChange, timeoutMs = 20000, setT = setTimeout, clearT = clearTimeout }) {
+export function createRepoLoader({ read, onChange, timeoutMs = 20000, setT = setTimeout, clearT = clearTimeout, now = Date.now }) {
   let state = { status: "idle", rows: [] };
+  let startedAt = 0;
   let seq = 0;
   let timer = null;
   let dead = false;
@@ -159,8 +165,12 @@ export function createRepoLoader({ read, onChange, timeoutMs = 20000, setT = set
     onChange(state);
   }
   function ask({ force = false } = {}) {
-    if (dead || state.status === "loading" || (state.status === "ready" && !force)) return;
+    if (dead || (state.status === "ready" && !force)) return;
+    // A read still inside its deadline is left to finish; one past it is stale (its timer was lost) and is replaced.
+    if (state.status === "loading" && now() - startedAt < timeoutMs) return;
+    if (timer !== null) clearT(timer);
     const mine = ++seq;
+    startedAt = now();
     state = { status: "loading", rows: [] };
     timer = setT(() => settle(mine, { status: "failed", rows: [] }), timeoutMs);
     Promise.resolve()
