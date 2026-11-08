@@ -440,6 +440,34 @@ describe("hostile PM output and PM failures: nothing the model writes decides st
     }
   });
 
+  it("SPEC-REFUSED-SILENT: a PM answer with no readable file list is asked for ONCE more, with the refusal named in the prompt; the second answer publishes", async () => {
+    const r = await rig();
+    r.writer.output = (req) => (req.idempotencyKey.endsWith(":fl") ? { summary: "s", spec: "1. Works.", acceptance_files: ["src/a.ts"] } : { summary: "s", spec: "1. Works." });
+    const out = await runSpecStep(r.deps, { workItemId: r.workItemId });
+    expect(out).toMatchObject({ status: "published", version: 1 });
+    expect(r.writer.calls).toHaveLength(2);
+    expect(r.writer.calls[0]!.prompt).not.toContain("previous answer was refused");
+    expect(r.writer.calls[1]!.prompt).toContain("previous answer was refused because `acceptance_files` was missing or unreadable");
+    expect(r.writer.calls[1]!.idempotencyKey).toBe(`${r.writer.calls[0]!.idempotencyKey}:fl`);
+    expectOneGenuineEnvelope(r.writer.calls[1]!.prompt);
+  });
+
+  it("SPEC-REFUSED-SILENT: a second unreadable list stops with invalid_file_scope after exactly two PM runs, and a replay starts no third", async () => {
+    const r = await rig();
+    r.writer.output = () => ({ summary: "s", spec: "1. Works.", acceptance_files: ["**"] });
+    for (let i = 0; i < 2; i++) expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toEqual({ status: "refused", reason: "invalid_file_scope" });
+    expect(new Set(r.writer.calls.map((c) => c.idempotencyKey)).size).toBe(2);
+    expect(await state(r.workItemId)).toMatchObject({ stage: "discussing", specs: [] });
+    expect(r.events).toEqual([]);
+  });
+
+  it("SPEC-REFUSED-SILENT: only a missing list is retried: an unusable answer or a PM failure is not asked twice", async () => {
+    const r = await rig();
+    r.writer.output = () => ({ summary: "s" });
+    expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toEqual({ status: "refused", reason: "invalid_spec_output" });
+    expect(r.writer.calls).toHaveLength(1);
+  });
+
   it("D#6 C12 A3: a PM whose run waits pending (paused clock) is not timed out by time spent pending; one that works past the deadline still is", async () => {
     const queued = await rig({ writerTimeoutMs: 100 });
     const inner = queued.writer;

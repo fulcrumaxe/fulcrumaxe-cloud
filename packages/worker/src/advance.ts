@@ -8,7 +8,7 @@ import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { NO_VERDICT_ESCALATION_CODE, readBranchAnswerRound, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { VERDICT_ROLES } from "@fx/core/src/work-items/verdictRoles.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError, hasLivePlannedChildSql, readsOwnSpecSql, specOfItemSql } from "@fx/core/src/work-items/stages.js";
-import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
+import { MAX_WAITING_ATTEMPT, SPEC_LIST_UNREADABLE_CODE, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { createRunnerPlaneMergeStore, PLANE_MERGE_OPEN_STATES, type PlaneMergeOrder, type RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
 import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
@@ -1436,6 +1436,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (bad) return bad;
     const out = await deps.spec(runnerPool, who.accountId, who.workItemId, portsFor(who), { ...(attempt !== undefined ? { attempt } : {}), ...(spendAttempt !== undefined && spendAttempt > 0 ? { spendAttempt } : {}) });
     console.info(JSON.stringify({ event: "advance.spec", work_item_id: who.workItemId, status: out.status, reason: out.reason ?? null, stage: out.stage ?? null, version: out.version ?? null }));
+    // SPEC-REFUSED-SILENT: a first Spec whose file list could not be read (even after the step's one automatic retry) is a recorded stop, so the card says why in place of
+    // "Nothing is running" and "No Spec yet". Same kind of fact as a Re-spec's `respec_list_unreadable`; the card reads it while the item is still Discussing.
+    if (out.status === "refused" && out.reason === "invalid_file_scope") await writeEvent(who, { kind: "stopped", dedupeKey: `spec:${attempt ?? "none"}`, code: SPEC_LIST_UNREADABLE_CODE });
     return out;
   }
 

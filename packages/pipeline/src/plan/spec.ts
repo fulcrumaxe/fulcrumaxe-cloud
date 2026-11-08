@@ -489,7 +489,7 @@ export const PLANNED_PRS_RULES = [
 ].join("\n");
 
 /** The PM prompt. The instructions are ours; the title, body and every comment are untrusted and each goes through `sanitize`. */
-export function buildSpecPrompt(input: { title: string; body: string; comments: ReadonlyArray<{ role: string; body: string }>; missingRoles: readonly PanelRole[] }): string {
+export function buildSpecPrompt(input: { title: string; body: string; comments: ReadonlyArray<{ role: string; body: string }>; missingRoles: readonly PanelRole[]; retryFileList?: boolean }): string {
   const lines = [
     "You are the project-manager on a software team. The consensus panel below has finished (or timed out).",
     "Your answer is read from the AGENT_OUTPUT block at the very end of this prompt: a JSON object with a `summary` (the consensus, one **<role>**: entry per panel comment), a `spec` (the Spec, acceptance criteria as a numbered pass/fail list) and an `acceptance_files` list. Optionally it has `planned_prs`, described below.",
@@ -500,6 +500,7 @@ export function buildSpecPrompt(input: { title: string; body: string; comments: 
     "",
     ACCEPTANCE_FILES_RULES,
     "",
+    ...(input.retryFileList === true ? ["Your previous answer was refused because `acceptance_files` was missing or unreadable, so no Spec was published. Answer again with a Spec and a valid `acceptance_files` list, following the rules above.", ""] : []),
     PLANNED_PRS_RULES,
     "",
     "TITLE:",
@@ -663,38 +664,49 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
   const postedRoles = new Set(panel.expectedRoles.filter((r) => comments.some((c) => c.role === r)));
   const signedForPrompt = comments.filter((c) => postedRoles.has(c.role as PanelRole));
 
-  // One synthesis per panel, after the last round has finished or timed out.
-  const controller = new AbortController();
-  const budget = new WaitBudget(deps.writerTimeoutMs ?? DEFAULT_PANEL_TIMEOUT_MS, () => controller.abort());
-  let pm: PanelSeatResult | "timeout";
-  try {
-    const aborted = new Promise<"timeout">((resolve) => controller.signal.addEventListener("abort", () => resolve("timeout"), { once: true }));
-    pm = await Promise.race([
-      deps.writer.writeSpec(
-        {
-          workItemId: wi,
-          discussionId: panel.discussionId,
-          prompt: buildSpecPrompt({ title: item.title ?? "", body: item.body ?? "", comments: signedForPrompt, missingRoles: panel.missingRoles }),
-          idempotencyKey: `spec:${panel.discussionId}${generation.n === 0 ? "" : `:g${generation.n}`}:pm${deps.pmAttempt ? `:${deps.pmAttempt}` : ""}`,
-        },
-        controller.signal,
-        budget,
-      ),
-      aborted,
-    ]);
-  } catch (err) {
-    // D#6 C29: the PM's run is still live and the step hands control back (see PanelYieldError). It is not a failure.
-    if (err instanceof PanelYieldError) throw err;
-    // D#483 S5-k1c: a spending limit denied the PM's start. Nothing failed: the pause is the answer, and the driver asks again.
-    if (err instanceof SpecWriterPausedError) return { status: "refused", reason: err.pause };
-    reportError(err, { stage: "plan.spec_writer" });
-    return { status: "refused", reason: "pm_failed" };
-  } finally {
-    budget.cancel();
+  // One synthesis per panel, after the last round has finished or timed out. SPEC-REFUSED-SILENT: a PM answer with no readable file list is asked for ONCE more, with the
+  // refusal named in the prompt, before the step stops. The second run has its own key (`:fl`), so a replay of this step follows both runs and never starts a third.
+  const askPm = async (retry: boolean): Promise<{ refused: SpecRefusal } | { out: unknown }> => {
+    const controller = new AbortController();
+    const budget = new WaitBudget(deps.writerTimeoutMs ?? DEFAULT_PANEL_TIMEOUT_MS, () => controller.abort());
+    let pm: PanelSeatResult | "timeout";
+    try {
+      const aborted = new Promise<"timeout">((resolve) => controller.signal.addEventListener("abort", () => resolve("timeout"), { once: true }));
+      pm = await Promise.race([
+        deps.writer.writeSpec(
+          {
+            workItemId: wi,
+            discussionId: panel.discussionId,
+            prompt: buildSpecPrompt({ title: item.title ?? "", body: item.body ?? "", comments: signedForPrompt, missingRoles: panel.missingRoles, ...(retry ? { retryFileList: true } : {}) }),
+            idempotencyKey: `spec:${panel.discussionId}${generation.n === 0 ? "" : `:g${generation.n}`}:pm${deps.pmAttempt ? `:${deps.pmAttempt}` : ""}${retry ? ":fl" : ""}`,
+          },
+          controller.signal,
+          budget,
+        ),
+        aborted,
+      ]);
+    } catch (err) {
+      // D#6 C29: the PM's run is still live and the step hands control back (see PanelYieldError). It is not a failure.
+      if (err instanceof PanelYieldError) throw err;
+      // D#483 S5-k1c: a spending limit denied the PM's start. Nothing failed: the pause is the answer, and the driver asks again.
+      if (err instanceof SpecWriterPausedError) return { refused: err.pause };
+      reportError(err, { stage: "plan.spec_writer" });
+      return { refused: "pm_failed" };
+    } finally {
+      budget.cancel();
+    }
+    if (pm === "timeout") return { refused: "pm_timed_out" };
+    return { out: pm !== null && typeof pm === "object" ? ownData(pm, "agentOutput") : undefined };
+  };
+  let asked = await askPm(false);
+  if ("refused" in asked) return { status: "refused", reason: asked.refused };
+  const wellFormed = (o: unknown): boolean => o !== null && typeof o === "object" && typeof ownData(o, "summary") === "string" && typeof ownData(o, "spec") === "string" && (ownData(o, "spec") as string).trim() !== "";
+  if (wellFormed(asked.out) && validAcceptanceFiles(ownData(asked.out as object, "acceptance_files")) === null) {
+    const again = await askPm(true);
+    if ("refused" in again) return { status: "refused", reason: again.refused };
+    asked = again;
   }
-  if (pm === "timeout") return { status: "refused", reason: "pm_timed_out" };
-
-  const out: unknown = pm !== null && typeof pm === "object" ? ownData(pm, "agentOutput") : undefined;
+  const out: unknown = asked.out;
   const summary = out !== null && typeof out === "object" ? ownData(out, "summary") : undefined;
   const spec = out !== null && typeof out === "object" ? ownData(out, "spec") : undefined;
   if (typeof summary !== "string" || typeof spec !== "string" || spec.trim() === "") return { status: "refused", reason: "invalid_spec_output" };

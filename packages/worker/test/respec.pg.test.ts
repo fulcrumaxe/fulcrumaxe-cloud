@@ -135,6 +135,19 @@ describe("respec_work_item [pg]", { timeout: 60_000 }, () => {
       expect(rows).toEqual([{ kind: "stopped", code: "respec_list_unreadable" }]);
     });
 
+    it("SPEC-REFUSED-SILENT: a first Spec whose list could not be read is recorded as the fact spec_list_unreadable, once per attempt; any other refusal records nothing", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a, { stage: "discussing" });
+      const attempt = randomUUID();
+      const t = build({ spec: async () => ({ status: "refused", reason: "invalid_file_scope" }) });
+      for (let i = 0; i < 2; i++) expect(await t.module.advanceSpec(who(a, w), attempt)).toEqual({ status: "refused", reason: "invalid_file_scope" });
+      expect((await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1", [w])).rows).toEqual([{ kind: "stopped", code: "spec_list_unreadable" }]);
+      const other = await item(a, { stage: "discussing" });
+      const t2 = build({ spec: async () => ({ status: "refused", reason: "pm_failed" }) });
+      await t2.module.advanceSpec(who(a, other), randomUUID());
+      expect((await admin.query("SELECT 1 FROM work_item_driver_events WHERE work_item_id = $1", [other])).rowCount).toBe(0);
+    });
+
     it("refuses a run that is not a succeeded project-manager run of this item, and does nothing without the pipeline step", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);

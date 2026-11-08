@@ -254,6 +254,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "invalid_planned_prs",
   // Re-spec (D#6 R4d-5b): the project manager's list could not be read, the Spec already has one, and the Spec moved on while the list was made.
   "respec_list_unreadable",
+  // First Spec (SPEC-REFUSED-SILENT): the project manager's list could not be read even after the one automatic retry.
+  "spec_list_unreadable",
   "spec_has_file_list",
   "spec_changed",
   // Spec version pin on follow-on runs (D#6 R4d-5c): a follow-on run of a runner repo whose parent has no Spec version, and an explicit version that is not the parent's.

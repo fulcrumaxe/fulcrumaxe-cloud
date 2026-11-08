@@ -1347,6 +1347,19 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       }
     });
 
+    it('SPEC-REFUSED-SILENT: a first Spec whose list could not be read shows a spec_refused notice at Discussing (the fixed code, not a sentence), and not at another stage', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'discussing' });
+      await seedPreFix(accountId, itemId);
+      expect(await noticeNow(accountId, userId, itemId)).toBeNull();
+      await fact(accountId, itemId, 'stopped', 'spec_list_unreadable', 'spec:1');
+      expect(await noticeNow(accountId, userId, itemId)).toEqual({ kind: 'spec_refused', reason: 'spec_list_unreadable' });
+      const other = await seedItem(accountId, { stage: 'spec_ready' });
+      await seedPreFix(accountId, other.itemId);
+      await fact(accountId, other.itemId, 'stopped', 'spec_list_unreadable', 'spec:2');
+      expect(await noticeNow(accountId, userId, other.itemId)).toBeNull();
+    });
+
     it('the exact words are the ones the issue gave', () => {
       expect(COPY.specHasNoFileList).toBe("This Spec has no file list, so the platform cannot check the agent's changes and will not open a pull request. Re-spec to have the project manager add the list (the Spec's text stays the same), then Build again.");
       expect(COPY.respecListUnreadable).toBe("The project manager's file list for this Spec could not be read, so nothing was changed. Re-spec to try again.");

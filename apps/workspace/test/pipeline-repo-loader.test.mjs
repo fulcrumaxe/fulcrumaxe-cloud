@@ -137,6 +137,51 @@ describe("repository loader", () => {
     expect(seen).toEqual(["loading", "failed"]);
   });
 
+  // INBOX-PICKER-HANG-2: the deadline timer is lost (a throttled or frozen page) while the read never settles. The loader must not stay "loading" with the
+  // "a read is running" guard turning every later ask into a no-op; once the clock says the read is over, the next ask reads again.
+  const lostTimers = (read) => {
+    let t = 0;
+    const seen = [];
+    const loader = createRepoLoader({ read, onChange: (s) => seen.push(s.status), setT: () => 1, clearT: () => {}, timeoutMs: 20000, now: () => t });
+    return { seen, loader, advance: (ms) => (t += ms) };
+  };
+
+  it("a read whose deadline timer was lost is replaced by the next ask once the deadline has passed on the clock", async () => {
+    let reads = 0;
+    const answers = [new Promise(() => {}), Promise.resolve([{ id: "r1", full_name: "a/b" }])];
+    const { loader, advance } = lostTimers(() => answers[reads++]);
+    loader.ask();
+    await tick();
+    expect(reads).toBe(1);
+    advance(19999);
+    loader.ask();
+    await tick();
+    expect(reads).toBe(1); // still inside its deadline: left to finish
+    advance(1);
+    loader.ask();
+    await tick();
+    expect(reads).toBe(2); // a request is in flight again
+    expect(loader.state().status).toBe("ready");
+    expect(loader.state().rows.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("a stale read that answers after it was replaced does not undo the newer read", async () => {
+    const first = deferred();
+    const second = deferred();
+    const reads = [first, second];
+    const { loader, advance } = lostTimers(() => reads.shift().p);
+    loader.ask();
+    await tick();
+    advance(20000);
+    loader.ask();
+    await tick();
+    second.ok([{ id: "new", full_name: "a/b" }]);
+    await tick();
+    first.ok([{ id: "stale", full_name: "x/y" }]);
+    await tick();
+    expect(loader.state().rows.map((r) => r.id)).toEqual(["new"]);
+  });
+
   it("reports nothing after destroy", async () => {
     const d = deferred();
     const { c, seen, loader } = setup(() => d.p);
@@ -159,5 +204,8 @@ describe("the Pipeline screen uses the loader", () => {
     expect(src).toMatch(/repoLoader\.destroy\(\)/);
     expect(src).toMatch(/repoLoader\.ask\(\{ force: true \}\)/);
     expect(src).toMatch(/repoLoader\.state\(\)\.status !== "ready"/);
+    // Coming back to a page that sat in the background asks again, and the listener goes with the mount.
+    expect(src).toMatch(/addEventListener\("visibilitychange", onVisible\)/);
+    expect(src).toMatch(/removeEventListener\("visibilitychange", onVisible\)/);
   });
 });
