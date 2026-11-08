@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHECK_FAILED_FILES_MIN_PROTOCOL, readCheckFailedFiles, CHECK_JOB_MIN_PROTOCOL, CHECK_NOT_RUN_REASONS, CURRENT_PROTOCOL_VERSION, DETAILS_OF_RUN_ENDED, DoneCheck, LocalOnlyEvent, RUNNER_MESSAGES, checkNotRunReason } from "../src/messages.js";
+import { CHECK_FAILED_FILES_MIN_PROTOCOL, readCheckFailedFileHints, readCheckFailedFiles, CHECK_FAILED_FILE_CHARS, CHECK_FAILED_FILES_MAX, CHECK_JOB_MIN_PROTOCOL, CHECK_NOT_RUN_REASONS, CURRENT_PROTOCOL_VERSION, DETAILS_OF_RUN_ENDED, DoneCheck, LocalOnlyEvent, RUNNER_MESSAGES, checkNotRunReason } from "../src/messages.js";
 import { CHECK_NOT_RUN_LINES, checkFailedText, checkNotRunText } from "../src/copy.js";
 
 const RUN = "33333333-3333-4333-8333-333333333333";
@@ -120,5 +120,55 @@ describe("D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files on done", () => {
     for (const list of bad) expect(readCheckFailedFiles(list, 0).ok, JSON.stringify(list)?.slice(0, 40)).toBe(false);
     for (const more of [-1, 1.5, "3", null, 1_000_001, Number.NaN]) expect(readCheckFailedFiles(["a.test.ts"], more).ok, String(more)).toBe(false);
     expect(readCheckFailedFiles([], 3).ok).toBe(false);
+  });
+});
+
+describe("D#6 CHECK-FAILFILES-TO-CLOUD (hint lines): the repo's own fix hint on done", () => {
+  const FILES = ["apps/ops/test/a.test.ts", "b.spec.mjs"];
+
+  it("is a plain optional field, with no protocol floor of its own: an older runner's body without it is as before", () => {
+    expect(done({ check: CHECK }).success).toBe(true);
+    expect(readCheckFailedFileHints(undefined, FILES)).toEqual({ ok: true, value: null });
+    expect(readCheckFailedFileHints(undefined, null)).toEqual({ ok: true, value: null });
+  });
+
+  it("the done schema lets any shape through, so a malformed list is the cloud's to drop and never a 400 for the whole body", () => {
+    expect(done({ check: { ...CHECK, exit_code: 1, failed_files: FILES, failed_file_hints: "not a list" } }).success).toBe(true);
+  });
+
+  it("keeps a plain {file, hint} list, each file one of the failed files, deduped by file and by hint text", () => {
+    expect(readCheckFailedFileHints([{ file: FILES[0], hint: "pnpm gen" }], FILES)).toEqual({ ok: true, value: [{ file: FILES[0], hint: "pnpm gen" }] });
+    expect(readCheckFailedFileHints([{ file: FILES[0], hint: "pnpm gen" }, { file: FILES[1], hint: "pnpm fix" }], FILES)).toEqual({
+      ok: true,
+      value: [{ file: FILES[0], hint: "pnpm gen" }, { file: FILES[1], hint: "pnpm fix" }],
+    });
+    expect(readCheckFailedFileHints([], FILES)).toEqual({ ok: true, value: null });
+    const twenty = Array.from({ length: CHECK_FAILED_FILES_MAX }, (_, i) => ({ file: `t/${String(i)}.test.ts`, hint: `fix ${String(i)}` }));
+    const twentyFiles = twenty.map((h) => h.file);
+    expect(readCheckFailedFileHints(twenty, twentyFiles).ok).toBe(true);
+    expect(readCheckFailedFileHints([{ file: FILES[0], hint: "x".repeat(CHECK_FAILED_FILE_CHARS) }], FILES).ok).toBe(true);
+    const bad: unknown[] = [
+      "not a list",
+      [...twenty, { file: "t/extra.test.ts", hint: "x" }],
+      [{ file: FILES[0], hint: "a" }, { file: FILES[0], hint: "b" }], // repeated file
+      [{ file: FILES[0], hint: "a" }, { file: FILES[1], hint: "a" }], // repeated hint text
+      [{ file: "not-a-failed-file.ts", hint: "a" }], // not one of failed_files
+      [{ file: FILES[0], hint: "" }],
+      [{ file: FILES[0], hint: "x".repeat(CHECK_FAILED_FILE_CHARS + 1) }],
+      [{ file: FILES[0] }],
+      [{ hint: "a" }],
+      [{ file: FILES[0], hint: "a", extra: 1 }],
+      [{ file: 1, hint: "a" }],
+      [{ file: FILES[0], hint: 1 }],
+      [null],
+      ["a string entry"],
+      [[FILES[0], "a"]],
+    ];
+    for (const list of bad) expect(readCheckFailedFileHints(list, FILES).ok, JSON.stringify(list)?.slice(0, 60)).toBe(false);
+  });
+
+  it("is refused whole when there are no failed files to attach a hint to", () => {
+    expect(readCheckFailedFileHints([{ file: FILES[0], hint: "a" }], null)).toEqual({ ok: false });
+    expect(readCheckFailedFileHints([{ file: FILES[0], hint: "a" }], [])).toEqual({ ok: false });
   });
 });

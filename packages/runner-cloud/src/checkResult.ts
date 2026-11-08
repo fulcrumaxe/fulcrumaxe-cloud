@@ -1,4 +1,4 @@
-import { checkNotRunReason, readCheckFailedFiles, CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { checkNotRunReason, readCheckFailedFileHints, readCheckFailedFiles, CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 
 /**
  * D#6 R-CHK-3: what a runner's check result may hold for the cloud to store it. The bounds are the ones `run_checks` (migration 0888) enforces. The protocol schema refuses most of
@@ -10,7 +10,7 @@ export const CHECK_BOUNDS = { exitCode: CHECK_EXIT_CODE_MAX, durationMs: CHECK_D
 const clampInt = (value: unknown, min: number, max: number): number => (typeof value === "number" && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.trunc(value))) : min);
 const inRange = (value: unknown, min: number, max: number): boolean => typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
 
-export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContract: string | null; failedFilesDropped: boolean } {
+export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContract: string | null; failedFilesDropped: boolean; failedFileHintsDropped: boolean } {
   let bad: string | null = null;
   const flag = (field: string): void => {
     bad ??= field;
@@ -56,5 +56,11 @@ export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContr
   const read = readCheckFailedFiles(check.failed_files, check.failed_files_more);
   const failedFilesDropped = !read.ok || (read.value !== null && (exit === 0 || check.timed_out === true));
   const files = read.ok && !failedFilesDropped && read.value !== null ? { failed_files: read.value.files, ...(read.value.more === 0 ? {} : { failed_files_more: read.value.more }) } : {};
-  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary, ...reason, ...files }, outOfContract: bad, failedFilesDropped };
+  // D#6 CHECK-FAILFILES-TO-CLOUD (hint lines): the repo's own fix hint, kept only beside the failed files it names; dropped whole (never part of the verdict)
+  // alongside them, under its own fixed log code, when it is malformed or there are no failed files left to carry it.
+  const keptFiles = read.ok && !failedFilesDropped ? read.value : null;
+  const hintsRead = readCheckFailedFileHints(check.failed_file_hints, keptFiles?.files ?? null);
+  const failedFileHintsDropped = !hintsRead.ok || (hintsRead.value !== null && keptFiles === null);
+  const hints = hintsRead.ok && !failedFileHintsDropped && hintsRead.value !== null ? { failed_file_hints: hintsRead.value } : {};
+  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary, ...reason, ...files, ...hints }, outOfContract: bad, failedFilesDropped, failedFileHintsDropped };
 }

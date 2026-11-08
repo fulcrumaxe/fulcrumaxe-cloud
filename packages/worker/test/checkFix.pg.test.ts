@@ -11,7 +11,7 @@ import type { BranchSyncOutcome } from "@fx/github";
 import { createStackBasePort } from "@fx/pipeline";
 import { BASE_SYNCED_PROMPT_LINE, checkFixBeforeStart } from "../src/fixRoundBase.js";
 const withSync = (beforeStart: ReturnType<typeof checkFixBeforeStart>) => ({ beforeStart, baseSync: () => beforeStart.state });
-import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, FAILED_FILES_PROMPT_LEAD, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
+import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, FAILED_FILE_HINTS_PROMPT_LEAD, FAILED_FILES_PROMPT_LEAD, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
 
 /**
  * [pg] D#6 R-CHK-3 (C47): the fix round that follows a run whose approved check failed. The ids and names in this file are its own (`chkfix-`): the runs are made here,
@@ -254,6 +254,29 @@ describe("check fix round [pg]", () => {
     expect((await startCheckFixRound(deps(), who(), forged)).ok).toBe(true);
     expect(resumed[resumed.length - 1]!.prompt).not.toContain(FAILED_FILES_PROMPT_LEAD);
     expect(checkFixPrompt({ round: 1, argv: ["x"], exitCode: 1, timedOut: false, summary: "s" })).not.toContain(FAILED_FILES_PROMPT_LEAD);
+  });
+
+  it("D#6 CHECK-FAILFILES-TO-CLOUD (hint lines): the round is told the repo's own fix hint beside the failing test file, inside the same fence, after the failed-files sentence; a hint naming a file outside failed_files is left out", async () => {
+    const failed = await ended({ reason: "check_failed", summary: "FAIL x" });
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 3, 'run.check_ended', $3::jsonb)", [
+      A.accountId,
+      failed,
+      JSON.stringify({ exit_code: 1, failed_files: ["packages/api-client/test/drift.test.ts"], failed_file_hints: [{ file: "packages/api-client/test/drift.test.ts", hint: "pnpm --filter @fx/api-client gen" }] }),
+    ]);
+    expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+    const prompt = resumed[resumed.length - 1]!.prompt;
+    expect(prompt).toContain(`${FAILED_FILE_HINTS_PROMPT_LEAD}\npackages/api-client/test/drift.test.ts: pnpm --filter @fx/api-client gen`);
+    expect(prompt.indexOf(FAILED_FILES_PROMPT_LEAD)).toBeLessThan(prompt.indexOf(FAILED_FILE_HINTS_PROMPT_LEAD));
+    expect(prompt.indexOf(FAILED_FILE_HINTS_PROMPT_LEAD)).toBeLessThan(prompt.indexOf("<<END UNTRUSTED>>"));
+    await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE account_id = $1 AND status IN ('pending', 'running')", [A.accountId]);
+    const mismatched = await ended({ reason: "check_failed", summary: "FAIL x" });
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 3, 'run.check_ended', $3::jsonb)", [
+      A.accountId,
+      mismatched,
+      JSON.stringify({ exit_code: 1, failed_files: ["apps/ops/test/a.test.ts"], failed_file_hints: [{ file: "a-file-not-in-failed-files.ts", hint: "pnpm gen" }] }),
+    ]);
+    expect((await startCheckFixRound(deps(), who(), mismatched)).ok).toBe(true);
+    expect(resumed[resumed.length - 1]!.prompt).not.toContain(FAILED_FILE_HINTS_PROMPT_LEAD);
   });
 
   it("the prompt tells the round not to run the check itself (the runner does), only the tests for what failed, and the line sits outside the untrusted fence", () => {

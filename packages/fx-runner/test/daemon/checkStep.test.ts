@@ -212,6 +212,119 @@ describe("the failed test files the summary names", () => {
   });
 });
 
+describe("the hint harvested for each failed file (Run: lines)", () => {
+  it("takes the first line after the file was named, up to the next failed-file line, that carries 'Run: ', even mid-sentence", () => {
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  packages/api-client/test/drift.test.ts > generated.ts is up to date");
+    found.line("AssertionError: generated.ts is out of date with packages/api/openapi.json. Run: pnpm --filter @fx/api-client gen");
+    found.line(" FAIL  packages/other/test/b.test.ts > y");
+    found.line("    at some/stack/frame.ts:12");
+    const { files } = found.list();
+    expect(found.hintsFor(files)).toEqual([{ file: "packages/api-client/test/drift.test.ts", hint: "pnpm --filter @fx/api-client gen" }]);
+  });
+
+  it("stops looking once the next failed-file line arrives, so a hint after it belongs to the new file, not the old one", () => {
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line(" FAIL  b/y.test.ts > t");
+    found.line("Run: pnpm fix-b");
+    const { files } = found.list();
+    expect(found.hintsFor(files)).toEqual([{ file: "b/y.test.ts", hint: "pnpm fix-b" }]);
+  });
+
+  it("keeps only the first 'Run: ' line for a file; a later one in the same window is ignored", () => {
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line("Run: pnpm first");
+    found.line("Run: pnpm second");
+    const { files } = found.list();
+    expect(found.hintsFor(files)).toEqual([{ file: "a/x.test.ts", hint: "pnpm first" }]);
+  });
+
+  it("strips ANSI colour and control characters, trims, and cuts to CHECK_FAILED_FILE_CHARS", () => {
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line(`\u001b[31mRun: \u001b[39m  pnpm gen\u0007 \t${"x".repeat(250)}  `);
+    const { files } = found.list();
+    const hint = found.hintsFor(files)[0]!.hint;
+    expect(hint.startsWith("pnpm gen")).toBe(true);
+    expect(hint.length).toBeLessThanOrEqual(200);
+    expect(hint).not.toMatch(/[\u0000-\u001f\u007f]/);
+  });
+
+  it("redacts a credential-shaped substring in the hint, the same as the summary's own output", () => {
+    const token = "sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0".repeat(3);
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line(`Run: pnpm login --token ${token}`);
+    const { files } = found.list();
+    const hint = found.hintsFor(files)[0]!.hint;
+    expect(hint).not.toContain(token);
+    expect(hint).toContain("[redacted]");
+  });
+
+  it("masks the workspace and home paths in the hint, the same as the summary's own output", () => {
+    const found = createFailedFiles("/w/space", "/home/person");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line("Run: /w/space/node_modules/.bin/x --config /home/person/.config/x");
+    const { files } = found.list();
+    const hint = found.hintsFor(files)[0]!.hint;
+    expect(hint).not.toContain("/w/space");
+    expect(hint).not.toContain("/home/person");
+    expect(hint).toBe("<workspace>/node_modules/.bin/x --config <home>/.config/x");
+  });
+
+  it("no 'Run: ' line anywhere: no hint for that file", () => {
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line("plain output, nothing to run here");
+    const { files } = found.list();
+    expect(found.hintsFor(files)).toEqual([]);
+  });
+
+  it("two files with the identical hint text: only the first file keeps it", () => {
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line("Run: pnpm gen");
+    found.line(" FAIL  b/y.test.ts > t");
+    found.line("Run: pnpm gen");
+    const { files } = found.list();
+    expect(found.hintsFor(files)).toEqual([{ file: "a/x.test.ts", hint: "pnpm gen" }]);
+  });
+
+  it("a hint is only ever carried for a file that is actually in the given file list (the ones done keeps)", () => {
+    const found = createFailedFiles("/w");
+    found.line(" FAIL  a/x.test.ts > t");
+    found.line("Run: pnpm gen-a");
+    found.line(" FAIL  b/y.test.ts > t");
+    found.line("Run: pnpm gen-b");
+    // only a/x.test.ts is in the kept list, as `done` might after its own bounds
+    expect(found.hintsFor(["a/x.test.ts"])).toEqual([{ file: "a/x.test.ts", hint: "pnpm gen-a" }]);
+  });
+
+  it("a failing check with a repo hint sends it in the body, beside failed_files; a passing check sends none", async () => {
+    const failed = await run([script("hint-fail.sh", `echo ' FAIL  packages/api-client/test/drift.test.ts > a'\necho 'out of date. Run: pnpm --filter @fx/api-client gen'\nexit 1`)]);
+    expect(failed.body).toMatchObject({ failed_files: ["packages/api-client/test/drift.test.ts"], failed_file_hints: [{ file: "packages/api-client/test/drift.test.ts", hint: "pnpm --filter @fx/api-client gen" }] });
+    const passed = await run([script("hint-pass.sh", `echo ' FAIL  a.test.ts > a'\necho 'Run: pnpm gen'\nexit 0`)]);
+    expect("failed_file_hints" in passed.body).toBe(false);
+  });
+
+  it("the hint that reaches the body is redacted and workspace/home-masked, the same as the summary", async () => {
+    const token = "sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0".repeat(3);
+    const home = path.join(root, "home-of-person");
+    const failed = await run(
+      [script("hint-secret.sh", `echo ' FAIL  a.test.ts > a'\necho "Run: ${ws}/node_modules/.bin/x --token ${token} --config ${home}/.config/x"\nexit 1`)],
+      60,
+      { home },
+    );
+    const hint = (failed.body.failed_file_hints as { file: string; hint: string }[] | undefined)?.[0]?.hint;
+    expect(hint).not.toContain(token);
+    expect(hint).not.toContain(ws);
+    expect(hint).not.toContain(home);
+    expect(hint).toBe("<workspace>/node_modules/.bin/x --token [redacted] --config <home>/.config/x");
+  });
+});
+
 describe("the failed test files as a list for done (protocol 13)", () => {
   it("names at most 20, repo-relative, and counts the rest; a path over 200 characters, an absolute one and a credential shape are not named", () => {
     const found = createFailedFiles("/w/space");

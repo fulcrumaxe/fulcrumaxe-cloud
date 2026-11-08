@@ -105,24 +105,53 @@ const FAILED_FILES_BYTES = 1500;
 /** How many names past `FAILED_FILES_MAX` are kept only to recognise a repeat, so `more` counts different files rather than prints. Bounded: past this cap a repeat may be counted again, as the deliberate bound. */
 const FAILED_FILES_COUNTED = 1000;
 
+/** The marker a repo's own assertion carries ahead of the fix command it suggests (`... out of date with x. Run: pnpm gen`), never only at a line's start. */
+const RUN_HINT = "Run: ";
+
 /**
  * Picks the failed test files out of the whole output of a check, line by line as it arrives (the summary keeps only the end of the output, and a long run's failures
  * are printed far above it). Closed shape: only a plain relative file name (`NAMED_FILE`, the workspace prefix removed first) is ever kept, first-seen order, at most
  * `FAILED_FILES_MAX` of them; the rest are counted. Memory stays bounded at `FAILED_FILES_MAX + FAILED_FILES_COUNTED` names; no output line is ever stored.
+ *
+ * Alongside, for each named failed file still within `FAILED_FILES_MAX`, harvests one hint: the first line between that file's own `FAILED_FILE` line and the next one
+ * (of any file) that carries `Run: `, with the rest of that line after the marker kept (trimmed, ANSI and control characters removed, credential-shaped substrings
+ * redacted and the workspace and home paths replaced exactly as the summary's own output is, cut to `CHECK_FAILED_FILE_CHARS` last). Bounded the same way: a hint is
+ * only ever recorded for a file `seen` already holds, so memory never grows past `FAILED_FILES_MAX` hints.
  */
-export function createFailedFiles(workspace: string): { line: (text: string) => void; summary: () => string; list: () => { files: string[]; more: number } } {
+export function createFailedFiles(workspace: string, home?: string | undefined): { line: (text: string) => void; summary: () => string; list: () => { files: string[]; more: number }; hintsFor: (files: readonly string[]) => { file: string; hint: string }[] } {
   const seen = new Set<string>();
   const countedPast = new Set<string>();
+  const hints = new Map<string, string>();
   let more = 0;
+  let current: string | undefined;
   return {
     line(text) {
-      const match = text.replace(/\u001b\[[0-9;]*m/g, "").match(FAILED_FILE);
-      if (match === null) return;
+      const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
+      const match = plain.match(FAILED_FILE);
+      if (match === null) {
+        if (current !== undefined && !hints.has(current)) {
+          const at = plain.indexOf(RUN_HINT);
+          if (at !== -1) {
+            let hint = plain.slice(at + RUN_HINT.length).replace(/[\u0000-\u001f\u007f]/g, "").trim();
+            if (hint !== "") {
+              // Same treatment as the summary's own output (`shown`): redacted before the workspace and home paths are masked, so a credential shape never leaves and an
+              // absolute path never names the runner's account.
+              hint = redactShapes(hint);
+              hint = hint.split(workspace).join("<workspace>");
+              if (home !== undefined && home !== "/") hint = hint.split(home).join("<home>");
+              hints.set(current, hint.slice(0, CHECK_FAILED_FILE_CHARS));
+            }
+          }
+        }
+        return;
+      }
       let file = match[1] ?? "";
       if (file.startsWith(`${workspace}/`)) file = file.slice(workspace.length + 1);
+      current = NAMED_FILE.test(file) && seen.has(file) ? file : undefined;
       if (!NAMED_FILE.test(file) || seen.has(file) || countedPast.has(file)) return;
       if (seen.size < FAILED_FILES_MAX) {
         seen.add(file);
+        current = file;
         return;
       }
       more += 1;
@@ -139,6 +168,21 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
         if (name !== undefined && name === file && name.length <= CHECK_FAILED_FILE_CHARS && redactShapes(name) === name && files.length < CHECK_FAILED_FILES_MAX) files.push(name);
       }
       return { files, more: seen.size + more - files.length };
+    },
+    /**
+     * D#6 CHECK-FAILFILES-TO-CLOUD: the hints for `done`'s `check.failed_file_hints`, one `{file, hint}` per entry of `files` (the names `list()` already kept) that
+     * carries a harvested hint, in that order, deduped by hint text so the first file carrying it keeps it and no later file repeats the same sentence.
+     */
+    hintsFor(files) {
+      const out: { file: string; hint: string }[] = [];
+      const used = new Set<string>();
+      for (const file of files) {
+        const hint = hints.get(file);
+        if (hint === undefined || used.has(hint)) continue;
+        used.add(hint);
+        out.push({ file, hint });
+      }
+      return out;
     },
     /** The line for the summary's header (with its newline), or "" when no failed test file was seen. */
     summary() {
@@ -481,7 +525,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
       return failed("protected_unreadable", `the check was not run: ${why}${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     let out: Awaited<ReturnType<InstallCapture>>;
-    const failedFiles = createFailedFiles(input.workspace);
+    const failedFiles = createFailedFiles(input.workspace, input.home);
     try {
       out = await deps.capture(launch.tool, launch.args, launch.env, input.workspace, input.check.timeout_s * 1000, RAW_TAIL_CHARS, input.signal, launch.feed, failedFiles.line);
     } catch {
@@ -523,6 +567,9 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     // A failed check names its failing test files on `done` (protocol 13); a pass, a timeout or an abort names none, and nothing is sent when none were seen.
     const named = out.code !== 0 && !out.timedOut && !out.aborted ? failedFiles.list() : { files: [], more: 0 };
     const failedList = named.files.length === 0 ? {} : { failed_files: named.files, ...(named.more === 0 ? {} : { failed_files_more: named.more }) };
+    // D#6 CHECK-FAILFILES-TO-CLOUD (hint lines): the repo's own suggested fix command for a failed file, carried only for files `done` already names.
+    const hints = named.files.length === 0 ? [] : failedFiles.hintsFor(named.files);
+    const hintsList = hints.length === 0 ? {} : { failed_file_hints: hints };
     const header = [
       out.code !== 0 ? failedFiles.summary() : "",
       changedLine,
@@ -536,7 +583,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     const summary = `${header}${lastBytes(shown, CHECK_SUMMARY_MAX_BYTES - Buffer.byteLength(header))}`;
     // The check ran, but it touched protected paths or its files could not be given back: its result does not count, and the reason says so (a plain failing exit carries none).
     const reason: CheckNotRunReason | undefined = guard.changed.length > 0 || guard.unrestored.length > 0 ? "protected_changed" : lost.length > 0 ? "not_restored" : undefined;
-    const body: DoneCheck = { exit_code: out.timedOut || out.aborted ? null : out.code, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: out.timedOut, skipped_tests: skipped, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES).replace(/\u0000/g, ""), ...(reason === undefined ? {} : { reason }), ...failedList };
+    const body: DoneCheck = { exit_code: out.timedOut || out.aborted ? null : out.code, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: out.timedOut, skipped_tests: skipped, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES).replace(/\u0000/g, ""), ...(reason === undefined ? {} : { reason }), ...failedList, ...hintsList };
     return { passed: out.code === 0 && !out.timedOut && !out.aborted && lost.length === 0 && guard.changed.length === 0, body };
   };
 }

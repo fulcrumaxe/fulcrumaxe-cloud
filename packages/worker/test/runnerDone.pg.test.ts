@@ -795,6 +795,43 @@ describe("runner done [pg]", () => {
       }
     });
 
+    it("D#6 CHECK-FAILFILES-TO-CLOUD (hint lines): every malformed hint list is dropped whole by the finish, beside a valid one on a passing or timed-out check; the verdict and the failed files stand", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const bad: Array<Partial<DoneCheck> & Record<string, unknown>> = [
+          { failed_files: ["a.test.ts"], failed_file_hints: "not a list" },
+          { failed_files: ["a.test.ts"], failed_file_hints: [{ file: "not-a.test.ts", hint: "x" }] },
+          { failed_files: ["a.test.ts"], failed_file_hints: [{ file: "a.test.ts", hint: "" }] },
+          { failed_files: ["a.test.ts"], failed_file_hints: [{ file: "a.test.ts", hint: "x".repeat(201) }] },
+          { failed_files: ["a.test.ts"], failed_file_hints: [{ file: "a.test.ts" }] },
+          { failed_file_hints: [{ file: "a.test.ts", hint: "x" }] }, // no failed_files at all
+          { failed_files: ["a.test.ts"], failed_file_hints: [{ file: "a.test.ts", hint: "x" }], exit_code: 0 },
+          { failed_files: ["a.test.ts"], failed_file_hints: [{ file: "a.test.ts", hint: "x" }], exit_code: null, timed_out: true },
+        ];
+        for (const over of bad) {
+          const id = await pending();
+          const g = await claimed(id);
+          const verdict = failedVerdict(`fx/${id}-g${g}`);
+          expect((await facade.finishRunnerDone({ ...lease(id, g), verdict, check: { ...result(), ...over } as DoneCheck })).kind, JSON.stringify(over).slice(0, 60)).toBe("recorded");
+          expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.check_ended'", [id])).rows[0]!.payload).not.toHaveProperty("failed_file_hints");
+        }
+        expect(warn.mock.calls.filter(([line]) => String(line).includes("check_failed_file_hints_dropped"))).toHaveLength(bad.length);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("a valid hint beside a valid failed file is stored in the check's end event, beside it", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const verdict = failedVerdict(`fx/${id}-g${g}`);
+      const failed_files = ["packages/api-client/test/drift.test.ts"];
+      const failed_file_hints = [{ file: failed_files[0], hint: "pnpm --filter @fx/api-client gen" }];
+      expect((await facade.finishRunnerDone({ ...lease(id, g), verdict, check: { ...result(), failed_files, failed_file_hints } })).kind).toBe("recorded");
+      const logged = (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.check_ended'", [id])).rows.map((r) => r.payload);
+      expect(logged).toEqual([{ exit_code: 1, timed_out: false, duration_ms: 2_460_000, failed_files, failed_file_hints }]);
+    });
+
     it("a check killed at its cap has no exit status and says so; one that never started records exit null, 0 ms and an empty summary", async () => {
       const killed = await pending();
       const gk = await claimed(killed);
@@ -1152,6 +1189,16 @@ describe("runner done [pg]", () => {
         } finally {
           warn.mockRestore();
         }
+      });
+
+      it("D#6 CHECK-FAILFILES-TO-CLOUD (hint lines): the repo's own fix hint a runner names beside a failed file reaches the check's end event beside it", async () => {
+        const id = await pending({ specVersion: await spec(["src/**"]), check: CHECK });
+        const g = await claimRoute(id);
+        const files = ["packages/api-client/test/drift.test.ts"];
+        const hints = [{ file: files[0], hint: "pnpm --filter @fx/api-client gen" }];
+        const res = await done(id, g, { check: { exit_code: 1, duration_ms: 5000, timed_out: false, skipped_tests: null, summary: "FAIL x", failed_files: files, failed_file_hints: hints } });
+        expect(DoneReply.parse(res.body).failure_reason).toBe("check_failed");
+        expect(await checkEnded(id)).toEqual([{ exit_code: 1, timed_out: false, duration_ms: 5000, failed_files: files, failed_file_hints: hints }]);
       });
 
       it("no dev shell: run_ended(check_failed, check_no_dev_shell), then done with exit null, 0 ms and an empty summary: failed check_failed, the detail kept on the event", async () => {

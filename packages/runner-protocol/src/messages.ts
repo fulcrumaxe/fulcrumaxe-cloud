@@ -732,6 +732,44 @@ export function readCheckFailedFiles(files: unknown, more: unknown): { ok: true;
   if (files.length === 0) return moreCount === 0 ? { ok: true, value: null } : { ok: false };
   return { ok: true, value: { files: files as string[], more: moreCount } };
 }
+/**
+ * D#6 CHECK-FAILFILES-TO-CLOUD (hint lines): the repo's own suggested fix command for a failed file (the line of a test's output that carries `Run: `), so the
+ * check-fix prompt can offer it beside the failing test files. At most `CHECK_FAILED_FILES_MAX` entries, each naming one of the check's `failed_files` (never a
+ * file sent only here) and never the same file twice; each hint at most `CHECK_FAILED_FILE_CHARS` characters, never empty, and never repeated across entries
+ * (the runner already dedups by hint text, keeping the first file that carried it).
+ */
+export const CHECK_FAILED_FILE_HINTS_DROPPED = "check_failed_file_hints_dropped";
+export interface CheckFailedFileHint {
+  file: string;
+  hint: string;
+}
+/**
+ * The hint list as the cloud keeps it. `value` is null when none was sent (or an empty one); `ok: false` is a malformed list, which the caller drops while the
+ * rest of the check stands, exactly as `readCheckFailedFiles` does. `failedFiles` is the check's own (already-read) failed-file names: a hint naming anything
+ * else, or sent while there is no failed-file list at all, is malformed.
+ */
+export function readCheckFailedFileHints(hints: unknown, failedFiles: readonly string[] | null): { ok: true; value: CheckFailedFileHint[] | null } | { ok: false } {
+  if (hints === undefined) return { ok: true, value: null };
+  if (!Array.isArray(hints) || hints.length > CHECK_FAILED_FILES_MAX) return { ok: false };
+  if (hints.length === 0) return { ok: true, value: null };
+  if (failedFiles === null || failedFiles.length === 0) return { ok: false };
+  const known = new Set(failedFiles);
+  const seenFiles = new Set<string>();
+  const seenHints = new Set<string>();
+  const value: CheckFailedFileHint[] = [];
+  for (const entry of hints as unknown[]) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return { ok: false };
+    const keys = Object.keys(entry as Record<string, unknown>);
+    if (keys.length !== 2 || !keys.includes("file") || !keys.includes("hint")) return { ok: false };
+    const { file, hint } = entry as { file: unknown; hint: unknown };
+    if (typeof file !== "string" || !known.has(file) || seenFiles.has(file)) return { ok: false };
+    if (typeof hint !== "string" || hint.length === 0 || hint.length > CHECK_FAILED_FILE_CHARS || seenHints.has(hint)) return { ok: false };
+    seenFiles.add(file);
+    seenHints.add(hint);
+    value.push({ file, hint });
+  }
+  return { ok: true, value };
+}
 export const DoneCheck = z
   .object({
     exit_code: safeInt.min(-CHECK_EXIT_CODE_MAX).max(CHECK_EXIT_CODE_MAX).nullable(),
@@ -744,6 +782,8 @@ export const DoneCheck = z
     // Read with `readCheckFailedFiles` by the cloud, not refused here: a malformed list is dropped and must not turn the whole `done` into a 400.
     failed_files: z.unknown().optional(),
     failed_files_more: z.unknown().optional(),
+    // Read with `readCheckFailedFileHints` by the cloud, not refused here: a malformed list is dropped and must not turn the whole `done` into a 400.
+    failed_file_hints: z.unknown().optional(),
   })
   .strict()
   // A check stopped at its cap did not exit.
