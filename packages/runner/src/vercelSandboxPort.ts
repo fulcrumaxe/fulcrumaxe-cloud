@@ -4,7 +4,7 @@ import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
 import { contextWindowTokensFor, type ModelId } from "@fx/spend";
-import { CLI_MODEL_NAMES, CONTEXT_WARN_PCT, ContextLedgerCapture, contextPct, contextSpillWrites, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
+import { CLI_MODEL_NAMES, CONTEXT_WARN_PCT, ContextLedgerCapture, extractAgentOutputEnvelope, contextPct, contextSpillWrites, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
 import {
   DETECT_NONE,
   DETECT_NPM,
@@ -557,6 +557,9 @@ function isNoActiveSession(err: unknown): boolean {
   return err instanceof Error && statusOf(err) === undefined && err.message === "No active session to stop.";
 }
 
+/** The opening marker of a verdict envelope; any message holding one, parsed or not, decides the fallback. */
+const ENVELOPE_MARKER = /<!--\s*AGENT_OUTPUT\s*-->/;
+
 export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions): SandboxPort {
   const { teamId, projectId, getToken } = options ?? ({} as CreateVercelSandboxPortOptions);
   if (typeof teamId !== "string" || teamId.trim() === "") {
@@ -1105,6 +1108,20 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       /** The event for the LAST raw `result` message; completion is decided
        * from it only after the command has exited. */
       let lastResult: NormalizedEvent | undefined;
+      /**
+       * Fallback verdict for a run whose last turn spoke after the envelope (a background task finished, the agent
+       * woke and added a closing line, and the final `result` has no envelope though the verdict was given).
+       * It is the envelope of the LAST main-thread message (assistant text or result) that carried an
+       * `AGENT_OUTPUT` marker, and only if that message parsed to a non-checkpoint envelope: a later message with a
+       * marker that does not parse sets it back to undefined (last marker wins, or nothing), as envelope.ts treats
+       * a malformed last block. Subagent lines (`parent_tool_use_id` set), user/tool lines and error runs never
+       * feed or use it.
+       * RESIDUAL RISK: an envelope quoted mid-run (a diff or log the agent echoed) followed only by prose with no
+       * marker looks the same as the real case (verdict, then a closing line); the stream carries no wake-up
+       * signal from a background task that we could require, so such a quote can become the verdict. A quote
+       * followed by any later marker, even a malformed one, fails closed.
+       */
+      let lastEnvelope: Record<string, unknown> | undefined;
       /** The `subtype` of that raw `result` line; read for nothing else. */
       let lastResultSubtype: unknown;
       /** The first limit the runner's own guard reached (MP-CLOCK/SILENT/TURNS). */
@@ -1208,6 +1225,11 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         if (isMalformedAssistant(parsed)) return reportInvalid("shape");
         ledger.observe(parsed);
         const event = dropInvalidUsage(normalizeMessage({ ...opts, backend: backend.name }, parsed, seq++, opts.workdir), reportInvalid);
+        const text = event.type === "assistant" || parsed.type === "result" ? event.text : undefined;
+        if (parsed.parent_tool_use_id == null && typeof text === "string" && ENVELOPE_MARKER.test(text)) {
+          const found = extractAgentOutputEnvelope(text);
+          lastEnvelope = found?.verdict === "checkpoint" ? undefined : found;
+        }
         if (parsed.type === "result") {
           lastResult = event;
           lastResultSubtype = parsed.subtype;
@@ -1320,7 +1342,9 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       // Succeeded = exit 0 AND the last result was not an error. Anything
       // else is a failure event built here, carrying only what that last
       // result reported (if any).
-      if (finished.exitCode === 0 && lastResult?.type === "result") return lastResult;
+      if (finished.exitCode === 0 && lastResult?.type === "result") {
+        return lastResult.agentOutput === undefined && lastEnvelope !== undefined ? { ...lastResult, agentOutput: lastEnvelope } : lastResult;
+      }
       return {
         runId: opts.runId,
         role: opts.role,
