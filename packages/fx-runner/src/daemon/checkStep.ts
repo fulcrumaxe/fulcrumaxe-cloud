@@ -23,7 +23,9 @@
  *  - what is reported is a closed shape: exit code, duration, timed-out flag, the skipped-test count, and the last 4096 bytes of output after credential-shape
  *    redaction, with the workspace and home paths replaced. When the check fails, one line ahead of that output names the test files the runner's output reported as failed
  *    (vitest's `FAIL path`, pytest's `FAILED path::test`), picked out of the WHOLE output as it streams and not only its tail: a plain relative file name each, at most 40,
- *    first-seen order, the rest counted, 1500 bytes at most, redacted like the rest. A second line, `changed files (N): ...`, names the paths the branch changed against the
+ *    first-seen order, the rest counted, 1500 bytes at most, redacted like the rest. A name a test runner printed relative to its own package (a monorepo's workspace
+ *    root, not the repository's) is widened to the repo-root-relative path, when exactly one of the workspace's tracked paths matches it; an ambiguous or unmatched
+ *    name is kept exactly as printed. A second line, `changed files (N): ...`, names the paths the branch changed against the
  *    default branch's merge-base (read with the same guarded git as the version-control digest, after the check), in the same closed shape: sorted, at most 40, 1000 bytes,
  *    N counting every path so a reader can tell a cut list from a whole one. The cloud compares the two lines: a check that failed only in files the change did not touch
  *    needs a person, not a fix round. Left out when the check passed or was stopped, or when git could not say.
@@ -36,6 +38,7 @@ import type { InstallCapture } from "./engineKit.js";
 import { GitPathError, guardConfigEnv, type GitCapture } from "./git.js";
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
 import { HostReadSession, hostGit, readWorkspaceGit } from "./hostRead.js";
+import { LISTING_CAP } from "./repoMap.js";
 import { protectedRootNames, VCS_DIR } from "../sandbox/checkProtected.js";
 
 /** How much raw output is kept before redaction; the summary is cut to `CHECK_SUMMARY_MAX_BYTES` afterwards. */
@@ -82,6 +85,12 @@ export interface CheckStepDeps {
    * the summary's header. Optional: a daemon without it sends no such line, and the cloud then treats a failed check as it always did.
    */
   changedFiles?: (workspace: string, base: string) => Promise<string[] | null>;
+  /**
+   * The workspace's tracked paths, read only when a failed check named at least one test file (`createFailedFiles`'s `resolve()`), to widen a name a test runner
+   * printed relative to its own package to the repo-root-relative path `done.failed_files` and the summary header carry. Optional for the same reason as
+   * `changedFiles`: a daemon without it sends every name exactly as printed, as before.
+   */
+  trackedFiles?: (workspace: string) => Promise<string[] | null>;
 }
 
 export type CheckOutcome = { passed: boolean; body: DoneCheck; /** Set when the check was not run because the dev shell is missing. */ noDevShell?: true };
@@ -109,11 +118,17 @@ const FAILED_FILES_COUNTED = 1000;
  * Picks the failed test files out of the whole output of a check, line by line as it arrives (the summary keeps only the end of the output, and a long run's failures
  * are printed far above it). Closed shape: only a plain relative file name (`NAMED_FILE`, the workspace prefix removed first) is ever kept, first-seen order, at most
  * `FAILED_FILES_MAX` of them; the rest are counted. Memory stays bounded at `FAILED_FILES_MAX + FAILED_FILES_COUNTED` names; no output line is ever stored.
+ *
+ * `trackedFiles`, when given, lists the workspace's tracked paths so a name a test runner prints relative to its own package (vitest's workspace root, not the
+ * repository's) can be widened to the repo-root-relative path the cloud's scope check and `done.failed_files` expect: `resolve()` maps a seen name to the one
+ * tracked path that equals it or ends with `/` plus it, and leaves it exactly as printed when no tracked path matches, more than one could, or it is already
+ * repo-root-relative (then the match is itself). `resolve()` must run, at most once, before `summary()` or `list()` is read.
  */
-export function createFailedFiles(workspace: string): { line: (text: string) => void; summary: () => string; list: () => { files: string[]; more: number } } {
+export function createFailedFiles(workspace: string, trackedFiles?: () => Promise<string[] | null>): { line: (text: string) => void; resolve: () => Promise<void>; summary: () => string; list: () => { files: string[]; more: number } } {
   const seen = new Set<string>();
   const countedPast = new Set<string>();
   let more = 0;
+  let resolved = false;
   return {
     line(text) {
       const match = text.replace(/\u001b\[[0-9;]*m/g, "").match(FAILED_FILE);
@@ -127,6 +142,16 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
       }
       more += 1;
       if (countedPast.size < FAILED_FILES_COUNTED) countedPast.add(file);
+    },
+    async resolve() {
+      // No daemon-supplied lister, or nothing seen yet to map: the lister is never called, and every name stays exactly as printed.
+      if (resolved || trackedFiles === undefined || seen.size === 0) return;
+      resolved = true;
+      const tracked = await trackedFiles();
+      if (tracked === null) return;
+      const mapped = [...seen].map((file) => widenToTracked(file, tracked));
+      seen.clear();
+      for (const file of mapped) seen.add(file);
     },
     /**
      * D#6 CHECK-FAILFILES-TO-CLOUD: the names for `done`'s `check.failed_files`: the first 20 that are plain repo-relative paths of at most 200 characters and carry no credential shape (`normalised` refuses an
@@ -155,6 +180,23 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
       return `failed test files (${String(seen.size + more)}): ${shown.join(", ")}${left === 0 ? "" : ` (and ${String(left)} more)`}\n`;
     },
   };
+}
+
+/**
+ * `name`, widened to the one tracked path that equals it or ends with `/` plus it; `name` unchanged when no tracked path matches, more than one could, or the
+ * matched path does not itself satisfy `NAMED_FILE`. `git ls-files -z` prints a tracked path verbatim, with no quoting, so a workspace that holds a path built
+ * to carry a newline, a comma or another byte the summary's closed shape never allows (`line()` already requires `NAMED_FILE` of a printed name before it is
+ * kept) must never be substituted in: that would let such a path forge extra header lines or fields once the summary joins it in with commas.
+ */
+function widenToTracked(name: string, tracked: readonly string[]): string {
+  let match: string | undefined;
+  for (const trackedPath of tracked) {
+    if (trackedPath === name || trackedPath.endsWith(`/${name}`)) {
+      if (match !== undefined) return name;
+      match = trackedPath;
+    }
+  }
+  return match !== undefined && NAMED_FILE.test(match) ? match : name;
 }
 
 /** How many changed files, and how many bytes of their names, the header names. A longer list is counted, and the cloud then does not rely on it. */
@@ -198,8 +240,26 @@ export function createChangedFiles(capture: GitCapture, envOptions: CleanEnvOpti
   };
 }
 
-/** A listing at least this long (the capture keeps 64 K) is treated as possibly cut. */
-const LISTING_CAP_GUARD = 60 * 1024;
+/**
+ * A listing at least this long is treated as possibly cut. Both `createChangedFiles` and `createTrackedFiles` run their reads through the `capture` the
+ * daemon hands them, which in production is always the engine's `captureLarge` (8 MiB, `LISTING_CAP` in `repoMap.ts`, the same cap `readRepoMap` guards its
+ * own big listing against); a smaller guard here would call an ordinary repository's whole tracked-path listing "possibly cut" and silently stop
+ * `createTrackedFiles` from ever widening a name.
+ */
+const LISTING_CAP_GUARD = LISTING_CAP;
+
+/**
+ * The workspace's tracked paths (`git ls-files -z`), read with the same guarded git, clean environment, 30 s timeout and cut-listing guard as `createChangedFiles`,
+ * for `createFailedFiles`'s `resolve()` to widen a failed test file's printed name to its repo-root-relative path. Null when the read failed, timed out or could
+ * have been cut; `resolve()` then leaves every name exactly as printed.
+ */
+export function createTrackedFiles(capture: GitCapture, envOptions: CleanEnvOptions): NonNullable<CheckStepDeps["trackedFiles"]> {
+  return async (workspace) => {
+    const listing = await readWorkspaceGit(capture, envOptions, workspace, hostGit("ls-files", "-z"), 30_000);
+    if (listing.code !== 0 || listing.timedOut || listing.stdout.length >= LISTING_CAP_GUARD) return null;
+    return listing.stdout.split("\0").filter((name) => name !== "");
+  };
+}
 
 /** The last `max` bytes of `text`, without a broken character at the start. */
 function lastBytes(text: string, max: number): string {
@@ -481,7 +541,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
       return failed("protected_unreadable", `the check was not run: ${why}${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     let out: Awaited<ReturnType<InstallCapture>>;
-    const failedFiles = createFailedFiles(input.workspace);
+    const failedFiles = createFailedFiles(input.workspace, deps.trackedFiles === undefined ? undefined : () => deps.trackedFiles!(input.workspace));
     try {
       out = await deps.capture(launch.tool, launch.args, launch.env, input.workspace, input.check.timeout_s * 1000, RAW_TAIL_CHARS, input.signal, launch.feed, failedFiles.line);
     } catch {
@@ -519,6 +579,15 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
         // fx-swallow-ok: a changed-files read that failed leaves the header line out; the check's result does not depend on it
         changedLine = "";
       }
+    }
+    // Widens a package-relative failed-file name to its repo-root-relative path before the summary header and `done.failed_files` are built from it (resolve() is a
+    // no-op without a lister or with nothing seen, so a daemon without one, or a passing check, never reads the workspace's tracked paths). `trackedFiles` reads
+    // through the same `readWorkspaceGit` as `changedFiles` above and can throw `GitPathError("workspace_git_refused")` the same way; a throw here must not
+    // escape and be mistaken for the check never having run, so it is swallowed exactly like the `changedFiles` read, leaving every name exactly as printed.
+    try {
+      await failedFiles.resolve();
+    } catch {
+      // fx-swallow-ok: a tracked-files read that failed leaves every failed-file name exactly as printed; the check's result does not depend on it
     }
     // A failed check names its failing test files on `done` (protocol 13); a pass, a timeout or an abort names none, and nothing is sent when none were seen.
     const named = out.code !== 0 && !out.timedOut && !out.aborted ? failedFiles.list() : { files: [], more: 0 };
