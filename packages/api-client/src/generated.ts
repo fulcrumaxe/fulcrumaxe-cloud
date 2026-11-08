@@ -576,7 +576,7 @@ export interface Operations {
         rejected: string;
       }>;
       receipts_total?: number;
-      actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr" | "remove_from_queue" | "queue_again">;
+      actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr" | "remove_from_queue" | "queue_again" | "review_again">;
       close_on_github: boolean;
       request_changes_blocked: ("live" | "rounds") | (null);
       change_requests: Array<{
@@ -693,6 +693,17 @@ export interface Operations {
     };
   };
   queueAgainWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      action_id: string;
+      state: "accepted" | "claimed" | "done" | "refused" | "failed";
+    };
+  };
+  reviewAgainWorkItem: {
     path: {
       id: string;
     };
@@ -5282,6 +5293,17 @@ export const operations = {
   queueAgainWorkItem: {
     method: "POST",
     path: "/api/v1/work-items/{id}/queue-again",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  reviewAgainWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/review-again",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

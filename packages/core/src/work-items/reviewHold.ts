@@ -14,8 +14,9 @@ export const NO_VERDICT_ESCALATION_CODE = 'reviewer_no_verdict';
 
 /**
  * A reviewer said it could not verify some criteria in its environment (`escalated`, code `reviewer_unverifiable`; reasons: the roles; run_id: the reviewer's run,
- * whose stored envelope holds the criteria and why). The item is at Needs a person and no fix round was started. It is NOT a review hold: pressing Approve would
- * ask the same reviewer in the same environment, so the person verifies the criteria themselves and merges or closes on GitHub.
+ * whose stored envelope holds the criteria and why). The item is at Needs a person and no fix round was started. While the pull request is still at the
+ * reviewed head it is a review hold (D#6 REVIEW-AGAIN-ACTION): the card's Review again asks the reviewers that did not pass again, once the person has fixed
+ * what the reviewer's environment lacked, or has verified the criteria themselves. A moved head ends the hold (the stop is about a commit that is gone).
  */
 export const UNVERIFIABLE_ESCALATION_CODE = 'reviewer_unverifiable';
 
@@ -27,7 +28,27 @@ export const QUEUE_ESCALATION_CODES: readonly string[] = ['merge_queue_retry_use
 
 export async function readReviewHold(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
   const code = await readEscalationCode(client, workItemId);
-  return code === NO_VERDICT_ESCALATION_CODE || (code !== null && QUEUE_ESCALATION_CODES.includes(code)) || (code !== null && BRANCH_QUESTION_CODES.includes(code) && (await readBranchAnswerHold(client, workItemId)));
+  return code === NO_VERDICT_ESCALATION_CODE || (code === UNVERIFIABLE_ESCALATION_CODE && (await readUnverifiableHold(client, workItemId))) || (code !== null && QUEUE_ESCALATION_CODES.includes(code)) || (code !== null && BRANCH_QUESTION_CODES.includes(code) && (await readBranchAnswerHold(client, workItemId)));
+}
+
+/**
+ * D#6 REVIEW-AGAIN-ACTION: the item sits at Needs a person because a reviewer could not verify criteria in its environment, and the pull request has not moved
+ * off the head that was reviewed. Derived, never stamped: the newest escalation since the item last reached Needs a person must be `reviewer_unverifiable`, and
+ * no `pr_head_pushed` fact for a different head may follow it. A new review of the same head that ends the same way writes a newer escalation, so the hold is
+ * asked again by each stop.
+ */
+export async function readUnverifiableHold(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT 1 FROM work_items w, LATERAL (
+        SELECT e.seq, e.head_sha, e.code FROM work_item_driver_events e
+         WHERE e.work_item_id = w.id AND e.kind = 'escalated'
+           AND e.created_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = w.id AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
+         ORDER BY e.seq DESC LIMIT 1) n
+      WHERE w.id = $1::uuid AND w.stage = 'needs_human' AND n.code = $2 AND n.head_sha IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM work_item_driver_events p WHERE p.work_item_id = w.id AND p.kind = 'pr_head_pushed' AND p.seq > n.seq AND p.head_sha IS DISTINCT FROM n.head_sha)`,
+    [workItemId, UNVERIFIABLE_ESCALATION_CODE],
+  );
+  return rows.length > 0;
 }
 
 /** The newest escalation's code since the item last reached Needs a person, or null. */

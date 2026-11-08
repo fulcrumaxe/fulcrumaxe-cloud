@@ -5,7 +5,7 @@ import { advanceActionFor } from './advance.js';
 import { CI_MISSING_PREFIX } from './driverEvents.js';
 import { blockingReasons, isQueuedSql, removedByPerson } from './mergeReadiness.js';
 import { CLOSE_ON_GITHUB_STAGES } from './operatorActions.js';
-import { readReviewHold } from './reviewHold.js';
+import { readReviewHold, readUnverifiableHold } from './reviewHold.js';
 import { cleanWorkItemTitle } from './title.js';
 
 /**
@@ -60,6 +60,9 @@ export const STALL_ACTION_LABELS: Readonly<Record<string, string>> = Object.free
   changes_requested: 'Continue the review',
   review_passed: 'Check the merge',
 });
+
+/** D#6 REVIEW-AGAIN-ACTION: the card's button for a stop whose reviewer could not verify criteria where it ran (the Pipeline app's operator label says the same). */
+export const REVIEW_AGAIN_LABEL = 'Review again';
 
 /** What a person shrinks when a job is too large to send to a runner; the build card and the reviewer-start card both say it. */
 const JOB_TOO_LARGE_SHRINK = "Shrink the Spec's file list or the context it pulls in (pinned files, memory, long task text)";
@@ -276,11 +279,12 @@ interface Row {
 }
 
 /** The label for the card's top button at this stage, asked of the stage driver's own table; null when it does not advance here. */
-export function stallActionLabel(stage: string, facts: { discussionId: string | null; kind: string | null; hasSpec: boolean; noVerdictHold: boolean; followUp?: boolean; prOpen?: boolean }): string | null {
+export function stallActionLabel(stage: string, facts: { discussionId: string | null; kind: string | null; hasSpec: boolean; noVerdictHold: boolean; followUp?: boolean; prOpen?: boolean; unverifiableHold?: boolean }): string | null {
   const verdict = advanceActionFor({ stage, discussion_id: facts.discussionId, kind: facts.kind, has_spec: facts.hasSpec, no_verdict_hold: facts.noVerdictHold, ...(facts.followUp === true ? { follow_up: true } : {}) });
   if (!verdict.ok) return null;
   if (stage === 'needs_human') {
-    if (verdict.action === 'review') return 'Continue the review';
+    // D#6 REVIEW-AGAIN-ACTION: a stop for criteria a reviewer could not verify asks the reviewers that did not pass again; its own words.
+    if (verdict.action === 'review') return facts.unverifiableHold === true ? REVIEW_AGAIN_LABEL : 'Continue the review';
     // D#6 REPUBLISH-TRANSIENT-RETRY: with the pull request still open a rebuild stops at it (`rebuild_pr_open`), so the press is a dead end. What works there is Request changes (#724, #733), which needs the
     // person's note and so is not a one-press button: the row offers nothing and says to open the card, which lists it.
     return facts.prOpen === true ? null : 'Build again';
@@ -315,8 +319,13 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
     );
     // Needs a person holds for a missing verdict (Approve re-enters the review) or is a build to run again: the one definition the approve route uses.
     const holds = new Set<string>();
-    for (const r of res.rows) if (r.stage === 'needs_human' && (await readReviewHold(client, r.id))) holds.add(r.id);
-    return res.rows.map((r) => ({ ...r, hold: holds.has(r.id) }));
+    const unverifiable = new Set<string>();
+    for (const r of res.rows) {
+      if (r.stage !== 'needs_human' || !(await readReviewHold(client, r.id))) continue;
+      holds.add(r.id);
+      if (await readUnverifiableHold(client, r.id)) unverifiable.add(r.id);
+    }
+    return res.rows.map((r) => ({ ...r, hold: holds.has(r.id), unverifiable: unverifiable.has(r.id) }));
   });
   const found: StalledItem[] = [];
   for (const r of rows) {
@@ -338,7 +347,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
       stage: r.stage,
       code: stall.code,
       why: stall.why,
-      actionLabel: stallActionLabel(r.stage, { discussionId: r.discussion_id, kind: r.kind, hasSpec: r.has_spec, noVerdictHold: r.hold, followUp: r.follow_up, prOpen: r.stage === 'needs_human' && r.needs_human_from !== null && CLOSE_ON_GITHUB_STAGES.includes(r.needs_human_from) }),
+      actionLabel: stallActionLabel(r.stage, { discussionId: r.discussion_id, kind: r.kind, hasSpec: r.has_spec, noVerdictHold: r.hold, unverifiableHold: r.unverifiable, followUp: r.follow_up, prOpen: r.stage === 'needs_human' && r.needs_human_from !== null && CLOSE_ON_GITHUB_STAGES.includes(r.needs_human_from) }),
       since: stall.since,
     });
   }

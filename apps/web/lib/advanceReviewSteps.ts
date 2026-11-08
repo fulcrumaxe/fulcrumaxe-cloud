@@ -202,9 +202,10 @@ const REVIEW_ROLES: readonly string[] = ["code-reviewer", "acceptance-tester", "
  * D#483 S5-k1d: the reviewer runs of one head and re-review round that really started (every run but a refused one), one per role. A restarted review uses them and
  * asks only for the roles that have none: the key of an ask a spending limit denied finds that refused run again, so it is never asked a second time.
  */
-export async function reviewRunsBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string }>> {
+export async function reviewRunsBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string; redoAttempt?: number }>> {
   if (!worker || typeof worker.advanceReviewRuns !== "function") return [];
-  return (await worker.advanceReviewRuns(who, { headSha, rereview })).map((r) => ({ role: r.role, runId: r.runId }));
+  // D#6 REVIEW-AGAIN-ACTION: a run a person's request has put aside (`superseded`) is not used: `redoAttempt` is the attempt its replacement starts under (never an existing key).
+  return (await worker.advanceReviewRuns(who, { headSha, rereview })).map((r) => ({ role: r.role, runId: r.runId, ...(r.superseded === true ? { redoAttempt: r.attempt + 1 } : {}) }));
 }
 
 export interface RerunOut {

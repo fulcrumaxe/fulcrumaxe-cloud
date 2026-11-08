@@ -2270,10 +2270,10 @@ export function approveView(item, approver, liveRun = false, waiting = null) {
 // for a few moments so a refusal that costs nothing reaches the sentence. An open pull request has no Close: the server says
 // so (`close_on_github`), and the card tells the person to close the pull request on GitHub.
 
-export const OPERATOR_LABELS = { request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again", remove_from_queue: "Remove from queue", queue_again: "Queue again" };
+export const OPERATOR_LABELS = { request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again", remove_from_queue: "Remove from queue", queue_again: "Queue again", review_again: "Review again" };
 /** The order buttons are drawn in. An action the server lists that is not here is not drawn. */
-export const OPERATOR_ORDER = ["request_changes", "build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen", "retry_push", "open_pr", "remove_from_queue", "queue_again"];
-const OPERATOR_TESTIDS = { request_changes: "pl-op-changes", build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen", retry_push: "pl-op-retry-push", open_pr: "pl-op-open-pr", remove_from_queue: "pl-op-queue-remove", queue_again: "pl-op-queue-again" };
+export const OPERATOR_ORDER = ["request_changes", "build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen", "retry_push", "open_pr", "remove_from_queue", "queue_again", "review_again"];
+const OPERATOR_TESTIDS = { request_changes: "pl-op-changes", build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen", retry_push: "pl-op-retry-push", open_pr: "pl-op-open-pr", remove_from_queue: "pl-op-queue-remove", queue_again: "pl-op-queue-again", review_again: "pl-op-review-again" };
 
 const itemPath = (id) => "/api/v1/work-items/" + encodeURIComponent(id);
 export const OPERATOR_PATHS = {
@@ -2288,6 +2288,7 @@ export const OPERATOR_PATHS = {
   open_pr: (id) => itemPath(id) + "/open-pr",
   remove_from_queue: (id) => itemPath(id) + "/remove-from-queue",
   queue_again: (id) => itemPath(id) + "/queue-again",
+  review_again: (id) => itemPath(id) + "/review-again",
 };
 
 /** Under the buttons, before the click: what each one does. */
@@ -2303,6 +2304,7 @@ export const OPERATOR_NOTES = {
   open_pr: "Open the pull request again opens the pull request for the branch that was already pushed. Nothing is pushed again.",
   remove_from_queue: "Remove from queue takes the pull request out of the merge queue. Nothing queues it again by itself; Queue again does.",
   queue_again: "Queue again checks the pull request's current commit as a first attempt would, and queues it only if everything is clear.",
+  review_again: "Review again asks the reviewers that did not pass to look at this same commit again. No fix round is used. Press it once the reviewer's environment is fixed, or after you checked the criteria yourself.",
 };
 export const CLOSE_ON_GITHUB_NOTE = "To close this, close its pull request on GitHub. The card then moves to Closed without a merge.";
 
@@ -2319,6 +2321,7 @@ export const OPERATOR_STARTED = {
   open_pr: "The pull request is open. The Public change line has its link.",
   remove_from_queue: "Removed. The card shows who removed it once GitHub reports the removal.",
   queue_again: "Started. The merge check is running again, and the card shows whether the pull request was queued.",
+  review_again: "Started. The reviewers that did not pass are checking the same commit again, and the card moves when they are done.",
 };
 /** Open the pull request again answers with its outcome at once; a refusal leaves the pushed branch as it was. */
 export const OPEN_PR_REFUSED = "The pull request could not be opened. The pushed branch is unchanged; the Public change line says what is known. You can try again.";

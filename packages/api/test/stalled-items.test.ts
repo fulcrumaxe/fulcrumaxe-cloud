@@ -173,6 +173,30 @@ describe('R6: stalled items list', () => {
     expect(byId.get(fromBuild)).toMatchObject({ stage: 'needs_human', action_label: 'Build again', can_act: true });
   });
 
+  it('D#6 REVIEW-AGAIN-ACTION: a stop for criteria a reviewer could not verify is listed with Review again; once the pull request moved to another head, or for any other stop, there is no press', async () => {
+    const f = await fixture();
+    const HEAD = 'e'.repeat(40);
+    const mk = async (title: string) => {
+      const id = await item(f.refs, 'needs_human', title);
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'pr_opened', 'needs_human', now() - interval '10 minutes', 'control_plane', 'x')`, [f.refs.accountId, id]);
+      return id;
+    };
+    const esc = async (id: string, code: string) => {
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'escalated', $3, $4::text[], $5, 7, $6)`, [f.refs.accountId, id, code, ['acceptance_tester'], HEAD, randomUUID()]);
+    };
+    const held = await mk('Unverifiable');
+    await esc(held, 'reviewer_unverifiable');
+    const moved = await mk('Head moved');
+    await esc(moved, 'reviewer_unverifiable');
+    await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'pr_head_pushed', 'observed', $3, 7, $4)`, [f.refs.accountId, moved, 'f'.repeat(40), randomUUID()]);
+    const other = await mk('Another stop');
+    await esc(other, 'max_fix_rounds');
+    const byId = new Map((await read(f.who)).items.map((i) => [i.work_item_id, i]));
+    expect(byId.get(held)).toMatchObject({ stage: 'needs_human', action_label: 'Review again', can_act: true });
+    expect(byId.get(moved)).toMatchObject({ action_label: null, can_act: false });
+    expect(byId.get(other)).toMatchObject({ action_label: null, can_act: false });
+  });
+
   it('a build the worker refused at Spec ready is listed with the build button', async () => {
     const f = await fixture();
     const id = await item(f.refs, 'spec_ready');

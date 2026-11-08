@@ -195,6 +195,16 @@ describe('R6: the action is the card\'s top button', () => {
     expect(stallActionLabel('pr_opened', { ...base, prOpen: true })).toBe(STALL_ACTION_LABELS.pr_opened);
   });
 
+  it('D#6 REVIEW-AGAIN-ACTION: a stop for criteria a reviewer could not verify is "Review again" (open pull request or not); only that stop, only with the hold', () => {
+    expect(stallActionLabel('needs_human', { ...base, prOpen: true, noVerdictHold: true, unverifiableHold: true })).toBe('Review again');
+    expect(stallActionLabel('needs_human', { ...base, noVerdictHold: true, unverifiableHold: true })).toBe('Review again');
+    // Without the hold the stop is today's: the flag alone changes nothing.
+    expect(stallActionLabel('needs_human', { ...base, prOpen: true, unverifiableHold: true })).toBeNull();
+    expect(stallActionLabel('needs_human', { ...base, unverifiableHold: true })).toBe('Build again');
+    // Another review hold keeps its words.
+    expect(stallActionLabel('needs_human', { ...base, prOpen: true, noVerdictHold: true, unverifiableHold: false })).toBe('Continue the review');
+  });
+
   it('is null where the driver cannot advance (no Spec to build from), so the row offers nothing it would refuse', () => {
     expect(stallActionLabel('needs_human', { ...base, hasSpec: false })).toBeNull();
     expect(stallActionLabel('pr_opened', { ...base, hasSpec: false })).toBeNull();

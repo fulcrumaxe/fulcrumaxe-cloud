@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { requestRunAction } from "@fx/core/src/runActions/index.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { OperatorMovedOnError, OperatorRefusedError, RequestChangesNoteError, checkRespec, closeWorkItem, reopenWorkItem, requestChanges, requestPublicChangeAction, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
+import { OperatorMovedOnError, OperatorRefusedError, RequestChangesNoteError, checkRespec, closeWorkItem, reopenWorkItem, requestChanges, requestPublicChangeAction, requestReviewAgain, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
 import { REQUEST_CHANGES_NOTE_MAX } from "@fx/core/src/work-items/operatorActions.js";
 import type { OperatorVerdict } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
@@ -383,5 +383,22 @@ export const workItemActionRoutes: RouteEntry[] = [
       "503": UNAVAILABLE_TEXT,
     },
     handler: (ctx, input) => driven(ctx, input.params.id!, (move, id) => queueAgain({ pool: move.pool, principal: move.principal }, id)),
+  },
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/review-again",
+    operationId: "reviewAgainWorkItem",
+    summary: "Ask the reviewers that did not pass to review the same commit again",
+    description:
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Records an audit row naming who pressed it, then asks the pipeline to run the review again on the pull request's current head: only the reviewers that did not pass on that head are asked again, no fix round is used and no new review version is counted. Answers 202 `{ action_id, state }`; the outcome arrives through `GET /api/v1/run-actions/{id}`. " +
+      "Allowed only while `actions` lists `review_again`: a reviewer could not verify criteria where it ran, and the pull request is still at the commit it reviewed.",
+    responseSchema: acceptedSchema,
+    successStatus: 202,
+    extraResponses: {
+      "403": SHARED_ERRORS,
+      "409": "Error `action_not_available` (the item is not stopped on a reviewer that could not verify criteria, or the pull request has moved to another commit), `no_repo` or `already_running` (agents are working on it).",
+      "503": UNAVAILABLE_TEXT,
+    },
+    handler: (ctx, input) => driven(ctx, input.params.id!, (move, id) => requestReviewAgain(move, id)),
   },
 ];

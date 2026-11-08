@@ -18,6 +18,7 @@ import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } fro
 import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalSentence } from './scopeRefusal.js';
 import { openPrStopSentence } from './baseSync.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
+import { VERDICT_ROLES } from './verdictRoles.js';
 import { buildStartsByItself } from './stageApprovalGate.js';
 import { readUnverifiable } from './unverifiable.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
@@ -351,6 +352,15 @@ export function reviewerUnverifiableSentence(reasons: readonly string[], stored:
     `The ${name} could not verify ${items.length === 1 ? 'this criterion' : 'these criteria'} where it ran, so no changes were requested and nothing was sent back to the builder. A person needs to verify ${items.length === 1 ? 'it' : 'them'}, then merge or close the pull request on GitHub:`,
     ...lines,
   ].join('\n'), 3500);
+}
+
+/** D#6 FIXROUND-NOCHANGE-STOP: a reviewer's run of the item is pending, running or paused. A SELECT over the tenant's client; the stop notice waits for it. */
+async function reviewerRunLive(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT 1 FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.role = ANY($2::text[]) AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled') LIMIT 1`,
+    [workItemId, VERDICT_ROLES],
+  );
+  return rows.length > 0;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -831,7 +841,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     } else if ((item.stage === 'merged' || item.stage === 'closed_unmerged') && (publicPrStop = await readPublicPrStop(client, workItemId)) !== null) {
       // A fix round ended on a public pull request that was closed or merged on GitHub: the item cannot move, so the record of the stop is the notice (D#598 P1g-1).
       notice = { kind: 'public_update_stopped', reason: publicPrStop };
-    } else if (item.stage === 'needs_human') {
+    } else if (item.stage === 'needs_human' && !(await reviewerRunLive(client, workItemId))) {
+      // D#6 FIXROUND-NOCHANGE-STOP: while a reviewer is running the card shows that reviewer (the live run), never the stop it is about to replace.
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.
       const rebuildStop = (

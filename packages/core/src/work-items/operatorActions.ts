@@ -18,7 +18,7 @@ import { mayOpenPublicPullRequest, mayRetryPublish, readRetryFacts, type RetryFa
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { ADVANCE_PANEL_KINDS, advanceActionFor, type AdvanceFacts } from './advance.js';
 import { reviewFixRoundsSql } from './driverEvents.js';
-import { QUEUE_ESCALATION_CODES, readEscalationCode } from './reviewHold.js';
+import { QUEUE_ESCALATION_CODES, readEscalationCode, readUnverifiableHold } from './reviewHold.js';
 import { readMergeQueueState, type MergeQueueState } from './mergeReadiness.js';
 import { isLegalStageTransition } from './stages.js';
 
@@ -29,7 +29,7 @@ import { isLegalStageTransition } from './stages.js';
  */
 export const BACK_TO_DISCUSSION_REF_PREFIX = 'back_to_discussion:';
 
-export const OPERATOR_ACTIONS = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen', 'retry_push', 'open_pr', 'remove_from_queue', 'queue_again'] as const;
+export const OPERATOR_ACTIONS = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen', 'retry_push', 'open_pr', 'remove_from_queue', 'queue_again', 'review_again'] as const;
 export type OperatorAction = (typeof OPERATOR_ACTIONS)[number];
 
 /**
@@ -85,6 +85,8 @@ export interface OperatorFacts extends AdvanceFacts {
   merge_queue?: MergeQueueState['state'] | null;
   /** D#694 B6-5: the item's newest escalation is one the merge queue made (`merge_queue_retry_used`, `merge_queue_no_answer`). Absent: unknown, and Queue again is not offered at Needs a person. */
   queue_hold?: boolean;
+  /** D#6 REVIEW-AGAIN-ACTION: a reviewer could not verify criteria where it ran and the pull request is still at the head it reviewed (`readUnverifiableHold`). Absent: unknown, and Review again is not offered. */
+  unverifiable_hold?: boolean;
   /** Fix rounds already started for the item (its `fix_round_started` driver events). Absent: unknown, and Request changes is refused. */
   fix_rounds_started?: number;
 }
@@ -95,7 +97,7 @@ export type OperatorVerdict = { ok: true } | { ok: false; reason: OperatorRefusa
 const no = (reason: OperatorRefusal, message: string): OperatorVerdict => ({ ok: false, reason, message });
 
 /** The actions the stage driver carries out (they need the repository and the issue behind the item). */
-const DRIVEN: readonly OperatorAction[] = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'queue_again'];
+const DRIVEN: readonly OperatorAction[] = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'queue_again', 'review_again'];
 
 /** Whether the caller may do `action` to the item now; or why not. The first refusal in this order wins: who, what, where, busy, stage. */
 export function operatorVerdict(action: OperatorAction, f: OperatorFacts): OperatorVerdict {
@@ -157,6 +159,12 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
     // Queue again also from Needs a person, when the queue put it there (a used-up retry, or the host's silence): the normal advance re-enters the review there (`no_verdict_hold`, see reviewHold.ts).
     case 'queue_again':
       return (f.stage === 'review_passed' || (f.stage === 'needs_human' && f.queue_hold === true)) && (f.merge_queue === 'removed' || f.merge_queue === 'no_answer') ? { ok: true } : no('state', 'the queue has not taken the pull request out');
+    // D#6 REVIEW-AGAIN-ACTION: the reviewers that did not pass look at the same head again. No fix round and no new review version; the approve route does it (as Build again does), recorded as the person's approval.
+    case 'review_again': {
+      if (f.stage !== 'needs_human' || f.pr_open !== true || f.unverifiable_hold !== true) return no('state', 'no reviewer is waiting to be asked again');
+      const v = advanceActionFor({ ...stageFacts, no_verdict_hold: true });
+      return v.ok && v.action === 'review' ? { ok: true } : no(v.ok ? 'stage' : v.reason, v.ok ? `work item is ${f.stage}` : v.message);
+    }
     case 'reopen':
       if (!REOPENABLE_STAGES.includes(f.stage) || !isLegalStageTransition(f.stage, 'triaged')) return no('stage', `work item is ${f.stage}`);
       return { ok: true };
@@ -197,5 +205,6 @@ export async function readOperatorFacts(client: PoolClient, workItemId: string, 
   const prOpen = CLOSE_ON_GITHUB_STAGES.includes(r.stage) || (r.stage === 'needs_human' && needsHumanFrom !== null && CLOSE_ON_GITHUB_STAGES.includes(needsHumanFrom));
   return { ...rest, role, spec_file_list_known: parseAcceptanceScope(acceptanceFiles).kind === 'known', push: await readRetryFacts(client, workItemId), merge_queue: (await readMergeQueueState(client, accountId, workItemId))?.state ?? null,
     queue_hold: QUEUE_ESCALATION_CODES.includes((await readEscalationCode(client, workItemId)) ?? ''),
+    unverifiable_hold: r.stage === 'needs_human' && (await readUnverifiableHold(client, workItemId)),
     pr_open: prOpen, fix_rounds_started: Number(fixRounds) };
 }

@@ -16,6 +16,7 @@ import { maxFixRounds } from '@fx/spend';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { removeIntentRecent } from '@fx/core/src/work-items/queueIntent.js';
+import { operatorActionsFor, readOperatorFacts } from '@fx/core/src/work-items/operatorActions.js';
 import { mergeQueue } from '@fx/pipeline';
 
 interface Identity {
@@ -988,6 +989,110 @@ describe('work item actions: back to discussion, treat as a feature, close', () 
       expect(await code(await post(m, againPath(await queuedItem(m.accountId, 'actor_app'))))).toBe('insufficient_role');
       expect(await queueAudits(p.accountId)).toBe(0);
       await noRequests(p.accountId);
+    });
+  });
+
+  describe('Review again (D#6 REVIEW-AGAIN-ACTION)', () => {
+    const HEAD = 'c'.repeat(40);
+    const MOVED = 'd'.repeat(40);
+    const path = (id: string) => `/work-items/${id}/review-again`;
+    const reviewAudits = (a: string) => count(`SELECT count(*) AS n FROM audit_log WHERE account_id = $1 AND action = 'work_item.sent_back' AND payload->>'action' = 'review_again'`, a);
+    const event = (a: string, item: string, kind: string, key: string, code: string | null, head: string | null, reasons: string[] = []) =>
+      admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, $3, $4, $5, $6, $7, 7)`, [a, item, kind, key, code, reasons, head]);
+    /** A Needs-a-person item whose pull request is open (it came from Pull request open) and whose newest escalation is `code` on HEAD. */
+    async function stopped(a: string, escalation = 'reviewer_unverifiable') {
+      const { item } = await seed(a, { stage: 'needs_human' });
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'pr_opened', 'needs_human', now(), 'control_plane', 'x')`, [a, item]);
+      await event(a, item, 'escalated', 'esc', escalation, HEAD, ['acceptance_tester']);
+      return item;
+    }
+
+    it('an owner presses it on an unverifiable stop: 202, one audit row naming who pressed it, no stage move, no fix round, and the stage driver is asked', async () => {
+      const p = await person('owner');
+      const item = await stopped(p.accountId);
+      expect(await readReviewHold(admin, item)).toBe(true);
+      const res = await post(p, path(item));
+      expect(res.status).toBe(202);
+      const body = (await res.json()) as Accepted;
+      expect(signal.sent).toEqual([{ actionId: body.action_id, accountId: p.accountId, kind: 'advance_work_item' }]);
+      const row = await one<{ actor: string; payload: Record<string, unknown> }>(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND payload->>'action' = 'review_again'`, [p.accountId]);
+      expect(row!.actor).toBe(p.userId);
+      expect(row!.payload).toMatchObject({ work_item_id: item, action: 'review_again', from_stage: 'needs_human' });
+      expect(await stageOf(item)).toBe('needs_human');
+      expect(await transitions(p.accountId)).toBe(1);
+      expect(await count(`SELECT count(*) AS n FROM work_item_driver_events WHERE account_id = $1 AND kind IN ('fix_round_started', 'fix_pushed_nothing')`, p.accountId)).toBe(0);
+    });
+
+    it('an admin may press it again after a second stop: each press is its own audit row', async () => {
+      const p = await person('admin');
+      const item = await stopped(p.accountId);
+      expect((await post(p, path(item))).status).toBe(202);
+      await admin.query(`UPDATE run_action_requests SET state = 'done', finished_at = now() WHERE account_id = $1`, [p.accountId]);
+      await event(p.accountId, item, 'escalated', 'esc2', 'reviewer_unverifiable', HEAD, ['acceptance_tester']);
+      expect((await post(p, path(item))).status).toBe(202);
+      expect(await reviewAudits(p.accountId)).toBe(2);
+    });
+
+    it.each([
+      ['another escalation', 'max_fix_rounds'],
+      ['a reviewer with no verdict', 'reviewer_no_verdict'],
+    ] as const)('is 409 action_not_available when the stop is %s: nothing is written', async (_n, escalation) => {
+      const p = await person('owner');
+      const item = await stopped(p.accountId, escalation);
+      const res = await post(p, path(item));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('action_not_available');
+      expect(await reviewAudits(p.accountId)).toBe(0);
+      expect(await requests(p.accountId)).toBe(0);
+      expect(signal.sent).toEqual([]);
+    });
+
+    it('is 409 once the pull request has moved to another head, and the stop reads as today\'s (no review hold)', async () => {
+      const p = await person('owner');
+      const item = await stopped(p.accountId);
+      await event(p.accountId, item, 'pr_head_pushed', 'push', 'observed', MOVED);
+      expect(await readReviewHold(admin, item)).toBe(false);
+      expect(await code(await post(p, path(item)))).toBe('action_not_available');
+      expect(await reviewAudits(p.accountId)).toBe(0);
+      expect(await requests(p.accountId)).toBe(0);
+      // A push event that names the reviewed head itself does not end the stop.
+      const same = await stopped(p.accountId);
+      await event(p.accountId, same, 'pr_head_pushed', 'push', 'observed', HEAD);
+      expect(await readReviewHold(admin, same)).toBe(true);
+    });
+
+    it('is 409 at any other stage, and for a stop whose pull request is not known to be open', async () => {
+      const p = await person('owner');
+      const { item: reviewed } = await seed(p.accountId, { stage: 'review_passed' });
+      await event(p.accountId, reviewed, 'escalated', 'esc', 'reviewer_unverifiable', HEAD, ['acceptance_tester']);
+      expect(await code(await post(p, path(reviewed)))).toBe('action_not_available');
+      const { item: noPr } = await seed(p.accountId, { stage: 'needs_human' });
+      await event(p.accountId, noPr, 'escalated', 'esc', 'reviewer_unverifiable', HEAD, ['acceptance_tester']);
+      expect(await code(await post(p, path(noPr)))).toBe('action_not_available');
+      expect(await reviewAudits(p.accountId)).toBe(0);
+    });
+
+    it('a member, a token and another account\'s item are refused; a live run is 409 already_running; nothing is written', async () => {
+      const m = await person('member');
+      expect(await code(await post(m, path(await stopped(m.accountId))))).toBe('insufficient_role');
+      const o = await person('owner');
+      const item = await stopped(o.accountId);
+      expect((await post(await tokenFor(o, ['read', 'runs:cancel']), path(item))).status).toBe(403);
+      expect((await post(o, path(randomUUID()))).status).toBe(404);
+      expect((await post(o, path(await stopped(m.accountId)))).status).toBe(404);
+      await seedRun(o.accountId, item, 'running');
+      expect(await code(await post(o, path(item)))).toBe('already_running');
+      expect(await reviewAudits(o.accountId)).toBe(0);
+      expect(await reviewAudits(m.accountId)).toBe(0);
+    });
+
+    it('the table lists review_again for this stop only', async () => {
+      const p = await person('owner');
+      const item = await stopped(p.accountId);
+      const other = await stopped(p.accountId, 'max_fix_rounds');
+      const actions = async (id: string) => withTenant(appUserPool, p.accountId, p.userId, async (c) => operatorActionsFor((await readOperatorFacts(c, id, 'owner'))!));
+      expect(await actions(item)).toContain('review_again');
+      expect(await actions(other)).not.toContain('review_again');
     });
   });
 });

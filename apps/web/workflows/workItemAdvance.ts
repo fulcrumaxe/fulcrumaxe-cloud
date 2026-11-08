@@ -418,7 +418,7 @@ export async function advanceStartReviewerStep(
 }
 
 /** D#483 S5-k1d: the reviewer runs of this head and re-review round that really started, so a restarted review asks only for the roles that have none. */
-export async function advanceReviewRunsStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string }>> {
+export async function advanceReviewRunsStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string; redoAttempt?: number }>> {
   "use step";
   return reviewRunsBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, headSha, rereview);
 }
@@ -1437,15 +1437,23 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   const { accountId, userId, workItemId } = args;
   const answers = new Map<string, StartedReviewer>();
   const attemptOf = new Map<string, number>();
-  for (const k of await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, rereview)) if (roles.includes(k.role)) answers.set(k.role, { role: k.role, runId: k.runId, reason: null });
+  // D#6 REVIEW-AGAIN-ACTION: a reviewer whose run a person's request put aside (it could not verify here and Review again was pressed, or a fix round the person asked for pushed nothing) is
+  // asked again under a new attempt key; the reviewers that passed are used as they are. `floor` is the least attempt each such role may start under.
+  const floor = new Map<string, number>();
+  for (const k of await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, rereview)) {
+    if (!roles.includes(k.role)) continue;
+    if (k.redoAttempt !== undefined) floor.set(k.role, k.redoAttempt);
+    else answers.set(k.role, { role: k.role, runId: k.runId, reason: null });
+  }
   let attempt = firstAttemptOf(args);
   const clocks = newClocks();
   let pending = roles.filter((r) => !answers.has(r));
   for (;;) {
     const asked = await Promise.all(
       pending.map((role) => {
-        attemptOf.set(role, attempt);
-        return advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, attempt > 0 ? attempt : undefined);
+        const n = Math.max(attempt, floor.get(role) ?? 0);
+        attemptOf.set(role, n);
+        return advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, n > 0 ? n : undefined);
       }),
     );
     for (const a of asked) answers.set(a.role, a);
@@ -1684,9 +1692,6 @@ async function followFix(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: n
   }
 }
 
-/** The fixed code the driver stops with when a person's fix round pushed nothing: the person asked for a change and none was made, so nothing is reviewed or merged. */
-const PERSON_FIX_NO_CHANGE = "person_fix_pushed_nothing";
-
 /**
  * A person's Request changes: one fix round on the pull request's current head, before any review. The executor gets the person's note (a fenced run
  * note the worker adds and stamps applied) and the findings of any reviewer that asked for changes on this head. The round counts toward the item's fix
@@ -1751,10 +1756,11 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx, answered =
     return { ctx: next };
   }
   if (after.headSha === pr.headSha) {
-    // Nothing was pushed for the person's request: stop and say so. The reviewers do not look again at a commit the person asked to change.
+    // D#6 FIXROUND-NOCHANGE-STOP: the person asked for a change and the round proved none was needed (or said "review again"). That is not a stop: the reviewers that did not pass look at the SAME
+    // head again (the fact below puts their earlier runs aside; the ones that passed stand), as after a reviewer-asked round that changed nothing. A repeat is bounded by the fix rounds the request spent.
     await advanceEventStep(accountId, userId, workItemId, { kind: "fix_pushed_nothing", dedupeKey: `nothing:${pr.headSha}:${actionId}:person`, code: "person_request", headSha: pr.headSha, prNumber: pr.number, runId });
-    await stopped(args, "person_fix", PERSON_FIX_NO_CHANGE, { head: pr.headSha, pr: pr.number, round });
-    return { end: { status: "needs_human", detail: PERSON_FIX_NO_CHANGE } };
+    await advanceLogStep("advance.fix_no_change", { work_item_id: workItemId, run_id: runId, run_status: fixed.status, head: pr.headSha.slice(0, 12), roles: "person" });
+    return { ctx: next };
   }
   const descent = await advanceFixDescentStep(next, pr.headSha, after.headSha);
   if (descent.state !== "descends" && descent.state !== "not_needed") return failed(descent.state === "rewritten" ? "branch_rewritten" : "compare_unavailable");

@@ -389,6 +389,24 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
     });
 
+    it('D#6 FIXROUND-NOCHANGE-STOP: the stop notice of a Needs-a-person item waits while a reviewer\'s run is live; a builder run, or a reviewer run that ended, does not hide it', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+      await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded', createdAt: '2026-10-03T09:00:00Z', envelope: { summary: 'Opened the pull request.' } });
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', 'republish_no_change', 'n1')`, [accountId, itemId]);
+      const stop = (await noticeOf(accountId, userId, itemId))!;
+      expect(stop.kind).toBe('needs_human');
+      expect(stop.reason).toMatch(/^The fix round made no changes to publish/);
+      // A reviewer for the head is running now: the card shows that run, not the stop.
+      const live = await seedRun(accountId, itemId, { role: 'acceptance-tester', status: 'running', createdAt: '2026-10-03T10:00:00Z', envelope: null });
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      // Once it ended the stop is back; a live builder run is not a reviewer and hides nothing.
+      await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [live]);
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/^The fix round made no changes to publish/);
+      await seedRun(accountId, itemId, { role: 'executor', status: 'running', createdAt: '2026-10-03T11:00:00Z', envelope: null });
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/^The fix round made no changes to publish/);
+    });
+
     it('review_limit_wait (D#6): a review parked for a refusal that clears by itself says its own fixed sentence, with no reset time; another stage, a stale fact, a later fact or a halt say nothing', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId } = await seedItem(accountId, { stage: 'pr_opened' });

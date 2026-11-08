@@ -76,7 +76,7 @@ describe("one rule source: the app draws what the server lists, in a fixed order
   });
 
   it("the labels are exactly the words the owner approved", () => {
-    expect(OPERATOR_LABELS).toEqual({ request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again", remove_from_queue: "Remove from queue", queue_again: "Queue again" });
+    expect(OPERATOR_LABELS).toEqual({ request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again", remove_from_queue: "Remove from queue", queue_again: "Queue again", review_again: "Review again" });
   });
 
   it("Re-spec (D#6 R4d-5b): drawn only when the server lists it, labelled exactly Re-spec, after Build again, on its own route", () => {
@@ -153,6 +153,27 @@ describe("D#694 B6-5: Remove from queue and Queue again", () => {
     expect(gets(call).map((g) => g[1])).toEqual(["/api/v1/run-actions/a1"]);
     expect(op.state).toMatchObject({ phase: "started", action: "queue_again", text: OPERATOR_STARTED.queue_again, confirm: false });
     expect(done).toEqual([[ID, "queue_again"]]);
+  });
+});
+
+describe("D#6 REVIEW-AGAIN-ACTION: Review again", () => {
+  it("its route, drawn only when the server lists it, labelled exactly Review again, last in the order", () => {
+    expect(OPERATOR_PATHS.review_again(ID)).toBe("/api/v1/work-items/" + ID + "/review-again");
+    expect(OPERATOR_LABELS.review_again).toBe("Review again");
+    expect(OPERATOR_ORDER[OPERATOR_ORDER.length - 1]).toBe("review_again");
+    expect(operatorActions({ actions: ["review_again", "close", "build_again"] })).toEqual(["build_again", "close", "review_again"]);
+    expect(operatorActions({ actions: ["close"] })).not.toContain("review_again");
+  });
+
+  it("sends at once (no dialog), one POST with no body, follows the accepted run, and says the reviewers that did not pass look at the same commit again", async () => {
+    const call = fakeCall();
+    const { op, done } = make(call);
+    await op.press(ITEM, "review_again");
+    expect(posts(call)).toEqual([["POST", "/api/v1/work-items/" + ID + "/review-again", undefined]]);
+    expect(gets(call).map((g) => g[1])).toEqual(["/api/v1/run-actions/a1"]);
+    expect(op.state).toMatchObject({ phase: "started", action: "review_again", text: OPERATOR_STARTED.review_again, confirm: false });
+    expect(OPERATOR_STARTED.review_again).toMatch(/same commit again/);
+    expect(done).toEqual([[ID, "review_again"]]);
   });
 });
 

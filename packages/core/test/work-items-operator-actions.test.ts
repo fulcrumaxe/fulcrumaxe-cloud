@@ -224,7 +224,7 @@ describe('retry_push and open_pr (D#598 P1f-6b)', () => {
   });
 
   it('they come last in the list, after the stuck-item actions', () => {
-    expect(OPERATOR_ACTIONS.slice(-4, -2)).toEqual(['retry_push', 'open_pr']);
+    expect(OPERATOR_ACTIONS.slice(-5, -3)).toEqual(['retry_push', 'open_pr']);
     expect(operatorActionsFor(push())).toEqual(['build_again', 'back_to_discussion', 'close', 'retry_push']);
   });
 });
@@ -303,5 +303,37 @@ describe('Request changes', () => {
     expect(operatorVerdict('request_changes', pr({ gh_number: null }))).toMatchObject({ ok: false, reason: 'no_issue' });
     expect(operatorVerdict('request_changes', pr({ has_spec: false }))).toMatchObject({ ok: false, reason: 'state' });
     expect(operatorVerdict('request_changes', pr({ live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
+  });
+});
+
+describe('Review again (D#6 REVIEW-AGAIN-ACTION)', () => {
+  const held = (over: Partial<OperatorFacts> = {}) => at({ pr_open: true, unverifiable_hold: true, ...over });
+
+  it('is offered at Needs a person while the stop is a reviewer that could not verify and the pull request is open, after Build again, and last in the list', () => {
+    expect(operatorVerdict('review_again', held())).toEqual({ ok: true });
+    expect(operatorActionsFor(held())).toEqual(['build_again', 'back_to_discussion', 'close', 'review_again']);
+    expect(OPERATOR_ACTIONS[OPERATOR_ACTIONS.length - 1]).toBe('review_again');
+  });
+
+  it('is not offered when the stop is something else or unknown (no hold, an absent fact) or the pull request is not known to be open', () => {
+    expect(operatorVerdict('review_again', held({ unverifiable_hold: false }))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorVerdict('review_again', held({ unverifiable_hold: undefined }))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorVerdict('review_again', held({ pr_open: false }))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorVerdict('review_again', held({ pr_open: undefined }))).toMatchObject({ ok: false, reason: 'state' });
+  });
+
+  it('is not offered at any other stage, without a Spec, to a member, for an external item, without a repository or issue, or while an agent runs (so a second press is already_running)', () => {
+    for (const stage of ['triaged', 'discussing', 'spec_ready', 'in_progress', 'pr_opened', 'changes_requested', 'review_passed', 'merged', 'closed']) expect(operatorVerdict('review_again', held({ stage })), stage).toMatchObject({ ok: false });
+    expect(operatorVerdict('review_again', held({ has_spec: false }))).toMatchObject({ ok: false });
+    expect(operatorVerdict('review_again', held({ role: 'member' }))).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('review_again', held({ provenance: 'external' }))).toMatchObject({ ok: false, reason: 'external' });
+    expect(operatorVerdict('review_again', held({ repo_id: null }))).toMatchObject({ ok: false, reason: 'no_repo' });
+    expect(operatorVerdict('review_again', held({ gh_number: null }))).toMatchObject({ ok: false, reason: 'no_issue' });
+    expect(operatorVerdict('review_again', held({ live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
+  });
+
+  it('does not count a fix round: the verdict never reads the rounds used, so it is offered with every round spent', () => {
+    expect(operatorVerdict('review_again', held({ fix_rounds_started: 99 }))).toEqual({ ok: true });
+    expect(operatorVerdict('request_changes', held({ fix_rounds_started: 99 }))).toMatchObject({ ok: false, reason: 'rounds' });
   });
 });

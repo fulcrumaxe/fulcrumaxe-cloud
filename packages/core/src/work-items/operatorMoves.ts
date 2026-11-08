@@ -165,6 +165,20 @@ export async function requestPublicChangeAction(ctx: OperatorMoveCtx, workItemId
 }
 
 /**
+ * D#6 REVIEW-AGAIN-ACTION: Review again. The table is asked with the item's row locked (Needs a person, the pull request still at the head a reviewer could not verify), and the audit row
+ * names who pressed it and for which stage. No fix round starts and no stage moves here: the stage driver re-enters the review after this returns (the route asks for it), and asks again
+ * only the reviewers that did not pass. Written as `work_item.sent_back` with an `action`, as Reopen and Try the push again are (the 0713 definer's allowlist has no event of its own).
+ */
+export async function requestReviewAgain(ctx: OperatorMoveCtx, workItemId: string): Promise<void> {
+  if (!UUID_RE.test(workItemId)) throw new NotFoundError('not found');
+  const { accountId, userId } = ctx.principal;
+  await withTenant(ctx.pool, accountId, userId, async (client) => {
+    const facts = await allowed(client, ctx, workItemId, 'review_again');
+    await audit(client, 'work_item.sent_back', { work_item_id: workItemId, action: 'review_again', from_stage: facts.stage });
+  });
+}
+
+/**
  * Request changes: a person asks for a fix round on the item's open pull request. In ONE transaction, with the item's row locked: the table's verdict, the
  * person's note recorded as a run note of the item that this person accepts at once (the corrections functions write both audit rows), and the move into
  * Changes requested whose source names that note (`request_changes:<correction id>`). The stage driver is asked to run afterwards (the route does that, as

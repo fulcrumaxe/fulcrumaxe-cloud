@@ -278,6 +278,81 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       for (const bad of [-1, 1.5, 101]) expect(await lookup(a, w, HEAD, bad)).toEqual([]);
     });
 
+    describe("superseded (D#6 REVIEW-AGAIN-ACTION / FIXROUND-NOCHANGE-STOP)", () => {
+      const fact = (w: string, a: SeedRefs, kind: string, key: string, code: string, head: string, reasons: string[] = []) =>
+        admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, $3, $4, $5, $6, $7, 7)", [a.accountId, w, kind, key, code, reasons, head]);
+      const withVerdict = async (runId: string, verdict: string) => admin.query("UPDATE agent_runs SET envelope = $2::jsonb WHERE id = $1", [runId, JSON.stringify({ verdict })]);
+      const flags = async (a: SeedRefs, w: string) => Object.fromEntries((await lookup(a, w, HEAD, 0)).map((r) => [r.role, r.superseded]));
+      /** Two reviewers on HEAD: the code reviewer passed, the acceptance tester ended unverifiable; the escalation names the tester. */
+      async function unverifiable(stage = "needs_human") {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a, stage);
+        const code = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "succeeded", "code-reviewer", "2026-01-01T00:00:00Z");
+        const tester = await runWithKey(a, w, `advance:${w}:review:${HEAD}:acceptance-tester`, "succeeded", "acceptance-tester", "2026-01-01T00:00:01Z");
+        await withVerdict(code, "pass");
+        await withVerdict(tester, "fail");
+        return { a, w, code, tester };
+      }
+
+      it("an unverifiable stop on this head puts aside the run of the reviewer it names, and only that one: the pass stands and the redo starts under the next attempt", async () => {
+        const { a, w, tester } = await unverifiable();
+        await fact(w, a, "escalated", "u1", "reviewer_unverifiable", HEAD, ["acceptance_tester"]);
+        expect(await flags(a, w)).toEqual({ "code-reviewer": false, "acceptance-tester": true });
+        expect(await lookup(a, w, HEAD, 0)).toContainEqual(expect.objectContaining({ role: "acceptance-tester", runId: tester, attempt: 0, superseded: true }));
+      });
+
+      it("once the reviewer has been asked again (a newer key) the new run speaks and nothing is put aside, however many times the person presses", async () => {
+        const { a, w } = await unverifiable();
+        await fact(w, a, "escalated", "u1", "reviewer_unverifiable", HEAD, ["acceptance_tester"]);
+        const again = await runWithKey(a, w, `advance:${w}:review:${HEAD}:acceptance-tester:s1`, "running", "acceptance-tester");
+        expect(await lookup(a, w, HEAD, 0)).toContainEqual(expect.objectContaining({ role: "acceptance-tester", runId: again, attempt: 1, superseded: false }));
+        expect(await flags(a, w)).toEqual({ "code-reviewer": false, "acceptance-tester": false });
+      });
+
+      it("nothing is put aside for a stop of another head, a different newest escalation, another stage, or an escalation older than the run", async () => {
+        const moved = await unverifiable();
+        await fact(moved.w, moved.a, "escalated", "u1", "reviewer_unverifiable", OTHER, ["acceptance_tester"]);
+        expect(await flags(moved.a, moved.w)).toEqual({ "code-reviewer": false, "acceptance-tester": false });
+        const later = await unverifiable();
+        await fact(later.w, later.a, "escalated", "u1", "reviewer_unverifiable", HEAD, ["acceptance_tester"]);
+        await fact(later.w, later.a, "escalated", "u2", "max_fix_rounds", HEAD);
+        expect(await flags(later.a, later.w)).toEqual({ "code-reviewer": false, "acceptance-tester": false });
+        const elsewhere = await unverifiable("review_passed");
+        await fact(elsewhere.w, elsewhere.a, "escalated", "u1", "reviewer_unverifiable", HEAD, ["acceptance_tester"]);
+        expect(await flags(elsewhere.a, elsewhere.w)).toEqual({ "code-reviewer": false, "acceptance-tester": false });
+        // An escalation written BEFORE the run (an earlier review of this head) is not about this run.
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a, "needs_human");
+        await fact(w, a, "escalated", "u0", "reviewer_unverifiable", HEAD, ["acceptance_tester"]);
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:acceptance-tester:s1`, "succeeded", "acceptance-tester", "2099-01-01T00:00:00Z");
+        expect(await flags(a, w)).toEqual({ "acceptance-tester": false });
+      });
+
+      it("a fix round a PERSON asked for that pushed nothing puts aside the runs that did not pass on that head; a reviewer-asked no-change round, another head, and a pass do not", async () => {
+        const { a, w } = await unverifiable("changes_requested");
+        await fact(w, a, "fix_pushed_nothing", "n1", "person_request", HEAD);
+        expect(await flags(a, w)).toEqual({ "code-reviewer": false, "acceptance-tester": true });
+        const reviewerAsked = await unverifiable("changes_requested");
+        await fact(reviewerAsked.w, reviewerAsked.a, "fix_pushed_nothing", "n1", "rereview", HEAD);
+        expect(await flags(reviewerAsked.a, reviewerAsked.w)).toEqual({ "code-reviewer": false, "acceptance-tester": false });
+        const otherHead = await unverifiable("changes_requested");
+        await fact(otherHead.w, otherHead.a, "fix_pushed_nothing", "n1", "person_request", OTHER);
+        expect(await flags(otherHead.a, otherHead.w)).toEqual({ "code-reviewer": false, "acceptance-tester": false });
+      });
+
+      it("a needs-fix run is put aside the same way, and the redo's own run (newer than the fact) is not", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a, "changes_requested");
+        const first = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "succeeded", "code-reviewer", "2026-01-01T00:00:00Z");
+        await withVerdict(first, "needs-fix");
+        await fact(w, a, "fix_pushed_nothing", "n1", "person_request", HEAD);
+        expect(await flags(a, w)).toEqual({ "code-reviewer": true });
+        const redo = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s1`, "succeeded", "code-reviewer");
+        await withVerdict(redo, "needs-fix");
+        expect(await lookup(a, w, HEAD, 0)).toContainEqual(expect.objectContaining({ runId: redo, attempt: 1, superseded: false }));
+      });
+    });
+
     describe("advanceDeltaRuns (MQ3-b-2b)", () => {
       const delta = (a: SeedRefs, w: string, headSha: string) => module(resumeWith().fn).advanceDeltaRuns(who(a, w), { headSha });
 
