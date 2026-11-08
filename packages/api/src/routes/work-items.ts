@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { getWorkItem, listWorkItems, OWN_PLAN_USAGE_STATES, WORK_ITEM_PRIORITIES } from "@fx/core/src/work-items/read.js";
 import { WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
+import { childFirstRunUsd } from "@fx/pipeline";
+import { readItemEnvelope } from "@fx/spend";
 import type { RouteEntry } from "../registry.js";
 import { assertBoundRepo, boundListRepo } from "../boundRepo.js";
 import { decodeCursor, decodeQueueCursor, encodeCursor, encodeQueueCursor, parseLimit } from "../pagination.js";
@@ -25,6 +28,24 @@ export const workItemResponseSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
 });
+
+/**
+ * The spend envelope the item draws on, null when it draws on none. `spent_usd` is the sum admission itself uses (what the item and its siblings have spent or hold, subscription runs
+ * at what they cost once over); `next_run_need_usd` is the price the launch check puts on the next executor run, or null when it cannot be priced.
+ */
+export const workItemEnvelopeSchema = z
+  .object({
+    id: z.string().uuid(),
+    scope: z.enum(["item", "batch", "weekly_autostart"]),
+    version: z.number().int(),
+    amount_usd: z.number(),
+    spent_usd: z.number(),
+    next_run_need_usd: z.number().nullable(),
+  })
+  .nullable()
+  .describe("The spend limit this item draws on, or null when it has none.");
+
+const getWorkItemResponseSchema = workItemResponseSchema.extend({ envelope: workItemEnvelopeSchema });
 
 const listWorkItemsResponseSchema = z.object({
   data: z.array(workItemResponseSchema),
@@ -96,10 +117,19 @@ export const workItemRoutes: RouteEntry[] = [
     idempotency: "never",
     rateClass: "read",
     paramsSchema: workItemIdParamsSchema,
-    responseSchema: workItemResponseSchema,
+    responseSchema: getWorkItemResponseSchema,
     async handler(ctx, input) {
       await assertBoundRepo(ctx, { workItemId: input.params.id! });
-      return getWorkItem({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      const item = await getWorkItem({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      const { accountId, userId } = ctx.principal;
+      const envelope = await withTenant(ctx.pool, accountId, userId, async (client) => {
+        const read = await readItemEnvelope(client, accountId, item.id);
+        if (read === null) return null;
+        // fx-swallow-ok: a price that cannot be read (no plan data, a repo that went away) is "unknown" on this screen, not a failed read of the envelope
+        const need = item.repo_id === null ? null : await childFirstRunUsd(client, { accountId, repoId: item.repo_id }).catch(() => null);
+        return { id: read.id, scope: read.scope, version: read.version, amount_usd: read.amountUsd, spent_usd: read.spentUsd, next_run_need_usd: need };
+      });
+      return { ...item, envelope };
     },
   },
 ];

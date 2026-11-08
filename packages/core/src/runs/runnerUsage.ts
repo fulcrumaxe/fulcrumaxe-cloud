@@ -3,8 +3,9 @@ import type { PoolClient } from 'pg';
 /**
  * D#6 R2b-5a (C32 section 5): the read side of `runner_run_usage` (migration 0768), shared by the run DTO and the run insight.
  *
- * What a run on a person's own machine would have cost at API prices. INFORMATION, NEVER SPEND: it is kept in a table of its own that no
- * metering, billing, budget or refusal query reads, and nothing here adds it to a spend field. `api_equivalent_usd` is the cloud's own
+ * What a run on a person's own machine would have cost at API prices. Never billed: it is kept in a table of its own that no metering, billing or
+ * per-account budget query reads, and nothing here adds it to a spend field. The spend envelope's sum and the per-run price median do read it (see
+ * packages/spend `envelope.ts`). `api_equivalent_usd` is the cloud's own
  * recomputation from the token counts, or null for a model with no price row (the app then says "no API price for this model").
  */
 export interface RunnerUsage {

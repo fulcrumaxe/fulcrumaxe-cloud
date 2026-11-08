@@ -3,9 +3,10 @@ import type { LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
 import { computeUsd, pricingFetchedAt, priceFor } from "@fx/spend";
 
 /**
- * D#6 R2b-5a (C32 section 5): what a run on a person's own machine would have cost at API prices. INFORMATION, NEVER SPEND: the figure
- * goes to `runner_run_usage` (migration 0768) and nowhere else. This module touches no ledger, no reservation and no `agent_runs.usd`,
- * and nothing it writes is read by a metering, budget, cap or refusal query.
+ * D#6 R2b-5a (C32 section 5): what a run on a person's own machine would have cost at API prices. Never billed: the figure goes to
+ * `runner_run_usage` (migration 0768) and nowhere else. This module touches no ledger, no reservation and no `agent_runs.usd`, and no metering,
+ * billing or per-account budget query reads it. It IS read by the spend envelope's sum (packages/spend `envelope.ts`, counted as it grows) and by
+ * the per-run price median (core `runPrice.ts`, finished runs only), so a limit the person set holds for runs on their own plan too.
  *
  * The runner's own `usd` is ignored. The cloud adds the token counts the runner reported to the run's row (`runner_usage_add`) and
  * recomputes the figure from the TOTALS with the same price tables the API runs are priced with (`computeUsd`, `priceFor` in
