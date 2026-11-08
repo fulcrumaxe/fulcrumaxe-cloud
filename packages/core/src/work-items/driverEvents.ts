@@ -209,16 +209,19 @@ export function toCode(text: string): string {
 
 /** The prefix of a `ci_wait_timeout` stop reason that names a required check that never reported (`missing_fx_gate1`). */
 export const CI_MISSING_PREFIX = 'missing_';
+/** The prefix of a `ci_wait_timeout` stop reason that names a check that had not reported finished (`running_pr_gates`). */
+export const CI_RUNNING_PREFIX = 'running_';
 const CI_WAIT_WORDS: ReadonlySet<string> = new Set(['wrong_head', 'incomplete_snapshot', 'check_running', 'status_pending', 'required_missing', 'gate1_waiting', 'gate1_attest_off']);
 
 /**
  * The `reasons` of a `ci_wait_timeout` stop: the wait's fixed reason words, then one `missing_<check name as a code>` per required check that never reported
  * (names only: a public check's name, made a plain code, so a hyphen reads as an underscore). Anything else is dropped; at most 5 names.
  */
-export function ciWaitStopReasons(reasons: readonly string[] | undefined, missing: readonly string[] | undefined): string[] {
+export function ciWaitStopReasons(reasons: readonly string[] | undefined, missing: readonly string[] | undefined, running?: readonly string[]): string[] {
   const words = (reasons ?? []).filter((r) => CI_WAIT_WORDS.has(r));
   const names = [...new Set((missing ?? []).slice(0, 5).map((n) => toCode(n).slice(0, 64 - CI_MISSING_PREFIX.length)))].map((c) => CI_MISSING_PREFIX + c);
-  return [...new Set(words), ...names];
+  const live = [...new Set((running ?? []).slice(0, 5).map((n) => toCode(n).slice(0, 64 - CI_RUNNING_PREFIX.length)))].map((c) => CI_RUNNING_PREFIX + c);
+  return [...new Set(words), ...names, ...live];
 }
 
 export function assertDriverEvent(e: DriverEventInput): void {

@@ -41,6 +41,13 @@ export interface FakeCheckRun {
   app?: { id: number } | null;
   /** When the run started (GitHub sets it on every run, a queued one included); read only by the fx-gate1 attester's document. */
   startedAt?: string;
+  /** When the run finished. Unset: GitHub's rule, a completed run has a time and any other has none. Set explicitly to model a run GitHub reports half-updated (a conclusion and a time under a status that is not `completed`). */
+  completedAt?: string | null;
+}
+
+/** GitHub sets a completion time on every completed run and none on an unfinished one. */
+export function fakeCompletedAt(c: FakeCheckRun): string | null {
+  return c.completedAt !== undefined ? c.completedAt : c.status === "completed" ? (c.startedAt ?? "2026-11-07T09:00:00Z") : null;
 }
 
 export interface FakeRepoState {
@@ -251,7 +258,7 @@ export function fakeGitHubRest(s: FakeRepoState, opts: { gate1?: Gate1World } = 
       if (req.method === "GET" && checks) {
         const sha = checks[1]!;
         if (req.query?.filter !== undefined && req.query.filter !== "latest" && req.query.filter !== "all") return json(422, { message: "Validation Failed" });
-        const list = (s.checks[sha] ?? []).map((c, i) => ({ id: i + 1, head_sha: sha, name: c.name, status: c.status, conclusion: c.conclusion, started_at: c.startedAt ?? "2026-11-07T09:00:00Z", app: c.app === undefined ? { id: 1 } : c.app }));
+        const list = (s.checks[sha] ?? []).map((c, i) => ({ id: i + 1, head_sha: sha, name: c.name, status: c.status, conclusion: c.conclusion, started_at: c.startedAt ?? "2026-11-07T09:00:00Z", completed_at: fakeCompletedAt(c), app: c.app === undefined ? { id: 1 } : c.app }));
         return json(200, { total_count: list.length, check_runs: page(list, req.query) });
       }
       const status = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/status$/.exec(path);

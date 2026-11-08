@@ -317,11 +317,11 @@ describe("D#598 P7c: the merge-only re-check reads GitHub the way the CI wait do
   });
 
   it("is given a CI gate (the wait is not skippable) and a client opened with the merge gate's purpose", async () => {
-    mocks.recordMergeOnlyRecheck.mockResolvedValue({ decision: "ci_pending", ciReasons: ["check_running"] });
+    mocks.recordMergeOnlyRecheck.mockResolvedValue({ decision: "ci_pending", ciReasons: ["check_running"], ciRunning: ["pr-gates"] });
     const http = { request: vi.fn() };
     const open = vi.fn(async () => http as never);
     const { pool } = fakePool(false);
-    expect(await createReviewDeps(open).recordMergeOnly!(pool, input)).toEqual({ decision: "ci_pending" });
+    expect(await createReviewDeps(open).recordMergeOnly!(pool, input)).toEqual({ decision: "ci_pending", ciReasons: ["check_running"], ciRunning: ["pr-gates"] });
     expect(open).toHaveBeenCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets" });
     const [, passedInput, deps] = mocks.recordMergeOnlyRecheck.mock.calls[0]! as [unknown, { baseRef: string; requiredRoles: string[] }, { http: unknown; ci: { gate: boolean } }];
     expect(passedInput).toMatchObject({ baseRef: "main", requiredRoles: ["code-reviewer", "acceptance-tester"] });

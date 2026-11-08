@@ -1,5 +1,6 @@
 import { isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp } from "../build/githubMergePort.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
+import { settleCheckRun } from "../build/checkRunSettle.js";
 import { listChangedFiles, listChangedFilesLocal, type ListFilesResult } from "./githubReads.js";
 
 /**
@@ -204,7 +205,8 @@ async function readCheckRuns(http: LocalGitHubHttp, repo: { owner: string; name:
       if (node.__typename !== "CheckRun") continue;
       if (typeof node.name !== "string" || typeof node.status !== "string" || (node.conclusion !== null && typeof node.conclusion !== "string") || (node.startedAt !== null && typeof node.startedAt !== "string")) fail("Gate1CheckRuns run");
       const app = isObj(node.checkSuite) && isObj(node.checkSuite.app) ? node.checkSuite.app.databaseId : null;
-      runs.push({ name: node.name as string, appId: typeof app === "number" ? app : null, status: (node.status as string).toLowerCase(), conclusion: node.conclusion === null ? null : (node.conclusion as string).toLowerCase(), startedAt: node.startedAt as string | null });
+      const settled = settleCheckRun({ status: (node.status as string).toLowerCase(), conclusion: node.conclusion === null ? null : (node.conclusion as string).toLowerCase(), completedAt: typeof node.completedAt === "string" ? node.completedAt : null });
+      runs.push({ name: node.name as string, appId: typeof app === "number" ? app : null, status: settled.status, conclusion: settled.conclusion, startedAt: node.startedAt as string | null });
     }
     const info = contexts.pageInfo as Json;
     if (info.hasNextPage !== true) return { runs, complete: true };
@@ -292,7 +294,8 @@ export function hostedGate1Reads(http: GitHubHttp, repo: Head): Gate1Reads {
         for (const c of body.check_runs as unknown[]) {
           if (!isObj(c) || c.head_sha !== repo.sha || typeof c.name !== "string" || typeof c.status !== "string" || (c.conclusion !== null && typeof c.conclusion !== "string") || (c.started_at !== null && typeof c.started_at !== "string")) return fail("check run");
           const app = isObj(c.app) ? c.app.id : null;
-          runs.push({ name: c.name, appId: typeof app === "number" ? app : null, status: c.status, conclusion: c.conclusion as string | null, startedAt: c.started_at as string | null });
+          const settled = settleCheckRun({ status: c.status, conclusion: c.conclusion as string | null, completedAt: typeof c.completed_at === "string" ? c.completed_at : null });
+          runs.push({ name: c.name, appId: typeof app === "number" ? app : null, status: settled.status, conclusion: settled.conclusion, startedAt: c.started_at as string | null });
         }
         if (body.check_runs.length < REST_PER_PAGE || runs.length >= body.total_count) return { runs, complete: true };
       }

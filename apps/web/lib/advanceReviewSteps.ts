@@ -370,7 +370,7 @@ export async function recordRoundBody(worker: ReviewWorker | null, who: StepWho,
   // A halt is its own answer, so the workflow can record one stop and end instead of treating it as a failed round.
   if (out.decision === "refused") return { decision: "reason" in out && (out.reason === "item_halted" || out.reason === "halted_since_approval") ? "halted" : "refused", round: 0, nextRound: null, recorded: [] };
   const done = out as Exclude<typeof out, { decision: "refused"; reason: string }>;
-  return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`), ...(done.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(done.ciReasons, done.ciMissing) } : {}) };
+  return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`), ...(done.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(done.ciReasons, done.ciMissing, done.ciRunning) } : {}) };
 }
 
 /** D#598 P7c: `all_passed` (a merge-only head, carried forward and recorded), `full_review` (run the reviewers), `ci_pending`, `halted` or `refused`. */
@@ -389,7 +389,7 @@ export async function recordMergeOnlyBody(worker: ReviewWorker | null, who: Step
     const reason = "reason" in out ? out.reason : null;
     return reason === "item_halted" || reason === "halted_since_approval" ? { decision: "halted", reason } : { decision: "full_review", reason: reason ?? "refused" };
   }
-  return { decision: out.decision, reason: "reason" in out && typeof out.reason === "string" ? out.reason : null, ...(out.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(out.ciReasons, out.ciMissing) } : {}) };
+  return { decision: out.decision, reason: "reason" in out && typeof out.reason === "string" ? out.reason : null, ...(out.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(out.ciReasons, out.ciMissing, out.ciRunning) } : {}) };
 }
 
 export interface FixOut {

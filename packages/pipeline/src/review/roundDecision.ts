@@ -61,6 +61,8 @@ export interface RoundResult {
   ciReasons?: CiWaitReason[];
   /** The required checks that never reported (names), when `required_missing` is a reason. Set for `ci_pending` only. */
   ciMissing?: string[];
+  /** The checks that had not finished (names), when `check_running` or `status_pending` is a reason. Set for `ci_pending` only. */
+  ciRunning?: string[];
 }
 
 /** Fix rounds started so far for one item (the driver events). */
@@ -96,7 +98,7 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
   const round = input.round ?? (await fixRoundsStarted(pool, input.accountId, input.workItemId));
   const wait = await ci.read({ accountId: input.accountId, workItemId: input.workItemId, prNumber: input.prNumber, headSha: input.headSha });
   if (wait.state === "head_moved") return { decision: "head_moved", round, recorded: [] };
-  if (wait.state === "pending") return { decision: "ci_pending", round, recorded: [], ciReasons: wait.reasons, ...(wait.missing ? { ciMissing: wait.missing } : {}) };
+  if (wait.state === "pending") return { decision: "ci_pending", round, recorded: [], ciReasons: wait.reasons, ...(wait.missing ? { ciMissing: wait.missing } : {}), ...(wait.running ? { ciRunning: wait.running } : {}) };
   const decision = decideRound({ requiredRoles: input.requiredRoles, verdicts: input.verdicts, fixRoundsStarted: round });
   if (decision === "environment_failure") {
     const failed = input.verdicts.filter((v) => v.environmentFailure === true);

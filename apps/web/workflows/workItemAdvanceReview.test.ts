@@ -72,7 +72,7 @@ interface World {
   /** (role) -> the verdict the reviewer run ends with. A function of the head the run is for. */
   verdict: (role: string, head: string, step: string) => { status?: string; envelope?: Record<string, unknown> | null; done?: boolean; failureReason?: string };
   /** The decision the worker's round returns, per call. */
-  rounds: Array<{ decision: string; round?: number; nextRound?: number | null; ciReasons?: string[]; ciMissing?: string[] }>;
+  rounds: Array<{ decision: string; round?: number; nextRound?: number | null; ciReasons?: string[]; ciMissing?: string[]; ciRunning?: string[] }>;
   /** The fix start. */
   fix: { ok: boolean; reason?: string };
   /** What the fix run does to the head when it ends. */
@@ -163,7 +163,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     }),
     advanceRecordRound: vi.fn(async (_who: unknown, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">) => {
       const r = w.realDecide ? { decision: decideRound({ requiredRoles: input.requiredRoles as never, verdicts: input.verdicts as never, fixRoundsStarted: 0 }) as string } : rounds.length > 1 ? rounds.shift()! : rounds[0]!;
-      return { decision: r.decision, round: r.round ?? 0, ...(r.ciReasons ? { ciReasons: r.ciReasons } : {}), ...(r.ciMissing ? { ciMissing: r.ciMissing } : {}), ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
+      return { decision: r.decision, round: r.round ?? 0, ...(r.ciReasons ? { ciReasons: r.ciReasons } : {}), ...(r.ciMissing ? { ciMissing: r.ciMissing } : {}), ...(r.ciRunning ? { ciRunning: r.ciRunning } : {}), ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
     }),
     advanceRecordMergeOnly: vi.fn(async (_who: unknown, _input: { headSha: string; prNumber: number; baseRef: string; requiredRoles: string[] }) => {
       const list = w.mergeOnly ?? [{ decision: "full_review", reason: "no_prior_review" }];
@@ -941,6 +941,12 @@ describe("what happens after the verdicts are recorded", () => {
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ci_wait_timeout" });
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "ci_wait_timeout", reasons: ["required_missing", "missing_fx_gate1"] }));
     expect(logs.find((l) => l.event === "advance.ci_wait_timeout")).toMatchObject({ ci_reasons: "required_missing,missing_fx_gate1" });
+  });
+
+  it("the timeout stop names the checks that had not reported finished", async () => {
+    const t = setup(fresh({ rounds: [{ decision: "ci_pending", ciReasons: ["check_running"], ciRunning: ["pr-gates", "e2e"] }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ci_wait_timeout" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "ci_wait_timeout", reasons: ["check_running", "running_pr_gates", "running_e2e"] }));
   });
 
   it("the delta re-check's timeout stop says the same", async () => {

@@ -165,7 +165,7 @@ export type MergeOnlyDecision =
   | { decision: "all_passed"; from: string }
   /** Not a merge-only head (or no way to be sure): the caller runs the full review. Nothing was recorded. */
   | { decision: "full_review"; reason: string }
-  | { decision: "ci_pending"; ciReasons: CiWaitReason[]; ciMissing?: string[] }
+  | { decision: "ci_pending"; ciReasons: CiWaitReason[]; ciMissing?: string[]; ciRunning?: string[] }
   /** The pull request's head is no longer the one asked about (only where the CI read follows the pull request). Nothing was recorded. */
   | { decision: "head_moved" };
 
@@ -227,7 +227,7 @@ export async function recordMergeOnlyRecheck(pool: Pool, input: MergeOnlyInput, 
   // The head's CI and repo-wide guards finish before anything is recorded (D#598 P7b), as for a full review.
   const wait = await deps.ci.read({ accountId, workItemId, prNumber, headSha });
   if (wait.state === "head_moved") return { decision: "head_moved" };
-  if (wait.state === "pending") return { decision: "ci_pending", ciReasons: wait.reasons, ...(wait.missing ? { ciMissing: wait.missing } : {}) };
+  if (wait.state === "pending") return { decision: "ci_pending", ciReasons: wait.reasons, ...(wait.missing ? { ciMissing: wait.missing } : {}), ...(wait.running ? { ciRunning: wait.running } : {}) };
 
   await withTenant(pool, accountId, (client) =>
     recordDriverEvent(client, accountId, {
