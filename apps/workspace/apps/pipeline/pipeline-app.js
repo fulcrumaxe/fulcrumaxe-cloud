@@ -16,12 +16,14 @@ import {
   createBoard,
   groupByColumn,
   isUuid,
+  loadCorrections,
   loadTimeline,
   itemHeading,
   kindLabel,
+  mergeHistoryRows,
   verdictFor,
 } from "./pipeline-storage.js";
-import { createAssistantPanel, createFollowUpsPanel, createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
+import { CORRECTION_KINDS, createAssistantPanel, createFollowUpsPanel, createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
 import { api } from "../_lib/api.js";
 import { NEEDS_YOU_APP, createInsightPanel, createPlan } from "./pipeline-insight.js";
 // One source for the count: the Needs you app's own reads and row rules (D#37 C47). Nothing of them is copied here.
@@ -48,6 +50,7 @@ function mountApp(contentEl, launchArg) {
   let openId = null; // the card whose detail is showing
   let openItem = null; // its last known data, kept if a re-load leaves it out
   let history = null; // { status: "loading" | "ready" | "error", data }
+  let corrections = null; // { status: "loading" | "ready" | "error", rows } (D#597 CC-7a)
   let historyAc = null;
   let runs = null; // the open detail's Runs panel (pipeline-actions.js)
   let followUps = null; // the open detail's Follow-ups list (pipeline-actions.js)
@@ -263,20 +266,30 @@ function mountApp(contentEl, launchArg) {
     if (!history || history.status === "loading") body = h("p", { class: "pl-muted" }, "Loading history…");
     else if (history.status === "error") body = h("p", { class: "pl-muted", role: "status", "data-testid": "pl-history-error" }, "History isn't available right now.");
     else {
-      const rows = Array.isArray(history.data.transitions) ? history.data.transitions : [];
+      const transitions = Array.isArray(history.data.transitions) ? history.data.transitions : [];
+      // Stage rows paint as soon as the timeline lands; correction rows join once the (independent) corrections read lands.
+      const merged =
+        corrections && corrections.status === "ready"
+          ? mergeHistoryRows(transitions, corrections.rows, CORRECTION_KINDS)
+          : transitions.map((t) => ({ type: "stage", at: t.at, transition: t }));
       body = h(
         "ol",
         { class: "pl-history", "data-testid": "pl-history" },
-        rows.map((t) =>
-          h(
-            "li",
-            { "data-testid": "pl-history-row" },
-            h("span", { class: "pl-history-stage" }, STAGE_LABELS[t.to_stage] || "Another stage"),
-            " ",
-            timeNode(t.at, true),
-            REVIEWER_LABELS[t.reviewer] ? h("span", { class: "pl-reviewer" }, REVIEWER_LABELS[t.reviewer]) : null
-          )
+        merged.map((r) =>
+          r.type === "stage"
+            ? h(
+                "li",
+                { "data-testid": "pl-history-row" },
+                h("span", { class: "pl-history-stage" }, STAGE_LABELS[r.transition.to_stage] || "Another stage"),
+                " ",
+                timeNode(r.transition.at, true),
+                REVIEWER_LABELS[r.transition.reviewer] ? h("span", { class: "pl-reviewer" }, REVIEWER_LABELS[r.transition.reviewer]) : null
+              )
+            : h("li", { "data-testid": "pl-history-correction" }, h("bdi", null, r.text), " ", timeNode(r.at, true))
         ),
+        corrections && corrections.status === "error"
+          ? h("li", { class: "pl-muted", role: "status", "data-testid": "pl-history-corrections-error" }, "Corrections aren't shown right now.")
+          : null,
         history.data.truncated ? h("li", { class: "pl-muted" }, "Older history isn't shown.") : null
       );
     }
@@ -324,6 +337,7 @@ function mountApp(contentEl, launchArg) {
     openId = item.id;
     openItem = item;
     history = { status: "loading" };
+    corrections = { status: "loading", rows: [] };
     approver.reset(item.id);
     operator.reset(item.id);
     activity = null;
@@ -368,6 +382,18 @@ function mountApp(contentEl, launchArg) {
         paintDetail();
       }
     );
+    loadCorrections(item.id, undefined, ac.signal).then(
+      (data) => {
+        if (ac.signal.aborted) return;
+        corrections = data && Array.isArray(data.data) ? { status: "ready", rows: data.data } : { status: "error", rows: [] };
+        paintDetail();
+      },
+      () => {
+        if (ac.signal.aborted) return;
+        corrections = { status: "error", rows: [] };
+        paintDetail();
+      }
+    );
   }
 
   // The card that just moved is scrolled into view and highlighted for a moment. Done after the current redraw, as reveal() is.
@@ -393,7 +419,7 @@ function mountApp(contentEl, launchArg) {
     if (assistant) assistant.destroy();
     insight.stop();
     mountCtx(null);
-    openId = openItem = history = runs = followUps = assistant = null;
+    openId = openItem = history = corrections = runs = followUps = assistant = null;
     syncOperator();
     paintDetail();
     const el = id && columns.querySelector('[data-id="' + id + '"]');

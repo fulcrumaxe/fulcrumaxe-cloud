@@ -171,7 +171,8 @@ export const correctionRoutes: RouteEntry[] = [
     path: "/api/v1/work-items/{id}/corrections",
     operationId: "listCorrections",
     summary: "A work item's corrections, oldest first",
-    description: "Session, or a token with `read`. Each entry says who made it and who decided it (\"a former member\" where that person is gone), and `attribution` reads \"<name> via assistant\" for an assistant's proposal or an assistant-token decision.",
+    description:
+      "Session, or a token with `read`. Each entry says who made it and who decided it (\"a former member\" where that person is gone). `attribution` is null while `proposed`; once decided it reads `<name> accepted` or `<name> rejected`, with `accepted via assistant` or `rejected via assistant` added when a person decided from the terminal, `assistant proposed, <name> accepted` or `assistant proposed, <name> rejected` for an assistant-drafted correction, or `replaced by a later correction` once superseded.",
     principals: ["session", "token"],
     tokens: ["api", "delegation"],
     scope: "read",

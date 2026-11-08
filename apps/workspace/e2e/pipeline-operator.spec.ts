@@ -114,6 +114,7 @@ async function mockApi(page: Page, init: { stage: string; kind: string; activity
     }
     if (p === "/api/v1/repos") return send(route, 200, REPOS);
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
+    if (p.endsWith("/corrections")) return send(route, 200, { data: [] });
     if (p.endsWith("/activity")) return send(route, mock.activity.status, mock.activity.json);
     if (p === "/api/v1/runs") return send(route, 200, url.searchParams.has("work_item_id") ? { data: mock.itemRuns, next_cursor: null } : { data: [{ ...RUN, id: RUN_LIST.data[0].id, status: "succeeded" }], next_cursor: null });
     if (p.endsWith("/insight")) return send(route, 200, { ...REVIEW_INSIGHT, work_item: { ...REVIEW_INSIGHT.work_item, id: mock.insightItem } });
