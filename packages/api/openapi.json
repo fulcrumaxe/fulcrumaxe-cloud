@@ -1665,6 +1665,58 @@
                     },
                     "updated_at": {
                       "type": "string"
+                    },
+                    "envelope": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "scope": {
+                              "type": "string",
+                              "enum": [
+                                "item",
+                                "batch",
+                                "weekly_autostart"
+                              ]
+                            },
+                            "version": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "amount_usd": {
+                              "type": "number"
+                            },
+                            "spent_usd": {
+                              "type": "number"
+                            },
+                            "next_run_need_usd": {
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "scope",
+                            "version",
+                            "amount_usd",
+                            "spent_usd",
+                            "next_run_need_usd"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The spend limit this item draws on, or null when it has none."
                     }
                   },
                   "required": [
@@ -1683,7 +1735,8 @@
                     "own_plan_tokens",
                     "context_pct",
                     "created_at",
-                    "updated_at"
+                    "updated_at",
+                    "envelope"
                   ],
                   "additionalProperties": false
                 }

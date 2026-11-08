@@ -202,6 +202,14 @@ export interface Operations {
       context_pct: (number) | (null);
       created_at: string;
       updated_at: string;
+      envelope: ({
+        id: string;
+        scope: "item" | "batch" | "weekly_autostart";
+        version: number;
+        amount_usd: number;
+        spent_usd: number;
+        next_run_need_usd: number | null;
+      }) | (null);
     };
   };
   setWorkItemPriority: {

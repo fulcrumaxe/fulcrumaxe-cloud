@@ -35,7 +35,13 @@ interface ModelMedianRow {
   median: string | null;
 }
 
-/** Medians of one run's model spend, keyed by role and model: a median that mixed other models would be stale once a model is changed. */
+/**
+ * Medians of one run's model spend, keyed by role and model: a median that mixed other models would be stale once a model is changed.
+ *
+ * A run's model spend is its ledger rows from the API sources, plus, for a run on a person's own machine, the API-equivalent figure the cloud priced from the tokens
+ * the runner reported (such a run writes no ledger row at all). A runner run counts only once it is over (its usage grows while it runs) and has priced usage; otherwise it has no figure, so it is left out: counting it as $0 made ten such
+ * runs a median of $0, a price no check can use.
+ */
 export type ModelRunMedians = ReadonlyMap<string, RunMedian>;
 
 const key = (role: string, model: string): string => `${role}\u0000${model}`;
@@ -44,14 +50,18 @@ const key = (role: string, model: string): string => `${role}\u0000${model}`;
 export async function loadModelRunMedians(client: PoolClient, accountId: string): Promise<ModelRunMedians> {
   const { rows } = await client.query<ModelMedianRow>(
     `WITH run_costs AS (
-       SELECT ar.role AS role, ar.model AS model, ar.id AS run_id, COALESCE(SUM(l.usd), 0) AS usd
+       SELECT ar.role AS role, ar.model AS model, ar.id AS run_id, COALESCE(SUM(l.usd), 0) + COALESCE(MAX(u.api_equivalent_usd), 0) AS usd
          FROM agent_runs ar
          LEFT JOIN ledger l
            ON l.run_id = ar.id
           AND l.account_id = ar.account_id
           AND l.kind = 'model'
           AND l.source IN ('customer_gateway', 'customer_anthropic')
+         LEFT JOIN runner_run_usage u
+           ON u.run_id = ar.id
+          AND u.account_id = ar.account_id
         WHERE ar.account_id = $1
+          AND (ar.runtime <> 'runner' OR (u.api_equivalent_usd IS NOT NULL AND ar.status NOT IN ('pending', 'running')))
         GROUP BY ar.role, ar.model, ar.id
      )
      SELECT role, model, count(*)::int AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY usd) AS median
@@ -105,10 +115,13 @@ export interface ModelRunPrice {
   source: 'ledger' | 'seed';
 }
 
-/** The model part of one run's price: the tenant's median at or above `MEDIAN_MIN_RUNS` runs, else the seed for the model's tier. */
+/**
+ * The model part of one run's price: the tenant's median at or above `MEDIAN_MIN_RUNS` runs, else the seed for the model's tier. A median that is not a positive
+ * number is no price (a role whose runs booked nothing), so it falls back to the seed rather than pricing a run at $0.
+ */
 export function modelRunPrice(medians: ModelRunMedians, role: string, effectiveModel: RoleModelId): ModelRunPrice {
   const m = medians.get(key(role, effectiveModel));
-  if (m !== undefined && m.n >= MEDIAN_MIN_RUNS) return { usd: m.median, source: 'ledger' };
+  if (m !== undefined && m.n >= MEDIAN_MIN_RUNS && Number.isFinite(m.median) && m.median > 0) return { usd: m.median, source: 'ledger' };
   return { usd: medianCostSeedUsd(seedTierForModelId(effectiveModel)), source: 'seed' };
 }
 

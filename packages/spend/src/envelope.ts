@@ -4,8 +4,8 @@ import type { PoolClient } from 'pg';
  * D#483 S5-d: the spend envelope of an approval. The ONE implementation of "may this run start, given the item's envelope": reserve() calls it under the
  * envelope's lock and headroom.ts calls it without one, so the two cannot disagree (packages/spend/test/headroom.test.ts holds them to it).
  *
- * Spend of an envelope = the ledger rows (model and compute) of the runs of every item that draws on it, plus its open reservations, plus the estimated
- * charge of each run that reserved no model money (envelope_run_charges, written by reserve()). A run is admitted only while that sum plus the run's own
+ * Spend of an envelope = the ledger rows (model and compute) of the runs of every item that draws on it, plus its open reservations, plus the API-equivalent figure
+ * of its runner runs, plus the estimated charge of each live run that reserved no model money (envelope_run_charges, written by reserve(); see SPENT_SQL). A run is admitted only while that sum plus the run's own
  * reservation stays within the envelope's current amount (its highest version), so spend never passes the amount by more than a run already in flight.
  * Nothing here stops a run that is in flight.
  */
@@ -33,7 +33,19 @@ export async function currentEnvelope(client: PoolClient, accountId: string, env
   return rows[0] ? { amountUsd: Number(rows[0].amount_usd), version: rows[0].version } : null;
 }
 
-/** The envelope's spend, as one SQL expression over $1 = account, $2 = envelope, $3 = the instant spend is counted from (see the file header and `spendSince`). Counts a charge only while its run started or may still start. */
+/**
+ * The envelope's spend, as one SQL expression over $1 = account, $2 = envelope, $3 = the instant spend is counted from (see the file header and `spendSince`).
+ * The ONE sum: reserve(), headroom, the item read and the child launch's room check all read it.
+ *
+ * A run that reserves no model money (a subscription run) is counted at an estimated price while it is live, and at what it really cost once it is over, but only
+ * when a real, positive figure exists:
+ *  - a ledger model row above $0 (an operator run books a $0 model row when it settles, which says nothing about its cost, so it does NOT replace the estimate);
+ *    a runner run's `runner_run_usage.api_equivalent_usd` (the cloud's own recomputation from the tokens the runner reported; counted as it grows, so a run
+ *    still going counts what it has reported so far);
+ *  - its estimated charge (`envelope_run_charges`) stops counting as soon as the run is over AND one of those figures exists. The estimate and the real figure are
+ *    never both in the sum. A finished run with neither keeps its estimate, so the sum stays on the safe side (fail closed).
+ * A charge counts only while its run started or may still start.
+ */
 const SPENT_SQL = `SELECT COALESCE(SUM(x.usd), 0) AS sum FROM (
        SELECT l.usd FROM ledger l
          JOIN agent_runs r ON r.account_id = l.account_id AND r.id = l.run_id
@@ -45,9 +57,17 @@ const SPENT_SQL = `SELECT COALESCE(SUM(x.usd), 0) AS sum FROM (
          JOIN work_items w ON w.account_id = r.account_id AND w.id = r.work_item_id
         WHERE s.account_id = $1 AND s.state = 'open' AND w.envelope_id = $2 AND s.created_at >= $3::timestamptz
        UNION ALL
+       SELECT u.api_equivalent_usd FROM runner_run_usage u
+         JOIN agent_runs r ON r.account_id = u.account_id AND r.id = u.run_id
+         JOIN work_items w ON w.account_id = r.account_id AND w.id = r.work_item_id
+        WHERE u.account_id = $1 AND w.envelope_id = $2 AND u.api_equivalent_usd IS NOT NULL AND u.recorded_at >= $3::timestamptz
+       UNION ALL
        SELECT c.usd FROM envelope_run_charges c
          JOIN agent_runs r ON r.account_id = c.account_id AND r.id = c.run_id
         WHERE c.account_id = $1 AND c.envelope_id = $2 AND c.created_at >= $3::timestamptz AND NOT (r.status = 'refused_spend' OR (r.status = 'cancelled' AND r.started_at IS NULL))
+          AND NOT (r.status NOT IN ('pending', 'running')
+                   AND (EXISTS (SELECT 1 FROM ledger lm WHERE lm.account_id = c.account_id AND lm.run_id = c.run_id AND lm.kind = 'model' AND lm.usd > 0)
+                        OR EXISTS (SELECT 1 FROM runner_run_usage ru WHERE ru.account_id = c.account_id AND ru.run_id = c.run_id AND ru.api_equivalent_usd IS NOT NULL)))
      ) x`;
 
 /**
@@ -74,6 +94,28 @@ export async function envelopeSpentUsd(client: PoolClient, accountId: string, en
   const since = await spendSince(client, accountId, envelopeId, now);
   const { rows } = await client.query<{ sum: string }>(`SELECT sum::text FROM (${SPENT_SQL}) t`, [accountId, envelopeId, since]);
   return Number(rows[0]!.sum);
+}
+
+/** The envelope an item draws on, as a person reads it: its current version and amount, and what it has spent or holds (`envelopeSpentUsd`, the sum admission uses). */
+export interface ItemEnvelopeRead {
+  id: string;
+  scope: EnvelopeScope;
+  version: number;
+  amountUsd: number;
+  spentUsd: number;
+}
+
+/** The item's envelope for display, or null when the item draws on none (or no such row is visible). Must run inside a `withTenant` transaction. */
+export async function readItemEnvelope(client: PoolClient, accountId: string, workItemId: string, now: Date = new Date()): Promise<ItemEnvelopeRead | null> {
+  const envelopeId = await itemEnvelopeId(client, accountId, workItemId);
+  if (envelopeId === null) return null;
+  const { rows } = await client.query<{ scope: EnvelopeScope; amount_usd: string; version: number }>(
+    'SELECT scope, amount_usd::text, version FROM approval_envelopes WHERE account_id = $1 AND id = $2 ORDER BY version DESC LIMIT 1',
+    [accountId, envelopeId],
+  );
+  const cur = rows[0];
+  if (cur === undefined) return null;
+  return { id: envelopeId, scope: cur.scope, version: cur.version, amountUsd: Number(cur.amount_usd), spentUsd: await envelopeSpentUsd(client, accountId, envelopeId, now) };
 }
 
 /** Whole ten-thousandths of a dollar: the unit the money columns hold, so sums and compares never meet a binary fraction. */
