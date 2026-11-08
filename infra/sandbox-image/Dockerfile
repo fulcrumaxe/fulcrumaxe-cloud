@@ -72,6 +72,17 @@ RUN printf '%s\n' \
     && usermod --home /vercel ubuntu \
     && chown -R ubuntu:ubuntu /vercel
 COPY --from=fetch --chown=root:root /opt/fx /opt/fx
+# Chromium for the repo's Playwright specs. The sandbox cannot reach cdn.playwright.dev at run time, so the browser is
+# baked in at build time. PLAYWRIGHT_VERSION must equal the @playwright/test version in pnpm-lock.yaml (a test checks it):
+# each Playwright release expects one exact Chromium build. The browsers live under /opt/ms-playwright, root-owned and
+# world-readable, and the env var points every Playwright process at them. The pinned node runs the installer, which
+# also installs Chromium's apt dependencies; the npm cache is removed afterwards.
+ARG PLAYWRIGHT_VERSION=1.63.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN apt-get update \
+    && PATH=/opt/fx/bin:$PATH npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
 # The runner starts the agent as plain `claude`, and the agent's own child processes expect `node`: both are found on
 # PATH. /opt/fx/bin comes FIRST, so these are the pinned binaries and nothing in a customer's repository or image can
 # shadow them. The rest is Ubuntu's standard PATH. packages/runner/test/sandboxImagePin.test.ts keeps this in step

@@ -141,6 +141,21 @@ describe("auto-update, secrets and paths", () => {
     expect(instructions("ENV").some((l) => /^ENV\s+PATH=[^\n]*:\/usr\/local\/bin:/.test(l.trim()))).toBe(true);
   });
 
+  it("bakes in the Chromium the repo's pinned @playwright/test expects, at a fixed path, with nothing fetched at run time", () => {
+    const pinned = /^ARG PLAYWRIGHT_VERSION=(\S+)$/m.exec(dockerfile)?.[1];
+    expect(pinned, "ARG PLAYWRIGHT_VERSION with a default").toMatch(/^\d+\.\d+\.\d+$/);
+    // The version must be the one pnpm-lock.yaml resolves for @playwright/test, or the specs ask for another Chromium build.
+    const pnpmLock = readFileSync(join(ROOT, "pnpm-lock.yaml"), "utf8");
+    const resolved = [...pnpmLock.matchAll(/^ {2}'@playwright\/test@(\d+\.\d+\.\d+)':/gm)].map((m) => m[1]);
+    expect(resolved, "@playwright/test entries in pnpm-lock.yaml").not.toHaveLength(0);
+    expect(new Set(resolved)).toEqual(new Set([pinned]));
+    expect(dockerfile).toMatch(/playwright@\$\{PLAYWRIGHT_VERSION\} install --with-deps chromium\b/);
+    expect(instructions("ENV")).toContain("ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright");
+    // The final stage's install runs as root (before USER ubuntu) and leaves the tree readable by the normal user.
+    expect(dockerfile.indexOf("install --with-deps chromium")).toBeLessThan(dockerfile.indexOf("USER ubuntu"));
+    expect(dockerfile).toMatch(/chmod -R a\+rX \/opt\/ms-playwright/);
+  });
+
   it("keeps the preset user, sudo and home", () => {
     expect(dockerfile).toContain("'ubuntu ALL=(ALL) NOPASSWD:ALL'");
     expect(dockerfile).toMatch(/^ENV HOME=\/vercel$/m);
