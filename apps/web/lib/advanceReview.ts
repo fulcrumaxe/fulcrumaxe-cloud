@@ -68,7 +68,9 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
         { accountId: input.accountId, workItemId: input.workItemId, headSha: input.headSha, prNumber: input.prNumber, baseRef: input.baseRef, requiredRoles: input.requiredRoles as VerdictRole[] },
         { http: await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool), gate1 }) },
       );
-      return out.decision === "full_review" ? { decision: out.decision, reason: out.reason } : { decision: out.decision };
+      if (out.decision === "full_review") return { decision: out.decision, reason: out.reason };
+      // A pending wait carries the words and check names the timeout stop will say; the other answers carry nothing more.
+      return out.decision === "ci_pending" ? { decision: out.decision, ciReasons: out.ciReasons, ...(out.ciMissing ? { ciMissing: out.ciMissing } : {}), ...(out.ciRunning ? { ciRunning: out.ciRunning } : {}) } : { decision: out.decision };
     },
     resume: (pool, registry, input) => resumeAgentRun(pool, registry, input),
     // D#6 PUBLIC-MERGE PR2b: an authorized merge order the runner never reported on (its lease ran out, or its deadline passed) is ended from GitHub's own answer,

@@ -41,7 +41,7 @@
  * entries are opt-in: they hold only on a client built with `gate1Attest: true` (the review round's code-repository client, which also leaves out
  * A10); every other client refuses them exactly as before. Nothing here posts or labels by itself: it only lets the exact calls through.
  *   A14  POST /repos/{owner}/{repo}/issues/{n}/labels, body exactly { labels: ["ci:full"] }
- *   A15  the fixed GraphQL document `Gate1CheckRuns`: the check runs on one commit by sha (name, status, conclusion, startedAt, app id), no output text
+ *   A15  the fixed GraphQL document `Gate1CheckRuns`: the check runs on one commit by sha (name, status, conclusion, startedAt, completedAt, app id), no output text
  *   A16  the fixed GraphQL document `Gate1LabelEvents`: a pull request's labeled and unlabeled events (label name and createdAt), nothing else
  *   A7   widened on that client only: also context exactly "fx-gate1", state success or failure, description one of `FX_GATE1_DESCRIPTIONS`
  * The REST check-runs and issue-events reads stay refused on every client.
@@ -142,7 +142,7 @@ export const GITHUB_GRAPHQL_DOCUMENTS = Object.freeze({
                 pageInfo { hasNextPage endCursor }
                 nodes {
                   __typename
-                  ... on CheckRun { name status conclusion checkSuite { app { databaseId } } }
+                  ... on CheckRun { name status conclusion completedAt checkSuite { app { databaseId } } }
                   ... on StatusContext { context state }
                 }
               }
@@ -180,7 +180,7 @@ export const GATE1_ATTEST_DOCUMENTS = Object.freeze({
             pageInfo { hasNextPage endCursor }
             nodes {
               __typename
-              ... on CheckRun { name status conclusion startedAt checkSuite { app { databaseId } } }
+              ... on CheckRun { name status conclusion startedAt completedAt checkSuite { app { databaseId } } }
             }
           }
         }

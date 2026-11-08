@@ -22,6 +22,7 @@ import {
 } from "./mergeGate.js";
 import { hasUnmatchablePath, MAX_PATH, type ResourceRule } from "../mergeQueue/orderedResources.js";
 import { readCleanMerge, readTreeEntries, type CleanMergeReading } from "./treeMerge.js";
+import { settleCheckRun } from "./checkRunSettle.js";
 import type { PullRequestRef } from "./types.js";
 
 /**
@@ -569,7 +570,8 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
           if (typeof node.name !== "string" || typeof node.status !== "string") bad("check_run");
           if (node.conclusion !== null && typeof node.conclusion !== "string") bad("check_run.conclusion");
           const app = isObj(node.checkSuite) && isObj(node.checkSuite.app) ? node.checkSuite.app.databaseId : null;
-          checkRuns.push({ name: node.name as string, status: (node.status as string).toLowerCase(), conclusion: node.conclusion === null ? null : (node.conclusion as string).toLowerCase(), appId: typeof app === "number" ? app : null });
+          const settled = settleCheckRun({ status: (node.status as string).toLowerCase(), conclusion: node.conclusion === null ? null : (node.conclusion as string).toLowerCase(), completedAt: typeof node.completedAt === "string" ? node.completedAt : null });
+          checkRuns.push({ name: node.name as string, status: settled.status, conclusion: settled.conclusion, appId: typeof app === "number" ? app : null });
         } else if (node.__typename === "StatusContext") {
           if (typeof node.context !== "string" || typeof node.state !== "string") bad("status");
           statuses.push({ context: node.context as string, state: (node.state as string).toLowerCase() });
@@ -850,7 +852,8 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         if (raw.head_sha !== headSha) attributedSha = typeof raw.head_sha === "string" ? raw.head_sha : "";
         if (typeof raw.id !== "number" && typeof raw.id !== "string") bad("check_run.id");
         const appId = isObj(raw.app) && typeof raw.app.id === "number" ? raw.app.id : null;
-        return { id: String(raw.id), name: raw.name, status: raw.status, conclusion: raw.conclusion, appId };
+        const settled = settleCheckRun({ status: raw.status, conclusion: raw.conclusion, completedAt: typeof raw.completed_at === "string" ? raw.completed_at : null });
+        return { id: String(raw.id), name: raw.name, status: settled.status, conclusion: settled.conclusion, appId };
       }, (c) => c.id);
       const statuses = await collect<CommitStatusState>(`${repo}/commits/${headSha}/status`, "statuses", {}, (raw) => {
         if (!isObj(raw) || typeof raw.context !== "string" || typeof raw.state !== "string") bad("status");

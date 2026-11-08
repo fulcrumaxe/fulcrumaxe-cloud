@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { advanceActionFor } from './advance.js';
-import { CI_MISSING_PREFIX } from './driverEvents.js';
+import { CI_MISSING_PREFIX, CI_RUNNING_PREFIX } from './driverEvents.js';
 import { blockingReasons, isQueuedSql, removedByPerson } from './mergeReadiness.js';
 import { CLOSE_ON_GITHUB_STAGES } from './operatorActions.js';
 import { readReviewHold } from './reviewHold.js';
@@ -147,6 +147,8 @@ export function ciWaitTimeoutWords(reasons: readonly string[]): string {
   const parts = reasons.filter((r) => CI_WAIT_REASON_WORDS[r] !== undefined).map((r) => CI_WAIT_REASON_WORDS[r]!);
   if (names.length > 0) parts.push(`the required ${names.length === 1 ? 'check' : 'checks'} ${names.join(', ')} never reported`);
   else if (reasons.includes('required_missing')) parts.push('a required check never reported');
+  const live = reasons.filter((r) => r.startsWith(CI_RUNNING_PREFIX)).map((r) => r.slice(CI_RUNNING_PREFIX.length));
+  if (live.length > 0) parts.push(`the ${live.length === 1 ? 'check' : 'checks'} ${live.join(', ')} had not reported finished`);
   if (parts.length === 0) return STOP_WORDS.ci_wait_timeout!;
   return `After two hours of waiting, ${parts.join(' and ')}, so the pipeline stopped for a person. Open the pull request on GitHub, start or run the check again, then press Check the merge.`;
 }

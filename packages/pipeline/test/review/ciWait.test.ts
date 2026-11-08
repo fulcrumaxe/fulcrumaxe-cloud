@@ -53,8 +53,8 @@ describe("readCiWait", () => {
     const named = readCiWaitNamed(s, HEAD);
     expect(named).toMatchObject({ state: "pending", reasons: ["required_missing"], missing: ["alpha", "c1", "c2", "c3", "c4"] });
     expect({ state: named.state, reasons: named.reasons }).toEqual(readCiWait(s, HEAD));
-    // Reported ones are not named; with nothing missing there is no `missing` at all.
-    expect(readCiWaitNamed(snap({ requiredContexts: ["build", "guard"], checkRuns: [run("build", "completed", "success"), run("guard", "queued")] }), HEAD)).toEqual({ state: "pending", reasons: ["check_running"] });
+    // Reported ones are not named; with nothing missing there is no `missing` at all (an unfinished check is named under `running`).
+    expect(readCiWaitNamed(snap({ requiredContexts: ["build", "guard"], checkRuns: [run("build", "completed", "success"), run("guard", "queued")] }), HEAD)).toEqual({ state: "pending", reasons: ["check_running"], running: ["guard"] });
     expect(readCiWaitNamed(snap(), HEAD)).toEqual({ state: "settled", reasons: [] });
   });
 

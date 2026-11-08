@@ -210,7 +210,7 @@ describe("what the attester must never reach, even on its own client", () => {
     expect(doc).toMatch(/^query Gate1CheckRuns\(/);
     expect(doc).toContain("object(oid: $sha)");
     expect([...doc.matchAll(/\.\.\. on (\w+)/g)].map((m) => m[1])).toEqual(["Commit", "CheckRun"]);
-    expect(doc).toContain("... on CheckRun { name status conclusion startedAt checkSuite { app { databaseId } } }");
+    expect(doc).toContain("... on CheckRun { name status conclusion startedAt completedAt checkSuite { app { databaseId } } }");
     for (const word of ["output", "summary", "text", "title", "annotations", "details", "detailsUrl", "url", "permalink", "description", "context", "state", "login", "author", "message", "body", "blob", "tree", "patch", "diff", "contents", "workflowRun", "StatusContext"]) {
       expect(doc, `selects ${word}`).not.toMatch(new RegExp(`\\b${word}\\b`, "i"));
     }

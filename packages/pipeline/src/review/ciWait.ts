@@ -16,7 +16,8 @@ import { createReviewGitHubPort } from "./mergeGateRun.js";
  * look. It holds for every repository the same way: there is no setting that turns it off and no check of whose repository it is.
  *
  * "Still running" is read from the head commit's own signals, the same ones the merge gate reads (`getCiSnapshot`):
- *   - a check run whose status is not `completed` (queued, in progress, waiting, pending, requested);
+ *   - a check run whose status is not `completed` (queued, in progress, waiting, pending, requested). A run that already has a conclusion and a
+ *     completion time counts as completed whatever its status says: the readers settle that once, in `settleCheckRun`;
  *   - a commit status that has not finished (anything but `success`, `failure` or `error`: `pending`, and `expected`, which a
  *     GraphQL read answers for a required status that was never reported);
  *   - a context the base branch requires (branch protection or a ruleset) that has not appeared on the commit yet. A repo-wide
@@ -47,6 +48,8 @@ export interface CiWaitReading {
   reasons: CiWaitReason[];
   /** Only from `readCiWaitNamed`, and only when `required_missing` is a reason: the names of the required checks that have not reported (public check names), sorted, at most MAX_MISSING_NAMES. */
   missing?: string[];
+  /** Only from `readCiWaitNamed`, and only when `check_running` or `status_pending` is a reason: the names of the checks that have not finished, sorted, at most MAX_MISSING_NAMES. */
+  running?: string[];
 }
 
 const MAX_MISSING_NAMES = 5;
@@ -71,8 +74,15 @@ function missingRequiredContexts(snapshot: CiSnapshot): string[] {
  */
 export function readCiWaitNamed(snapshot: CiSnapshot, headSha: string, opts: { followsPullRequest?: boolean } = {}): CiWaitReading {
   const reading = readCiWait(snapshot, headSha, opts);
-  if (!reading.reasons.includes("required_missing")) return reading;
-  return { ...reading, missing: [...new Set(missingRequiredContexts(snapshot).map((n) => n.slice(0, MAX_NAME_LENGTH)))].sort().slice(0, MAX_MISSING_NAMES) };
+  const names = (list: string[]): string[] => [...new Set(list.map((n) => n.slice(0, MAX_NAME_LENGTH)))].sort().slice(0, MAX_MISSING_NAMES);
+  const out: CiWaitReading = { ...reading };
+  if (reading.reasons.includes("required_missing")) out.missing = names(missingRequiredContexts(snapshot));
+  if (reading.reasons.includes("check_running") || reading.reasons.includes("status_pending")) {
+    const checks = (Array.isArray(snapshot.checkRuns) ? snapshot.checkRuns : []).filter((c) => c.status !== "completed").map((c) => c.name);
+    const states = (Array.isArray(snapshot.statuses) ? snapshot.statuses : []).filter((s) => s.context !== REVIEW_STATUS_CONTEXT && !FINISHED_STATUS_STATES.has(s.state)).map((s) => s.context);
+    out.running = names([...checks, ...states]);
+  }
+  return out;
 }
 
 /**

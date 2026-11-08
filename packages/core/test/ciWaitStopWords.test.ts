@@ -19,6 +19,12 @@ describe('ci_wait_timeout stop reasons', () => {
     expect(ciWaitStopReasons(undefined, undefined)).toEqual([]);
   });
 
+  it('names the checks that had not finished as running_<check>, after the missing ones', () => {
+    expect(ciWaitStopReasons(['check_running'], undefined, ['pr-gates', 'e2e'])).toEqual(['check_running', 'running_pr_gates', 'running_e2e']);
+    expect(ciWaitStopReasons(['required_missing', 'check_running'], ['fx-gate1'], ['pr-gates'])).toEqual(['required_missing', 'check_running', 'missing_fx_gate1', 'running_pr_gates']);
+    expect(() => assertDriverEvent({ workItemId: 'w', kind: 'stopped', dedupeKey: 'k', code: 'ci_wait_timeout', reasons: ciWaitStopReasons(['check_running'], undefined, ['9 lives', 'a/b']) })).not.toThrow();
+  });
+
   it('are plain codes the driver-event store accepts, at most five names, whatever the check is called', () => {
     const reasons = ciWaitStopReasons(['required_missing'], ['9lives', 'x'.repeat(200), 'a/b', 'c', 'd', 'e', 'f']);
     expect(reasons).toHaveLength(1 + 5);
@@ -27,6 +33,12 @@ describe('ci_wait_timeout stop reasons', () => {
 });
 
 describe('the card words for a ci_wait_timeout stop', () => {
+  it('names the checks that had not reported finished', () => {
+    const why = classifyStall(stopped(ciWaitStopReasons(['check_running'], undefined, ['pr-gates'])))!.why;
+    expect(why).toContain('a check was still running');
+    expect(why).toContain('the check pr_gates had not reported finished');
+  });
+
   it('names the required check that never reported', () => {
     const s = classifyStall(stopped(ciWaitStopReasons(['required_missing'], ['fx-gate1'])))!;
     expect(s.code).toBe('stopped');

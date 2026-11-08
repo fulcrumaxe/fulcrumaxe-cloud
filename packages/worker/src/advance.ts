@@ -321,6 +321,7 @@ export interface AdvanceMergeOnlyResult {
   /** `ci_pending` only, as for `AdvanceRoundResult`. */
   ciReasons?: string[];
   ciMissing?: string[];
+  ciRunning?: string[];
 }
 
 /** The review context the workflow keeps: small facts only. The Spec's text is read inside the step that needs it. */
@@ -382,6 +383,7 @@ export interface AdvanceRoundResult {
   /** `ci_pending` only: why CI is not finished (fixed words), and the required checks that never reported (public check names) when `required_missing` is one. */
   ciReasons?: string[];
   ciMissing?: string[];
+  ciRunning?: string[];
 }
 /**
  * D#6 PUBLIC-MERGE PR2b: where the merge order of a paired `runner_local` item stands. `open`: still waiting for the runner (pending, claimed or authorized).
@@ -1670,7 +1672,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const bad = await guardStep(who);
     if (bad) return { decision: "refused", reason: bad.reason ?? "refused" };
     const out = await deps.review.recordRound(runnerPool, deps.registry, { ...input, accountId: who.accountId, workItemId: who.workItemId });
-    console.info(JSON.stringify({ event: "advance.round", work_item_id: who.workItemId, round: input.round, decision: out.decision, verdicts: out.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`), ...(out.decision === "ci_pending" ? { ci_reasons: out.ciReasons ?? [], ci_missing: out.ciMissing ?? [] } : {}) }));
+    console.info(JSON.stringify({ event: "advance.round", work_item_id: who.workItemId, round: input.round, decision: out.decision, verdicts: out.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`), ...(out.decision === "ci_pending" ? { ci_reasons: out.ciReasons ?? [], ci_missing: out.ciMissing ?? [], ci_running: out.ciRunning ?? [] } : {}) }));
     return out;
   }
 
@@ -1687,7 +1689,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // No port, no carry-forward: the reviewers run as they always did.
     if (!deps.review.recordMergeOnly) return { decision: "full_review", reason: "unavailable" };
     const out = await deps.review.recordMergeOnly(runnerPool, { ...input, accountId: who.accountId, workItemId: who.workItemId });
-    console.info(JSON.stringify({ event: "advance.merge_only", work_item_id: who.workItemId, decision: out.decision, reason: out.reason ?? null, ...(out.decision === "ci_pending" ? { ci_reasons: out.ciReasons ?? [], ci_missing: out.ciMissing ?? [] } : {}) }));
+    console.info(JSON.stringify({ event: "advance.merge_only", work_item_id: who.workItemId, decision: out.decision, reason: out.reason ?? null, ...(out.decision === "ci_pending" ? { ci_reasons: out.ciReasons ?? [], ci_missing: out.ciMissing ?? [], ci_running: out.ciRunning ?? [] } : {}) }));
     return out;
   }
 

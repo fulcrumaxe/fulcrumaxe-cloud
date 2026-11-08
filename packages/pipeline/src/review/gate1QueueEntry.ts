@@ -1,5 +1,6 @@
 import { isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp } from "../build/githubMergePort.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
+import { settleCheckRun } from "../build/checkRunSettle.js";
 import { ACTIONS_APP_ID, GATE1_CONTEXT, GATE1_DESCRIPTIONS, GATE1_WORKFLOW_CONTEXTS, gate1AttestEnabled, hostedGate1Reads } from "./gate1Attest.js";
 import { readGate1CreatorFor } from "./gate1Creator.js";
 
@@ -134,7 +135,8 @@ async function readRuns(http: LocalGitHubHttp, repo: { owner: string; name: stri
       if (node.__typename !== "CheckRun") continue;
       if (typeof node.name !== "string" || typeof node.status !== "string" || (node.conclusion !== null && typeof node.conclusion !== "string")) fail("run");
       const app = isObj(node.checkSuite) && isObj(node.checkSuite.app) ? node.checkSuite.app.databaseId : null;
-      runs.push({ name: node.name as string, appId: typeof app === "number" ? app : null, status: (node.status as string).toLowerCase(), conclusion: node.conclusion === null ? null : (node.conclusion as string).toLowerCase() });
+      const settled = settleCheckRun({ status: (node.status as string).toLowerCase(), conclusion: node.conclusion === null ? null : (node.conclusion as string).toLowerCase(), completedAt: typeof node.completedAt === "string" ? node.completedAt : null });
+      runs.push({ name: node.name as string, appId: typeof app === "number" ? app : null, status: settled.status, conclusion: settled.conclusion });
     }
     const info = ctx.pageInfo as Json;
     if (info.hasNextPage !== true) return { runs, complete: true };

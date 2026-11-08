@@ -18,7 +18,7 @@ const PR = { repoId: "repo-1", prNumber: 7 };
 
 interface FakeState {
   headSha: string;
-  checks: { name: string; status: string; conclusion: string | null; head_sha?: string; id?: number; app?: { id: number } }[];
+  checks: { name: string; status: string; conclusion: string | null; completed_at?: string | null; head_sha?: string; id?: number; app?: { id: number } }[];
   statuses: { context: string; state: string }[];
   /** Classic protection response; undefined = 404 "Branch not protected". */
   protection?: { status: number; body: unknown };
@@ -89,6 +89,20 @@ function portOver(f: { http: GitHubHttp }) {
 }
 
 describe("H14c-1 GitHub merge port: CI collection", () => {
+  it("a run GitHub reports in_progress with a conclusion and a completion time is a completed run, in the snapshot and for the merge gate", async () => {
+    const half = (conclusion: string) => ({ name: "pr-gates", status: "in_progress", conclusion, completed_at: "2026-11-07T10:00:00Z" });
+    const green = await portOver(fakeGitHub({ checks: [ok("build"), half("success")] })).port.getCiSnapshot(PR, HEAD);
+    expect(green.checkRuns.map((c) => c.status)).toEqual(["completed", "completed"]);
+    expect(isCiGreen(green, HEAD)).toBe(true);
+    const red = await portOver(fakeGitHub({ checks: [ok("build"), half("failure")] })).port.getCiSnapshot(PR, HEAD);
+    expect(red.checkRuns[1]).toMatchObject({ status: "completed", conclusion: "failure" });
+    expect(isCiGreen(red, HEAD)).toBe(false);
+    // A run that really is running (no completion time, no conclusion) stays running.
+    const running = await portOver(fakeGitHub({ checks: [ok("build"), { name: "pr-gates", status: "in_progress", conclusion: null, completed_at: null }] })).port.getCiSnapshot(PR, HEAD);
+    expect(running.checkRuns[1]!.status).toBe("in_progress");
+    expect(isCiGreen(running, HEAD)).toBe(false);
+  });
+
   it("CI-1: pages through every check run; a failing run only on page 2 is seen, not green", async () => {
     const f = fakeGitHub({ checks: [...many(100), { name: "e2e", status: "completed", conclusion: "failure" }] });
     const snap = await portOver(f).port.getCiSnapshot(PR, HEAD);

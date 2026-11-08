@@ -1,6 +1,6 @@
 import { GATE1_ATTEST_DOCUMENTS, GATE1_QUEUE_DOCUMENTS, GATE1_STATUS_DOCUMENTS, GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubRequest, type GithubResponse } from "@fx/runner-cloud";
 import type { LocalGitHubHttp } from "../../../src/build/githubMergePort.js";
-import { defaultGhId, type FakeRepoState } from "./fakeGitHubRest.js";
+import { defaultGhId, fakeCompletedAt, type FakeRepoState } from "./fakeGitHubRest.js";
 
 /**
  * D#6 R3c: the GitHub a `runner_local` repo's review and merge path talks to, as a strict fake, over the same `FakeRepoState` the
@@ -210,7 +210,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
             const creator = w.creators[sha] ?? null;
             return json(200, { data: { repository: { object: { oid: sha, status: s.statuses[sha] === undefined ? null : { context: state === undefined ? null : { state: state.toUpperCase(), creator } } } } } });
           }
-          const runs = (s.checks[sha] ?? []).map((c) => ({ __typename: "CheckRun", name: c.name, status: c.status.toUpperCase(), conclusion: c.conclusion === null ? null : c.conclusion.toUpperCase(), startedAt: c.startedAt ?? "2026-11-07T09:00:00Z", checkSuite: { app: c.app === null ? null : { databaseId: c.app?.id ?? 1 } } }));
+          const runs = (s.checks[sha] ?? []).map((c) => ({ __typename: "CheckRun", name: c.name, status: c.status.toUpperCase(), conclusion: c.conclusion === null ? null : c.conclusion.toUpperCase(), startedAt: c.startedAt ?? "2026-11-07T09:00:00Z", completedAt: fakeCompletedAt(c), checkSuite: { app: c.app === null ? null : { databaseId: c.app?.id ?? 1 } } }));
           const all = [...runs, ...Object.keys(s.statuses[sha] ?? {}).map(() => ({ __typename: "StatusContext" }))];
           return json(200, { data: { repository: { object: { oid: sha, statusCheckRollup: all.length === 0 ? null : { contexts: { totalCount: all.length, ...page(all, v.cursor, false) } } } } } });
         },
@@ -253,7 +253,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
         op,
         reply: () => {
           if (v.owner !== s.owner || v.name !== s.name || v.number !== s.prNumber) return json(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve." }] });
-          const runs = (s.checks[s.headSha] ?? []).map((c) => ({ __typename: "CheckRun", name: c.name, status: c.status.toUpperCase(), conclusion: c.conclusion === null ? null : c.conclusion.toUpperCase(), checkSuite: { app: { databaseId: c.app?.id ?? 1 } } }));
+          const runs = (s.checks[s.headSha] ?? []).map((c) => ({ __typename: "CheckRun", name: c.name, status: c.status.toUpperCase(), conclusion: c.conclusion === null ? null : c.conclusion.toUpperCase(), completedAt: fakeCompletedAt(c), checkSuite: { app: { databaseId: c.app?.id ?? 1 } } }));
           const sts = Object.entries(s.statuses[s.headSha] ?? {}).map(([context, state]) => ({ __typename: "StatusContext", context, state: state.toUpperCase() }));
           const all = [...runs, ...sts];
           const start = typeof v.cursor === "string" ? Number(Buffer.from(v.cursor, "base64url").toString()) : 0;
