@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
+import { RUN_LIMIT_BOUNDS } from "@fx/core/src/run-limits/limits.js";
 import type { HostLookup } from "@fx/net-guard";
 import {
   claudeModelIds,
@@ -190,6 +191,14 @@ const PENDING_POLL_MS = 25;
 /** How long after a stop this runner recorded itself a still-`running` run is left to its own finalize before the lost-run check settles it. */
 export const OWN_STOP_GRACE_MS = 5 * 60_000;
 
+/**
+ * The durable backstop's limits. The run's own guard (meteringGuard, armed in the process that started the run) ends it at its
+ * resolved limits; this check runs where that process may be gone and does not know the run's resolved values (they are not
+ * stored), so it uses the platform ceilings: it never ends a run earlier than the run's own guard would have.
+ */
+export const DURABLE_SILENCE_MS = RUN_LIMIT_BOUNDS.silence_minutes.ceiling * 60_000;
+export const DURABLE_RUN_MS = RUN_LIMIT_BOUNDS.max_run_minutes.ceiling * 60_000;
+
 interface RunBookkeeping {
   /** Set when the run's firewall policy was built from the operator subscription (decided once, at dispatch/resume). */
   operatorSubscription?: boolean;
@@ -309,6 +318,8 @@ export class SandboxTarget implements ExecutionTarget {
   /** D#6 C12 A1: the runtime a sandbox run is stamped with. It used to be a literal in `startAgentRun`. */
   readonly runtime = "production" as const;
   private readonly runs = new Map<string, RunBookkeeping>();
+  /** Durable limit checks in flight on this instance, so two overlapping ticks here stop a run's sandbox once (another instance is covered by the status compare-and-set). */
+  private readonly durableChecks = new Map<string, Promise<LostRunOutcome>>();
 
   constructor(private readonly deps: SandboxTargetDeps) {}
 
@@ -606,9 +617,9 @@ export class SandboxTarget implements ExecutionTarget {
     }
     // One look: the provider FIRST, the run's row second. The run's own finalize records its stop before it asks the
     // provider to stop, so a provider that already reports "stopped" guarantees the row read after it shows that mark.
-    const look = async (): Promise<"lost" | LostRunOutcome> => {
+    const look = async (): Promise<"lost" | "running" | LostRunOutcome> => {
       const state = (await this.deps.sandboxPort.sandboxState?.(handle)) ?? "unknown";
-      if (state === "running") return "alive";
+      if (state === "running") return "running";
       if (state === "unknown") return "unknown";
       const { rows } = await this.withAccount(run.accountId, (client) =>
         client.query<{ status: string; stopped: Date | null }>(
@@ -628,11 +639,48 @@ export class SandboxTarget implements ExecutionTarget {
     // makes every sandbox read 404, a provider hiccup) must never settle a healthy run, and a finalize that was mid-way
     // has recorded its stop by the second look.
     const first = await look();
+    // The sandbox is there: the run is only still going if the limits its own process would have enforced are not past.
+    if (first === "running") {
+      const inFlight = this.durableChecks.get(run.id) ?? this.enforceLimitsDurably(run).finally(() => this.durableChecks.delete(run.id));
+      this.durableChecks.set(run.id, inFlight);
+      return inFlight;
+    }
     if (first !== "lost") return first;
     await new Promise((resolve) => setTimeout(resolve, this.deps.lostConfirmDelayMs ?? LOST_CONFIRM_DELAY_MS));
     const second = await look();
+    if (second === "running") return "alive";
     if (second !== "lost") return second;
     await this.finalize(run, { status: "failed", failureReason: "sandbox_stopped" });
+    return "settled";
+  }
+
+  /**
+   * The run-time and silence limits live in the process that started the run; when that invocation ends nothing else
+   * enforces them. For a run whose sandbox is still running, ends it (stop, measure, `timed_out` with the limit's
+   * checkpoint, through `finalize`) when it is older than the run-time ceiling or has had no event for the silence
+   * ceiling. `finalize` writes through the compare-and-set status writer, so overlapping ticks end a run once.
+   */
+  private async enforceLimitsDurably(run: ExecutionRun): Promise<LostRunOutcome> {
+    const { rows } = await this.withAccount(run.accountId, (client) =>
+      client.query<{ status: string; requested: Date | null; last_event: Date | null }>(
+        `SELECT a.status, a.sandbox_requested_at AS requested,
+                (SELECT e.created_at FROM run_events e WHERE e.account_id = a.account_id AND e.run_id = a.id ORDER BY e.seq DESC LIMIT 1) AS last_event
+           FROM agent_runs a WHERE a.account_id = $1 AND a.id = $2`,
+        [run.accountId, run.id],
+      ),
+    );
+    const row = rows[0];
+    if (row?.status !== "running" || row.requested === null) return "alive";
+    const now = Date.now();
+    const age = now - row.requested.getTime();
+    const quiet = now - Math.max(row.requested.getTime(), row.last_event?.getTime() ?? 0);
+    const limit: RunLimit | undefined =
+      age > DURABLE_RUN_MS ? { kind: "run_time", limit: DURABLE_RUN_MS, observed: age }
+      : quiet > DURABLE_SILENCE_MS ? { kind: "silence", limit: DURABLE_SILENCE_MS, observed: quiet }
+      : undefined;
+    if (limit === undefined) return "alive";
+    console.warn(JSON.stringify({ event: "run.durable_limit", run_id: run.id, kind: limit.kind }));
+    await this.finalize(run, { status: "timed_out", limit });
     return "settled";
   }
 

@@ -354,6 +354,72 @@ describe("agent launch survives the invocation that started it [pg]", () => {
     }
   });
 
+  /** Moves a running run's start and its events back in time: its sandbox was requested `startedMin` minutes ago, its last event `eventMin` minutes ago. */
+  async function ageRun(runId: string, startedMin: number, eventMin: number): Promise<void> {
+    await db.admin.query(`ALTER TABLE agent_runs DISABLE TRIGGER agent_runs_sandbox_guard`);
+    try {
+      await db.admin.query(`UPDATE agent_runs SET sandbox_requested_at = now() - make_interval(mins => $2) WHERE id = $1`, [runId, startedMin]);
+    } finally {
+      await db.admin.query(`ALTER TABLE agent_runs ENABLE TRIGGER agent_runs_sandbox_guard`);
+    }
+    await db.admin.query(`UPDATE run_events SET created_at = now() - make_interval(mins => $2) WHERE run_id = $1`, [runId, eventMin]);
+  }
+  const stopCalls = (inv: { sdk: { calls: readonly string[] } }) => inv.sdk.calls.filter((c) => c === "stop").length;
+  const checkpointKindOf = async (runId: string): Promise<string | undefined> =>
+    (await db.admin.query(`SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'checkpoint'`, [runId])).rows[0]?.payload.kind;
+
+  it("durable limits: a running sandbox whose run has been silent past the silence ceiling is stopped and ended as timed_out/silence, once", async () => {
+    const { s, inv, runId } = await runningRun();
+    configureAgentRunWiring({ pool: db.runWriterPool, registry: { sandbox: inv.target } });
+    await ageRun(runId, 90, 80); // started 90 minutes ago, last event 80 minutes ago: a fresh instance, the starter's timers are gone
+    const fresh = new SandboxTarget({ ...inv.deps });
+    const callsBefore = stopCalls(inv);
+    // Two ticks at once on the same instance, then a later one.
+    const run = { id: runId, accountId: s.accountId, role: "code-reviewer" as const, product: "team" as const, repoId: s.repoId, roleCard: "", prompt: "", model: "", capUsd: 0, spend: { plan: "starter" as const } };
+    const outcomes = await Promise.all([fresh.settleIfLost(run), fresh.settleIfLost(run)]);
+    expect(outcomes).toContain("settled");
+    expect(await fresh.settleIfLost(run)).toBe("alive");
+    expect(await statusOf(runId)).toBe("timed_out");
+    expect(await checkpointKindOf(runId)).toBe("silence");
+    expect(stopCalls(inv) - callsBefore).toBe(1);
+    expect(await openReservations(runId)).toBe(0);
+  });
+
+  it("durable limits: a run past the run-time ceiling that is still chatty is ended as timed_out/run_time", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 300, 1);
+    const fresh = new SandboxTarget({ ...inv.deps });
+    const run = { id: runId, accountId: s.accountId, role: "code-reviewer" as const, product: "team" as const, repoId: s.repoId, roleCard: "", prompt: "", model: "", capUsd: 0, spend: { plan: "starter" as const } };
+    expect(await fresh.settleIfLost(run)).toBe("settled");
+    expect(await statusOf(runId)).toBe("timed_out");
+    expect(await checkpointKindOf(runId)).toBe("run_time");
+  });
+
+  it("durable limits: an active run (recent event, inside the run-time ceiling) is left running and its sandbox untouched", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 120, 2);
+    const callsBefore = stopCalls(inv);
+    const fresh = new SandboxTarget({ ...inv.deps });
+    const run = { id: runId, accountId: s.accountId, role: "code-reviewer" as const, product: "team" as const, repoId: s.repoId, roleCard: "", prompt: "", model: "", capUsd: 0, spend: { plan: "starter" as const } };
+    expect(await fresh.settleIfLost(run)).toBe("alive");
+    expect(await statusOf(runId)).toBe("running");
+    expect(stopCalls(inv)).toBe(callsBefore);
+  });
+
+  it("durable limits: a run already finalized is skipped without a stop", async () => {
+    const { s, inv, runId, name } = await runningRun();
+    await ageRun(runId, 300, 200);
+    const fresh = new SandboxTarget({ ...inv.deps });
+    const run = { id: runId, accountId: s.accountId, role: "code-reviewer" as const, product: "team" as const, repoId: s.repoId, roleCard: "", prompt: "", model: "", capUsd: 0, spend: { plan: "starter" as const } };
+    expect(await fresh.settleIfLost(run)).toBe("settled");
+    const callsAfterFirst = stopCalls(inv);
+    // The sandbox is reported running again (a stale read); the run is over, so nothing more is done.
+    const stale = new SandboxTarget({ ...inv.deps, sandboxPort: { ...inv.port, sandboxState: async () => "running" } });
+    expect(await stale.settleIfLost(run)).toBe("alive");
+    expect(stopCalls(inv)).toBe(callsAfterFirst);
+    expect(name).toBeTruthy();
+  });
+
   it("the lister is for the runner login only, and takes a sane limit", async () => {
     await expect(db.pureAppUserPool.query(`SELECT * FROM agent_run_list_running(5, 0)`)).rejects.toMatchObject({ code: "42501" });
     await expect(db.runWriterPool.query(`SELECT * FROM agent_run_list_running(0, 0)`)).rejects.toMatchObject({ code: "22023" });
