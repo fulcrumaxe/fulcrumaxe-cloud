@@ -33,6 +33,8 @@ export function jobFor(over: Partial<Job> = {}): Job {
     // relative to the real clock: the daemon checks expiry against Date.now(), so a fixed date here is a time bomb
     expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     key_id: KEY_ID,
+    // D#749 V2c-1: the deploy verifier's job is signed with its browser method.
+    ...(over.role === "deploy-verifier" && over.browser_method === undefined ? { browser_method: "chrome_runner" as const } : {}),
     ...over,
   };
 }

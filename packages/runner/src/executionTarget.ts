@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import type { Product, Role } from "./types.js";
-import type { ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
+import type { BrowserMethod, ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
 import type { ContextAssembly } from "./contextLedgerWriter.js";
 import type { DenyReason, ReserveParams } from "@fx/spend";
 import type { RunFunding } from "./funding.js";
@@ -290,6 +290,8 @@ export interface ExecutionRun {
    * `conflict_round`, without reading the database. Never set by any other start, and never taken from a runner.
    */
   conflictRound?: { fromSha: string; baseSha: string; baseRef: string };
+  /** D#749 V2c-1: how a deploy verifier run drives its browser. Set by the verify stage's start (the cloud's own choice) on that role's run and on no other; the job issuer signs it as `browser_method`. */
+  browserMethod?: BrowserMethod;
   /**
    * D#599 PL-2b-2: set on a run that starts a round on a branch another side opened (not a follow-up): `RunnerTarget.dispatch` then issues a continuation
    * with no session (a foreign session is never claimed). A follow-up of a lost round sets `continuesBranch` alone and goes through `resume`.

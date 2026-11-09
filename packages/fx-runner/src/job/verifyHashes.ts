@@ -5,7 +5,7 @@ import { UnknownRoleError, roleToolsDigest } from "./roleTools.js";
 export type HashRefusal = "unknown_role" | "task_prompt_hash_mismatch" | "role_card_hash_mismatch" | "role_tools_mismatch";
 
 /** The fields of a job these checks read. */
-export type HashCheckedJob = Pick<Job, "role" | "task" | "role_card" | "role_tools_sha256">;
+export type HashCheckedJob = Pick<Job, "role" | "task" | "role_card" | "role_tools_sha256" | "browser_method">;
 
 /**
  * Every reason a job's text or tool list does not match what the cloud signed. Empty means consistent.
@@ -16,7 +16,7 @@ export type HashCheckedJob = Pick<Job, "role" | "task" | "role_card" | "role_too
 export function jobHashRefusals(job: HashCheckedJob): HashRefusal[] {
   let ownDigest: string;
   try {
-    ownDigest = roleToolsDigest(job.role);
+    ownDigest = roleToolsDigest(job.role, job.browser_method);
   } catch (error) {
     if (error instanceof UnknownRoleError) return ["unknown_role"];
     throw error;

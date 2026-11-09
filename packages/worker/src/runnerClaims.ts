@@ -2,6 +2,7 @@ import { createHash, randomInt } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS,
+  BROWSER_CAPABILITY_FOR_METHOD,
   BROWSER_JOB_ROLES,
   BROWSER_JOB_SLOTS_PER_RUNNER,
   CLAIM_QUEUED_RETRY_AFTER_SECONDS,
@@ -29,6 +30,9 @@ import { accountCeiling, hostedLimitsFromPlanData, type HostedLimitsSource } fro
 import { recordRunnerUsage } from "./runnerUsage.js";
 import { ROUTING_JOIN_SQL, ROUTING_WHERE_SQL, loadPollRouting, rolesForCapabilities, routingParams } from "./runnerRouting.js";
 import { requestFollowUp, settleFollowUp, type FollowUpOutcome, type FollowUpPorts } from "./runnerFollowUp.js";
+
+/** `CASE` from a signed browser method to the capability it needs, built from the protocol's table so the two cannot drift. Constants only; nothing from a row or a request goes into it. */
+const BROWSER_METHOD_CAPABILITY_SQL = `CASE a.job_signed #>> '{job,browser_method}' ${Object.entries(BROWSER_CAPABILITY_FOR_METHOD).map(([method, cap]) => `WHEN '${method}' THEN '${cap}'`).join(" ")} END`;
 
 /**
  * D#6 R2b-3 (C9 section 1, C12 section 2.6, C14, C21): the runner lease facade on the `Worker`. Claim, heartbeat and events are
@@ -503,11 +507,14 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND (a.min_protocol_version IS NULL OR a.min_protocol_version <= $20::int)
                   -- D#749 V2a: a browser job is offered only to a runner that holds none (the claim re-checks under the lock).
                   AND (NOT a.role = ANY($21::text[]) OR NOT EXISTS (SELECT 1 FROM agent_runs b WHERE b.account_id = a.account_id AND b.runner_id = $7 AND b.runtime = 'runner' AND b.status = 'running' AND b.role = ANY($21::text[])))
+                  -- D#749 V2c-1: a job that names a browser method (the deploy verifier's, signed by the cloud) is offered only to a runner whose latest hello lists that method's capability.
+                  -- A method the cloud does not know matches nothing (the CASE is NULL), so it is never offered.
+                  AND (a.job_signed #>> '{job,browser_method}' IS NULL OR (${BROWSER_METHOD_CAPABILITY_SQL}) = ANY($22::text[]))
                   AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
                   ${ROUTING_WHERE_SQL}
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
                 LIMIT 1`,
-              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos, ...routingParams(routing), runner.protocol_version ?? 0, BROWSER_JOB_ROLES],
+              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos, ...routingParams(routing), runner.protocol_version ?? 0, BROWSER_JOB_ROLES, runner.capabilities ?? []],
             );
             return rows;
           });
@@ -518,6 +525,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           const parsed = SignedJobSchema.safeParse(candidate.job_signed);
           // A job that does not parse, or has expired, is left for the sweeper; a runner would refuse it anyway.
           if (!parsed.success || Date.parse(parsed.data.job.expires_at) <= now()) continue;
+          // D#749 V2c-1: the same capability rule again on the parsed job (the query is the first line, this is the second): a browser job goes only to a runner that lists its method's capability.
+          if (parsed.data.job.browser_method !== undefined && !(runner.capabilities ?? []).includes(BROWSER_CAPABILITY_FOR_METHOD[parsed.data.job.browser_method])) continue;
 
           // The repo may have been made public since dispatch, and a visibility that cannot be read is not private (C12 section 5).
           let visibility = seen.get(candidate.dispatch_repo_id);

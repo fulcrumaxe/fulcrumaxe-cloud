@@ -25,7 +25,7 @@ import { insertAgentRun, writeRunStatus, type InsertAgentRunParams } from "./run
 import { providerCapacityOf } from "./providerCapacity.js";
 import type { RunStatus } from "./statusTransitions.js";
 import type { Product, Role } from "./types.js";
-import type { ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
+import type { BrowserMethod, ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
 import type { ContextAssembly } from "./contextLedgerWriter.js";
 
 /**
@@ -127,6 +127,8 @@ export interface StartAgentRunInput {
   base?: { sha: string; branch: string };
   /** D#519 MQ4-e2-c1 (C19): see `ExecutionRun.conflictRound`. Only a conflict round's start sets it. */
   conflictRound?: { fromSha: string; baseSha: string; baseRef: string };
+  /** D#749 V2c-1: see `ExecutionRun.browserMethod`. Only the verify stage's deploy verifier start sets it. */
+  browserMethod?: BrowserMethod;
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: see `ExecutionRun.cloneRepo` (`sha`: the proposal verifier's pinned checkout). */
   cloneRepo?: { owner: string; name: string; sha?: string };
@@ -208,6 +210,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     backend: input.backend,
     ...(input.continues ? { continuesBranch: input.continues.branch, continuesFresh: true, ...(input.continues.prNumber === undefined ? {} : { continuesPrNumber: input.continues.prNumber }), ...(input.continues.baseSha === undefined ? {} : { continuesBaseSha: input.continues.baseSha, continuesBaseBranch: input.continues.branch }) } : input.base ? { continuesBaseSha: input.base.sha, continuesBaseBranch: input.base.branch } : {}),
     ...(input.conflictRound ? { conflictRound: input.conflictRound } : {}),
+    ...(input.browserMethod ? { browserMethod: input.browserMethod } : {}),
     workdir: input.workdir,
     ...(input.slice === true && { slice: true as const }),
     cloneRepo: input.cloneRepo,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   BROWSER_CHROME_CAPABILITY,
+  BROWSER_PLAYWRIGHT_CAPABILITY,
   BROWSER_JOB_ROLES,
   BROWSER_JOB_SLOTS_PER_RUNNER,
   CHROME_TOOL_PREFIX,
@@ -27,7 +28,7 @@ import {
 } from "../src/index.js";
 import { HelloMessage, RUNNER_MESSAGES } from "../src/messages.js";
 import { ClaimIdleReply, ClaimedReply, RUNNER_REPLIES } from "../src/replies.js";
-import { JOB_CLASS_BY_ROLE, JobSchema, LIGHT_JOB_ROLES, PINNED_COMMIT_JOB_ROLES, RUNNER_CAPABILITIES, RUNNER_CAPABILITY_FOR_ROLE, RUNNER_ELIGIBLE_ROLES, jobCarriesPinnedCommit, jobClassOfRole } from "../src/job.js";
+import { JOB_CLASS_BY_ROLE, JobSchema, LIGHT_JOB_ROLES, PINNED_COMMIT_JOB_ROLES, RUNNER_ANY_CAPABILITY_FOR_ROLE, RUNNER_CAPABILITIES, RUNNER_CAPABILITY_FOR_ROLE, RUNNER_ELIGIBLE_ROLES, jobCarriesPinnedCommit, jobClassOfRole } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 import { fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
@@ -38,11 +39,12 @@ const failed = (over: Record<string, unknown> = {}) => ({ order_id: ORDER, lease
 const claimed = (over: Record<string, unknown> = {}) => ({ order_id: ORDER, lease_generation: 1, lease_expires_at: "2026-11-09T10:20:00.000Z", repo: { owner: "acme", name: "widgets" }, sha: SHA, ...over });
 
 describe("the deploy verifier role and its capabilities (D#749 V2a)", () => {
-  it("is a runner-eligible role gated by browser_chrome_v1 alone", () => {
+  it("is a runner-eligible role gated by one of the two browser capabilities, never by deploy_order_v1", () => {
     expect(DEPLOY_VERIFIER_ROLE).toBe("deploy-verifier");
     expect(RUNNER_ELIGIBLE_ROLES).toContain(DEPLOY_VERIFIER_ROLE);
     expect(BROWSER_CHROME_CAPABILITY).toBe("browser_chrome_v1");
-    expect(RUNNER_CAPABILITY_FOR_ROLE[DEPLOY_VERIFIER_ROLE]).toBe(BROWSER_CHROME_CAPABILITY);
+    expect(Object.keys(RUNNER_CAPABILITY_FOR_ROLE)).not.toContain(DEPLOY_VERIFIER_ROLE);
+    expect(RUNNER_ANY_CAPABILITY_FOR_ROLE[DEPLOY_VERIFIER_ROLE]).toEqual([BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY]);
     expect(RUNNER_CAPABILITIES).toContain(BROWSER_CHROME_CAPABILITY);
     expect(Object.values(RUNNER_CAPABILITY_FOR_ROLE)).not.toContain(DEPLOY_ORDER_CAPABILITY);
   });

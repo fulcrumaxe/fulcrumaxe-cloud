@@ -16,6 +16,21 @@ export const DEPLOY_VERIFIER_ROLE = "deploy-verifier";
 /** The capability that gates the deploy verifier's job: the machine has Chrome connected and signed in as the configured test account (checked by the daemon, never by the model). */
 export const BROWSER_CHROME_CAPABILITY = "browser_chrome_v1";
 
+/**
+ * D#749 V2c-1: the capability of the second browser method, a runner-owned Playwright browser that the model drives through the `fxverify` MCP server (a runner advertises it only once that
+ * server and a Chromium pass the daemon's own probe). Like `browser_chrome_v1` it gates one METHOD of the deploy verifier's job, not the role: see `BROWSER_CAPABILITY_FOR_METHOD`.
+ */
+export const BROWSER_PLAYWRIGHT_CAPABILITY = "browser_playwright_v1";
+
+/**
+ * The ways a deploy verifier job drives a browser. The cloud signs one of them into the job (`browser_method`) when it issues it; the method is never read from a runner's output or from model text,
+ * and the verify row's method is copied from that signed value. Each method needs its own capability on the claiming runner's latest hello, and holds its own tool table (`deployVerifierToolsFor`).
+ */
+export const BROWSER_METHODS = ["chrome_runner", "playwright_runner"] as const;
+export type BrowserMethod = (typeof BROWSER_METHODS)[number];
+export const BROWSER_CAPABILITY_FOR_METHOD: Readonly<Record<BrowserMethod, string>> = Object.freeze({ chrome_runner: BROWSER_CHROME_CAPABILITY, playwright_runner: BROWSER_PLAYWRIGHT_CAPABILITY });
+export const isBrowserMethod = (value: unknown): value is BrowserMethod => typeof value === "string" && (BROWSER_METHODS as readonly string[]).includes(value);
+
 /** The capability to claim and report a deploy order. Gates no role. */
 export const DEPLOY_ORDER_CAPABILITY = "deploy_order_v1";
 
@@ -51,3 +66,17 @@ export const isMcpToolName = (entry: string): boolean => entry.startsWith("mcp__
  * and moves the digest.
  */
 export const DEPLOY_VERIFIER_RUNNER_TOOLS: readonly string[] = Object.freeze(["Read", "Glob", "Grep", ...DEPLOY_VERIFIER_BROWSER_TOOLS]);
+
+/**
+ * D#749 V2c-1: the Playwright method's tools. The model gets the three read tools and the twelve tools of the runner-owned `fxverify` MCP server (fx-runner's verifyBrowser/server.ts defines them).
+ * None of them runs a script, reads the network, uploads, downloads or takes an address or a selector. The Chrome tools above stay out of this list and stay denied in the job's settings.
+ */
+export const FXVERIFY_TOOL_PREFIX = "mcp__fxverify__";
+const FXVERIFY_TOOL_NAMES = ["begin_journey", "open", "snapshot", "click", "type", "select", "press", "reload", "wait_text", "read_number", "console", "submit_answer"] as const;
+export const DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS: readonly string[] = Object.freeze(FXVERIFY_TOOL_NAMES.map((name) => `${FXVERIFY_TOOL_PREFIX}${name}`));
+export const DEPLOY_VERIFIER_PLAYWRIGHT_RUNNER_TOOLS: readonly string[] = Object.freeze(["Read", "Glob", "Grep", ...DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS]);
+
+/** The tool list a deploy verifier job of this method holds, and the one the cloud signs (`role_tools_sha256`). No method means the Chrome list, as before the second method existed. */
+export function deployVerifierToolsFor(method: BrowserMethod = "chrome_runner"): readonly string[] {
+  return method === "playwright_runner" ? DEPLOY_VERIFIER_PLAYWRIGHT_RUNNER_TOOLS : DEPLOY_VERIFIER_RUNNER_TOOLS;
+}

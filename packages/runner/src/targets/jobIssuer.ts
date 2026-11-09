@@ -30,6 +30,8 @@ import {
   HOSTED_CLAIM_REPLY_BUDGET_BYTES,
   worstCaseClaimReplyBytes,
   type AllowanceSet,
+  type BrowserMethod,
+  DEPLOY_VERIFIER_ROLE,
   type Job,
   type SignedJob,
 } from "@fulcrumaxe/runner-protocol";
@@ -124,8 +126,8 @@ export function createJobSigner(input: { keyId: string; privateKey: KeyObject })
 export const RUNNER_BRANCH_PREFIX = "fx/";
 
 /** The SHA-256 of the role's tool allow list, as the runner must compute it from its own table: sorted, canonical JSON (`runnerToolsForRole`). */
-export function roleToolsDigest(role: string): string {
-  return sha256Text(canonicalJson([...runnerToolsForRole(role)].sort()));
+export function roleToolsDigest(role: string, browserMethod?: BrowserMethod): string {
+  return sha256Text(canonicalJson([...runnerToolsForRole(role, browserMethod)].sort()));
 }
 
 /** What the job needs that the run itself does not carry. */
@@ -510,6 +512,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         conflictRound = marker.data;
       }
 
+      // D#749 V2c-1: a deploy verifier job is issued with the method the starting code chose (the cloud's own pipeline, never a runner or model text), and no other job has one. Anything else is no job.
+      if ((role === DEPLOY_VERIFIER_ROLE) !== (run.browserMethod !== undefined)) throw new JobIssueError("job_invalid");
+
       const issuedAt = now();
       const candidate: Job = {
         schema_version: 1,
@@ -521,7 +526,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         spec: context.spec,
         task: { kind: taskKind(role, continues !== null), prompt: run.prompt, prompt_sha256: sha256Text(run.prompt) },
         role_card: { text: run.roleCard, sha256: sha256Text(run.roleCard) },
-        role_tools_sha256: roleToolsDigest(role),
+        role_tools_sha256: roleToolsDigest(role, run.browserMethod),
         continues,
         ...(review ? { review } : {}),
         ...(sandboxAllowances ? { sandbox_allowances: sandboxAllowances } : {}),
@@ -540,6 +545,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(contextWindowTokens !== undefined ? { context_window: contextWindowTokens } : {}),
         // D#519 MQ4-e2-c1: omitted (never null) when this is not a conflict round, so such a job's signed bytes are unchanged.
         ...(conflictRound !== undefined ? { conflict_round: conflictRound } : {}),
+        // D#749 V2c-1: omitted (never null) on every job but the deploy verifier's, so their signed bytes are unchanged.
+        ...(run.browserMethod !== undefined ? { browser_method: run.browserMethod } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),

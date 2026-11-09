@@ -66,6 +66,7 @@ export const COVERED: Record<string, string> = {
   "signed_job.job.check.timeout_s": ENVELOPE,
   "signed_job.job.scope": "MAX_JOB_SCOPE_ENTRIES term",
   "signed_job.job.requires_engine": ENVELOPE,
+  "signed_job.job.browser_method": ENVELOPE,
   "signed_job.job.memory": CONTAINER,
   "signed_job.job.memory.person": "two MAX_JOB_MEMORY_BYTES terms",
   "signed_job.job.memory.fenced": "two MAX_JOB_MEMORY_BYTES terms",
