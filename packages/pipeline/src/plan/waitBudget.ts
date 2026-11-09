@@ -30,6 +30,11 @@ export interface WaitClock {
    * measured from the run's own record and a re-entry does not reset it. Optional: a clock that cannot do it is a plain timeout.
    */
   consume?(ms: number): void;
+  /**
+   * What the follower last saw of the runner run this clock bounds: whether it had left `pending`, and how long the run's own record says it has been working
+   * (null: no record). A clock that keeps it can tell, when it expires, whether the run was working or the budget went on something else. Optional.
+   */
+  observe?(seen: { ran: boolean; runningMs: number | null }): void;
 }
 
 export class WaitBudget implements WaitClock {
@@ -40,6 +45,8 @@ export class WaitBudget implements WaitClock {
   private timer: NodeJS.Timeout | undefined;
   private pendingTimer: NodeJS.Timeout | undefined;
   private done = false;
+  /** The follower's last look at the runner run (see `WaitClock.observe`); null while it has seen none, and always null for a run that is not a runner run. */
+  observed: { ran: boolean; runningMs: number | null } | null = null;
 
   constructor(
     totalMs: number,
@@ -90,6 +97,10 @@ export class WaitBudget implements WaitClock {
       this.pausedAt = null;
     }
     this.start();
+  }
+
+  observe(seen: { ran: boolean; runningMs: number | null }): void {
+    this.observed = seen;
   }
 
   consume(ms: number): void {
