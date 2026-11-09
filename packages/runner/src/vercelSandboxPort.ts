@@ -27,6 +27,7 @@ import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunC
 import { RunLimitError, WARN_FRACTION, createRunGuard, resolveRunLimits, type RunLimits } from "./meteringGuard.js";
 import type { RunLimit } from "./executionTarget.js";
 import { tryExtend } from "./runLimitDecision.js";
+import { createSideEffects, recordExtension } from "./readerState.js";
 import { CLAUDE_CLI_SHA256, CLAUDE_CLI_VERSION, SANDBOX_IMAGE_REF, resolveSandboxImage } from "./sandboxRuntime.js";
 import { BACKENDS, CLAUDE_CODE_BACKEND } from "./backends.js";
 import { PIN_CHECK_NAME, PIN_CHECK_SCRIPT, verifyPin, type BackendRegistry } from "@fx/runtime/src/backends/registry.js";
@@ -1126,7 +1127,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       let lastResultSubtype: unknown;
       /** The first limit the runner's own guard reached (MP-CLOCK/SILENT/TURNS). */
       let limitHit: RunLimit | undefined;
-      let callsWarned = false;
+      // RLR-2: the effects that leave this process (warnings, extensions, the kill) live in one monotone record a reader can checkpoint.
+      const fx = createSideEffects();
       let wakeLoop!: () => void;
       const limitSignal = new Promise<void>((resolve) => {
         wakeLoop = resolve;
@@ -1134,9 +1136,6 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       // X-1..X-4: only the runner's own guard reaches an extension, when `run_time` or
       // `model_calls` is hit; an agent's checkpoint envelope never comes through here.
       const extPolicy = knownTimeoutMs === undefined ? undefined : opts.extension;
-      let used = 0;
-      let ghAtLast = 0;
-      let idsAtLast = 0;
       /** The decision `decide` reached, held until the guard applies it. */
       let grant: { d: Extract<Awaited<ReturnType<typeof tryExtend>>, { extend: true }>; ghWrites: number; messageIds: number } | undefined;
       const extension = extPolicy && {
@@ -1148,14 +1147,14 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             startedMs,
             lastUsageRiseMs: guard.lastRiseAt(),
             silenceMs: limits.meteringSilenceMs,
-            extensionsUsed: used,
+            extensionsUsed: fx.extensionsUsed,
             maxExtensions: extPolicy.maxExtensions,
             ghWrites: extPolicy.ghWrites(),
-            ghWritesAtLastExtension: ghAtLast,
+            ghWritesAtLastExtension: fx.ghAtLast,
             // Fail closed: a policy that does not say is a writing role, so ids alone never count as progress.
             roleWrites: extPolicy.roleWrites !== false,
             messageIds: guard.modelCalls(),
-            messageIdsAtLastExtension: idsAtLast,
+            messageIdsAtLastExtension: fx.idsAtLast,
             resolvedLimit: limit.kind === "run_time" ? limits.maxRunMs : limits.maxModelCalls,
             currentLimit: limit.limit,
             meteredUsd: extPolicy.meteredUsd(),
@@ -1173,12 +1172,10 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           if (grant) {
             const g = grant;
             grant = undefined;
-            used += 1;
-            ghAtLast = g.ghWrites;
-            idsAtLast = g.messageIds;
+            recordExtension(fx, g.d.kind, { ghWrites: g.ghWrites, messageIds: g.messageIds });
             // Best effort, like every mid-run write: the extension stands even if the event row does not land.
             try {
-              void Promise.resolve(extPolicy.onExtended({ kind: g.d.kind, extensionsUsed: used, newLimit: g.d.newLimit, progress: g.d.progress })).catch(() => undefined);
+              void Promise.resolve(extPolicy.onExtended({ kind: g.d.kind, extensionsUsed: fx.extensionsUsed, newLimit: g.d.newLimit, progress: g.d.progress })).catch(() => undefined);
             } catch (err) {
               // a throwing recorder does not undo the extension
               reportError(err, { stage: "run.extension_record" });
@@ -1190,7 +1187,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             timeWarningMinutes = undefined;
             armTimeWarning();
           } else {
-            callsWarned = false;
+            fx.callsWarned = false;
             modelCallsRemaining = undefined;
           }
           rewriteLimits();
@@ -1200,6 +1197,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         limits,
         (limit) => {
           limitHit = limit;
+          fx.killIssued = true;
           void killQuietly(handle.sandboxName, command, runSessionId);
           wakeLoop();
         },
@@ -1257,8 +1255,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         }
         // W-2: once, at 80% of the call limit, tell the agent how many remain.
         // Advisory and best effort: the runner's own count is what enforces.
-        if (!callsWarned && guard.modelCalls() >= WARN_FRACTION * inForce().maxModelCalls) {
-          callsWarned = true;
+        if (!fx.callsWarned && guard.modelCalls() >= WARN_FRACTION * inForce().maxModelCalls) {
+          fx.callsWarned = true;
           modelCallsRemaining = Math.max(inForce().maxModelCalls - guard.modelCalls(), 0);
           rewriteLimits();
         }
@@ -1271,6 +1269,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         clearTimeout(timeWarning);
         timeWarning = setTimeout(
           () => {
+            fx.timeWarned = true;
             timeWarningMinutes = Math.max(Math.ceil((startedMs + inForce().maxRunMs - Date.now()) / 60_000), 0);
             rewriteLimits();
           },
