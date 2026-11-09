@@ -941,8 +941,16 @@ test.describe("step 3, live progress", () => {
     const before = await stageStates(page);
     await page.clock.runFor(2000);
     await expect(timer).toHaveText(`3:0${start + 2}`); // ticking on its own between answers: exactly the page time that passed
-    await page.clock.runFor(3000); // the next read is due (every 3 s of page time) and the figure follows the server's
-    await expect(timer).toHaveText(/^3:2\d$/);
+    // The next read is due (every 3 s of page time). Its answer arrives in real time, after runFor has returned, and the timer's text
+    // is only rewritten by the page's own tick: an answer that lands after the last tick of a runFor shows on screen only at the
+    // next tick. So wait for that answer, then move the clock a little at a time until a tick shows the figure the server gave.
+    const second = page.waitForResponse((r) => r.request().method() === "GET" && new URL(r.url()).pathname === "/api/v1/onboarding/preview");
+    await page.clock.runFor(3000);
+    await second;
+    await expect(async () => {
+      await page.clock.runFor(500);
+      await expect(timer).toHaveText(/^3:2\d$/, { timeout: 1000 });
+    }).toPass({ timeout: 20_000 });
     await page.clock.runFor(40_000); // a long wait later, the same answers: the same stages (nothing advances on a timer)
     expect(await stageStates(page)).toEqual(before);
   });
