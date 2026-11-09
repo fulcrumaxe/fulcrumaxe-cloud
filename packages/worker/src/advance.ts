@@ -735,7 +735,7 @@ export interface AdvanceFacade {
    * summary, for the card); `refused` carries a fixed code. A replay on an item that already has its Spec publishes nothing more.
    */
   /** `split` is set (true) only when the published version plans two or more pull requests: the item then waits at Spec ready for a person's approval, which creates the children. */
-  advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string): Promise<{ status: string; reason: string | null; version: number | null; split?: true }>;
+  advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string, retried?: boolean): Promise<{ status: string; reason: string | null; version: number | null; split?: true }>;
   /**
    * D#6 R4d-5b (C34 section 2.3): publishes the next Spec version from the finished project-manager run `runId` (file-list mode; the worker reads the run's
    * result itself). `expectedVersion` is the version its prompt was made from. `published` leaves the item at Spec ready (from Needs a person it moved there through
@@ -2074,7 +2074,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return started(out.id);
   }
 
-  async function advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string): Promise<{ status: string; reason: string | null; version: number | null; split?: true }> {
+  async function advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string, retried = false): Promise<{ status: string; reason: string | null; version: number | null; split?: true }> {
     const refusedWith = (reason: string) => ({ status: "refused", reason, version: null });
     if (!deps.lightSpec) return refusedWith("light_spec_unavailable");
     if (!UUID_RE.test(runId) || !UUID_RE.test(actionId)) return refusedWith("invalid_input");
@@ -2094,7 +2094,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const code = typeof out.reason === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(out.reason) ? out.reason : null;
     console.info(JSON.stringify({ event: "advance.light_spec", work_item_id: who.workItemId, status: out.status, reason: out.status === "refused" ? code : null, version: out.version ?? null }));
     if (out.status === "not_feasible" || out.status === "refused") {
-      await writeEvent(who, { kind: "stopped", dedupeKey: `light:${actionId}`, code: out.status === "not_feasible" ? "not_feasible" : (code ?? "refused"), runId });
+      await writeEvent(who, { kind: "stopped", dedupeKey: `light:${actionId}${retried ? ":rt" : ""}`, code: out.status === "not_feasible" ? "not_feasible" : (code ?? "refused"), runId });
     }
     // The PM's own sentence for a not-feasible request is model text: it stays in the run (its summary), never returned.
     const split = out.status === "published" && typeof out.version === "number" ? await specPlansSplit(who, out.version) : {};

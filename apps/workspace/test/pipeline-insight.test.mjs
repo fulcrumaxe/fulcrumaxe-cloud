@@ -1161,6 +1161,10 @@ describe("the short-Spec refusal notice (spec_refused)", () => {
   const banner = (reason) => noticeBanner({ notice: { kind: "spec_refused", reason } });
   const SENTENCES_BY_CODE = {
     invalid_spec_output: "The Spec writer's output was incomplete, so no Spec was published." + TAIL,
+    light_answer_missing: "The Spec writer finished, but its answer had no readable final block, so no Spec was published." + TAIL,
+    light_answer_too_large: "The Spec writer's answer was too large to keep, so no Spec was published." + TAIL,
+    light_spec_empty: "The Spec writer's answer had an empty Spec, so no Spec was published." + TAIL,
+    light_split_flag_missing: "The Spec writer's answer didn't say whether the work should be split into several pull requests, so no Spec was published." + TAIL,
     invalid_file_scope: "The Spec writer didn't give a readable list of the files the change may touch, so no Spec was published." + TAIL,
     invalid_planned_prs: "The Spec writer's list of planned pull requests couldn't be read, so no Spec was published." + TAIL,
     planned_prs_too_large: "The Spec writer planned more pull requests than one Spec may hold, so no Spec was published." + TAIL,

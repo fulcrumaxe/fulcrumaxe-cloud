@@ -230,6 +230,8 @@ const CAPACITY_WAIT_MS = 4 * 3_600_000;
 const NO_CHANGE_REPEATED = "fix_no_change_repeated";
 /** The short-Spec PM run: one run reading a repository, like the classify run. */
 const LIGHT_SPEC_WAIT_MS = 20 * 60_000;
+/** The short Spec's named answer checks that earn a second ask. Same values as `LIGHT_SPEC_RETRY_CODES` in @fx/pipeline (a workflow body imports no value from a package; a test pins the two equal). */
+const LIGHT_SPEC_RETRY_CODES: readonly string[] = ["light_answer_missing", "light_answer_too_large", "light_spec_empty", "light_split_flag_missing"];
 
 export async function advanceLoadStep(accountId: string, workItemId: string): Promise<LoadedAdvance> {
   "use step";
@@ -360,15 +362,15 @@ export async function advanceEventStep(accountId: string, userId: string, workIt
 
 // ---- the short Spec (small, bug, doc: no panel) ---------------------------------------------------------------------
 
-export async function advanceStartLightSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: { category: string; title: string; body: string }, actionId: string, attempt?: number): Promise<AdvanceRunStart> {
+export async function advanceStartLightSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: { category: string; title: string; body: string }, actionId: string, attempt?: number, retry?: string): Promise<AdvanceRunStart> {
   "use step";
-  return startLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input, actionId, attempt);
+  return startLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input, actionId, attempt, retry);
 }
 
 /** Publishes the short Spec from the finished PM run. The PM's text stays in the run. */
-export async function advanceLightSpecPublishStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string, actionId: string): Promise<LightPublished> {
+export async function advanceLightSpecPublishStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string, actionId: string, retried?: boolean): Promise<LightPublished> {
   "use step";
-  return publishLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, runId, actionId);
+  return publishLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, runId, actionId, retried);
 }
 
 // ---- Re-spec (D#6 R4d-5b): the project manager's file list for a Spec that has none, then the next Spec version ----------
@@ -842,27 +844,39 @@ async function specPhase(args: AdvanceStartArgs, rootId: string, firstAttempt: n
  */
 async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { category: string; title: string; body: string }, firstAttempt: number): Promise<Result> {
   const { accountId, userId, actionId } = args;
-  const asked = await askUntilAllowed(args, "spec", rootId, firstAttempt, (n) => advanceStartLightSpecStep(accountId, userId, rootId, args.haltEpoch, issue, actionId, n > 0 ? n : undefined), (r) => (r.ok ? null : r.reason));
-  const started = asked.answer;
-  if (!started.ok) {
-    if (asked.pause !== null) return pausedEnd(rootId, "spec", asked.pause, asked.attempt);
-    if (isHaltReason(started.reason)) return haltedEnd(args, "light_spec_start");
-    await advanceLogStep("advance.failed", { work_item_id: rootId, at: "light_spec_start", reason: started.reason });
-    return { status: "failed", detail: `light_spec_refused:${started.reason}` };
+  // The PM is asked at most twice. The second ask happens only when the first answer failed one of the named checks of publishLightSpec (LIGHT_SPEC_RETRY_CODES): it names
+  // the check, runs under its own key, and its refusal (any) is final. `retry` is that check's code for the second round, undefined for the first.
+  let retry: string | undefined;
+  let published: LightPublished;
+  for (;;) {
+    const asked = await askUntilAllowed(args, "spec", rootId, firstAttempt, (n) => advanceStartLightSpecStep(accountId, userId, rootId, args.haltEpoch, issue, actionId, n > 0 ? n : undefined, retry), (r) => (r.ok ? null : r.reason));
+    const started = asked.answer;
+    if (!started.ok) {
+      if (asked.pause !== null) return pausedEnd(rootId, "spec", asked.pause, asked.attempt);
+      if (isHaltReason(started.reason)) return haltedEnd(args, "light_spec_start");
+      await advanceLogStep("advance.failed", { work_item_id: rootId, at: "light_spec_start", reason: started.reason });
+      return { status: "failed", detail: `light_spec_refused:${started.reason}` };
+    }
+    const followed = await followSeat(args, rootId, "light_spec", started.runId, (id) => advanceBuildOutcomeStep(accountId, id), LIGHT_SPEC_WAIT_MS);
+    if ("end" in followed) return followed.end;
+    const outcome = followed.outcome;
+    if (!outcome.done) {
+      await advanceCancelStep(accountId, userId, rootId, outcome.tailRunId);
+      await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: "wait_timeout" });
+      return { status: "light_spec_failed", detail: "wait_timeout" };
+    }
+    if (outcome.status !== "succeeded") {
+      await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: `run_${outcome.status}` });
+      return { status: "light_spec_failed", detail: `run_${outcome.status}` };
+    }
+    published = await advanceLightSpecPublishStep(accountId, userId, rootId, args.haltEpoch, followed.runId, actionId, retry === undefined ? undefined : true);
+    if (retry === undefined && published.status === "refused" && published.reason !== null && LIGHT_SPEC_RETRY_CODES.includes(published.reason)) {
+      await advanceLogStep("advance.light_spec_retry", { work_item_id: rootId, at: "light_spec", reason: published.reason });
+      retry = published.reason;
+      continue;
+    }
+    break;
   }
-  const followed = await followSeat(args, rootId, "light_spec", started.runId, (id) => advanceBuildOutcomeStep(accountId, id), LIGHT_SPEC_WAIT_MS);
-  if ("end" in followed) return followed.end;
-  const outcome = followed.outcome;
-  if (!outcome.done) {
-    await advanceCancelStep(accountId, userId, rootId, outcome.tailRunId);
-    await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: "wait_timeout" });
-    return { status: "light_spec_failed", detail: "wait_timeout" };
-  }
-  if (outcome.status !== "succeeded") {
-    await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: `run_${outcome.status}` });
-    return { status: "light_spec_failed", detail: `run_${outcome.status}` };
-  }
-  const published = await advanceLightSpecPublishStep(accountId, userId, rootId, args.haltEpoch, followed.runId, actionId);
   if (published.status === "not_feasible") {
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: "not_feasible" });
     return { status: "not_feasible" };

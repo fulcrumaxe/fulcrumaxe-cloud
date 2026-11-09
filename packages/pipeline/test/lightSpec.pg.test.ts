@@ -80,16 +80,17 @@ describe("publishLightSpec", () => {
   });
 
   it.each([
-    ["the string false", { feasible: "false", spec: "" }],
-    ["no spec", { feasible: true, summary: "s" }],
-    ["a blank spec", { feasible: true, summary: "s", spec: "   " }],
-    ["a spec that is not text", { feasible: true, summary: "s", spec: { a: 1 } }],
-    ["no object at all", null],
-    ["a list", [GOOD]],
-    ["text", "1. do it"],
-  ])("%s is refused as invalid_spec_output and publishes nothing (only the exact JSON false stops as not feasible)", async (_n, output) => {
+    ["the string false", { feasible: "false", spec: "" }, "light_spec_empty"],
+    ["no spec", { feasible: true, summary: "s" }, "light_spec_empty"],
+    ["a blank spec", { feasible: true, summary: "s", spec: "   " }, "light_spec_empty"],
+    ["a spec that is not text", { feasible: true, summary: "s", spec: { a: 1 } }, "light_spec_empty"],
+    ["no object at all", null, "light_answer_missing"],
+    ["a list", [GOOD], "light_answer_missing"],
+    ["text", "1. do it", "light_answer_missing"],
+    ["the marker stored for an over-size answer", { dropped: "too_large" }, "light_answer_too_large"],
+  ])("%s is refused with its own named check and publishes nothing (only the exact JSON false stops as not feasible)", async (_n, output, code) => {
     const t = await triagedItem();
-    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, output)).toEqual({ status: "refused", reason: "invalid_spec_output" });
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, output)).toEqual({ status: "refused", reason: code });
     expect(await stageOf(t.workItemId)).toBe("triaged");
     expect(await specs(t.workItemId)).toEqual([]);
   });
@@ -199,11 +200,11 @@ describe("planned PRs on the short Spec", () => {
     expect(await specs(t.workItemId)).toEqual([]);
   });
 
-  it.each([["missing", undefined], ["a string", "true"], ["a number", 1], ["null", null]])("split_proposed %s is refused invalid_spec_output: nothing published", async (_n, v) => {
+  it.each([["missing", undefined], ["a string", "true"], ["a number", 1], ["null", null]])("split_proposed %s is refused light_split_flag_missing: nothing published", async (_n, v) => {
     const t = await triagedItem("doc");
     const out = { ...SPLIT, ...(v === undefined ? {} : { split_proposed: v }) };
     if (v === undefined) delete (out as { split_proposed?: unknown }).split_proposed;
-    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "refused", reason: "invalid_spec_output" });
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "refused", reason: "light_split_flag_missing" });
     expect(await specs(t.workItemId)).toEqual([]);
   });
 
