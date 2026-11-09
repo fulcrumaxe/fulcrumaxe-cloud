@@ -6,6 +6,8 @@ import type { HookWaitPort } from "../hookChannel.js";
 import { failClosedOnQueued, startAgentRun, type StartAgentRunInput, type StartAgentRunResult } from "../startAgentRun.js";
 import { writeRunStatus } from "../runStatusWriter.js";
 import type { RunStatus } from "../statusTransitions.js";
+import { runOfSliceFacts, parseSliceFacts, sameSliceFacts, type SliceRunFacts } from "../sliceRun.js";
+import { readReaderFacts } from "../readerStore.js";
 import type { Product, Role } from "../types.js";
 
 /**
@@ -172,6 +174,65 @@ export async function followTimeoutBody(accountId: string, runId: string): Promi
   await cancelStep(accountId, runId);
   const status = write.updated ? "timed_out" : (write.currentStatus ?? "unknown");
   return { status, done: true };
+}
+
+/** What the follower carries for a run read in slices (see `SliceRunFacts`). */
+export interface FollowSliceArgs {
+  startedMs: number;
+  run: SliceRunFacts;
+}
+
+/** What one slice step tells the follower loop: whether the run is over, whether the step held the lease, a failed re-attach, and the time it ran. */
+export interface FollowSliceOut {
+  sliced: boolean;
+  done: boolean;
+  held: boolean;
+  failed: boolean;
+  spentMs: number;
+}
+
+/**
+ * The run's target and the run as the slice acts on it. The facts come from the copy stored on the reader row at hand-over, parsed strictly; the follower's own copy
+ * must equal it. Anything else (no stored copy, a copy that does not parse, a follower copy that differs or is absent) is `refused`: the caller ends the run, it never
+ * reads one under caps nobody vouched for.
+ */
+async function sliceTargetOf(accountId: string, runId: string, slice: FollowSliceArgs | undefined) {
+  const rebuilt = await rebuildRun(accountId, runId);
+  if (!rebuilt) return undefined;
+  const target = resolveExecutionTarget(rebuilt.mode, wired().registry);
+  const stored = parseSliceFacts(await readReaderFacts(wired().pool, { accountId, runId }));
+  const given = slice === undefined ? undefined : parseSliceFacts(slice.run);
+  if (stored === undefined || given === undefined || !sameSliceFacts(stored, given)) return { target, run: rebuilt.run, refused: true as const };
+  return { target, run: runOfSliceFacts(accountId, runId, stored), refused: false as const };
+}
+
+/**
+ * For the follower in apps/web (RLR-5): one slice of the run's log, bounded by `FX_READER_SLICE_MS` and by what is left of the invocation (`deadlineMs`, from the
+ * platform). A run whose target reads no slices answers `sliced: false` and the follower polls it as before.
+ */
+export async function followSliceBody(accountId: string, runId: string, slice: FollowSliceArgs | undefined, deadlineMs?: number): Promise<FollowSliceOut> {
+  const found = await sliceTargetOf(accountId, runId, slice);
+  if (found?.refused) {
+    // Caps nobody vouched for: the run is ended as failed from the saved meter, never read.
+    await found.target.settleAttachLost?.(found.run);
+    return { sliced: true, done: true, held: false, failed: false, spentMs: 0 };
+  }
+  const out = await found?.target.followSlice?.(found.run, { ...(slice !== undefined && { startedMs: slice.startedMs }), ...(deadlineMs !== undefined && { deadlineMs }) });
+  return { sliced: out?.sliced ?? false, done: out?.done ?? false, held: out?.held ?? false, failed: out?.failed ?? false, spentMs: out?.spentMs ?? 0 };
+}
+
+/** For the follower: it could not re-attach to the run's command in its limit of tries. Ends the run as failed and books the saved meter; returns the status after. */
+export async function followAttachLostBody(accountId: string, runId: string, slice: FollowSliceArgs): Promise<FollowStatus> {
+  const found = await sliceTargetOf(accountId, runId, slice);
+  await found?.target.settleAttachLost?.(found.run);
+  const status = await runStatusStep(accountId, runId);
+  return { status: status ?? "unknown", done: status !== undefined && status !== "pending" && status !== "running" };
+}
+
+/** For the follower, once the run is over: books the saved meter of a sliced run if it is not booked (`held`: a live reader still has the lease, ask again later). */
+export async function followRevisitBody(accountId: string, runId: string, slice: FollowSliceArgs): Promise<"held" | "done"> {
+  const found = await sliceTargetOf(accountId, runId, slice);
+  return (await found?.target.revisitSavedMeter?.(found.run)) ?? "done";
 }
 
 /** `"use workflow"`: the thin orchestrator. Arguments are plain data. */

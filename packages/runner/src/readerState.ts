@@ -155,8 +155,9 @@ export function mergeSideEffects(a: SideEffects, b: SideEffects): SideEffects {
 }
 
 export function parseSideEffects(raw: unknown): SideEffects {
-  const r = raw as Record<string, unknown> | null;
-  if (typeof r !== "object" || r === null) throw new Error("reader state: side effects are not an object");
+  if (typeof raw !== "object" || raw === null) throw new Error("reader state: side effects are not an object");
+  // The run's stored slice facts (RLR-5) share the column; they are no side effect and are read by their own parser.
+  const { facts: _facts, ...r } = raw as Record<string, unknown>;
   // A row's default is `{}`: nothing has happened yet.
   if (Object.keys(r).length === 0) return createSideEffects();
   const count = (v: unknown, what: string): number => {

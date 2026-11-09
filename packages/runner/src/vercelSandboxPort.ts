@@ -1468,11 +1468,21 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       }
       run.command = command;
       if (phase) phase.attached = true;
+      // RLR-5: a run read in slices is handed over as soon as its command exists: the id is saved BEFORE the launch counts as done (the invocation may be frozen the
+      // moment it returns), and nothing is read here. A command without an id cannot be found again, so it is no launch.
+      const handingOff = attach === undefined && opts.handOff !== undefined;
+      if (handingOff && !run.stopped) {
+        if (command.cmdId === undefined) throw new SandboxPortError("handOff");
+        await opts.handOff!({ cmdId: command.cmdId, startedMs });
+      }
       markLaunched();
       if (run.stopped) {
         await killQuietly(handle.sandboxName, command, runSessionId);
         return undefined;
       }
+      if (handingOff) return undefined;
+      // RLR-5 (staging only, `FX_RECORDER_TAMPER`): what a hostile agent could do to the record file, done from outside so the exit check has something to find.
+      if (attach?.faultTruncateRecord) await guarded("runCommand", () => sandbox.runCommand({ cmd: "sh", args: ["-c", ': > "$1"', "fx-tamper", recordPathFor(opts.runId)], detached: true, signal: signal() }));
 
       // RLR-4: what a slice carries over from the one before it (nothing, for a launch or a first slice).
       const restored = attach?.restore?.reader;

@@ -77,7 +77,7 @@ class Feed {
 }
 
 export interface VmLogEntry {
-  kind: "agent_started" | "agent_logs" | "agent_wait" | "agent_kill" | "read" | "read_logs" | "agent_refused" | "exit_code_read" | "sandbox_stop" | "get_command";
+  kind: "agent_started" | "agent_logs" | "agent_wait" | "agent_kill" | "read" | "read_logs" | "agent_refused" | "exit_code_read" | "sandbox_stop" | "get_command" | "tamper";
   cmdId?: string;
   /** agent_kill: the signal asked for. */
   sig?: string;
@@ -370,6 +370,14 @@ export function createRecordingVm(opts: RecordingVmOptions = {}) {
               return startAgent(target, params);
             }
             if (params.cmd === "sh" && a[0] === "-c" && a[1] === READ_SCRIPT && a[2] === "fx-read") return startRead(params);
+            // RLR-5's staging fault (`FX_RECORDER_TAMPER`): the file emptied, as `: > "$1"` does in the VM.
+            if (params.cmd === "sh" && a[0] === "-c" && a[2] === "fx-tamper") {
+              const f = files.get(abs(a[3]!));
+              if (!f) throw new Error("strict fake: the tamper command names a file that is not there");
+              f.content = Buffer.alloc(0);
+              log.push({ kind: "tamper" });
+              return finishedCommand(`cmd_${++cmdSeq}`, [], 0);
+            }
             if (params.cmd === "sh" && a[0] === "-c" && a[2] === "fx-read") throw new Error("strict fake: a read command runs the one read script");
             return target.runCommand(params);
           };

@@ -498,7 +498,7 @@ describe("MP-SRC: usage and completion come only from the agent command's stdout
       const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(code).not.toMatch(/readFile|downloadFile|readFileToBuffer/);
     }
-    // Exactly seven command sites exist: the version check, (preview runs only) the repository
+    // Exactly eight command sites exist: the version check, (preview runs only) the repository
     // clone, whose output is drained and never read, (D#6 C44-6b) the fixed detect and install scripts, whose
     // output is held as a capped redacted tail for the operator only (one shared site), the agent, and (COMPUTE-SETTLE CS-1b) the
     // constant read-only counters read before a stop, whose output fills in COST figures only and is
@@ -506,7 +506,8 @@ describe("MP-SRC: usage and completion come only from the agent command's stdout
     // and whose agent-free sandbox has no usage or completion at all.
     const port = readFileSync(path.join(here, "..", "src", "vercelSandboxPort.ts"), "utf8");
     // RLR-3b: and the record file's read (`readRecords`), a fixed script whose output is parsed by the one parser; the agent command is started by `startAgentCommand`.
-    expect(port.match(/\.runCommand\(/g)).toHaveLength(7);
+    // RLR-5: and the staging fault's one command (`FX_RECORDER_TAMPER`, which the worker refuses outside staging), which empties the record file and returns nothing that is read.
+    expect(port.match(/\.runCommand\(/g)).toHaveLength(8);
   });
 });
 

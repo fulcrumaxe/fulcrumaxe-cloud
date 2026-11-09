@@ -191,3 +191,30 @@ export async function releaseLease(pool: Pool, p: { accountId: string; runId: st
     return rowCount === 1;
   });
 }
+
+/**
+ * Whole seconds since the run's reader row last moved (a take, a save, a renewal, a release), or null when the run has no reader row. A follower that is reading keeps
+ * this near zero; a follower that has stopped lets it grow, which is how a run nobody is reading is found.
+ */
+export async function readerIdleSeconds(pool: Pool, p: { accountId: string; runId: string }): Promise<number | null> {
+  return withTenant(pool, p.accountId, async (client) => {
+    const { rows } = await client.query<{ idle: string }>(`SELECT floor(extract(epoch FROM clock_timestamp() - updated_at))::text AS idle FROM run_log_readers WHERE run_id = $1 AND account_id = $2`, [p.runId, p.accountId]);
+    return rows[0] === undefined ? null : Number(rows[0].idle);
+  });
+}
+
+/** Stores the run's slice facts (see `sliceRun.ts`) on its reader row, from the dispatching invocation's own resolved input. Merges into `side_effects`, which a save never drops. */
+export async function setReaderFacts(pool: Pool, p: { accountId: string; runId: string; facts: Record<string, unknown> }): Promise<void> {
+  await withTenant(pool, p.accountId, async (client) => {
+    const { rowCount } = await client.query(`UPDATE run_log_readers SET side_effects = side_effects || jsonb_build_object('facts', $3::jsonb), updated_at = now() WHERE run_id = $1 AND account_id = $2`, [p.runId, p.accountId, JSON.stringify(p.facts)]);
+    if (rowCount !== 1) throw new Error("reader store: no reader row to store the run's facts on");
+  });
+}
+
+/** The facts stored by `setReaderFacts`, raw (null: no row, or none stored). The caller parses them strictly. */
+export async function readReaderFacts(pool: Pool, p: { accountId: string; runId: string }): Promise<unknown> {
+  return withTenant(pool, p.accountId, async (client) => {
+    const { rows } = await client.query<{ facts: unknown }>(`SELECT side_effects -> 'facts' AS facts FROM run_log_readers WHERE run_id = $1 AND account_id = $2`, [p.runId, p.accountId]);
+    return rows[0]?.facts ?? null;
+  });
+}

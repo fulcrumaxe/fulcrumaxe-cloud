@@ -35,6 +35,8 @@ export * from "./contextLedgerWriter.js";
 export * from "./startAgentRun.js";
 export * from "./cancelRun.js";
 export * from "./workflows/agentRun.js";
+export * from "./sliceRun.js";
+export { readerConfigFromEnv, ReaderFaultRefusedError, READER_SLICE_MIN_MS, READER_SLICE_MAX_MS, SLICE_EXIT_RESERVE_MS, type ReaderConfig, type ReaderFaults } from "./readerConfig.js";
 export * from "./vercelSandboxPort.js";
 export { providerCapacityOf } from "./providerCapacity.js";
 export { recordStage, type RecordStageInput, type RecordStageResult } from "@fx/core/src/work-items/recordStage.js";

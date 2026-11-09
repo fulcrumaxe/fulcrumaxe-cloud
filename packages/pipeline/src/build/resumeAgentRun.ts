@@ -43,7 +43,7 @@ import { ResumeBackendError, ResumeSideError, lookupOwnedExecutorSession } from 
 export type ResumeAgentRunResult =
   | { id: string; status: "refused_spend"; reason: string }
   | { id: string; status: "timed_out" }
-  | { id: string; status: "running"; hookToken: string }
+  | { id: string; status: "running"; hookToken: string; /** D#2 RLR-5: the command's start (epoch ms), present for a run handed to a slice follower. */ startedMs?: number }
   /** D#6 C12 section 2.1: the target queued the fix round for a runner. It stays `pending`; a caller that cannot wait for
    * a claim fails closed on it. */
   | { id: string; status: "pending"; queued: true }
@@ -201,5 +201,5 @@ export async function resumeAgentRun(
       raceLost: true,
     };
   }
-  return { id, status: "running", hookToken: raced.dispatched.hookToken };
+  return { id, status: "running", hookToken: raced.dispatched.hookToken, ...("startedMs" in raced.dispatched && raced.dispatched.startedMs !== undefined && { startedMs: raced.dispatched.startedMs }) };
 }

@@ -71,6 +71,8 @@ export class EnvironmentFailedError extends Error {
 
 export interface StartAgentRunInput {
   accountId: string;
+  /** D#2 RLR-5: see `ExecutionRun.slice`. Set only by the run starter that also starts the slice follower. */
+  slice?: true;
   /** `repos.id` -- `startAgentRun` reads `repos.execution_mode` from this
    * row to pick a target (C10: "Routing is by data, never by
    * environment"), and it doubles as the executor role's sandbox-naming
@@ -169,7 +171,7 @@ export interface StartAgentRunInput {
 export type StartAgentRunResult =
   | { id: string; status: "refused_spend"; reason: string }
   | { id: string; status: "timed_out" }
-  | { id: string; status: "running"; hookToken: string }
+  | { id: string; status: "running"; hookToken: string; /** D#2 RLR-5: the command's start (epoch ms), present for a run read in slices. */ startedMs?: number }
   /** D#6 C12 section 2.1: the target queued the run (a runner will claim it). It stays `pending`; there is no hook to
    * wait on. A caller that waits on a hook must fail closed on this (`failClosedOnQueued`); one whose wait is a status poll
    * that credits queued time accepts it by name (`acceptQueuedRunnerRun`). */
@@ -207,6 +209,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     ...(input.continues ? { continuesBranch: input.continues.branch, continuesFresh: true, ...(input.continues.prNumber === undefined ? {} : { continuesPrNumber: input.continues.prNumber }), ...(input.continues.baseSha === undefined ? {} : { continuesBaseSha: input.continues.baseSha, continuesBaseBranch: input.continues.branch }) } : input.base ? { continuesBaseSha: input.base.sha, continuesBaseBranch: input.base.branch } : {}),
     ...(input.conflictRound ? { conflictRound: input.conflictRound } : {}),
     workdir: input.workdir,
+    ...(input.slice === true && { slice: true as const }),
     cloneRepo: input.cloneRepo,
     contextSections: input.contextSections,
     contextAssembly: input.contextAssembly,
@@ -570,7 +573,7 @@ export async function startAgentRun(
   // A running run is work for the compute-settle cron: its sandbox may be lost, and the cron skips ticks while nothing is
   // marked. The cron keeps the marker while running runs exist (its lost-run sweep lists them) and clears it when none remain.
   void markWorkPending("compute-settle-sweep");
-  return { id, status: "running", hookToken: raced.dispatched.hookToken };
+  return { id, status: "running", hookToken: raced.dispatched.hookToken, ...("startedMs" in raced.dispatched && raced.dispatched.startedMs !== undefined && { startedMs: raced.dispatched.startedMs }) };
 }
 
 /**

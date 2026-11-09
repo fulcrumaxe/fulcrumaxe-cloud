@@ -27,6 +27,7 @@ import {
   type CancelResult,
   type ExecutionRun,
   type ExecutionTarget,
+  type FollowSliceResult,
   type HookResult,
   type LostRunOutcome,
   type RunLimit,
@@ -47,7 +48,9 @@ import {
 } from "../meteringGuard.js";
 import { AgentOutputRecorder, LineOutputBudget } from "../agentOutput.js";
 import { buildReaderState, cursorSeqOfRow, parseOutputBudget, parseReaderState, parseSideEffects, restoreMeterLedger, rowSeqOfCursor, snapshotMeterLedger } from "../readerState.js";
-import { commit as commitReader, fenceLease, readSavedState, releaseLease, renewLease, takeLease } from "../readerStore.js";
+import { commit as commitReader, fenceLease, insertReader, readerIdleSeconds, readReaderFacts, setReaderFacts, readSavedState, releaseLease, renewLease, takeLease } from "../readerStore.js";
+import { sliceEndMs, type ReaderConfig } from "../readerConfig.js";
+import { parseSliceFacts, runOfSliceFacts, sliceFactsOf } from "../sliceRun.js";
 import { RunProgressRecorder } from "../runProgress.js";
 import { CloneError } from "../repoClone.js";
 import { detectModelFailure, type ModelFailureCode } from "../modelFailure.js";
@@ -176,8 +179,15 @@ export interface SandboxTargetDeps {
   keepAlive?: (work: Promise<unknown>) => void;
   /** Tests only: the start window, default `AGENT_START_TIMEOUT_MS`. */
   agentStartTimeoutMs?: number;
+  /** Tests only: how long the watchdog's last read of an unfollowed run lasts, default `FOLLOWER_CATCHUP_MS`. */
+  followerCatchUpMs?: number;
   /** Tests only: the pause between the two looks of the lost-run check, default `LOST_CONFIRM_DELAY_MS`. */
   lostConfirmDelayMs?: number;
+  /**
+   * D#2 RLR-5: present, a run's log is read in slices by the follower (dispatch hands the started command over and inserts the run's reader row); absent, by the
+   * invocation that started it, as before. The settings come from the worker (`readerConfigFromEnv`).
+   */
+  reader?: ReaderConfig;
 }
 
 const DEFAULT_SANDBOX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -188,6 +198,18 @@ const DEFAULT_SANDBOX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
  * and its sandbox is stopped and measured, instead of sitting in `running` with nothing in it.
  */
 export const AGENT_START_TIMEOUT_MS = 3 * 60_000;
+
+/**
+ * How long a sliced run's reader row may stand still before the run is taken to have no follower. The longest honest gap is a slice (at most 10 minutes, and its saves
+ * and renewals move the row every few seconds inside it) plus a poll pause behind another holder; this is well past that.
+ */
+export const FOLLOWER_STALE_MS = 15 * 60_000;
+
+/** How long the watchdog reads a run nobody follows before it ends it. */
+export const FOLLOWER_CATCHUP_MS = 30_000;
+
+/** How often a reader that is finalizing renews its lease (the lease lasts 60 s). */
+const FINALIZE_RENEW_MS = 20_000;
 
 /** The pause between the lost-run check's two looks. */
 export const LOST_CONFIRM_DELAY_MS = 5_000;
@@ -298,6 +320,8 @@ interface RunBookkeeping {
   measurement?: SandboxSessionFigures[];
   /** True once this run's sandbox was deleted (always after it was measured). */
   deleted: boolean;
+  /** D#2 RLR-5: the agent command was handed to the sliced reader; the launch's own end is no end of the run. */
+  handedOff: boolean;
 }
 
 function freshBookkeeping(): RunBookkeeping {
@@ -317,6 +341,7 @@ function freshBookkeeping(): RunBookkeeping {
     sessionStartedMs: new Map(),
     sessionWrites: [],
     deleted: false,
+    handedOff: false,
   };
 }
 
@@ -337,6 +362,14 @@ export interface ReadSliceStep {
   held: boolean;
   failed?: boolean;
   status?: TerminalReport["status"];
+}
+
+/** D#2 RLR-5: the saved state of a sliced run is not one a reader may continue from (see `readSlice`). */
+class SliceStateRefused extends Error {
+  constructor(public readonly why: "no_reader_part" | "cursor_mismatch") {
+    super(`sandbox target: saved reader state refused (${why})`);
+    this.name = "SliceStateRefused";
+  }
 }
 
 /** Thrown from `onEvent` (never caught anywhere but `dispatch`'s own
@@ -413,7 +446,7 @@ export class SandboxTarget implements ExecutionTarget {
     return { admitted: true };
   }
 
-  async dispatch(run: ExecutionRun): Promise<{ hookToken: string }> {
+  async dispatch(run: ExecutionRun): Promise<{ hookToken: string; startedMs?: number }> {
     assertMeterableModel(run.model);
     assertSelectableBackend(run.backend);
     const bk = this.bookkeeping(run.id);
@@ -513,6 +546,7 @@ export class SandboxTarget implements ExecutionTarget {
 
     const hookToken = randomUUID();
     bk.hookToken = hookToken;
+    const handOff = this.handOffOf(run, bk);
 
     const { hookFired, launched } = this.deps.sandboxPort.startDetached(handle, {
       onSession: (id) => this.recordSession(run, bk, id),
@@ -537,6 +571,7 @@ export class SandboxTarget implements ExecutionTarget {
       ...this.spillOf(run, bk),
       ...(excludes.length > 0 && { excludes }),
       ...(run.limits && { limits: run.limits }),
+      ...(handOff && { handOff: handOff.call }),
       onEvent,
       onStage,
     });
@@ -565,7 +600,7 @@ export class SandboxTarget implements ExecutionTarget {
     // one of these two branches runs, and resumeHookOnce is idempotent,
     // so the hook is resumed exactly once either way (pass/fail 8).
     const finalizing = hookFired
-      .then((lastEvent) => this.finalizeAndResume(run, buildTerminalReport(lastEvent, getSessionId(), bk.cumulativeModelUsd, snapshotOf(bk))))
+      .then((lastEvent) => (bk.handedOff ? undefined : this.finalizeAndResume(run, buildTerminalReport(lastEvent, getSessionId(), bk.cumulativeModelUsd, snapshotOf(bk)))))
       .catch((err: unknown) =>
         this.finalizeAndResume(run, buildAbortTerminalReport(abortOf(bk, err), getSessionId(), bk.cumulativeModelUsd, snapshotOf(bk))),
       );
@@ -574,7 +609,27 @@ export class SandboxTarget implements ExecutionTarget {
     // invocation returns is frozen, and a launch frozen half way leaves a sandbox with nothing running in it.
     await this.awaitAgentStart(run, bk, handle, launched);
 
-    return { hookToken };
+    return { hookToken, ...(handOff?.startedMs !== undefined && { startedMs: handOff.startedMs }) };
+  }
+
+  /**
+   * D#2 RLR-5: the hand-over of a started command to the sliced reader, or undefined when this deployment reads in the starting invocation. The port calls it
+   * once the command exists and before the launch counts as done: the reader row (with the command id) is inserted, so the first slice can find the command.
+   */
+  private handOffOf(run: ExecutionRun, bk: RunBookkeeping): { call: (c: { cmdId: string; startedMs: number }) => Promise<void>; startedMs?: number } | undefined {
+    // Only a caller that also starts the slice follower (it sets `run.slice`) hands a run over: nothing else would ever read it.
+    if (run.slice !== true || this.deps.reader === undefined || this.deps.sandboxPort.readSlice === undefined) return undefined;
+    const out: { call: (c: { cmdId: string; startedMs: number }) => Promise<void>; startedMs?: number } = {
+      call: async (c) => {
+        // A row that already exists belongs to an earlier command of this run: its cursor says nothing about this one, so the launch fails (closed) rather than read the wrong file.
+        if (!(await insertReader(this.deps.pool, { accountId: run.accountId, runId: run.id, cmdId: c.cmdId }))) throw new Error("sandbox target: the run already has a reader row");
+        // The caps and limits a slice will enforce are stored HERE, from the input this invocation resolved and reserved against; a later slice trusts this copy, never the follower's.
+        await setReaderFacts(this.deps.pool, { accountId: run.accountId, runId: run.id, facts: sliceFactsOf(run) as unknown as Record<string, unknown> });
+        bk.handedOff = true;
+        out.startedMs = c.startedMs;
+      },
+    };
+    return out;
   }
 
   /** Hands the stream/finalize chain to the platform's keep-alive; a throwing hook can never fail the run. */
@@ -676,6 +731,15 @@ export class SandboxTarget implements ExecutionTarget {
     // makes every sandbox read 404, a provider hiccup) must never settle a healthy run, and a finalize that was mid-way
     // has recorded its stop by the second look.
     const first = await look();
+    // The sandbox is there. A sliced run whose reader row has not moved for a long while has no follower: nothing meters it, so its spend cannot be held to its caps.
+    // It ends as failed, booked from the last save behind the lease fence (a holder that is only slow books its own newer figure at its next save).
+    if (first === "running" && (await this.followerStopped(run))) {
+      console.warn(JSON.stringify({ event: "run.follower_stopped", run_id: run.id }));
+      // What the command spent since the last save is recovered first: one bounded slice from the saved cursor, on the facts stored at hand-over. If that slice ends the run, it ended.
+      if ((await this.catchUpBeforeWatchdog(run)) === "ended") return "settled";
+      await this.finalize(run, { status: "failed", failureReason: "sandbox_error" });
+      return "settled";
+    }
     // The sandbox is there: the run is only still going if the limits its own process would have enforced are not past.
     if (first === "running") {
       const inFlight = this.durableChecks.get(run.id) ?? this.enforceLimitsDurably(run).finally(() => this.durableChecks.delete(run.id));
@@ -689,6 +753,25 @@ export class SandboxTarget implements ExecutionTarget {
     if (second !== "lost") return second;
     await this.finalize(run, { status: "failed", failureReason: "sandbox_stopped" });
     return "settled";
+  }
+
+  /** The watchdog's last read of a run nobody follows: "ended" when that read finished the run, else "open" (also when it could not read, which is reported). Never throws. */
+  private async catchUpBeforeWatchdog(run: ExecutionRun): Promise<"ended" | "open"> {
+    try {
+      const facts = parseSliceFacts(await readReaderFacts(this.deps.pool, { accountId: run.accountId, runId: run.id }));
+      if (facts === undefined || this.deps.sandboxPort.readSlice === undefined) return "open";
+      const step = await this.readSlice(runOfSliceFacts(run.accountId, run.id, facts), { untilMs: Date.now() + (this.deps.followerCatchUpMs ?? FOLLOWER_CATCHUP_MS) });
+      return step.done ? "ended" : "open";
+    } catch (err) {
+      reportError(err, { stage: "run.watchdog_catch_up" });
+      return "open";
+    }
+  }
+
+  /** D#2 RLR-5 watchdog: a run with a reader row that has not moved for `FOLLOWER_STALE_MS`. A database error is the caller's (the sweep counts it and looks again). */
+  private async followerStopped(run: ExecutionRun): Promise<boolean> {
+    const idle = await readerIdleSeconds(this.deps.pool, { accountId: run.accountId, runId: run.id });
+    return idle !== null && idle * 1000 > FOLLOWER_STALE_MS;
   }
 
   /** Stamps the run alive, at most once per `ALIVE_STAMP_INTERVAL_MS` per run on this instance. Never throws: a missed stamp only brings the durable silence check closer. */
@@ -773,7 +856,7 @@ export class SandboxTarget implements ExecutionTarget {
    * whatever the caller (`resumeAgentRun.ts`) already built, PR diff
    * included; this package has no GitHub access to seed one itself.
    */
-  async resume(run: ExecutionRun, sessionId: string | null): Promise<{ hookToken: string }> {
+  async resume(run: ExecutionRun, sessionId: string | null): Promise<{ hookToken: string; startedMs?: number }> {
     // D#599 PL-2b-2: a null session (a round that claims none) belongs to the runner target only; a sandbox round starts fresh instead.
     if (sessionId === null) throw new Error("sandbox target: a resume needs a session id");
     assertMeterableModel(run.model);
@@ -797,6 +880,7 @@ export class SandboxTarget implements ExecutionTarget {
     const { onEvent, onStage, getSessionId } = await this.buildMeteredOnEvent(run, payerAccountId, handle, bk);
 
     let startResult: StartDetachedResult;
+    const handOff = this.handOffOf(run, bk);
     await this.markRequested(run, sandboxName);
     try {
       startResult = this.deps.sandboxPort.resume(handle, sessionId, run.prompt, {
@@ -821,6 +905,7 @@ export class SandboxTarget implements ExecutionTarget {
         ...this.spillOf(run, bk),
         ...(excludes.length > 0 && { excludes }),
         ...(run.limits && { limits: run.limits }),
+        ...(handOff && { handOff: handOff.call }),
         onEvent,
         onStage,
       });
@@ -843,7 +928,7 @@ export class SandboxTarget implements ExecutionTarget {
     const notFound = (err: unknown): boolean => err instanceof SandboxNotFoundError;
     const finalizing = hookFired
       .then((lastEvent) =>
-        this.finalizeAndResume(run, buildTerminalReport(lastEvent, getSessionId() ?? sessionId, bk.cumulativeModelUsd, snapshotOf(bk))),
+        bk.handedOff ? undefined : this.finalizeAndResume(run, buildTerminalReport(lastEvent, getSessionId() ?? sessionId, bk.cumulativeModelUsd, snapshotOf(bk))),
       )
       .catch((err: unknown) =>
         notFound(err) ? undefined : this.finalizeAndResume(
@@ -854,7 +939,7 @@ export class SandboxTarget implements ExecutionTarget {
     this.keepAlive(finalizing);
     if ((await this.awaitAgentStart(run, bk, handle, launched, notFound)) === "not_found") return this.dispatch(this.freshSessionRun(run));
 
-    return { hookToken };
+    return { hookToken, ...(handOff?.startedMs !== undefined && { startedMs: handOff.startedMs }) };
   }
 
   /** The run's durable status, or undefined when there is no such row. */
@@ -891,7 +976,10 @@ export class SandboxTarget implements ExecutionTarget {
     if (lease === null) return { done: false, held: false };
     const { epoch } = lease;
     const bk = this.bookkeeping(run.id);
+    let crashed = false; // staging fault `FX_READER_CRASH`: set when this slice plays a process that died
     try {
+      // The operator decision was made at dispatch, in memory this instance does not have: made again from the same inputs (as `isOperatorRun` does for a settle), so an operator run keeps the operator budget and source.
+      bk.operatorSubscription ??= this.deps.operatorToken?.(run.accountId, this.payerFor(run)) !== undefined;
       const saved = Object.keys(lease.state).length === 0 ? undefined : parseReaderState(lease.state);
       if (saved) {
         restoreMeterLedger(saved.ledger, bk);
@@ -918,7 +1006,15 @@ export class SandboxTarget implements ExecutionTarget {
         },
       });
       let cancelledOutside = false;
+      const faults = this.deps.reader?.faults;
+      let saveAttempts = 0;
       const commit = async (cp: SliceCheckpoint): Promise<boolean> => {
+        // Staging only (`FX_READER_CRASH`): the slice that holds this epoch dies between its first and second save, as a process that is gone would: every save from the second on fails.
+        if (faults?.crashAtEpoch === epoch && ++saveAttempts >= 2) {
+          if (!crashed) console.warn(JSON.stringify({ event: "reader.fault_injected", fault: "crash", run_id: run.id, epoch }));
+          crashed = true; // a process that died gives nothing back: its lease stays until it runs out
+          throw new Error("reader fault injected: the process died");
+        }
         const rows = pending.splice(0);
         try {
           const state = buildReaderState({ usage: usageSnapshot(), guard: cp.guard, ledger: snapshotMeterLedger(bk), reader: cp.reader, out: budget.state(), ...(bk.abort !== undefined && { abort: bk.abort }), ...(bk.ccSessionId !== undefined && { cc: bk.ccSessionId }) });
@@ -969,10 +1065,18 @@ export class SandboxTarget implements ExecutionTarget {
         ...(opts.checkpointEveryMs !== undefined && { checkpointEveryMs: opts.checkpointEveryMs }),
         renew: () => renewLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch }),
         ...(opts.renewEveryMs !== undefined && { renewEveryMs: opts.renewEveryMs }),
+        // Staging only (`FX_RECORDER_TAMPER`): the second slice finds the record file emptied, so the exit check has a prefix it can no longer read back.
+        ...(faults?.tamper === true && epoch === 2 && { faultTruncateRecord: true }),
         commit,
       };
       let report: TerminalReport | undefined;
       try {
+        // A save the reader cannot trust is refused, never half-restored: state without a reader part would restore the meter but start the guard from nothing, and a
+        // consumed-record count that is not the cursor means the cursor or the state is not what was saved together. Either ends the run as a failure, from the saved meter.
+        if (saved !== undefined) {
+          if (saved.reader === undefined) throw new SliceStateRefused("no_reader_part");
+          if (saved.reader !== undefined && saved.reader.file.count !== cursorSeqOfRow(lease.nextSeq)) throw new SliceStateRefused("cursor_mismatch");
+        }
         const result = await port.readSlice(handle, sliceOpts);
         if (result.kind === "slice") return { done: false, held: true };
         if (result.kind === "lost") {
@@ -998,16 +1102,66 @@ export class SandboxTarget implements ExecutionTarget {
         report = buildAbortTerminalReport(abortOf(bk, err), getSessionId() ?? bk.ccSessionId, bk.cumulativeModelUsd, snapshotOf(bk));
       }
       // The run is over: the rows of the lines read are in the last save; the one `capped` row follows them, then the stop, the measure and the terminal status.
-      if (budget.droppedMessages > 0) {
-        await recordAgentOutputCapped(this.deps.pool, { accountId: run.accountId, runId: run.id, droppedMessages: budget.droppedMessages, droppedBytes: budget.droppedBytes }).catch((err: unknown) =>
-          reportError(err, { stage: "run.agent_output_capped" }),
-        );
+      // The finalize can outlast the lease (a stop, up to three measure reads, the settle), and the port's own renewals ended with the port call: a lapsed lease lets another
+      // invocation take the run mid-finalize and end it a second time. So the lease is renewed for as long as the finalize runs.
+      const beat = setInterval(() => void renewLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch }).catch(() => undefined), opts.renewEveryMs ?? FINALIZE_RENEW_MS);
+      try {
+        if (budget.droppedMessages > 0) {
+          await recordAgentOutputCapped(this.deps.pool, { accountId: run.accountId, runId: run.id, droppedMessages: budget.droppedMessages, droppedBytes: budget.droppedBytes }).catch((err: unknown) =>
+            reportError(err, { stage: "run.agent_output_capped" }),
+          );
+        }
+        await this.untilRunning(run);
+        if (!bk.cancelled) await this.finalize(run, report, { leaseEpoch: epoch });
+      } finally {
+        clearInterval(beat);
       }
-      await this.untilRunning(run);
-      if (!bk.cancelled) await this.finalize(run, report, { leaseEpoch: epoch });
       return { done: true, held: true, status: report.status };
     } finally {
-      await releaseLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch }).catch(() => undefined);
+      if (!crashed) await releaseLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * D#2 RLR-5: one step of the follower's reading of this run. It reads one slice, ending at the earlier of `FX_READER_SLICE_MS` from now and what is left of the
+   * invocation (`deadlineMs`, less the time the exit sequence and the finalize need). A deployment that does not read in slices answers `sliced: false` and does nothing.
+   */
+  async followSlice(run: ExecutionRun, o: { deadlineMs?: number; startedMs?: number } = {}): Promise<FollowSliceResult> {
+    const cfg = this.deps.reader;
+    if (cfg === undefined || this.deps.sandboxPort.readSlice === undefined) return { sliced: false, done: false, held: false, spentMs: 0 };
+    const began = Date.now();
+    const step = await this.readSlice(run, { untilMs: sliceEndMs(cfg, began, o.deadlineMs), ...(o.startedMs !== undefined && { startedMs: o.startedMs }) });
+    return { sliced: true, done: step.done, held: step.held, ...(step.failed && { failed: true }), spentMs: Date.now() - began };
+  }
+
+  /**
+   * D#2 RLR-5 (hard condition a): the follower could not re-attach to the run's command in N tries. The run ends as failed through the normal finalize: the stop, the
+   * measure and the status; the model spend is booked from the larger of this instance's figure (none) and the last save, behind the lease fence (a live holder books
+   * its own, newer figure at its next save). A run that is already over is only booked.
+   */
+  async settleAttachLost(run: ExecutionRun): Promise<void> {
+    if ((await this.runStatus(run)) === "running") {
+      await this.finalize(run, { status: "failed", failureReason: "sandbox_error" });
+      return;
+    }
+    await this.settleModelFromSavedMeter(run);
+  }
+
+  /**
+   * D#2 RLR-5 (hard condition b): books a FINISHED run's saved meter once. It fences the reader row first (an epoch bump, so no earlier holder can save or book), books
+   * the saved figure through the idempotent settle, and gives the lease back. `held`: a live holder still has the lease; its own end books, or the caller asks again after
+   * the lease ran out. A run that is not over is left alone (`done`).
+   */
+  async revisitSavedMeter(run: ExecutionRun): Promise<"held" | "done"> {
+    const status = await this.runStatus(run);
+    if (status === undefined || status === "pending" || status === "running") return "done";
+    const plan = await this.modelBooking(run, undefined);
+    try {
+      if (plan.skip) return "held";
+      if (plan.usd !== undefined) await this.settleModelRows(this.payerFor(run), run, plan.usd, plan.epoch);
+      return "done";
+    } finally {
+      await plan.done().catch((err: unknown) => reportError(err, { stage: "run.fence_release" }));
     }
   }
 
