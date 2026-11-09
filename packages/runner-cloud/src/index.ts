@@ -27,6 +27,7 @@ export { DISPATCH_BASE_KIND, branchOf, donePath, doneRun } from "./done.js";
 export { CHECK_BOUNDS, normaliseCheck } from "./checkResult.js";
 export { gitTicketRun } from "./gitTicket.js";
 export { planeMergeClaimRun, planeMergeReportRun, planeMergeVerifyRun, settleAuthorizedOrder, type SettleHint, type SettleOutcome } from "./planeMerge.js";
+export { DEPLOY_ORDER_ELIGIBLE_SQL, deployOrderClaimRun, deployOrderReportRun, deployOrderWaiting } from "./deployOrder.js";
 export { memoryProposalsRun } from "./memoryProposals.js";
 export { PLANE_PUSH_REPORT_CODES, planePushPairingRun, planePushReportRun, planePushTokenRun } from "./planePush.js";
 export {

@@ -85,7 +85,7 @@ describe("RunnerTarget [pg]", () => {
         [
           "executor", "project-manager", "technical-architect", "product-owner", "cost-analyst", "performance-expert",
           "security-expert", "docs-writer", "accessibility-reviewer",
-          "code-reviewer", "security-reviewer", "acceptance-tester", "debater", "proposal-verifier", "discovery-analyst",
+          "code-reviewer", "security-reviewer", "acceptance-tester", "debater", "proposal-verifier", "discovery-analyst", "deploy-verifier",
         ].sort(),
       );
     });

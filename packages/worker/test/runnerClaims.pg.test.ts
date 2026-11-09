@@ -342,7 +342,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
         const fresh = await newRunner({ roles: [] });
         expect((await admin.query("SELECT allowed_roles FROM runners WHERE id = $1", [fresh])).rows[0].allowed_roles).toEqual([]);
         // D#483 S4-b2c: the claim verifier also needs the capability on the runner's latest hello (its own tests are below).
-        await capable(fresh, ["proposal_verifier", "discovery_analyst"]);
+        await capable(fresh, ["proposal_verifier", "discovery_analyst", "browser_chrome_v1"]);
         for (const role of RUNNER_ELIGIBLE_ROLES) {
           const id = await pending({ role });
           const result = await claim(fresh);
@@ -390,6 +390,47 @@ describe("runner claim, heartbeat and events [pg]", () => {
         const next = await pending({ role: "discovery-analyst", mode: "runner_verified" });
         expect((await claim(analyst)).kind).toBe("idle");
         expect((await row(next)).status).toBe("pending");
+      });
+
+      // D#749 V2a: the deploy verifier is a browser job, gated by browser_chrome_v1 alone, and a runner holds one at a time whatever capacity it declares.
+      it("the deploy verifier is offered only to a runner whose latest hello advertised browser_chrome_v1; deploy_order_v1 and the verifier's capability do not stand in for it", async () => {
+        const id = await pending({ role: "deploy-verifier" });
+        const orderOnly = await newRunner({ roles: [] });
+        await capable(orderOnly, ["deploy_order_v1", "proposal_verifier"]);
+        const none = await newRunner({ roles: [] });
+        expect((await claim(none)).kind).toBe("idle");
+        expect((await claim(orderOnly)).kind).toBe("idle");
+        expect((await row(id)).status).toBe("pending");
+        const browser = await newRunner({ roles: [] });
+        await capable(browser, ["browser_chrome_v1"]);
+        expect(await claim(browser)).toMatchObject({ kind: "claimed", runId: id });
+        // Withdrawn on a later hello: the next one is not offered to it.
+        await capable(browser, []);
+        await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
+        const next = await pending({ role: "deploy-verifier" });
+        expect((await claim(browser)).kind).toBe("idle");
+        expect((await row(next)).status).toBe("pending");
+      });
+
+      it("a runner holds one browser job at a time, however much capacity it declares: two concurrent claims give exactly one, and a second after the first still waits", async () => {
+        const wide = { light: { limit: 4, in_use: 0 }, heavy: { limit: 4, in_use: 0 }, limited_by: null } as const;
+        const browser = await newRunner({ roles: [] });
+        await capable(browser, ["browser_chrome_v1"]);
+        const first = await pending({ role: "deploy-verifier", createdAt: T0 - 5000 });
+        const second = await pending({ role: "deploy-verifier", createdAt: T0 - 4000 });
+        const results = await Promise.all([facade.claimRunnerRun({ accountId: A.accountId, runnerId: browser, capacity: wide }), facade.claimRunnerRun({ accountId: A.accountId, runnerId: browser, capacity: wide })]);
+        expect(results.filter((r) => r.kind === "claimed")).toHaveLength(1);
+        const running = (await admin.query("SELECT id FROM agent_runs WHERE runner_id = $1 AND status = 'running' AND role = 'deploy-verifier'", [browser])).rows;
+        expect(running).toHaveLength(1);
+        expect((await facade.claimRunnerRun({ accountId: A.accountId, runnerId: browser, capacity: wide })).kind).toBe("idle");
+        // Another job class is not held back by the browser job, and the next browser job goes once the first has ended.
+        const reviewer = await pending({ role: "code-reviewer" });
+        const other = await newRunner({ roles: ["code-reviewer"] });
+        expect(await claim(other)).toMatchObject({ kind: "claimed", runId: reviewer });
+        await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [running[0]!.id]);
+        const again = await facade.claimRunnerRun({ accountId: A.accountId, runnerId: browser, capacity: wide });
+        expect(again.kind).toBe("claimed");
+        expect([first, second]).toContain(again.kind === "claimed" ? again.runId : "");
       });
 
       it("a capability-gated role: a runner without the capability still claims every other role", async () => {

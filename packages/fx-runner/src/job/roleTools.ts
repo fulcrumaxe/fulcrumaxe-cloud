@@ -1,4 +1,4 @@
-import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
+import { DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
 
 /**
  * The tools each runner-eligible role may use on a customer's machine.
@@ -40,6 +40,8 @@ const ENTRY_FOR_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], re
   debater: REVIEWER,
   [PROPOSAL_VERIFIER_ROLE]: PROPOSAL_VERIFIER_RUNNER_TOOLS,
   [DISCOVERY_ANALYST_ROLE]: PROPOSAL_VERIFIER_RUNNER_TOOLS,
+  // D#749 V2a: the three read tools for now (deployVerifier.ts says why); the browser tools arrive with the runner side that serves them.
+  [DEPLOY_VERIFIER_ROLE]: DEPLOY_VERIFIER_RUNNER_TOOLS,
 };
 
 /** The role table. Its keys are exactly the runner-eligible roles; each entry is frozen. */

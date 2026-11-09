@@ -2,8 +2,11 @@ import { createHash, randomInt } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS,
+  BROWSER_JOB_ROLES,
+  BROWSER_JOB_SLOTS_PER_RUNNER,
   CLAIM_QUEUED_RETRY_AFTER_SECONDS,
   LIGHT_JOB_ROLES,
+  isBrowserJobRole,
   RUNNER_ELIGIBLE_ROLES,
   RUNNER_LEASE_SECONDS,
   SignedJobSchema,
@@ -396,6 +399,12 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
       // The runner's own cap: its free slots in this run's class, counted under the same lock the account count uses.
       const free = freeSlotsFor(capacity, await runningByClass(client, accountId, runnerId));
       if ((heavy ? free.heavy : free.light) <= 0) return "runner_full" as const;
+      // D#749 V2a: a browser job (the deploy verifier) needs the machine's one Chrome, so a runner holds at most BROWSER_JOB_SLOTS_PER_RUNNER of them at once, on top of the
+      // heavy slot it also takes. Counted under the same lock, so two claims cannot both pass.
+      if (isBrowserJobRole(candidate.role)) {
+        const held = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND runner_id = $2 AND runtime = 'runner' AND status = 'running' AND role = ANY($3::text[])", [accountId, runnerId, BROWSER_JOB_ROLES]);
+        if (Number(held.rows[0]!.n) >= BROWSER_JOB_SLOTS_PER_RUNNER) return "runner_full" as const;
+      }
       const locked = await client.query<{ initiated_by: string | null; approved_by: string | null }>(
         "SELECT initiated_by, approved_by FROM agent_runs WHERE account_id = $1 AND id = $2 AND status = 'pending' AND runner_id IS NULL FOR UPDATE SKIP LOCKED",
         [accountId, runId],
@@ -492,11 +501,13 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   -- D#599 PL-2b: a job in the cross-side shape is read by no runner that predates it (its strict parse would fail the whole reply). NULL means any runner;
                   -- a runner that has not said hello (no stored version) counts as below every version.
                   AND (a.min_protocol_version IS NULL OR a.min_protocol_version <= $20::int)
+                  -- D#749 V2a: a browser job is offered only to a runner that holds none (the claim re-checks under the lock).
+                  AND (NOT a.role = ANY($21::text[]) OR NOT EXISTS (SELECT 1 FROM agent_runs b WHERE b.account_id = a.account_id AND b.runner_id = $7 AND b.runtime = 'runner' AND b.status = 'running' AND b.role = ANY($21::text[])))
                   AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
                   ${ROUTING_WHERE_SQL}
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
                 LIMIT 1`,
-              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos, ...routingParams(routing), runner.protocol_version ?? 0],
+              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos, ...routingParams(routing), runner.protocol_version ?? 0, BROWSER_JOB_ROLES],
             );
             return rows;
           });

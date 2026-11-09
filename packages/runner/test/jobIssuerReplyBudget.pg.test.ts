@@ -75,7 +75,7 @@ describe("JobIssuer reply budget [pg]", () => {
     const run = await executorRun(w);
     await issuerWith().issue({ run });
     const signed = await stored(run.id);
-    const reply = { signed_job: signed, run_id: run.id, lease_generation: Number.MAX_SAFE_INTEGER, wake: { token: "a".repeat(1024), poll_s: Number.MAX_SAFE_INTEGER, transport: "a".repeat(32) }, merge_order: true };
+    const reply = { signed_job: signed, run_id: run.id, lease_generation: Number.MAX_SAFE_INTEGER, wake: { token: "a".repeat(1024), poll_s: Number.MAX_SAFE_INTEGER, transport: "a".repeat(32) }, merge_order: true, deploy_order: true };
     expect(worstCaseClaimReplyBytes(signed, run.id)).toBe(claimReplyBytes(reply));
     expect(claimReplyBytes(reply)).toBe(Buffer.byteLength(JSON.stringify(reply), "utf8"));
   });

@@ -9,6 +9,7 @@ import { CONTEXT_MAX_COUNT, CONTEXT_MAX_TOOL_CALLS, CONTEXT_SECTION_CODES, CONTE
 import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
+import { DeployOrderClaimMessage, DeployOrderReportMessage } from "./deployOrder.js";
 import { RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
 
 /** The isolation tiers a runner can report. Display only. There is no "none". */
@@ -843,6 +844,8 @@ export const RUNNER_MESSAGES = {
   plane_merge_claim: PlaneMergeClaimMessage,
   plane_merge_verify: PlaneMergeVerifyMessage,
   plane_merge_report: PlaneMergeReportMessage,
+  deploy_order_claim: DeployOrderClaimMessage,
+  deploy_order_report: DeployOrderReportMessage,
   events: EventsMessage,
   done: DoneMessage,
   register: RegisterMessage,

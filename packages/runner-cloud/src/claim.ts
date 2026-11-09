@@ -1,6 +1,7 @@
 import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
+import { deployOrderWaiting } from "./deployOrder.js";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 import { configuredWakeKey, wakeGrantFor, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
@@ -86,7 +87,11 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
         );
         mergeOrder = waiting.rows.length > 0;
       }
-      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder };
+      // D#749 V2a: whether a deploy order waits for THIS runner (the same transaction, one EXISTS; no poll of its own). The eligibility text is the claim route's own
+      // (`DEPLOY_ORDER_ELIGIBLE_SQL`), and it joins the runner's latest hello, so a runner without `deploy_order_v1` finds none and is never sent the key.
+      let deployOrder = false;
+      if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) deployOrder = await deployOrderWaiting(client, runner);
+      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder };
     }),
   );
   const wait = gate.waited;
@@ -102,6 +107,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     ...(wakeGrant ? { wake: wakeGrant } : {}),
     // Only ever `true`, and only for a runner whose own rows say an order waits for it; the runner then calls plane-merge-claim (no polling of its own).
     ...(gate.mergeOrder ? { merge_order: true as const } : {}),
+    // Only ever `true`, and only for a runner whose own rows say a deploy order waits for it; the runner then calls deploy-order-claim.
+    ...(gate.deployOrder ? { deploy_order: true as const } : {}),
   };
   // D#6 RUNNER-WAKE R3b: the allow record the wake check requires, written only for a runner this claim just verified in the database and granted.
   if (wakeGrant) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());

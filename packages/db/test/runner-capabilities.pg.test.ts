@@ -258,6 +258,37 @@ describe('migration 0893: runner_capabilities and runner_capabilities_record [pg
     expect(new0985.replaceAll(", 'mem_proposal_v1'", '').trim()).toBe(body('0980_runner_tip_publish_capability.sql').trim());
   });
 
+  // D#749 V2a (1004): browser_chrome_v1 and deploy_order_v1 are the eleventh and twelfth closed codes, through the definer and under the CHECK alike.
+  it('1004: stores browser_chrome_v1 and deploy_order_v1, alone or with the others, and still refuses a repeat or a near miss', async () => {
+    for (const code of ['browser_chrome_v1', 'deploy_order_v1']) {
+      await record([code]);
+      expect(await stored(), code).toEqual([code]);
+    }
+    const all = ['proposal_verifier', 'wake_v1', 'plane_merge_v1', 'memory_limit_v1', 'plane_merge_queue_v1', 'discovery_analyst', 'conflict_facts_v1', 'ordered_facts_v1', 'tip_publish_v1', 'mem_proposal_v1', 'browser_chrome_v1', 'deploy_order_v1'];
+    await record(all);
+    expect(await stored()).toEqual(all);
+    for (const bad of [['browser_chrome_v1', 'browser_chrome_v1'], ['deploy_order_v1', 'deploy_order_v1'], ['browser_chrome_v2'], ['Deploy_order_v1'], ['deploy_order'], ['browser_chrome_v1', 'shell']]) {
+      await expect(record(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: '22023' });
+    }
+    expect(await stored()).toEqual(all);
+    const other = await insertRunner(admin, a.accountId, a.userId);
+    await admin.query(`INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{deploy_order_v1,browser_chrome_v1}')`, [other, a.accountId]);
+    await expect(admin.query(`UPDATE runner_capabilities SET capabilities = '{deploy_order_v1,deploy_order_v2}' WHERE runner_id = $1`, [other])).rejects.toMatchObject({ code: '23514' });
+    await record(['proposal_verifier']);
+  });
+
+  it('1004 changes exactly two values of the CHECK and of the closed list: the rest of the statement is 0985 verbatim', () => {
+    const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+    const body = (file: string): string => {
+      const text = readFileSync(path.join(dir, file), 'utf8');
+      return text.slice(text.indexOf('ALTER TABLE runner_capabilities DROP CONSTRAINT'));
+    };
+    const new1004 = body('1004_runner_browser_capabilities.sql');
+    expect(new1004.split("'browser_chrome_v1'")).toHaveLength(3);
+    expect(new1004.split("'deploy_order_v1'")).toHaveLength(3);
+    expect(new1004.replaceAll(", 'browser_chrome_v1', 'deploy_order_v1'", '').trim()).toBe(body('0985_runner_mem_proposal_capability.sql').trim());
+  });
+
   it('names the runner from the session only: none, a malformed one, an unknown one, a revoked one or another account’s is refused (42501)', async () => {
     const before = await stored();
     for (const runnerId of [null, 'not-a-uuid', randomUUID()]) await expect(record(['proposal_verifier'], { runnerId }), String(runnerId)).rejects.toMatchObject({ code: '42501' });
