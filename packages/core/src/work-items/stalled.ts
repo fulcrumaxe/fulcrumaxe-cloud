@@ -100,7 +100,7 @@ export const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   reviewer_fail: 'A reviewer could not approve this change.',
   reviewer_no_verdict: 'A reviewer kept ending without a verdict.',
   reviewer_unverifiable: 'A reviewer could not check some of the criteria in its environment.',
-  reviewer_environment: 'A reviewer could not run the tests.',
+  reviewer_environment: 'A reviewer could not run the tests, so the review stopped. This item gives up its build slot while it waits; continue the review from this card, and it counts toward the limit again.',
   wait_timeout: 'A fix round ran out of time and was stopped.',
   halted: 'The work was halted.',
   stack_parent_no_pull_request: 'The item this work builds on has no pull request yet, so this did not start. Build that item until it has a pull request, then start this one again.',

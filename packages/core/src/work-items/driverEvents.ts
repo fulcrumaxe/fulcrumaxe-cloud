@@ -1,4 +1,6 @@
 import type { PoolClient } from 'pg';
+import { markWorkPending } from '../pendingWork.js';
+import { isPersonOnlyStop, SLOT_RELEASE_STAGES } from './slotRelease.js';
 import { ACTOR_YOU, PERSON_REQUEUE_REASON, QUEUE_AGAIN_ACTION, queueAuditAtSql } from './queueIntent.js';
 
 /**
@@ -265,6 +267,12 @@ export async function recordDriverEvent(client: PoolClient, accountId: string, e
   const d = e.detail;
   if (r.rowCount === 1 && d !== undefined && ((d.conflictFiles?.length ?? 0) > 0 || (d.baseRef ?? null) !== null)) {
     await client.query(`INSERT INTO work_item_driver_event_details (driver_event_id, account_id, conflict_files, base_ref) VALUES ($1, $2, $3::text[], $4)`, [r.rows[0].id, accountId, [...(d.conflictFiles ?? [])], d.baseRef ?? null]);
+  }
+  // A stop only a person can restart frees the item's build slot (slotRelease.ts). An orphaned waiter has nothing left that asks again, so wake the parked-stage sweep now
+  // rather than at its next pass (a hint, as in recordStage: the sweep reads the rows). Only the first write of the fact does; a replay wakes nothing.
+  if (r.rowCount === 1 && isPersonOnlyStop(e.kind, e.code ?? null)) {
+    const at = await client.query('SELECT stage FROM work_items WHERE id = $1 AND account_id = $2', [e.workItemId, accountId]);
+    if (at.rows[0] !== undefined && SLOT_RELEASE_STAGES.includes(at.rows[0].stage)) void markWorkPending('stage-resume-sweep');
   }
   return { recorded: r.rowCount === 1 };
 }
