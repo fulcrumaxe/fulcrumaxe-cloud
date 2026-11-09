@@ -34,7 +34,7 @@ export { continuationStartInput, CONTINUE_PROMPT, CONTINUATION_SITES, type Conti
 // D#599 HO-2a: the cloud target of a run handoff (the seat a cloud run of the item would get, and its reservations); a factory over a pool the caller owns.
 export { createHandoffCloudTarget, runnerJobsConfigured, type HandoffCloudTargetPort } from "./handoffTarget.js";
 // D#2 H14c-3-3a-3: the follower's two step bodies, standalone functions (not Worker methods); the timeout writes with the runner's own writer over the runner login.
-export { followStatusBody, followTimeoutBody, type FollowStatus } from "@fx/runner";
+export { followStatusBody, followTimeoutBody, followSliceBody, followAttachLostBody, followRevisitBody, type FollowStatus, type FollowSliceArgs, type FollowSliceOut } from "@fx/runner";
 export { operatorMode } from "@fx/runner";
 // D#6 R3b: a pure factory (no pool, no secret); apps/web builds the live repository-visibility read with it and passes it in as a port.
 export { createGithubRepoVisibility, type RepoReadHttp } from "@fx/runner";

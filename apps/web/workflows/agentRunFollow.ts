@@ -1,5 +1,6 @@
 import { createHook, sleep } from "workflow";
-import { followStatusBody, followTimeoutBody, type FollowStatus, type WorkerPorts } from "@fx/worker";
+import { getDeadline } from "@vercel/functions";
+import { followAttachLostBody, followRevisitBody, followSliceBody, followStatusBody, followTimeoutBody, type FollowSliceArgs, type FollowSliceOut, type FollowStatus, type WorkerPorts } from "@fx/worker";
 import { getWorker } from "../lib/worker";
 
 /**
@@ -17,6 +18,12 @@ import { getWorker } from "../lib/worker";
  *   3. otherwise race the hook against a sleep, in slices. A wake-up (the hook or a tick) is followed by another status
  *      read. A hook for another run is ignored. Slices of the sleep count against the watchdog; a hook does not;
  *   4. when the watchdog is used up on a run still `running`, time it out and stop its sandbox.
+ *
+ * A run whose log is read in slices (`args.slice` is set; the deployment turned on FX_READER_SLICE_MS) is read by this workflow, one slice per step: a slice reads the
+ * run's record file for at most FX_READER_SLICE_MS and never past what is left of the step's own invocation (`getDeadline`), saves everything it did in one write and
+ * lets go, so no invocation holds a reader past its slice. Time spent reading counts against the watchdog. A step that does not hold the lease (another invocation is
+ * reading) or could not re-attach waits one poll slice, as an unsliced run does. After ATTACH_FAILURE_LIMIT failed re-attaches in a row the run is ended as failed and its
+ * saved meter booked; and once the run is over, its saved meter is booked if the reader that ended it did not (a cancel behind a live holder that never came back).
  *
  * The directive wrapper lives here and the bodies in @fx/runner, reached through @fx/worker (the request path imports nothing from @fx/runner; the Workflow builder compiles directives in the app's
  * own source only); the workflow body below imports no value from a package. vitest here is 2.x, below
@@ -42,10 +49,40 @@ function followPollMs(sleptMs: number): number {
   return pause;
 }
 
+/** Failed re-attaches in a row after which the follower gives the run up (each is followed by at least a minute's wait, so the run is given about this many minutes). */
+export const ATTACH_FAILURE_LIMIT = 8;
+/**
+ * Asks for a revisit of the saved meter this many times, a lease apart, while a live holder keeps the lease. The holder may be a reader that is renewing its lease through a
+ * finalize, so the tries last at least the longest invocation (the step limit, 800 s) plus one lease (60 s).
+ */
+export const REVISIT_WAIT_MS = 65_000;
+export const REVISIT_TRIES = 14;
+/** A slice that reports no time (a degenerate one) still costs the watchdog this much, so a loop of such slices ends. */
+const MIN_SLICE_COST_MS = 1_000;
+
 export async function followStatusStep(accountId: string, runId: string): Promise<FollowStatus> {
   "use step";
   await getWorker();
   return followStatusBody(accountId, runId);
+}
+
+/** One slice of the run's log (RLR-5), bounded by the setting and by what is left of this invocation. */
+export async function followSliceStep(accountId: string, runId: string, slice: FollowSliceArgs): Promise<FollowSliceOut> {
+  "use step";
+  await getWorker();
+  return followSliceBody(accountId, runId, slice, getDeadline()?.getTime());
+}
+
+export async function followAttachLostStep(accountId: string, runId: string, slice: FollowSliceArgs): Promise<FollowStatus> {
+  "use step";
+  await getWorker();
+  return followAttachLostBody(accountId, runId, slice);
+}
+
+export async function followRevisitStep(accountId: string, runId: string, slice: FollowSliceArgs): Promise<"held" | "done"> {
+  "use step";
+  await getWorker();
+  return followRevisitBody(accountId, runId, slice);
 }
 
 export async function followTimeoutStep(accountId: string, runId: string): Promise<FollowStatus> {
@@ -73,7 +110,7 @@ export async function followLogStep(event: "run.follower_finalized" | "run.follo
 
 export async function agentRunFollowWorkflow(args: FollowArgs): Promise<FollowOutcome> {
   "use workflow";
-  const { runId, accountId, hookToken, watchdogMs } = args;
+  const { runId, accountId, hookToken, watchdogMs, slice } = args;
 
   const hook = createHook<{ runId: string; status: string }>({ token: hookToken });
   const never = new Promise<never>(() => undefined);
@@ -81,10 +118,28 @@ export async function agentRunFollowWorkflow(args: FollowArgs): Promise<FollowOu
 
   let seen = await followStatusStep(accountId, runId);
   let remaining = watchdogMs;
+  let attachFailures = 0;
   while (!seen.done && remaining > 0) {
-    const slice = Math.min(followPollMs(watchdogMs - remaining), remaining);
-    const woke = await Promise.race([waiting, sleep(slice).then(() => ({ kind: "tick" as const }))]);
-    if (woke.kind === "tick") remaining -= slice;
+    if (slice !== undefined) {
+      const step = await followSliceStep(accountId, runId, slice);
+      if (step.sliced) {
+        remaining -= Math.max(step.spentMs, MIN_SLICE_COST_MS);
+        attachFailures = step.failed ? attachFailures + 1 : 0;
+        if (attachFailures >= ATTACH_FAILURE_LIMIT) {
+          seen = await followAttachLostStep(accountId, runId, slice);
+          attachFailures = 0; // a run still open after that (a live holder has it) gets a whole new round of tries
+          continue;
+        }
+        // A slice that read (the run goes on, or is over) is followed at once by the next look; one that did not hold the lease or could not attach waits a poll slice.
+        if (step.held && !step.failed) {
+          seen = await followStatusStep(accountId, runId);
+          continue;
+        }
+      }
+    }
+    const pause = Math.min(followPollMs(watchdogMs - remaining), remaining);
+    const woke = await Promise.race([waiting, sleep(pause).then(() => ({ kind: "tick" as const }))]);
+    if (woke.kind === "tick") remaining -= pause;
     // The hook is used up once it fires, whoever it was for; the status row decides either way.
     else waiting = never;
     if (woke.kind === "hook" && woke.runId !== runId) {
@@ -93,12 +148,21 @@ export async function agentRunFollowWorkflow(args: FollowArgs): Promise<FollowOu
     seen = await followStatusStep(accountId, runId);
   }
 
+  const revisit = async (): Promise<void> => {
+    if (slice === undefined) return;
+    for (let i = 0; i < REVISIT_TRIES; i++) {
+      if ((await followRevisitStep(accountId, runId, slice)) === "done") return;
+      await sleep(REVISIT_WAIT_MS);
+    }
+  };
   if (seen.done) {
+    await revisit();
     await followLogStep("run.follower_finalized", accountId, runId, seen.status);
     await capacityReleaseStep();
     return { runId, status: seen.status, timedOut: false };
   }
   const ended = await followTimeoutStep(accountId, runId);
+  await revisit();
   await followLogStep("run.follower_timed_out", accountId, runId, ended.status);
   await capacityReleaseStep();
   return { runId, status: ended.status, timedOut: true };

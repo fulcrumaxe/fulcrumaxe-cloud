@@ -4,6 +4,8 @@ import {
   IdempotencyKeyTakenError,
   acceptQueuedRunnerRun,
   buildExecutionRun,
+  sliceFactsOf,
+  type SliceRunFacts,
   failClosedOnQueued,
   readRunExecutionMode,
   resolveExecutionTarget,
@@ -38,6 +40,8 @@ export interface FollowArgs {
   hookToken: string;
   /** How long the follower waits before it treats the run as lost: the run's own sandbox timeout plus a margin, never a fixed hours-long default. */
   watchdogMs: number;
+  /** D#2 RLR-5: present for a run whose log is read in slices: when its agent command started (epoch ms), and the figures its slices decide against. */
+  slice?: { startedMs: number; run: SliceRunFacts };
 }
 
 /** Added to the run's sandbox timeout to get the follower's watchdog. */
@@ -79,7 +83,8 @@ export function createRunStarter(deps: RunStarterDeps): RunStarter {
       try {
         // A queued runner run has no hook for `follow`. "accept" leaves it pending for a runner and starts no follower;
         // "refuse" cancels it and fails, for a caller that waits on the run's end.
-        const result = await startAgentRun(deps.pool, deps.registry, input);
+        // This starter follows every run it starts (just below), so its runs may be read in slices by that follower; no other caller of `startAgentRun` sets `slice`.
+        const result = await startAgentRun(deps.pool, deps.registry, { ...input, slice: true });
         started = deps.queued === "accept" ? await acceptQueuedRunnerRun(deps.pool, input.accountId, result) : await failClosedOnQueued(deps.pool, input.accountId, result);
       } catch (err) {
         // A concurrent start with the same key won the claim: that run is the answer.
@@ -93,7 +98,7 @@ export function createRunStarter(deps: RunStarterDeps): RunStarter {
 
       logEvent("run.started", started.id, input.accountId);
       try {
-        await deps.follow({ runId: started.id, accountId: input.accountId, hookToken: started.hookToken, watchdogMs: input.timeoutMs + WATCHDOG_MARGIN_MS });
+        await deps.follow({ runId: started.id, accountId: input.accountId, hookToken: started.hookToken, watchdogMs: input.timeoutMs + WATCHDOG_MARGIN_MS, ...(started.startedMs !== undefined && { slice: { startedMs: started.startedMs, run: sliceFactsOf(buildExecutionRun(started.id, input)) } }) });
       } catch (err) {
         // A running sandbox nobody follows would run, and spend, to its timeout: stop it and fail the run, then surface the error.
         // D#599 PL-2: the run's own recorded mode, never the repo's or the item's now: a placement change while it ran must not stop it on the wrong side.

@@ -163,6 +163,11 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
    * own defaults, so nothing one run sets reaches another. The port refuses a launch
    * whose `maxRunMs` is not below its sandbox's `timeoutMs` (MP-CLOCK). */
   limits?: Partial<RunLimits>;
+  /**
+   * D#2 RLR-5: the run is read in slices by later invocations, not by this one. Called once the agent command exists (and has not been stopped), with its id and
+   * start time; the launch then ends without reading a record, `hookFired` resolving with nothing. A failure of the callback fails the launch like any other.
+   */
+  handOff?(c: { cmdId: string; startedMs: number }): Promise<void>;
   /** D#2 H09b2 fix round 1 (S-MUST 2): may return a promise -- see
    * `@fx/runtime`'s `StartOptions.onEvent` for why every runtime awaits it
    * before producing the next event. */
@@ -230,6 +235,8 @@ export interface ReadSliceOptions
   renew?(): Promise<boolean>;
   renewEveryMs?: number;
   commit(cp: SliceCheckpoint): Promise<boolean>;
+  /** Staging only (`FX_RECORDER_TAMPER`): empties the record file before this slice reads, as a hostile agent could. Never set outside staging. */
+  faultTruncateRecord?: boolean;
 }
 
 /**

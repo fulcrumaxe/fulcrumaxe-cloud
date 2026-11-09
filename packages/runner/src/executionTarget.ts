@@ -296,6 +296,11 @@ export interface ExecutionRun {
    */
   continuesFresh?: boolean;
   workdir?: string;
+  /**
+   * D#2 RLR-5: the caller starts a slice follower for this run (and only such a caller sets it: `worker/src/starter.ts`, which follows every run it starts). A sandbox target with
+   * a reader setting hands the run's log to that follower only when this is set; every other run is read in the invocation that starts it, exactly as before.
+   */
+  slice?: true;
   /** D#600 CX-1a: the assembled prompt's sections (code, bytes, hash, trimmed bytes), stored on the run's context ledger. The prompt assembler (CX-2) supplies them; absent = none recorded. */
   contextSections?: readonly ContextSection[];
   /** D#600 CX-10a: how long the cloud took to assemble this prompt (and whether it built the repo map), stored on the run's context ledger. Absent: not recorded. */
@@ -346,7 +351,7 @@ export interface ExecutionRun {
  * Workflow hook that its end will resume. A runner run starts nothing: it waits in `pending` until a runner claims it, and
  * no hook exists for it (section 2.6). `queued: true` is that case, and the caller leaves the run `pending`.
  */
-export type DispatchResult = { hookToken: string } | { queued: true };
+export type DispatchResult = { hookToken: string; /** D#2 RLR-5: set when the run is read in slices: when its agent command started (epoch ms), for the first slice. */ startedMs?: number } | { queued: true };
 
 export interface ExecutionTarget {
   /** D#6 C12 A1: the `agent_runs.runtime` this target's runs are stamped with. */
@@ -400,6 +405,27 @@ export interface ExecutionTarget {
    * is in doubt. Optional: a target without it is never swept for lost runs.
    */
   settleIfLost?(run: ExecutionRun): Promise<LostRunOutcome>;
+  /**
+   * D#2 RLR-5: one step of the follower's reading of a run whose log is read in slices (see `FollowSliceResult`). Optional: a target that reads nothing in
+   * slices has none, and the follower only polls its status.
+   */
+  followSlice?(run: ExecutionRun, o: { deadlineMs?: number; startedMs?: number }): Promise<FollowSliceResult>;
+  /** D#2 RLR-5: the follower gave up re-attaching to the run's command; end it as failed and book the saved meter once. */
+  settleAttachLost?(run: ExecutionRun): Promise<void>;
+  /** D#2 RLR-5: a finished run's saved meter, booked once if it is not yet (`held`: a live reader still has the lease, ask again after it ran out). */
+  revisitSavedMeter?(run: ExecutionRun): Promise<"held" | "done">;
+}
+
+/**
+ * What one follower step reports. `sliced` is false for a run with no reader (a target not configured for slices, or a run started before it was): the follower
+ * polls it as before. `held` is whether this step held the lease; `failed` a re-attach that did not work; `spentMs` the time the step ran.
+ */
+export interface FollowSliceResult {
+  sliced: boolean;
+  done: boolean;
+  held: boolean;
+  failed?: boolean;
+  spentMs: number;
 }
 
 /** What `settleIfLost` found: the run was settled, its compute is alive, or the provider could not say. */

@@ -10,6 +10,7 @@ import {
   createJobIssuer,
   createPgJobContext,
   SandboxTarget,
+  readerConfigFromEnv,
   SWEEP_TIME_BUDGET_MS,
   unwiredJobIssuer,
   unwiredRepoVisibility,
@@ -387,8 +388,15 @@ function assertCurrentKek(kek: KekSource): void {
   }
 }
 
+function readerOf(env: Readonly<Record<string, string | undefined>>): Pick<SandboxTargetDeps, "reader"> {
+  const reader = readerConfigFromEnv(env);
+  return reader === undefined ? {} : { reader };
+}
+
 export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWorker> {
   const env = options.env ?? process.env;
+  // D#2 RLR-5: read first, so a fault flag on a deployment that is not staging stops the build before any pool opens.
+  const reader = readerOf(env);
   const kek = options.kek ?? envKekSource(env);
   // The default decrypt is the only user of the KEK: refuse to build (before any pool opens) without the current version's key.
   if (!options.ports.decryptTenantKey) assertCurrentKek(kek);
@@ -411,6 +419,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       modelConnection: options.ports.modelConnection ?? createModelConnectionPort(pools.runnerPool),
       connectionStatus: options.ports.connectionStatus ?? createConnectionStatusPort(pools.platformOpsPool),
       outsideMeterOn: () => outsideMeterOn(env.FX_OUTSIDE_METER),
+      // D#2 RLR-5: sliced reading and the staging fault flags. A fault flag on a deployment that is not staging stops the build here, before any pool is used.
+      ...reader,
       hooks: options.ports.hooks,
       // The payer is read from targetDeps at call time, so an extension is held against the account `admit` charged.
       extensionPolicyFor:

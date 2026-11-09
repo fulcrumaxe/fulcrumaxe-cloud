@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { isRunnerMode } from "../runnerModes.js";
-import type { AdmitResult, CancelResult, DispatchResult, ExecutionRun, ExecutionTarget, LostRunOutcome, PrecheckDenyReason, PrecheckRun, TargetRuntime, TerminalReport } from "../executionTarget.js";
+import type { AdmitResult, CancelResult, DispatchResult, ExecutionRun, FollowSliceResult, ExecutionTarget, LostRunOutcome, PrecheckDenyReason, PrecheckRun, TargetRuntime, TerminalReport } from "../executionTarget.js";
 import { VERIFIED_SANDBOX_REVIEW_ROLES } from "./runnerTarget.js";
 
 /**
@@ -45,6 +45,15 @@ export class VerifiedTarget implements ExecutionTarget {
   }
   async settleIfLost(run: ExecutionRun): Promise<LostRunOutcome> {
     return (await this.forRole(run.role).settleIfLost?.(run)) ?? "unknown";
+  }
+  async followSlice(run: ExecutionRun, o: { deadlineMs?: number; startedMs?: number }): Promise<FollowSliceResult> {
+    return (await this.forRole(run.role).followSlice?.(run, o)) ?? { sliced: false, done: false, held: false, spentMs: 0 };
+  }
+  async settleAttachLost(run: ExecutionRun): Promise<void> {
+    await this.forRole(run.role).settleAttachLost?.(run);
+  }
+  async revisitSavedMeter(run: ExecutionRun): Promise<"held" | "done"> {
+    return (await this.forRole(run.role).revisitSavedMeter?.(run)) ?? "done";
   }
 }
 
