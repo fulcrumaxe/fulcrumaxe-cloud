@@ -433,6 +433,46 @@ describe("runner claim, heartbeat and events [pg]", () => {
         expect([first, second]).toContain(again.kind === "claimed" ? again.runId : "");
       });
 
+      // D#749 V3a: the test above makes both claims reach for the SAME run first, so the row lock decides. Here the two claims pick DIFFERENT browser runs (each one's candidate read
+      // happened while the runner held none), so only the count made under the account's claim lock can stop the second: this is the test of that count.
+      it("two concurrent claims of one runner that picked DIFFERENT browser runs give exactly one: the in-lock browser count stops the second, not the row lock", async () => {
+        const wide = { light: { limit: 4, in_use: 0 }, heavy: { limit: 4, in_use: 0 }, limited_by: null } as const;
+        const browser = await newRunner({ roles: [] });
+        await capable(browser, ["browser_chrome_v1"]);
+        const first = await pending({ role: "deploy-verifier", createdAt: T0 - 5000 });
+        const second = await pending({ role: "deploy-verifier", createdAt: T0 - 4000 });
+        // Only `first` is claimable while claim one reads its candidates; then `second` alone is while claim two reads its own.
+        const later = "now() + interval '1 hour'";
+        await admin.query(`UPDATE agent_runs SET claimable_after = ${later} WHERE id = $1`, [second]);
+        const defer = (): { promise: Promise<void>; resolve: () => void } => {
+          let resolve!: () => void;
+          const promise = new Promise<void>((r) => (resolve = r));
+          return { promise, resolve };
+        };
+        const gates = [defer(), defer()];
+        const picked = [defer(), defer()];
+        const via = (n: 0 | 1) => createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => { picked[n]!.resolve(); await gates[n]!.promise; return "private"; } }, now: () => clock, randomBetween: (min) => min });
+        const one = via(0).claimRunnerRun({ accountId: A.accountId, runnerId: browser, capacity: wide });
+        await picked[0]!.promise;
+        await admin.query(`UPDATE agent_runs SET claimable_after = ${later} WHERE id = $1`, [first]);
+        await admin.query(`UPDATE agent_runs SET claimable_after = NULL WHERE id = $1`, [second]);
+        const two = via(1).claimRunnerRun({ accountId: A.accountId, runnerId: browser, capacity: wide });
+        await picked[1]!.promise;
+        // Both have chosen (one: first, two: second) and neither holds a lease yet. Both runs are claimable again (the database refuses a claim of one held back), and both go to claim.
+        await admin.query("UPDATE agent_runs SET claimable_after = NULL WHERE id = ANY($1::uuid[])", [[first, second]]);
+        gates[0]!.resolve();
+        gates[1]!.resolve();
+        const results = await Promise.all([one, two]);
+        expect(results.filter((r) => r.kind === "claimed")).toHaveLength(1);
+        const running = (await admin.query("SELECT id FROM agent_runs WHERE runner_id = $1 AND status = 'running' AND role = 'deploy-verifier'", [browser])).rows;
+        expect(running).toHaveLength(1);
+        expect([first, second]).toContain(running[0]!.id);
+        // The loser was left pending, untouched.
+        const other = running[0]!.id === first ? second : first;
+        expect((await row(other)).status).toBe("pending");
+        expect((await row(other)).runner_id).toBeNull();
+      });
+
       it("a capability-gated role: a runner without the capability still claims every other role", async () => {
         const plain = await newRunner({ roles: [] });
         const id = await pending({ role: "code-reviewer" });

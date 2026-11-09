@@ -237,6 +237,43 @@ describe("GET /api/health", () => {
       expect(res.body).toMatchObject({ deploy_env: "staging", project_id: null, commit: null });
     });
 
+    // D#749 V3a: a deployment made from the command line has no git metadata, so the deploy command stamps the commit it deploys.
+    describe("the stamped commit (FX_DEPLOY_COMMIT)", () => {
+      const stamp = "fedcba9876543210fedcba9876543210fedcba98";
+      const staging = { ...completeEnv("staging"), FX_DEPLOY_ENV: "staging" };
+
+      it("a command-line deploy (no platform commit) reports the stamp", async () => {
+        expect((await call({ ...staging, FX_DEPLOY_COMMIT: stamp })).body).toMatchObject({ commit: stamp });
+      });
+
+      it("the stamp wins over the platform's commit, in any case and with blanks around it, and a 64-hex id counts", async () => {
+        expect((await call({ ...staging, ...ids, FX_DEPLOY_COMMIT: `  ${stamp.toUpperCase()}\n` })).body).toMatchObject({ commit: stamp });
+        expect((await call({ ...staging, FX_DEPLOY_COMMIT: "ab".repeat(32) })).body).toMatchObject({ commit: "ab".repeat(32) });
+      });
+
+      it("a stamp that is not a commit id is ignored and never echoed: the platform's commit, else null", async () => {
+        for (const bad of ["main", "abc123", `${stamp}0`, `${stamp.slice(1)}`, "g".repeat(40), "<script>alert(1)</script>", ""]) {
+          expect((await call({ ...staging, ...ids, FX_DEPLOY_COMMIT: bad })).body, bad).toMatchObject({ commit: ids.VERCEL_GIT_COMMIT_SHA });
+          const alone = await call({ ...staging, FX_DEPLOY_COMMIT: bad });
+          expect(alone.body, bad).toMatchObject({ commit: null });
+          expect(JSON.stringify(alone.body), bad).not.toContain("script");
+        }
+      });
+
+      it("only staging reports it: production and an unknown deployment give no commit even with a stamp", async () => {
+        for (const value of ["production", undefined, "local"]) {
+          const body = (await call({ ...completeEnv("production"), FX_DEPLOY_ENV: value, FX_DEPLOY_COMMIT: stamp })).body;
+          expect(body, String(value)).not.toHaveProperty("commit");
+          expect(JSON.stringify(body), String(value)).not.toContain(stamp);
+        }
+      });
+
+      it("the route reads it from the live environment", async () => {
+        for (const [key, value] of Object.entries({ ...staging, FX_DEPLOY_COMMIT: stamp })) vi.stubEnv(key, value);
+        expect(await GET(new NextRequest("https://example.test/api/health")).json()).toMatchObject({ deploy_env: "staging", commit: stamp });
+      });
+    });
+
     it("on production gives deploy_env only: no project id and no commit, even when the platform sets them", async () => {
       const res = await call({ ...completeEnv("production"), FX_DEPLOY_ENV: "production", ...ids });
       expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", outside_meter: "off", partners: "off", deploy_env: "production" });

@@ -15,6 +15,7 @@ export type { RunHandoffs, RunHandoffSweepResult, CompleteRunHandoffInput, Compl
 export type { RunnerQueueSweeper, RunnerQueueSweepResult } from "./runnerQueueSweep.js";
 export type { ProposalVerifyCounts, VerifyRepoReader, VerifyRecord } from "./proposalVerify.js";
 export type { DocsCodeAnalysisCounts } from "./docsCodeAnalysis.js";
+export type { VerifyStageCounts, VerifyHostPort, VerifyTarget, HealthRead } from "./verifyStage.js";
 export type { AutoStartCounts } from "./autoStartSweep.js";
 export type { DiscoveryDrainCounts } from "./discoveryDrain.js";
 export type { DiscoveryScheduleCounts } from "./discoverySchedule.js";

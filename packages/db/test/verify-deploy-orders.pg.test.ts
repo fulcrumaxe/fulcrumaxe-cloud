@@ -5,6 +5,7 @@ import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
 import { seedAccount, type SeedRefs } from './helpers/seed.js';
 import { insertRunner } from './helpers/runnerFixtures.js';
+import { seedVerifyRow } from './helpers/verifyRows.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
 
 /**
@@ -30,8 +31,9 @@ describe('verify_deploy_orders (migration 1004)', () => {
       return fn(c);
     });
 
-  const place = (who: SeedRefs, over: Record<string, unknown> = {}) => {
-    const v = { repo: who.repoId, row: randomUUID(), sha: randomUUID().replaceAll('-', '') + 'abcdef01', deadline: new Date(Date.now() + 3_600_000), ...over };
+  const place = async (who: SeedRefs, over: Record<string, unknown> = {}) => {
+    // Migration 1005: an order names a real verify row of its account.
+    const v = { repo: who.repoId, row: await seedVerifyRow(admin, who), sha: randomUUID().replaceAll('-', '') + 'abcdef01', deadline: new Date(Date.now() + 3_600_000), ...over };
     return cloud(who, (c) =>
       c.query<{ id: string }>(
         `INSERT INTO verify_deploy_orders (account_id, repo_id, verify_row_id, merge_sha, deadline_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,

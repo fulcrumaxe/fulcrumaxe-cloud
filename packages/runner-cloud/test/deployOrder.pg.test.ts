@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ClaimReply, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_LEASE_SECONDS, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimReply, DeployOrderReportReply } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { seedVerifyRow } from "@fx/db/test/helpers/verifyRows.js";
 import { CLAIM_PATH, claimRun, deployOrderClaimRun, deployOrderReportRun, toResponse, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerLeaseOps } from "../src/index.js";
 import { harness, newKey, registerKey, signed, type Harness, type TestKey } from "./helpers.js";
 
@@ -40,7 +41,7 @@ describe("deploy order routes [pg]", () => {
   async function place(who: SeedRefs, over: { sha?: string; deadline?: Date } = {}): Promise<string> {
     const { rows } = await h.admin.query<{ id: string }>(
       `INSERT INTO verify_deploy_orders (account_id, repo_id, verify_row_id, merge_sha, deadline_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [who.accountId, who.repoId, randomUUID(), over.sha ?? randomUUID().replaceAll("-", "") + "abcdef01", over.deadline ?? new Date(Date.now() + 3_600_000)],
+      [who.accountId, who.repoId, await seedVerifyRow(h.admin, who), over.sha ?? randomUUID().replaceAll("-", "") + "abcdef01", over.deadline ?? new Date(Date.now() + 3_600_000)],
     );
     return rows[0]!.id;
   }

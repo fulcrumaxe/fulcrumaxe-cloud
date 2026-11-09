@@ -55,6 +55,11 @@ export async function proposalVerifySweepHandler(req: NextRequest, deps: Proposa
         deps.log(`proposal verify sweep: analysis pass failed (${err instanceof Error ? err.name : "error"})`);
         return null;
       });
+      // D#749 V3a: the post-merge verify stage (off by default: it lists only repositories that turned it on). A fault in it never hides the verifier's counts.
+      const verify = await worker.sweepVerifyStage().catch((err: unknown) => {
+        deps.log(`proposal verify sweep: verify stage pass failed (${err instanceof Error ? err.name : "error"})`);
+        return null;
+      });
       // D#483 S5-b1a-2: the auto-start gate runs after the check pass, in this same tick. A fault in it never hides the verifier's own counts.
       const autoStart = await worker.sweepAutoStart().catch((err: unknown) => {
         deps.log(`proposal verify sweep: auto-start pass failed (${err instanceof Error ? err.name : "error"})`);
@@ -64,10 +69,10 @@ export async function proposalVerifySweepHandler(req: NextRequest, deps: Proposa
       // wait for its renewal instead of polling: the gate cannot start them before then, and the backstop still looks now and then.
       // D#483 S5-b2c-1: the child pass counts the same way (a child it launched, or could not gate, keeps the next pass coming).
       const moreToGate = autoStart !== null && (autoStart.started > 0 || autoStart.failed > 0 || (autoStart.children?.started ?? 0) > 0 || (autoStart.children?.failed ?? 0) > 0);
-      const workFound = counts.listed > 0 || moreToGate || discovery?.more === true || schedule?.more === true || (analysis?.listed ?? 0) > 0;
+      const workFound = counts.listed > 0 || moreToGate || discovery?.more === true || schedule?.more === true || (analysis?.listed ?? 0) > 0 || (verify?.active ?? 0) > 0;
       const renewsAt = autoStart?.renews_at !== undefined ? Date.parse(autoStart.renews_at) : Number.NaN;
       const nextDueAt = workFound ? now() + PROPOSAL_VERIFY_PASS_MS : Number.isFinite(renewsAt) ? renewsAt : null;
-      return { result: { configured: true, ...counts, schedule, discovery, analysis, auto_start: autoStart }, workFound, nextDueAt };
+      return { result: { configured: true, ...counts, schedule, discovery, analysis, verify, auto_start: autoStart }, workFound, nextDueAt };
     },
     deps.log,
     now,

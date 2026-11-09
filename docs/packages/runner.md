@@ -62,6 +62,16 @@ H18-SS2. `test/hostileConfig.contract.ts` is the per-backend conformance test ag
 
 `agent_runs`, `run_events`, and (via `@fx/spend`) `spend_reservations` and `ledger`. See `../data-model.md` for the schema.
 
+## The deploy command for the post-merge verify stage
+
+A repository that turns on post-merge verification has the cloud place a deploy order (the merge commit and a deadline, nothing else); a runner on the machine that deploys the app claims it and runs a command held in the runner's own local configuration. The cloud never sends a command. One rule binds that command: it must stamp the commit it deploys. A deployment made from the command line has no git metadata, so the app's `/api/health` would report no commit and the verify row would end `unverified` (`commit_not_deployed`). The stamp is a runtime setting passed on the deploy line:
+
+```
+vercel deploy --prod --yes --env FX_DEPLOY_COMMIT="$(git rev-parse HEAD)"
+```
+
+`/api/health` on a staging deployment reports `FX_DEPLOY_COMMIT` as `commit` when it is a 40 or 64 character lower-case commit id (anything else is ignored, never echoed) and falls back to the platform's own commit otherwise. The commit is the one the deploying tree is at: for a repository with a private plane that is the plane's sync commit, which the cloud accepts only when it is a genuine sync commit (a merge whose second parent is the code-plane commit its message names) naming the merge commit or a descendant of it.
+
 ## Security notes
 
 See `../security.md` for the platform-wide model. Package-specific points: `packages/runner/src/sandboxEnv.ts`'s `buildSandboxEnv` takes no ambient input (no `process.env`, no credential object) and returns only two placeholder values (`ANTHROPIC_API_KEY=""`, `ANTHROPIC_AUTH_TOKEN="brokered-at-firewall"`); `isForbiddenSandboxEnvName` fails closed on any candidate name that isn't even a well-formed env-var identifier (`^[A-Za-z_][A-Za-z0-9_]*$`, catching a leading/trailing space or a hyphen) before testing whether it otherwise matches any other var name shaped like a credential (`FORBIDDEN_ENV_NAME_PATTERN`, which also now matches `PEM` at a name boundary on both sides — e.g. `APP_PEM_FILE`, `PEM_DIR` — not only as a trailing segment). The GitHub forward host that reaches the sandbox's firewall rule is resolved and address-checked by `@fx/net-guard` (see "How it works" above) before a policy is ever built, so a forward host that resolves to a loopback/private/link-local/metadata/multicast/reserved address is refused rather than allowlisted. `SandboxTarget` (`packages/runner/src/targets/sandboxTarget.ts`) carries several rounds of concurrency fixes from PR #85's later revisions, addressing races between a cancel/timeout and an in-flight `dispatch`: it re-checks the run's durable `pending` status after `createSandbox`, again immediately before `startDetached`, and tracks per-instance bookkeeping (`started`, `cancelRequested`, `stoppedDirectly`) so a cancel that lands on the same instance stops the sandbox directly rather than through a reservation table a competing writer may have already emptied. `cancel`'s `stillOwnsSandbox` check also guards against a stale instance stopping a newer run that has since taken over a persistent (executor) sandbox's shared name.

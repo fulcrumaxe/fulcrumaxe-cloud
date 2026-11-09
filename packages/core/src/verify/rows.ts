@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { recordDriverEvent, type DriverEventKind } from '../work-items/driverEvents.js';
 import { specOfItemSql } from '../work-items/stages.js';
+import { cancelOpenOrders } from './orders.js';
 import { deriveJourneys, VerifyInputError, type Journey } from './journeys.js';
 import { isEligible, readVerifySettings, writeVerifySettings, type VerifySettings, type VerifySettingsPatch } from './settings.js';
 
@@ -301,6 +302,8 @@ export async function endUnstartedRows(client: PoolClient, accountId: string, re
     const r = await finishVerifyRow(client, accountId, id, { status: 'unverified', reason: 'verify_disabled' });
     if (r.moved) ended.push(id);
   }
+  // The deploy order of a row that will not run is called off with it, or a runner would still deploy for a repository that was switched off.
+  await cancelOpenOrders(client, accountId, ended);
   return ended;
 }
 

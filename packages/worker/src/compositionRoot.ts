@@ -99,6 +99,7 @@ import { createDiscoverySchedule, emptyScheduleCounts, type DiscoveryScheduleCou
 import { createDiscoveryDrain, emptyDrainCounts, type DiscoveryDrainCounts, type DiscoveryDrainDeps } from "./discoveryDrain.js";
 import { createPreviewHints, type PreviewResultParser } from "./previewHints.js";
 import { createDocsCodeAnalysisSweep, type DocsCodeAnalysisCounts, type DocsCodeAnalysisDeps } from "./docsCodeAnalysis.js";
+import { createVerifyStageSweep, type VerifyStageCounts, type VerifyStageDeps } from "./verifyStage.js";
 import { createAutoStartSweep, type AutoStartCounts, type AutoStartDeps } from "./autoStartSweep.js";
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
@@ -195,6 +196,11 @@ export interface CreateWorkerOptions {
    * @fx/pipeline). It reads the repository through `verify.github`. Absent (or without `verify`), `sweepDocsCodeAnalysis` starts nothing and answers `idle: "not_configured"`.
    */
   analysis?: Pick<DocsCodeAnalysisDeps, "prompt" | "parse">;
+  /**
+   * D#749 V3a: the post-merge verify stage's injected pieces: what the host says about a merge and a deployed commit, the reader of the app's /api/health, and the next
+   * stage's entry. Absent, `sweepVerifyStage` runs nothing and answers `idle: "not_configured"`.
+   */
+  verifyStage?: Pick<VerifyStageDeps, "host" | "health" | "ready">;
   /** D#483 S5-b1a-2: the auto-start gate's injected price of an item's first run (pipeline's `firstRunReservationUsd`). Absent, `sweepAutoStart` starts nothing and answers `idle: "not_configured"`. */
   autoStart?: Pick<AutoStartDeps, "firstRunUsd" | "child" | "followUp">;
   /**
@@ -269,6 +275,8 @@ export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade
   sweepProposalVerification(): Promise<ProposalVerifyCounts>;
   /** D#483 S4-f3: one pass of the docs-and-code analysis (the verifier cron runs it after its own pass). Starts runs for queued analyses of sandbox repositories and merges what they propose. */
   sweepDocsCodeAnalysis(): Promise<DocsCodeAnalysisCounts>;
+  /** D#749 V3a: one pass of the post-merge verify stage (the verifier cron runs it after the analysis pass). Off by default: it lists only repositories that turned verification on. */
+  sweepVerifyStage(): Promise<VerifyStageCounts>;
   /** D#483 S5-b1a-2: one pass of the auto-start gate (the verifier cron runs it after its own pass). Works across tenants and is for the cron only; every start is one transaction on the receipt login. */
   sweepAutoStart(): Promise<AutoStartCounts>;
   /** D#483 S4-c2: runs the queued install and payment discoveries and withdraws a removed repository's `new` proposals. */
@@ -471,6 +479,9 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       previewStarter && options.verify && options.analysis
         ? createDocsCodeAnalysisSweep({ pool: pools.runnerPool, resolveSeat: resolveRunSeat, starter: previewStarter, ...(advanceStarter ? { runnerStarter: advanceStarter } : {}), visibility: repoVisibility, github: options.verify.github, settings: analysisSettings, prompt: options.analysis.prompt, parse: options.analysis.parse })
         : async (): Promise<DocsCodeAnalysisCounts> => ({ idle: "not_configured", listed: 0, started: 0, waiting: 0, recorded: 0, daily_cap: 0, skipped: 0, failed: 0 });
+    const verifyStage = options.verifyStage
+      ? createVerifyStageSweep({ pool: pools.runnerPool, host: options.verifyStage.host, health: options.verifyStage.health, ...(options.verifyStage.ready ? { ready: options.verifyStage.ready } : {}) })
+      : async (): Promise<VerifyStageCounts> => ({ idle: "not_configured", listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 });
     const autoStart = options.autoStart
       ? createAutoStartSweep({ receiptPool: pools.receiptPool, firstRunUsd: options.autoStart.firstRunUsd, ...(options.autoStart.child ? { child: options.autoStart.child } : {}), ...(options.autoStart.followUp ? { followUp: options.autoStart.followUp } : {}) }).sweepAutoStart
       : async (): Promise<AutoStartCounts> => ({ idle: "not_configured", listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 });
@@ -582,6 +593,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       withRunnerPool: (fn) => fn(pools.runnerPool),
       sweepProposalVerification: verifySweep,
       sweepDocsCodeAnalysis: docsCodeAnalysis,
+      sweepVerifyStage: verifyStage,
       sweepAutoStart: autoStart,
       sweepDiscoveryQueue: discoveryDrain,
       sweepDiscoverySchedule: discoverySchedule,
@@ -686,6 +698,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
       withRunnerPool,
       sweepProposalVerification,
       sweepDocsCodeAnalysis,
+      sweepVerifyStage,
       performStartPreview,
       previewReady,
       performRetryRun,
@@ -783,6 +796,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         withRunnerPool,
         sweepProposalVerification,
         sweepDocsCodeAnalysis,
+        sweepVerifyStage,
         sweepAutoStart,
         sweepDiscoveryQueue,
         sweepDiscoverySchedule,
