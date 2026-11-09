@@ -54,8 +54,9 @@ describe("boundary: what the source may import, and every workspace import is de
 
   // The third-party libraries the runner may import: the TUF client its updater is built on (D#6 R6-2a, correction C38 section 2), and js-yaml (D#6 C44-4), which
   // parses a repo's lockfile and workspace file for the host-side install's pre-check (exact version, in dependencies).
+  // And playwright-core (D#749 V2c-2a), which the verify browser server uses to drive Chromium; only src/verifyBrowser/driver.ts imports it, as a type and as the lazy load.
   // It is declared exactly in package.json (a test below pins that), and no other third-party import is allowed.
-  const THIRD_PARTY = new Set(["tuf-js", "tuf-js/dist/error.js", "js-yaml"]);
+  const THIRD_PARTY = new Set(["tuf-js", "tuf-js/dist/error.js", "js-yaml", "playwright-core"]);
   // The one protocol subpath src may import besides the root (D#598 P1f-3): the public-push route and its scanner, which run the version-control tool for the
   // run-end hook. Only this exact subpath; the root never exports them (runner-protocol's root-closure test), and the files below are the only importers.
   const PLANE_PUSH_SUBPATH = "@fulcrumaxe/runner-protocol/planePush";
@@ -118,6 +119,12 @@ describe("boundary: what the source may import, and every workspace import is de
 
   it("js-yaml is declared as an exact version, in dependencies", () => {
     expect(manifest.dependencies?.["js-yaml"]).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("playwright-core is declared as an exact version, in dependencies, and only the verify browser driver imports it", () => {
+    expect(manifest.dependencies?.["playwright-core"]).toMatch(/^\d+\.\d+\.\d+$/);
+    const importers = sourceFiles.filter((f) => [...readFileSync(f, "utf8").matchAll(specifier)].some((m) => m[1] === "playwright-core")).map((f) => path.relative(PACKAGE_DIR, f).split(path.sep).join("/"));
+    expect(importers).toEqual(["src/verifyBrowser/driver.ts"]);
   });
 
   it("the TUF client is declared as an exact version, in dependencies", () => {
