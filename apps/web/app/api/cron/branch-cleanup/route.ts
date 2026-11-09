@@ -4,6 +4,7 @@ import { createPrCloseOpener } from "../../../../lib/github/prClose";
 import { createPrStateReader } from "../../../../lib/github/prState";
 import { getWorker } from "../../../../lib/worker";
 import { branchCleanupHandler } from "./handler";
+import { cronLog } from "../../../../lib/cronLog";
 
 /** A pass starts items for 40 seconds at most (packages/worker/src/branchCleanup.ts), well under the minute until the cron fires again. */
 export const maxDuration = 60;
@@ -16,6 +17,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     github: openInstallationHttp,
     closePr: createPrCloseOpener(),
     prState: createPrStateReader(),
-    log: (line) => console.log(line),
+    log: cronLog,
   });
 }

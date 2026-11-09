@@ -53,6 +53,38 @@ describe("GET /api/cron/invariant-sweep", () => {
     expect(await res.json()).toEqual({ configured: true, passes: [{ skipped: true }, { skipped: true }] });
     expect(s.getWorker).not.toHaveBeenCalled();
     expect(s.sweepInvariants).not.toHaveBeenCalled();
+    // The second pass could only skip too, so the invocation does not hold itself open for 30 s to make it.
+    expect(s.sleep).not.toHaveBeenCalled();
+  });
+
+  it("an idle first pass with an ask window ending inside the gap sleeps and lets the second pass handle it", async () => {
+    await markWorkPending("invariant-sweep", { since: clock.value + PASS_GAP_MS - 5_000, now: clock.value });
+    const s = setup();
+    const res = await run(s);
+    expect(await res.json()).toEqual({ configured: true, passes: [{ skipped: true }, COUNTS] });
+    expect(s.sleep.mock.calls).toEqual([[PASS_GAP_MS]]);
+    expect(s.sweepInvariants).toHaveBeenCalledTimes(1);
+  });
+
+  it("an idle first pass with a marker further out than the gap ends at once and leaves the marker alone", async () => {
+    const ahead = clock.value + PASS_GAP_MS + 5_000;
+    await markWorkPending("invariant-sweep", { since: ahead, now: clock.value });
+    const s = setup();
+    expect(await (await run(s)).json()).toEqual({ configured: true, passes: [{ skipped: true }, { skipped: true }] });
+    expect(s.sleep).not.toHaveBeenCalled();
+    expect(s.getWorker).not.toHaveBeenCalled();
+    expect(marker()).toBe(ahead);
+  });
+
+  it("a run that completes during an idle invocation is picked up by the next invocation's first pass", async () => {
+    const s1 = setup();
+    await run(s1);
+    expect(s1.sleep).not.toHaveBeenCalled();
+    await markWorkPending("invariant-sweep", { now: clock.value });
+    clock.value += 20_000;
+    const s2 = setup();
+    await run(s2);
+    expect(s2.sweepInvariants).toHaveBeenCalledTimes(2); // connected on the first pass, then the cover pass 30 s later
   });
 
   it("a completed run wakes it: both passes sweep, 30 s apart, and the marker stays while the cover lasts", async () => {

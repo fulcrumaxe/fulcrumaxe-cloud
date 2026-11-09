@@ -43,7 +43,7 @@
     },
     {
       "path": "/api/cron/branch-cleanup",
-      "schedule": "* * * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "path": "/api/cron/proposal-verify-sweep",

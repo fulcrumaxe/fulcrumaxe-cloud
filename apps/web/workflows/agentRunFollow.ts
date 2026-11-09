@@ -30,8 +30,17 @@ export interface FollowOutcome {
   timedOut: boolean;
 }
 
-/** How often a parked follower looks at the run's status when no hook has arrived (cheap; the hook is the fast path). */
-const POLL_MS = 60_000;
+/**
+ * How often a parked follower looks at the run's status when no hook has arrived. The hook is the fast path; this look is only the backstop for a wake-up that
+ * was lost, so it slows as the wait grows: every minute for the first five (a run that fails to start ends early), every two minutes to half an hour, every five
+ * after. The watchdog counts the time actually slept, so it is as long as before, and a lost hook is noticed within the slice in force (five minutes at most).
+ */
+const POLL_TIERS: ReadonlyArray<readonly [startMs: number, pauseMs: number]> = [[0, 60_000], [5 * 60_000, 120_000], [30 * 60_000, 300_000]];
+function followPollMs(sleptMs: number): number {
+  let pause = POLL_TIERS[0]![1];
+  for (const [start, ms] of POLL_TIERS) if (sleptMs >= start) pause = ms;
+  return pause;
+}
 
 export async function followStatusStep(accountId: string, runId: string): Promise<FollowStatus> {
   "use step";
@@ -73,7 +82,7 @@ export async function agentRunFollowWorkflow(args: FollowArgs): Promise<FollowOu
   let seen = await followStatusStep(accountId, runId);
   let remaining = watchdogMs;
   while (!seen.done && remaining > 0) {
-    const slice = Math.min(POLL_MS, remaining);
+    const slice = Math.min(followPollMs(watchdogMs - remaining), remaining);
     const woke = await Promise.race([waiting, sleep(slice).then(() => ({ kind: "tick" as const }))]);
     if (woke.kind === "tick") remaining -= slice;
     // The hook is used up once it fires, whoever it was for; the status row decides either way.

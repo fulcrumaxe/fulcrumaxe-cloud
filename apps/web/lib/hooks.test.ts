@@ -133,6 +133,26 @@ describe("the follower workflow body", () => {
     expect(logged.some((l) => l.includes("run.follower_timed_out"))).toBe(true);
   });
 
+  it("a long watchdog backs off its status reads (the hook is the fast path) and still adds up to watchdogMs exactly", async () => {
+    const hours = 4 * 3_600_000;
+    const done = agentRunFollowWorkflow({ ...ARGS, watchdogMs: hours });
+    for (let i = 0; i < 400 && world.order.filter((o) => o === "timeout").length === 0; i++) {
+      await flush();
+      world.sleeps.at(-1)?.resolve();
+    }
+    const out = await done;
+    const slept = world.order.filter((o) => o.startsWith("sleep:")).map((o) => Number(o.slice(6)));
+    expect(out).toMatchObject({ status: "timed_out", timedOut: true });
+    expect(slept.reduce((a, b) => a + b, 0)).toBe(hours);
+    // The test's own copy of the pacing: a minute for 5 minutes, two minutes to half an hour, five minutes after (the final slice is cut to what is left).
+    expect(slept.slice(0, 5)).toEqual(Array(5).fill(60_000));
+    expect(slept.slice(5, 18)).toEqual(Array(13).fill(120_000)); // 5 to 31 minutes: the slice that starts at 29 minutes is still a two-minute one
+    expect(slept.slice(18, 19)).toEqual([300_000]);
+    expect(slept.length).toBe(5 + 13 + Math.ceil((hours - 31 * 60_000) / 300_000));
+    // Against 240 asks a minute-paced wait made, that is about a quarter of the status reads.
+    expect(world.order.filter((o) => o === "status")).toHaveLength(1 + slept.length);
+  });
+
   it("a poll tick that finds the run terminal ends it with no hook at all (the resume was lost)", async () => {
     world.statuses.push({ status: "running", done: false }, { status: "succeeded", done: true });
     const done = agentRunFollowWorkflow(ARGS);

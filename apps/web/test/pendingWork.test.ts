@@ -7,6 +7,8 @@ import {
   STORE_TIMEOUT_MS,
   finishTick,
   gateLine,
+  isSkippedGateLine,
+  markerDueWithin,
   markRunnerWork,
   markWorkPending,
   RUNNER_WORK_TTL_SECONDS,
@@ -612,5 +614,41 @@ describe("markRunnerWork: the per-account runner-work hint", () => {
     setPendingHooks(null);
     expect(await recordRunnerCheck(R1, clock.value)).toBe(false);
     expect(await readRunnerReplyHints(ACCT, [R1])).toEqual({ checks: new Map() });
+  });
+});
+
+describe("idle-tick helpers (platform floor)", () => {
+  const tick = (over: Partial<Parameters<typeof gateLine>[0]> = {}) => ({ name: "api-sweep" as const, connect: false, reason: "none" as const, marker: "miss" as const, markerValue: null, lastRun: "hit" as const, paused: false, ...over });
+
+  it("isSkippedGateLine is true only for a cron.gate line of a tick that did not connect", () => {
+    expect(isSkippedGateLine(gateLine(tick()))).toBe(true);
+    expect(isSkippedGateLine(gateLine(tick({ connect: true, reason: "marker" }), true))).toBe(false);
+    expect(isSkippedGateLine(gateLine(tick({ connect: true, reason: "backstop" })))).toBe(false);
+    expect(isSkippedGateLine(JSON.stringify({ event: "cron.refused", route: "/api/cron/x", reason: "mismatch", connected: false }))).toBe(false);
+    expect(isSkippedGateLine("handoff sweep: worker not configured")).toBe(false);
+    expect(isSkippedGateLine("")).toBe(false);
+    expect(isSkippedGateLine("null")).toBe(false);
+  });
+
+  it("markerDueWithin: a due or soon-due marker is within the window; none or a later one is not", () => {
+    expect(markerDueWithin({ markerValue: null }, 1000, 500)).toBe(false);
+    expect(markerDueWithin({ markerValue: 900 }, 1000, 500)).toBe(true);
+    expect(markerDueWithin({ markerValue: 1500 }, 1000, 500)).toBe(true);
+    expect(markerDueWithin({ markerValue: 1501 }, 1000, 500)).toBe(false);
+  });
+
+  it("runGatedTick tells onSkipped about a tick that ended at the gate, with the marker it read, and never about one that connected", async () => {
+    install((region = makeRegion(clock)));
+    region.entries.set("lastrun:api-sweep", { json: JSON.stringify(clock.value), expiresAt: clock.value + 3_600_000 });
+    await markWorkPending("api-sweep", { since: clock.value + 10_000, now: clock.value });
+    const skipped = vi.fn();
+    const run = vi.fn(async () => ({ result: 1, workFound: false, nextDueAt: null }));
+    expect(await runGatedTick("api-sweep", run, () => {}, () => clock.value, { onSkipped: skipped })).toBeNull();
+    expect(skipped).toHaveBeenCalledTimes(1);
+    expect(skipped.mock.calls[0]![0]).toMatchObject({ connect: false, markerValue: clock.value + 10_000 });
+    expect(run).not.toHaveBeenCalled();
+    const later = clock.value + 20_000;
+    expect(await runGatedTick("api-sweep", run, () => {}, () => later, { onSkipped: skipped })).not.toBeNull();
+    expect(skipped).toHaveBeenCalledTimes(1);
   });
 });

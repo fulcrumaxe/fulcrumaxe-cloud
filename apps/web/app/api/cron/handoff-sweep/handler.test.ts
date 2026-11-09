@@ -51,6 +51,39 @@ describe("GET /api/cron/handoff-sweep", () => {
     expect(await (await run(s)).json()).toEqual({ passes: [{ skipped: true }, { skipped: true }] });
     expect(s.getWorker).not.toHaveBeenCalled();
     expect(s.sweepRunHandoffs).not.toHaveBeenCalled();
+    // The second pass could only skip too, so the invocation does not hold itself open for 30 s to make it.
+    expect(s.sleep).not.toHaveBeenCalled();
+  });
+
+  it("an idle first pass with a marker still ahead but inside the gap sleeps and lets the second pass handle it on time", async () => {
+    const T = clock.value;
+    await markWorkPending("handoff-sweep", { since: T + PASS_GAP_MS - 5_000 });
+    const s = setup({}, async () => ({ ...NONE, listed: 1, completed: 1 }));
+    const body = (await (await run(s)).json()) as { passes: unknown[] };
+    expect(s.sleep.mock.calls).toEqual([[PASS_GAP_MS]]);
+    expect(body.passes).toEqual([{ skipped: true }, { configured: true, listed: 1, completed: 1, failed: 0, waiting: 0, errors: 0 }]);
+    expect(s.sweepRunHandoffs).toHaveBeenCalledTimes(1);
+  });
+
+  it("an idle first pass with a marker further out than the gap ends at once: no sleep, no connection, the marker untouched", async () => {
+    const ahead = clock.value + PASS_GAP_MS + 5_000;
+    await markWorkPending("handoff-sweep", { since: ahead });
+    const s = setup();
+    expect(await (await run(s)).json()).toEqual({ passes: [{ skipped: true }, { skipped: true }] });
+    expect(s.sleep).not.toHaveBeenCalled();
+    expect(s.getWorker).not.toHaveBeenCalled();
+    expect(marker()).toBe(ahead);
+  });
+
+  it("a marker written while the idle first pass ran is not lost: the next invocation's first pass connects and handles it", async () => {
+    const s1 = setup();
+    await run(s1);
+    expect(s1.sleep).not.toHaveBeenCalled();
+    await markWorkPending("handoff-sweep", { since: clock.value });
+    clock.value += 20_000;
+    const s2 = setup({}, async () => ({ ...NONE, listed: 1, completed: 1 }));
+    await run(s2);
+    expect(s2.sweepRunHandoffs).toHaveBeenCalledTimes(2); // the first pass connected, and the marker is younger than its grace, so the second does too
   });
 
   it("a handoff due now wakes it: both passes sweep, 30 s apart, and the marker is rewritten to the deadline still ahead", async () => {

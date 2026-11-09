@@ -21,6 +21,7 @@ import { setWorkerWiringForTests } from "../lib/worker";
 import { setIssueReaderForTests } from "../lib/github/issueRead";
 import { setInstallationHttpForTests } from "../lib/github/installationHttp";
 import { workItemAdvanceWorkflow } from "./workItemAdvance";
+import { BUILD_TIERS, elapsedAfter, pollsAfter, pollsFor, readAt } from "./pollTiers.testkit";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const ITEM = "22222222-2222-4222-8222-222222222222";
@@ -553,7 +554,7 @@ describe("the build for an item at Spec ready", () => {
     it("a fix round that never ends is given up on like the build: cancelled and recorded wait_timeout", async () => {
       const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: (id) => (id === "run-fix-1" ? { status: "running", done: false, envelope: null, tailRunId: "run-fix-1" } : undefined) });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_wait_timeout" });
-      expect(world.sleeps).toBe(250);
+      expect(world.sleeps).toBe(pollsFor(BUILD_TIERS, 250 * 60_000));
       expect(w.advanceCancel).toHaveBeenCalledWith(expect.objectContaining({ workItemId: ITEM }), "run-fix-1");
       expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-fix-1", "wait_timeout");
     });
@@ -589,7 +590,7 @@ describe("the build for an item at Spec ready", () => {
   it("a run that never ends is given up on after four hours and ten minutes, and recorded", async () => {
     const w = setup({ item: AT_SPEC, buildOutcomes: [{ status: "running", done: false, envelope: null }] });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_wait_timeout" });
-    expect(world.sleeps).toBe(250);
+    expect(world.sleeps).toBe(pollsFor(BUILD_TIERS, 250 * 60_000));
     expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "wait_timeout");
     // The run does not keep going behind a card that says Needs human: it is cancelled through the existing path.
     expect(w.advanceCancel).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, "run-b");
@@ -654,19 +655,20 @@ describe("the build for an item at Spec ready", () => {
     it("a build that waits six hours for a runner and then succeeds is not given up on", async () => {
       const w = setup({
         item: AT_SPEC,
-        buildOutcomes: [...Array.from({ length: 360 }, () => pending), { status: "succeeded", done: true, envelope: { summary: "I changed the footer." } }],
+        buildOutcomes: [...Array.from({ length: pollsFor(BUILD_TIERS, 6 * 3600_000) }, () => pending), { status: "succeeded", done: true, envelope: { summary: "I changed the footer." } }],
         stages: ["pr_opened"],
       });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
-      expect(world.sleeps).toBe(360);
+      expect(world.sleeps).toBe(pollsFor(BUILD_TIERS, 6 * 3600_000));
       expect(w.advanceBuildFailed).not.toHaveBeenCalled();
       expect(w.advanceCancel).not.toHaveBeenCalled();
     });
 
     it("once the run is running the full 250 minutes apply", async () => {
-      const w = setup({ item: AT_SPEC, buildOutcomes: [...Array.from({ length: 300 }, () => pending), running] });
+      const pendingPolls = pollsFor(BUILD_TIERS, 300 * 60_000); // five hours of pending credit
+      const w = setup({ item: AT_SPEC, buildOutcomes: [...Array.from({ length: pendingPolls }, () => pending), running] });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_wait_timeout" });
-      expect(world.sleeps).toBe(300 + 250);
+      expect(world.sleeps).toBe(pendingPolls + pollsAfter(BUILD_TIERS, elapsedAfter(BUILD_TIERS, pendingPolls), 250 * 60_000));
       expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "wait_timeout");
     });
   });
@@ -674,7 +676,7 @@ describe("the build for an item at Spec ready", () => {
   describe("D#6 C12 A3: the pending credit is capped, and only a runner run gets it", () => {
     const pending = { status: "pending", done: false, envelope: null, runtime: "runner" } as const;
     const running = { status: "running", done: false, envelope: null } as const;
-    const CEILING_POLLS = (73 * 3600) / 60; // build polls are 60 seconds
+    const CEILING_POLLS = pollsFor(BUILD_TIERS, 73 * 3600_000); // the pending credit is time, however the polls are paced
 
     it("a build run held pending past the ceiling ends the wait like any wait timeout", async () => {
       const w = setup({ item: AT_SPEC, buildOutcomes: [pending] });
@@ -686,17 +688,20 @@ describe("the build for an item at Spec ready", () => {
     it("a sandbox build run that stays pending ends at the normal 250 minutes", async () => {
       setup({ item: AT_SPEC, buildOutcomes: [{ ...pending, runtime: "production" }] });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_wait_timeout" });
-      expect(world.sleeps).toBe(250);
+      expect(world.sleeps).toBe(pollsFor(BUILD_TIERS, 250 * 60_000));
     });
 
     it("a runner build that goes pending, then running, then pending keeps its credit", async () => {
       const w = setup({
         item: AT_SPEC,
-        buildOutcomes: [...Array.from({ length: 200 }, () => pending), ...Array.from({ length: 100 }, () => running), ...Array.from({ length: 200 }, () => pending), { status: "succeeded", done: true, envelope: { summary: "I changed the footer." } }],
+        // Time-based phases (the polls slow down as the wait grows): pending for 200 minutes, running for 100, pending for 200, then the run succeeds.
+        buildOutcomes: Array.from({ length: pollsFor(BUILD_TIERS, 500 * 60_000) + 1 }, (_, k) =>
+          readAt<AdvanceRunOutcome>(BUILD_TIERS, k, [[200 * 60_000, pending], [300 * 60_000, running], [500 * 60_000, pending]], { status: "succeeded", done: true, envelope: { summary: "I changed the footer." } }),
+        ),
         stages: ["pr_opened"],
       });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
-      expect(world.sleeps).toBe(500);
+      expect(world.sleeps).toBe(pollsFor(BUILD_TIERS, 500 * 60_000));
       expect(w.advanceBuildFailed).not.toHaveBeenCalled();
     });
   });

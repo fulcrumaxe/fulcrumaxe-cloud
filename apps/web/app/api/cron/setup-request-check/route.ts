@@ -5,6 +5,7 @@ import { computeParityForJob } from "../../../../lib/planeParityCompute";
 import { readRepoFileForImport } from "../../../../lib/github/planSource";
 import { liveInstallationTokens } from "@fx/github";
 import { setupRequestCheckHandler } from "./handler";
+import { cronLog } from "../../../../lib/cronLog";
 
 /** A pass starts checks for 40 seconds at most (checkSweep.ts), well under the minute until the cron fires again. */
 export const maxDuration = 60; // handler.ts TICK_BUDGET_MS: the parity pass starts no check that cannot finish inside it
@@ -21,6 +22,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     envSource: productionVercelEnvSource,
     planeParity: computeParityForJob,
     repoFiles: { read: readRepoFileForImport, liveSecrets: () => liveInstallationTokens() },
-    log: (line) => console.log(line),
+    log: cronLog,
   });
 }
