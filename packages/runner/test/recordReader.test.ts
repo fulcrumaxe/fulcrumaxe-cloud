@@ -818,6 +818,33 @@ describe("RLR-3b an echo that cannot be read is not a clean end", () => {
     expect(last).toMatchObject({ type: "error" });
     expect(r.flags).toEqual(["reader_unavailable"]);
   });
+
+  it("a first attempt that fails with only a sliver of the bound left gets no second one (clock injected, no timer precision involved)", async () => {
+    const bound = 10_000;
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    let attempts = 0;
+    const lateFail = (c: SdkCommand): SdkCommand => ({
+      cmdId: c.cmdId,
+      logs: () => {
+        attempts++;
+        skew = bound - 5; // by the time this attempt ends, all but 5 ms of the bound is gone
+        return (async function* () { throw new Error("stream lost"); })();
+      },
+      wait: (o) => c.wait(o),
+      kill: () => c.kill(),
+    });
+    try {
+      const r = portRig({ stdout: [M1, result()] }, {}, { echoTimeoutMs: bound }, { wrapSdk: (sdk) => onAgentCommand(sdk, lateFail) });
+      const last = await r.run();
+      expect(attempts).toBe(1);
+      expect(last).toMatchObject({ type: "error" });
+      expect(r.flags).toEqual(["reader_unavailable"]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("RLR-3b the drain after the exit tolerates transient read failures", () => {

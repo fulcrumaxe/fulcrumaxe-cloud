@@ -1809,7 +1809,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             // An echo that cannot be read is tried once more inside the same bound; if it still cannot be, the run is not a success (the meter stays at what was read).
             const echoDeadline = Date.now() + echoTimeoutMs;
             let echo = await replay(echoTimeoutMs);
-            if (echo !== "stopped" && echo.unavailable && limitHit === undefined && echoDeadline - Date.now() > 0) echo = await replay(echoDeadline - Date.now());
+            // The retry needs at least half of the bound left: an attempt that ended by its own timeout leaves a sliver at most, and a timer may fire a tick early.
+            if (echo !== "stopped" && echo.unavailable && limitHit === undefined && echoDeadline - Date.now() >= echoTimeoutMs / 2) echo = await replay(echoDeadline - Date.now());
             if (echo !== "stopped" && limitHit === undefined) {
               if (echo.unavailable) {
                 raiseFlag("reader_unavailable");
