@@ -73,6 +73,15 @@ describe("sweepLostRuns", () => {
     configureErrorReporter({ service: "app" });
   });
 
+  it("with no running run it makes one list query and no target (so no provider or limit) call", async () => {
+    const { pool, asked } = poolOf([]);
+    let touched = 0;
+    const result = await sweepLostRuns({ pool, target: { settleIfLost: async () => (touched++, "alive" as const) } });
+    expect(asked).toHaveLength(1);
+    expect(touched).toBe(0);
+    expect(result).toMatchObject({ listed: 0, settled: 0 });
+  });
+
   it("lists with the batch size and the minimum age, and tallies each outcome", async () => {
     const { pool, asked } = poolOf([row(1), row(2), row(3)]);
     const answers: LostRunOutcome[] = ["settled", "alive", "unknown"];

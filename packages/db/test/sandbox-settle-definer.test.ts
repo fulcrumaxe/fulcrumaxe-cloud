@@ -13,10 +13,11 @@ const FUNCTIONS = [
   'public.agent_run_sandbox_mark(uuid,uuid,boolean,text,boolean,jsonb,boolean,text)',
   'public.compute_settle_list_due(integer)',
   'public.agent_run_list_running(integer,integer)',
+  'public.agent_run_alive_mark(uuid,uuid,integer,bigint)',
 ];
 const PRIVILEGES = [
-  ...['id', 'account_id', 'role', 'status', 'dispatch_repo_id', 'dispatch_pr_number', 'sandbox_name', ...COLUMNS, 'compute_settle_retry_at'].map((c) => `agent_runs.${c} SELECT`),
-  ...[...COLUMNS, 'sandbox_name'].map((c) => `agent_runs.${c} UPDATE`),
+  ...['id', 'account_id', 'role', 'status', 'dispatch_repo_id', 'dispatch_pr_number', 'sandbox_name', ...COLUMNS, 'compute_settle_retry_at', 'last_alive_at', 'silence_limit_ms', 'run_limit_ms'].map((c) => `agent_runs.${c} SELECT`),
+  ...[...COLUMNS, 'sandbox_name', 'last_alive_at', 'silence_limit_ms', 'run_limit_ms'].map((c) => `agent_runs.${c} UPDATE`),
   ...['account_id', 'run_id', 'state', 'budget'].map((c) => `spend_reservations.${c} SELECT`),
   ...['id', 'deleted_at'].map((c) => `accounts.${c} SELECT`),
   'schema public USAGE',
@@ -138,14 +139,14 @@ describe('sandbox_settle_definer (0742)', () => {
       expect((await admin.query(`SELECT has_schema_privilege('sandbox_settle_definer', 'public', 'CREATE') AS c`)).rows[0].c).toBe(false);
     });
 
-    it('holds exactly the 26 privileges and owns exactly the three functions, no table, type or schema', async () => {
+    it('holds exactly the 32 privileges and owns exactly the four functions, no table, type or schema', async () => {
       const { rows } = await admin.query(
         `SELECT c.relname || '.' || t.attname || ' ' || a.privilege_type AS x FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a WHERE a.grantee = ${ROLE}
          UNION ALL SELECT c.relname || ' ' || a.privilege_type FROM pg_class c, aclexplode(c.relacl) a WHERE a.grantee = ${ROLE}
          UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a WHERE a.grantee = ${ROLE}`,
       );
       expect(rows.map((r: { x: string }) => r.x).sort()).toEqual(PRIVILEGES);
-      expect(PRIVILEGES).toHaveLength(26);
+      expect(PRIVILEGES).toHaveLength(32);
       const owned = await admin.query(`SELECT p.oid::regprocedure::text AS f FROM pg_proc p WHERE p.proowner = ${ROLE}`);
       const wanted = (await admin.query(`SELECT unnest($1::regprocedure[])::text AS f`, [FUNCTIONS])).rows.map((r: { f: string }) => r.f);
       expect(owned.rows.map((r: { f: string }) => r.f).sort()).toEqual(wanted.sort());

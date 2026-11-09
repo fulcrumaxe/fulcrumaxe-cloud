@@ -1453,7 +1453,7 @@ check_proposal_work_item_role_shape() {
 }
 
 # D#2 PLATFORM-OPS-READ (0742): the SECURITY DEFINER functions owned by sandbox_settle_definer. Prints their oids, comma separated,
-# when each is one of the three exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public,
+# when each is one of the four exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public,
 # pg_temp, with an ACL that holds agent_run_writer and nobody else but the owner (and platform_ops, for the two listers only),
 # with no grant option; SHAPE_FAIL:<count> when any is not; nothing when the role owns none (the generic owner check then rejects
 # anything else).
@@ -1462,7 +1462,8 @@ check_sandbox_settle_definer_exception_shape() {
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
       SELECT p.oid, (p.oid IN ('public.agent_run_sandbox_mark(uuid,uuid,boolean,text,boolean,jsonb,boolean,text)'::regprocedure,
-                               'public.compute_settle_list_due(integer)'::regprocedure, 'public.agent_run_list_running(integer,integer)'::regprocedure)
+                               'public.compute_settle_list_due(integer)'::regprocedure, 'public.agent_run_list_running(integer,integer)'::regprocedure,
+                               'public.agent_run_alive_mark(uuid,uuid,integer,bigint)'::regprocedure)
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 'agent_run_writer'::regrole)
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable OR (a.grantee <> p.proowner AND a.grantee <> 'agent_run_writer'::regrole
@@ -1474,7 +1475,7 @@ check_sandbox_settle_definer_exception_shape() {
   fi
   IFS='|' read -r oids bad <<<"$row"
   if [ "$bad" != "0" ]; then
-    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by sandbox_settle_definer fail the exception shape (not one of its three exact signatures, a loose search_path, EXECUTE for anyone but agent_run_writer, the owner and (listers only) platform_ops, or a grant option)"
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by sandbox_settle_definer fail the exception shape (not one of its four exact signatures, a loose search_path, EXECUTE for anyone but agent_run_writer, the owner and (listers only) platform_ops, or a grant option)"
     return 0
   fi
   echo "$oids"
@@ -1482,11 +1483,11 @@ check_sandbox_settle_definer_exception_shape() {
 
 # D#2 PLATFORM-OPS-READ (0742): role shape of sandbox_settle_definer. A no-op when the role does not exist. Every problem is named:
 # NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly
-# the 26 granted by 0742 (13 + 6 agent_runs column SELECT/UPDATE, 4 spend_reservations and 2 accounts column SELECT, USAGE on public),
+# the 32 granted by 0742 and 1002 (16 + 9 agent_runs column SELECT/UPDATE, 4 spend_reservations and 2 accounts column SELECT, USAGE on public),
 # owning exactly its three functions and nothing else.
 check_sandbox_settle_definer_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.role SELECT','column agent_runs.status SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.sandbox_requested_at SELECT','column agent_runs.sandbox_session_ids SELECT','column agent_runs.sandbox_stopped_at SELECT','column agent_runs.sandbox_self_measured SELECT','column agent_runs.compute_settle_due_at SELECT','column agent_runs.compute_settle_retry_at SELECT','column agent_runs.sandbox_requested_at UPDATE','column agent_runs.sandbox_session_ids UPDATE','column agent_runs.sandbox_stopped_at UPDATE','column agent_runs.sandbox_self_measured UPDATE','column agent_runs.compute_settle_due_at UPDATE','column agent_runs.sandbox_name UPDATE','column spend_reservations.account_id SELECT','column spend_reservations.run_id SELECT','column spend_reservations.state SELECT','column spend_reservations.budget SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.role SELECT','column agent_runs.status SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.sandbox_requested_at SELECT','column agent_runs.sandbox_session_ids SELECT','column agent_runs.sandbox_stopped_at SELECT','column agent_runs.sandbox_self_measured SELECT','column agent_runs.compute_settle_due_at SELECT','column agent_runs.compute_settle_retry_at SELECT','column agent_runs.last_alive_at SELECT','column agent_runs.silence_limit_ms SELECT','column agent_runs.run_limit_ms SELECT','column agent_runs.sandbox_requested_at UPDATE','column agent_runs.sandbox_session_ids UPDATE','column agent_runs.sandbox_stopped_at UPDATE','column agent_runs.sandbox_self_measured UPDATE','column agent_runs.compute_settle_due_at UPDATE','column agent_runs.sandbox_name UPDATE','column agent_runs.last_alive_at UPDATE','column agent_runs.silence_limit_ms UPDATE','column agent_runs.run_limit_ms UPDATE','column spend_reservations.account_id SELECT','column spend_reservations.run_id SELECT','column spend_reservations.state SELECT','column spend_reservations.budget SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'sandbox_settle_definer'),
     held AS (
@@ -1501,12 +1502,13 @@ check_sandbox_settle_definer_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'sandbox_settle_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 26 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 26 granted by 0742' END,
-      CASE WHEN (SELECT count(*) FROM mine) <> 3
+      CASE WHEN (SELECT count(*) FROM held) <> 32 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 32 granted by 0742 and 1002' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 4
               OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.agent_run_sandbox_mark(uuid,uuid,boolean,text,boolean,jsonb,boolean,text)'::regprocedure,
-                   'public.compute_settle_list_due(integer)'::regprocedure, 'public.agent_run_list_running(integer,integer)'::regprocedure]::oid[]))
+                   'public.compute_settle_list_due(integer)'::regprocedure, 'public.agent_run_list_running(integer,integer)'::regprocedure,
+                   'public.agent_run_alive_mark(uuid,uuid,integer,bigint)'::regprocedure]::oid[]))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its three functions and nothing else' END,
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its four functions and nothing else' END,
       CASE WHEN has_schema_privilege('sandbox_settle_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
     FROM r;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
