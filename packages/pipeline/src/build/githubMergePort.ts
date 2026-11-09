@@ -428,22 +428,28 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
   }
 
   /**
-   * A8, for a `runner_local` repo: the one protection call. The classic rule is all that can be read through the allowlist, so a
-   * branch guarded only by a ruleset reads as "not protected" here (the gate then blocks with `no_branch_protection`); that is the
-   * fail-closed side. 403 and any other 404 mean the rule is unreadable, and CI never reads green from that.
+   * A8, for a `runner_local` repo: the one protection call. The classic rule is all that can be read through the allowlist on a repository that
+   * is not a paired item's code repository, so a branch guarded only by a ruleset reads as "not protected" there (the gate then blocks with
+   * `no_branch_protection`); that is the fail-closed side. A paired item's CODE repository (`pairedQueueReads`) also has its branch rules read
+   * (A11): a branch guarded by a ruleset, as a code repository with a merge queue is, counts as protected, and the checks a ruleset requires join
+   * the classic ones. 403 and any other 404 on the classic rule mean the rule is unreadable, and CI never reads green from that.
    */
   async function requiredContextsLocal(pr: PullRequestRef, baseRef: string): Promise<{ contexts: string[]; appBound: RequiredAppCheck[]; protectedBase: boolean; unreadable: boolean }> {
-    const prot = await get(`${await repoPath(pr)}/branches/${encodeURIComponent(baseRef)}/protection`);
-    if (prot.status === 404 && isObj(prot.body) && prot.body.message === "Branch not protected") return { contexts: [], appBound: [], protectedBase: false, unreadable: false };
-    if (prot.status === 403 || prot.status === 404) return { contexts: [], appBound: [], protectedBase: false, unreadable: true };
-    if (prot.status !== 200 || !isObj(prot.body)) throw new Error(`GitHub branch protection: unexpected status ${prot.status}`);
+    const repo = await repoPath(pr);
+    const prot = await get(`${repo}/branches/${encodeURIComponent(baseRef)}/protection`);
+    const rulesToo = deps.pairedQueueReads === true;
+    const noClassicRule = prot.status === 404 && isObj(prot.body) && prot.body.message === "Branch not protected";
+    if (noClassicRule && !rulesToo) return { contexts: [], appBound: [], protectedBase: false, unreadable: false };
+    if (!noClassicRule && (prot.status === 403 || prot.status === 404)) return { contexts: [], appBound: [], protectedBase: false, unreadable: true };
+    if (!noClassicRule && (prot.status !== 200 || !isObj(prot.body))) throw new Error(`GitHub branch protection: unexpected status ${prot.status}`);
     const contexts = new Set<string>();
     const bound = new Map<string, RequiredAppCheck>();
     const need = (context: string, appId: number | null) => {
       contexts.add(context);
       if (appId !== null) bound.set(`${appId}:${context}`, { context, appId });
     };
-    const checks = prot.body.required_status_checks;
+    let protectedBase = !noClassicRule;
+    const checks = !noClassicRule && isObj(prot.body) ? prot.body.required_status_checks : undefined;
     if (checks !== undefined && checks !== null) {
       if (!isObj(checks)) bad("protection.required_status_checks");
       for (const c of Array.isArray(checks.contexts) ? checks.contexts : []) {
@@ -455,8 +461,22 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         need(c.context, appBinding(c.app_id, "protection.checks.app_id"));
       }
     }
+    if (rulesToo) {
+      // A rules read that fails throws, as the hosted read does (the step's retry): it must not become a lasting `no_branch_protection` for a failure that passes.
+      for (const rule of await listRules(repo, baseRef)) {
+        if (typeof rule.enforcement === "string" && rule.enforcement !== "active") continue;
+        if (typeof rule.type === "string" && PROTECTING_RULE_TYPES.has(rule.type)) protectedBase = true;
+        if (rule.type !== "required_status_checks") continue;
+        const params = rule.parameters;
+        if (!isObj(params) || !Array.isArray(params.required_status_checks)) bad("rule.parameters");
+        for (const c of params.required_status_checks) {
+          if (!isObj(c) || typeof c.context !== "string") bad("rule.required_status_checks");
+          need(c.context, appBinding(c.integration_id, "rule.required_status_checks.integration_id"));
+        }
+      }
+    }
     const appBound = [...bound.values()].sort((a, b) => a.appId - b.appId || a.context.localeCompare(b.context));
-    return { contexts: [...contexts].sort(), appBound, protectedBase: true, unreadable: false };
+    return { contexts: [...contexts].sort(), appBound, protectedBase, unreadable: false };
   }
 
   /** Every rule the rulesets apply to the base branch, across all pages. */

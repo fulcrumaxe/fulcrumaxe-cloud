@@ -166,6 +166,8 @@ export interface StallFacts {
   now: Date;
   /** D#694 B6-3: the item is waiting in GitHub's merge queue (derived, mergeReadiness.ts). Absent reads as false. */
   queued?: boolean;
+  /** The item's open PUBLIC pull request (a paired item), which the merge gate judges instead of the private copy. Absent for an item that is not paired. */
+  judgedPr?: number;
 }
 
 export interface Stall {
@@ -218,7 +220,7 @@ export function classifyStall(f: StallFacts): Stall | null {
     if (transient.length > 0) {
       return {
         code: 'gate_not_ready',
-        why: `The merge check ran before the pull request was ready (${transient.map((r) => GATE_REASON_WORDS[r] ?? humanise(r)).join(', ')}) and it was not asked again.`,
+        why: `The merge check ran ${f.judgedPr !== undefined ? 'on public pull request #' + String(f.judgedPr) + ' before it was ready' : 'before the pull request was ready'} (${transient.map((r) => GATE_REASON_WORDS[r] ?? humanise(r)).join(', ')}) and it was not asked again.`,
         since: last.at,
       };
     }
@@ -273,6 +275,8 @@ interface Row {
   last_at: Date | null;
   last_activity: Date;
   queued: boolean;
+  /** The open public pull request of a paired item, or null. */
+  public_pr: number | null;
   /** The stage Needs a person was entered from (null at any other stage, or none recorded). */
   needs_human_from: string | null;
 }
@@ -306,6 +310,8 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
               EXISTS (SELECT 1 FROM decision_asks a WHERE a.work_item_id = w.id AND a.state IN ('open', 'overdue')) AS waiting_ask,
               e.kind AS last_kind, e.code AS last_code, e.reasons AS last_reasons, e.created_at AS last_at,
               ${isQueuedSql('w.account_id', 'w.id')} AS queued,
+              (SELECT p.pr_number FROM plane_pushes p WHERE p.account_id = w.account_id AND p.work_item_id = w.id AND p.pr_number IS NOT NULL
+                  AND p.state NOT IN ('pr_closed', 'pr_merged', 'scope_refused') ORDER BY p.created_at DESC, p.id DESC LIMIT 1) AS public_pr,
               (SELECT t.from_stage FROM work_item_transitions t WHERE t.work_item_id = w.id AND t.to_stage = 'needs_human' ORDER BY t.at DESC, t.created_at DESC LIMIT 1) AS needs_human_from,
               GREATEST(w.updated_at, e.created_at, (SELECT max(r.updated_at) FROM agent_runs r WHERE r.work_item_id = w.id)) AS last_activity
          FROM work_items w
@@ -332,6 +338,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
       lastActivity: r.last_activity,
       now,
       queued: r.queued,
+      ...(r.public_pr !== null ? { judgedPr: r.public_pr } : {}),
     });
     if (stall === null) continue;
     found.push({

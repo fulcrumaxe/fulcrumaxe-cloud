@@ -130,6 +130,13 @@ describe('R6: what counts as stalled', () => {
     expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_gate', 'ready_human_merges', ['ci_not_green'], aged), lastActivity: ago(aged) }))).toMatchObject({ code: 'gate_not_ready' });
   });
 
+  it('a paired item\'s stop names the public pull request the gate judged; an unpaired item\'s words are unchanged', () => {
+    const aged = 61 * MIN;
+    const base = { stage: 'review_passed', last: last('merge_gate', 'ready_human_merges', ['ci_not_green'], aged), lastActivity: ago(aged) };
+    expect(classifyStall(facts({ ...base, judgedPr: 826 }))!.why).toContain('The merge check ran on public pull request #826 before it was ready (');
+    expect(classifyStall(facts(base))!.why).toContain('The merge check ran before the pull request was ready (');
+  });
+
   it('D#483 S5-j2a1: an item that gave up waiting on a busy repository is on the stalled list, with its own words, and is a transient answer the gate may be asked again on', () => {
     const aged = 61 * MIN;
     const s = classifyStall(facts({ stage: 'review_passed', last: last('merge_gate', 'ready_human_merges', ['merge_repo_busy'], aged), lastActivity: ago(aged) }));

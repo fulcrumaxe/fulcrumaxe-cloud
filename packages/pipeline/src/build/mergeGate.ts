@@ -549,6 +549,16 @@ export function hasRepoOwnCi(snapshot: CiSnapshot): boolean {
   );
 }
 
+/**
+ * The repository's own CI is still running on this commit: a check run of another name that has not completed, or a commit status of another context that
+ * is pending. A commit whose only CI is on its way has CI (`ci_not_green` says it has not finished, and the checks finishing clears that), so it must not also
+ * carry `repo_ci_missing`, which only a person can fix: the gate's re-ask would never fire for a pull request seen in its first minutes.
+ */
+export function repoOwnCiRunning(snapshot: CiSnapshot): boolean {
+  const ours = REVIEW_STATUS_CONTEXT_NAME.toLowerCase();
+  return snapshot.checkRuns.some((c) => c.name.toLowerCase() !== ours && c.status !== "completed") || snapshot.statuses.some((s) => s.context.toLowerCase() !== ours && s.state === "pending");
+}
+
 export const SHA_PATTERN =/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /** Check-run conclusions that count as green. `neutral` and `skipped` are
@@ -954,7 +964,7 @@ async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput, le
   if (!isCiGreen(ci, headSha) || missingExpectedSignals(ci, input.expectedSignals ?? []).length > 0) reasons.push("ci_not_green");
   if (mode === "runner_local_on") {
     // (c): GitHub, not a runner, decides CI and protection. Our own status must not be the only CI signal.
-    if (!hasRepoOwnCi(ci)) reasons.push("repo_ci_missing");
+    if (!hasRepoOwnCi(ci) && !repoOwnCiRunning(ci)) reasons.push("repo_ci_missing");
     if (ci.baseBranchProtected !== true) reasons.push("no_branch_protection");
   }
 
