@@ -102,8 +102,7 @@ describe('settings values', () => {
   it('parseBaseUrl keeps an https origin and refuses everything else', () => {
     expect(parseBaseUrl('https://app.example')).toBe('https://app.example');
     expect(parseBaseUrl(' https://app.example/ ')).toBe('https://app.example');
-    expect(parseBaseUrl('https://127.0.0.1:8443')).toBe('https://127.0.0.1:8443');
-    const bad = ['http://app.example', 'https://app.example/a', 'https://u@app.example', 'https://app.example?q', 'https://app.example#f', 'mailto:a@b.example', 'https://', '', 'https://[::1]', 'https://app.example:99999', 5, null, 'https://' + 'a'.repeat(300) + '.example'];
+    const bad = ['http://app.example', 'https://app.example/a', 'https://u@app.example', 'https://app.example?q', 'https://app.example#f', 'mailto:a@b.example', 'https://', '', 'https://[::1]', 'https://app.example:99999', 'https://app.example:8443', 'https://app.example:443', 'https://127.0.0.1:8443', 5, null, 'https://' + 'a'.repeat(300) + '.example'];
     for (const raw of bad) expect(() => parseBaseUrl(raw), String(raw)).toThrowError(expect.objectContaining({ code: 'verify_base_url_invalid' }));
   });
   it('a patch is checked as a whole and never leaves a repository on without an address', () => {

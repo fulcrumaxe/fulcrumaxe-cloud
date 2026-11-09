@@ -71,10 +71,13 @@ export async function readVerifySettings(client: PoolClient, repoId: string): Pr
   };
 }
 
-/** The origin of the deployed app, or a refusal: https only, a plain lower-case host, an optional port, no credentials, path, query or fragment. */
+/**
+ * The origin of the deployed app, or a refusal: https only, a plain lower-case host, no port, no credentials, path, query or fragment. A port is refused here because the
+ * health reader (apps/web/lib/verifyHealth.ts) connects to 443 alone; saving one would only end every row `deployment_unreachable`.
+ */
 export function parseBaseUrl(raw: unknown): string {
   const refuse = (): never => {
-    throw new VerifyInputError('verify_base_url_invalid', 'the base URL must be an https origin: a host and an optional port');
+    throw new VerifyInputError('verify_base_url_invalid', 'the base URL must be an https origin: a host, with no port');
   };
   if (typeof raw !== 'string' || raw.length > 300) return refuse();
   let u: URL;
@@ -86,7 +89,7 @@ export function parseBaseUrl(raw: unknown): string {
   }
   if (u.protocol !== 'https:' || u.username !== '' || u.password !== '' || u.search !== '' || u.hash !== '' || u.pathname !== '/') return refuse();
   if (raw.trim().replace(/\/$/, '') !== u.origin) return refuse();
-  if (!/^https:\/\/[a-z0-9.-]{1,253}(:[0-9]{1,5})?$/.test(u.origin)) return refuse();
+  if (u.port !== '' || !/^https:\/\/[a-z0-9.-]{1,253}$/.test(u.origin)) return refuse();
   return u.origin;
 }
 
@@ -144,6 +147,7 @@ export async function writeVerifySettings(client: PoolClient, accountId: string,
      ON CONFLICT (repo_id) DO UPDATE SET enabled = EXCLUDED.enabled, base_url = EXCLUDED.base_url, standing_journeys = EXCLUDED.standing_journeys,
        test_account_label = EXCLUDED.test_account_label, eligibility = EXCLUDED.eligibility, eligibility_paths = EXCLUDED.eligibility_paths,
        updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    // enabled_since is not written here: the table's trigger stamps it on the off -> on move alone (migration 1005), so a save that changes nothing moves nothing.
     [accountId, repoId, next.enabled, next.baseUrl, JSON.stringify(next.standingJourneys), next.testAccountLabel, next.eligibility, next.eligibilityPaths, userId],
   );
   return { settings: { ...next, configured: true }, turnedOff: current.enabled && !next.enabled };

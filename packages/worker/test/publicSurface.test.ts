@@ -152,6 +152,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepRunnerQueue",
       "sweepSandboxReap",
       "sweepSetupRequestChecks",
+      "sweepVerifyStage",
       "wakeConflictingSiblings",
       "wakeMergeGate",
       "withRunnerPool",
@@ -165,6 +166,8 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     expect(await worker.sweepDiscoverySchedule()).toMatchObject({ idle: "not_configured", listed: 0, queued: 0 });
     // D#483 S4-f3: with no analysis pieces given, the analysis pass starts nothing and says so.
     expect(await worker.sweepDocsCodeAnalysis()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
+    // D#749 V3a: with no verify-stage pieces given, the post-merge verify pass lists and does nothing, and says so.
+    expect(await worker.sweepVerifyStage()).toMatchObject({ idle: "not_configured", listed: 0, opened: 0, ordered: 0 });
     const everything = reachable(worker);
     expect(everything).not.toContain(poolA);
     expect(everything).not.toContain(poolB);

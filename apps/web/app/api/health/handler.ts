@@ -32,7 +32,7 @@ import { productionVercelEnvSource, VERCEL_ENV_SOURCE_UNCONFIGURED } from "../..
  * Every caller also gets `partners`: "on" only when FX_PARTNER_LAYER is exactly "on", else "off" (the partner layer's kill switch).
  *
  * Every caller also gets `deploy_env` (FX_DEPLOY_ENV, or null when unset). Only when that is "staging" does the
- * body also carry `project_id` (VERCEL_PROJECT_ID) and `commit` (VERCEL_GIT_COMMIT_SHA, or null): the live-test
+ * body also carry `project_id` (VERCEL_PROJECT_ID) and `commit` (FX_DEPLOY_COMMIT when it is a commit id, else VERCEL_GIT_COMMIT_SHA, or null): the live-test
  * runner compares them before it runs anything that is not safe on production. Any other deployment, production
  * included, discloses neither.
  */
@@ -70,11 +70,23 @@ function detail(report: EnvReport) {
 
 const orNull = (value: string | undefined): string | null => (value === undefined || value === "" ? null : value);
 
+const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * The commit this deployment runs. A deployment made from the command line (`vercel deploy`) carries no git metadata, so the platform's own commit is empty for it;
+ * the command stamps the commit it deploys as FX_DEPLOY_COMMIT (runtime setting) and that wins when it is a commit id. Anything else in it (a typo, a branch name, text)
+ * is ignored rather than echoed, and the platform's value is the fallback.
+ */
+function deployedCommit(env: EnvLike): string | null {
+  const stamped = (env.FX_DEPLOY_COMMIT ?? "").trim().toLowerCase();
+  return COMMIT_ID.test(stamped) ? stamped : orNull(env.VERCEL_GIT_COMMIT_SHA);
+}
+
 /** The deployment's self-description. The Vercel project id and commit are given to staging only. */
 function identity(env: EnvLike) {
   const deploy_env = orNull(env.FX_DEPLOY_ENV);
   if (deploy_env !== "staging") return { deploy_env };
-  return { deploy_env, project_id: orNull(env.VERCEL_PROJECT_ID), commit: orNull(env.VERCEL_GIT_COMMIT_SHA) };
+  return { deploy_env, project_id: orNull(env.VERCEL_PROJECT_ID), commit: deployedCommit(env) };
 }
 
 /**
