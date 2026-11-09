@@ -86,8 +86,10 @@ describe('CWE-639: cross-account row access returns NotFoundError, never a permi
     expect(JSON.stringify(row)).not.toMatch(/fxr_a{26}|b{64}/);
     const cols = (await admin.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'agent_runs'`)).rows.map((r) => r.column_name);
     const listed = AGENT_RUN_COLUMNS.split(',').map((c) => c.trim());
+    // The durable watchdog's own columns (1002: liveness stamp and the run's stored limits) are runner-internal: app_user holds no privilege on them, so they are not listed either.
+    const WATCHDOG_COLUMNS = ['last_alive_at', 'silence_limit_ms', 'run_limit_ms'];
     // `excluded_runner_id` (0794) is the claim's own column: app_user holds no privilege on it, so it is not listed either.
-    expect([...listed].sort()).toEqual(cols.filter((c) => c !== 'gateway_report_tag' && c !== 'om_key_ref' && c !== 'excluded_runner_id').sort());
+    expect([...listed].sort()).toEqual(cols.filter((c) => c !== 'gateway_report_tag' && c !== 'om_key_ref' && c !== 'excluded_runner_id' && !WATCHDOG_COLUMNS.includes(c)).sort());
   });
 
   it('a genuinely nonexistent id also gets NotFoundError (same error as the cross-account case)', async () => {

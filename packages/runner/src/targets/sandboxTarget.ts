@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
+import { RUN_LIMIT_BOUNDS } from "@fx/core/src/run-limits/limits.js";
+import { sandboxTimeFor } from "../runTime.js";
 import type { HostLookup } from "@fx/net-guard";
 import {
   claudeModelIds,
@@ -36,6 +38,7 @@ import type { GithubForwardConfig } from "../githubForwardConfig.js";
 import { defaultResolvePayer } from "../funding.js";
 import {
   MAX_LINE_INPUT_SIDE_TOKENS,
+  DEFAULT_RUN_LIMITS,
   MAX_LINE_OUTPUT_TOKENS,
   RunLimitError,
   createUsageMeter,
@@ -190,6 +193,30 @@ const PENDING_POLL_MS = 25;
 /** How long after a stop this runner recorded itself a still-`running` run is left to its own finalize before the lost-run check settles it. */
 export const OWN_STOP_GRACE_MS = 5 * 60_000;
 
+/**
+ * The durable backstop's limits. The run's own guard (meteringGuard, armed in the process that started the run) ends it at its
+ * resolved limits. The runner stores those limits on the run with its first stamp (silence limit, and the longest the run can go
+ * with every extension taken); this check uses them plus a margin. A run with none stored (started before they were) falls back to
+ * the platform ceilings below.
+ *
+ * What is guaranteed: a run is ended for silence only when nothing (the liveness stamp, a run event, or its start) is newer
+ * than the silence ceiling, and for run time only when it has been running longer than the run-time ceiling plus a margin. The
+ * run-time clock starts at the run's latest move into `running`; the guard's own clock starts later, when the agent command
+ * starts (the sandbox request, clone and install come between, and the command start is not stored), so the margin covers that
+ * gap. A run on its own guard's limits is therefore never ended earlier than it would have been; one past them is ended within
+ * a sweep tick or two of the margin.
+ */
+export const DURABLE_SILENCE_MS = RUN_LIMIT_BOUNDS.silence_minutes.ceiling * 60_000;
+export const DURABLE_RUN_MARGIN_MS = 10 * 60_000;
+export const DURABLE_RUN_MS = RUN_LIMIT_BOUNDS.max_run_minutes.ceiling * 60_000 + DURABLE_RUN_MARGIN_MS;
+/** On top of a run's stored silence limit: the stamp is throttled to a minute and written behind the stream, so a live run's newest sign of life can be this much older than the run's own meter saw. */
+export const DURABLE_SILENCE_MARGIN_MS = 2 * 60_000;
+/** A running run's liveness stamp is written at most this often (the definer enforces the same floor). */
+export const ALIVE_STAMP_INTERVAL_MS = 60_000;
+
+/** A stored limit is held to the column's bounds: one minute up to the platform ceiling (a value outside them would lose the whole stamp to the CHECK). */
+const clampMs = (ms: number, ceilingMs: number): number => Math.min(Math.max(Math.trunc(ms), 60_000), ceilingMs);
+
 interface RunBookkeeping {
   /** Set when the run's firewall policy was built from the operator subscription (decided once, at dispatch/resume). */
   operatorSubscription?: boolean;
@@ -257,6 +284,10 @@ interface RunBookkeeping {
   sessionStartedMs: Map<string, number>;
   /** The persisting writes of those ids still in flight; a stop waits for them so it measures every session. */
   sessionWrites: Promise<unknown>[];
+  /** The Claude Code session id the stream last reported (not the sandbox VM's session id, which is in `sessionIds`). */
+  ccSessionId?: string;
+  /** When this instance last wrote the run's liveness stamp (throttled to one write per `ALIVE_STAMP_INTERVAL_MS`). */
+  aliveStampedMs?: number;
   /** What was measured for those sessions when the sandbox was stopped; the settle (CS-2) prices it. */
   measurement?: SandboxSessionFigures[];
   /** True once this run's sandbox was deleted (always after it was measured). */
@@ -309,6 +340,8 @@ export class SandboxTarget implements ExecutionTarget {
   /** D#6 C12 A1: the runtime a sandbox run is stamped with. It used to be a literal in `startAgentRun`. */
   readonly runtime = "production" as const;
   private readonly runs = new Map<string, RunBookkeeping>();
+  /** Durable limit checks in flight on this instance, so two overlapping ticks here stop a run's sandbox once (another instance is covered by the status compare-and-set). */
+  private readonly durableChecks = new Map<string, Promise<LostRunOutcome>>();
 
   constructor(private readonly deps: SandboxTargetDeps) {}
 
@@ -606,9 +639,9 @@ export class SandboxTarget implements ExecutionTarget {
     }
     // One look: the provider FIRST, the run's row second. The run's own finalize records its stop before it asks the
     // provider to stop, so a provider that already reports "stopped" guarantees the row read after it shows that mark.
-    const look = async (): Promise<"lost" | LostRunOutcome> => {
+    const look = async (): Promise<"lost" | "running" | LostRunOutcome> => {
       const state = (await this.deps.sandboxPort.sandboxState?.(handle)) ?? "unknown";
-      if (state === "running") return "alive";
+      if (state === "running") return "running";
       if (state === "unknown") return "unknown";
       const { rows } = await this.withAccount(run.accountId, (client) =>
         client.query<{ status: string; stopped: Date | null }>(
@@ -628,11 +661,75 @@ export class SandboxTarget implements ExecutionTarget {
     // makes every sandbox read 404, a provider hiccup) must never settle a healthy run, and a finalize that was mid-way
     // has recorded its stop by the second look.
     const first = await look();
+    // The sandbox is there: the run is only still going if the limits its own process would have enforced are not past.
+    if (first === "running") {
+      const inFlight = this.durableChecks.get(run.id) ?? this.enforceLimitsDurably(run).finally(() => this.durableChecks.delete(run.id));
+      this.durableChecks.set(run.id, inFlight);
+      return inFlight;
+    }
     if (first !== "lost") return first;
     await new Promise((resolve) => setTimeout(resolve, this.deps.lostConfirmDelayMs ?? LOST_CONFIRM_DELAY_MS));
     const second = await look();
+    if (second === "running") return "alive";
     if (second !== "lost") return second;
     await this.finalize(run, { status: "failed", failureReason: "sandbox_stopped" });
+    return "settled";
+  }
+
+  /** Stamps the run alive, at most once per `ALIVE_STAMP_INTERVAL_MS` per run on this instance. Never throws: a missed stamp only brings the durable silence check closer. */
+  private async stampAlive(run: ExecutionRun, bk: RunBookkeeping): Promise<void> {
+    const now = Date.now();
+    if (bk.aliveStampedMs !== undefined && now - bk.aliveStampedMs < ALIVE_STAMP_INTERVAL_MS) return;
+    bk.aliveStampedMs = now;
+    // The run's own limits go with the stamp (first-wins in the database): the silence limit and the longest it can run, extensions included.
+    const limits = run.limits ?? DEFAULT_RUN_LIMITS;
+    const maxPossibleRunMs = sandboxTimeFor(limits, run.maxExtensions ?? 0).maxPossibleRunMs;
+    try {
+      await this.withAccount(run.accountId, (client) =>
+        client.query("SELECT agent_run_alive_mark($1::uuid, $2::uuid, $3::integer, $4::bigint)", [run.accountId, run.id, clampMs(limits.meteringSilenceMs, RUN_LIMIT_BOUNDS.silence_minutes.ceiling * 60_000), clampMs(maxPossibleRunMs, RUN_LIMIT_BOUNDS.max_run_minutes.ceiling * 60_000)]),
+      );
+    } catch (err) {
+      reportError(err, { stage: "run.alive_stamp" });
+    }
+  }
+
+  /**
+   * The run-time and silence limits live in the process that started the run; when that invocation ends nothing else
+   * enforces them. For a run whose sandbox is still running, ends it (stop, measure, `timed_out` with the limit's
+   * checkpoint, through `finalize`) when it has been running longer than the run-time ceiling (plus margin) or nothing
+   * has shown it alive for the silence ceiling: the newest of its liveness stamp, its last run event and its sandbox
+   * request. The events alone are not enough (they are capped and sparse); the stamp is written throttled by the runner
+   * on any stream line or metered rise. `finalize` writes through the compare-and-set status writer, so overlapping ticks end a run once.
+   */
+  private async enforceLimitsDurably(run: ExecutionRun): Promise<LostRunOutcome> {
+    const { rows } = await this.withAccount(run.accountId, (client) =>
+      client.query<{ status: string; requested: Date | null; last_event: Date | null; alive: Date | null; running_since: Date | null; silence_ms: number | null; run_ms: string | null }>(
+        `SELECT a.status, a.sandbox_requested_at AS requested, a.last_alive_at AS alive, a.silence_limit_ms AS silence_ms, a.run_limit_ms::text AS run_ms,
+                (SELECT e.created_at FROM run_events e WHERE e.account_id = a.account_id AND e.run_id = a.id ORDER BY e.seq DESC LIMIT 1) AS last_event,
+                (SELECT max(e.created_at) FROM run_events e WHERE e.account_id = a.account_id AND e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'running') AS running_since
+           FROM agent_runs a WHERE a.account_id = $1 AND a.id = $2`,
+        [run.accountId, run.id],
+      ),
+    );
+    const row = rows[0];
+    if (row?.status !== "running" || row.requested === null) return "alive";
+    const now = Date.now();
+    // The run-time clock starts at the latest move into running (a resumed round restarts it); the request time is the fallback.
+    const age = now - (row.running_since ?? row.requested).getTime();
+    const quiet = now - Math.max(row.requested.getTime(), row.last_event?.getTime() ?? 0, row.alive?.getTime() ?? 0);
+    // The run's own stored limits, plus a margin; a run with none stored is held to the platform ceilings.
+    const runLimit = row.run_ms !== null ? Number(row.run_ms) + DURABLE_RUN_MARGIN_MS : DURABLE_RUN_MS;
+    const silenceLimit = row.silence_ms !== null ? row.silence_ms + DURABLE_SILENCE_MARGIN_MS : DURABLE_SILENCE_MS;
+    const limit: RunLimit | undefined =
+      age > runLimit ? { kind: "run_time", limit: runLimit, observed: age }
+      : quiet > silenceLimit ? { kind: "silence", limit: silenceLimit, observed: quiet }
+      : undefined;
+    if (limit === undefined) return "alive";
+    console.warn(JSON.stringify({ event: "run.durable_limit", run_id: run.id, kind: limit.kind }));
+    // An instance that holds the run's meter reports what it metered (so model spend already incurred is settled, as when the run's own guard ends it);
+    // another instance holds none, and the stop then settles compute only, as the sandbox_stopped path does.
+    const held = this.runs.get(run.id);
+    await this.finalize(run, held ? buildAbortTerminalReport({ kind: "limit", limit }, held.ccSessionId, held.cumulativeModelUsd, snapshotOf(held)) : { status: "timed_out", limit });
     return "settled";
   }
 
@@ -783,6 +880,7 @@ export class SandboxTarget implements ExecutionTarget {
 
     const meterEvent = async (event: NormalizedEvent): Promise<void> => {
       sessionId = event.sessionId ?? sessionId;
+      if (event.sessionId) bk.ccSessionId = event.sessionId; // the Claude Code session id, kept where a durable stop on another path can read it
 
       // H09.5: a fake model response of 401/402/403 stops the run.
       const failureCode = detectModelFailure(event);
@@ -857,6 +955,8 @@ export class SandboxTarget implements ExecutionTarget {
       const stored = event.type === "assistant" && event.text ? output.record(event.text) : undefined;
       await meterEvent(event);
       await stored;
+      // After metering, so a stamp write never delays the spend check or a kill; throttled, and it never throws.
+      await this.stampAlive(run, bk);
     };
 
     return { onEvent, onStage: (stage) => progress.stage(stage), getSessionId: () => sessionId };
@@ -1326,6 +1426,8 @@ export class SandboxTarget implements ExecutionTarget {
     // The sandbox name goes in the same write (first-wins): the gh-proxy finds the run by it, so it must be stored
     // before the sandbox exists to make a request.
     await this.markSandbox(run, { requested: true, sandboxName });
+    // First stamp and the run's own limits, before any event: a run that never speaks must still have something to be compared against.
+    await this.stampAlive(run, this.bookkeeping(run.id));
     const { rows } = await this.withAccount(run.accountId, (client) =>
       client.query(`SELECT 1 FROM agent_runs WHERE account_id = $1 AND id = $2 AND status = 'pending'`, [run.accountId, run.id]),
     );

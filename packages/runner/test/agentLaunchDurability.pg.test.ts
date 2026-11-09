@@ -9,6 +9,7 @@ import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import { configureAgentRunWiring, followStatusBody } from "../src/workflows/agentRun.js";
 import { LOST_SWEEP_BATCH_SIZE, sweepLostRuns } from "../src/lostRunSweep.js";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { seedAccount, seedMember, seedRepo, seedWorkItem } from "./helpers/seed.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { AGENT_OUTPUT_DELAY_MS, createFrozenInvocationSdk, type Platform } from "./helpers/frozenInvocationSdk.js";
@@ -352,6 +353,259 @@ describe("agent launch survives the invocation that started it [pg]", () => {
     } finally {
       setPendingHooks(null);
     }
+  });
+
+  /**
+   * Moves a running run back in time: its latest move into running and its sandbox request `startedMin` minutes ago, its other events
+   * `eventMin` minutes ago, and its liveness stamp `aliveMin` minutes ago (null: never stamped).
+   */
+  async function ageRun(runId: string, startedMin: number, eventMin: number, aliveMin: number | null = null, stored?: { silenceMin: number; runMin: number }): Promise<void> {
+    // The run's stored limits: none by default (the platform ceilings apply), or the run's own.
+    await db.admin.query(`UPDATE agent_runs SET silence_limit_ms = $2, run_limit_ms = $3 WHERE id = $1`, [runId, stored ? stored.silenceMin * 60_000 : null, stored ? stored.runMin * 60_000 : null]);
+    await db.admin.query(`ALTER TABLE agent_runs DISABLE TRIGGER agent_runs_sandbox_guard`);
+    try {
+      await db.admin.query(`UPDATE agent_runs SET sandbox_requested_at = now() - make_interval(mins => $2) WHERE id = $1`, [runId, startedMin]);
+    } finally {
+      await db.admin.query(`ALTER TABLE agent_runs ENABLE TRIGGER agent_runs_sandbox_guard`);
+    }
+    await db.admin.query(`UPDATE run_events SET created_at = now() - make_interval(mins => $2) WHERE run_id = $1`, [runId, eventMin]);
+    await db.admin.query(`UPDATE run_events SET created_at = now() - make_interval(mins => $2) WHERE run_id = $1 AND kind = 'run.status_changed' AND payload->>'to' = 'running'`, [runId, startedMin]);
+    await db.admin.query(`UPDATE agent_runs SET last_alive_at = ${aliveMin === null ? "NULL" : "now() - make_interval(mins => $2)"} WHERE id = $1`, aliveMin === null ? [runId] : [runId, aliveMin]);
+  }
+  const stopCalls = (inv: { sdk: { calls: readonly string[] } }) => inv.sdk.calls.filter((c) => c === "stop").length;
+  const checkpointKindOf = async (runId: string): Promise<string | undefined> =>
+    (await db.admin.query(`SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'checkpoint'`, [runId])).rows[0]?.payload.kind;
+  const checkpointCcSessionOf = async (runId: string): Promise<string | undefined> =>
+    (await db.admin.query(`SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'checkpoint'`, [runId])).rows[0]?.payload.cc_session_id;
+  const countEvents = async (runId: string, kind: string): Promise<number> => (await db.admin.query(`SELECT count(*)::int AS n FROM run_events WHERE run_id = $1 AND kind = $2`, [runId, kind])).rows[0].n;
+  const runOf = (s: { accountId: string; repoId: string }, runId: string) => ({ id: runId, accountId: s.accountId, role: "code-reviewer" as const, product: "team" as const, repoId: s.repoId, roleCard: "", prompt: "", model: "", capUsd: 0, spend: { plan: "starter" as const } });
+
+  it("durable limits: a running sandbox whose run has been silent past the silence ceiling is stopped and ended as timed_out/silence, once", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 90, 80, 75); // started 90 minutes ago; last event 80 and last stamp 75 minutes ago: a fresh instance, the starter's timers are gone
+    const fresh = new SandboxTarget({ ...inv.deps });
+    const callsBefore = stopCalls(inv);
+    // Two ticks at once on the same instance, then a later one.
+    const outcomes = await Promise.all([fresh.settleIfLost(runOf(s, runId)), fresh.settleIfLost(runOf(s, runId))]);
+    expect(outcomes).toContain("settled");
+    expect(await fresh.settleIfLost(runOf(s, runId))).toBe("alive");
+    expect(await statusOf(runId)).toBe("timed_out");
+    expect(await checkpointKindOf(runId)).toBe("silence");
+    expect(stopCalls(inv) - callsBefore).toBe(1);
+    expect(await openReservations(runId)).toBe(0);
+  });
+
+  it("durable limits: the kill charges no model spend: only compute is ledgered and settled, as on the sandbox_stopped path", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 90, 80, null);
+    expect(await new SandboxTarget({ ...inv.deps }).settleIfLost(runOf(s, runId))).toBe("settled");
+    const ledger = (await db.admin.query(`SELECT budget FROM ledger WHERE run_id = $1 ORDER BY budget`, [runId])).rows.map((r: { budget: string }) => r.budget);
+    const reservations = (await db.admin.query(`SELECT budget, state FROM spend_reservations WHERE run_id = $1 ORDER BY budget`, [runId])).rows;
+    // Exactly what is ledgered: one compute row, no model row; the one reservation (compute) is settled, none is open and none holds model spend.
+    expect(ledger).toEqual(["foreground_compute"]);
+    expect(reservations).toEqual([{ budget: "foreground_compute", state: "settled" }]);
+  });
+
+  it("durable limits: the run's own limits are stored at dispatch, before any event (default limits, no extensions)", async () => {
+    const { runId } = await runningRun();
+    const r = (await db.admin.query(`SELECT silence_limit_ms, run_limit_ms::int AS run_limit_ms, last_alive_at IS NOT NULL AS stamped FROM agent_runs WHERE id = $1`, [runId])).rows[0];
+    expect(r).toEqual({ silence_limit_ms: 15 * 60_000, run_limit_ms: 60 * 60_000, stamped: true });
+  });
+
+  it("durable limits: a silent run is stopped on its OWN silence limit (below the platform ceiling), not only the ceiling", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 40, 20, 20, { silenceMin: 15, runMin: 60 }); // 20 minutes quiet: past 15 + 2 margin, well under the 30 minute ceiling
+    expect(await new SandboxTarget({ ...inv.deps }).settleIfLost(runOf(s, runId))).toBe("settled");
+    expect(await checkpointKindOf(runId)).toBe("silence");
+    const inside = await runningRun();
+    await ageRun(inside.runId, 40, 16, 16, { silenceMin: 15, runMin: 120 }); // 16 minutes: inside the two minute margin
+    expect(await new SandboxTarget({ ...inside.inv.deps }).settleIfLost(runOf(inside.s, inside.runId))).toBe("alive");
+  });
+
+  it("durable limits: a run past its OWN run limit is stopped as run_time (below the platform ceiling); a live stamping run inside it is not", async () => {
+    const over = await runningRun();
+    await ageRun(over.runId, 75, 1, 1, { silenceMin: 15, runMin: 60 }); // 75 minutes: past 60 + 10 margin, well under 240
+    expect(await new SandboxTarget({ ...over.inv.deps }).settleIfLost(runOf(over.s, over.runId))).toBe("settled");
+    expect(await checkpointKindOf(over.runId)).toBe("run_time");
+    const live = await runningRun();
+    await ageRun(live.runId, 65, 1, 1, { silenceMin: 15, runMin: 60 }); // inside the margin, stamped a minute ago
+    const callsBefore = stopCalls(live.inv);
+    expect(await new SandboxTarget({ ...live.inv.deps }).settleIfLost(runOf(live.s, live.runId))).toBe("alive");
+    expect(stopCalls(live.inv)).toBe(callsBefore);
+  });
+
+  it("durable limits: the finalized run marks the invariant sweep pending (what frees the item's slot), for a silent run and for an expired sandbox", async () => {
+    const marks = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => marks.get(k), set: async (k, v) => void marks.set(k, v), delete: async (k) => void marks.delete(k) } });
+    try {
+      const silent = await runningRun();
+      await ageRun(silent.runId, 90, 80, 80);
+      marks.clear();
+      expect(await new SandboxTarget({ ...silent.inv.deps }).settleIfLost(runOf(silent.s, silent.runId))).toBe("settled");
+      expect(marks.has("pending:invariant-sweep")).toBe(true);
+      const expired = await runningRun();
+      expired.inv.sdk.stopFromOutside(expired.name, "deleted");
+      marks.clear();
+      expect(await new SandboxTarget({ ...expired.inv.deps }).settleIfLost(runOf(expired.s, expired.runId))).toBe("settled");
+      expect(await statusOf(expired.runId)).toBe("failed");
+      expect(await failureReasonOf(expired.runId)).toBe("sandbox_stopped");
+      expect(marks.has("pending:invariant-sweep")).toBe(true);
+    } finally {
+      setPendingHooks(null);
+    }
+  });
+
+  it("durable limits: the instance that holds the run's meter reports what it metered, so model spend already incurred is settled", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 90, 80, null);
+    const held = (inv.target as unknown as { runs: Map<string, { cumulativeModelUsd: number; ccSessionId?: string; sessionIds: string[] }> }).runs.get(runId)!;
+    held.cumulativeModelUsd = 0.5;
+    held.ccSessionId = "cc-stream-session";
+    expect(held.sessionIds.length).toBeGreaterThan(0); // a VM session id exists and must not be what is recorded
+    expect(await inv.target.settleIfLost(runOf(s, runId))).toBe("settled");
+    const rows = (await db.admin.query(`SELECT budget, usd::float AS usd FROM ledger WHERE run_id = $1 ORDER BY budget`, [runId])).rows;
+    expect(rows.find((r: { budget: string }) => r.budget === "model")?.usd).toBe(0.5);
+    const recorded = (await db.admin.query(`SELECT cc_session_id FROM agent_runs WHERE id = $1`, [runId])).rows[0].cc_session_id;
+    expect(recorded).toBe("cc-stream-session");
+    expect(held.sessionIds).not.toContain(recorded);
+    expect(await checkpointCcSessionOf(runId)).toBe("cc-stream-session");
+  });
+
+  it("durable limits: a run with a fresh liveness stamp is NOT killed although its run events are old (events are capped and sparse)", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 120, 100, 1); // events 100 minutes old (as after the activity cap), stamped a minute ago
+    const callsBefore = stopCalls(inv);
+    expect(await new SandboxTarget({ ...inv.deps }).settleIfLost(runOf(s, runId))).toBe("alive");
+    expect(await statusOf(runId)).toBe("running");
+    expect(stopCalls(inv)).toBe(callsBefore);
+  });
+
+  it("durable limits: a run with a stale liveness stamp and stale events IS killed", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 120, 100, 45);
+    expect(await new SandboxTarget({ ...inv.deps }).settleIfLost(runOf(s, runId))).toBe("settled");
+    expect(await checkpointKindOf(runId)).toBe("silence");
+  });
+
+  it("durable limits: a run past the run-time ceiling that is still chatty is ended as timed_out/run_time, but not inside the margin", async () => {
+    const inside = await runningRun();
+    await ageRun(inside.runId, 245, 1, 1); // past the 240 minute ceiling, inside the 10 minute margin
+    expect(await new SandboxTarget({ ...inside.inv.deps }).settleIfLost(runOf(inside.s, inside.runId))).toBe("alive");
+    expect(await statusOf(inside.runId)).toBe("running");
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 300, 1, 1);
+    expect(await new SandboxTarget({ ...inv.deps }).settleIfLost(runOf(s, runId))).toBe("settled");
+    expect(await statusOf(runId)).toBe("timed_out");
+    expect(await checkpointKindOf(runId)).toBe("run_time");
+  });
+
+  it("durable limits: an active run (recent event, inside the run-time ceiling) is left running and its sandbox untouched", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 120, 2, 1);
+    const callsBefore = stopCalls(inv);
+    expect(await new SandboxTarget({ ...inv.deps }).settleIfLost(runOf(s, runId))).toBe("alive");
+    expect(await statusOf(runId)).toBe("running");
+    expect(stopCalls(inv)).toBe(callsBefore);
+  });
+
+  it("durable limits: a run already finalized is skipped without a stop", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 300, 200);
+    expect(await new SandboxTarget({ ...inv.deps }).settleIfLost(runOf(s, runId))).toBe("settled");
+    const callsAfterFirst = stopCalls(inv);
+    // The sandbox is reported running again (a stale read); the run is over, so nothing more is done.
+    const stale = new SandboxTarget({ ...inv.deps, sandboxPort: { ...inv.port, sandboxState: async () => "running" } });
+    expect(await stale.settleIfLost(runOf(s, runId))).toBe("alive");
+    expect(stopCalls(inv)).toBe(callsAfterFirst);
+  });
+
+  it("durable limits: two separate instances ticking at once may both call stop, but the run is finalized once", async () => {
+    const { s, inv, runId } = await runningRun();
+    await ageRun(runId, 90, 80, null);
+    const one = new SandboxTarget({ ...inv.deps });
+    const two = new SandboxTarget({ ...inv.deps });
+    const callsBefore = stopCalls(inv);
+    const outcomes = await Promise.all([one.settleIfLost(runOf(s, runId)), two.settleIfLost(runOf(s, runId))]);
+    expect(outcomes.filter((o) => o === "settled").length).toBeGreaterThanOrEqual(1);
+    expect(stopCalls(inv) - callsBefore).toBeLessThanOrEqual(2);
+    expect(await statusOf(runId)).toBe("timed_out");
+    expect(await countEvents(runId, "checkpoint")).toBe(1);
+    expect((await db.admin.query(`SELECT count(*)::int AS n FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed' AND payload->>'to' = 'timed_out'`, [runId])).rows[0].n).toBe(1);
+    expect(await openReservations(runId)).toBe(0);
+  });
+
+  it("durable limits: another tenant's silent run is untouched by a check made in this tenant's context", async () => {
+    const mine = await runningRun();
+    const theirs = await runningRun();
+    await ageRun(theirs.runId, 90, 80, null);
+    const callsBefore = stopCalls(theirs.inv);
+    // This tenant's context naming the other tenant's run id finds no row: nothing is stopped or written.
+    const crossed = await new SandboxTarget({ ...theirs.inv.deps }).settleIfLost({ ...runOf(mine.s, theirs.runId) });
+    expect(crossed).not.toBe("settled");
+    expect(await statusOf(theirs.runId)).toBe("running");
+    expect(stopCalls(theirs.inv)).toBe(callsBefore);
+    // And this tenant's own healthy run is not touched when the other's is settled.
+    expect(await new SandboxTarget({ ...theirs.inv.deps }).settleIfLost(runOf(theirs.s, theirs.runId))).toBe("settled");
+    expect(await statusOf(mine.runId)).toBe("running");
+  });
+
+  it("liveness stamp: the definer writes at most once per minute per run, only for a running run, only in the caller's tenant", async () => {
+    const { s, runId } = await runningRun();
+    await db.admin.query(`UPDATE agent_runs SET last_alive_at = NULL WHERE id = $1`, [runId]);
+    const mark = async (account = s.accountId, context = s.accountId): Promise<boolean> =>
+      (await withTenant(db.runWriterPool, context, (c) => c.query(`SELECT agent_run_alive_mark($1::uuid, $2::uuid) AS w`, [account, runId]))).rows[0].w;
+    expect(await mark()).toBe(true);
+    expect(await mark()).toBe(false); // inside the minute
+    await db.admin.query(`UPDATE agent_runs SET last_alive_at = now() - interval '61 seconds' WHERE id = $1`, [runId]);
+    expect(await mark()).toBe(true);
+    await expect(mark(s.accountId, randomUUID())).rejects.toMatchObject({ code: "42501" });
+    await db.admin.query(`UPDATE agent_runs SET last_alive_at = NULL WHERE id = $1`, [runId]);
+    await db.admin.query(`ALTER TABLE agent_runs DISABLE TRIGGER USER`);
+    try {
+      await db.admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE id = $1`, [runId]);
+    } finally {
+      await db.admin.query(`ALTER TABLE agent_runs ENABLE TRIGGER USER`);
+    }
+    expect(await mark()).toBe(false); // not running
+  });
+
+  it("liveness stamp: a run's stream lines stamp it while the run is running", async () => {
+    const s = await scenario();
+    const inv = invocation();
+    const started = await startAgentRun(db.runWriterPool, { sandbox: inv.target }, s.input);
+    if (started.status !== "running") throw new Error("run did not start");
+    await inv.endInvocation();
+    await sleep(AGENT_OUTPUT_DELAY_MS + 100);
+    expect((await db.admin.query(`SELECT last_alive_at IS NOT NULL AS stamped FROM agent_runs WHERE id = $1`, [started.id])).rows[0].stamped).toBe(true);
+  });
+
+  it("liveness stamp: the runner writes it at most once per minute however many events arrive", async () => {
+    const { s, inv, runId } = await runningRun();
+    let stamps = 0;
+    const wrapped = new WeakSet<object>(); // a pooled client is handed out again: wrap it once
+    const pool = {
+      connect: async () => {
+        const client = await db.runWriterPool.connect();
+        if (!wrapped.has(client)) {
+          wrapped.add(client);
+          const query = client.query.bind(client) as (...a: unknown[]) => unknown;
+          (client as unknown as { query: unknown }).query = (...a: unknown[]) => {
+            if (typeof a[0] === "string" && a[0].includes("agent_run_alive_mark")) stamps++;
+            return query(...a);
+          };
+        }
+        return client;
+      },
+    };
+    const target = new SandboxTarget({ ...inv.deps, pool: pool as never });
+    const bk = {} as { aliveStampedMs?: number };
+    const stamp = (target as unknown as { stampAlive(run: unknown, bk: unknown): Promise<void> }).stampAlive.bind(target);
+    for (let i = 0; i < 25; i++) await stamp(runOf(s, runId), bk);
+    expect(stamps).toBe(1);
+    bk.aliveStampedMs = Date.now() - 61_000;
+    await stamp(runOf(s, runId), bk);
+    await stamp(runOf(s, runId), bk);
+    expect(stamps).toBe(2);
   });
 
   it("the lister is for the runner login only, and takes a sane limit", async () => {
