@@ -8,6 +8,8 @@ import { setIntakeAllowlistForTests } from "../../../../lib/github/intakeTrust";
 
 // The production deps build their pools with createPool; a pool that records its statements lets the wiring tests below see the SQL the marks run.
 const recorded = vi.hoisted(() => ({ statements: [] as Array<{ sql: string; params: unknown[] }> }));
+const siblingWake = vi.hoisted(() => ({ calls: [] as unknown[] }));
+vi.mock("../../../../lib/siblingConflictWake", () => ({ wakeSiblingConflicts: async (_pool: unknown, event: unknown) => void siblingWake.calls.push(event) }));
 vi.mock("@fx/db/src/pool", () => {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
@@ -473,5 +475,21 @@ describe("the webhook's repo instruction file marks", () => {
     });
     expect(marks()).toHaveLength(1);
     expect(marks()[0]!.params).toEqual([ACCOUNT, [REPO], ["CLAUDE.md", "AGENTS.md"], 60]);
+  });
+});
+
+// A merge wakes the repository's other open pull requests that now conflict: the production deps run that wake on every repo event (its rules are siblingConflictWake.test.ts).
+describe("the webhook's sibling conflict wake", () => {
+  it("runs through onRepoEvent with the event as delivered, beside the other wakes", async () => {
+    vi.stubEnv("DATABASE_URL_APP_USER", "postgres://u:p@127.0.0.1:1/none");
+    vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://u:p@127.0.0.1:1/none");
+    siblingWake.calls.length = 0;
+    try {
+      const event = { accountId: "11111111-1111-4111-8111-111111111111", repoId: "22222222-2222-4222-8222-222222222222", eventName: "pull_request" as const, payload: { action: "closed", repository: { full_name: "acme/widgets", default_branch: "main" }, pull_request: { number: 826, merged: true, base: { ref: "main" } } } };
+      await defaultGithubWebhookDeps().onRepoEvent!(event as never).catch(() => undefined);
+      expect(siblingWake.calls).toEqual([event]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
