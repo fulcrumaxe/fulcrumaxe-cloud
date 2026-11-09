@@ -32,6 +32,12 @@ export interface WorkItemDTO {
   repo_id: string | null;
   kind: string | null;
   issue_number: number | null;
+  /**
+   * Present only on a planned PR child (a row that carries a planned PR key): the GitHub issue number of the item it belongs to, or null when that item has none or is gone.
+   * A child has no issue number of its own (`issue_number` is null by design) and builds on its parent's, so this is what a card needs to offer Approve for it. Absent on every
+   * other item, so a client reads "is a child" as "the key is present". Derived on each read, never stored.
+   */
+  parent_issue_number?: number | null;
   /** A one-line plain-English title (the GitHub issue's, cleaned and cut to 120 characters). Untrusted text: render it as text only. Null when the item has none yet. */
   title: string | null;
   stage: WorkItemStage;
@@ -64,6 +70,8 @@ interface WorkItemRow {
   repo_id: string | null;
   kind: string | null;
   gh_number: string | null;
+  is_child: boolean;
+  parent_gh_number: string | null;
   title: string | null;
   stage: string;
   provenance: string;
@@ -95,7 +103,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * dependent on it.
  */
 const WORK_ITEM_SELECT = `
-  SELECT wi.id, wi.repo_id, wi.kind, wi.gh_number, wi.title, wi.stage, wi.provenance, wi.priority, wi.queue_rank,
+  SELECT wi.id, wi.repo_id, wi.kind, wi.gh_number, (wi.planned_pr_key IS NOT NULL) AS is_child,
+         -- A planned PR child's parent's issue number (NULL when the parent has none or is gone); only read for a child, as operatorActions.ts reads it.
+         (SELECT p.gh_number FROM work_items p WHERE p.account_id = wi.account_id AND p.id = wi.parent_id AND wi.planned_pr_key IS NOT NULL) AS parent_gh_number,
+         wi.title, wi.stage, wi.provenance, wi.priority, wi.queue_rank,
          wi.created_at, wi.updated_at,
          to_char(wi.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor,
          COALESCE(SUM(ar.usd), 0) AS cost_usd,
@@ -139,6 +150,7 @@ function toDTO(row: WorkItemRow): WorkItemDTO {
     repo_id: row.repo_id,
     kind: row.kind,
     issue_number: row.gh_number === null ? null : Number(row.gh_number),
+    ...(row.is_child ? { parent_issue_number: row.parent_gh_number === null ? null : Number(row.parent_gh_number) } : {}),
     // Cleaned on every read: a root's title is the discussion's (up to 256 characters, as the issue had it).
     title: cleanWorkItemTitle(row.title),
     // The stage CHECK constraint (0610) already restricts this column to

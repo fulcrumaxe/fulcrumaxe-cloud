@@ -221,6 +221,30 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect((await waitOf(itemId, mine)).queue_wait).toBeUndefined();
   });
 
+  // The sibling wake's waiting fact (a merge in the repository may have left this pull request conflicting) surfaces as `sibling_conflict`, only while it is the item's newest waiting fact.
+  it('sibling_conflict: names the merged pull request while the wake is the newest waiting fact, at a pull-request stage, for the item\'s own account only', async () => {
+    const mine = await seedAccountWithMember(admin, { role: 'owner' });
+    const theirs = await seedAccountWithMember(admin, { role: 'owner' });
+    const { itemId } = await seedItem(mine.accountId, { stage: 'review_passed' });
+    const of = async (id: string, who: { accountId: string; userId: string }) => (await (await get(id, who)).json()) as Activity & { sibling_conflict?: { after_pr: number } };
+    const wait = (code: string, reasons: string[], key: string) =>
+      admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, dedupe_key, stage, attempt) VALUES ($1, $2, 'stage_waiting', $3, $4::text[], $5, 'review', 0)`, [mine.accountId, itemId, code, reasons, key]);
+    expect((await of(itemId, mine)).sibling_conflict).toBeUndefined();
+    await wait('sibling_merged', ['after_pr_41'], 'sibling:acme/docs#41');
+    const answer = await of(itemId, mine);
+    expect(answer.sibling_conflict).toEqual({ after_pr: 41 });
+    expect(activityResponseSchema.parse(answer)).toBeTruthy();
+    expect((await get(itemId, theirs)).status).toBe(404);
+    // Another waiting fact is newer, so the line is gone; a newer wake for a later merge names that one.
+    await wait('runner_daily_limit', [], 'limit:1');
+    expect((await of(itemId, mine)).sibling_conflict).toBeUndefined();
+    await wait('sibling_merged', ['after_pr_52'], 'sibling:acme/docs#52');
+    expect((await of(itemId, mine)).sibling_conflict).toEqual({ after_pr: 52 });
+    // An item no longer at a pull-request stage shows no line from the old fact.
+    await admin.query(`UPDATE work_items SET stage = 'merged' WHERE id = $1`, [itemId]);
+    expect((await of(itemId, mine)).sibling_conflict).toBeUndefined();
+  });
+
   // MQ5-c1-6 through the route and the real `mergeQueue.countAhead`: two accounts, a repository of the same name each, a different number of entries ahead in each.
   it('queue_wait: each caller\'s `ahead` counts only its own account\'s entries, and the other account\'s item answers 404', async () => {
     const accts = [await seedAccountWithMember(admin, { role: 'owner' }), await seedAccountWithMember(admin, { role: 'owner' })];

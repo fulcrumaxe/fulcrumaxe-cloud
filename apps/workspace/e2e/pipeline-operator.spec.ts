@@ -68,11 +68,13 @@ interface Mock {
   gone: Set<string>;
   /** The open item's runs (the Runs section's list read). */
   itemRuns: unknown[];
+  /** Fields laid over the board's first item (a planned PR child has no issue number and carries its parent's). */
+  item: Record<string, unknown>;
 }
 
 const activityFor = (base: Record<string, unknown>, stage: string, actions: string[], closeOnGithub = false) => ({ ...base, stage, actions, close_on_github: closeOnGithub });
 
-async function mockApi(page: Page, init: { stage: string; kind: string; activity: Reply }): Promise<Mock> {
+async function mockApi(page: Page, init: { stage: string; kind: string; activity: Reply; item?: Record<string, unknown> }): Promise<Mock> {
   const mock: Mock = {
     requests: [],
     posts: [],
@@ -84,10 +86,11 @@ async function mockApi(page: Page, init: { stage: string; kind: string; activity
     insightItem: ITEM,
     gone: new Set(),
     itemRuns: [],
+    item: init.item ?? {},
   };
   const send = (route: Route, status: number, json: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(json) }).catch(() => undefined);
   const items = () => [
-    { ...LIST.data[0], stage: mock.stage, kind: mock.kind },
+    { ...LIST.data[0], ...mock.item, stage: mock.stage, kind: mock.kind },
     ...Array.from({ length: mock.extra }, (_, i) => ({ ...LIST.data[0], id: uuidN(i + 1), issue_number: 100 + i, stage: mock.stage, kind: mock.kind })),
   ];
   await page.route((u) => u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events", async (route) => {
@@ -125,7 +128,7 @@ async function mockApi(page: Page, init: { stage: string; kind: string; activity
   return mock;
 }
 
-async function boot(page: Page, init: { stage: string; kind: string; activity: Reply }) {
+async function boot(page: Page, init: { stage: string; kind: string; activity: Reply; item?: Record<string, unknown> }) {
   const errors: string[] = [];
   const browserDialogs: string[] = [];
   page.on("console", (m) => {
@@ -157,7 +160,7 @@ async function openPipeline(page: Page, arg?: Record<string, unknown>) {
   await expect(page.locator(PIPE)).not.toHaveClass(/opening/);
 }
 
-async function setup(page: Page, init: { stage: string; kind: string; activity: Reply }) {
+async function setup(page: Page, init: { stage: string; kind: string; activity: Reply; item?: Record<string, unknown> }) {
   const env = await boot(page, init);
   await openPipeline(page);
   await expect(tid(page, "pl-card")).toHaveCount(1);
@@ -605,6 +608,68 @@ test.describe("D#7 DP8-f2: resume refusal (mocked API)", () => {
       await expectNoOverflow(page);
       expect(browserDialogs).toEqual([]);
       expect(await tt()).toEqual([]);
+      expect(errors).toEqual([]);
+    });
+  }
+});
+
+// A planned PR child has no issue number of its own and builds on its parent's: the server sends parent_issue_number for a child only, and Approve follows it.
+test.describe("planned PR child: Approve (mocked API)", () => {
+  const open = async (page: Page, item: Record<string, unknown>) => {
+    const env = await setup(page, { stage: "triaged", kind: "feature", activity: { status: 200, json: activityFor(EMPTY, "triaged", []) }, item });
+    await openDetail(page);
+    return env;
+  };
+  test("a child with a parent number gets the button, and pressing it sends the item's approve request with no body", async ({ page }) => {
+    const { errors, browserDialogs, mock, tt } = await open(page, { issue_number: null, parent_issue_number: 42 });
+    const btn = tid(page, "pl-approve-btn");
+    await expect(btn).toBeVisible();
+    await expect(btn).toBeEnabled();
+    await press(page, btn);
+    await expect(tid(page, "pl-approve-note")).toBeVisible();
+    await expect(tid(page, "pl-approve-note")).not.toContainText(/null|undefined|#/);
+    expect(mock.posts.map((p) => [p.path, p.body])).toEqual([[`/api/v1/work-items/${ITEM}/approve`, null]]);
+    await expectNoOverflow(page);
+    expect(browserDialogs).toEqual([]);
+    expect(await tt()).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+  test("a child whose parent has no issue number gets no button", async ({ page }) => {
+    const { errors, mock } = await open(page, { issue_number: null, parent_issue_number: null });
+    await expect(tid(page, "pl-approve")).toHaveCount(0);
+    await expect(tid(page, "pl-approve-btn")).toHaveCount(0);
+    expect(mock.posts).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+  test("a normal item with its own issue number is unchanged", async ({ page }) => {
+    const { errors } = await open(page, {});
+    await expect(tid(page, "pl-approve-btn")).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+});
+
+// A merge in the repository may have left this pull request conflicting: the card shows one fixed sentence with the merged pull request's number, from the server's derived field.
+test.describe("sibling conflict line (mocked API)", () => {
+  const SENTENCE = (n: number) => `Conflicts with main after #${n} merged.`;
+  for (const n of [41, 1234567]) {
+    test(`review passed / after #${n} merged: the card shows the fixed sentence`, async ({ page }) => {
+      const activity = { ...activityFor(REVIEW_PASSED, "review_passed", []), sibling_conflict: { after_pr: n } };
+      const { errors, browserDialogs, tt } = await setup(page, { stage: "review_passed", kind: "feature", activity: { status: 200, json: activity } });
+      await openDetail(page);
+      await expect(tid(page, "pl-sibling-conflict")).toHaveText(SENTENCE(n));
+      await expect(tid(page, "pl-sibling-conflict")).not.toContainText(/null|undefined|NaN/);
+      await expectNoOverflow(page);
+      expect(browserDialogs).toEqual([]);
+      expect(await tt()).toEqual([]);
+      expect(errors).toEqual([]);
+    });
+  }
+  for (const [name, field] of [["no field", undefined], ["a zero number", { after_pr: 0 }], ["a string number", { after_pr: "41" }], ["markup in the number", { after_pr: "<b>41</b>" }]] as const) {
+    test(`review passed / ${name}: no line is drawn`, async ({ page }) => {
+      const activity = { ...activityFor(REVIEW_PASSED, "review_passed", []), ...(field === undefined ? {} : { sibling_conflict: field }) };
+      const { errors } = await setup(page, { stage: "review_passed", kind: "feature", activity: { status: 200, json: activity } });
+      await openDetail(page);
+      await expect(tid(page, "pl-sibling-conflict")).toHaveCount(0);
       expect(errors).toEqual([]);
     });
   }

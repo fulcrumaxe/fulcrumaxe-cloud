@@ -1,0 +1,20 @@
+{
+  "id": "22222222-2222-4222-8222-222222222222",
+  "repo_id": "44444444-4444-4444-8444-444444444444",
+  "kind": "feature",
+  "issue_number": null,
+  "parent_issue_number": 42,
+  "title": "Add the dark mode toggle to settings",
+  "stage": "triaged",
+  "provenance": "internal",
+  "priority": "high",
+  "queue_rank": 2048,
+  "cost_usd": 7.8,
+  "own_plan_api_equivalent_usd": 0,
+  "own_plan_usage_state": "recorded",
+  "own_plan_tokens": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 },
+  "context_pct": null,
+  "created_at": "2026-09-18T11:00:00.000Z",
+  "updated_at": "2026-09-18T13:30:00.000Z",
+  "envelope": null
+}

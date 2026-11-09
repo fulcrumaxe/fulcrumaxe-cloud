@@ -2109,14 +2109,20 @@ const startedFor = (item) =>
   item.stage === "spec_ready" ? APPROVE_SENTENCES.started_build : item.stage === "discussing" ? APPROVE_SENTENCES.started_spec : item.stage === "in_progress" ? APPROVE_SENTENCES.started_check : PR_STAGES.includes(item.stage) ? APPROVE_SENTENCES.started_review : APPROVE_SENTENCES.started;
 
 /**
- * The button is offered for an internal item that has a repository and an issue number, at a stage the server can
+ * A planned PR child has no issue number of its own (it is null by design) and builds on its parent's: the server sends `parent_issue_number` for a child only. The button is
+ * offered for it when that number is a real one; a child whose parent has none (null) is not offered, as the server would refuse it.
+ */
+const hasIssue = (item) => Number.isInteger(item.issue_number) || (Number.isInteger(item.parent_issue_number) && item.parent_issue_number >= 1);
+
+/**
+ * The button is offered for an internal item that has a repository and an issue number (a planned PR child: its parent's), at a stage the server can
  * advance from, and with no run of its own live (`liveRun`). At Spec ready the item is the pipeline's root: its kind is
  * the discussion's, and a question or a project has nothing to build. At Discussing only a kind with a panel qualifies.
  * At In progress ("Check the build") and the pull-request stages the server also needs a published Spec; it answers `not_approvable` when there is none.
  */
 export function canApprove(item, liveRun = false) {
   if (liveRun === true) return false;
-  if (!item || item.provenance !== "internal" || typeof item.repo_id !== "string" || item.repo_id === "" || !Number.isInteger(item.issue_number)) return false;
+  if (!item || item.provenance !== "internal" || typeof item.repo_id !== "string" || item.repo_id === "" || !hasIssue(item)) return false;
   if (item.stage === "triaged" || item.stage === "in_progress" || PR_STAGES.includes(item.stage)) return true;
   if (item.stage === "discussing") return item.kind === "critical" || item.kind === "feature";
   return item.stage === "spec_ready" && typeof item.kind === "string" && item.kind !== "" && !NOT_BUILT.includes(item.kind);

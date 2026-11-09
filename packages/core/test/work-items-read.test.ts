@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { plannedFixture, type PlannedFixture } from '@fx/db/test/helpers/plannedChildren.js';
 import { getWorkItem, listWorkItems } from '../src/work-items/read.js';
 
 /** D#31 API-3a criteria 1-3, corrected by C10 (`stage` is D#45's `work_items.stage`): against a real Postgres cluster under `withTenant`/RLS. */
@@ -95,6 +96,47 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
       expect(Object.keys(dto).sort()).toEqual(
         ['id', 'repo_id', 'kind', 'issue_number', 'title', 'stage', 'provenance', 'priority', 'queue_rank', 'cost_usd', 'own_plan_api_equivalent_usd', 'own_plan_usage_state', 'own_plan_tokens', 'context_pct', 'created_at', 'updated_at'].sort(),
       );
+    });
+
+    // A planned PR child has no issue number of its own; the card needs its parent's to offer Approve. Present only on a child, derived on every read.
+    describe('parent_issue_number (planned PR children)', () => {
+      // The fixture builds the parent and its children the way the product does (the approval creates them; a test cannot insert a child itself).
+      const fixture = async (parentIssue: number | null) => {
+        const f = await plannedFixture(admin, appUserPool, { dial: null, weeklyUsd: null });
+        await admin.query('UPDATE work_items SET gh_number = $2 WHERE id = $1', [f.parent, parentIssue]);
+        return f;
+      };
+      const dtoOf = (f: PlannedFixture, id: string) => getWorkItem({ pool: appUserPool, principal: f.t }, id);
+
+      it("a child carries its parent's issue number, in a single read and in the list, while its own issue_number stays null", async () => {
+        const f = await fixture(77);
+        const dto = await dtoOf(f, f.kids.api!);
+        expect(dto.issue_number).toBeNull();
+        expect(dto.parent_issue_number).toBe(77);
+        const listed = await listWorkItems({ pool: appUserPool, principal: f.t }, { repoId: f.t.repoId, limit: 200 });
+        expect(listed.data.filter((w) => w.parent_issue_number !== undefined).map((w) => w.id).sort()).toEqual(Object.values(f.kids).sort());
+        expect(listed.data.find((w) => w.id === f.kids.ui)?.parent_issue_number).toBe(77);
+        expect(Object.keys(listed.data.find((w) => w.id === f.parent)!)).not.toContain('parent_issue_number');
+      });
+
+      it('is derived, not stamped: it follows the parent, and is null (key present) when the parent has no issue number or no longer links', async () => {
+        const f = await fixture(null);
+        expect(await dtoOf(f, f.kids.api!)).toHaveProperty('parent_issue_number', null);
+        await admin.query('UPDATE work_items SET gh_number = 78 WHERE id = $1', [f.parent]);
+        expect((await dtoOf(f, f.kids.api!)).parent_issue_number).toBe(78);
+        await admin.query('UPDATE work_items SET parent_id = NULL WHERE id = $1', [f.kids.api]);
+        expect(await dtoOf(f, f.kids.api!)).toHaveProperty('parent_issue_number', null);
+        expect((await dtoOf(f, f.kids.ui!)).parent_issue_number).toBe(78);
+      });
+
+      it('is absent on an item that is not a planned PR child, even one with a parent', async () => {
+        const f = await fixture(79);
+        const plain = await insertWorkItem(f.t, { ghNumber: 80, createdAt: new Date('2026-02-01T00:00:00.000Z') });
+        await admin.query('UPDATE work_items SET parent_id = $2 WHERE id = $1', [plain, f.parent]);
+        const dto = await dtoOf(f, plain);
+        expect(dto.issue_number).toBe(80);
+        expect(Object.keys(dto)).not.toContain('parent_issue_number');
+      });
     });
 
     // D#600 CX-9b: context_pct is the whole percent the item's newest RUNNING run has filled, from the warning level (70) up, else null. Derived on every read.
