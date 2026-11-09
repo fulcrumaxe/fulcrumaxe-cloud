@@ -681,6 +681,23 @@ describe("the verdict envelope across a run's lines (empty_agent_output)", () =>
     expect(buildTerminalReport(last, "s1")).toMatchObject({ status: "succeeded", envelope: { verdict: "pass" } });
   });
 
+  it("a block quoted in the middle of a message, with prose after it, is not adopted from an earlier message", async () => {
+    const quoted = "the PR body says:\n" + block("pass") + "\nI did not run anything yet, but here is my reading of it";
+    const last = await lastOf([assistant(quoted), assistant("here is my review in prose"), result("here is my review in prose")]);
+    expect(buildTerminalReport(last, "s1")).toMatchObject({ status: "failed", failureReason: "empty_agent_output", envelope: null });
+  });
+
+  it("a final message with the block followed by trailing prose is still read from that message itself", async () => {
+    const withTail = block("needs-fix") + "\n\nBackground command finished: exit 0.";
+    const last = await lastOf([assistant(withTail), result(withTail)]);
+    expect(buildTerminalReport(last, "s1")).toMatchObject({ status: "succeeded", envelope: { verdict: "needs-fix" } });
+  });
+
+  it("a block that ends its message (trailing whitespace only) is adopted after a prose-only closing turn", async () => {
+    const last = await lastOf([assistant(block("pass") + "\n  \n"), assistant("background command finished"), result("background command finished")]);
+    expect(buildTerminalReport(last, "s1")).toMatchObject({ status: "succeeded", envelope: { verdict: "pass" } });
+  });
+
   it("a subagent envelope never becomes the verdict, and never replaces or clears the main thread's", async () => {
     const only = await lastOf([assistant(block("pass"), "toolu_1"), assistant("done"), result("done")]);
     expect(buildTerminalReport(only, "s1")).toMatchObject({ status: "failed", failureReason: "empty_agent_output" });

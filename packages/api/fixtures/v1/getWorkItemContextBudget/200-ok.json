@@ -5,7 +5,7 @@
   "role_defaults": {
     "executor": 35840,
     "fix": 43008,
-    "code-reviewer": 26624,
+    "code-reviewer": 27648,
     "acceptance-tester": 27648,
     "security-reviewer": 27648,
     "debater": 34816

@@ -24,7 +24,7 @@ export type ContextBudgetRole = "executor" | "fix" | "code-reviewer" | "acceptan
 export const ROLE_CONTEXT_DEFAULTS: Readonly<Record<ContextBudgetRole, number>> = Object.freeze({
   executor: 35_840,
   fix: 43_008,
-  "code-reviewer": 26_624,
+  "code-reviewer": 27_648,
   "acceptance-tester": 27_648,
   "security-reviewer": 27_648,
   debater: 34_816,

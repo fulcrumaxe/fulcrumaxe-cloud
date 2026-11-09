@@ -321,6 +321,9 @@ const NO_VERDICT_ENDS: Readonly<Record<string, string>> = Object.freeze({
   cancelled: 'its run was cancelled',
   runner_lost: 'the runner lost contact with it',
   agent_failed: 'its agent stopped before it finished',
+  succeeded: 'it finished without giving a verdict',
+  empty_agent_output: 'it finished without giving a verdict',
+  no_verdict: 'it finished without giving a verdict',
 });
 
 /**

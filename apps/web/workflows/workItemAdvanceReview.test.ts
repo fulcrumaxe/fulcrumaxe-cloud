@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFixRequest, AdvanceItem, AdvanceRoundInput, AdvanceRunOutcome, AdvanceRunRequest, AdvanceStartArgs, DecisionStepCode, Worker } from "@fx/worker";
 import type { InstallationHttp, InstallationHttpRequest } from "@fx/github";
 import { decideRound, maxFixRounds, reviewStep } from "@fx/pipeline";
+import { noVerdictEndsBound } from "../lib/advanceReviewSteps";
 
 /**
  * D#483 P3: the advance workflow's review phase over a fake worker and a fake GitHub that answers like the real one
@@ -1732,14 +1733,35 @@ describe("reviewers that end without a verdict", () => {
     expect(stepsOf(t.started, "code-reviewer").filter((s) => s.startsWith(`review:${H1}:`))).toEqual([reviewStep(H1, "code-reviewer")]);
   });
 
-  it("a reviewer that keeps ending without a verdict is run maxFixRounds() times on the head, then the item goes to a person, named, with how it ended", async () => {
+  it("a reviewer that keeps ending without a verdict is run again ONCE on the head (two runs), then the item goes to a person, named, with how it ended", async () => {
     const t = setup(fresh({ listRuns: true, realDecide: true, verdict: (role) => (role === "code-reviewer" ? OOM : PASS) }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_no_verdict" });
-    expect(stepsOf(t.started, "code-reviewer")).toEqual(Array.from({ length: maxFixRounds() }, (_, i) => reviewStep(H1, "code-reviewer", 0, i)));
+    expect(stepsOf(t.started, "code-reviewer")).toEqual(Array.from({ length: noVerdictEndsBound() }, (_, i) => reviewStep(H1, "code-reviewer", 0, i)));
+    expect(noVerdictEndsBound()).toBe(2);
     expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
     expect(t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.find((x) => x.role === "code-reviewer")).toMatchObject({ verdict: "fail", noVerdict: true, endCode: "resource_limit" });
     expect(logs.find((l) => l.event === "advance.stopped")).toMatchObject({ reason: "reviewer_no_verdict", roles: "code-reviewer", ends: "resource_limit" });
+  });
+
+  it("the re-run's prompt names how the first run ended; the first run's prompt does not, and both say to write nothing after the block", async () => {
+    const t = setup(fresh({ listRuns: true, realDecide: true, verdict: (role) => (role === "code-reviewer" ? OOM : PASS) }));
+    await workItemAdvanceWorkflow(ARGS);
+    const prompts = t.worker.advanceStartRun.mock.calls.map((c) => c[0] as AdvanceRunRequest).filter((r) => r.role === "code-reviewer").map((r) => r.prompt);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain("gave no verdict");
+    expect(prompts[1]).toContain("Your previous run on this commit gave no verdict: it ended early (resource limit)");
+    for (const p of prompts) expect(p).toContain("write nothing after the block");
+  });
+
+  it("a run that SUCCEEDED with no verdict block is run again once, the prompt says it finished without the block, and a second such run stops with reviewer_no_verdict", async () => {
+    const NO_BLOCK = { status: "succeeded", envelope: {} };
+    const t = setup(fresh({ listRuns: true, realDecide: true, verdict: (role) => (role === "acceptance-tester" ? NO_BLOCK : PASS) }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_no_verdict" });
+    const prompts = t.worker.advanceStartRun.mock.calls.map((c) => c[0] as AdvanceRunRequest).filter((r) => r.role === "acceptance-tester").map((r) => r.prompt);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("it finished without a final verdict block");
+    expect(logs.find((l) => l.event === "advance.stopped")).toMatchObject({ reason: "reviewer_no_verdict", roles: "acceptance-tester", ends: "succeeded" });
   });
 
   it("a spending limit that denies a re-run is a pause, not a missing verdict", async () => {
@@ -1783,7 +1805,7 @@ describe("Approve after a reviewer gave up (Needs a person, reviewer_no_verdict)
   });
 
   it("a reviewer that gives up again goes back to a person, bounded by the STORED count: stored ends at the bound mean the one end in this workflow is not re-run (a workflow restarted by a spending-limit pause starts its own count at 1)", async () => {
-    const t = setup(fresh({ listRuns: true, realDecide: true, storedNoVerdict: { "code-reviewer": maxFixRounds() }, verdict: (role) => (role === "code-reviewer" ? OOM : PASS) }), HELD);
+    const t = setup(fresh({ listRuns: true, realDecide: true, storedNoVerdict: { "code-reviewer": noVerdictEndsBound() }, verdict: (role) => (role === "code-reviewer" ? OOM : PASS) }), HELD);
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_no_verdict" });
     expect(reviewerSteps(t.started, "code-reviewer")).toEqual([reviewStep(H1, "code-reviewer")]);
   });

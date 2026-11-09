@@ -15,6 +15,7 @@ Acceptance: the footer shows the year.
 Your verdict is exactly one of these three words, in lower case: "pass" (ready to merge), "needs-fix" (fixable problems: list each one so the executor can fix it), "fail" (wrong approach, or you cannot review it).
 Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.
 If you see something worth doing later that does not block this change, you may add it to an optional `follow_ups` array next to the verdict, at most 3 items of {"title":"<at most 120 characters>","why":"<at most 600 characters>"}; a problem that blocks the change is never a follow-up, it stays a finding and the verdict is "needs-fix".
+Wait for any background command to finish before your final message; write nothing after the block.
 End your final message with this block, and nothing after it:
 <!-- AGENT_OUTPUT -->
 ```json

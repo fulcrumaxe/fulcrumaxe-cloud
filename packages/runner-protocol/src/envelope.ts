@@ -31,18 +31,23 @@ const starts = (re: RegExp, text: string): { at: number; end: number }[] =>
  * on repeated whitespace).
  */
 function lastBody(text: string): string | undefined {
+  return lastBlock(text)?.body;
+}
+
+/** The last complete block: its body and where its own closing marker ends. */
+function lastBlock(text: string): { body: string; end: number } | undefined {
   const markers = starts(MARKER, text);
   const closers = starts(CLOSER, text);
   let m = 0;
   let c = 0;
-  let last: string | undefined;
+  let last: { body: string; end: number } | undefined;
   for (const { end: bodyStart } of starts(OPENER, text)) {
     while (m < markers.length && markers[m]!.at < bodyStart) m++;
     while (c < closers.length && closers[c]!.at < bodyStart) c++;
     const closer = closers[c];
     if (!closer) break;
     if (m < markers.length && markers[m]!.at < closer.at) continue;
-    last = text.slice(bodyStart, closer.at).trim();
+    last = { body: text.slice(bodyStart, closer.at).trim(), end: closer.end };
   }
   return last;
 }
@@ -62,4 +67,15 @@ export function extractAgentOutputEnvelope(text: string): Record<string, unknown
     // fx-swallow-ok: a body that is not JSON is "no envelope"; the caller rejects it
     return undefined;
   }
+}
+
+/**
+ * True when the text ends with a complete block: the last closing marker is the last non-whitespace text. The sandbox port adopts a block from an EARLIER
+ * message as the run's envelope (when the final message has none, the shape a background command's trailing turn leaves) only for such a message, so a
+ * block that was merely quoted in the middle of a message, with prose after it, is never taken for the agent's answer.
+ */
+export function endsWithEnvelopeBlock(text: string): boolean {
+  // The closing marker that counts is the LAST COMPLETE block's own: a bare closing marker typed after prose does not make an earlier quoted block "the end".
+  const block = lastBlock(text);
+  return block !== undefined && text.slice(block.end).trim() === "";
 }
