@@ -3,6 +3,7 @@ import type { CreateWorkerOptions, Worker } from "@fx/worker";
 import { runActionDeps } from "@fx/api/src/routes/run-actions.js";
 import { buildPreviewPrompt } from "@fx/pipeline";
 import { getWorker, setWorkerWiringForTests, workerConfigured } from "./worker";
+import { openVerifyHost } from "./github/planSource";
 import "../app/api/v1/[...path]/route";
 
 /**
@@ -64,5 +65,19 @@ describe("both ids present", () => {
     expect(typeof options.ports.follow).toBe("function");
     // The prompt builder is pipeline's own, by identity; the follower starter is supplied, so a preview can start once the flag is on.
     expect(options.previewPrompt).toBe(buildPreviewPrompt);
+  });
+
+  it("D#749 V3a-2: the post-merge verify stage gets the production host reader and health reader, so the pass no longer answers not_configured", async () => {
+    vi.stubEnv("VERCEL_TEAM_ID", "team_1");
+    vi.stubEnv("VERCEL_PROJECT_ID", "prj_1");
+    const { seen } = captureFactory();
+    await getWorker();
+    const stage = seen[0]!.verifyStage;
+    expect(stage).toBeDefined();
+    expect(stage!.host).toBe(openVerifyHost);
+    expect(Object.keys(stage!.host).sort()).toEqual(["commit", "mergeCommit", "relation"]);
+    expect(typeof stage!.health).toBe("function");
+    // No read-App settings in a test process: the first read is plain no answer (the stage retries), never a throw into the tick.
+    expect(await stage!.host.mergeCommit({ repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets" }, 1)).toBeNull();
   });
 });

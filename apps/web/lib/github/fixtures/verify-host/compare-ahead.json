@@ -1,0 +1,43 @@
+{
+  "url": "https://api.github.com/repos/acme/widgets/compare/3f786850e387550fdab836ed7e6dc881de23001b...dddddddddddddddddddddddddddddddddddddddd",
+  "html_url": "https://github.com/acme/widgets/compare/x",
+  "permalink_url": "https://github.com/acme/widgets/compare/acme:x...acme:y",
+  "diff_url": "https://github.com/acme/widgets/compare/x.diff",
+  "patch_url": "https://github.com/acme/widgets/compare/x.patch",
+  "base_commit": {
+    "sha": "3f786850e387550fdab836ed7e6dc881de23001b",
+    "parents": []
+  },
+  "merge_base_commit": {
+    "sha": "3f786850e387550fdab836ed7e6dc881de23001b",
+    "parents": []
+  },
+  "status": "ahead",
+  "ahead_by": 2,
+  "behind_by": 0,
+  "total_commits": 2,
+  "commits": [
+    {
+      "sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "parents": [
+        {
+          "sha": "3f786850e387550fdab836ed7e6dc881de23001b"
+        }
+      ],
+      "commit": {
+        "message": "first"
+      }
+    }
+  ],
+  "files": [
+    {
+      "sha": "1111111111111111111111111111111111111111",
+      "filename": "file1.txt",
+      "status": "added",
+      "additions": 103,
+      "deletions": 21,
+      "changes": 124,
+      "patch": "@@ -132,7 +132,7 @@ module Test"
+    }
+  ]
+}

@@ -3,8 +3,9 @@ import { platformOpsPool } from "@fx/api/src/sse/pools.js";
 import type { PlanImportDeps } from "@fx/api/src/routes/plan.js";
 import { createPlanReadClient, createPlanSourceFactory, createRepoInstallationResolver, loadAppCredentials, readRepoHead, readRepoInstructionFile, type PlanReadDeps, type PlanReadTarget, type PlanSourceShape } from "@fx/github";
 import { fileReaderFromContents } from "@fx/pipeline";
-import type { VerifyRepoReader } from "@fx/worker";
+import type { VerifyHostPort, VerifyRepoReader } from "@fx/worker";
 import type { RepoFileRead } from "@fx/core/src/memory/repoFileSweep.js";
+import { createVerifyHost } from "./verifyHost";
 import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/api/gh-proxy/[...path]/handler";
 
 /**
@@ -53,3 +54,10 @@ export const readRepoFileForImport: RepoFileRead = async (job) => {
   const commit = (await readRepoHead(client, repo)).sha;
   return { commit, file: await readRepoInstructionFile(client, repo, job.path, commit) };
 };
+
+/**
+ * D#749 V3a-2: the post-merge verify stage's host reader (a merged pull request's commit, a commit's parents, how two commits relate), on the same read-only client
+ * and the same read-App credentials as the plan import. The client is built on the first read, so a deployment without the credentials answers "no answer" (which the stage retries),
+ * never an error at load or in the tick.
+ */
+export const openVerifyHost: VerifyHostPort = createVerifyHost(planReadDeps);
