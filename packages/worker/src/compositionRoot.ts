@@ -221,7 +221,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
+export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate" | "wakeConflictingSiblings">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
   registry: ExecutionTargetRegistry;
   /** D#2 H14c-3-2d-2: resolves one run's card, model, limits, sandbox timeout and spend facts, or refuses with a fixed reason. Starts nothing. */
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
@@ -568,6 +568,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       sweepRunHandoffs: runHandoffs.sweepRunHandoffs,
       sweepParkedStages: stageResume.sweepParkedStages,
       wakeMergeGate: gateReask.wakeMergeGate,
+      wakeConflictingSiblings: gateReask.wakeConflictingSiblings,
       sweepSetupRequestChecks,
       approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal, ...(afterReceipt ? { afterReceipt } : {}), ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}), ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}) }),
       requestReversal: (input) => requestReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { receiptId: input.receiptId, ...(input.confirmEstimateUsd === undefined ? {} : { confirmEstimateUsd: input.confirmEstimateUsd }) }),
@@ -671,6 +672,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
       sweepInvariants: runInvariants,
       sweepParkedStages,
       wakeMergeGate,
+      wakeConflictingSiblings,
       sweepSetupRequestChecks,
       answerDecisionAsk,
       requestReversal,
@@ -767,6 +769,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         sweepInvariants: runInvariants,
         sweepParkedStages,
         wakeMergeGate,
+        wakeConflictingSiblings,
         sweepSetupRequestChecks,
         answerDecisionAsk,
         requestReversal,

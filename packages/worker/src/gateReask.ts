@@ -7,6 +7,7 @@ import { stageApprovalGate, type StageGateEntry } from "@fx/core/src/work-items/
 import { TRANSIENT_GATE_REASONS } from "@fx/core/src/work-items/stalled.js";
 import { reportError } from "@fx/telemetry";
 import type { AdvanceStartArgs } from "./advance.js";
+import { createSiblingConflictWake } from "./siblingConflictWake.js";
 
 /**
  * The merge gate asks itself again. A pull request that is not open yet, or whose checks have not finished, makes the gate answer `ready_human_merges` with a
@@ -152,7 +153,8 @@ export function createGateReask(runnerPool: Pool, deps: GateReaskDeps) {
     }
     return started;
   }
-  return { wakeMergeGate };
+  // A merge in the repository wakes its other open pull requests that now conflict (siblingConflictWake.ts).
+  return { wakeMergeGate, ...createSiblingConflictWake(runnerPool, deps) };
 }
 
 export type GateReask = ReturnType<typeof createGateReask>;
