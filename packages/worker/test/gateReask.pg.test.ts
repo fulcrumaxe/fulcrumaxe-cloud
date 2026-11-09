@@ -103,7 +103,7 @@ describe("the merge gate re-ask [pg]", { timeout: 60_000 }, () => {
   });
 
   it("a stop that is not transient is never re-asked: only a person's merge setting is left, or something that still blocks", async () => {
-    for (const reasons of [["auto_merge_not_allowed"], ["human_merge_only"], ["head_sha_malformed"], ["ci_not_green", "merge_conflict"], ["a_code_nobody_has_heard_of"]]) {
+    for (const reasons of [["auto_merge_not_allowed"], ["human_merge_only"], ["head_sha_malformed"], ["ci_not_green", "merge_conflict"], ["ci_not_green", "no_branch_protection"], ["a_code_nobody_has_heard_of"]]) {
       const { a, w } = await atGate({ reasons });
       const started: AdvanceStartArgs[] = [];
       expect((await ask(started, w, a.accountId)).started, reasons.join()).toBe(false);

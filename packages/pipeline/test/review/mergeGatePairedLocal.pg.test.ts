@@ -211,6 +211,71 @@ describe("a paired runner_local item: the gate judges the public pull request", 
     expectNoMergeAnywhere(open);
   });
 
+  it("CI that is still running is ci_not_green ALONE, so the checks finishing re-asks the gate; no CI at all, only skipped checks, or a failed one, still carry repo_ci_missing", async () => {
+    for (const checks of [[{ name: "build", status: "in_progress", conclusion: null }], [{ name: "build", status: "queued", conclusion: null }]]) {
+      const w = await world({ pub: { checks: { [PUB_HEAD]: checks } } });
+      expect(reasons(await gate(w)), JSON.stringify(checks)).toEqual(["ci_not_green"]);
+    }
+    for (const checks of [[], [{ name: "build", status: "completed", conclusion: "skipped" }], [{ name: "build", status: "completed", conclusion: "failure" }]]) {
+      const w = await world({ pub: { checks: { [PUB_HEAD]: checks } } });
+      expect(reasons(await gate(w)), JSON.stringify(checks)).toContain("repo_ci_missing");
+    }
+  });
+
+  describe("a code repository guarded by a ruleset (and a merge queue) instead of a classic protection rule", () => {
+    const ruleset = { pub: { protectedWithoutChecks: false, rulesetRules: [{ type: "pull_request", enforcement: "active" }] } };
+
+    it("is protected: the stop is the cloud's own merge reason, never no_branch_protection, and the ruleset was read through A11", async () => {
+      const w = await world({ ...ruleset, queue: { graphql: true, rules: true } });
+      expect(reasons(await gate(w))).toEqual(["runner_merge_unavailable"]);
+      expect(w.pubLocal.calls.map((c) => c.label)).toContain("A11");
+      expect(w.pubLocal.denied).toEqual([]);
+      expectNoMergeAnywhere(w);
+    });
+
+    it("and with the order phase wired, a green public pull request is handed to the runner with no person step (the head to merge is the public one)", async () => {
+      const w = await world({ ...ruleset, queue: { graphql: true, rules: true } });
+      const { run, calls, contexts } = delegating(w, { queueDocuments: true });
+      expect(await run()).toMatchObject({ outcome: "merge_delegated", headSha: PUB_HEAD, reasons: [] });
+      expect(calls).toEqual([{ accountId: w.accountId, workItemId: w.workItemId, sha: PUB_HEAD, reviewedHead: HEAD }]);
+      expect(contexts).toEqual([{ mergeMode: "queue" }]);
+      expectNoMergeAnywhere(w);
+    });
+
+    it("a ruleset that is not active, or that only forbids deletion, is not protection", async () => {
+      for (const rules of [[{ type: "pull_request", enforcement: "evaluate" }], [{ type: "deletion", enforcement: "active" }], []]) {
+        const w = await world({ pub: { protectedWithoutChecks: false, rulesetRules: rules } });
+        expect(reasons(await gate(w)), JSON.stringify(rules)).toEqual(["no_branch_protection"]);
+      }
+    });
+
+    it("a check the ruleset requires that the head has not reported is ci_not_green, and once it reports the gate passes", async () => {
+      const required = { type: "required_status_checks", enforcement: "active", parameters: { required_status_checks: [{ context: "e2e" }] } };
+      const missing = await world({ pub: { protectedWithoutChecks: false, rulesetRules: [required] } });
+      expect(reasons(await gate(missing))).toEqual(["ci_not_green"]);
+      const reported = await world({ pub: { protectedWithoutChecks: false, rulesetRules: [required], checks: { [PUB_HEAD]: [green, { name: "e2e", status: "completed", conclusion: "success" }] } } });
+      expect(reasons(await gate(reported))).toEqual(["runner_merge_unavailable"]);
+    });
+
+    it("CI still running with a ruleset in place is ci_not_green ALONE: the one reason that time clears", async () => {
+      const w = await world({ pub: { ...ruleset.pub, checks: { [PUB_HEAD]: [{ name: "build", status: "in_progress", conclusion: null }] } }, queue: { graphql: true, rules: true } });
+      expect(reasons(await gate(w))).toEqual(["ci_not_green"]);
+    });
+
+    it("a rules read that fails is a throw (the step's retry): it is never read as unprotected, which would be a lasting stop for a failure that passes", async () => {
+      const w = await world({ ...ruleset, queue: { graphql: true, rules: true, fail: true } });
+      await expect(gate(w)).rejects.toThrow("GitHub branch rules");
+      expectNoMergeAnywhere(w);
+    });
+
+    it("an UNPAIRED runner_local repository is unchanged: its ruleset stays invisible, no rules read is made, and it reads as unprotected", async () => {
+      const w = await world({ pairing: false, priv: { protectedWithoutChecks: false, rulesetRules: [{ type: "pull_request", enforcement: "active" }] } });
+      const out = await gate(w);
+      expect(reasons(out)).toContain("no_branch_protection");
+      expect(w.privLocal.calls.map((c) => c.label)).not.toContain("A11");
+    });
+  });
+
   it("the opt-in off: local_review_not_enabled, no status, and the merge reason does not hide it", async () => {
     const w = await world();
     const out = await gate(w, { optIn: off });
@@ -890,12 +955,12 @@ describe("a paired item and the merge queue: the mode is read on the public repo
     expect(w.pubLocal.denied).toEqual([]);
   });
 
-  it("a direct repository: the delegate is told direct; a queue read that fails is merge_queue_unreadable and the delegate is not called", async () => {
+  it("a direct repository: the delegate is told direct; a queue read that is unreadable is merge_queue_unreadable and the delegate is not called (a failing rules read throws before the gate answers: see the ruleset tests)", async () => {
     const direct = await world({ queue: { graphql: false, rules: false } });
     const a = delegating(direct, { queueDocuments: true });
     expect(await a.run()).toMatchObject({ outcome: "merge_delegated" });
     expect(a.contexts).toEqual([{ mergeMode: "direct" }]);
-    for (const queue of [{ graphql: true, rules: false }, { graphql: false, rules: true }, { graphql: true, rules: true, fail: true }]) {
+    for (const queue of [{ graphql: true, rules: false }, { graphql: false, rules: true }]) {
       clearMergeQueueModeCache();
       const w = await world({ queue });
       const b = delegating(w, { queueDocuments: true });

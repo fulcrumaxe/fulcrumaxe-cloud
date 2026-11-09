@@ -15,7 +15,7 @@ import { defaultGhId, fakeCompletedAt, type FakeRepoState } from "./fakeGitHubRe
  *   - GraphQL: the query text must equal one of the fixed documents byte for byte, errors come as status 200 with `errors`, and the
  *     check state is one connection (`statusCheckRollup.contexts`) paged 100 at a time with a cursor, in GitHub's upper-case enums;
  *   - the files document returns paths and change types, never a `patch` (a test asserts no answer carries one);
- *   - branch protection is the classic rule only: a ruleset is invisible through this allowlist (`rulesetRules` is ignored on purpose);
+ *   - branch protection: the classic rule (A8) and, for a code repository client only, the branch rules (A11, `rulesetRules` plus the queue state's merge_queue); a repository client that does not read A11 never sees a ruleset;
  *   - statuses, the merge and the pull request list answer as the REST fake does (40-hex sha, state enum, 140-character description,
  *     409 on a moved head, merged_at set after a merge).
  *
@@ -290,7 +290,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
         for (const k of Object.keys(query)) if (!["per_page", "page"].includes(k)) deny(`A11 query key ${k}`);
         if (req.body !== undefined) deny("A11 body");
         label = "A11";
-        reply = () => (opts.queue?.fail ? json(500, { message: "Server Error" }) : json(200, opts.queue?.rules ? [{ type: "merge_queue", parameters: { max_entries_to_build: 5 } }] : [{ type: "pull_request", parameters: {} }]));
+        reply = () => (opts.queue?.fail ? json(500, { message: "Server Error" }) : json(200, [...(opts.queue?.rules ? [{ type: "merge_queue", parameters: { max_entries_to_build: 5 } }] : []), ...(s.rulesetRules ?? [])]));
       } else if (method === "GET" && path === `${base}/pulls`) {
         if (req.body !== undefined) deny("body on GET");
         label = "A3";

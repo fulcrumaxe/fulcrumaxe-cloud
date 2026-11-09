@@ -105,6 +105,20 @@ describe('D#598 P8c-2b: merge-ready list', () => {
     expect(Number.isNaN(Date.parse(row.since))).toBe(false);
   });
 
+  it('a paired item is listed on its PUBLIC pull request (the one a person merges): the number and the link are the code repository\'s, not the private draft\'s; a closed or merged public pull request falls back to the item\'s own', async () => {
+    const f = await fixture();
+    const id = await item(f.refs, 'Paired item');
+    await gate(f.refs, id, { pr: 764 });
+    await admin.query(`INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'example-org/example-public', ARRAY['.autonomous-team/**'])`, [f.refs.repoId, f.refs.accountId]);
+    await admin.query(
+      `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, pr_number, pr_url) VALUES ($1, $2, $3, 'example-org/example-public', $4, 'pr_opened', $5, $5, 826, 'https://github.com/example-org/example-public/pull/826')`,
+      [f.refs.accountId, id, f.refs.repoId, 'a'.repeat(64), 'c'.repeat(40)],
+    );
+    expect((await read(f.member)).items[0]).toMatchObject({ pr_number: 826, pr_url: 'https://github.com/example-org/example-public/pull/826' });
+    await admin.query(`UPDATE plane_pushes SET state = 'pr_merged' WHERE work_item_id = $1`, [id]);
+    expect((await read(f.member)).items[0]).toMatchObject({ pr_number: 764, pr_url: 'https://github.com/example-org/example-repo/pull/764' });
+  });
+
   it('D#694 B6-3: an item waiting in the merge queue of GitHub is not "ready for you to merge", even with an older ready answer; it is listed again after a removal', async () => {
     const f = await fixture();
     const id = await item(f.refs, 'Queued by hand');
