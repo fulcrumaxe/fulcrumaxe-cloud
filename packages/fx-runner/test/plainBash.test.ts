@@ -57,7 +57,9 @@ describe("C44-5: plain Bash in the role tables", () => {
     // S4-f4: so is the discovery analyst (the same three, the same confinement).
     expect(roleToolsFor("proposal-verifier")).toEqual(["Read", "Glob", "Grep"]);
     expect(roleToolsFor("discovery-analyst")).toEqual(["Read", "Glob", "Grep"]);
-    const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !(PLAIN_BASH_ROLES as readonly string[]).includes(role) && role !== "proposal-verifier" && role !== "discovery-analyst");
+    // D#749 V2a: the deploy verifier holds the same three for now (no Bash, no Edit, no Write); the browser tools arrive with the runner side.
+    expect(roleToolsFor("deploy-verifier")).toEqual(["Read", "Glob", "Grep"]);
+    const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !(PLAIN_BASH_ROLES as readonly string[]).includes(role) && role !== "proposal-verifier" && role !== "discovery-analyst" && role !== "deploy-verifier");
     expect(others.length).toBeGreaterThan(0);
     for (const role of others) {
       const tools = roleToolsFor(role);

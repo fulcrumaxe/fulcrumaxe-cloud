@@ -26,6 +26,8 @@ export * from "./contextSpill.js";
 export * from "./contextLevers.js";
 export * from "./excludeRules.js";
 export * from "./verifierGuard.js";
+export * from "./deployVerifier.js";
+export * from "./deployOrder.js";
 export * from "./wake.js";
 export * from "./pinRules.js";
 export * from "./acceptanceScope.js";

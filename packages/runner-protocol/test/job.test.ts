@@ -82,7 +82,8 @@ describe("job schema", () => {
     // D#483 S4-b2c: and the claim verifier.
     expect(RUNNER_ELIGIBLE_ROLES).toContain("proposal-verifier");
     expect(RUNNER_ELIGIBLE_ROLES).toContain("discovery-analyst");
-    expect(RUNNER_ELIGIBLE_ROLES).toHaveLength(15);
+    expect(RUNNER_ELIGIBLE_ROLES).toHaveLength(16);
+    expect(RUNNER_ELIGIBLE_ROLES).toContain("deploy-verifier");
     for (const role of ["researcher", "browser-tester", "root", ""]) {
       expect(JobSchema.safeParse(sampleJob({ role })).success, role).toBe(false);
     }
@@ -241,9 +242,9 @@ describe("job.review (D#6 R4d-4a, C33)", () => {
     expect(Object.keys(JOB_CLASS_BY_ROLE).sort()).toEqual([...RUNNER_ELIGIBLE_ROLES].sort());
   });
 
-  it("C43-2a: executor, acceptance-tester and code-reviewer are heavy, the other twelve (the claim verifier and the discovery analyst included) are light, an unknown role is heavy", () => {
+  it("C43-2a: executor, acceptance-tester and code-reviewer are heavy, and so is the deploy verifier (a browser job counts as heavy), the other twelve (the claim verifier and the discovery analyst included) are light, an unknown role is heavy", () => {
     const heavy = RUNNER_ELIGIBLE_ROLES.filter((r) => jobClassOfRole(r) === "heavy");
-    expect([...heavy].sort()).toEqual(["acceptance-tester", "code-reviewer", "executor"]);
+    expect([...heavy].sort()).toEqual(["acceptance-tester", "code-reviewer", "deploy-verifier", "executor"]);
     expect(RUNNER_ELIGIBLE_ROLES.filter((r) => jobClassOfRole(r) === "light")).toHaveLength(12);
     // Live OOM 10-24: a code-reviewer run (it runs the affected test suites) was killed at the 2 GB light budget. It must stay heavy.
     expect(jobClassOfRole("code-reviewer")).toBe("heavy");

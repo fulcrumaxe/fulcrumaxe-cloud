@@ -17,6 +17,7 @@ export const COVERED: Record<string, string> = {
   "wake.token": ENVELOPE,
   "wake.transport": ENVELOPE,
   merge_order: ENVELOPE,
+  deploy_order: ENVELOPE,
   retry_after: ENVELOPE,
   "signed_job.signature": ENVELOPE,
   "signed_job.job": CONTAINER,

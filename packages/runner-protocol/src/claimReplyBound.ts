@@ -71,7 +71,7 @@ export function claimReplyBytes(reply: unknown): number {
 
 /**
  * The size of the claim reply a signed job would travel in, with the fields the job does not fix taken at their largest: the lease generation (a safe
- * integer), a wake grant (its longest token and transport) and the merge-order flag. A job whose reply is over the budget even so is not issued.
+ * integer), a wake grant (its longest token and transport) and the merge-order and deploy-order flags. A job whose reply is over the budget even so is not issued.
  */
 export function worstCaseClaimReplyBytes(signedJob: unknown, runId: string): number {
   return claimReplyBytes({
@@ -80,5 +80,6 @@ export function worstCaseClaimReplyBytes(signedJob: unknown, runId: string): num
     lease_generation: Number.MAX_SAFE_INTEGER,
     wake: { token: "a".repeat(WAKE_TOKEN_MAX_LENGTH), poll_s: Number.MAX_SAFE_INTEGER, transport: "a".repeat(32) },
     merge_order: true,
+    deploy_order: true,
   });
 }

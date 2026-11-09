@@ -20,6 +20,7 @@
  *    later PR; its replies are fixed here so the runner client has one set.
  */
 import { z } from "zod";
+import { DeployOrderClaimReply, DeployOrderReportReply } from "./deployOrder.js";
 import { SignedJobSchema } from "./job.js";
 import { pairingDigest } from "./pairingDigest.js";
 import { WakeGrant } from "./wake.js";
@@ -55,8 +56,14 @@ const wake = WakeGrant.optional();
 /** D#6 PUBLIC-MERGE PR2a: `merge_order` is only ever true: a merge order waits for this runner. Sent only to a runner whose latest hello listed `plane_merge_v1` (the same gating as `wake`). */
 const mergeOrder = z.literal(true).optional();
 
+/**
+ * D#749 V2a: `deploy_order` is only ever true: a deploy order waits for this runner (deployOrder.ts). Sent only to a runner whose latest hello listed `deploy_order_v1`, the same gating as `merge_order`.
+ * The runner then calls deploy-order-claim; the claim reply carries no order of its own.
+ */
+const deployOrder = z.literal(true).optional();
+
 /** Nothing for this runner to do right now. */
-export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder }).strict();
+export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder, deploy_order: deployOrder }).strict();
 export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
 
 /**
@@ -64,7 +71,7 @@ export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
  * later write with it. `run_id` repeats the signed job's own so a runner can key on it before it opens the job.
  */
 export const ClaimedReply = z
-  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake, merge_order: mergeOrder })
+  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake, merge_order: mergeOrder, deploy_order: deployOrder })
   .strict()
   .refine((reply) => reply.signed_job.job.run_id === reply.run_id, { message: "run_id must be the signed job's run" });
 export type ClaimedReply = z.infer<typeof ClaimedReply>;
@@ -316,6 +323,8 @@ export const RUNNER_REPLIES = {
   plane_merge_verify: PlaneMergeVerifyReply,
   plane_merge_report: PlaneMergeReportReply,
   plane_merge_retry: PlaneMergeRetryReply,
+  deploy_order_claim: DeployOrderClaimReply,
+  deploy_order_report: DeployOrderReportReply,
   events: EventsReply,
   stop: StopReply,
   seq_not_increasing: SeqNotIncreasingReply,
