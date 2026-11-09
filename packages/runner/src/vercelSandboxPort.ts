@@ -4,7 +4,7 @@ import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
 import { contextWindowTokensFor, type ModelId } from "@fx/spend";
-import { CLI_MODEL_NAMES, CONTEXT_WARN_PCT, ContextLedgerCapture, extractAgentOutputEnvelope, contextPct, contextSpillWrites, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
+import { CLI_MODEL_NAMES, CONTEXT_WARN_PCT, ContextLedgerCapture, endsWithEnvelopeBlock, extractAgentOutputEnvelope, contextPct, contextSpillWrites, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
 import {
   DETECT_NONE,
   DETECT_NPM,
@@ -1226,7 +1226,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         ledger.observe(parsed);
         const event = dropInvalidUsage(normalizeMessage({ ...opts, backend: backend.name }, parsed, seq++, opts.workdir), reportInvalid);
         const text = event.type === "assistant" || parsed.type === "result" ? event.text : undefined;
-        if (parsed.parent_tool_use_id == null && typeof text === "string" && ENVELOPE_MARKER.test(text)) {
+        if (parsed.parent_tool_use_id == null && typeof text === "string" && ENVELOPE_MARKER.test(text) && endsWithEnvelopeBlock(text)) {
           const found = extractAgentOutputEnvelope(text);
           lastEnvelope = found?.verdict === "checkpoint" ? undefined : found;
         }

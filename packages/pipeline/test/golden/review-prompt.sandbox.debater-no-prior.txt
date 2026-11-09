@@ -14,6 +14,7 @@ Acceptance: the footer shows the year.
 
 Your verdict is exactly one of these three words, in lower case: "pass" (ready to merge), "needs-fix" (fixable problems: list each one so the executor can fix it), "fail" (wrong approach, or you cannot review it).
 Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.
+Wait for any background command to finish before your final message; write nothing after the block.
 End your final message with this block, and nothing after it:
 <!-- AGENT_OUTPUT -->
 ```json

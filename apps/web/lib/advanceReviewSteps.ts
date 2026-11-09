@@ -207,6 +207,13 @@ export async function reviewRunsBody(worker: ReviewWorker | null, who: StepWho, 
   return (await worker.advanceReviewRuns(who, { headSha, rereview })).map((r) => ({ role: r.role, runId: r.runId }));
 }
 
+/**
+ * A reviewer whose run ends without a verdict is run again ONCE, with the reason named in its prompt: the second such end stops the round (`reviewer_no_verdict`).
+ * Never more than the fix-round limit, so a plan that allows fewer still wins.
+ */
+export const NO_VERDICT_ENDS_BOUND = 2;
+export const noVerdictEndsBound = (): number => Math.min(NO_VERDICT_ENDS_BOUND, maxFixRounds());
+
 export interface RerunOut {
   /** Start the reviewer again, under `attempt`. False: its runs on this head have ended without a verdict `bound` times (or no safe key is known). */
   rerun: boolean;
@@ -216,15 +223,14 @@ export interface RerunOut {
 
 /**
  * A reviewer's run on this head ended without a verdict (`ends` such ends so far in this review). It is started again, under the attempt after the highest one
- * any of its keys on this head and round has (so the new key is never an existing run's), until it has ended that way as many times as an item gets fix rounds
- * (`maxFixRounds()`, the escalation's own bound). Without the worker's run listing no safe key is known, and it is not started again.
+ * any of its keys on this head and round has (so the new key is never an existing run's), until it has ended that way twice (`noVerdictEndsBound()`: one re-run). Without the worker's run listing no safe key is known, and it is not started again.
  *
  * The count is the larger of `ends` (this workflow's own) and the STORED ends the worker counts (`noVerdictEnds`: the role's runs on this head that ended with no
  * verdict, since the item's last `reviewer_no_verdict` escalation). The stored count is what a workflow that restarted (a spending-limit pause resumed it, so `ends`
  * began again at 1) cannot lose. It starts again only after a person's Approve at Needs a person: that is the one way past the escalation.
  */
 export async function reviewRerunBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number, role: string, ends: number): Promise<RerunOut> {
-  const bound = maxFixRounds();
+  const bound = noVerdictEndsBound();
   if (!worker || typeof worker.advanceReviewRuns !== "function" || !REVIEW_ROLES.includes(role) || ends >= bound) return { rerun: false, attempt: 0, bound };
   const mine = (await worker.advanceReviewRuns(who, { headSha, rereview })).find((r) => r.role === role);
   if ((mine?.noVerdictEnds ?? 0) >= bound) return { rerun: false, attempt: 0, bound };
@@ -249,6 +255,7 @@ export async function startReviewerBody(
   rereview = 0,
   attempt = 0,
   delta?: DeltaReviewInput,
+  retryReason?: string,
 ): Promise<StartedReviewer> {
   if (!worker) return { role, runId: null, reason: "worker_unavailable" };
   if (!REVIEW_ROLES.includes(role)) return { role, runId: null, reason: "invalid_input" };
@@ -281,6 +288,7 @@ export async function startReviewerBody(
       runtime: promptRuntimeOf(ctx.executionMode, role),
       round: (ctx.fixRoundsStarted ?? 0) + 1,
       ...(delta !== undefined ? { delta } : role === "debater" ? { prior: priorSummaries } : {}),
+      ...(retryReason !== undefined ? { retryReason } : {}),
     });
   } catch (err) {
     if (err instanceof ReviewPromptInputError) return { role, runId: null, reason: `bad_${err.field.toLowerCase()}` };

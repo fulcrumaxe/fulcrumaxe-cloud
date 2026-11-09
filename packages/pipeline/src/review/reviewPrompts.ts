@@ -82,6 +82,11 @@ export interface ReviewPromptInput {
   round?: number;
   /** D#519 MQ3-b-2: absent is the review this prompt always was, byte for byte. Present: a delta review (see `DeltaReviewInput`); `prior` must be absent. */
   delta?: DeltaReviewInput;
+  /**
+   * A re-run of a reviewer whose earlier run on this commit ended without a verdict: how that run ended, as a fixed code (`^[a-z][a-z0-9_]{0,39}$`; anything else is
+   * refused). The prompt names the reason so the reviewer knows what to avoid. Absent is a first run, whose text is unchanged.
+   */
+  retryReason?: string;
 }
 
 /** From this review round on, the security reviewer is told to step back from finding instances one by one. */
@@ -110,7 +115,23 @@ const JOBS: Record<ReviewPromptRole, string> = {
 const ENV_FAILURE_LINE =
   'If you could not run the tests at all (the test command would not start, or a tool it needs was refused), do not guess at a verdict on the code: set "environment_failure" to true in the envelope, use the verdict "fail", and say in `summary` which command did not start. A test that ran and failed is not this: that is a code problem, so use "needs-fix".';
 
+const RETRY_REASON_RE = /^[a-z][a-z0-9_]{0,39}$/;
+
+/** The line a re-run gets: the reason is a fixed code, never model text, and it is put in words by the code that names it. */
+export function retryLine(reason: string): string {
+  const how =
+    reason === "succeeded" || reason === "no_verdict" || reason === "missing" || reason === "empty_agent_output"
+      ? "it finished without a final verdict block"
+      : `it ended early (${reason.replaceAll("_", " ")})`;
+  return `Your previous run on this commit gave no verdict: ${how}. Review again and end with the verdict block below as the last thing in your final message. If a command you started is still running, wait for it before you write that message.`;
+}
+
+/** Said in every review prompt, above the block: the trailing-turn shape (a background command ending after the block) is what left runs without a verdict. */
+export const FINAL_MESSAGE_LINE =
+  "Wait for any background command to finish before your final message; write nothing after the block.";
+
 function checkReviewInput(i: ReviewPromptInput): void {
+  if (i.retryReason !== undefined && !RETRY_REASON_RE.test(i.retryReason)) throw new ReviewPromptInputError("retryReason");
   if (!NAME_RE.test(i.owner)) throw new ReviewPromptInputError("owner");
   if (!NAME_RE.test(i.name)) throw new ReviewPromptInputError("name");
   if (!Number.isSafeInteger(i.issue) || i.issue <= 0) throw new ReviewPromptInputError("issue");
@@ -221,6 +242,8 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
         "Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.",
         ...(role === "debater" ? [] : [REVIEWER_FOLLOW_UPS_LINE]),
         ...(role === "acceptance-tester" ? [UNVERIFIABLE_LINE] : []),
+        ...(input.retryReason !== undefined ? [retryLine(input.retryReason)] : []),
+        FINAL_MESSAGE_LINE,
         ...agentOutputBlock(example),
       ].join("\n"),
     });
@@ -243,6 +266,8 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
       "Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.",
       ...(role === "debater" ? [] : [REVIEWER_FOLLOW_UPS_LINE]),
       ...(role === "acceptance-tester" ? [UNVERIFIABLE_LINE] : []),
+      ...(input.retryReason !== undefined ? [retryLine(input.retryReason)] : []),
+      FINAL_MESSAGE_LINE,
       ...agentOutputBlock(example),
     ].join("\n"),
   });

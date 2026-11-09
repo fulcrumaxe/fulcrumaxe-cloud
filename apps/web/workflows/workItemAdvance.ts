@@ -423,9 +423,10 @@ export async function advanceStartReviewerStep(
   prior: Array<{ role: string; runId: string }>,
   rereview = 0,
   attempt = 0,
+  retryReason?: string,
 ): Promise<StartedReviewer> {
   "use step";
-  return startReviewerBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, role, prior, rereview, attempt);
+  return startReviewerBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, role, prior, rereview, attempt, undefined, retryReason);
 }
 
 /** D#483 S5-k1d: the reviewer runs of this head and re-review round that really started, so a restarted review asks only for the roles that have none. */
@@ -1390,8 +1391,8 @@ async function waitForReviewer(args: AdvanceStartArgs, role: string, firstRunId:
 
 /**
  * One reviewer, waited for until it gives a verdict. A run that ends without one (killed at a memory limit, a lost runner, cancelled, out of time) is never
- * used as a verdict: the reviewer is started again on the same head under a new attempt key, until its runs have ended that way as many times as the
- * re-run step allows (the fix-round limit). Then the entry goes back marked `noVerdict` and the round hands the item to a person. A spending limit that
+ * used as a verdict: the reviewer is started again on the same head under a new attempt key, until its runs have ended that way twice (one re-run, `noVerdictEndsBound()`; or
+ * fewer, when the fix-round limit is lower). Then the entry goes back marked `noVerdict` and the round hands the item to a person. A spending limit that
  * denies a re-run is a pause, like any reviewer start's.
  */
 async function reviewUntilVerdict(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, role: string, firstRunId: string, prior: Array<{ role: string; runId: string }>, rereview: number, attemptOf: Map<string, number>): Promise<{ verdict: Verdict; pause: { pause: string; attempt: number } | null } | { end: Result }> {
@@ -1406,7 +1407,7 @@ async function reviewUntilVerdict(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { 
       await advanceLogStep("advance.review_no_verdict", { work_item_id: workItemId, role, run_id: v.runId, reason: v.endCode, ends });
       return { verdict: v, pause: null };
     }
-    const again = await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, next.attempt);
+    const again = await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, next.attempt, v.endCode ?? "no_verdict");
     const pause = pauseOf(again.reason);
     if (pause !== null) {
       await waitOnHead(args, "review", pause, next.attempt, pr, rereview);

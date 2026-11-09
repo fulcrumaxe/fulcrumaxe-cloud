@@ -498,7 +498,7 @@ describe("the budget controller, per role and per item (D#600 CX-12)", () => {
     wrapped.log = call.log;
     return { s, call: wrapped };
   }
-  const ROLES = { executor: 35840, fix: 43008, "code-reviewer": 26624, "acceptance-tester": 27648, "security-reviewer": 27648, debater: 34816 };
+  const ROLES = { executor: 35840, fix: 43008, "code-reviewer": 27648, "acceptance-tester": 27648, "security-reviewer": 27648, debater: 34816 };
 
   it("the repository view offers the repository and each role as levels, each with its own bounds, and names where every number comes from", async () => {
     const { call } = repoWorld({ repo: 20000, roles: { executor: 8192 } });
