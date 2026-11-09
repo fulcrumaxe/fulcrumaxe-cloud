@@ -18,6 +18,8 @@ export type VerifyRowStatus = (typeof VERIFY_ROW_STATUSES)[number];
 export const FINISHED_STATUSES: readonly VerifyRowStatus[] = ['verified', 'failed', 'unverified'];
 export const VERIFY_METHODS = ['chrome_runner', 'playwright_runner', 'playwright_sandbox'] as const;
 export type VerifyMethod = (typeof VERIFY_METHODS)[number];
+/** The methods whose verified rows count toward the streak: the runner's own browser, by either driver. `playwright_sandbox` is not one of them. */
+export const GATE_METHODS: readonly VerifyMethod[] = ['chrome_runner', 'playwright_runner'];
 /** The closed reasons a row ends `unverified` (the table's check names the same list; a test holds them equal). */
 export const VERIFY_REASON_CODES = [
   'no_browser', 'chrome_not_connected', 'wrong_account', 'sign_in_refused', 'deploy_failed', 'deployment_unreachable',
@@ -98,9 +100,9 @@ export interface StreakInput {
  * The count of consecutive clean, self-verified merges after one more finished row.
  *   - A merge the product did not make is not part of the streak: no count, no reset.
  *   - A person step resets to 0. A `failed` row resets (a regression shipped to staging is not a success). An `unverified` row resets (it stops for a person).
- *   - A `verified` row counts +1 only when the stage's own order deployed it and the browser was the runner's Chrome.
+ *   - A `verified` row counts +1 only when the stage's own order deployed it and a gate method drove it (the runner's own browser, by either driver: see GATE_METHODS).
  *     Two readings the plan leaves to its reader, chosen here and named in the tests: a verified row deployed by someone else resets (that deploy was a person step);
- *     a verified row driven by another method neither counts nor resets (the gate is proven on the runner path first, so such a row is not part of it).
+ *     a verified row driven by another method (the sandbox browser) or with no method neither counts nor resets.
  *   - A row that has not finished changes nothing.
  */
 export function nextStreak(streak: number, row: StreakInput): number {
@@ -109,7 +111,7 @@ export function nextStreak(streak: number, row: StreakInput): number {
   if (row.personStep) return 0;
   if (row.status === 'failed' || row.status === 'unverified') return 0;
   if (!row.deployByOrder) return 0;
-  if (row.method !== 'chrome_runner') return streak;
+  if (row.method === null || !GATE_METHODS.includes(row.method)) return streak;
   return streak + 1;
 }
 
