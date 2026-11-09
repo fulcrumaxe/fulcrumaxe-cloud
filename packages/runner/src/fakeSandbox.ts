@@ -335,6 +335,11 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
       if (opts?.deleteSnapshots === true) snapshots.delete(handle.sandboxName);
     },
 
+    /** The fake plays scripted events in-process: it has no record file and no command to re-attach to, so a slice cannot be read from it (the real port is tested over the strict recording VM). */
+    async readSlice(): Promise<never> {
+      throw new Error("fakeSandbox: readSlice is not supported; the fake has no record file to read in slices");
+    },
+
     async listSandboxes(opts: ListSandboxesOptions): Promise<SandboxListPage> {
       calls.push(`list:${opts.prefix}`);
       if (!LISTABLE_PREFIXES.includes(opts.prefix)) throw new Error("fakeSandbox: listSandboxes accepts only the ex-, rn- and pp- prefixes");

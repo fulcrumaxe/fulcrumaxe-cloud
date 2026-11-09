@@ -1,4 +1,6 @@
+import type { RunLimit } from "./executionTarget.js";
 import type { GuardSnapshot, TokenTotals, UsageMeterSnapshot } from "./meteringGuard.js";
+import type { ModelFailureCode } from "./modelFailure.js";
 
 /**
  * D#2 RLR-2 (run-log reader design, Round 3, B3): what a reader saves in `run_log_readers.state` and
@@ -15,6 +17,13 @@ import type { GuardSnapshot, TokenTotals, UsageMeterSnapshot } from "./meteringG
 
 /** The `state` column's ceiling, the same figure as the table's CHECK. */
 export const STATE_MAX_BYTES = 262_144;
+
+/**
+ * THE one place the reader row's `next_seq` is converted. The column is 1-based (migration 0697: default 1, CHECK >= 1), while the record file's header is seq 0
+ * and the parser's first expected seq is 0. A fresh row (next_seq 1, byte_offset 0) therefore means "the header is next"; after the header alone it is 2.
+ */
+export const rowSeqOfCursor = (parserNextSeq: number): number => parserNextSeq + 1;
+export const cursorSeqOfRow = (rowNextSeq: number): number => rowNextSeq - 1;
 
 /** The meter's bookkeeping the sandbox target keeps per run; structural, so `RunBookkeeping` satisfies it as it is. */
 export interface MeterLedger<M extends string = string> {
@@ -170,6 +179,121 @@ export function parseSideEffects(raw: unknown): SideEffects {
   };
 }
 
+/** The fixed fields of the last `result` line, kept so a later slice can build the run's end. No text. */
+export interface LastResultState {
+  type: "result" | "error";
+  isError?: boolean;
+  sessionId?: string;
+  costUsd?: number;
+  usage?: Record<string, number>;
+  agentOutput?: Record<string, unknown>;
+}
+
+/**
+ * D#2 RLR-4: the port's own reader state across slices. `file` is the count and a chain hash of the record digests consumed so far (the exit cross-check
+ * re-reads the agent-writable file and trusts it only if its consumed prefix gives this same pair); `trailer` is the trailer once consumed; the rest is what
+ * the run's end is built from.
+ */
+export interface PortReaderState {
+  file: { count: number; chain: string };
+  trailer: { seq: number; code: number | null; sig: string | null; lines: number; bytes: number } | null;
+  seq: number;
+  lastResult: LastResultState | null;
+  lastEnvelope: Record<string, unknown> | null;
+  lastResultSubtype: string | null;
+}
+
+/** The caps that keep the `agent.output` rows of a sliced run to what the in-process writer would store; counted over committed rows only. */
+export interface OutputBudgetState {
+  rows: number;
+  bytes: number;
+  capped: boolean;
+  droppedMessages: number;
+  droppedBytes: number;
+}
+
+const isCountN = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+export function parseOutputBudget(raw: unknown): OutputBudgetState {
+  const r = raw as Record<string, unknown> | null;
+  if (typeof r !== "object" || r === null) throw new Error("reader state: out is not an object");
+  const { rows, bytes, capped, droppedMessages, droppedBytes } = r;
+  if (!isCountN(rows) || !isCountN(bytes) || typeof capped !== "boolean" || !isCountN(droppedMessages) || !isCountN(droppedBytes)) throw new Error("reader state: bad out");
+  return { rows, bytes, capped, droppedMessages, droppedBytes };
+}
+
+export function parsePortReaderState(raw: unknown): PortReaderState {
+  const r = raw as Record<string, unknown> | null;
+  if (typeof r !== "object" || r === null) throw new Error("reader state: reader is not an object");
+  const file = r.file as Record<string, unknown> | null;
+  if (typeof file !== "object" || file === null || !isCountN(file.count) || typeof file.chain !== "string" || !/^[0-9a-f]{64}$/.test(file.chain)) throw new Error("reader state: bad file chain");
+  let trailer: PortReaderState["trailer"] = null;
+  if (r.trailer !== null) {
+    const t = r.trailer as Record<string, unknown> | undefined;
+    if (typeof t !== "object" || t === null || !isCountN(t.seq) || !isCountN(t.lines) || !isCountN(t.bytes)) throw new Error("reader state: bad trailer");
+    if (!(t.code === null || (typeof t.code === "number" && Number.isInteger(t.code))) || !(t.sig === null || typeof t.sig === "string")) throw new Error("reader state: bad trailer");
+    trailer = { seq: t.seq, code: t.code as number | null, sig: t.sig as string | null, lines: t.lines, bytes: t.bytes };
+  }
+  const obj = (v: unknown, what: string): Record<string, unknown> | null => {
+    if (v === null) return null;
+    if (typeof v !== "object" || Array.isArray(v)) throw new Error(`reader state: bad ${what}`);
+    return v as Record<string, unknown>;
+  };
+  const lr = obj(r.lastResult, "lastResult") as LastResultState | null;
+  if (lr !== null && lr.type !== "result" && lr.type !== "error") throw new Error("reader state: bad lastResult");
+  if (!isCountN(r.seq)) throw new Error("reader state: bad seq");
+  if (r.lastResultSubtype !== null && typeof r.lastResultSubtype !== "string") throw new Error("reader state: bad subtype");
+  return { file: { count: file.count, chain: file.chain }, trailer, seq: r.seq, lastResult: lr, lastEnvelope: obj(r.lastEnvelope, "lastEnvelope"), lastResultSubtype: r.lastResultSubtype as string | null };
+}
+
+/**
+ * The verdict a later slice builds the run's end from (the last result and the last envelope) may take at most this much of the state column, measured the way
+ * jsonb prints it. The rest of the state at its worst (full id windows of hostile ids, the longest figures) is about 96 KB, so the whole stays under the column's
+ * 256 KiB with room to spare; a verdict that does not fit ends the run as `reader_unavailable`.
+ */
+export const TAIL_STATE_MAX_BYTES = 96 * 1024;
+
+export function tailStateBytes(lastResult: unknown, lastEnvelope: unknown): number {
+  return Buffer.byteLength(jsonbText([lastResult, lastEnvelope]));
+}
+
+/** The first reason the runner itself ended a run, kept so a reader that takes the run over ends it for the same reason (the shape of the target's `RunAbortReason`). */
+export type SavedAbort =
+  | { kind: "model_key_broken"; code: ModelFailureCode }
+  | { kind: "spend_kill"; cause: "per_run_cap" | "monthly_budget"; limit?: RunLimit }
+  | { kind: "limit"; limit: RunLimit; reportedUsd?: number }
+  | { kind: "implausible" };
+
+const LIMIT_KINDS = new Set(["run_time", "model_calls", "per_run_usd", "turns", "silence"]);
+
+function parseSavedLimit(raw: unknown): RunLimit {
+  const l = raw as Record<string, unknown> | null;
+  if (typeof l !== "object" || l === null || typeof l.kind !== "string" || !LIMIT_KINDS.has(l.kind) || typeof l.limit !== "number" || !Number.isFinite(l.limit) || typeof l.observed !== "number" || !Number.isFinite(l.observed)) {
+    throw new Error("reader state: bad abort limit");
+  }
+  return { kind: l.kind as RunLimit["kind"], limit: l.limit, observed: l.observed };
+}
+
+export function parseSavedAbort(raw: unknown): SavedAbort {
+  const a = raw as Record<string, unknown> | null;
+  if (typeof a !== "object" || a === null) throw new Error("reader state: bad abort");
+  switch (a.kind) {
+    case "implausible":
+      return { kind: "implausible" };
+    case "model_key_broken":
+      if (a.code !== 401 && a.code !== 403 && a.code !== "credits_exhausted") throw new Error("reader state: bad abort code");
+      return { kind: "model_key_broken", code: a.code };
+    case "spend_kill":
+      if (a.cause !== "per_run_cap" && a.cause !== "monthly_budget") throw new Error("reader state: bad abort cause");
+      return { kind: "spend_kill", cause: a.cause, ...(a.limit !== undefined && { limit: parseSavedLimit(a.limit) }) };
+    case "limit":
+      if (a.reportedUsd !== undefined && (typeof a.reportedUsd !== "number" || !Number.isFinite(a.reportedUsd))) throw new Error("reader state: bad abort figure");
+      return { kind: "limit", limit: parseSavedLimit(a.limit), ...(a.reportedUsd !== undefined && { reportedUsd: a.reportedUsd }) };
+    default:
+      throw new Error("reader state: bad abort kind");
+  }
+}
+
 /** The `state` document: versioned so a later change can refuse an older shape instead of misreading it. */
 export interface ReaderState {
   v: 1;
@@ -177,6 +301,13 @@ export interface ReaderState {
   usage: UsageMeterSnapshot;
   guard: GuardSnapshot;
   ledger: MeterLedgerSnapshot;
+  /** RLR-4: absent in a state written before the sliced reader. */
+  reader?: PortReaderState;
+  out?: OutputBudgetState;
+  /** The first end the runner itself decided (a spend kill, a broken key, an implausible line), saved with the checkpoint after it so a takeover ends the run the same way. */
+  abort?: SavedAbort;
+  /** The Claude Code session id the stream last reported (what a limit end's checkpoint resumes from). */
+  cc?: string;
 }
 
 /** A number as jsonb prints it: plain decimal digits, never an exponent (so 1e300 is 301 characters). */
@@ -215,5 +346,10 @@ export function parseReaderState(raw: unknown): ReaderState {
   for (const k of ["usage", "guard", "ledger"] as const) {
     if (typeof r[k] !== "object" || r[k] === null) throw new Error(`reader state: ${k} is missing`);
   }
+  if (r.cc !== undefined && (typeof r.cc !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(r.cc))) throw new Error("reader state: bad session id");
+  // RLR-4: the parts a sliced reader adds are checked in full here, so a state that cannot be read stops the reader rather than resuming from nothing.
+  if (r.reader !== undefined) parsePortReaderState(r.reader);
+  if (r.out !== undefined) parseOutputBudget(r.out);
+  if (r.abort !== undefined) parseSavedAbort(r.abort);
   return r as unknown as ReaderState;
 }

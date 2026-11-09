@@ -2,7 +2,8 @@ import type { AgentHandle, NormalizedEvent, Role, StartOptions } from "./types.j
 import type { NetworkPolicyRule } from "./networkPolicy.js";
 import type { SandboxRetentionPolicy } from "./sandboxNaming.js";
 import type { ExtensionPolicy } from "./runLimitDecision.js";
-import type { RunLimits } from "./meteringGuard.js";
+import type { GuardSnapshot, RunLimits } from "./meteringGuard.js";
+import type { PortReaderState, SideEffects } from "./readerState.js";
 import { SANDBOX_PINNED_VCPUS } from "@fx/spend";
 import type { ContextLedgerMeasure, ContextSpill } from "@fulcrumaxe/runner-protocol";
 
@@ -174,7 +175,76 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
  */
 export interface EventMeta {
   readonly meterOnly?: boolean;
+  /** The record-file line (its seq) the event came from. The sliced reader keys the event's `agent.output` row by it. */
+  readonly sourceLine?: number;
 }
+
+/** D#2 RLR-4: where a slice resumes in the record file. */
+export interface ReadSliceCursor {
+  nextSeq: number;
+  byteOffset: number;
+  readFailures: number;
+}
+
+/** What the port saves at each checkpoint; the caller adds its own parts (the usage meter, the run's ledger, the output rows) and commits all in one compare-and-swap. */
+export interface SliceCheckpoint extends ReadSliceCursor {
+  guard: GuardSnapshot;
+  sideEffects: SideEffects;
+  reader: PortReaderState;
+  /** True for the last checkpoint of a slice, written after the slice's work (including any catch-up) is done. */
+  final: boolean;
+}
+
+/** What a later slice restores from the last committed checkpoint. */
+export interface SliceRestore {
+  guard: GuardSnapshot;
+  sideEffects: SideEffects;
+  reader: PortReaderState;
+}
+
+/**
+ * D#2 RLR-4: one slice of the run-log reader. The agent command was started by an earlier invocation; this one re-attaches to it by id, reads the record
+ * file from `cursor`, and gives the same answers the in-process reader gives. `commit` saves a checkpoint and says whether this reader still holds the lease:
+ * on `false` the slice stops at once and touches nothing (no finalize, no stop).
+ */
+export interface ReadSliceOptions
+  extends Pick<StartDetachedOptions, "runId" | "role" | "model" | "backend" | "workdir" | "extension" | "excludes" | "limits" | "onModelCalls" | "onReaderFlag" | "onContextLedger" | "onContextFigure" | "onEvent"> {
+  /** The agent command and the VM session it runs in. */
+  cmdId: string;
+  sessionId: string;
+  cursor: ReadSliceCursor;
+  /** Absent on the first slice. */
+  restore?: SliceRestore;
+  /** The command's start (epoch ms), used only when there is nothing to restore. */
+  startedMs?: number;
+  /** Epoch ms at which the slice ends and hands over. */
+  untilMs: number;
+  /** Ends the slice after this many records (a record boundary): a seam for tests and fault injection. */
+  maxRecords?: number;
+  /** Checkpoint cadence while records are being processed; default 10 s. */
+  checkpointEveryMs?: number;
+  /**
+   * Renews the lease without moving the cursor (false: it is lost). The port calls it every `renewEveryMs` (default 20 s) for as long as the exit sequence runs --
+   * the kill ladder, the rebuild of the consumed prefix and the echo replay -- which saves nothing until its last checkpoint and can outlast the lease.
+   */
+  renew?(): Promise<boolean>;
+  renewEveryMs?: number;
+  commit(cp: SliceCheckpoint): Promise<boolean>;
+}
+
+/**
+ * `readSlice` could not re-attach to the agent command (the sandbox could not be opened, the session is not the one the command ran in, the command could not
+ * be found). That is no end of the run: the slice did nothing, and the caller tries again later. A failure after the attach is not this.
+ */
+export class SliceAttachError extends Error {
+  constructor(public readonly causeName: string) {
+    super("could not re-attach to the agent command");
+    this.name = "SliceAttachError";
+  }
+}
+
+/** A slice ends for its time, because the lease was lost, or because the run ended (with the same last event `hookFired` would give; an abort rejects instead). */
+export type ReadSliceResult = { kind: "slice" } | { kind: "lost" } | { kind: "ended"; event: NormalizedEvent | undefined };
 
 export interface StartDetachedResult {
   handle: AgentHandle;
@@ -271,6 +341,8 @@ export interface SandboxPort {
    * `/fx/plane-publish/`; an agent sandbox (`ex-`, `rn-`) is refused, so the publish hook can never land in a sandbox that runs a model.
    */
   writeFiles(handle: SandboxHandle, files: readonly SandboxFile[]): Promise<void>;
+  /** D#2 RLR-4: one slice of the run-log reader (see `ReadSliceOptions`). Optional: a port that cannot re-attach (a test double) has none. */
+  readSlice?(handle: SandboxHandle, opts: ReadSliceOptions): Promise<ReadSliceResult>;
   /** D#598 P1f-5a: see `RunCommandOptions`. Throws `SandboxPortError` on a provider failure; a command that fails is a result, not a throw. */
   runCommand(handle: SandboxHandle, opts: RunCommandOptions): Promise<RunCommandResult>;
   createSandbox(opts: CreateSandboxOptions): Promise<SandboxHandle>;
