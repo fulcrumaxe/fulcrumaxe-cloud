@@ -58,6 +58,7 @@ import { isPersistentRole, retentionPolicyFor, sandboxNameFor } from "../sandbox
 import {
   SandboxBusyError,
   SandboxNotFoundError,
+  type EventMeta,
   type SandboxHandle,
   type SandboxPort,
   type SandboxSessionUsage,
@@ -517,6 +518,7 @@ export class SandboxTarget implements ExecutionTarget {
       env,
       ...this.extensionOf(run, bk),
       onModelCalls: (n) => (bk.meteredModelCalls += n),
+      onReaderFlag: (flag) => void bk.meterFlags.add(flag),
       onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
       onContextFigure: this.figureOf(run, bk),
       ...this.spillOf(run, bk),
@@ -800,6 +802,7 @@ export class SandboxTarget implements ExecutionTarget {
         env,
         ...this.extensionOf(run, bk),
         onModelCalls: (n) => (bk.meteredModelCalls += n),
+        onReaderFlag: (flag) => void bk.meterFlags.add(flag),
         onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
         onContextFigure: this.figureOf(run, bk),
         ...this.spillOf(run, bk),
@@ -866,7 +869,7 @@ export class SandboxTarget implements ExecutionTarget {
     handle: SandboxHandle,
     bk: RunBookkeeping,
   ): Promise<{
-    onEvent: (event: NormalizedEvent) => Promise<void>;
+    onEvent: (event: NormalizedEvent, meta?: EventMeta) => Promise<void>;
     onStage: (stage: "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed") => void;
     getSessionId: () => string | undefined;
   }> {
@@ -878,14 +881,16 @@ export class SandboxTarget implements ExecutionTarget {
     const output = (bk.output ??= new AgentOutputRecorder(this.deps.pool, run.accountId, run.id));
     const progress = (bk.progress ??= new RunProgressRecorder(this.deps.pool, run.accountId, run.id));
 
-    const meterEvent = async (event: NormalizedEvent): Promise<void> => {
+    // `meterOnly`: usage counted after the run's end was decided (the echo catch-up behind an enforced end). It is metered and booked like any other,
+    // but it issues no stop and no abort reason, and it replaces none: the first end stands.
+    const meterEvent = async (event: NormalizedEvent, meterOnly = false): Promise<void> => {
       sessionId = event.sessionId ?? sessionId;
       if (event.sessionId) bk.ccSessionId = event.sessionId; // the Claude Code session id, kept where a durable stop on another path can read it
 
       // H09.5: a fake model response of 401/402/403 stops the run.
       const failureCode = detectModelFailure(event);
-      if (failureCode !== undefined) {
-        bk.abort = { kind: "model_key_broken", code: failureCode };
+      if (failureCode !== undefined && !meterOnly) {
+        bk.abort ??= { kind: "model_key_broken", code: failureCode };
         this.deps.sandboxPort.stop(handle).catch(() => {});
         throw new RunAbortSignal(bk.abort);
       }
@@ -930,14 +935,14 @@ export class SandboxTarget implements ExecutionTarget {
           bk.operatorSubscription === true,
         );
         bk.cumulativeModelUsd = result.cumulativeUsd;
-        if (result.decision === "kill") {
+        if (result.decision === "kill" && !meterOnly) {
           // Same test as `meter()`: a per-run cap kill is resumable
           // (LIMIT-END) and counts as such when both bounds tripped; a
           // monthly-budget kill is not. A kill on implausible usage alone
           // is neither: the run failed.
           const overCap = result.cumulativeUsd > perSpawnCapUsd(run);
           const overMonth = result.spendKill;
-          bk.abort = overCap
+          bk.abort ??= overCap
             ? { kind: "spend_kill", cause: "per_run_cap", limit: { kind: "per_run_usd", limit: perSpawnCapUsd(run), observed: result.cumulativeUsd } }
             : overMonth
               ? { kind: "spend_kill", cause: "monthly_budget" }
@@ -950,10 +955,10 @@ export class SandboxTarget implements ExecutionTarget {
 
     // H14c-3-2c: output persistence never delays metering or the kill. The text is handed to the recorder first, but
     // only awaited (its bounded backpressure) once metering has passed; a kill throws out of `meterEvent` unawaited.
-    const onEvent = async (event: NormalizedEvent): Promise<void> => {
+    const onEvent = async (event: NormalizedEvent, meta?: EventMeta): Promise<void> => {
       progress.observe(event); // synchronous and never throws: the writes run behind the stream
       const stored = event.type === "assistant" && event.text ? output.record(event.text) : undefined;
-      await meterEvent(event);
+      await meterEvent(event, meta?.meterOnly === true);
       await stored;
       // After metering, so a stamp write never delays the spend check or a kill; throttled, and it never throws.
       await this.stampAlive(run, bk);

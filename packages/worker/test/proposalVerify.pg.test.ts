@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { recordingSdk } from "../../runner/test/helpers/recorderSdk.js";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CLAUDE_CLI_VERSION, CLONE_PINNED_SCRIPT, FX_AGENT_SETTINGS_PATH, VERIFIER_WORKDIR, PROPOSAL_VERIFIER_ROLE, agentSettingsFor, createTestConnectionStatusPort, type SdkCommand, type SdkSandbox, type VercelSandboxSdk } from "@fx/runner";
@@ -71,7 +72,7 @@ function sdkFake(): VercelSandboxSdk {
     delete: async () => undefined,
     listSessions: async () => ({ sessions: [{ id: "sess-1", memory: 4096, region: "iad1", duration: 60_000, activeCpuDurationMs: 10_000, networkTransfer: { ingress: 5, egress: 100 } }], pagination: { next: null } }),
   });
-  return { create: async (p) => sandbox(p.name), get: async (p) => sandbox(p.name) };
+  return recordingSdk({ create: async (p) => sandbox(p.name), get: async (p) => sandbox(p.name) });
 }
 
 /** GitHub's contents API for one file at one commit: the object media type only, a full sha only, 404 with GitHub's body otherwise. */

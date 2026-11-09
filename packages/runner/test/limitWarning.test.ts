@@ -14,6 +14,7 @@ import { buildSandboxEnv } from "../src/sandboxEnv.js";
 import { networkPolicy } from "../src/networkPolicy.js";
 import { keyedPolicy } from "./helpers/keyedPolicy.js";
 import { sdkSessionStubs } from "./helpers/sdkSession.js";
+import { recordingSdk } from "./helpers/recorderSdk.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import { buildTerminalReport } from "../src/targets/sandboxTarget.js";
 import type { NormalizedEvent } from "../src/types.js";
@@ -39,7 +40,7 @@ const checkpointEnvelope = (summary: unknown) =>
   `stop\n<!-- AGENT_OUTPUT -->\n\`\`\`json\n${JSON.stringify({ verdict: "checkpoint", summary })}\n\`\`\`\n<!-- /AGENT_OUTPUT -->`;
 
 type Write = { path: string; content: string; mode?: number };
-type Step = { at: "lines" | "write"; lines?: string[]; files?: Write[] };
+type Step = { at: "lines" | "write" | "event"; lines?: string[]; files?: Write[] };
 
 /** A sandbox that prints the given lines and records every file write in order relative to them. */
 function harness(lines: string[], hold?: Promise<void>) {
@@ -85,11 +86,11 @@ function harness(lines: string[], hold?: Promise<void>) {
     capUsd: 5,
     networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
     env: buildSandboxEnv("code-reviewer"),
-    onEvent: (e) => void events.push(e),
+    onEvent: (e) => void (events.push(e), steps.push({ at: "event" })),
   };
   /** `restarted`: the port never created this sandbox (a worker restart); the SDK reports `sdkTimeoutMs` for it, or nothing. */
   const run = async (limits: Partial<RunLimits>, resumeId?: string, extension?: ExtensionPolicy, restarted?: { sdkTimeoutMs?: number; perRun?: Partial<RunLimits> }) => {
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { create: get, get }, limits });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: recordingSdk({ create: get, get }), limits });
     (sandbox as { timeout?: number }).timeout = restarted?.sdkTimeoutMs;
     const handle = restarted
       ? { runId: "", sandboxName: NAME }
@@ -448,9 +449,9 @@ describe("W-2: the model-call warning", () => {
     expect(files).toHaveLength(2);
     expect(files[0]!.json.model_calls_remaining).toBeUndefined();
     expect(files[1]).toMatchObject({ mode: 0o444, json: { max_model_calls: 10, model_calls_remaining: 2 } });
-    // The rewrite lands right after the 8th message, before the 9th is printed.
+    // The rewrite lands right after the 8th message is processed, before the 9th (a reader takes lines in batches, so "printed" is not the mark).
     const writeAt = h.steps.findIndex((s) => s.files?.some((f) => f.path === FX_RUN_LIMITS_PATH && f.content.includes("remaining")));
-    expect(h.steps.slice(0, writeAt).filter((s) => s.at === "lines")).toHaveLength(8);
+    expect(h.steps.slice(0, writeAt).filter((s) => s.at === "event")).toHaveLength(8);
   });
 
   it("writes nothing extra below 80%", async () => {

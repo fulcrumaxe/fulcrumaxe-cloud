@@ -16,6 +16,7 @@ import type { SandboxHandle, StartDetachedOptions } from "../src/sandboxPort.js"
 import { FORBIDDEN_ENV_NAME_PATTERN, buildSandboxEnv } from "../src/sandboxEnv.js";
 import { networkPolicy } from "../src/networkPolicy.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
+import { recordingSdk } from "./helpers/recorderSdk.js";
 import { FX_AGENT_MCP_PATH, FX_AGENT_SETTINGS_PATH, FX_LIMIT_HOOK_PATH, FX_RUN_LIMITS_PATH } from "../src/agentConfig.js";
 import {
   DETECT_TOO_BIG,
@@ -138,7 +139,7 @@ function fakeSdk(knobs: Knobs = {}) {
     delete: async () => undefined,
     listSessions: async () => ({ sessions: [], pagination: { next: null } }),
   };
-  const sdk: VercelSandboxSdk = { create: async (params: SdkCreateParams) => (void params, sandbox), get: async () => sandbox };
+  const sdk: VercelSandboxSdk = recordingSdk({ create: async (params: SdkCreateParams) => (void params, sandbox), get: async () => sandbox });
   return { sdk, log, envs, writes, killed, trace, agentSaw: () => agentSawDisk };
 }
 
@@ -263,7 +264,7 @@ describe("the agent is started from what the runner wrote, not from what the ins
     const afterInstall = f.trace.slice(f.trace.indexOf("cmd:fx-deps-install") + 1);
     expect(afterInstall).toEqual(["cmd:fx-pin", "write:batch", "cmd:agent"]);
     // The batch written after the install carries every config path and the prompt.
-    const lastBatch = f.writes.slice(-CONFIG_PATHS.length - 1);
+    const lastBatch = f.writes.slice(-CONFIG_PATHS.length - 3); // the config, the prompt, and the recorder with its directory
     expect(lastBatch.map((w) => w.path).filter((p) => CONFIG_PATHS.includes(p)).sort()).toEqual([...CONFIG_PATHS].sort());
     expect(lastBatch.some((w) => w.path.startsWith("/tmp/fx-prompt-"))).toBe(true);
   });

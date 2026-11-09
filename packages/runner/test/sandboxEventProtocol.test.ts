@@ -22,6 +22,7 @@ import { buildSandboxEnv } from "../src/sandboxEnv.js";
 import { networkPolicy } from "../src/networkPolicy.js";
 import { keyedPolicy } from "./helpers/keyedPolicy.js";
 import { sdkSessionStubs } from "./helpers/sdkSession.js";
+import { recordingSdk } from "./helpers/recorderSdk.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import type { NormalizedEvent } from "../src/types.js";
 import { RunLimitError, createUsageMeter, type RunLimits } from "../src/meteringGuard.js";
@@ -36,6 +37,9 @@ import { seedAccount, seedRepo } from "./helpers/seed.js";
 const WINDOW_SONNET = contextWindowTokensFor("sonnet-5");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+/** The reader polls about as fast as the scripted agent prints, so a limit measured in milliseconds sees the lines the way the stream used to show them. */
+const FAST_READER = { probeMs: 5, trailerWaitMs: 50 };
+import { setTimeout as realSleep } from "node:timers/promises";
 const NAME = "rn-9-reviewer-run-1";
 const PROMPT = "PROMPT-SECRET-7f3a: review the diff";
 const ROLE_CARD = "ROLE-CARD-TEXT-91bc: you are the reviewer";
@@ -123,7 +127,7 @@ function harness(version = `${CLAUDE_CLI_VERSION} (Claude Code)`) {
   };
   // Named after whatever the caller asked for (SandboxTarget picks its own names).
   const named = async (p: { name: unknown }) => ((sandboxName = String(p.name)), sandbox);
-  const sdk = { create: named, get: named };
+  const sdk = recordingSdk({ create: named, get: named });
   return Object.assign(api, { sdk });
 }
 
@@ -151,6 +155,7 @@ async function start(h: ReturnType<typeof harness>, overrides: Partial<StartDeta
     projectId: "p",
     getToken: async () => "tok",
     sdk: h.sdk,
+    reader: FAST_READER,
     onInvalidEvent: (r) => void invalid.push(r),
   });
   const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
@@ -181,7 +186,7 @@ describe("EV-CMD: claude print mode, prompt on stdin, pinned version", () => {
     expect(SANDBOX_AGENT_COMMAND.slice(0, 5).join(" ")).toBe("claude -p --output-format stream-json --verbose");
 
     const h2 = harness();
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h2.sdk });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h2.sdk, reader: FAST_READER });
     const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const resumed = port.resume(handle, "sess-9", "next", startOpts());
     h2.exit(0);
@@ -199,7 +204,7 @@ describe("EV-CMD: claude print mode, prompt on stdin, pinned version", () => {
     expect(JSON.stringify(runs)).not.toContain("PROMPT-SECRET");
     expect(JSON.stringify(runs)).not.toContain("ROLE-CARD-TEXT");
     const write = h.calls.find((c) => c.op === "writeFiles")!.params.files as Array<{ path: string; content: string; mode: number }>;
-    expect(write.map((f) => f.path).slice(1)).toEqual(["/fx/agent-config/settings.json", "/fx/agent-config/mcp.json", "/fx/agent-config/limit-hook.sh", "/fx/run-limits.json"]);
+    expect(write.map((f) => f.path).slice(1)).toEqual(["/fx/agent-config/settings.json", "/fx/agent-config/mcp.json", "/fx/agent-config/limit-hook.sh", "/fx/run-limits.json", "/fx/agent-config/recorder.mjs", "/fx/run/.keep"]);
     expect(write[0]!.mode).toBe(0o600);
     expect(write[0]!.content).toBe(`${ROLE_CARD}\n\n${PROMPT}`);
     // The wrapper is handed the file path and nothing else that is data.
@@ -279,7 +284,7 @@ describe("C55 criterion 16: --model is an explicit table lookup, never the price
 
   it("a model missing from the table throws before any SDK command or file write", async () => {
     const h = harness();
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, reader: FAST_READER });
     const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     for (const model of ["gpt-9", "toString", "haiku"]) {
       expect(() => port.startDetached(handle, startOpts({ model }))).toThrow(/CLI model name/);
@@ -493,14 +498,15 @@ describe("MP-SRC: usage and completion come only from the agent command's stdout
       const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(code).not.toMatch(/readFile|downloadFile|readFileToBuffer/);
     }
-    // Exactly six command sites exist: the version check, (preview runs only) the repository
+    // Exactly seven command sites exist: the version check, (preview runs only) the repository
     // clone, whose output is drained and never read, (D#6 C44-6b) the fixed detect and install scripts, whose
     // output is held as a capped redacted tail for the operator only (one shared site), the agent, and (COMPUTE-SETTLE CS-1b) the
     // constant read-only counters read before a stop, whose output fills in COST figures only and is
     // never a usage or completion source, and (D#598 P1f-5a) the publish sandbox's one command, whose phase lines the worker reads
     // and whose agent-free sandbox has no usage or completion at all.
     const port = readFileSync(path.join(here, "..", "src", "vercelSandboxPort.ts"), "utf8");
-    expect(port.match(/\.runCommand\(/g)).toHaveLength(6);
+    // RLR-3b: and the record file's read (`readRecords`), a fixed script whose output is parsed by the one parser; the agent command is started by `startAgentCommand`.
+    expect(port.match(/\.runCommand\(/g)).toHaveLength(7);
   });
 });
 
@@ -541,8 +547,8 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   function build(h: ReturnType<typeof harness>, limits?: Partial<RunLimits>) {
     const created: string[] = [];
     const seen: NormalizedEvent[] = [];
-    const sdk = { create: async (p: { name: unknown }) => (created.push(String(p.name)), h.sdk.create(p)), get: h.sdk.get };
-    const real = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk, limits });
+    const sdk = { create: async (p: { name: unknown }) => (created.push(String(p.name)), h.sdk.create(p as never)), get: h.sdk.get };
+    const real = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk, limits, reader: FAST_READER });
     const sandboxPort = { ...real, startDetached: (handle: Parameters<typeof real.startDetached>[0], o: StartDetachedOptions) => real.startDetached(handle, { ...o, onEvent: async (e) => (seen.push(e), o.onEvent(e)) }) };
     const base = createSandboxTargetHarness(db.runWriterPool);
     return { target: new SandboxTarget({ ...base.deps, sandboxPort }), hooks: base.hooks, created, seen };
@@ -875,14 +881,18 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
   const usage = (id: string) => msg({ id, content: text(id), usage: { input_tokens: 10 } });
   const displayOnly = (n: number) => msg({ content: text(`line ${n}`) });
   const stalled = () => result("out of turns", { is_error: true, subtype: "error_max_turns" });
-  const tick = (ms = 1) => vi.advanceTimersByTimeAsync(ms);
+  // The reader polls in real time (an aborted wait is a real timer) while these tests move a fake clock: before each step of fake time it gets a real moment to take what was printed.
+  const tick = async (ms = 1) => {
+    await realSleep(30);
+    await vi.advanceTimersByTimeAsync(ms);
+  };
 
   /** A port with `limits` over a fake clock; `settled` is how hookFired ended. */
   async function limited(limits: Partial<RunLimits>) {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const h = harness();
     const delivered: NormalizedEvent[] = [];
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits, reader: FAST_READER });
     const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const { hookFired } = port.startDetached(handle, startOpts({ onEvent: (e) => void delivered.push(e) }));
     const settled = hookFired.then((value) => ({ value }), (error: unknown) => ({ error }));
@@ -908,7 +918,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
   it("MP-CLOCK: maxRunMs at or above the sandbox timeoutMs is refused before the SDK create call", async () => {
     const h = harness();
     const create = vi.fn(h.sdk.create);
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { ...h.sdk, create }, limits: { maxRunMs: 1000 } });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { ...h.sdk, create }, limits: { maxRunMs: 1000 }, reader: FAST_READER });
     const opts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), networkPolicy: [] };
     await expect(port.createSandbox({ ...opts, timeoutMs: 1000 })).rejects.toThrow(/maxRunMs/);
     expect(create).not.toHaveBeenCalled();
@@ -952,7 +962,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
 
   it("MP-TURNS: the argv carries --max-turns from the limits and --max-budget-usd from the run's cap", async () => {
     const h = harness();
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits: { maxTurns: 7 } });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits: { maxTurns: 7 }, reader: FAST_READER });
     const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const { hookFired } = port.startDetached(handle, startOpts({ capUsd: 2.5 }));
     h.exit(0);

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { recordingSdk } from "../../runner/test/helpers/recorderSdk.js";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CLAUDE_CLI_VERSION, createTestConnectionStatusPort, followStatusBody, type HookResult, type SdkCommand, type SdkSandbox, type VercelSandboxSdk } from "@fx/runner";
@@ -56,7 +57,7 @@ function sdkFake(): VercelSandboxSdk {
       pagination: { next: null },
     }),
   });
-  return { create: async (p) => sandbox(p.name), get: async (p) => sandbox(p.name) };
+  return recordingSdk({ create: async (p) => sandbox(p.name), get: async (p) => sandbox(p.name) });
 }
 
 describe("the live run path over its fakes [pg]", { timeout: 60_000 }, () => {

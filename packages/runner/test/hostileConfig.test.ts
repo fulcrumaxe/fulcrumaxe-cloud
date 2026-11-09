@@ -16,6 +16,7 @@ import { buildSandboxEnv } from "../src/sandboxEnv.js";
 import { networkPolicy } from "../src/networkPolicy.js";
 import { keyedPolicy } from "./helpers/keyedPolicy.js";
 import { sdkSessionStubs } from "./helpers/sdkSession.js";
+import { recordingSdk as withRecorder } from "./helpers/recorderSdk.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import { BACKENDS, CLAUDE_CODE_BACKEND } from "../src/backends.js";
 import { createBackendRegistry } from "@fx/runtime/src/backends/registry.js";
@@ -60,7 +61,7 @@ function recordingSdk() {
     ...sdkSessionStubs(),
   };
   const get = async () => sandbox;
-  return { log, sdk: { create: get, get } };
+  return { log, sdk: withRecorder({ create: get, get }) };
 }
 
 const startOpts = (workdir: string | undefined = WORKDIR, excludes?: readonly string[]): StartDetachedOptions => ({
@@ -82,7 +83,7 @@ async function startAndResume(workdir: string | undefined = WORKDIR, excludes?: 
   const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk });
   const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
   await port.startDetached(handle, startOpts(workdir, excludes)).hookFired.catch(() => undefined);
-  await port.resume(handle, "sess-9", "next", startOpts(workdir, excludes)).hookFired.catch(() => undefined);
+  await port.resume(handle, "sess-9", "next", { ...startOpts(workdir, excludes), runId: "run-2" }).hookFired.catch(() => undefined);
   return log;
 }
 

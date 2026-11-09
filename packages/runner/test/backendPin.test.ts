@@ -9,6 +9,7 @@ import { networkPolicy } from "../src/networkPolicy.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import { keyedPolicy } from "./helpers/keyedPolicy.js";
 import { sdkSessionStubs } from "./helpers/sdkSession.js";
+import { recordingSdk } from "./helpers/recorderSdk.js";
 
 /**
  * D#221 R1a: the pin check (version AND digest) before every agent command, and backend selection by registered name.
@@ -41,7 +42,7 @@ function harness(pin: { out?: string; exit?: number } = {}) {
     ...sdkSessionStubs(),
   };
   const get = async () => sandbox;
-  return { calls, sdk: { create: get, get } };
+  return { calls, sdk: recordingSdk({ create: get, get }) };
 }
 
 const startOpts = (over: Partial<StartDetachedOptions> = {}): StartDetachedOptions => ({
@@ -82,7 +83,7 @@ describe("the pin check runs before EVERY agent command", () => {
   it("runs again on resume, and again for each further start", async () => {
     const { port, handle, calls } = await setup();
     await port.startDetached(handle, startOpts()).hookFired.catch(() => undefined);
-    await port.resume(handle, "sess-9", "next", startOpts()).hookFired.catch(() => undefined);
+    await port.resume(handle, "sess-9", "next", startOpts({ runId: "run-2" })).hookFired.catch(() => undefined); // each command has its own run id, so its own record file
     expect(pinCalls(calls)).toHaveLength(2);
     expect(agentCalls(calls)).toHaveLength(2);
     const order = calls.map((c) => (c.op === "writeFiles" ? "write" : (c.params.args as string[])[2]));

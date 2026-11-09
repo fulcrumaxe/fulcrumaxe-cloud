@@ -27,6 +27,7 @@ import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunC
 import { RunLimitError, WARN_FRACTION, createRunGuard, resolveRunLimits, type RunLimits } from "./meteringGuard.js";
 import type { RunLimit } from "./executionTarget.js";
 import { tryExtend } from "./runLimitDecision.js";
+import { RECORD_READ_CAP, acceptRecords, evaluateRead, isTampered, nextHeadStreak, readArgv, trailerMatchesWait, type AcceptedRecord, type ReadFault, type ReadOutcome, type Trailer } from "./recordParser.js";
 import { createSideEffects, recordExtension } from "./readerState.js";
 import { CLAUDE_CLI_SHA256, CLAUDE_CLI_VERSION, SANDBOX_IMAGE_REF, resolveSandboxImage } from "./sandboxRuntime.js";
 import { BACKENDS, CLAUDE_CODE_BACKEND } from "./backends.js";
@@ -44,6 +45,8 @@ import {
   FX_AGENT_SETTINGS_PATH,
   FX_LIMIT_HOOK_PATH,
   FX_LIMIT_HOOK_SCRIPT,
+  FX_RECORDER_PATH,
+  FX_RECORDER_SCRIPT,
   FX_RUN_LIMITS_PATH,
   runLimitsFileContent,
   overlapsAgentConfigDir,
@@ -60,6 +63,7 @@ import {
   SANDBOX_MAX_TIMEOUT_MS,
   SANDBOX_TIMEOUT_MARGIN_MS,
   type SandboxHandle,
+  type ReaderFlag,
   type SandboxPort,
   type SandboxSessionUsage,
   type StartDetachedOptions,
@@ -90,11 +94,12 @@ import {
  * Usage and completion are read ONLY from the stdout and exit of the one
  * command `runCommand` returned for the agent (D#2 C46 MP-SRC/MP-PIN): never
  * stderr, never a file in the VM, never the version check's command. (The
- * run-log reader changes this: once its read loop lands, RLR-3b/4, the source
- * is the recorder's framed, contiguous record file, cross-checked at exit
- * against the recorder command's own stdout. `FX_RECORDER_SCRIPT` and
- * `recordParser.ts` exist and are tested but nothing here calls them yet; the
- * new invariant is written out in docs/ops/spend-metering.md.) It is
+ * run-log reader changes this, from RLR-3b on: the source is the recorder's
+ * framed, contiguous record file (read by `readRecords`, judged only by
+ * `recordParser.ts`), cross-checked at exit against the recorder command's own
+ * stdout (`crossCheckEcho`, metering the larger of the two). The agent command
+ * itself gets no log subscriber before it has exited; the new invariant is
+ * written out in docs/ops/spend-metering.md.) It is
  * normalized HERE, outside the VM, by the mapper the local runtime
  * uses; `runId`, `role`, `seq` and `ts` are stamped by this file and never
  * read from a line. A line that is not a JSON object of a known `type` is
@@ -278,8 +283,9 @@ export interface SdkSessionPage {
 export interface SdkCommand {
   /** The SDK command's id (always set by the real SDK); lets a kill re-find the command under fresh credentials. */
   readonly cmdId?: string;
-  logs(): AsyncIterable<{ stream: string; data: unknown }>;
-  wait(): Promise<{ exitCode: number }>;
+  logs(opts?: { signal?: AbortSignal }): AsyncIterable<{ stream: string; data: unknown }>;
+  /** The real `wait` takes `{ signal }` and rejects with the signal's reason when it aborts first (@vercel/sandbox 3.5.1, command.js). */
+  wait(params?: { signal?: AbortSignal }): Promise<{ exitCode: number }>;
   kill(): Promise<void>;
 }
 
@@ -361,6 +367,8 @@ export interface CreateVercelSandboxPortOptions {
   limits?: Partial<RunLimits>;
   /** Pause between `measure`'s reads while a session's figures are not reported yet. Default 2 s. */
   measureRetryDelayMs?: number;
+  /** D#2 RLR-3b: the run-log reader's waits (tests shorten them). Defaults: `PROBE_EXIT_MS`, `TRAILER_WAIT_MS`, `ECHO_REPLAY_TIMEOUT_MS`, `EXIT_WAIT_MS`. */
+  reader?: { probeMs?: number; trailerWaitMs?: number; echoTimeoutMs?: number; exitWaitMs?: number };
 }
 
 /**
@@ -563,6 +571,321 @@ function isNoActiveSession(err: unknown): boolean {
   return err instanceof Error && statusOf(err) === undefined && err.message === "No active session to stop.";
 }
 
+/** Rejects with `SandboxPortError(operation)` if `work` outlives `limitMs`. The abandoned work is left to settle on its own. */
+function boundedBy<T>(operation: string, work: Promise<T>, limitMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new SandboxPortError(operation)), limitMs);
+    timer.unref?.();
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** Runs an SDK call; whatever it throws becomes a `SandboxPortError` naming the operation and the HTTP status only. */
+async function guardedCall<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof SandboxNotFoundError || err instanceof SandboxNameConflictError) throw err;
+    if (err instanceof SandboxPortError) throw err;
+    throw new SandboxPortError(operation, statusOf(err));
+  }
+}
+
+// ---- D#2 RLR-3b: the run-log reader's port functions (design Round 3 B1-B4, the RLR-0c conditions, the 2026-11-09 amendments) -------------------
+//
+// The agent command is the recorder (`FX_RECORDER_SCRIPT`), which frames the CLI's stdout lines into a file and echoes the same
+// records to its own stdout. NOTHING subscribes to that command's logs() until it has exited: every read is a NEW short command with
+// one subscriber held to its end, and the echo is replayed once, after exit, as the cross-check. These functions take the SDK
+// objects as arguments so the strict fake in the tests can drive each of them on its own.
+
+/** Where a run's record file lives. The recorder creates it with O_EXCL, so each run (each fix round is one) needs its own path. */
+export const RUN_RECORD_DIR = "/fx/run";
+const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+export function recordPathFor(runId: string): string {
+  if (!RUN_ID_RE.test(runId)) throw new Error("createVercelSandboxPort: runId has an unexpected shape");
+  return `${RUN_RECORD_DIR}/${runId}.rec`;
+}
+
+/** How long a probe waits for the command to exit before reading it as "still running". */
+export const PROBE_EXIT_MS = 1_500;
+/** A trailer counts only if `wait()` resolves within this long of it (RLR-0c condition 6); a trailer on a running command is a forgery. */
+export const TRAILER_WAIT_MS = 5_000;
+/** After a kill the reader waits at most this long for the command to exit before it replays the echo (RLR-0c condition 8). */
+export const EXIT_WAIT_MS = 8_000;
+/** The exit replay of the recorder's echo is bounded; 50 MB replayed in about 2 s in the spike. */
+export const ECHO_REPLAY_TIMEOUT_MS = 120_000;
+/** Reads that fail in a row, with the command still running, before the reader gives up (`reader_unavailable`). */
+export const READ_FAILURE_LIMIT = 3;
+/** After the command has exited the reader asks for what is left at most this many times. */
+export const DRAIN_READS = 4;
+/** What a read's stdout may hold beyond its cap: the 0xff byte, `@` and up to 15 digits. */
+const READ_SUFFIX_ROOM = 32;
+
+/**
+ * The recorder script and the directory its file goes in: written with the settings files before EVERY agent command (an earlier command runs
+ * as the same uid and may have edited them). `/fx/run/.keep` makes the directory exist: the recorder does not create it, and exits 98 without it.
+ */
+export function agentRecorderFiles(): Array<{ path: string; content: string; mode: number }> {
+  return [
+    { path: FX_RECORDER_PATH, content: FX_RECORDER_SCRIPT, mode: 0o444 },
+    { path: `${RUN_RECORD_DIR}/.keep`, content: "", mode: 0o444 },
+  ];
+}
+
+/** The agent command's argv: the prompt wrapper (fd 3), then the recorder, then the CLI. */
+export function agentCommandArgs(p: { promptFile: string; runId: string; agentArgv: readonly string[] }): string[] {
+  return ["-c", PROMPT_WRAPPER, "fx-agent", p.promptFile, "node", FX_RECORDER_PATH, recordPathFor(p.runId), p.runId, "--", ...p.agentArgv];
+}
+
+/** B1: starts the agent command under the recorder. It returns the command and attaches NO `logs()` subscriber, ever; the reads use their own commands. */
+export async function startAgentCommand(
+  sandbox: SdkSandbox,
+  p: { promptFile: string; runId: string; agentArgv: readonly string[]; cwd?: string; env: Record<string, string>; timeoutMs: number },
+): Promise<SdkCommand> {
+  const args = agentCommandArgs(p);
+  return guardedCall("runCommand", () => sandbox.runCommand({ cmd: "sh", args, cwd: p.cwd, env: p.env, detached: true, signal: AbortSignal.timeout(p.timeoutMs) }));
+}
+
+/**
+ * The vendor hands a log's data over as a string, decoding the bytes as UTF-8. Records and the echo are ASCII, so every ASCII character is its byte
+ * and anything else is damage, mapped to 0x80 (which the parser refuses as non-ASCII, so it can never pass for data).
+ */
+export function logBytes(text: string): Buffer {
+  const out = Buffer.allocUnsafe(text.length);
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    out[i] = c < 0x80 ? c : 0x80;
+  }
+  return out;
+}
+
+/**
+ * A read's whole output as bytes. The read script ends with a 0xff byte and `@<size>`; the vendor's UTF-8 decoding turns that one invalid byte into
+ * U+FFFD. Only a U+FFFD that is directly followed by `@<digits>` to the end of the text is turned back into 0xff. Any other non-ASCII character,
+ * including any other U+FFFD, is damage and stays 0x80. The offsets the parser returns are counted on these bytes (one per character), never on the string.
+ * A suffix that is split, altered or missing leaves no 0xff, which `evaluateRead` reports as a failed read.
+ */
+export function readBytes(text: string): Buffer {
+  const m = /\ufffd(@\d{1,15})$/.exec(text);
+  if (!m) return logBytes(text);
+  return Buffer.concat([logBytes(text.slice(0, m.index)), Buffer.from([0xff]), Buffer.from(m[1]!, "latin1")]);
+}
+
+const failedRead = (fault: ReadFault): ReadOutcome => ({ records: [], run: null, bytes: 0, stop: null, trailer: null, size: null, fault, headViolation: false });
+
+/**
+ * B2: one read. A NEW command with fixed argv, ONE `logs()` subscriber held to its end, then `wait()` with exit code 0 required, then the bytes judged by
+ * `evaluateRead` (the one parser). A read that could not be made (no command, a timeout, a non-zero exit, a lost stream) is the fault `read_failed`;
+ * the caller counts them. This function does not throw.
+ */
+export async function readRecords(
+  sandbox: Pick<SdkSandbox, "runCommand">,
+  p: { recordPath: string; offset: number; nextSeq: number; cap?: number; timeoutMs: number; abandon?: (command: SdkCommand) => Promise<void> },
+): Promise<ReadOutcome> {
+  const cap = p.cap ?? RECORD_READ_CAP;
+  let command: SdkCommand | undefined;
+  try {
+    return await boundedBy(
+      "readRecords",
+      (async (): Promise<ReadOutcome> => {
+        command = await guardedCall("runCommand", () => sandbox.runCommand({ cmd: "sh", args: readArgv(p.offset, p.recordPath, cap), detached: true, signal: AbortSignal.timeout(p.timeoutMs) }));
+        const chunks: string[] = [];
+        let total = 0;
+        for await (const entry of command.logs()) {
+          if (entry.stream !== "stdout" || typeof entry.data !== "string") continue;
+          total += entry.data.length;
+          if (total > cap + READ_SUFFIX_ROOM) return failedRead("read_exceeds_cap"); // bounds memory whatever the stream sends
+          chunks.push(entry.data);
+        }
+        const done = await command.wait();
+        if (done.exitCode !== 0) return failedRead("read_failed");
+        return evaluateRead(readBytes(chunks.join("")), { offset: p.offset, nextSeq: p.nextSeq, cap });
+      })(),
+      p.timeoutMs,
+    );
+  } catch {
+    // fx-swallow-ok: a read that could not be made is the answer (`read_failed`); the caller counts consecutive ones and the run ends on the third
+    if (command) await (p.abandon ?? ((c) => c.kill()))(command).catch(() => undefined);
+    return failedRead("read_failed");
+  }
+}
+
+export type ExitProbe = { exited: true; exitCode: number } | { exited: false };
+const isAbortReason = (err: unknown): boolean => err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+
+/**
+ * B4 step 1: has the command exited? `wait()` with a signal that aborts after `withinMs`. An aborted wait (`AbortError`, or `TimeoutError`, the name
+ * `AbortSignal.timeout` gives its reason) means the command is still running. `getCommand().exitCode` is never used: it stays null until a wait completes.
+ */
+export async function probeExit(command: SdkCommand, withinMs: number = PROBE_EXIT_MS): Promise<ExitProbe> {
+  try {
+    const done = await command.wait({ signal: AbortSignal.timeout(withinMs) });
+    if (!Number.isInteger(done.exitCode) || done.exitCode < 0 || done.exitCode > 255) throw new SandboxPortError("wait");
+    return { exited: true, exitCode: done.exitCode };
+  } catch (err) {
+    if (isAbortReason(err)) return { exited: false };
+    if (err instanceof SandboxPortError) throw err;
+    throw new SandboxPortError("wait", statusOf(err));
+  }
+}
+
+const digestOf = (r: AcceptedRecord): Buffer => createHash("sha256").update(`${r.seq}:${r.kind}:${r.n}:`).update(r.data).digest().subarray(0, 8);
+
+/** What was accepted from the file: the count, a running hash, and one 8-byte digest per record (so a differing echo record can be found). */
+export class RecordLedger {
+  count = 0;
+  private chain = createHash("sha256");
+  private digests = Buffer.alloc(8 * 1024);
+  add(r: AcceptedRecord): void {
+    const d = digestOf(r);
+    if ((this.count + 1) * 8 > this.digests.length) {
+      const grown = Buffer.alloc(this.digests.length * 2);
+      this.digests.copy(grown);
+      this.digests = grown;
+    }
+    d.copy(this.digests, this.count * 8);
+    this.count++;
+    this.chain.update(d);
+  }
+  at(i: number): Buffer | undefined {
+    return i < this.count ? this.digests.subarray(i * 8, i * 8 + 8) : undefined;
+  }
+  hash(): string {
+    return this.chain.copy().digest("hex");
+  }
+}
+
+export interface EchoCheck {
+  /** The echo could not be read (a failed or timed-out replay); the other fields are then only what was seen before it failed. */
+  unavailable: boolean;
+  /** The echo and the file differ: a record, the count, the hash or the trailer. */
+  mismatch: boolean;
+  /** The echo held a valid header record. A command that started recording has at least that. */
+  hasHeader: boolean;
+  /** The echo's trailer, when it has a valid one. */
+  trailer: Trailer | null;
+  count: number;
+}
+
+const sameTrailer = (a: Trailer | null, b: Trailer | null): boolean =>
+  a === null || b === null ? a === b : a.code === b.code && a.sig === b.sig && a.lines === b.lines && a.bytes === b.bytes && a.seq === b.seq;
+
+/**
+ * B4 step 3 (RLR-0c condition 7): the one post-exit `logs()` replay of the recorder command's echo, the first subscriber it ever had, so the
+ * store is whole. It is parsed by the same acceptance rule, as it streams. Each record is compared with the file's by seq; one the file lacks
+ * or has differently (`o`, `tail`, `big`) goes to `onEchoOnly`, so the caller meters `max(file, echo)` and can only raise the bill. The count, the
+ * hash and the trailer are compared as well. An error thrown by `onEchoOnly` (a spend kill) is the caller's own and propagates.
+ * With `upToSeq`, only a record at or below that seq goes to `onEchoOnly`: after a kill the reader hands over what the file lacked of the part it had consumed
+ * and nothing past it.
+ */
+export async function crossCheckEcho(
+  command: SdkCommand,
+  file: { ledger: RecordLedger; trailer: Trailer | null },
+  o: { timeoutMs?: number; onEchoOnly: (r: AcceptedRecord) => Promise<void>; upToSeq?: number },
+): Promise<EchoCheck> {
+  const echo = new RecordLedger();
+  let trailer: Trailer | null = null;
+  let hasHeader = false;
+  let mismatch = false;
+  let pending: Buffer = Buffer.alloc(0);
+  /** Set while an over-long partial line is being dropped: its bytes are skipped up to the next newline. */
+  let skipping = false;
+  let over = false;
+  let callerError: { err: unknown } | undefined;
+  /**
+   * One complete line. It is judged by the parser on its own, under the seq it claims, so a line the rule refuses is skipped and the lines after it are
+   * still read (the meter keeps the maximum per message id, so no order has to be protected). A record the file does not have as the echo does, at
+   * the seq it claims, goes to `onEchoOnly` whether or not it is the next one in the echo's own chain: a record that repeats a seq is metered as well.
+   */
+  const take = async (line: Buffer): Promise<void> => {
+    let claimed: unknown;
+    try {
+      claimed = (JSON.parse(line.toString("latin1")) as { s?: unknown } | null)?.s;
+    } catch {
+      // fx-swallow-ok: a line that is not JSON is a line the echo should not have; it is skipped and the echo counts as differing
+    }
+    const seq = typeof claimed === "number" && Number.isSafeInteger(claimed) && claimed >= 0 ? claimed : undefined;
+    const acc = seq === undefined ? undefined : acceptRecords(Buffer.concat([line, Buffer.from("\n")]), seq);
+    const r = acc?.records[0];
+    if (!r || acc?.stop !== null) {
+      mismatch = true;
+      return;
+    }
+    hasHeader ||= r.kind === "h";
+    if (r.kind === "x" && acc?.trailer) {
+      if (trailer !== null && !sameTrailer(trailer, acc.trailer)) mismatch = true;
+      trailer ??= acc.trailer;
+    }
+    if (!digestOf(r).equals(file.ledger.at(r.seq) ?? Buffer.alloc(0))) {
+      mismatch = true;
+      if ((r.kind === "o" || r.kind === "tail" || r.kind === "big") && (o.upToSeq === undefined || r.seq <= o.upToSeq)) {
+        try {
+          await o.onEchoOnly(r);
+        } catch (err) {
+          callerError = { err };
+          throw err;
+        }
+      }
+    }
+    if (r.seq === echo.count) echo.add(r);
+    else mismatch = true; // out of order, repeated or a gap: not the recorder's own echo
+  };
+  try {
+    await boundedBy(
+      "crossCheckEcho",
+      (async () => {
+        for await (const entry of command.logs()) {
+          if (over) return; // the replay was given up on: nothing more is metered from it
+          if (entry.stream !== "stdout" || typeof entry.data !== "string") continue;
+          let chunk = logBytes(entry.data);
+          if (skipping) {
+            const nl = chunk.indexOf(0x0a);
+            if (nl < 0) continue;
+            chunk = chunk.subarray(nl + 1);
+            skipping = false;
+          }
+          pending = Buffer.concat([pending, chunk]);
+          let from = 0;
+          for (let nl = pending.indexOf(0x0a, from); nl >= 0; nl = pending.indexOf(0x0a, from)) {
+            const line = pending.subarray(from, nl);
+            from = nl + 1;
+            if (line.length > RECORD_READ_CAP) mismatch = true;
+            else if (line.length > 0) await take(line);
+          }
+          pending = pending.subarray(from);
+          // A partial line longer than any record can be is dropped up to its newline, and the lines after it are still read.
+          if (pending.length > RECORD_READ_CAP) {
+            pending = Buffer.alloc(0);
+            skipping = true;
+            mismatch = true;
+          }
+        }
+        if (pending.length > 0) mismatch = true; // an unterminated last line is not a record
+      })(),
+      o.timeoutMs ?? ECHO_REPLAY_TIMEOUT_MS,
+    );
+  } catch (err) {
+    over = true;
+    if (callerError) throw callerError.err;
+    reportError(err, { stage: "run.echo_replay" });
+    return { unavailable: true, mismatch, hasHeader, trailer, count: echo.count };
+  }
+  if (echo.count !== file.ledger.count || echo.hash() !== file.ledger.hash() || !sameTrailer(trailer, file.trailer)) mismatch = true;
+  return { unavailable: false, mismatch, hasHeader, trailer, count: echo.count };
+}
+
+/** The token each opened sandbox object carries (a rotated token is not on an object opened before the rotation). */
+const sandboxTokens = new WeakMap<SdkSandbox, string>();
+
 /** The opening marker of a verdict envelope; any message holding one, parsed or not, decides the fallback. */
 const ENVELOPE_MARKER = /<!--\s*AGENT_OUTPUT\s*-->/;
 
@@ -590,6 +913,15 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   if (!Number.isSafeInteger(measureRetryDelayMs) || measureRetryDelayMs < 0) {
     throw new Error("createVercelSandboxPort: measureRetryDelayMs must be a non-negative integer");
   }
+  // Every wait in here is bounded by `callTimeoutMs`, so the reader's two waits default to no more than it.
+  const probeMs = options.reader?.probeMs ?? Math.min(PROBE_EXIT_MS, callTimeoutMs);
+  const trailerWaitMs = options.reader?.trailerWaitMs ?? Math.min(TRAILER_WAIT_MS, callTimeoutMs);
+  const echoTimeoutMs = options.reader?.echoTimeoutMs ?? ECHO_REPLAY_TIMEOUT_MS;
+  assertPositiveInt(probeMs, "reader.probeMs");
+  assertPositiveInt(trailerWaitMs, "reader.trailerWaitMs");
+  assertPositiveInt(echoTimeoutMs, "reader.echoTimeoutMs");
+  const exitWaitMs = options.reader?.exitWaitMs ?? Math.min(EXIT_WAIT_MS, callTimeoutMs);
+  assertPositiveInt(exitWaitMs, "reader.exitWaitMs");
   /** The port-wide defaults. A launch resolves its own on top (D#2 H14c-3-2d-1, C56 s1). */
   const portLimits = resolveRunLimits(options.limits);
   /** Each sandbox's `timeoutMs` as created here; a launch is checked against it. */
@@ -632,24 +964,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   }
   const runs = new Map<string, Run>();
 
-  /** Rejects with `SandboxPortError(operation)` if `work` outlives
-   * `callTimeoutMs`. The abandoned work is left to settle on its own. */
-  function bounded<T>(operation: string, work: Promise<T>, limitMs: number = callTimeoutMs): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new SandboxPortError(operation)), limitMs);
-      timer.unref?.();
-      work.then(
-        (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        (err: unknown) => {
-          clearTimeout(timer);
-          reject(err);
-        },
-      );
-    });
-  }
+  /** `boundedBy` with the port-wide call timeout as its default. */
+  const bounded = <T,>(operation: string, work: Promise<T>, limitMs: number = callTimeoutMs): Promise<T> => boundedBy(operation, work, limitMs);
 
   /**
    * R-TOKEN-LIFETIME: the command object a launch holds carries the launch-time token, which may have rotated
@@ -695,15 +1011,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   /** Only a test sets one (a local server standing in for the provider's API); the real SDK uses its own `fetch` otherwise. */
   const fetchOption = options.fetch ? { fetch: options.fetch } : {};
 
-  async function guarded<T>(operation: string, fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      if (err instanceof SandboxNotFoundError || err instanceof SandboxNameConflictError) throw err;
-      if (err instanceof SandboxPortError) throw err;
-      throw new SandboxPortError(operation, statusOf(err));
-    }
-  }
+  const guarded = guardedCall;
 
   function assertName(name: string): void {
     if (!SANDBOX_NAME_RE.test(name)) {
@@ -719,6 +1027,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     );
     // Never act on a sandbox other than the one the handle names.
     if (sandbox.name !== handle.sandboxName) throw new SandboxPortError(operation);
+    sandboxTokens.set(sandbox, creds.token);
     return sandbox;
   }
 
@@ -929,6 +1238,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     for (const arg of [opts.model, sessionId]) {
       if (arg !== undefined && !SAFE_ARG_RE.test(arg)) throw new Error("createVercelSandboxPort: model or sessionId has an unexpected shape");
     }
+    recordPathFor(opts.runId); // a run id the recorder's path cannot carry is refused before anything starts
     const cliModel = Object.hasOwn(CLI_MODEL_NAMES, opts.model) ? CLI_MODEL_NAMES[opts.model as ModelId] : undefined;
     if (cliModel === undefined) throw new Error("createVercelSandboxPort: model has no CLI model name");
     // D#600 CX-6a: the model's window, for the context warning. A model with no figure (or a price table that cannot be read) has no window, and the run gets no context_pct.
@@ -1048,6 +1358,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
               // C66: the runner's one hook, and the deadline it warns from (W-1).
               { path: FX_LIMIT_HOOK_PATH, content: FX_LIMIT_HOOK_SCRIPT, mode: 0o444 },
               { path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 },
+              // D#2 RLR-3b: the recorder the agent command runs under, and the directory its record file goes in.
+              ...agentRecorderFiles(),
               // D#600 CX-4a: the text the prompt cut, from the runner's own copy, never trusted from before the install.
               ...spillRewrite,
             ],
@@ -1091,16 +1403,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           }
         }
       }
-      const command = await guarded("runCommand", () =>
-        sandbox.runCommand({
-          cmd: "sh",
-          args: ["-c", PROMPT_WRAPPER, "fx-agent", promptFile, ...agentArgv],
-          cwd: opts.workdir,
-          env: opts.env,
-          detached: true,
-          signal: signal(),
-        }),
-      );
+      // D#2 RLR-3b: the agent command is the recorder; no `logs()` subscriber is ever attached to it before it has exited.
+      const command = await startAgentCommand(sandbox, { promptFile, runId: opts.runId, agentArgv, cwd: opts.workdir, env: opts.env, timeoutMs: callTimeoutMs });
       run.command = command;
       markLaunched();
       if (run.stopped) {
@@ -1108,9 +1412,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         return undefined;
       }
 
-      const assembler = new LineAssembler(MAX_EVENT_LINE_CHARS);
       let seq = 0;
-      let oversize = false;
       /** The event for the LAST raw `result` message; completion is decided
        * from it only after the command has exited. */
       let lastResult: NormalizedEvent | undefined;
@@ -1211,8 +1513,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       // D#600 CX-1a: measures this command's context from the same lines the meter reads; integers only.
       const ledger = new ContextLedgerCapture(disabledToolsFor(opts.excludes));
       let lastFigure = 0;
-      const deliver = async (line: string): Promise<void> => {
-        if (run.stopped || limitHit !== undefined) return;
+      const deliver = async (line: string, catchingUp = false): Promise<void> => {
+        if (!catchingUp && (run.stopped || limitHit !== undefined)) return;
         let parsed: unknown;
         try {
           parsed = JSON.parse(line);
@@ -1283,32 +1585,257 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         timeWarning.unref?.();
       };
       armTimeWarning();
-      try {
-        const iterator = command.logs()[Symbol.asyncIterator]();
+      // D#2 RLR-3b: the reader, one parser (`recordParser.ts`) and one path. Reads of the record file (each a new command with one held subscriber), a probe
+      // for the exit, a drain to the trailer, the trailer checked against `wait()`, then the one replay of the recorder's echo. The agent command itself
+      // never gets a `logs()` subscriber before it has exited.
+      const recordPath = recordPathFor(opts.runId);
+      // R-TOKEN-LIFETIME, for the reader: the sandbox and the command this launch holds carry the launch-time token, which may have rotated by the time a read
+      // or a probe is due (a run is long). When the token has changed, the sandbox is opened again with the new one (never resumed: it must be running, in the
+      // session the command started in) and the command is looked up on that session by id.
+      let liveToken = sandboxTokens.get(sandbox);
+      let liveSandbox = sandbox;
+      let liveCommand = command;
+      const live = async (): Promise<{ sandbox: SdkSandbox; command: SdkCommand }> => {
+        const creds = await credentials();
+        if (command.cmdId === undefined || creds.token === liveToken || liveToken === undefined) return { sandbox: liveSandbox, command: liveCommand };
+        const fresh = await sdk.get({ name: handle.sandboxName, resume: false, signal: signal(), ...creds, ...fetchOption });
+        const session = fresh.currentSession();
+        if (fresh.name !== handle.sandboxName || fresh.status !== "running" || session.sessionId !== runSessionId || session.getCommand === undefined) throw new SandboxPortError("reopen");
+        const found = await session.getCommand(command.cmdId, { signal: signal() });
+        if (found.cmdId !== command.cmdId) throw new SandboxPortError("reopen"); // the lookup answered another command: never read or killed as ours
+        liveCommand = found;
+        liveSandbox = fresh;
+        liveToken = creds.token;
+        return { sandbox: liveSandbox, command: liveCommand };
+      };
+      const unreadableEcho: EchoCheck = { unavailable: true, mismatch: false, hasHeader: false, trailer: null, count: 0 };
+      const fileRecords = new RecordLedger();
+      let fileTrailer: Trailer | null = null;
+      let offset = 0;
+      let nextSeq = 0;
+      let headStreak = 0;
+      let failedReads = 0;
+      let exitCode: number | undefined;
+      let trailerMissing = false;
+      let launchRefused = false;
+      let echoUnreadable = false;
+      let faulted = false;
+      const raised = new Set<ReaderFlag>();
+      const raiseFlag = (flag: ReaderFlag): void => {
+        if (raised.has(flag)) return;
+        raised.add(flag);
         try {
-          while (!run.stopped && limitHit === undefined) {
-            const pending = iterator.next();
-            pending.catch(() => undefined); // if the stop wins the race, this read is abandoned
-            const next = await Promise.race([
-              pending,
-              run.stopSignal.then(() => "stopped" as const),
-              limitSignal.then(() => "stopped" as const),
-            ]);
-            if (next === "stopped" || next.done) break;
-            const entry = next.value;
-            if (entry.stream !== "stdout" || typeof entry.data !== "string") continue;
-            const lines = assembler.push(entry.data, () => {
-              oversize = true;
-              reportInvalid("oversize");
-            });
-            // An over-long line ends the run (EV-CAP), not just that line.
-            if (oversize) throw new SandboxPortError("stdout line cap");
-            for (const line of lines) {
-              await deliver(line);
-              if (limitHit !== undefined) break;
+          opts.onReaderFlag?.(flag);
+        } catch (err) {
+          // a flag hook must never break a run
+          reportError(err, { stage: "run.reader_flag_hook" });
+        }
+      };
+      /** Ends the run on a reader fault: the flag, then a throw (the catch below kills the command). */
+      function fail(flag: ReaderFlag, operation: string): never {
+        faulted = true;
+        raiseFlag(flag);
+        throw new SandboxPortError(operation);
+      }
+      /** One accepted record's effect. A line goes to `deliver`; an over-long one ends the run (EV-CAP); the header and the trailer carry no line. */
+      const deliverRecord = async (r: AcceptedRecord): Promise<void> => {
+        if (r.kind === "big") {
+          reportInvalid("oversize");
+          throw new SandboxPortError("stdout line cap");
+        }
+        if (r.kind !== "o" && r.kind !== "tail") return;
+        const line = r.data.toString("utf8").trim();
+        if (line) await deliver(line);
+      };
+      /** One read and what it means. A fault that is not a plain failed read ends the run here. */
+      const step = async (): Promise<{ progressed: boolean; caughtUp: boolean; failed: boolean } | "stopped"> => {
+        const held = await orStopped(bounded("reader_live", live())).catch(() => undefined);
+        if (held === "stopped") return "stopped";
+        if (held === undefined) return { progressed: false, caughtUp: false, failed: true };
+        // Only the read itself races a stop or a limit; what it returned is processed to the end, so a kill thrown from `onEvent` is never lost to a stop.
+        const out = await orStopped(readRecords(held.sandbox, { recordPath, offset, nextSeq, timeoutMs: callTimeoutMs, abandon: (c) => killQuietly(handle.sandboxName, c, runSessionId) }));
+        if (out === "stopped") return "stopped";
+        if (out.fault === "read_failed") return { progressed: false, caughtUp: false, failed: true };
+        if (out.fault === "log_oversize") fail("log_oversize", "record file oversize");
+        if (out.fault !== null) fail("record_file_tampered", `record file ${out.fault}`); // truncated, or a read the script cannot make
+        if (nextSeq === 0 && out.records.length > 0 && out.run !== opts.runId) fail("record_file_tampered", "record file run id");
+        headStreak = nextHeadStreak(headStreak, out);
+        if (isTampered(headStreak, out)) fail("record_file_tampered", "record file head");
+        for (const r of out.records) {
+          fileRecords.add(r);
+          await deliverRecord(r);
+          if (limitHit !== undefined) break;
+        }
+        offset += out.bytes;
+        nextSeq += out.records.length;
+        if (out.trailer) fileTrailer = out.trailer;
+        return { progressed: out.records.length > 0, caughtUp: out.size !== null && offset >= out.size, failed: false };
+      };
+      /** `work`, or "stopped" when `stop()` or the runner's own limit comes first (the abandoned work is left to settle). */
+      const orStopped = async <T,>(work: Promise<T>): Promise<T | "stopped"> => {
+        let failure: { err: unknown } | undefined;
+        work.catch((err: unknown) => void (failure = { err }));
+        const first = await Promise.race([work, run.stopSignal.then(() => "stopped" as const), limitSignal.then(() => "stopped" as const)]);
+        if (first === "stopped") {
+          // A stop and an abort from `onEvent` (a spend kill stops the sandbox first) arrive in the same turn: the abort wins, as it did when the loop awaited each line.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          if (failure) throw failure.err;
+        }
+        return first;
+      };
+      /**
+       * RLR-0c condition 8, for an exit that does not take the cross-check above and was not the runner's own enforcement (a reader fault, a stop): the
+       * command is waited for, bounded, and the echo is replayed with whatever the file lacks metered, so usage taken out of the unread part of the file
+       * is still counted. It runs once. `swallow` is for an exit that ends the run with its own answer: an error from the meter there is not allowed to
+       * replace it. A spend kill, a limit and an over-long line are the runner's own enforcement and keep today's end: nothing after them is consumed.
+       */
+      let caughtUp = false;
+      const meterRecord = async (r: AcceptedRecord): Promise<void> => {
+        if (r.kind === "big") return reportInvalid("oversize"); // counted; the run is ending already
+        if (r.kind !== "o" && r.kind !== "tail") return;
+        const line = r.data.toString("utf8").trim();
+        if (line) await deliver(line, true);
+      };
+      /**
+       * The same record for an end the runner itself enforced (a limit, a spend kill, an over-long line): the usage in it reaches the caller's meter and nothing
+       * else is done with it. No text, no tool activity and no envelope is passed on, the guard does not see it, and the run's last result is not replaced.
+       */
+      const meterOnly = async (r: AcceptedRecord): Promise<void> => {
+        if (r.kind === "big") return reportInvalid("oversize");
+        if (r.kind !== "o" && r.kind !== "tail") return;
+        const line = r.data.toString("utf8").trim();
+        if (!line) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          // fx-swallow-ok: a recorded line that is not JSON is counted by reportInvalid and never echoed
+          return reportInvalid("not_json");
+        }
+        if (!isPlainObject(parsed)) return reportInvalid("shape");
+        if (!isKnownStreamJsonType(parsed)) return reportInvalid("type");
+        if (isMalformedAssistant(parsed)) return reportInvalid("shape");
+        const event = dropInvalidUsage(normalizeMessage({ ...opts, backend: backend.name }, parsed, seq, opts.workdir), reportInvalid);
+        if (event.usage === undefined && event.costUsd === undefined) return;
+        const { runId, role, seq: eventSeq, type, ts, backend: eventBackend, sessionId, messageId, messageModel, usage, costUsd } = event;
+        try {
+          await opts.onEvent({ runId, role, seq: eventSeq, type, ts, ...(eventBackend !== undefined && { backend: eventBackend }), ...(sessionId !== undefined && { sessionId }), ...(messageId !== undefined && { messageId }), ...(messageModel !== undefined && { messageModel }), ...(usage !== undefined && { usage }), ...(costUsd !== undefined && { costUsd }) }, { meterOnly: true });
+        } catch (err) {
+          // The run is ending already; the meter's own abort must not stop the records after this one from being counted.
+          reportError(err, { stage: "run.meter_only" });
+        }
+      };
+      /**
+       * `enforced`: the end was the runner's own kill. Only what the file lacked of the part this reader had consumed is metered (`upToSeq`), through `meterOnly`;
+       * whatever the echo has after the killing record stays unconsumed and unmetered. Finding any of it raises `record_mismatch`.
+       */
+      const catchUp = async (swallow: boolean, enforced = false): Promise<void> => {
+        if (caughtUp) return;
+        caughtUp = true;
+        let hidden = false;
+        try {
+          const held = await bounded("reader_live", live()).catch(() => undefined);
+          const gone = held === undefined ? undefined : await bounded("reader_exit", probeExit(held.command, exitWaitMs), exitWaitMs + callTimeoutMs).catch(() => undefined);
+          if (held === undefined || !gone?.exited) return raiseFlag("reader_unavailable");
+          const replayMs = Math.min(echoTimeoutMs, Math.max(callTimeoutMs - exitWaitMs, 1_000));
+          const echo = await crossCheckEcho(
+            held.command,
+            { ledger: fileRecords, trailer: fileTrailer },
+            enforced
+              ? {
+                  timeoutMs: replayMs,
+                  upToSeq: fileRecords.count - 1,
+                  onEchoOnly: async (r) => {
+                    hidden = true;
+                    await meterOnly(r);
+                  },
+                }
+              : { timeoutMs: replayMs, onEchoOnly: meterRecord },
+          );
+          if (echo.unavailable) raiseFlag("reader_unavailable");
+        } catch (err) {
+          if (!swallow) throw err; // the meter's own abort (a spend kill)
+          reportError(err, { stage: "run.catch_up" });
+        } finally {
+          if (hidden) raiseFlag("record_mismatch");
+        }
+      };
+      let endedByStop = false;
+      try {
+        try {
+          for (;;) {
+            if (run.stopped || limitHit !== undefined) break;
+            if (fileTrailer === null) {
+              const r = await step();
+              if (r === "stopped" || limitHit !== undefined) break;
+              failedReads = r.failed ? failedReads + 1 : 0;
+              if (r.progressed && !r.caughtUp) continue; // more is waiting: read again at once
+            }
+            // Caught up, or the read failed, or the trailer is in: ask the command. While it runs the probe is the pause between reads.
+            const probe = await orStopped(bounded("reader_live", live()).then((h) => probeExit(h.command, fileTrailer === null ? probeMs : trailerWaitMs)).catch(() => undefined));
+            if (probe === "stopped") break;
+            if (probe?.exited) {
+              exitCode = probe.exitCode;
+              break;
+            }
+            if (probe === undefined) failedReads++;
+            else if (fileTrailer !== null) fail("record_file_tampered", "trailer on a running command"); // RLR-0c condition 6: wait() did not agree within seconds
+            if (failedReads >= READ_FAILURE_LIMIT) fail("reader_unavailable", "reader unavailable");
+          }
+          if (exitCode !== undefined && !run.stopped && limitHit === undefined) {
+            // The command has exited: read what is left, up to the trailer.
+            // A read that fails is tried again (as in the loop above, up to READ_FAILURE_LIMIT in a row) before the trailer is given up on.
+            for (let reads = 0, failures = 0; reads < DRAIN_READS && fileTrailer === null; ) {
+              const r = await step();
+              if (r === "stopped" || limitHit !== undefined) break;
+              if (r.failed) {
+                if (++failures >= READ_FAILURE_LIMIT) break;
+                continue;
+              }
+              failures = 0;
+              if (!r.progressed) break;
+              reads++;
             }
           }
-          for (const line of assembler.finish()) await deliver(line);
+          if (exitCode !== undefined && !run.stopped && limitHit === undefined) {
+            if (fileTrailer !== null && !trailerMatchesWait(fileTrailer, exitCode)) raiseFlag("record_mismatch");
+            // B4 step 3 (condition 7): the first-ever replay of the echo, compared with the file; anything only the echo has is metered too.
+            const replay = async (timeoutMs: number): Promise<EchoCheck | "stopped"> => {
+              const held = await orStopped(bounded("reader_live", live())).catch(() => undefined);
+              if (held === "stopped") return "stopped";
+              if (held === undefined) return unreadableEcho;
+              return orStopped(crossCheckEcho(held.command, { ledger: fileRecords, trailer: fileTrailer }, { timeoutMs, onEchoOnly: deliverRecord }));
+            };
+            // An echo that cannot be read is tried once more inside the same bound; if it still cannot be, the run is not a success (the meter stays at what was read).
+            const echoDeadline = Date.now() + echoTimeoutMs;
+            let echo = await replay(echoTimeoutMs);
+            if (echo !== "stopped" && echo.unavailable && limitHit === undefined && echoDeadline - Date.now() > 0) echo = await replay(echoDeadline - Date.now());
+            if (echo !== "stopped" && limitHit === undefined) {
+              if (echo.unavailable) {
+                raiseFlag("reader_unavailable");
+                echoUnreadable = true;
+              }
+              if (echo.mismatch) raiseFlag("record_mismatch");
+              if (fileTrailer === null) {
+                // A command that never wrote a header or a trailer was refused at launch (whatever its exit code, which a child can fake); one that did, and then lost its trailer, was cut off.
+                launchRefused = fileRecords.count === 0 && !echo.unavailable && !echo.hasHeader && echo.trailer === null;
+                trailerMissing = !launchRefused;
+                raiseFlag(launchRefused ? "record_launch_refused" : "record_trailer_missing");
+              }
+            }
+          }
+          // The end is decided here, before any catch-up: a stop requested while the hidden part is counted must not turn a limit or a spend kill into a stop.
+          endedByStop = run.stopped;
+          if (limitHit !== undefined) {
+            guard.stop(); // the limit is reached; nothing more is enforced while the hidden part is counted
+            await catchUp(true, true);
+          } else if (run.stopped) await catchUp(false);
+        } catch (err) {
+          // Kill the command; after a reader fault or any other end the runner enforced, count what the file did not show; then pass the failure on.
+          await killQuietly(handle.sandboxName, command, runSessionId);
+          guard.stop();
+          await catchUp(true, !faulted);
+          throw err;
         } finally {
           guard.stop();
           try {
@@ -1322,11 +1849,6 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             // fx-swallow-ok: the only observer stores the measure on the run's bookkeeping and cannot throw; a ledger is never worth ending a run for
           }
           clearTimeout(timeWarning);
-          // Not awaited: on a stream blocked mid-read the close would wait
-          // for the read that never finishes.
-          void Promise.resolve()
-            .then(() => iterator.return?.())
-            .catch(() => undefined);
         }
       } catch (err) {
         // `onEvent` throwing is the sanctioned way to abort (see
@@ -1334,10 +1856,11 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         await killQuietly(handle.sandboxName, command, runSessionId);
         throw err;
       }
-      if (run.stopped) return undefined;
+      if (endedByStop) return undefined;
       // The runner's own limit ended the command: report it, never "failed".
       if (limitHit !== undefined) throw new RunLimitError(limitHit);
-      const finished = await guarded("wait", () => bounded("wait", (async () => command.wait())()));
+      if (exitCode === undefined) throw new SandboxPortError("wait");
+      const finished = { exitCode };
       // The CLI ran out of turns (its own count): resumable only if the
       // runner's own distinct message-id count agrees, so a forged line
       // cannot turn a failure into a resumable end.
@@ -1346,7 +1869,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       // Succeeded = exit 0 AND the last result was not an error. Anything
       // else is a failure event built here, carrying only what that last
       // result reported (if any).
-      if (finished.exitCode === 0 && lastResult?.type === "result") {
+      if (finished.exitCode === 0 && lastResult?.type === "result" && !trailerMissing && !launchRefused && !echoUnreadable) {
         return lastResult.agentOutput === undefined && lastEnvelope !== undefined ? { ...lastResult, agentOutput: lastEnvelope } : lastResult;
       }
       return {

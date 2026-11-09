@@ -86,6 +86,17 @@ export interface CreateSandboxOptions {
   networkPolicy?: NetworkPolicyRule[];
 }
 
+/**
+ * D#2 RLR-3b (run-log reader design, B2/B4 and the RLR-0c conditions): what the reader flags on a run. All are meter flags; none is an error code.
+ * - `record_mismatch`: the recorder's echo and its file differ (a record, the count, the trailer), or the trailer's exit code differs from `wait()`'s.
+ * - `record_trailer_missing`: the command ended with no trailer (the recorder was killed), so the end is not clean.
+ * - `record_file_tampered`: the file was changed under the reader (shorter than the offset, a rewritten head, a trailer while the command still runs, a wrong run id).
+ * - `reader_unavailable`: three reads in a row failed while the command ran, or the exit replay could not be read.
+ * - `log_oversize`: the record file passed its size ceiling.
+ * - `record_launch_refused`: the recorder never wrote a header or a trailer (the echo is empty): the command did not start recording.
+ */
+export type ReaderFlag = "record_mismatch" | "record_trailer_missing" | "record_file_tampered" | "reader_unavailable" | "log_oversize" | "record_launch_refused";
+
 export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sandboxSpec"> {
   role: Role;
   /** D#2 COMPUTE-SETTLE CS-1: awaited with the id of the session the command runs in, before the command starts. */
@@ -122,6 +133,11 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   /** D#221 OM-1: called once when this command's stream ends, however it ends, with the run guard's count of distinct
    * assistant message ids for this command. The runner's own number; the caller adds it to the run's total. */
   onModelCalls?: (count: number) => void;
+  /**
+   * D#2 RLR-3b: called when the run-log reader meets something it must not trust (see `ReaderFlag`). The caller adds the flag to the run's
+   * meter flags, which settle with the run. Called at most once per flag; it must not throw (a throw is reported, never ends the run).
+   */
+  onReaderFlag?: (flag: ReaderFlag) => void;
   /** D#600 CX-1a: called once when this command's stream ends, with what the stream said about the run's context (turn sizes,
    * cache tokens, tool output bytes, compactions). Integers only; the caller merges the measures of a run's commands. Best effort. */
   onContextLedger?: (measure: ContextLedgerMeasure) => void;
@@ -149,7 +165,15 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   /** D#2 H09b2 fix round 1 (S-MUST 2): may return a promise -- see
    * `@fx/runtime`'s `StartOptions.onEvent` for why every runtime awaits it
    * before producing the next event. */
-  onEvent: (event: NormalizedEvent) => void | Promise<void>;
+  onEvent: (event: NormalizedEvent, meta?: EventMeta) => void | Promise<void>;
+}
+
+/**
+ * The second argument of `onEvent`. `meterOnly` marks usage the port counts after the run's own end was decided (the echo catch-up behind an enforced end):
+ * the handler books it and issues no new stop, kill or abort reason, so the end already decided is the end reported.
+ */
+export interface EventMeta {
+  readonly meterOnly?: boolean;
 }
 
 export interface StartDetachedResult {
