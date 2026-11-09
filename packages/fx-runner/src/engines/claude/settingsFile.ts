@@ -1,6 +1,6 @@
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { CONFINED_READ_ROLES, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS, excludeDenyRules, isBrowserJobRole, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
 import type { ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { anchored, checkCommandDenyRules, confineFileTools, denyRules, readRulesFor, workspaceProtectedEditRules } from "./filePermissions.js";
@@ -52,7 +52,8 @@ function verifierSettings(role: string, sandbox: Record<string, unknown>, worksp
     permissions: {
       defaultMode: "dontAsk",
       allow: confineFileTools(roleToolsFor(role), workspace),
-      deny: [...VERIFIER_CHECKOUT_DENY.map((p) => `Read(${root}/${p})`), ...denyRules(protectedList), ...excludeRules(excludes)],
+      // D#749 V2b: the browser role is denied the five extension tools it is never given (script execution in the signed-in page, request headers, file and image upload, form filling), as well as not being allowed them.
+      deny: [...VERIFIER_CHECKOUT_DENY.map((p) => `Read(${root}/${p})`), ...denyRules(protectedList), ...excludeRules(excludes), ...(isBrowserJobRole(role) ? DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS : [])],
       blockReadsOutsideWorkingDirectories: true,
     },
     sandbox,
@@ -81,7 +82,10 @@ function realpathOrNull(dir: string): string | null {
   }
 }
 
-/** The MCP file. No server in v1; this one function is where a later, job-provided server list would come from. */
+/**
+ * The MCP file. No server for any role, the browser role included: the CLI reaches the Claude in Chrome extension through its `--chrome` flag (argv.ts), not through an
+ * entry here, and `--strict-mcp-config` with this empty file keeps every other server out. This one function is where a later, job-provided server list would come from.
+ */
 export function mcpConfigFor(_job: { role: string }): { mcpServers: Record<string, never> } {
   return { mcpServers: {} };
 }

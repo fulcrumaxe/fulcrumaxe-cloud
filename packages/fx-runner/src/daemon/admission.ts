@@ -11,7 +11,7 @@
  * have (the ramp) or have used it. Nothing here stops a job: when the headroom shrinks the runner only stops asking for more.
  * A finished job's measured peak (its own scope's, else the machine-wide drop) feeds the footprint store.
  */
-import { MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, jobClassOfRole, type LimitedBy, type ClaimCapacity, type JobClass } from "@fulcrumaxe/runner-protocol";
+import { BROWSER_JOB_SLOTS_PER_RUNNER, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, isBrowserJobRole, jobClassOfRole, type LimitedBy, type ClaimCapacity, type JobClass } from "@fulcrumaxe/runner-protocol";
 import type { Claimed } from "./client.js";
 import { GIB, type Footprint, type FootprintStore } from "./footprints.js";
 import type { ResourceProbe, ResourceReading } from "./resources.js";
@@ -48,6 +48,8 @@ export interface Admission {
   snapshot(): Snapshot;
   /** The class a claimed run counts as, from its role. A role the table lacks is heavy. */
   classOf(claimed: Claimed): JobClass;
+  /** D#749 V2b: whether the run is a browser job and this machine already holds its one (`BROWSER_JOB_SLOTS_PER_RUNNER`). Any other role is never full here. */
+  browserSlotFull?(claimed: Claimed): boolean;
   /** Counts the run as in hand from now; the returned function ends it and records its measured peak. */
   begin(claimed: Claimed): () => void;
   /** Takes one peak sample of every job in hand (also done on a timer while any is). */
@@ -195,6 +197,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     snapshot,
     sample,
     classOf: (claimed) => jobClassOfRole(claimed.signedJob.job.role),
+    browserSlotFull: (claimed) => isBrowserJobRole(claimed.signedJob.job.role) && [...inHand].filter((job) => isBrowserJobRole(job.role)).length >= BROWSER_JOB_SLOTS_PER_RUNNER,
     begin(claimed) {
       const job = claimed.signedJob.job;
       const repo = `${job.repo.owner}/${job.repo.name}`;

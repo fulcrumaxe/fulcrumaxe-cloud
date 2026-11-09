@@ -289,6 +289,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_unusable",
   // The cloud has no git ticket key (503 not_configured on the git ticket route); the run ended before the agent began.
   "git_ticket_unavailable",
+  // D#749 V2b: a browser job was claimed on a machine whose Chrome or Claude in Chrome extension is not connected; the run ended before the agent began.
+  "browser_not_connected",
   // D#6 R5b-3: the key file holds something that is not a key, or is a link, or belongs to another user or is open to other users.
   "api_key_format",
   "api_key_unsafe",

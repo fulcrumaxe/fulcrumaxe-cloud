@@ -98,6 +98,8 @@ function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: A
       return over.lockfile!.outcome;
     } } }),
     ...(over.skipHook === true ? { runJobFn: (async (job: never, d: RunJobDeps) => { const done = await runJob(job, { ...d, afterAgent: undefined }); return done; }) as typeof runJob } : {}),
+    // D#749 V2b: a browser job (the deploy verifier, one of the confined roles below) starts only when the daemon's own probe says Chrome is connected.
+    browserReady: () => undefined,
     planePush: { baseLedger: createPlaneBaseLedger(), run: async () => (order.push("hook"), { kind: "pr_opened" as const, number: 9, seconds: 1 }) },
     ...(over.wired === false ? {} : {
       checkStep: async (input) => {
@@ -492,7 +494,7 @@ describe("a job with a check and the Spec's file scope (D#6 SCOPE-IN-JOB)", () =
 });
 
 /** A confined read-only role cannot change a manifest, so the runner does not try to bring a lockfile up to date for it; its result still reaches the cloud. */
-const CONFINED = ["proposal-verifier", "discovery-analyst"] as const;
+const CONFINED = ["proposal-verifier", "discovery-analyst", "deploy-verifier"] as const;
 it("the roles below are exactly the confined read-only roles", () => expect([...CONFINED].sort()).toEqual([...CONFINED_READ_ROLES].sort()));
 for (const ROLE of CONFINED) {
   describe(`a ${ROLE} job with a lockfile update wired`, () => {

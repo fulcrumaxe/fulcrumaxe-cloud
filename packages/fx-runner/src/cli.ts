@@ -94,7 +94,10 @@ Commands:
                      Turn automatic updates, which happen between jobs only, on or off.
   config set concurrency.total <1-8> | concurrency.heavy <1-4> | reserve-gb <1-256|auto> | cpu-reserve <0-256 cores|auto>
   config set budget.light.memory <1-8 GB> | budget.heavy.memory <2-32 GB> | budget.light.tasks | budget.heavy.tasks <64-65536>
-  config unset concurrency.total | concurrency.heavy | reserve-gb | cpu-reserve | budget.<class>.memory | budget.<class>.tasks
+  config set verify.deploy_argv '["program", "script", ...]' | verify.deploy_dir <absolute path> | verify.test_account <label>
+                     The post-merge deploy check's local half: the command (a JSON array of words, never a shell string) and the checkout on this machine it runs in (its script is looked
+                     up below that folder, link-free), and the account label the machine's Chrome must be signed in as. All stay off until you set them; nothing the cloud sends can set or change them.
+  config unset concurrency.total | concurrency.heavy | reserve-gb | cpu-reserve | budget.<class>.memory | budget.<class>.tasks | verify.deploy_argv | verify.deploy_dir | verify.test_account
                      Return a setting to its automatic default.
                      Lower the most jobs held at once, or set the memory kept free for your own work. A change applies from the next claim; running jobs are never stopped.
                      The budget is the hard limit one job runs under (memory and processes); a job past it is stopped on its own, others go on.

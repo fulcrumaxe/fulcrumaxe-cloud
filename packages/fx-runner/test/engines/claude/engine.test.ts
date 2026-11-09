@@ -83,6 +83,25 @@ describe("engine run", () => {
     expect(rig.fake.stdin()).toBe("next prompt");
   });
 
+  // D#749 V2b: the browser flag on the command line the engine really spawns, not only on `claudeArgv`: `--chrome` for the deploy verifier alone, `--no-chrome` for every other role,
+  // on a fresh start and on a resume.
+  it.each([["executor", false], ["code-reviewer", false], ["security-reviewer", false], ["deploy-verifier", true]] as const)("%s: the spawned command line carries %s browser flag on a start and on a resume", async (role, chrome) => {
+    const rig = makeRig();
+    const engine = engineFor(rig);
+    const first = await engine.start(rig.startOptions({ role }));
+    await outcomeOf(first.handle);
+    const started = rig.fake.argv();
+    const second = await engine.resume(first.handle, "sess-0001", "next prompt");
+    await outcomeOf(second.handle);
+    const resumed = rig.fake.argv();
+    for (const argv of [started, resumed]) {
+      expect(argv.includes("--chrome"), role).toBe(chrome);
+      expect(argv.includes("--no-chrome"), role).toBe(!chrome);
+      expect(argv, role).toContain("--strict-mcp-config");
+    }
+    expect(resumed.slice(-2)).toEqual(["--resume", "sess-0001"]);
+  });
+
   it("the version is on the run: in the outcome, the local log and the first uploaded event", async () => {
     const local: LocalOnlyEvent[] = [];
     const rig = makeRig({ onLocalEvent: (event) => void local.push(event) });

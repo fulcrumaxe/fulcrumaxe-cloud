@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CONFINED_READ_ROLES, DISCOVERY_ANALYST_ROLE, PLATFORM_ROLES, PROPOSAL_VERIFIER_ROLE, VERIFIER_DENY, VERIFIER_READ_GUARD, agentSettingsFor, runnerToolsForRole, toolsForRole } from "../src/agentConfig.js";
+import { CONFINED_READ_ROLES, DISCOVERY_ANALYST_ROLE, PLATFORM_ROLES, PROPOSAL_VERIFIER_ROLE, RUNNER_ONLY_ROLES, VERIFIER_DENY, VERIFIER_READ_GUARD, agentSettingsFor, runnerToolsForRole, toolsForRole } from "../src/agentConfig.js";
 import { roleToolsDigest } from "../src/targets/jobIssuer.js";
 
 /**
@@ -31,9 +31,9 @@ describe("S4f-5: the analyst's tools are exactly the confined Read, Glob and Gre
     for (const t of WRITE_OR_REACH) expect(settings.permissions.allow.some((x) => x === t || x.startsWith(`${t}(`)), t).toBe(false);
   });
 
-  it("exactly the two platform roles are confined, and a role outside the set is not", () => {
-    expect([...CONFINED_READ_ROLES].sort()).toEqual(["discovery-analyst", "proposal-verifier"]);
-    expect([...CONFINED_READ_ROLES].sort()).toEqual([...PLATFORM_ROLES].sort());
+  it("exactly the two platform roles and the runner-only deploy verifier are confined, and a role outside the set is not", () => {
+    expect([...CONFINED_READ_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "proposal-verifier"]);
+    expect([...CONFINED_READ_ROLES].filter((role) => !RUNNER_ONLY_ROLES.includes(role)).sort()).toEqual([...PLATFORM_ROLES].sort());
     for (const role of ["executor", "code-reviewer", "researcher", "", "__proto__", "Discovery-Analyst"]) expect(CONFINED_READ_ROLES.has(role), role).toBe(false);
   });
 

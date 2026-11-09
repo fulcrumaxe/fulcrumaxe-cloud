@@ -1321,3 +1321,43 @@ describe("D#6 RUNNER-CWD-1: the CLI's placeholders made during the run are gone 
     expect(excludeAtPublish).toBe("# repo excludes\n");
   });
 });
+
+// D#749 V2b: a browser job (the deploy verifier) starts only when the daemon's own probe says Chrome and its extension are connected. The probe is asked after the credentials and
+// before any mirror or sandbox, and a machine that wires no probe refuses the job too (fail closed). Every other role never asks.
+describe("a browser job needs a connected browser (D#749 V2b)", () => {
+  const HEAD = "b".repeat(40);
+  const browserJob = () => signedJob({ role: "deploy-verifier", task: jobFor().task, role_tools_sha256: roleToolsDigest("deploy-verifier"), review: { head_sha: HEAD } });
+
+  it("a probe that fails ends the run runner_setup/browser_not_connected before any sandbox, and nothing is started", async () => {
+    let asked = 0;
+    const rig = makeRig({ handler: { browserReady: () => (asked++, "browser_not_connected") } });
+    const claimed = await rig.claim(browserJob());
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "browser_not_connected" });
+    expect(asked).toBe(1);
+    expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "browser_not_connected" });
+    expect(rig.port.calls).toEqual([]);
+  });
+
+  it("a machine that wires no probe refuses a browser job the same way", async () => {
+    const rig = makeRig();
+    const claimed = await rig.claim(browserJob());
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "browser_not_connected" });
+    expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ reason: "runner_setup", detail: "browser_not_connected" });
+    expect(rig.port.calls).toEqual([]);
+  });
+
+  it("a probe that passes lets the job through to the sandbox", async () => {
+    const rig = makeRig({ handler: { browserReady: () => undefined } });
+    const claimed = await rig.claim(browserJob());
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(rig.port.calls).toContain("start");
+  });
+
+  it("a job of any other role never asks the probe", async () => {
+    let asked = 0;
+    const rig = makeRig({ handler: { browserReady: () => (asked++, "browser_not_connected") } });
+    const claimed = await rig.claim();
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(asked).toBe(0);
+  });
+});

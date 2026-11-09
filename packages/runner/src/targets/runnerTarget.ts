@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { CONFINED_READ_ROLES, NOT_RECORDED_MEASURE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_ROLE, NOT_RECORDED_MEASURE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
 import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -183,7 +183,9 @@ export class RunnerTarget implements ExecutionTarget {
     // D#483 S4-b2c: the claim verifier is a runner job for a cloud-verified repo only. Its result is re-read by our cloud from the repository, which a
     // Local-only repo's promise rules out, so a `runner_local` verifier run is refused before anything is counted or written.
     // D#483 S4-f4: the discovery analyst is refused there for the same reason (its refs are re-read by our cloud; S4-f5 owns Local-only).
-    if (this.mode === "runner_local" && CONFINED_READ_ROLES.has(run.role)) return "role_not_runner_eligible";
+    // D#749 V2b: the deploy verifier is confined read-only too, but it IS served in a Local-only repository: the owner's machine is the runner, its result is the browser job's own
+    // evidence (not a repository read by our cloud), and its checkout read stays behind the read guard. The hosted sandbox still refuses it (agentConfig.ts).
+    if (this.mode === "runner_local" && CONFINED_READ_ROLES.has(run.role) && run.role !== DEPLOY_VERIFIER_ROLE) return "role_not_runner_eligible";
     return null;
   }
 

@@ -1,3 +1,5 @@
+import { isMcpToolName } from "@fulcrumaxe/runner-protocol";
+
 export interface ArgvInput {
   /** The CLI's own name for the model. */
   cliModel: string;
@@ -7,6 +9,12 @@ export interface ArgvInput {
   allowRules: readonly string[];
   settingsPath: string;
   mcpPath: string;
+  /**
+   * D#749 V2b: true only for the browser role (the deploy verifier). The command line then carries `--chrome` (the CLI reaches the Claude in Chrome extension
+   * through that flag; the MCP file stays empty). Every other role carries `--no-chrome`, so a person's own "Chrome on by default" setting cannot bring the
+   * browser tools to a job that does not hold them.
+   */
+  chrome?: boolean;
   /** Present on a resume. */
   resumeSessionId?: string;
 }
@@ -14,12 +22,15 @@ export interface ArgvInput {
 /** Every flag `claudeArgv` uses. The binary's `--help` must list each one; a test keeps this and the argument list in step. */
 export const REQUIRED_FLAGS: readonly string[] = Object.freeze([
   "-p", "--output-format", "--verbose", "--setting-sources", "--settings", "--strict-mcp-config", "--mcp-config", "--tools",
-  "--allowedTools", "--disallowedTools", "--permission-prompts", "--disable-slash-commands", "--model", "--resume",
+  "--allowedTools", "--disallowedTools", "--permission-prompts", "--disable-slash-commands", "--model", "--resume", "--chrome", "--no-chrome",
 ]);
 
-/** The distinct base tool names of a role's entries, in first-seen order: `Bash(git:*)` and `Bash(ls:*)` give one `Bash`. */
+/**
+ * The distinct base tool names of a role's entries, in first-seen order: `Bash(git:*)` and `Bash(ls:*)` give one `Bash`. An MCP tool is not one of the CLI's built-in tools,
+ * which is what `--tools` lists; it is granted by its allow rule alone, so it is left out here.
+ */
 export function baseToolNames(entries: readonly string[]): string[] {
-  return [...new Set(entries.map((entry) => entry.replace(/\(.*$/, "")))];
+  return [...new Set(entries.filter((entry) => !isMcpToolName(entry)).map((entry) => entry.replace(/\(.*$/, "")))];
 }
 
 /**
@@ -43,6 +54,7 @@ export function claudeArgv(input: ArgvInput): string[] {
     "--settings", input.settingsPath,
     "--strict-mcp-config",
     "--mcp-config", input.mcpPath,
+    input.chrome === true ? "--chrome" : "--no-chrome",
     "--tools", baseToolNames(input.roleTools).join(","),
     ...(input.allowRules.length === 0 ? [] : ["--allowedTools", ...input.allowRules]),
     "--disallowedTools", "WebFetch", "WebSearch",

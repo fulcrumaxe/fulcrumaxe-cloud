@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { DEPLOY_VERIFIER_BROWSER_TOOLS, DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
 import { CONFINED_READ_ROLES, PLATFORM_ROLES, RUNNER_ONLY_ROLES, TOOL_LISTED_ROLES, UnknownRoleError, agentSettingsFor, runnerToolsForRole, toolsForRole } from "../src/agentConfig.js";
 
 /**
@@ -12,16 +12,17 @@ describe("the deploy verifier role in the runner package", () => {
     expect([...RUNNER_ONLY_ROLES]).toEqual([DEPLOY_VERIFIER_ROLE]);
   });
 
-  it("has no sandbox tool list: toolsForRole refuses it, and it is neither a platform role nor a confined read role", () => {
+  it("has no sandbox tool list: toolsForRole and agentSettingsFor refuse it though it is a confined read role, and it is not a platform role", () => {
     expect(() => toolsForRole(DEPLOY_VERIFIER_ROLE)).toThrow(UnknownRoleError);
     expect(() => agentSettingsFor(DEPLOY_VERIFIER_ROLE)).toThrow(UnknownRoleError);
     expect(TOOL_LISTED_ROLES).not.toContain(DEPLOY_VERIFIER_ROLE);
     expect(PLATFORM_ROLES).not.toContain(DEPLOY_VERIFIER_ROLE);
-    expect(CONFINED_READ_ROLES.has(DEPLOY_VERIFIER_ROLE)).toBe(false);
+    // D#749 V2b: a member, so a local runner gives it the read guard and the dot-git and dot-env denies (its page text is an outsider's).
+    expect(CONFINED_READ_ROLES.has(DEPLOY_VERIFIER_ROLE)).toBe(true);
   });
 
-  it("is signed with Read, Glob and Grep only: nothing that writes, runs a command or reaches the network", () => {
-    expect([...runnerToolsForRole(DEPLOY_VERIFIER_ROLE)]).toEqual(["Read", "Glob", "Grep"]);
+  it("is signed with Read, Glob, Grep and the browser tools: nothing that writes, runs a command or reaches the web", () => {
+    expect([...runnerToolsForRole(DEPLOY_VERIFIER_ROLE)]).toEqual(["Read", "Glob", "Grep", ...DEPLOY_VERIFIER_BROWSER_TOOLS]);
     expect(runnerToolsForRole(DEPLOY_VERIFIER_ROLE)).toBe(DEPLOY_VERIFIER_RUNNER_TOOLS);
     expect(Object.isFrozen(DEPLOY_VERIFIER_RUNNER_TOOLS)).toBe(true);
     for (const tool of runnerToolsForRole(DEPLOY_VERIFIER_ROLE)) expect(tool).not.toMatch(/Bash|Edit|Write|Web|curl/);

@@ -4,12 +4,16 @@ import {
   BROWSER_CHROME_CAPABILITY,
   BROWSER_JOB_ROLES,
   BROWSER_JOB_SLOTS_PER_RUNNER,
+  CHROME_TOOL_PREFIX,
+  CONFINED_READ_ROLES,
   DEPLOY_ORDER_CAPABILITY,
   DEPLOY_ORDER_CLAIM_PATH,
   DEPLOY_ORDER_FAILURE_CODES,
   DEPLOY_ORDER_LEASE_SECONDS,
   DEPLOY_ORDER_MAX_ATTEMPTS,
   DEPLOY_ORDER_REPORT_PATH,
+  DEPLOY_VERIFIER_BROWSER_TOOLS,
+  DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS,
   DEPLOY_VERIFIER_ROLE,
   DEPLOY_VERIFIER_RUNNER_TOOLS,
   DeployOrderClaimMessage,
@@ -19,6 +23,7 @@ import {
   MAX_DEPLOY_OUTPUT_LINE_CHARS,
   MAX_DEPLOY_OUTPUT_TAIL_LINES,
   isBrowserJobRole,
+  isMcpToolName,
 } from "../src/index.js";
 import { HelloMessage, RUNNER_MESSAGES } from "../src/messages.js";
 import { ClaimIdleReply, ClaimedReply, RUNNER_REPLIES } from "../src/replies.js";
@@ -62,13 +67,25 @@ describe("the deploy verifier role and its capabilities (D#749 V2a)", () => {
     expect(BROWSER_JOB_SLOTS_PER_RUNNER).toBe(1);
   });
 
-  it("its job carries the pinned merge commit like the other pinned roles, and its tools are the bare read tools", () => {
+  it("its job carries the pinned merge commit like the other pinned roles, and its tools are the three read tools and the browser tools: nothing that writes, runs a command or reaches the web", () => {
     expect(PINNED_COMMIT_JOB_ROLES).toContain(DEPLOY_VERIFIER_ROLE);
     expect(jobCarriesPinnedCommit(DEPLOY_VERIFIER_ROLE)).toBe(true);
     expect(JobSchema.safeParse(sampleJob({ role: DEPLOY_VERIFIER_ROLE, review: { head_sha: SHA } })).success).toBe(true);
     expect(JobSchema.safeParse(sampleJob({ role: DEPLOY_VERIFIER_ROLE, review: { head_sha: "A".repeat(40) } })).success).toBe(false);
-    expect([...DEPLOY_VERIFIER_RUNNER_TOOLS]).toEqual(["Read", "Glob", "Grep"]);
+    expect([...DEPLOY_VERIFIER_RUNNER_TOOLS]).toEqual(["Read", "Glob", "Grep", ...DEPLOY_VERIFIER_BROWSER_TOOLS]);
     expect(Object.isFrozen(DEPLOY_VERIFIER_RUNNER_TOOLS)).toBe(true);
+    expect(DEPLOY_VERIFIER_BROWSER_TOOLS.map((tool) => tool.slice(CHROME_TOOL_PREFIX.length))).toEqual(["tabs_context_mcp", "tabs_create_mcp", "tabs_close_mcp", "navigate", "computer", "find", "read_page", "get_page_text", "read_console_messages"]);
+    expect(Object.isFrozen(DEPLOY_VERIFIER_BROWSER_TOOLS)).toBe(true);
+    // The two tools the role never holds are named once in the denied list and in no allow list.
+    expect(DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS.map((tool) => tool.slice(CHROME_TOOL_PREFIX.length))).toEqual(["javascript_tool", "form_input", "file_upload", "upload_image", "read_network_requests"]);
+    for (const denied of DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS) expect(DEPLOY_VERIFIER_RUNNER_TOOLS).not.toContain(denied);
+    for (const tool of DEPLOY_VERIFIER_RUNNER_TOOLS) expect(tool).not.toMatch(/Bash|Edit|Write|Web|curl/);
+    expect(DEPLOY_VERIFIER_RUNNER_TOOLS.filter((tool) => !isMcpToolName(tool))).toEqual(["Read", "Glob", "Grep"]);
+    expect(isMcpToolName("Bash")).toBe(false);
+  });
+
+  it("is a member of the confined read roles (the read guard and the .git and .env denies), beside the two it was built on", () => {
+    expect([...CONFINED_READ_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "proposal-verifier"]);
   });
 });
 

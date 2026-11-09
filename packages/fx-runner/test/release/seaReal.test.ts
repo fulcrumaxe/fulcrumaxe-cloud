@@ -70,7 +70,7 @@ describe.skipIf(!REACHABLE)("the Linux x64 single-executable build", () => {
   it("runs --version", async () => {
     const result = await runner(["--version"]);
     expect(result.code).toBe(0);
-    expect(result.stdout).toBe("fx-runner 0.1.0 (2026-05-28)\n");
+    expect(result.stdout).toBe("fx-runner 0.1.1 (2026-05-28)\n");
   });
 
   it("runs doctor --sandbox-only and answers as the probe does: 0 on a pass, 1 with the failed line on a fail", async () => {
@@ -110,7 +110,7 @@ describe.skipIf(!REACHABLE)("the Linux x64 single-executable build", () => {
 
   it("writes a manifest with the version, platform, SHA-256 and size of the file, and nothing else", () => {
     const manifest = JSON.parse(readFileSync(path.join(a, "release-manifest.json"), "utf8"));
-    expect(manifest).toEqual([{ version: "0.1.0", platform: "linux-x64", sha256: sha(file(a)), size: readFileSync(file(a)).length }]);
+    expect(manifest).toEqual([{ version: "0.1.1", platform: "linux-x64", sha256: sha(file(a)), size: readFileSync(file(a)).length }]);
     expect(readFileSync(path.join(a, "release-manifest.json"), "utf8")).toBe(readFileSync(path.join(b, "release-manifest.json"), "utf8"));
   });
 

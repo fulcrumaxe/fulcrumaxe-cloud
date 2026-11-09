@@ -7,6 +7,7 @@ import {
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimMessage, DeployOrderClaimReply, DeployOrderReportMessage, DeployOrderReportReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
@@ -30,8 +31,8 @@ export interface CallError {
 }
 
 /** `wake` is the grant the reply carried (D#6 RUNNER-WAKE), absent when it carried none. */
-export type Claimed = { kind: "claimed"; signedJob: SignedJob; runId: string; leaseGeneration: number; wake?: WakeGrant; mergeOrder?: true };
-export type ClaimResult = Claimed | { kind: "idle"; retryAfter: number; wake?: WakeGrant; mergeOrder?: true } | { kind: "rate_limited"; retryAfter: number } | CallError;
+export type Claimed = { kind: "claimed"; signedJob: SignedJob; runId: string; leaseGeneration: number; wake?: WakeGrant; mergeOrder?: true; deployOrder?: true };
+export type ClaimResult = Claimed | { kind: "idle"; retryAfter: number; wake?: WakeGrant; mergeOrder?: true; deployOrder?: true } | { kind: "rate_limited"; retryAfter: number } | CallError;
 /** D#6 RUNNER-WAKE: a wake check's answer: the account's wake epoch and the earliest due time, both ms (due null when none). */
 export type WakeResult = { kind: "wake"; epoch: number; dueAt: number | null } | CallError;
 /** `handoff` is present only when the cloud asked for the run to move to the other side; `deadline` is the UTC instant after which it takes the last pushed commit. */
@@ -79,6 +80,10 @@ export type PlaneMergeVerifyResult =
   /** 409: the order is not this runner's any more (fenced, mismatch, or a credential already issued). Nothing more may be done with it. */
   | { kind: "fenced"; code?: string }
   | CallError;
+/** D#749 V2b: a deploy order claimed: the repository and the commit, nothing else (the command is this machine's own). */
+export type DeployOrderClaimed = Extract<DeployOrderClaimReply, { order_id: string }>;
+export type DeployOrderClaimResult = { kind: "order"; order: DeployOrderClaimed } | { kind: "none"; retryAfter: number } | { kind: "fenced" } | CallError;
+export type DeployOrderReportResult = { kind: "recorded" } | { kind: "fenced"; code?: string } | CallError;
 export type PlaneMergeReportResult = { kind: "recorded" } | { kind: "retry"; retryAfter: number } | { kind: "fenced"; code?: string } | CallError;
 
 /** The closed codes a token request can be refused with; any other 4xx or 5xx word is a plain `CallError`. */
@@ -122,6 +127,9 @@ export interface RunnerClient {
   planeMergeClaim(): Promise<PlaneMergeClaimResult>;
   planeMergeVerify(message: PlaneMergeVerifyMessage): Promise<PlaneMergeVerifyResult>;
   planeMergeReport(message: PlaneMergeReportMessage): Promise<PlaneMergeReportResult>;
+  /** D#749 V2b. The two signed calls of a deploy order on this runner. Used only after a claim reply said `deploy_order`, and only by a runner whose hello kept `deploy_order_v1`. */
+  deployOrderClaim(): Promise<DeployOrderClaimResult>;
+  deployOrderReport(message: DeployOrderReportMessage): Promise<DeployOrderReportResult>;
 }
 
 export interface RunnerClientConfig {
@@ -161,7 +169,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       const refused = (r: CloudReply | undefined): boolean => r?.status === 400 && errorCodeOf(r.body) === "invalid_message";
       let dropped: string[] = [];
       // `mem_proposal_v1` (D#601 MEM-6) is the newest, so it goes first (the runner then offers no memory proposal), then `tip_publish_v1` (D#598 P1g-3a-3) (the runner then never asks to publish the branch tip), then `ordered_facts_v1` (D#483 S5-j2c2) (the runner computes and sends no ordering fact), then `conflict_facts_v1` (D#519 MQ4-e2-a) (no `conflict` field on a merge report), then `discovery_analyst` (D#483 S4-f4) (a cloud without it just never offers the analyst), then `plane_merge_queue_v1` (D#694 B7-1), then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
-      for (const drop of [MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
+      // D#749 V2b: `browser_chrome_v1` and `deploy_order_v1` are the newest of all, so they go first: a cloud without them keeps every other capability.
+      for (const drop of [BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -197,7 +206,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
         // A status poll takes no job: a reply with one is refused here, so no code path past this point can run it.
         if (sandboxUnavailable !== undefined && "signed_job" in parsed.data) return fail(reply, "invalid_reply");
         // The reply schema also refuses a claim whose `run_id` differs from the signed job's own.
-        const wake = { ...(parsed.data.wake === undefined ? {} : { wake: parsed.data.wake }), ...(parsed.data.merge_order === true ? { mergeOrder: true as const } : {}) };
+        const wake = { ...(parsed.data.wake === undefined ? {} : { wake: parsed.data.wake }), ...(parsed.data.merge_order === true ? { mergeOrder: true as const } : {}), ...(parsed.data.deploy_order === true ? { deployOrder: true as const } : {}) };
         return "signed_job" in parsed.data
           ? { kind: "claimed", signedJob: parsed.data.signed_job, runId: parsed.data.run_id, leaseGeneration: parsed.data.lease_generation, ...wake }
           : { kind: "idle", retryAfter: parsed.data.retry_after, ...wake };
@@ -331,6 +340,29 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
         const retry = PlaneMergeRetryReply.safeParse(reply.body);
         if (retry.success) return { kind: "retry", retryAfter: retry.data.retry_after };
       }
+      if (reply?.status === 409) {
+        const code = errorCodeOf(reply.body);
+        return { kind: "fenced", ...(code === undefined ? {} : { code }) };
+      }
+      return fail(reply);
+    },
+
+    async deployOrderClaim() {
+      const reply = await send(DEPLOY_ORDER_CLAIM_PATH, DeployOrderClaimMessage.parse({}));
+      if (reply?.status === 200) {
+        const parsed = DeployOrderClaimReply.safeParse(reply.body);
+        if (!parsed.success) return fail(reply, "invalid_reply");
+        return "order_id" in parsed.data ? { kind: "order", order: parsed.data } : { kind: "none", retryAfter: parsed.data.retry_after };
+      }
+      if (reply?.status === 409) return { kind: "fenced" };
+      return fail(reply);
+    },
+
+    async deployOrderReport(message) {
+      const parsed = DeployOrderReportMessage.safeParse(message);
+      if (!parsed.success) return fail(undefined, "invalid_message");
+      const reply = await send(DEPLOY_ORDER_REPORT_PATH, parsed.data);
+      if (reply?.status === 200) return DeployOrderReportReply.safeParse(reply.body).success ? { kind: "recorded" } : fail(reply, "invalid_reply");
       if (reply?.status === 409) {
         const code = errorCodeOf(reply.body);
         return { kind: "fenced", ...(code === undefined ? {} : { code }) };
