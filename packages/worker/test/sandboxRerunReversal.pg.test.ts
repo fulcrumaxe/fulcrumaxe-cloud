@@ -231,12 +231,15 @@ describe("a sandbox reversal's re-run keeps the original branch [pg]", { timeout
     expect(await rowOf(orphan)).toMatchObject({ state: "failed", reason_code: "rerun_would_overwrite_branch" });
     expect(await stageOf(orphan)).toBe("pr_opened");
 
-    // With its parent the child's identity resolves, so the branch refusal is not the answer. What Build again's own table says of a child (it has no issue of its own, so `no_issue`) is the existing
-    // answer, given before anything is closed: rerun_refused with GitHub untouched. The branch lookup for a child is covered at the port in git-adapter.test.ts.
+    // With its parent the child's identity resolves, so the branch refusal is not the answer. Build again's own table now answers a child with its parent's issue (it has none of its own), as it does
+    // an issue-backed item: the re-run goes ahead exactly as case 1's does (the pull request is closed through its recorded branch, the item is at Needs a person, Build again is filed).
+    // The branch lookup for a child is covered at the port in git-adapter.test.ts.
     const live = await world({ child: { parent: "x" } });
-    await run(live);
-    expect(await rowOf(live)).toMatchObject({ state: "failed", reason_code: "rerun_refused" });
-    expect(live.pf.requests).toEqual([]);
+    expect(await run(live)).toEqual({ done: 1, failed: 0 });
+    expect(await rowOf(live)).toMatchObject({ state: "done", reason_code: null });
+    expect(live.pf.requests.map((r) => `${r.method} ${r.path.replace(live.name, "<repo>")}`)).toEqual(["GET /repos/acme/<repo>/pulls", "PATCH /repos/acme/<repo>/pulls/7"]);
+    expect(await stageOf(live)).toBe("needs_human");
+    expect((await admin.query("SELECT 1 FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item'", [live.itemId])).rowCount).toBe(1);
     expect(live.pf.refused).toEqual([]);
   });
 });

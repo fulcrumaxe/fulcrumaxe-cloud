@@ -305,3 +305,49 @@ describe('Request changes', () => {
     expect(operatorVerdict('request_changes', pr({ live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
   });
 });
+
+describe('a planned PR child (no issue number of its own; it builds on its parent\'s)', () => {
+  // A child has no discussion, its own kind, and the parent's issue answers for it.
+  const child = (over: Partial<OperatorFacts> = {}): OperatorFacts => at({ child: true, gh_number: null, parent_gh_number: '41', discussion_id: null, kind: 'small', stage: 'pr_opened', pr_open: true, fix_rounds_started: 0, ...over });
+
+  it('is offered Request changes where an issue-backed item is', () => {
+    expect(operatorVerdict('request_changes', child())).toEqual({ ok: true });
+    expect(operatorVerdict('request_changes', at({ stage: 'pr_opened', pr_open: true, fix_rounds_started: 0 }))).toEqual({ ok: true });
+    expect(operatorVerdict('request_changes', child({ stage: 'needs_human', pr_open: true }))).toEqual({ ok: true });
+  });
+
+  it('is offered Build again at Needs a person, like an issue-backed item', () => {
+    expect(operatorVerdict('build_again', child({ stage: 'needs_human', pr_open: false }))).toEqual({ ok: true });
+    expect(operatorVerdict('build_again', child({ stage: 'needs_human', has_spec: false }))).toMatchObject({ ok: false, reason: 'state' });
+  });
+
+  it('is offered Close where an issue-backed item is, with or without a parent number', () => {
+    expect(operatorVerdict('close', child({ stage: 'needs_human' }))).toEqual({ ok: true });
+    expect(operatorVerdict('close', child({ stage: 'needs_human', parent_gh_number: null }))).toEqual({ ok: true });
+  });
+
+  it('is refused the driven actions when the parent has no issue, with a sentence that names the parent', () => {
+    for (const a of ['request_changes', 'build_again'] as const) {
+      const v = operatorVerdict(a, child({ stage: 'needs_human', parent_gh_number: null }));
+      expect(v, a).toMatchObject({ ok: false, reason: 'no_issue' });
+      expect((v as { message: string }).message).toContain('planned PR belongs to');
+    }
+    expect(operatorVerdict('request_changes', child({ parent_gh_number: undefined }))).toMatchObject({ ok: false, reason: 'no_issue' });
+  });
+
+  it('keeps every other refusal: role, external, no repo, a live run', () => {
+    expect(operatorVerdict('request_changes', child({ role: 'member' }))).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('request_changes', child({ provenance: 'external' }))).toMatchObject({ ok: false, reason: 'external' });
+    expect(operatorVerdict('request_changes', child({ repo_id: null }))).toMatchObject({ ok: false, reason: 'no_repo' });
+    expect(operatorVerdict('request_changes', child({ live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
+  });
+
+  it('is not re-specced or sent back to discussion (its Spec and its discussion are its parent\'s), with a sentence that says so', () => {
+    expect(operatorVerdict('respec', child({ stage: 'needs_human', spec_file_list_known: false }))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorVerdict('back_to_discussion', child({ stage: 'needs_human', discussion_id: 'd', kind: 'feature' }))).toMatchObject({ ok: false, reason: 'state' });
+  });
+
+  it('an issue-backed item with no issue is still refused, even if it carries a parent number', () => {
+    expect(operatorVerdict('request_changes', at({ stage: 'pr_opened', pr_open: true, fix_rounds_started: 0, gh_number: null, parent_gh_number: '41' }))).toMatchObject({ ok: false, reason: 'no_issue' });
+  });
+});
