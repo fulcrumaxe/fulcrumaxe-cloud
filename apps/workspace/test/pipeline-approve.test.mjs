@@ -53,6 +53,28 @@ describe("canApprove", () => {
   });
 });
 
+// A planned PR child has issue_number null by design; the server sends parent_issue_number for a child only, and the button follows it.
+describe("canApprove for a planned PR child", () => {
+  const CHILD = { ...ITEM, issue_number: null, parent_issue_number: 12 };
+  it("is offered to a child with a repository and a parent number, at every stage a normal item gets it", () => {
+    expect(canApprove(CHILD)).toBe(true);
+    expect(canApprove({ ...CHILD, stage: "in_progress" })).toBe(true);
+    for (const stage of ["pr_opened", "changes_requested", "review_passed"]) expect(canApprove({ ...CHILD, stage }), stage).toBe(true);
+  });
+  it("is not offered to an orphan (the parent has no issue number) or to a bad parent number", () => {
+    for (const parent_issue_number of [null, undefined, 0, -3, 1.5, "12", NaN]) expect(canApprove({ ...CHILD, parent_issue_number }), String(parent_issue_number)).toBe(false);
+  });
+  it("keeps every other rule: provenance, repository, stage and a live run", () => {
+    for (const over of [{ provenance: "external" }, { repo_id: null }, { repo_id: "" }, { stage: "merged" }, { stage: "closed" }]) expect(canApprove({ ...CHILD, ...over }), JSON.stringify(over)).toBe(false);
+    expect(canApprove(CHILD, true)).toBe(false);
+  });
+  it("a normal item is unchanged: with its own issue number it is offered whatever else is there, and without one and without a parent number it is not", () => {
+    expect(canApprove({ ...ITEM, parent_issue_number: 12 })).toBe(true);
+    expect(canApprove({ ...ITEM, issue_number: null })).toBe(false);
+    expect(canApprove({ ...ITEM, issue_number: null, parent_issue_number: undefined })).toBe(false);
+  });
+});
+
 describe("canApprove at Discussing (P3: the panel and the Spec again)", () => {
   const D = { ...ITEM, stage: "discussing", kind: "feature" };
   it("only a kind that has a panel", () => {

@@ -153,6 +153,7 @@ export interface Operations {
         repo_id: (string) | (null);
         kind: string | null;
         issue_number: (number) | (null);
+        parent_issue_number?: (number) | (null);
         title: string | null;
         stage: "triaged" | "discussing" | "spec_ready" | "in_progress" | "pr_opened" | "changes_requested" | "review_passed" | "needs_human" | "merged" | "closed_unmerged" | "closed";
         provenance: "internal" | "external";
@@ -185,6 +186,7 @@ export interface Operations {
       repo_id: (string) | (null);
       kind: string | null;
       issue_number: (number) | (null);
+      parent_issue_number?: (number) | (null);
       title: string | null;
       stage: "triaged" | "discussing" | "spec_ready" | "in_progress" | "pr_opened" | "changes_requested" | "review_passed" | "needs_human" | "merged" | "closed_unmerged" | "closed";
       provenance: "internal" | "external";
@@ -228,6 +230,7 @@ export interface Operations {
       repo_id: (string) | (null);
       kind: string | null;
       issue_number: (number) | (null);
+      parent_issue_number?: (number) | (null);
       title: string | null;
       stage: "triaged" | "discussing" | "spec_ready" | "in_progress" | "pr_opened" | "changes_requested" | "review_passed" | "needs_human" | "merged" | "closed_unmerged" | "closed";
       provenance: "internal" | "external";
@@ -553,6 +556,9 @@ export interface Operations {
       stacked_wait?: {
         state: "waiting" | "moving" | "conflict" | "parent_closed" | "retarget_failed";
         parent_pr: (number) | (null);
+      };
+      sibling_conflict?: {
+        after_pr: number;
       };
       setup_pause?: ({
         state: "open" | "withdrawn";

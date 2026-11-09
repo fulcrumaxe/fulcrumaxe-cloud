@@ -296,3 +296,33 @@ export async function readStackedWait(client: Pick<PoolClient, 'query'>, account
   if (e.state === 'queued' || e.state === 'in_flight') return merged ? at('moving') : e.state === 'queued' ? at('waiting') : null;
   return null;
 }
+
+// ---- A merge in the repository that may have left this item's pull request conflicting, derived (never stored) ------------------------------------------------------
+
+/**
+ * The waiting fact the worker's sibling-conflict wake records (`SIBLING_WAKE_CODE` and `afterPrReason` in packages/worker siblingConflictWake.ts; @fx/core cannot import that
+ * package, and a test there holds these copies equal): code `sibling_merged`, with the merged pull request's number as one reason, `after_pr_<n>`.
+ */
+export const SIBLING_MERGED_WAIT_CODE = 'sibling_merged';
+export const AFTER_PR_REASON_PREFIX = 'after_pr_';
+const AFTER_PR_REASON = /^after_pr_([1-9][0-9]{0,8})$/;
+
+/**
+ * The merged pull request's number while the item's NEWEST waiting fact (`stage_waiting`, any stage) is the sibling wake's, else null. A later waiting fact of any other code
+ * (a review parked for a limit, a slot wait) ends it, and a newer sibling wake for a different merge replaces the number. The caller offers it only at the pull-request
+ * stages, where the wake can have been recorded. Only the integer in the fact's own `after_pr_<n>` reason is returned; a fact without a parseable one says nothing.
+ */
+export async function readSiblingConflict(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string): Promise<{ after_pr: number } | null> {
+  const { rows } = await client.query<{ code: string | null; reasons: string[] | null }>(
+    `SELECT e.code, e.reasons FROM work_item_driver_events e
+      WHERE e.account_id = $1 AND e.work_item_id = $2 AND e.kind = 'stage_waiting' ORDER BY e.seq DESC LIMIT 1`,
+    [accountId, workItemId],
+  );
+  const fact = rows[0];
+  if (!fact || fact.code !== SIBLING_MERGED_WAIT_CODE) return null;
+  for (const reason of fact.reasons ?? []) {
+    const m = AFTER_PR_REASON.exec(reason);
+    if (m) return { after_pr: Number(m[1]) };
+  }
+  return null;
+}

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, conflictLine, CONFLICT_SENTENCES, CONFLICT_NO_BRANCH, queuedToMerge, stackedLine, STACKED_SENTENCES, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, conflictLine, CONFLICT_SENTENCES, CONFLICT_NO_BRANCH, queuedToMerge, stackedLine, STACKED_SENTENCES, siblingConflictLine, SIBLING_CONFLICT_SENTENCE, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 import { PERSON_MERGES_REASONS } from "../apps/pipeline/pipeline-insight.js";
 
@@ -1569,6 +1569,56 @@ describe("D#598 P3c (C25): one line, not two, for a stacked child in a conflict 
     expect(m.conflictLine).toBeNull();
     expect(buildInsight({ ...REVIEW_PASSED, ...RUNNING }, "UTC").conflictLine.kind).toBe("running");
     expect(buildInsight({ ...REVIEW_PASSED, ...SPENT, stacked_wait: { state: "waiting", parent_pr: 40 } }, "UTC").conflictLine.kind).toBe("attempts_spent");
+  });
+});
+
+describe("a merge in the repository may have left this pull request conflicting: the line from the derived sibling_conflict", () => {
+  const SIBLING = fx("200-sibling-conflict.json");
+  const withAfter = (after_pr) => ({ ...REVIEW_PASSED, sibling_conflict: { after_pr } });
+
+  it("is one fixed sentence with the merged pull request's number", () => {
+    expect(SIBLING_CONFLICT_SENTENCE(41)).toBe("Conflicts with main after #41 merged.");
+    expect(siblingConflictLine(SIBLING)).toEqual({ text: "Conflicts with main after #41 merged." });
+    expect(buildInsight(SIBLING, "UTC").siblingLine.text).toBe("Conflicts with main after #41 merged.");
+  });
+
+  it("says nothing without the field, and prints no null, undefined or NaN for a missing or malformed number", () => {
+    expect(siblingConflictLine(REVIEW_PASSED)).toBeNull();
+    expect(siblingConflictLine(null)).toBeNull();
+    expect(buildInsight(REVIEW_PASSED, "UTC").siblingLine).toBeNull();
+    for (const n of [null, undefined, "41", "not a number", NaN, 0, -3, 1.5, {}, []]) expect(siblingConflictLine(withAfter(n)), String(n)).toBeNull();
+    for (const bad of [null, "41", 41, [], [41]]) expect(siblingConflictLine({ ...REVIEW_PASSED, sibling_conflict: bad }), JSON.stringify(bad)).toBeNull();
+  });
+
+  it("a number-like string anywhere else in the answer never fills it; only after_pr does", () => {
+    const hostile = { ...REVIEW_PASSED, summary: "#999 merged", pr_number: 555, runs: [{ role: "executor", summary: "after #777" }] };
+    expect(siblingConflictLine(hostile)).toBeNull();
+    expect(siblingConflictLine({ ...hostile, sibling_conflict: { after_pr: 41, note: "#999" } }).text).toBe("Conflicts with main after #41 merged.");
+  });
+
+  it("a stacked child's own 'Conflict after #n merged' line is not drawn twice", () => {
+    const stacked = { ...withAfter(41), stacked_wait: { state: "conflict", parent_pr: 40 } };
+    expect(buildInsight(stacked, "UTC").siblingLine).toBeNull();
+    expect(buildInsight({ ...withAfter(41), stacked_wait: { state: "waiting", parent_pr: 40 } }, "UTC").siblingLine.text).toBe("Conflicts with main after #41 merged.");
+  });
+
+  it("the panel draws it as a text node line of its own, only when there is one", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+    try {
+      const show = async (data) => {
+        const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(data)), setInterval: () => 1, clearInterval: () => {} });
+        panel.start("item-1");
+        await flush();
+        return panel;
+      };
+      expect((byId((await show(SIBLING)).el, "pl-sibling-conflict")).map((e) => e.textContent)).toEqual(["Conflicts with main after #41 merged."]);
+      expect(byId((await show(REVIEW_PASSED)).el, "pl-sibling-conflict")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });
 

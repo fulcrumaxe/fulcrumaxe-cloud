@@ -845,6 +845,18 @@ export function stackedLine(data) {
   return { kind: w.state, text: STACKED_SENTENCES[w.state](parent) };
 }
 
+/**
+ * A merge in the repository may have left this pull request conflicting with its base: the server's derived `sibling_conflict.after_pr` is the merged pull request's number
+ * (present only while the sibling wake is the item's newest waiting fact). One fixed sentence; the only value filled in is that integer, from the field and from nothing a
+ * model wrote. No valid number, no line: never "#undefined".
+ */
+export const SIBLING_CONFLICT_SENTENCE = (n) => "Conflicts with main after #" + n + " merged.";
+export function siblingConflictLine(data) {
+  const s = data && isObj(data.sibling_conflict) ? data.sibling_conflict : null;
+  if (s === null || !Number.isInteger(s.after_pr) || s.after_pr < 1) return null;
+  return { text: SIBLING_CONFLICT_SENTENCE(s.after_pr) };
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. When something still blocks the merge it says what, in fixed words, and offers no link. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
@@ -921,6 +933,8 @@ export function buildInsight(data, timeZone) {
     // C25: a stacked child in a conflict round gets its own line ("Conflict after #n merged"); the general running line is not drawn beside it.
     conflictLine: stackedLine(data)?.kind === "conflict" && conflictLine(data)?.kind === "running" ? null : conflictLine(data),
     stackedLine: stackedLine(data),
+    // A stacked child's own "Conflict after #n merged" line already says it; the sibling line is not drawn beside it.
+    siblingLine: stackedLine(data)?.kind === "conflict" ? null : siblingConflictLine(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
     waitingText: waiting.length ? waitingLine(waiting, waitingRaw) : null,
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
@@ -1244,6 +1258,7 @@ export function createInsightPanel(deps) {
       m.queueLine && m.queueLine.hint ? h("p", { class: "pl-ins-notice", "data-testid": "pl-queue-hint" }, m.queueLine.hint) : [],
       m.conflictLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-conflict-line", "data-kind": m.conflictLine.kind }, m.conflictLine.text) : [],
       m.stackedLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-stacked-line", "data-kind": m.stackedLine.kind }, m.stackedLine.text) : [],
+      m.siblingLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-sibling-conflict" }, m.siblingLine.text) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),

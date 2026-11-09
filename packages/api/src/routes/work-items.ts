@@ -14,6 +14,7 @@ export const workItemResponseSchema = z.object({
   repo_id: z.string().uuid().nullable(),
   kind: z.string().nullable(),
   issue_number: z.number().int().nullable(),
+  parent_issue_number: z.number().int().nullable().optional().describe("Present only on a planned PR child, which has no issue number of its own: the GitHub issue number of the item it belongs to, or null when that item has none. Absent on every other item."),
   title: z.string().nullable().describe("A one-line plain-English title: the GitHub issue's title with control characters removed, cut to 120 characters. Untrusted text; show it as text only. Null when the item has none yet."),
   stage: z.enum(WORK_ITEM_STAGES),
   provenance: z.enum(["internal", "external"]),

@@ -156,4 +156,20 @@ describe('card actions on a planned PR child [pg]', { timeout: 120_000 }, () => 
     expect(await stageOf(k.child)).toBe('needs_human');
     expect(await requests(k)).toEqual([]);
   });
+
+  // The card offers Approve from the item read, not from the activity read: a child's read carries its parent's issue number (and only a child's), and follows the parent.
+  it('the work item reads carry parent_issue_number for a child only, and follow the parent', async () => {
+    const k = await kid({ parentIssue: 41 });
+    const cookie = `${SESSION_COOKIE_NAME}=${await signSession({ accountId: k.f.t.accountId, userId: k.f.t.userId })}`;
+    const read = async (path: string) => handleApiRequest(new Request(`http://localhost${path}`, { headers: { cookie } }), appUserPool, platformOpsPool, ROUTES);
+    const one = async (id: string) => (await (await read(`/api/v1/work-items/${id}`)).json()) as { issue_number: number | null; parent_issue_number?: number | null };
+    expect(await one(k.child)).toMatchObject({ issue_number: null, parent_issue_number: 41 });
+    expect(Object.keys(await one(k.f.parent))).not.toContain('parent_issue_number');
+    const list = (await (await read(`/api/v1/work-items?repo_id=${k.f.t.repoId}&limit=100`)).json()) as { data: Array<{ id: string; parent_issue_number?: number | null }> };
+    expect(list.data.find((w) => w.id === k.child)?.parent_issue_number).toBe(41);
+    expect(list.data.find((w) => w.id === k.f.parent)).toBeDefined();
+    expect(Object.keys(list.data.find((w) => w.id === k.f.parent)!)).not.toContain('parent_issue_number');
+    await admin.query('UPDATE work_items SET gh_number = NULL WHERE id = $1', [k.f.parent]);
+    expect(await one(k.child)).toMatchObject({ issue_number: null, parent_issue_number: null });
+  });
 });
