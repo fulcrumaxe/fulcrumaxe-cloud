@@ -21,14 +21,14 @@ import {
 } from "./depsInstall.js";
 import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, CloneError, buildCloneCommand, redactedCloneTail, type CloneTarget } from "./repoClone.js";
 import { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "@fx/runtime/src/streamJson.js";
-import type { NormalizedEvent } from "./types.js";
+import type { AgentHandle, NormalizedEvent } from "./types.js";
 import { assertSandboxEnvMatchesRole } from "./fakeSandbox.js";
 import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunCommandOptions, assertWriteFiles, vcpusForCreate } from "./runCommand.js";
 import { RunLimitError, WARN_FRACTION, createRunGuard, resolveRunLimits, type RunLimits } from "./meteringGuard.js";
 import type { RunLimit } from "./executionTarget.js";
 import { tryExtend } from "./runLimitDecision.js";
 import { RECORD_READ_CAP, acceptRecords, evaluateRead, isTampered, nextHeadStreak, readArgv, trailerMatchesWait, type AcceptedRecord, type ReadFault, type ReadOutcome, type Trailer } from "./recordParser.js";
-import { createSideEffects, recordExtension } from "./readerState.js";
+import { createSideEffects, mergeSideEffects, recordExtension, tailStateBytes, TAIL_STATE_MAX_BYTES, type LastResultState, type PortReaderState } from "./readerState.js";
 import { CLAUDE_CLI_SHA256, CLAUDE_CLI_VERSION, SANDBOX_IMAGE_REF, resolveSandboxImage } from "./sandboxRuntime.js";
 import { BACKENDS, CLAUDE_CODE_BACKEND } from "./backends.js";
 import { PIN_CHECK_NAME, PIN_CHECK_SCRIPT, verifyPin, type BackendRegistry } from "@fx/runtime/src/backends/registry.js";
@@ -64,6 +64,8 @@ import {
   SANDBOX_TIMEOUT_MARGIN_MS,
   type SandboxHandle,
   type ReaderFlag,
+  type ReadSliceOptions,
+  SliceAttachError,
   type SandboxPort,
   type SandboxSessionUsage,
   type StartDetachedOptions,
@@ -286,7 +288,8 @@ export interface SdkCommand {
   logs(opts?: { signal?: AbortSignal }): AsyncIterable<{ stream: string; data: unknown }>;
   /** The real `wait` takes `{ signal }` and rejects with the signal's reason when it aborts first (@vercel/sandbox 3.5.1, command.js). */
   wait(params?: { signal?: AbortSignal }): Promise<{ exitCode: number }>;
-  kill(): Promise<void>;
+  /** The real `kill` takes the signal to send, SIGTERM by default (@vercel/sandbox 3.5.1, command.js). */
+  kill(signal?: "SIGTERM" | "SIGKILL"): Promise<void>;
 }
 
 /** The fields of a listed sandbox the port reads; the real SDK's `Sandbox.list` result is assigned to this type, so an SDK change to any of them stops the build. */
@@ -680,6 +683,18 @@ export function readBytes(text: string): Buffer {
   return Buffer.concat([logBytes(text.slice(0, m.index)), Buffer.from([0xff]), Buffer.from(m[1]!, "latin1")]);
 }
 
+/** A slice commits at least this often while it works (the lease lasts 60 s). */
+export const SLICE_CHECKPOINT_MS = 10_000;
+/** While the exit sequence runs (no save is due, and it can take minutes) the lease is renewed this often, a third of its lifetime. */
+export const SLICE_RENEW_MS = 20_000;
+/** The most reads the exit makes to read the record file again (8 MiB each; the file is held to 200 MiB). */
+const REBUILD_MAX_READS = 64;
+/** The digest of a record whose file side cannot be trusted: it equals no echo record's. */
+const UNTRUSTED_DIGEST = Buffer.alloc(8);
+
+/** What a sliced reader's promise carries when the slice ended and the run did not: the time came, or the lease was lost. */
+type SliceEnd = { readonly sliceEnd: "slice" | "lost" };
+
 const failedRead = (fault: ReadFault): ReadOutcome => ({ records: [], run: null, bytes: 0, stop: null, trailer: null, size: null, fault, headViolation: false });
 
 /**
@@ -742,25 +757,49 @@ const digestOf = (r: AcceptedRecord): Buffer => createHash("sha256").update(`${r
 
 /** What was accepted from the file: the count, a running hash, and one 8-byte digest per record (so a differing echo record can be found). */
 export class RecordLedger {
-  count = 0;
-  private chain = createHash("sha256");
+  /** Records represented, the `from` ones included. */
+  count: number;
+  /** How many leading records this ledger holds no digest for (an earlier slice consumed them), and the chain it saved over them. */
+  readonly base: number;
+  readonly savedChain: string;
+  private chain: Buffer;
   private digests = Buffer.alloc(8 * 1024);
+  /**
+   * `from` (RLR-4): a ledger that continues one an earlier slice saved as its count and chain. It has no digest for those first records (`at` gives
+   * undefined for them) and is `partial` until the whole file has been read again.
+   */
+  constructor(from?: { count: number; chain: string }) {
+    this.base = from?.count ?? 0;
+    this.count = this.base;
+    this.savedChain = from?.chain ?? "";
+    this.chain = from ? Buffer.from(from.chain, "hex") : Buffer.alloc(32);
+  }
   add(r: AcceptedRecord): void {
-    const d = digestOf(r);
-    if ((this.count + 1) * 8 > this.digests.length) {
+    this.addDigest(digestOf(r));
+  }
+  addDigest(d: Buffer): void {
+    const at = (this.count - this.base) * 8;
+    if (at + 8 > this.digests.length) {
       const grown = Buffer.alloc(this.digests.length * 2);
       this.digests.copy(grown);
       this.digests = grown;
     }
-    d.copy(this.digests, this.count * 8);
+    d.copy(this.digests, at);
     this.count++;
-    this.chain.update(d);
+    this.chain = createHash("sha256").update(this.chain).update(d).digest();
   }
   at(i: number): Buffer | undefined {
-    return i < this.count ? this.digests.subarray(i * 8, i * 8 + 8) : undefined;
+    return i >= this.base && i < this.count ? this.digests.subarray((i - this.base) * 8, (i - this.base) * 8 + 8) : undefined;
   }
+  /** The chain over every digest so far: each step hashes the previous value with the next digest, so a saved (count, chain) can be continued or re-derived. */
   hash(): string {
-    return this.chain.copy().digest("hex");
+    return this.chain.toString("hex");
+  }
+  get partial(): boolean {
+    return this.base > 0;
+  }
+  state(): { count: number; chain: string } {
+    return { count: this.count, chain: this.hash() };
   }
 }
 
@@ -976,12 +1015,13 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
    * In every other case (no `cmdId`, no session id, a stopped or different session, a failed lookup) it kills
    * through the captured command, which never resumes anything.
    */
-  async function killQuietly(sandboxName: string, command: SdkCommand, sessionId: string | undefined): Promise<void> {
+  async function killQuietly(sandboxName: string, command: SdkCommand, sessionId: string | undefined, signalName?: "SIGKILL"): Promise<void> {
     await bounded(
       "kill",
       (async () => {
         const fresh = await freshCommand(sandboxName, command, sessionId).catch(() => undefined);
-        await (fresh ?? command).kill();
+        // SIGTERM (the SDK's default) first; the second kill of the ladder (RLR-0c condition 8) names SIGKILL.
+        await (fresh ?? command).kill(...(signalName === undefined ? [] : [signalName]));
       })(),
     ).catch(() => undefined);
   }
@@ -1215,13 +1255,16 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     opts: StartDetachedOptions,
     prompt: string,
     sessionId: string | undefined,
-  ): StartDetachedResult {
+    attach?: ReadSliceOptions,
+    phase?: { attached: boolean },
+  ): { handle: AgentHandle; hookFired: Promise<NormalizedEvent | undefined | SliceEnd>; launched: Promise<void> } {
     assertName(handle.sandboxName);
     // D#221 R1a: a backend that is not registered (with the hostile-config contract) is not selectable; nothing starts.
     const backend = backends.select(opts.backend);
     // D#598 P1f-5a: no agent is ever launched in a publish sandbox (any role), and the publish role has no model connection (any sandbox).
     assertNoAgentInPublishSandbox(handle.sandboxName, opts.role);
-    assertSandboxEnvMatchesRole(opts.role, opts.env);
+    // A re-attach carries no environment: it starts no process the environment could reach.
+    if (attach === undefined) assertSandboxEnvMatchesRole(opts.role, opts.env);
     // A role with no tool list is refused here (UnknownRoleError, `unknown_role`), before any agent file is written or command run.
     toolsForRole(opts.role);
     // This run's limits: the port's defaults under whatever the run carries. Invalid values throw here, before anything starts.
@@ -1267,8 +1310,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     });
     launched.catch(() => undefined); // the caller awaits it; `hookFired` carries the same failure
 
-    const hookFired = (async (): Promise<NormalizedEvent | undefined> => {
-      const sandbox = await open(handle, resuming ? "resume" : "startDetached", resuming).catch((err: unknown) => {
+    const hookFired = (async (): Promise<NormalizedEvent | undefined | SliceEnd> => {
+      const sandbox = await open(handle, attach ? "readSlice" : resuming ? "resume" : "startDetached", resuming).catch((err: unknown) => {
         // Resuming a sandbox the platform no longer has is the one case
         // H09b's fallback keys on.
         if (resuming && err instanceof SandboxPortError && (err.status === 404 || err.status === 410)) {
@@ -1295,24 +1338,17 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       run.sessionId = runSessionId;
       await opts.onSession?.(runSessionId);
       if (run.stopped) return undefined;
-      // Egress is the SDK 3.5.1 `NetworkPolicy` shape (H14c-3-1, CARRY-12).
-      const policy = sdkNetworkPolicy(opts.networkPolicy);
-      // Re-applied even when it equals the create-time policy (a resumed or woken session starts from whatever the last one left).
-      await applyPolicy(sandbox, policy, true);
-      if (run.stopped) return undefined;
-      await checkCliPin(sandbox, opts.env, backend);
-      if (run.stopped) return undefined;
-      // The prompt (role card first) goes to a 0600 file the wrapper opens
-      // and deletes before claude starts; it is in no argv.
-      const promptFile = `/tmp/fx-prompt-${randomUUID()}`;
-      const startedMs = Date.now();
+      // RLR-4: a slice re-attaches to the command an earlier invocation started; it clones, installs and writes nothing.
+      if (attach !== undefined && runSessionId !== attach.sessionId) throw new SandboxPortError("readSlice");
+      // The command's start: the guard's saved one when a slice restores, else what the caller knew, else now.
+      const startedMs = attach === undefined ? Date.now() : attach.restore && attach.restore.guard.startedMs > 0 ? attach.restore.guard.startedMs : (attach.startedMs ?? Date.now());
       // What the warnings say, computed by the runner (the hook has no clock).
       let timeWarningMinutes: number | undefined;
       let modelCallsRemaining: number | undefined;
       // CX-6a: the whole percent of the window the latest turn fills, set only from CONTEXT_WARN_PCT up (it falls back to undefined after a compaction).
       let contextPctNow: number | undefined;
       // X-4: the limits in force; an extension raises them (`applied`).
-      let inForceLimits: RunLimits = limits;
+      let inForceLimits: RunLimits = attach?.restore ? { ...limits, ...attach.restore.guard.limits } : limits;
       const inForce = (): RunLimits => inForceLimits;
       const limitsFile = (): string =>
         runLimitsFileContent({ startedMs, deadlineMs: startedMs + inForce().maxRunMs, maxModelCalls: inForce().maxModelCalls, timeWarningMinutes, modelCallsRemaining, contextPct: contextPctNow });
@@ -1323,99 +1359,130 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           .then(() => sandbox.writeFiles([{ path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 }], { signal: signal() }))
           .catch(() => undefined);
       };
-      // The prompt and the agent's config, as one batch. Written here, and written again after the dependency install (D#6 C44-6b):
-      // the install runs the repo's lifecycle scripts as the same uid, so it is an "earlier command" in the sense below.
-      // D#600 CX-4a: the text the prompt cut goes to /fx/context/<code>.md first (fixed names, one writeFiles call, outside the checkout). If it cannot be
-      // written, the prompt that goes out is the uncut one: a cut never happens without a readable file.
-      let promptText = prompt;
-      // The spill files, once the first write succeeded: they are rewritten with the agent's other files after the install (CWE-345), because the
-      // prompt sends the agent to them and a repo's lifecycle script could replace them.
-      let spillRewrite: Array<{ path: string; content: string; mode: number }> = [];
-      if (opts.spill !== undefined) {
-        let written = false;
-        try {
-          const spillWrites = contextSpillWrites(opts.spill);
-          await guarded("writeFiles", () => sandbox.writeFiles(spillWrites, { signal: signal() }));
-          written = true;
-          spillRewrite = spillWrites;
-        } catch {
-          // fx-swallow-ok: a spill that cannot be written is the uncut prompt, below; it never fails the launch
-        }
+      /** Everything before the agent command exists: policy, pin, files, clone, install, the command. `undefined`: the run was stopped meanwhile. */
+      const startFresh = async (): Promise<SdkCommand | undefined> => {
+        // Egress is the SDK 3.5.1 `NetworkPolicy` shape (H14c-3-1, CARRY-12).
+        const policy = sdkNetworkPolicy(opts.networkPolicy);
+        // Re-applied even when it equals the create-time policy (a resumed or woken session starts from whatever the last one left).
+        await applyPolicy(sandbox, policy, true);
         if (run.stopped) return undefined;
-        if (!written) promptText = opts.spill.uncut.prompt;
-        opts.onSpill?.(written);
-      }
-      let promptBody = `${opts.roleCard}\n\n${promptText}`;
-      const writeAgentFiles = (): Promise<void> =>
-        guarded("writeFiles", () =>
-          sandbox.writeFiles(
-            [
-              { path: promptFile, content: promptBody, mode: 0o600 },
-              // Rewritten before EVERY agent command (start and resume): an
-              // earlier command runs as the same uid and may have edited them.
-              { path: FX_AGENT_SETTINGS_PATH, content: JSON.stringify(agentSettingsFor(opts.role, opts.excludes)), mode: 0o444 },
-              { path: FX_AGENT_MCP_PATH, content: JSON.stringify(FX_AGENT_MCP_CONFIG), mode: 0o444 },
-              // C66: the runner's one hook, and the deadline it warns from (W-1).
-              { path: FX_LIMIT_HOOK_PATH, content: FX_LIMIT_HOOK_SCRIPT, mode: 0o444 },
-              { path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 },
-              // D#2 RLR-3b: the recorder the agent command runs under, and the directory its record file goes in.
-              ...agentRecorderFiles(),
-              // D#600 CX-4a: the text the prompt cut, from the runner's own copy, never trusted from before the install.
-              ...spillRewrite,
-            ],
-            { signal: signal() },
-          ),
-        );
-      await writeAgentFiles();
-      // D#2 PREVIEW-RUNNER-EVENTS: the sandbox is up, locked down and loaded; the agent command is next. Best effort:
-      // a progress mark that fails to record never fails the launch.
-      const mark = async (stage: "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed"): Promise<void> => {
-        try {
-          await opts.onStage?.(stage);
-        } catch {
-          // fx-swallow-ok: a progress mark is best effort; the launch never depends on it
-        }
-      };
-      await mark("sandbox_ready");
-      if (opts.clone !== undefined && !resuming) {
-        if (opts.workdir === undefined) throw new Error("createVercelSandboxPort: a clone needs a workdir");
-        await cloneRepository(sandbox, opts.clone, opts.workdir, opts.env);
+        await checkCliPin(sandbox, opts.env, backend);
         if (run.stopped) return undefined;
-        await mark("cloned");
-      }
-      if (opts.installPolicy !== undefined && opts.workdir !== undefined) {
-        const deps = await installDependencies(sandbox, opts, opts.workdir, resuming);
-        if (run.stopped) return undefined;
-        const line = depsPromptLine(deps.outcome);
-        if (line !== undefined) {
-          // Repo scripts ran as the agent's own user (which can sudo): what the agent will be started from is checked again and
-          // rewritten from the runner's own text, never trusted from before the install. A CLI that no longer matches its pin
-          // refuses the launch (SandboxPortError); changed config files are overwritten, the prompt gains its one fixed line.
-          await checkCliPin(sandbox, opts.env, backend);
-          if (run.stopped) return undefined;
-          promptBody = `${promptBody}\n\n${line}`;
-          await writeAgentFiles();
-          await mark(deps.outcome === "failed" ? "deps_install_failed" : "deps_installed");
+        // The prompt (role card first) goes to a 0600 file the wrapper opens
+        // and deletes before claude starts; it is in no argv.
+        const promptFile = `/tmp/fx-prompt-${randomUUID()}`;
+        // The prompt and the agent's config, as one batch. Written here, and written again after the dependency install (D#6 C44-6b):
+        // the install runs the repo's lifecycle scripts as the same uid, so it is an "earlier command" in the sense below.
+        // D#600 CX-4a: the text the prompt cut goes to /fx/context/<code>.md first (fixed names, one writeFiles call, outside the checkout). If it cannot be
+        // written, the prompt that goes out is the uncut one: a cut never happens without a readable file.
+        let promptText = prompt;
+        // The spill files, once the first write succeeded: they are rewritten with the agent's other files after the install (CWE-345), because the
+        // prompt sends the agent to them and a repo's lifecycle script could replace them.
+        let spillRewrite: Array<{ path: string; content: string; mode: number }> = [];
+        if (opts.spill !== undefined) {
+          let written = false;
           try {
-            opts.onInstall?.({ outcome: deps.outcome === "failed" ? "failed" : deps.outcome === "skipped" ? "skipped" : "installed", ...(deps.exitCode !== undefined && { exitCode: deps.exitCode }), ...(deps.tail !== undefined && { tail: deps.tail }) });
+            const spillWrites = contextSpillWrites(opts.spill);
+            await guarded("writeFiles", () => sandbox.writeFiles(spillWrites, { signal: signal() }));
+            written = true;
+            spillRewrite = spillWrites;
           } catch {
-            // fx-swallow-ok: an observer never fails the launch
+            // fx-swallow-ok: a spill that cannot be written is the uncut prompt, below; it never fails the launch
+          }
+          if (run.stopped) return undefined;
+          if (!written) promptText = opts.spill.uncut.prompt;
+          opts.onSpill?.(written);
+        }
+        let promptBody = `${opts.roleCard}\n\n${promptText}`;
+        const writeAgentFiles = (): Promise<void> =>
+          guarded("writeFiles", () =>
+            sandbox.writeFiles(
+              [
+                { path: promptFile, content: promptBody, mode: 0o600 },
+                // Rewritten before EVERY agent command (start and resume): an
+                // earlier command runs as the same uid and may have edited them.
+                { path: FX_AGENT_SETTINGS_PATH, content: JSON.stringify(agentSettingsFor(opts.role, opts.excludes)), mode: 0o444 },
+                { path: FX_AGENT_MCP_PATH, content: JSON.stringify(FX_AGENT_MCP_CONFIG), mode: 0o444 },
+                // C66: the runner's one hook, and the deadline it warns from (W-1).
+                { path: FX_LIMIT_HOOK_PATH, content: FX_LIMIT_HOOK_SCRIPT, mode: 0o444 },
+                { path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 },
+                // D#2 RLR-3b: the recorder the agent command runs under, and the directory its record file goes in.
+                ...agentRecorderFiles(),
+                // D#600 CX-4a: the text the prompt cut, from the runner's own copy, never trusted from before the install.
+                ...spillRewrite,
+              ],
+              { signal: signal() },
+            ),
+          );
+        await writeAgentFiles();
+        // D#2 PREVIEW-RUNNER-EVENTS: the sandbox is up, locked down and loaded; the agent command is next. Best effort:
+        // a progress mark that fails to record never fails the launch.
+        const mark = async (stage: "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed"): Promise<void> => {
+          try {
+            await opts.onStage?.(stage);
+          } catch {
+            // fx-swallow-ok: a progress mark is best effort; the launch never depends on it
+          }
+        };
+        await mark("sandbox_ready");
+        if (opts.clone !== undefined && !resuming) {
+          if (opts.workdir === undefined) throw new Error("createVercelSandboxPort: a clone needs a workdir");
+          await cloneRepository(sandbox, opts.clone, opts.workdir, opts.env);
+          if (run.stopped) return undefined;
+          await mark("cloned");
+        }
+        if (opts.installPolicy !== undefined && opts.workdir !== undefined) {
+          const deps = await installDependencies(sandbox, opts, opts.workdir, resuming);
+          if (run.stopped) return undefined;
+          const line = depsPromptLine(deps.outcome);
+          if (line !== undefined) {
+            // Repo scripts ran as the agent's own user (which can sudo): what the agent will be started from is checked again and
+            // rewritten from the runner's own text, never trusted from before the install. A CLI that no longer matches its pin
+            // refuses the launch (SandboxPortError); changed config files are overwritten, the prompt gains its one fixed line.
+            await checkCliPin(sandbox, opts.env, backend);
+            if (run.stopped) return undefined;
+            promptBody = `${promptBody}\n\n${line}`;
+            await writeAgentFiles();
+            await mark(deps.outcome === "failed" ? "deps_install_failed" : "deps_installed");
+            try {
+              opts.onInstall?.({ outcome: deps.outcome === "failed" ? "failed" : deps.outcome === "skipped" ? "skipped" : "installed", ...(deps.exitCode !== undefined && { exitCode: deps.exitCode }), ...(deps.tail !== undefined && { tail: deps.tail }) });
+            } catch {
+              // fx-swallow-ok: an observer never fails the launch
+            }
           }
         }
+        // D#2 RLR-3b: the agent command is the recorder; no `logs()` subscriber is ever attached to it before it has exited.
+        return startAgentCommand(sandbox, { promptFile, runId: opts.runId, agentArgv, cwd: opts.workdir, env: opts.env, timeoutMs: callTimeoutMs });
+      };
+      let command: SdkCommand;
+      if (attach === undefined) {
+        const started = await startFresh();
+        if (started === undefined) return undefined;
+        command = started;
+      } else {
+        // The command is looked up on the SESSION it ran in (never the sandbox's resume wrapper, which could wake a stopped sandbox into a new session).
+        const session = sandbox.currentSession();
+        if (session.getCommand === undefined) throw new SandboxPortError("readSlice");
+        command = await guarded("getCommand", () => session.getCommand!(attach.cmdId, { signal: signal() }));
+        if (command.cmdId !== attach.cmdId) throw new SandboxPortError("readSlice"); // the lookup answered another command: never read or killed as ours
       }
-      // D#2 RLR-3b: the agent command is the recorder; no `logs()` subscriber is ever attached to it before it has exited.
-      const command = await startAgentCommand(sandbox, { promptFile, runId: opts.runId, agentArgv, cwd: opts.workdir, env: opts.env, timeoutMs: callTimeoutMs });
       run.command = command;
+      if (phase) phase.attached = true;
       markLaunched();
       if (run.stopped) {
         await killQuietly(handle.sandboxName, command, runSessionId);
         return undefined;
       }
 
-      let seq = 0;
+      // RLR-4: what a slice carries over from the one before it (nothing, for a launch or a first slice).
+      const restored = attach?.restore?.reader;
+      let seq = restored?.seq ?? 0;
       /** The event for the LAST raw `result` message; completion is decided
        * from it only after the command has exited. */
-      let lastResult: NormalizedEvent | undefined;
+      let lastResult: NormalizedEvent | undefined =
+        restored?.lastResult == null
+          ? undefined
+          : ({ runId: opts.runId, role: opts.role, seq: 0, ts: new Date().toISOString(), ...restored.lastResult, backend: backend.name } as NormalizedEvent);
       /**
        * Fallback verdict for a run whose last turn spoke after the envelope (a background task finished, the agent
        * woke and added a closing line, and the final `result` has no envelope though the verdict was given).
@@ -1429,13 +1496,14 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
        * signal from a background task that we could require, so such a quote can become the verdict. A quote
        * followed by any later marker, even a malformed one, fails closed.
        */
-      let lastEnvelope: Record<string, unknown> | undefined;
+      let lastEnvelope: Record<string, unknown> | undefined = restored?.lastEnvelope ?? undefined;
       /** The `subtype` of that raw `result` line; read for nothing else. */
-      let lastResultSubtype: unknown;
+      let lastResultSubtype: unknown = restored?.lastResultSubtype ?? undefined;
       /** The first limit the runner's own guard reached (MP-CLOCK/SILENT/TURNS). */
       let limitHit: RunLimit | undefined;
       // RLR-2: the effects that leave this process (warnings, extensions, the kill) live in one monotone record a reader can checkpoint.
       const fx = createSideEffects();
+      if (attach?.restore) Object.assign(fx, mergeSideEffects(fx, attach.restore.sideEffects));
       let wakeLoop!: () => void;
       const limitSignal = new Promise<void>((resolve) => {
         wakeLoop = resolve;
@@ -1509,11 +1577,23 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           wakeLoop();
         },
         extension,
+        attach?.restore?.guard,
       );
+      if (attach?.restore) {
+        // A limit the guard had already reached ended the run in the slice before: it is the end here too, and the command is told again (a kill is idempotent).
+        const reached = attach.restore.guard.fired;
+        if (reached !== null) {
+          limitHit = reached;
+          void killQuietly(handle.sandboxName, command, runSessionId);
+        }
+        // The warnings are said once; what they said is worked out again from the clock and the count, for the file a later change rewrites.
+        if (fx.timeWarned) timeWarningMinutes = Math.max(Math.ceil((startedMs + inForce().maxRunMs - Date.now()) / 60_000), 0);
+        if (fx.callsWarned) modelCallsRemaining = Math.max(inForce().maxModelCalls - guard.modelCalls(), 0);
+      }
       // D#600 CX-1a: measures this command's context from the same lines the meter reads; integers only.
       const ledger = new ContextLedgerCapture(disabledToolsFor(opts.excludes));
       let lastFigure = 0;
-      const deliver = async (line: string, catchingUp = false): Promise<void> => {
+      const deliver = async (line: string, catchingUp = false, sourceLine?: number): Promise<void> => {
         if (!catchingUp && (run.stopped || limitHit !== undefined)) return;
         let parsed: unknown;
         try {
@@ -1539,7 +1619,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           lastResult = event;
           lastResultSubtype = parsed.subtype;
         }
-        await opts.onEvent(event);
+        checkTail();
+        await opts.onEvent(event, sourceLine === undefined ? undefined : { sourceLine });
         guard.observe(event);
         // CX-6a: after a main-thread turn, say how full the window is. The file is rewritten only when the figure crosses in, changes or drops out.
         if (parsed.type === "assistant") {
@@ -1584,7 +1665,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         );
         timeWarning.unref?.();
       };
-      armTimeWarning();
+      if (!fx.timeWarned) armTimeWarning(); // a slice that restores a time warning already said does not say it again
       // D#2 RLR-3b: the reader, one parser (`recordParser.ts`) and one path. Reads of the record file (each a new command with one held subscriber), a probe
       // for the exit, a drain to the trailer, the trailer checked against `wait()`, then the one replay of the recorder's echo. The agent command itself
       // never gets a `logs()` subscriber before it has exited.
@@ -1609,16 +1690,19 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         return { sandbox: liveSandbox, command: liveCommand };
       };
       const unreadableEcho: EchoCheck = { unavailable: true, mismatch: false, hasHeader: false, trailer: null, count: 0 };
-      const fileRecords = new RecordLedger();
-      let fileTrailer: Trailer | null = null;
-      let offset = 0;
-      let nextSeq = 0;
+      const fileRecords = new RecordLedger(restored?.file.count ? restored.file : undefined);
+      let fileTrailer: Trailer | null = restored?.trailer ?? null;
+      let offset = attach?.cursor.byteOffset ?? 0;
+      let nextSeq = attach?.cursor.nextSeq ?? 0;
       let headStreak = 0;
-      let failedReads = 0;
+      // A streak of failed reads is carried across slices (the saved count), so many short slices that all fail still reach the limit.
+      let failedReads = attach?.cursor.readFailures ?? 0;
       let exitCode: number | undefined;
       let trailerMissing = false;
       let launchRefused = false;
       let echoUnreadable = false;
+      /** RLR-4: the record file's consumed part was found changed at exit (`record_file_tampered`): the run does not succeed. */
+      let fileAltered = false;
       let faulted = false;
       const raised = new Set<ReaderFlag>();
       const raiseFlag = (flag: ReaderFlag): void => {
@@ -1645,7 +1729,98 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         }
         if (r.kind !== "o" && r.kind !== "tail") return;
         const line = r.data.toString("utf8").trim();
-        if (line) await deliver(line);
+        if (line) await deliver(line, false, attach === undefined ? undefined : r.seq);
+      };
+      // ---- RLR-4: slices. Everything below is inert for a launch (`attach` undefined).
+      /** Thrown by a checkpoint the lease no longer covers; the slice stops at once and does nothing else (no kill, no catch-up, no finalize). */
+      const leaseLost = new Error("reader lease lost");
+      let sliceEnd: "slice" | "lost" | undefined;
+      /** Set once the command has exited: the exit sequence is never cut short by the slice's time. */
+      let exiting = false;
+      let consumedInSlice = 0;
+      let lastCommitMs = Date.now();
+      const sliceOver = (): boolean => attach !== undefined && !exiting && (Date.now() >= attach.untilMs || (attach.maxRecords !== undefined && consumedInSlice >= attach.maxRecords));
+      /** Set once the verdict a later slice would build the end from outgrew what the state column holds: the run is ending as unreadable, and the saved state drops it. */
+      let tailTooLarge = false;
+      const tailOf = (): { lr: LastResultState | null; env: Record<string, unknown> | null } => {
+        const lr: LastResultState | null =
+          lastResult === undefined
+            ? null
+            : {
+                type: lastResult.type === "result" ? "result" : "error",
+                ...(lastResult.isError !== undefined && { isError: lastResult.isError }),
+                ...(lastResult.sessionId !== undefined && { sessionId: lastResult.sessionId }),
+                ...(lastResult.costUsd !== undefined && { costUsd: lastResult.costUsd }),
+                ...(lastResult.usage !== undefined && { usage: { ...lastResult.usage } as Record<string, number> }),
+                ...(lastResult.agentOutput !== undefined && { agentOutput: lastResult.agentOutput }),
+              };
+        return { lr, env: lastEnvelope ?? null };
+      };
+      /**
+       * The verdict a later slice builds the end from is bounded by what the state column holds, MEASURED THE WAY jsonb PRINTS IT (a number such as 1e300 is 301
+       * characters there and 5 in JSON). One that does not fit is a reader that cannot do its job: the run ends as `reader_unavailable` at the moment the verdict
+       * grows, inside the read (so the end is the run's own and not a save that fails for ever). From then on the saved state carries no verdict, so the last save fits.
+       */
+      const checkTail = (): void => {
+        if (attach === undefined || tailTooLarge) return;
+        const { lr, env } = tailOf();
+        if (tailStateBytes(lr, env) > TAIL_STATE_MAX_BYTES) {
+          tailTooLarge = true;
+          fail("reader_unavailable", "reader state too large");
+        }
+      };
+      const portState = (): PortReaderState => {
+        const { lr, env } = tailTooLarge ? { lr: null, env: null } : tailOf();
+        return {
+          file: fileRecords.state(),
+          trailer: fileTrailer,
+          seq,
+          lastResult: lr,
+          lastEnvelope: env,
+          lastResultSubtype: typeof lastResultSubtype === "string" ? lastResultSubtype : null,
+        };
+      };
+      /** One checkpoint: the cursor, the guard, the monotone effects and the port's own state, committed by the caller together with its parts. */
+      let commitFailures = 0;
+      const checkpoint = async (final: boolean): Promise<void> => {
+        if (attach === undefined) return;
+        const cp = { nextSeq, byteOffset: offset, readFailures: failedReads, guard: guard.snapshot(), sideEffects: { ...fx }, reader: portState(), final };
+        let held: boolean;
+        try {
+          held = await attach.commit(cp);
+          commitFailures = 0;
+        } catch (err) {
+          // A save that errors is tried again at the next checkpoint (nothing was lost: the caller keeps what it had not saved). Three in a row, or one at the
+          // very end, means the lease cannot be shown to be held: the slice stops as if it were lost, and whoever takes it over replays from the last save.
+          if (final) throw err;
+          reportError(err, { stage: "run.slice_checkpoint" });
+          if (++commitFailures >= READ_FAILURE_LIMIT) throw leaseLost;
+          lastCommitMs = Date.now();
+          return;
+        }
+        lastCommitMs = Date.now();
+        if (!held) throw leaseLost;
+      };
+      const maybeCheckpoint = async (): Promise<void> => {
+        if (attach !== undefined && Date.now() - lastCommitMs >= (attach.checkpointEveryMs ?? SLICE_CHECKPOINT_MS)) await checkpoint(false);
+      };
+      /**
+       * The exit sequence (the kill ladder, the rebuild of the consumed prefix, the echo replay) saves nothing until its last checkpoint and can outlast the lease:
+       * a heartbeat renews it meanwhile, so the end is saved and finalized by the reader that ran it. A renewal that finds the lease gone changes nothing here; the
+       * last checkpoint's fenced save is what says so.
+       */
+      let beat: ReturnType<typeof setInterval> | undefined;
+      const startBeat = (): void => {
+        const renew = attach?.renew;
+        if (attach === undefined || renew === undefined || beat !== undefined) return;
+        beat = setInterval(() => {
+          renew().catch((err: unknown) => reportError(err, { stage: "run.slice_renew" }));
+        }, attach.renewEveryMs ?? SLICE_RENEW_MS);
+        beat.unref?.();
+      };
+      const stopBeat = (): void => {
+        clearInterval(beat);
+        beat = undefined;
       };
       /** One read and what it means. A fault that is not a plain failed read ends the run here. */
       const step = async (): Promise<{ progressed: boolean; caughtUp: boolean; failed: boolean } | "stopped"> => {
@@ -1664,11 +1839,14 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         for (const r of out.records) {
           fileRecords.add(r);
           await deliverRecord(r);
-          if (limitHit !== undefined) break;
+          // The cursor moves record by record, so a checkpoint (or the end of a slice) can fall between any two records.
+          offset += r.size;
+          nextSeq++;
+          consumedInSlice++;
+          if (r.kind === "x" && out.trailer) fileTrailer = out.trailer;
+          if (limitHit !== undefined || sliceOver()) break;
+          await maybeCheckpoint();
         }
-        offset += out.bytes;
-        nextSeq += out.records.length;
-        if (out.trailer) fileTrailer = out.trailer;
         return { progressed: out.records.length > 0, caughtUp: out.size !== null && offset >= out.size, failed: false };
       };
       /** `work`, or "stopped" when `stop()` or the runner's own limit comes first (the abandoned work is left to settle). */
@@ -1694,7 +1872,78 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         if (r.kind === "big") return reportInvalid("oversize"); // counted; the run is ending already
         if (r.kind !== "o" && r.kind !== "tail") return;
         const line = r.data.toString("utf8").trim();
-        if (line) await deliver(line, true);
+        if (line) await deliver(line, true, attach === undefined ? undefined : r.seq);
+      };
+      /**
+       * RLR-4: the file side of the exit cross-check. A launch holds every digest in memory. A slice that restored holds only the chain of the records an
+       * earlier slice consumed, so it reads the record file again from the start for them; the file is agent-writable, so what comes back is trusted for
+       * nothing until its first `base` records give exactly the saved (count, chain). If they do, those digests are the file side, as in-process. If they do
+       * not (or too few come back), the file was changed after it was consumed: `record_file_tampered`, and every echo record in that part is metered
+       * (`prefixTrusted: false`), which the per-message-id maximum dedupes. A file that cannot be read again at all is treated exactly the same way (nothing in it
+       * is trusted: the echo is still replayed and metered in full for that part) and is told apart only by `unreadable`, which the exit raises as
+       * `reader_unavailable` and which stops the run from succeeding. It never skips the echo.
+       */
+      let crossed: { ledger: RecordLedger; prefixTrusted: boolean; base: number; unreadable: boolean } | undefined;
+      const untrustedCross = (base: number, unreadable: boolean): NonNullable<typeof crossed> => {
+        const merged = new RecordLedger();
+        for (let i = 0; i < base; i++) merged.addDigest(UNTRUSTED_DIGEST);
+        for (let i = base; i < fileRecords.count; i++) merged.addDigest(fileRecords.at(i)!);
+        return (crossed = { ledger: merged, prefixTrusted: false, base, unreadable });
+      };
+      const crossLedger = async (): Promise<NonNullable<typeof crossed>> => {
+        if (crossed) return crossed;
+        const base = fileRecords.base;
+        if (base === 0) return (crossed = { ledger: fileRecords, prefixTrusted: true, base, unreadable: false });
+        const held = await bounded("reader_live", live()).catch(() => undefined);
+        if (held === undefined) return untrustedCross(base, true);
+        const prefix: Buffer[] = [];
+        let off = 0;
+        let want = 0;
+        let ok = true;
+        try {
+          await bounded(
+            "reader_rebuild",
+            (async () => {
+              for (let reads = 0; want < base && reads < REBUILD_MAX_READS; reads++) {
+                const out = await readRecords(held.sandbox, { recordPath, offset: off, nextSeq: want, timeoutMs: callTimeoutMs, abandon: (c) => killQuietly(handle.sandboxName, c, runSessionId) });
+                if (out.fault !== null) {
+                  if (out.fault === "read_failed") throw new SandboxPortError("readRecords");
+                  ok = false; // a file that is shorter, oversize or not the recorder's: not the file that was consumed
+                  return;
+                }
+                for (const r of out.records) {
+                  if (want >= base) break;
+                  prefix.push(digestOf(r));
+                  off += r.size;
+                  want++;
+                }
+                if (out.records.length === 0) return;
+              }
+            })(),
+            echoTimeoutMs,
+          );
+        } catch {
+          // fx-swallow-ok: a file that cannot be read again is the answer (untrusted and unreadable): the exit then raises reader_unavailable, replays the echo in full for that part, and the run does not succeed
+          return untrustedCross(base, true);
+        }
+        const merged = new RecordLedger();
+        const check = new RecordLedger();
+        for (const d of prefix) check.addDigest(d);
+        const trusted = ok && prefix.length === base && check.hash() === fileRecords.savedChain;
+        for (let i = 0; i < base; i++) merged.addDigest(trusted ? prefix[i]! : UNTRUSTED_DIGEST);
+        for (let i = base; i < fileRecords.count; i++) merged.addDigest(fileRecords.at(i)!);
+        if (!trusted) {
+          raiseFlag("record_file_tampered");
+          fileAltered = true;
+        }
+        return (crossed = { ledger: merged, prefixTrusted: trusted, base, unreadable: false });
+      };
+      /** RLR-0c condition 8: the exit of an ended command is waited for; if SIGTERM (sent by whoever ended it) has not done it in time, SIGKILL, and wait once more. */
+      const awaitExit = async (held: { command: SdkCommand }): Promise<ExitProbe | undefined> => {
+        const first = await bounded("reader_exit", probeExit(held.command, exitWaitMs), exitWaitMs + callTimeoutMs).catch(() => undefined);
+        if (first?.exited) return first;
+        await killQuietly(handle.sandboxName, command, runSessionId, "SIGKILL");
+        return bounded("reader_exit", probeExit(held.command, exitWaitMs), exitWaitMs + callTimeoutMs).catch(() => undefined);
       };
       /**
        * The same record for an end the runner itself enforced (a limit, a spend kill, an over-long line): the usage in it reaches the caller's meter and nothing
@@ -1735,12 +1984,15 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         let hidden = false;
         try {
           const held = await bounded("reader_live", live()).catch(() => undefined);
-          const gone = held === undefined ? undefined : await bounded("reader_exit", probeExit(held.command, exitWaitMs), exitWaitMs + callTimeoutMs).catch(() => undefined);
+          const gone = held === undefined ? undefined : await awaitExit(held);
           if (held === undefined || !gone?.exited) return raiseFlag("reader_unavailable");
+          const file = await crossLedger();
+          // A consumed part that cannot be read again is "untrusted", not "skipped": the echo below is still replayed and metered for it.
+          if (file.unreadable) raiseFlag("reader_unavailable");
           const replayMs = Math.min(echoTimeoutMs, Math.max(callTimeoutMs - exitWaitMs, 1_000));
           const echo = await crossCheckEcho(
             held.command,
-            { ledger: fileRecords, trailer: fileTrailer },
+            { ledger: file.ledger, trailer: fileTrailer },
             enforced
               ? {
                   timeoutMs: replayMs,
@@ -1750,7 +2002,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
                     await meterOnly(r);
                   },
                 }
-              : { timeoutMs: replayMs, onEchoOnly: meterRecord },
+              : { timeoutMs: replayMs, onEchoOnly: (r) => (file.prefixTrusted || r.seq >= file.base ? meterRecord(r) : meterOnly(r)) },
           );
           if (echo.unavailable) raiseFlag("reader_unavailable");
         } catch (err) {
@@ -1765,10 +2017,19 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         try {
           for (;;) {
             if (run.stopped || limitHit !== undefined) break;
+            if (sliceOver()) {
+              sliceEnd = "slice"; // the time (or the record budget) is up: hand over from the cursor, the command running on
+              break;
+            }
+            await maybeCheckpoint();
             if (fileTrailer === null) {
               const r = await step();
               if (r === "stopped" || limitHit !== undefined) break;
               failedReads = r.failed ? failedReads + 1 : 0;
+              if (sliceOver()) {
+                sliceEnd = "slice"; // the budget ran out inside the read: hand over before asking the command, the next slice picks up from the cursor
+                break;
+              }
               if (r.progressed && !r.caughtUp) continue; // more is waiting: read again at once
             }
             // Caught up, or the read failed, or the trailer is in: ask the command. While it runs the probe is the pause between reads.
@@ -1776,12 +2037,14 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             if (probe === "stopped") break;
             if (probe?.exited) {
               exitCode = probe.exitCode;
+              exiting = true;
               break;
             }
             if (probe === undefined) failedReads++;
             else if (fileTrailer !== null) fail("record_file_tampered", "trailer on a running command"); // RLR-0c condition 6: wait() did not agree within seconds
             if (failedReads >= READ_FAILURE_LIMIT) fail("reader_unavailable", "reader unavailable");
           }
+          if (sliceEnd === undefined) startBeat(); // the loop ended for good: what follows is the exit sequence, which keeps the lease alive
           if (exitCode !== undefined && !run.stopped && limitHit === undefined) {
             // The command has exited: read what is left, up to the trailer.
             // A read that fails is tried again (as in the loop above, up to READ_FAILURE_LIMIT in a row) before the trailer is given up on.
@@ -1804,7 +2067,10 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
               const held = await orStopped(bounded("reader_live", live())).catch(() => undefined);
               if (held === "stopped") return "stopped";
               if (held === undefined) return unreadableEcho;
-              return orStopped(crossCheckEcho(held.command, { ledger: fileRecords, trailer: fileTrailer }, { timeoutMs, onEchoOnly: deliverRecord }));
+              const file = await orStopped(crossLedger().catch(() => untrustedCross(fileRecords.base, true)));
+              if (file === "stopped") return "stopped";
+              // Records in the part an earlier slice consumed, when the file's copy of it can no longer be trusted, are metered and nothing more.
+              return orStopped(crossCheckEcho(held.command, { ledger: file.ledger, trailer: fileTrailer }, { timeoutMs, onEchoOnly: (r) => (file.prefixTrusted || r.seq >= file.base ? deliverRecord(r) : meterOnly(r)) }));
             };
             // An echo that cannot be read is tried once more inside the same bound; if it still cannot be, the run is not a success (the meter stays at what was read).
             const echoDeadline = Date.now() + echoTimeoutMs;
@@ -1812,6 +2078,11 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             // The retry needs at least half of the bound left: an attempt that ended by its own timeout leaves a sliver at most, and a timer may fire a tick early.
             if (echo !== "stopped" && echo.unavailable && limitHit === undefined && echoDeadline - Date.now() >= echoTimeoutMs / 2) echo = await replay(echoDeadline - Date.now());
             if (echo !== "stopped" && limitHit === undefined) {
+              // The echo was replayed either way; a consumed part that could not be re-read is still a reader that could not do its job.
+              if (crossed?.unreadable) {
+                raiseFlag("reader_unavailable");
+                echoUnreadable = true;
+              }
               if (echo.unavailable) {
                 raiseFlag("reader_unavailable");
                 echoUnreadable = true;
@@ -1832,31 +2103,55 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             await catchUp(true, true);
           } else if (run.stopped) await catchUp(false);
         } catch (err) {
+          // A lease lost mid-slice is not an end of the run: nothing is killed, counted or finalized here.
+          if (err === leaseLost) {
+            sliceEnd = "lost";
+            throw err;
+          }
           // Kill the command; after a reader fault or any other end the runner enforced, count what the file did not show; then pass the failure on.
+          startBeat();
           await killQuietly(handle.sandboxName, command, runSessionId);
           guard.stop();
           await catchUp(true, !faulted);
           throw err;
         } finally {
           guard.stop();
-          try {
-            opts.onModelCalls?.(guard.modelCalls());
-          } catch {
-            // fx-swallow-ok: the only observer adds to a counter and cannot throw; if it ever did, the count stays a floor and the run ends as it would have
-          }
-          try {
-            opts.onContextLedger?.({ ...ledger.snapshot(), denied_tool_calls: ledger.deniedToolCalls(), ...(windowTokens === undefined ? {} : { window_tokens: windowTokens }) });
-          } catch {
-            // fx-swallow-ok: the only observer stores the measure on the run's bookkeeping and cannot throw; a ledger is never worth ending a run for
-          }
           clearTimeout(timeWarning);
+          stopBeat();
+          if (sliceEnd !== "lost") {
+            // The slice's last checkpoint: after any catch-up, so what the run ended with (and the rows of its last lines) is saved before it is reported.
+            try {
+              await checkpoint(true);
+            } catch (err) {
+              if (err === leaseLost) sliceEnd = "lost";
+              else reportError(err, { stage: "run.slice_checkpoint" });
+            }
+          }
+          // The run's totals are reported once, by the slice that ends it. The context measure of a sliced run is not carried across slices, so only a run that
+          // never restored (one slice from the start) reports it.
+          if (sliceEnd === undefined) {
+            try {
+              opts.onModelCalls?.(guard.modelCalls());
+            } catch {
+              // fx-swallow-ok: the only observer adds to a counter and cannot throw; if it ever did, the count stays a floor and the run ends as it would have
+            }
+            if (attach?.restore === undefined) {
+              try {
+                opts.onContextLedger?.({ ...ledger.snapshot(), denied_tool_calls: ledger.deniedToolCalls(), ...(windowTokens === undefined ? {} : { window_tokens: windowTokens }) });
+              } catch {
+                // fx-swallow-ok: the only observer stores the measure on the run's bookkeeping and cannot throw; a ledger is never worth ending a run for
+              }
+            }
+          }
         }
       } catch (err) {
+        if (err === leaseLost || sliceEnd === "lost") return { sliceEnd: "lost" };
         // `onEvent` throwing is the sanctioned way to abort (see
         // `StartDetachedResult.hookFired`): stop the command, pass it on.
         await killQuietly(handle.sandboxName, command, runSessionId);
         throw err;
       }
+      if (sliceEnd !== undefined) return { sliceEnd };
       if (endedByStop) return undefined;
       // The runner's own limit ended the command: report it, never "failed".
       if (limitHit !== undefined) throw new RunLimitError(limitHit);
@@ -1870,7 +2165,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       // Succeeded = exit 0 AND the last result was not an error. Anything
       // else is a failure event built here, carrying only what that last
       // result reported (if any).
-      if (finished.exitCode === 0 && lastResult?.type === "result" && !trailerMissing && !launchRefused && !echoUnreadable) {
+      if (finished.exitCode === 0 && lastResult?.type === "result" && !trailerMissing && !launchRefused && !echoUnreadable && !fileAltered) {
         return lastResult.agentOutput === undefined && lastEnvelope !== undefined ? { ...lastResult, agentOutput: lastEnvelope } : lastResult;
       }
       return {
@@ -2046,7 +2341,26 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     },
 
     startDetached(handle, opts) {
-      return launch(handle, opts, opts.prompt, undefined);
+      return launch(handle, opts, opts.prompt, undefined) as StartDetachedResult;
+    },
+
+    /**
+     * D#2 RLR-4: one slice of the run-log reader. It runs the very reader `startDetached` runs (so there is one parser and one set of decisions), but
+     * re-attaches to a command an earlier invocation started and begins from the saved cursor. It resolves with how the slice ended; an abort (a spend
+     * kill, a limit, a reader fault) rejects exactly as `hookFired` does.
+     */
+    async readSlice(handle, o) {
+      if (!Number.isSafeInteger(o.untilMs)) throw new Error("createVercelSandboxPort: untilMs must be an integer");
+      // The reader needs only these; the rest of a launch's options (prompt, env, policy, spill, clone) has no part in a re-attach.
+      const opts: StartDetachedOptions = { ...o, prompt: "", roleCard: "", networkPolicy: [], env: {}, capUsd: 1 };
+      const phase = { attached: false };
+      const { hookFired } = launch(handle, opts, "", undefined, o, phase);
+      const ended = await hookFired.catch((err: unknown) => {
+        // Before the reader has the command, a failure is a failed attach (the caller tries again), never the run's end.
+        throw phase.attached ? err : new SliceAttachError(err instanceof Error ? err.name : "unknown");
+      });
+      if (ended !== undefined && "sliceEnd" in ended) return { kind: ended.sliceEnd };
+      return { kind: "ended", event: ended };
     },
 
     /**
@@ -2132,7 +2446,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     },
 
     resume(handle, sessionId, prompt, opts) {
-      return launch(handle, opts, prompt, sessionId);
+      return launch(handle, opts, prompt, sessionId) as StartDetachedResult;
     },
 
     async deleteSandbox(handle, opts?: DeleteSandboxOptions) {

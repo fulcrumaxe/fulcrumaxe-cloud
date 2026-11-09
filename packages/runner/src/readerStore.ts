@@ -99,6 +99,29 @@ export async function takeLease(pool: Pool, p: { accountId: string; runId: strin
   });
 }
 
+/**
+ * What an end that is not the reader's own finds on the run's reader row: `none` (no row: the run was never sliced), `held` (another invocation holds a live
+ * lease: it is still reading, and books its own, newer figure), or `fenced` (the lease was free or expired and is now this caller's, at a new epoch, so no earlier
+ * holder can save or book anything again).
+ */
+export type Fence = { kind: "none" } | { kind: "held" } | { kind: "fenced"; epoch: number };
+
+/** The fenced acquire of an off-lease end (a cancel, the watchdog): `takeLease`, plus the difference between a live holder and no row at all. */
+export async function fenceLease(pool: Pool, p: { accountId: string; runId: string }): Promise<Fence> {
+  return withTenant(pool, p.accountId, async (client) => {
+    const { rows } = await client.query<{ epoch: string }>(
+      `UPDATE run_log_readers
+          SET epoch = epoch + 1, lease_until = clock_timestamp() + make_interval(secs => $3), updated_at = now()
+        WHERE run_id = $1 AND account_id = $2 AND lease_until <= clock_timestamp()
+        RETURNING epoch`,
+      [p.runId, p.accountId, LEASE_TTL_SECONDS],
+    );
+    if (rows[0]) return { kind: "fenced", epoch: Number(rows[0].epoch) };
+    const { rowCount } = await client.query(`SELECT 1 FROM run_log_readers WHERE run_id = $1 AND account_id = $2`, [p.runId, p.accountId]);
+    return rowCount === 1 ? { kind: "held" } : { kind: "none" };
+  });
+}
+
 /** Extends the lease without moving the cursor. False means the lease is lost: stop at once. */
 export async function renewLease(pool: Pool, p: { accountId: string; runId: string; epoch: number }): Promise<boolean> {
   return withTenant(pool, p.accountId, async (client) => {
@@ -142,6 +165,18 @@ export async function commit(pool: Pool, p: ReaderCommit): Promise<{ held: boole
       await insertAgentOutputLine(client, { accountId: p.accountId, runId: p.runId, sourceLine: row.sourceLine, payload: row.payload });
     }
     return { held: true };
+  });
+}
+
+/**
+ * The last saved state document of a run's reader row, read without the lease (null: no row, or nothing saved yet). It is how an end that is not the reader's
+ * own -- a cancel, the watchdog -- finds the meter of a sliced run, which lives only here and in no instance's memory.
+ */
+export async function readSavedState(pool: Pool, p: { accountId: string; runId: string }): Promise<Record<string, unknown> | null> {
+  return withTenant(pool, p.accountId, async (client) => {
+    const { rows } = await client.query<{ state: Record<string, unknown> }>(`SELECT state FROM run_log_readers WHERE run_id = $1 AND account_id = $2`, [p.runId, p.accountId]);
+    const state = rows[0]?.state;
+    return state === undefined || Object.keys(state).length === 0 ? null : state;
   });
 }
 

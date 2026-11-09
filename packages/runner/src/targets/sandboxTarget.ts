@@ -43,12 +43,15 @@ import {
   RunLimitError,
   createUsageMeter,
   type TokenTotals,
+  type UsageMeterSnapshot,
 } from "../meteringGuard.js";
-import { AgentOutputRecorder } from "../agentOutput.js";
+import { AgentOutputRecorder, LineOutputBudget } from "../agentOutput.js";
+import { buildReaderState, cursorSeqOfRow, parseOutputBudget, parseReaderState, parseSideEffects, restoreMeterLedger, rowSeqOfCursor, snapshotMeterLedger } from "../readerState.js";
+import { commit as commitReader, fenceLease, readSavedState, releaseLease, renewLease, takeLease } from "../readerStore.js";
 import { RunProgressRecorder } from "../runProgress.js";
 import { CloneError } from "../repoClone.js";
 import { detectModelFailure, type ModelFailureCode } from "../modelFailure.js";
-import { pauseQueuedRuns, recordLimitExtended, writeRunStatus } from "../runStatusWriter.js";
+import { pauseQueuedRuns, recordAgentOutputCapped, recordLimitExtended, writeRunStatus } from "../runStatusWriter.js";
 import type { ExtensionPolicy, ExtensionPolicyInput } from "../runLimitDecision.js";
 import { BACKENDS } from "../backends.js";
 import { buildSandboxEnv } from "../sandboxEnv.js";
@@ -58,8 +61,10 @@ import { isPersistentRole, retentionPolicyFor, sandboxNameFor } from "../sandbox
 import {
   SandboxBusyError,
   SandboxNotFoundError,
+  SliceAttachError,
   type EventMeta,
   type SandboxHandle,
+  type SliceCheckpoint,
   type SandboxPort,
   type SandboxSessionUsage,
   type StartDetachedResult,
@@ -325,6 +330,14 @@ export type RunAbortReason =
   | { kind: "limit"; limit: RunLimit; reportedUsd?: number }
   /** MP-PLAUS: a line no model could have produced, killed under the cap. */
   | { kind: "implausible" };
+
+/** What one `readSlice` call tells its caller (the follower loop): the run is over (`done`), whether this call held the lease, and a failed attach. */
+export interface ReadSliceStep {
+  done: boolean;
+  held: boolean;
+  failed?: boolean;
+  status?: TerminalReport["status"];
+}
 
 /** Thrown from `onEvent` (never caught anywhere but `dispatch`'s own
  * `hookFired` continuation below) to abort the run's `AgentRuntime.start`
@@ -844,6 +857,160 @@ export class SandboxTarget implements ExecutionTarget {
     return { hookToken };
   }
 
+  /** The run's durable status, or undefined when there is no such row. */
+  private async runStatus(run: ExecutionRun): Promise<string | undefined> {
+    const { rows } = await this.withAccount(run.accountId, (client) =>
+      client.query<{ status: string }>(`SELECT status FROM agent_runs WHERE account_id = $1 AND id = $2`, [run.accountId, run.id]),
+    );
+    return rows[0]?.status;
+  }
+
+  /**
+   * D#2 RLR-4 (run-log reader design, B3 and B4): one slice of the reader, run by whichever invocation holds the run's lease.
+   *
+   * It takes the fenced lease (`done: false, held: false` when another invocation holds it), restores the meter, the guard and the monotone effects from the
+   * last commit, and has the port read the record file from the saved cursor until `untilMs`. Every save -- the cursor, the state, the output rows of the
+   * records read and the renewed lease -- is ONE compare-and-swap (`readerStore.commit`), at least every 10 s and after each batch, so a crash replays from the last save
+   * and the line-keyed rows make the replay exactly-once. When the run ends here (the command exited and the exit sequence ran, or the runner's own limit or a spend kill
+   * ended it) the run is finalized -- the reader's output rows first, then the stop, the measure and the terminal status -- and the lease is given up. A lease lost mid-slice
+   * ends the slice at once and does nothing else; a cancel is noticed at each save (the run is no longer `running`).
+   */
+  async readSlice(run: ExecutionRun, opts: { untilMs: number; startedMs?: number; maxRecords?: number; checkpointEveryMs?: number; renewEveryMs?: number }): Promise<ReadSliceStep> {
+    const port = this.deps.sandboxPort;
+    if (port.readSlice === undefined) throw new Error("sandbox target: the sandbox port cannot read slices");
+    assertMeterableModel(run.model);
+    assertSelectableBackend(run.backend);
+    const status = await this.runStatus(run);
+    if (status === undefined || status === "pending") return { done: false, held: false };
+    if (status !== "running") {
+      // Another path ended the run (a cancel, the watchdog). What the sliced reader metered is in its saved state and in no instance's memory: it is booked from there.
+      await this.settleModelFromSavedMeter(run);
+      return { done: true, held: false };
+    }
+    const lease = await takeLease(this.deps.pool, { accountId: run.accountId, runId: run.id });
+    if (lease === null) return { done: false, held: false };
+    const { epoch } = lease;
+    const bk = this.bookkeeping(run.id);
+    try {
+      const saved = Object.keys(lease.state).length === 0 ? undefined : parseReaderState(lease.state);
+      if (saved) {
+        restoreMeterLedger(saved.ledger, bk);
+        bk.ccSessionId = saved.cc ?? bk.ccSessionId;
+        // The first end the runner decided stands across a takeover: a run killed for spend is not turned into a plain failure by the reader that finds it dead.
+        if (saved.abort !== undefined) bk.abort ??= saved.abort;
+      }
+      const sideEffects = parseSideEffects(lease.sideEffects);
+      bk.extensionsUsed = sideEffects.extensionsUsed;
+      const budget = new LineOutputBudget(saved?.out === undefined ? undefined : parseOutputBudget(saved.out));
+      const pending: Array<{ sourceLine: number; payload: Record<string, unknown> }> = [];
+      const sandboxName = sandboxNameFor({ role: run.role, runId: run.id, accountId: run.accountId, repoId: run.repoId, pr: run.pr });
+      const handle: SandboxHandle = { runId: run.id, sandboxName };
+      bk.handle ??= handle;
+      const sessionId = (await this.readSandboxState(run)).sessionIds.at(-1);
+      if (sessionId === undefined) throw new Error("sandbox target: the run has no recorded sandbox session");
+      const payerAccountId = this.payerFor(run);
+      const excludes = await this.readExcludes(run);
+      const { onEvent, getSessionId, usageSnapshot } = await this.buildMeteredOnEvent(run, payerAccountId, handle, bk, {
+        restoreUsage: saved?.usage,
+        collect: (text, sourceLine) => {
+          const payload = sourceLine === undefined ? undefined : budget.admit(text);
+          if (payload !== undefined && sourceLine !== undefined) pending.push({ sourceLine, payload });
+        },
+      });
+      let cancelledOutside = false;
+      const commit = async (cp: SliceCheckpoint): Promise<boolean> => {
+        const rows = pending.splice(0);
+        try {
+          const state = buildReaderState({ usage: usageSnapshot(), guard: cp.guard, ledger: snapshotMeterLedger(bk), reader: cp.reader, out: budget.state(), ...(bk.abort !== undefined && { abort: bk.abort }), ...(bk.ccSessionId !== undefined && { cc: bk.ccSessionId }) });
+          const { held } = await commitReader(this.deps.pool, {
+            accountId: run.accountId,
+            runId: run.id,
+            epoch,
+            nextSeq: rowSeqOfCursor(cp.nextSeq),
+            byteOffset: cp.byteOffset,
+            state: state as unknown as Record<string, unknown>,
+            sideEffects: cp.sideEffects as unknown as Record<string, unknown>,
+            readFailures: cp.readFailures,
+            rows,
+          });
+          if (!held) return false; // the rows belong to whoever holds the lease now, who replays them from its own cursor
+          // A cancel (or any other end) is noticed here, in the same breath as the save.
+          if ((await this.runStatus(run)) !== "running") {
+            cancelledOutside = true;
+            return false;
+          }
+          return true;
+        } catch (err) {
+          pending.unshift(...rows); // nothing was saved: the next save carries them
+          throw err;
+        }
+      };
+      const sliceOpts = {
+        runId: run.id,
+        role: run.role,
+        model: run.model,
+        ...(run.backend !== undefined && { backend: run.backend }),
+        workdir: run.workdir,
+        ...this.extensionOf(run, bk),
+        ...(excludes.length > 0 && { excludes }),
+        ...(run.limits && { limits: run.limits }),
+        onModelCalls: (n: number) => (bk.meteredModelCalls += n),
+        onReaderFlag: (flag: string) => void bk.meterFlags.add(flag),
+        onContextLedger: (m: ContextLedgerMeasure) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
+        onContextFigure: this.figureOf(run, bk),
+        onEvent,
+        cmdId: lease.cmdId,
+        sessionId,
+        cursor: { nextSeq: cursorSeqOfRow(lease.nextSeq), byteOffset: lease.byteOffset, readFailures: lease.readFailures },
+        ...(saved?.reader !== undefined && { restore: { guard: saved.guard, sideEffects, reader: saved.reader } }),
+        ...(opts.startedMs !== undefined && { startedMs: opts.startedMs }),
+        untilMs: opts.untilMs,
+        ...(opts.maxRecords !== undefined && { maxRecords: opts.maxRecords }),
+        ...(opts.checkpointEveryMs !== undefined && { checkpointEveryMs: opts.checkpointEveryMs }),
+        renew: () => renewLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch }),
+        ...(opts.renewEveryMs !== undefined && { renewEveryMs: opts.renewEveryMs }),
+        commit,
+      };
+      let report: TerminalReport | undefined;
+      try {
+        const result = await port.readSlice(handle, sliceOpts);
+        if (result.kind === "slice") return { done: false, held: true };
+        if (result.kind === "lost") {
+          const over = cancelledOutside || (await this.runStatus(run)) !== "running";
+          // The run was ended by another path (a cancel, the watchdog) and this slice's last save still held the lease: that save is the newest figure, and it is booked here,
+          // once, guarded by the epoch. A slice that LOST the lease books nothing: whoever fenced it books.
+          if (cancelledOutside) await this.settleModelFromSavedMeter(run, epoch);
+          else if (over) {
+            // The lease was lost (saves refused, an expired lease) and the run is already over, so nobody is left to read it: give our own lease up if it is still ours, then fence and
+            // book the saved figure if that fence wins. A live holder elsewhere books for itself; a fence that loses leaves the booking to whoever won it.
+            await releaseLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch }).catch(() => undefined);
+            await this.settleModelFromSavedMeter(run);
+          }
+          return { done: over, held: false };
+        }
+        const sid = getSessionId() ?? result.event?.sessionId ?? bk.ccSessionId;
+        // A run the runner itself ended in an earlier slice (a spend kill) and that this reader found dead is still that end, not a failure.
+        report = bk.abort !== undefined ? buildAbortTerminalReport(bk.abort, sid, bk.cumulativeModelUsd, snapshotOf(bk)) : buildTerminalReport(result.event, sid, bk.cumulativeModelUsd, snapshotOf(bk));
+      } catch (err) {
+        // fx-swallow-ok: a rejection of the slice is how the run ends (a limit, a spend kill, a reader fault); it becomes the terminal report just below, as `dispatch` does for `hookFired`
+        // A slice that could not attach did nothing; the run goes on and the caller tries again.
+        if (err instanceof SliceAttachError) return { done: false, held: true, failed: true };
+        report = buildAbortTerminalReport(abortOf(bk, err), getSessionId() ?? bk.ccSessionId, bk.cumulativeModelUsd, snapshotOf(bk));
+      }
+      // The run is over: the rows of the lines read are in the last save; the one `capped` row follows them, then the stop, the measure and the terminal status.
+      if (budget.droppedMessages > 0) {
+        await recordAgentOutputCapped(this.deps.pool, { accountId: run.accountId, runId: run.id, droppedMessages: budget.droppedMessages, droppedBytes: budget.droppedBytes }).catch((err: unknown) =>
+          reportError(err, { stage: "run.agent_output_capped" }),
+        );
+      }
+      await this.untilRunning(run);
+      if (!bk.cancelled) await this.finalize(run, report, { leaseEpoch: epoch });
+      return { done: true, held: true, status: report.status };
+    } finally {
+      await releaseLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch }).catch(() => undefined);
+    }
+  }
+
   /** The run as a fresh session sees it: a round that sent only "Spec unchanged" supplies the prompt that carries the Spec body (D#600 CX-2). */
   private freshSessionRun(run: ExecutionRun): ExecutionRun {
     return run.fallbackPrompt === undefined
@@ -868,17 +1035,23 @@ export class SandboxTarget implements ExecutionTarget {
     payerAccountId: string,
     handle: SandboxHandle,
     bk: RunBookkeeping,
+    /**
+     * D#2 RLR-4: a sliced reader's way of saving what the run said. The usage meter continues from `restoreUsage`; the assistant text of each record line
+     * is not queued to the unkeyed writer but handed to `collect`, to be saved with the cursor under the line's number.
+     */
+    slice?: { restoreUsage?: unknown; collect: (text: string, sourceLine: number | undefined) => void },
   ): Promise<{
     onEvent: (event: NormalizedEvent, meta?: EventMeta) => Promise<void>;
     onStage: (stage: "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed") => void;
     getSessionId: () => string | undefined;
+    usageSnapshot: () => UsageMeterSnapshot;
   }> {
     let sessionId: string | undefined;
     // This command's own meter. A resumed command reports usage from zero,
     // so its priced total sits on top of what earlier commands metered.
-    const usageMeter = createUsageMeter();
+    const usageMeter = createUsageMeter(slice?.restoreUsage === undefined ? undefined : { restore: slice.restoreUsage });
 
-    const output = (bk.output ??= new AgentOutputRecorder(this.deps.pool, run.accountId, run.id));
+    const output = slice ? undefined : (bk.output ??= new AgentOutputRecorder(this.deps.pool, run.accountId, run.id));
     const progress = (bk.progress ??= new RunProgressRecorder(this.deps.pool, run.accountId, run.id));
 
     // `meterOnly`: usage counted after the run's end was decided (the echo catch-up behind an enforced end). It is metered and booked like any other,
@@ -957,14 +1130,18 @@ export class SandboxTarget implements ExecutionTarget {
     // only awaited (its bounded backpressure) once metering has passed; a kill throws out of `meterEvent` unawaited.
     const onEvent = async (event: NormalizedEvent, meta?: EventMeta): Promise<void> => {
       progress.observe(event); // synchronous and never throws: the writes run behind the stream
-      const stored = event.type === "assistant" && event.text ? output.record(event.text) : undefined;
+      let stored: Promise<void> | undefined;
+      if (event.type === "assistant" && event.text) {
+        if (slice) slice.collect(event.text, meta?.sourceLine);
+        else stored = output!.record(event.text);
+      }
       await meterEvent(event, meta?.meterOnly === true);
       await stored;
       // After metering, so a stamp write never delays the spend check or a kill; throttled, and it never throws.
       await this.stampAlive(run, bk);
     };
 
-    return { onEvent, onStage: (stage) => progress.stage(stage), getSessionId: () => sessionId };
+    return { onEvent, onStage: (stage) => progress.stage(stage), getSessionId: () => sessionId, usageSnapshot: () => usageMeter.snapshot() };
   }
 
   /**
@@ -1151,7 +1328,8 @@ export class SandboxTarget implements ExecutionTarget {
     }
   }
 
-  async finalize(run: ExecutionRun, report: TerminalReport): Promise<CancelResult> {
+  /** `opts.leaseEpoch`: the caller is the run's reader and holds that epoch (its own figure and the saved one are then booked guarded by it); without it this is an off-lease end, which fences first (`modelBooking`). */
+  async finalize(run: ExecutionRun, report: TerminalReport, opts: { leaseEpoch?: number } = {}): Promise<CancelResult> {
     const payerAccountId = this.payerFor(run);
 
     // CS-1: the run is over, so stop its VM now (it used to run to the sandbox timeout): stop, measure, delete.
@@ -1164,6 +1342,10 @@ export class SandboxTarget implements ExecutionTarget {
 
     const operatorRun = this.isOperatorRun(run, payerAccountId);
     const metering = report.metering ?? { meteredUsd: null, reportedUsd: null, flags: ["no_metering"] };
+    // A report that carries no spend is an end from outside the reader (the watchdog, a lost sandbox): a sliced run's meter is then in its saved state only.
+    // The larger of what the report holds and what the last save holds: a figure from an older slice's memory never stands in for a newer save.
+    const savedUsd = await this.savedMeterUsd(run);
+    const usd = report.usd === undefined ? savedUsd : savedUsd === undefined ? report.usd : Math.max(report.usd, savedUsd);
     const write = await writeRunStatus(this.deps.pool, {
       accountId: run.accountId,
       runId: run.id,
@@ -1181,20 +1363,20 @@ export class SandboxTarget implements ExecutionTarget {
         envelope: report.envelope,
         tokensIn: report.tokensIn,
         tokensOut: report.tokensOut,
-        usd: report.usd,
+        usd,
         sessionId: report.sessionId,
       },
       // LIMIT-END (C48): a limit that ended the run leaves a checkpoint, in
       // the same transaction as the status change.
       ...(report.limit
-        ? { checkpoint: { kind: report.limit.kind, ccSessionId: report.sessionId ?? null, meteredUsd: report.usd ?? 0, extensionsUsed: report.extensionsUsed ?? 0 } }
+        ? { checkpoint: { kind: report.limit.kind, ccSessionId: report.sessionId ?? null, meteredUsd: usd ?? 0, extensionsUsed: report.extensionsUsed ?? 0 } }
         : report.agentCheckpoint
           ? {
               checkpoint: {
                 reason: "agent_checkpoint" as const,
                 summary: report.agentCheckpoint.summary,
                 ccSessionId: report.sessionId ?? null,
-                meteredUsd: report.usd ?? 0,
+                meteredUsd: usd ?? 0,
                 extensionsUsed: report.extensionsUsed ?? 0,
               },
             }
@@ -1227,7 +1409,7 @@ export class SandboxTarget implements ExecutionTarget {
     // operator token is ours to rotate (see the owner notes in docs/ops/staging.md), and the run's row
     // above carries the `operator_token_rejected` flag so the failure reads as ours, not the customer's.
 
-    await this.settleOpenRows(payerAccountId, run, report.usd, { deadlinePassed: false, measured });
+    await this.settleOpenRows(payerAccountId, run, usd, { deadlinePassed: false, measured }, opts.leaseEpoch);
 
     // D#2 H09b2, C21 item 1's OTHER half: `finalize` is the normal
     // (non-cancelled) completion path, and it always runs AFTER the hook
@@ -1273,10 +1455,80 @@ export class SandboxTarget implements ExecutionTarget {
     run: ExecutionRun,
     meteredUsd: number | undefined,
     compute: { deadlinePassed: boolean; measured?: SandboxSessionFigures[] },
-  ): Promise<void> {
+    leaseEpoch?: number,
+  ): Promise<{ modelDeferred: boolean }> {
+    const plan = await this.modelBooking(run, meteredUsd, leaseEpoch);
+    try {
+      if (!plan.skip) await this.settleModelRows(payerAccountId, run, plan.usd, plan.epoch);
+      await this.settleRunCompute(run, compute);
+    } finally {
+      await plan.done().catch((err: unknown) => reportError(err, { stage: "run.fence_release" }));
+    }
+    return { modelDeferred: plan.skip };
+  }
+
+  /**
+   * The meter of a SLICED run lives in its reader row's saved state (and in the memory of whichever instance last held the lease), never in the instance that
+   * happens to cancel it or to find it lost. This reads it back: the spend the last save holds, or undefined when there is none (no reader row, nothing metered).
+   * A row that cannot be read is reported and counts as none (the money is then released, as for a run that never metered); a database error is the caller's.
+   */
+  private async savedMeterUsd(run: ExecutionRun): Promise<number | undefined> {
+    const raw = await readSavedState(this.deps.pool, { accountId: run.accountId, runId: run.id });
+    if (raw === null) return undefined;
+    try {
+      const probe = freshBookkeeping();
+      restoreMeterLedger(parseReaderState(raw).ledger, probe);
+      return probe.cumulativeModelUsd > 0 ? probe.cumulativeModelUsd : undefined;
+    } catch (err) {
+      reportError(err, { stage: "run.saved_meter" });
+      return undefined;
+    }
+  }
+
+  /**
+   * How an end books the model spend of a possibly SLICED run (the money must end at the larger figure, and the ledger takes one row and never an update).
+   *  - `leaseEpoch` given: the caller IS the reader and holds that epoch; it books max(its own figure, the saved one), guarded by the epoch.
+   *  - otherwise (a cancel, the watchdog, a lost run, a slice that finds the run over): fence first. No reader row: the instance's own figure, as for any unsliced run.
+   *    A live holder elsewhere: nothing is booked here (`skip`); that holder books its own, newer figure at its next save. An expired lease: it is taken
+   *    (epoch bump), so the old holder can book nothing after this, and max(own figure, saved) is booked; `done` gives the lease back.
+   */
+  private async modelBooking(run: ExecutionRun, ownUsd: number | undefined, leaseEpoch?: number): Promise<{ skip: boolean; usd: number | undefined; epoch?: number; done: () => Promise<void> }> {
+    const nothing = async (): Promise<void> => undefined;
+    const larger = async (): Promise<number | undefined> => {
+      const saved = await this.savedMeterUsd(run);
+      return ownUsd === undefined ? saved : saved === undefined ? ownUsd : Math.max(ownUsd, saved);
+    };
+    if (leaseEpoch !== undefined) return { skip: false, usd: await larger(), epoch: leaseEpoch, done: nothing };
+    const fence = await fenceLease(this.deps.pool, { accountId: run.accountId, runId: run.id });
+    if (fence.kind === "none") return { skip: false, usd: ownUsd, done: nothing };
+    if (fence.kind === "held") return { skip: true, usd: undefined, done: nothing };
+    return { skip: false, usd: await larger(), epoch: fence.epoch, done: () => releaseLease(this.deps.pool, { accountId: run.accountId, runId: run.id, epoch: fence.epoch }).then(() => undefined) };
+  }
+
+  /** Books a sliced run's saved spend against its model reservation (idempotent: the lock-held settle books each run's spend once). A no-op when nothing was metered or a live reader holds the run. */
+  private async settleModelFromSavedMeter(run: ExecutionRun, leaseEpoch?: number): Promise<void> {
+    const plan = await this.modelBooking(run, undefined, leaseEpoch);
+    try {
+      if (!plan.skip && plan.usd !== undefined) await this.settleModelRows(this.payerFor(run), run, plan.usd, plan.epoch);
+    } finally {
+      await plan.done().catch((err: unknown) => reportError(err, { stage: "run.fence_release" }));
+    }
+  }
+
+  private async settleModelRows(payerAccountId: string, run: ExecutionRun, meteredUsd: number | undefined, guardEpoch?: number): Promise<void> {
     const runId = run.id;
     await this.withAccount(payerAccountId, async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${payerAccountId}:model`]);
+      // A booking made under a reader lease is made only while that epoch is still the row's, and the reader row stays share-locked until the booking commits: a fence
+      // or a take (any epoch bump) waits for it, and one that came first is seen here. A reader fenced out books nothing; whoever fenced it books. The lease TIME is not
+      // part of this: a lease that merely ran out (a slow stop or measure) with nobody having taken it still lets its holder book its own end.
+      if (guardEpoch !== undefined) {
+        const { rowCount } = await client.query(
+          `SELECT 1 FROM run_log_readers WHERE run_id = $1 AND account_id = $2 AND epoch = $3 FOR SHARE`,
+          [runId, run.accountId, guardEpoch],
+        );
+        if (rowCount !== 1) return;
+      }
       const { rows } = await client.query<{ budget: Budget }>(
         `SELECT budget FROM spend_reservations WHERE account_id = $1 AND run_id = $2 AND state = 'open'`,
         [payerAccountId, runId],
@@ -1310,7 +1562,6 @@ export class SandboxTarget implements ExecutionTarget {
         }
       }
     });
-    await this.settleRunCompute(run, compute);
   }
 
   /**
@@ -1730,6 +1981,7 @@ export class SandboxTarget implements ExecutionTarget {
       ),
     );
 
+    let modelDeferred = false;
     if (openRows.rows.length > 0) {
       // Sandbox name is a pure function of (role, runId, accountId,
       // repoId, pr) -- recomputing it means `cancel` never depends on
@@ -1776,17 +2028,21 @@ export class SandboxTarget implements ExecutionTarget {
       // fresh under the advisory lock itself now, so a concurrent
       // metered kill's own settle (same lock) is never raced past on a
       // stale snapshot. See that method's own comment.
-      await this.settleOpenRows(payerAccountId, run, bk.cumulativeModelUsd > 0 ? bk.cumulativeModelUsd : undefined, {
+      // A sliced run's meter is in its reader row's saved state; this instance's own memory has it only if it read a slice of this run. Whichever is more is booked.
+      // `settleOpenRows` fences first and books the larger of the two, or books nothing when a live reader holds the run (that reader books its newer figure at its next save).
+      const settled = await this.settleOpenRows(payerAccountId, run, bk.cumulativeModelUsd > 0 ? bk.cumulativeModelUsd : undefined, {
         deadlinePassed: false,
         measured: bk.measurement,
       });
+      modelDeferred = settled.modelDeferred;
     } else if (bk.stoppedDirectly) {
       await this.deleteIfEphemeral(run, bk); // no compute row is waiting for this sandbox's figures
     }
 
     const totals = await this.totalsFor(payerAccountId, run.id);
     bk.cancelled = true;
-    bk.cachedCancelResult = totals;
+    // A cancel that left the model booking to a live reader is not complete: a repeat call (on any instance) must look again once that reader is gone.
+    if (!modelDeferred) bk.cachedCancelResult = totals;
 
     // D#2 H09b2, C21 item 1 (PR #85 final security review, should-fix 2;
     // CWE-401/754): pruning here is now GATED on `!bk.hookToken ||

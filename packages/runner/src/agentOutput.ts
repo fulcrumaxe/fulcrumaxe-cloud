@@ -163,3 +163,42 @@ export class AgentOutputRecorder {
     }
   }
 }
+
+/**
+ * D#2 RLR-4: the same per-run caps as `AgentOutputRecorder`, for the rows a sliced reader saves with its cursor (one row per record line, keyed by the line).
+ * The counts are part of the saved reader state, so a slice that takes over continues them. `admit` returns the bounded payload to save, or undefined
+ * when a cap dropped the message (counted, and left for the one `agent.output.capped` row at the run's end). Once a cap is hit it stays hit.
+ */
+export class LineOutputBudget {
+  private rows: number;
+  private bytes: number;
+  private capped: boolean;
+  droppedMessages: number;
+  droppedBytes: number;
+
+  constructor(from?: { rows: number; bytes: number; capped: boolean; droppedMessages: number; droppedBytes: number }) {
+    this.rows = from?.rows ?? 0;
+    this.bytes = from?.bytes ?? 0;
+    this.capped = from?.capped ?? false;
+    this.droppedMessages = from?.droppedMessages ?? 0;
+    this.droppedBytes = from?.droppedBytes ?? 0;
+  }
+
+  admit(text: string): Record<string, unknown> | undefined {
+    if (text === "") return undefined;
+    const { payload, storedBytes } = boundAgentOutput(text);
+    if (this.capped || this.rows >= AGENT_OUTPUT_LIMITS.maxRows || this.bytes + storedBytes > AGENT_OUTPUT_LIMITS.maxRunBytes) {
+      this.capped = true;
+      this.droppedMessages += 1;
+      this.droppedBytes += Buffer.byteLength(text, "utf8");
+      return undefined;
+    }
+    this.rows += 1;
+    this.bytes += storedBytes;
+    return payload;
+  }
+
+  state(): { rows: number; bytes: number; capped: boolean; droppedMessages: number; droppedBytes: number } {
+    return { rows: this.rows, bytes: this.bytes, capped: this.capped, droppedMessages: this.droppedMessages, droppedBytes: this.droppedBytes };
+  }
+}

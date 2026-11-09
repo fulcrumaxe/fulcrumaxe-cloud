@@ -77,8 +77,10 @@ class Feed {
 }
 
 export interface VmLogEntry {
-  kind: "agent_started" | "agent_logs" | "agent_wait" | "agent_kill" | "read" | "read_logs" | "agent_refused" | "exit_code_read";
+  kind: "agent_started" | "agent_logs" | "agent_wait" | "agent_kill" | "read" | "read_logs" | "agent_refused" | "exit_code_read" | "sandbox_stop" | "get_command";
   cmdId?: string;
+  /** agent_kill: the signal asked for. */
+  sig?: string;
   /** agent_logs: whether the command had already exited when the subscriber attached. */
   exited?: boolean;
   /** agent_wait: whether a signal was passed, and how it ended. */
@@ -102,8 +104,12 @@ export interface RecordingVmOptions {
   readHangs?: boolean;
   /** The agent command's wait() answers this exit code whatever the recorder wrote (a recorder killed just after its trailer). */
   waitExit?: number;
+  /** The recorder's child ignores SIGTERM, as a stuck agent does: only SIGKILL ends the command (the recorder's own 5 s escalation is not modelled here). */
+  ignoreSigterm?: boolean;
   /** Called as each read command starts, before it looks at the file: where a test plays the agent that rewrites the record file. */
   onRead?: (path: string, vm: RecordingVm) => void;
+  /** Awaited by each read command before its output is produced: where a test makes a step of the exit sequence slow. */
+  readDelay?: (ctx: { offset: number; path: string }) => Promise<void> | void;
 }
 
 interface AgentCmd {
@@ -121,6 +127,8 @@ export function createRecordingVm(opts: RecordingVmOptions = {}) {
   const dirs = new Set<string>(["/", "/fx", "/tmp", "/vercel", "/vercel/sandbox"]);
   const log: VmLogEntry[] = [];
   const agents: AgentCmd[] = [];
+  /** The agent commands by id, for `session.getCommand` (a re-attach by a later invocation). */
+  const commandsById = new Map<string, SdkCommand>();
   const chunkBytes = opts.chunkBytes ?? 8192;
   let cmdSeq = 0;
   let hold: Promise<void> | undefined;
@@ -281,12 +289,14 @@ export function createRecordingVm(opts: RecordingVmOptions = {}) {
         return feed.iterate();
       },
       wait,
-      kill: async () => {
-        log.push({ kind: "agent_kill", cmdId });
+      kill: async (sig: "SIGTERM" | "SIGKILL" = "SIGTERM") => {
+        log.push({ kind: "agent_kill", cmdId, sig });
+        if (opts.ignoreSigterm && sig === "SIGTERM") return;
         await childCmd.kill();
-        cmd.kill("SIGTERM");
+        cmd.kill(sig);
       },
     };
+    commandsById.set(cmdId, command);
     Object.defineProperty(command, "exitCode", {
       get() {
         log.push({ kind: "exit_code_read", cmdId });
@@ -327,6 +337,7 @@ export function createRecordingVm(opts: RecordingVmOptions = {}) {
         log.push({ kind: "read_logs", cmdId });
         if (subscribers > 1) throw new Error("strict fake: a read command's output is read once");
         return (async function* () {
+          await opts.readDelay?.({ offset, path });
           for (const data of chunked(out)) yield { stream: "stdout", data };
           if (opts.readHangs) await new Promise<never>(() => undefined);
         })();
@@ -361,6 +372,25 @@ export function createRecordingVm(opts: RecordingVmOptions = {}) {
             if (params.cmd === "sh" && a[0] === "-c" && a[1] === READ_SCRIPT && a[2] === "fx-read") return startRead(params);
             if (params.cmd === "sh" && a[0] === "-c" && a[2] === "fx-read") throw new Error("strict fake: a read command runs the one read script");
             return target.runCommand(params);
+          };
+        }
+        if (prop === "currentSession") {
+          // As the real session does: a command found by id (anything else is a 404), the same object a later invocation re-attaches to.
+          return () => ({
+            ...target.currentSession(),
+            getCommand: async (cmdId: string, o?: { signal?: AbortSignal }): Promise<SdkCommand> => {
+              o?.signal?.throwIfAborted();
+              log.push({ kind: "get_command", cmdId });
+              const found = commandsById.get(cmdId);
+              if (!found) throw Object.assign(new Error("command not found"), { status: 404 });
+              return found;
+            },
+          });
+        }
+        if (prop === "stop") {
+          return async (o?: { signal?: AbortSignal }): Promise<unknown> => {
+            log.push({ kind: "sandbox_stop" });
+            return target.stop(o);
           };
         }
         if (prop === "writeFiles") {
