@@ -84,6 +84,10 @@ The CLI reaches the extension through `--chrome` (only this role; every other ro
 4. With Chrome closed, the same command (with the token) must fail to attach, and `fx-runner run` stops advertising `browser_chrome_v1` at its next hello.
 5. If `--tools` refuses the run, or the `init` line shows a tool outside that list, stop and report: the attach or the flag handling differs from what the runner assumes.
 
+### Which browser method a deploy verifier job uses
+
+The cloud chooses how each deploy verifier job drives its browser and signs the choice into the job as `browser_method`: `playwright_runner` (the runner's own Playwright browser, driven through the runner-owned `fxverify` MCP server) unless the repository or the runner sets `verify.browser_driver` to `chrome`, which is set only after the smoke above passes (the stage reads it through an injected port; the store behind it comes with the production wiring, so until then every job is `playwright_runner`). Each method has its own capability on the runner's hello (`browser_playwright_v1`, `browser_chrome_v1`) and its own tool list, and the signed tool digest covers the list of the job's method. The cloud offers a job only to a runner that lists the capability of its method. The verify row's method is copied from the signed job, never from anything the run reports.
+
 ## Known gaps
 
 - No production `SandboxPort` implementation exists in this package — only the interface and the fake (`packages/runner/src/sandboxPort.ts`'s own header, `packages/runner/src/fakeSandbox.ts`).

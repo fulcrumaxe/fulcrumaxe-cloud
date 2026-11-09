@@ -1,4 +1,4 @@
-import { DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
+import { DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES, canonicalJson, deployVerifierToolsFor, sha256Text, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 
 /**
  * The tools each runner-eligible role may use on a customer's machine.
@@ -62,12 +62,14 @@ export class UnknownRoleError extends Error {
  * The tools of a role. Fails closed: an unknown role throws, as the cloud's own `toolsForRole` does. Own-property
  * lookup only, so names like `constructor` and `__proto__` are unknown too.
  */
-export function roleToolsFor(role: string): readonly string[] {
+export function roleToolsFor(role: string, browserMethod?: BrowserMethod): readonly string[] {
+  // D#749 V2c-1: the deploy verifier's list depends on the method the job signed (no method: the Chrome list in the table).
+  if (role === DEPLOY_VERIFIER_ROLE && browserMethod !== undefined) return deployVerifierToolsFor(browserMethod);
   if (typeof role !== "string" || !Object.hasOwn(ROLE_TOOLS, role)) throw new UnknownRoleError(String(role));
   return ROLE_TOOLS[role]!;
 }
 
 /** The SHA-256 of the role's tool list as the job carries it: the sorted list as canonical JSON. */
-export function roleToolsDigest(role: string): string {
-  return sha256Text(canonicalJson([...roleToolsFor(role)].sort()));
+export function roleToolsDigest(role: string, browserMethod?: BrowserMethod): string {
+  return sha256Text(canonicalJson([...roleToolsFor(role, browserMethod)].sort()));
 }

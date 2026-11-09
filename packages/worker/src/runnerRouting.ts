@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { LIGHT_JOB_ROLES, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, RUNNER_CAPABILITY_FOR_ROLE, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { LIGHT_JOB_ROLES, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, RUNNER_ANY_CAPABILITY_FOR_ROLE, RUNNER_CAPABILITY_FOR_ROLE, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
 import { RUNNER_HANDOFF_MIN_PROTOCOL_VERSION, RUNNER_ONLINE_SECONDS, PREFER_HOLD_MAX_SECONDS, runnerLiveSql } from "@fx/runner";
 
 /**
@@ -68,6 +68,8 @@ function freeSlots(row: PeerRow): { light: boolean; heavy: boolean } {
 export function rolesForCapabilities(roles: readonly string[], capabilities: readonly string[] | null | undefined): string[] {
   const held = capabilities ?? [];
   return roles.filter((role) => {
+    // D#749 V2c-1: a role that needs any one of several capabilities (the deploy verifier: one per browser method). Which one a job needs is checked per job in the claim's candidate query.
+    if (Object.hasOwn(RUNNER_ANY_CAPABILITY_FOR_ROLE, role)) return RUNNER_ANY_CAPABILITY_FOR_ROLE[role]!.some((cap) => held.includes(cap));
     const needed = Object.hasOwn(RUNNER_CAPABILITY_FOR_ROLE, role) ? RUNNER_CAPABILITY_FOR_ROLE[role as keyof typeof RUNNER_CAPABILITY_FOR_ROLE] : undefined;
     return needed === undefined || held.includes(needed);
   });

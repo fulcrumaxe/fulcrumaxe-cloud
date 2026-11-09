@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEPLOY_VERIFIER_BROWSER_TOOLS, DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { DEPLOY_VERIFIER_BROWSER_TOOLS, DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS, DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
 import { CONFINED_READ_ROLES, PLATFORM_ROLES, RUNNER_ONLY_ROLES, TOOL_LISTED_ROLES, UnknownRoleError, agentSettingsFor, runnerToolsForRole, toolsForRole } from "../src/agentConfig.js";
 
 /**
@@ -26,6 +26,18 @@ describe("the deploy verifier role in the runner package", () => {
     expect(runnerToolsForRole(DEPLOY_VERIFIER_ROLE)).toBe(DEPLOY_VERIFIER_RUNNER_TOOLS);
     expect(Object.isFrozen(DEPLOY_VERIFIER_RUNNER_TOOLS)).toBe(true);
     for (const tool of runnerToolsForRole(DEPLOY_VERIFIER_ROLE)) expect(tool).not.toMatch(/Bash|Edit|Write|Web|curl/);
+  });
+
+  // D#749 V2c-1: the list the job is signed with depends on the method the cloud chose for it.
+  it("is signed with the list of its browser method: Chrome's (also when no method is given) or the fxverify tools, never both", () => {
+    expect(runnerToolsForRole(DEPLOY_VERIFIER_ROLE, "chrome_runner")).toBe(DEPLOY_VERIFIER_RUNNER_TOOLS);
+    expect([...runnerToolsForRole(DEPLOY_VERIFIER_ROLE, "playwright_runner")]).toEqual(["Read", "Glob", "Grep", ...DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS]);
+    expect(runnerToolsForRole(DEPLOY_VERIFIER_ROLE, "playwright_runner")).not.toEqual(runnerToolsForRole(DEPLOY_VERIFIER_ROLE, "chrome_runner"));
+    for (const tool of runnerToolsForRole(DEPLOY_VERIFIER_ROLE, "playwright_runner")) expect(tool).not.toMatch(/Bash|Edit|Write|Web|curl|claude-in-chrome/);
+  });
+
+  it("gives a method to no other role: another role's list is the same whatever method is passed", () => {
+    expect(runnerToolsForRole("executor", "playwright_runner")).toBe(toolsForRole("executor"));
   });
 
   it("leaves every other role's list as it was", () => {

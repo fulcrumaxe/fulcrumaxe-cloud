@@ -18,6 +18,7 @@ const ABSENT_ON_PURPOSE: Record<string, string> = {
   "wake.transport": "only on an idle claim answer",
   merge_order: "only on a claim answer that holds a run back",
   deploy_order: "only on a claim answer that holds a run back",
+  "signed_job.job.browser_method": "only on a deploy-verifier job",
   retry_after: "only on an idle claim answer",
   // a job is a fresh run, a continuation, a review or a conflict round; the largest fresh job carries none of the others, and each is small and fixed
   "signed_job.job.continues": "a continuation job, small and fixed",

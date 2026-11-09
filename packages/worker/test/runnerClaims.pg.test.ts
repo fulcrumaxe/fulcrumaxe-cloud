@@ -68,7 +68,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
     return id;
   }
   /** A pending runner run with a real signed job. */
-  async function pending(o: { role?: string; columnRole?: string; repoId?: string; initiatedBy?: string | null; approvedBy?: string | null; parent?: string | null; expiresAt?: number; mode?: string; createdAt?: number; workItemId?: string | null } = {}): Promise<string> {
+  async function pending(o: { role?: string; columnRole?: string; repoId?: string; initiatedBy?: string | null; approvedBy?: string | null; parent?: string | null; expiresAt?: number; mode?: string; createdAt?: number; workItemId?: string | null; browserMethod?: Job["browser_method"] | null; rawMethod?: string } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -87,11 +87,13 @@ describe("runner claim, heartbeat and events [pg]", () => {
       issued_at: new Date(T0 - 1000).toISOString(),
       expires_at: new Date(o.expiresAt ?? T0 + 72 * 3_600_000).toISOString(),
       key_id: "k1",
+      // D#749 V2c-1: a deploy verifier job is signed with the browser method it needs; the tests that do not care get the Chrome one (null: signed without one, like a job from before the method existed).
+      ...((o.role ?? "executor") === "deploy-verifier" && o.browserMethod !== null ? { browser_method: o.browserMethod ?? "chrome_runner" } : {}),
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, approved_by, parent_run_id, created_at, work_item_id)
        VALUES ($1, $2, $3, 'runner', 'pending', $4, $5, $6::jsonb, $7, $8, $9, to_timestamp($10 / 1000.0), $11)`,
-      [id, A.accountId, o.columnRole ?? job.role, o.mode ?? "runner_local", o.repoId ?? A.repoId, JSON.stringify(signJob(job, key)), o.initiatedBy === undefined ? A.userId : o.initiatedBy, o.approvedBy ?? null, o.parent ?? null, o.createdAt ?? T0 - 5000, o.workItemId ?? null],
+      [id, A.accountId, o.columnRole ?? job.role, o.mode ?? "runner_local", o.repoId ?? A.repoId, JSON.stringify(o.rawMethod === undefined ? signJob(job, key) : { ...signJob(job, key), job: { ...job, browser_method: o.rawMethod } }), o.initiatedBy === undefined ? A.userId : o.initiatedBy, o.approvedBy ?? null, o.parent ?? null, o.createdAt ?? T0 - 5000, o.workItemId ?? null],
     );
     return id;
   }
@@ -410,6 +412,47 @@ describe("runner claim, heartbeat and events [pg]", () => {
         const next = await pending({ role: "deploy-verifier" });
         expect((await claim(browser)).kind).toBe("idle");
         expect((await row(next)).status).toBe("pending");
+      });
+
+      // D#749 V2c-1: the capability a deploy verifier job needs is the one of its own signed browser method; the role alone is not enough, and neither is the other method's capability.
+      it("a deploy verifier job is offered only to a runner that lists the capability of its signed method: playwright_runner needs browser_playwright_v1, chrome_runner needs browser_chrome_v1", async () => {
+        const chromeJob = await pending({ role: "deploy-verifier", browserMethod: "chrome_runner", createdAt: T0 - 5000 });
+        const playwrightJob = await pending({ role: "deploy-verifier", browserMethod: "playwright_runner", createdAt: T0 - 4000 });
+        const chromeOnly = await newRunner({ roles: [] });
+        await capable(chromeOnly, ["browser_chrome_v1"]);
+        const playwrightOnly = await newRunner({ roles: [] });
+        await capable(playwrightOnly, ["browser_playwright_v1"]);
+        const noBrowser = await newRunner({ roles: [] });
+        await capable(noBrowser, ["deploy_order_v1", "proposal_verifier"]);
+        // A runner with neither browser capability sees neither job; the playwright job is not the chrome runner's even though it is the older job's neighbour.
+        expect((await claim(noBrowser)).kind).toBe("idle");
+        expect(await claim(playwrightOnly)).toMatchObject({ kind: "claimed", runId: playwrightJob });
+        expect((await row(chromeJob)).status).toBe("pending");
+        expect((await claim(playwrightOnly)).kind).toBe("idle");
+        expect(await claim(chromeOnly)).toMatchObject({ kind: "claimed", runId: chromeJob });
+        expect((await row(playwrightJob)).runner_id).toBe(playwrightOnly);
+      });
+
+      it("a runner that lists both browser capabilities takes either method's job, and a job that names a method the cloud does not know is offered to nobody", async () => {
+        // (The unknown-method job is stored as the signer would never write it; the claim's query and its parse both leave it.)
+        const both = await newRunner({ roles: [] });
+        await capable(both, ["browser_chrome_v1", "browser_playwright_v1"]);
+        // A method the cloud does not know (stored bytes that no signer would produce) matches no capability: the query leaves it, and it is the oldest job here.
+        const odd = await pending({ role: "deploy-verifier", createdAt: T0 - 5000, rawMethod: "playwright_sandbox" });
+        expect((await claim(both)).kind).toBe("idle");
+        expect((await row(odd)).status).toBe("pending");
+        const playwrightJob = await pending({ role: "deploy-verifier", browserMethod: "playwright_runner" });
+        expect(await claim(both)).toMatchObject({ kind: "claimed", runId: playwrightJob });
+        await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [playwrightJob]);
+        const chromeJob = await pending({ role: "deploy-verifier", browserMethod: "chrome_runner", createdAt: T0 - 3000 });
+        expect(await claim(both)).toMatchObject({ kind: "claimed", runId: chromeJob });
+      });
+
+      it("a runner's other jobs are untouched by the method gate: a job with no browser method is claimed by a runner with no browser capability", async () => {
+        const plain = await newRunner({ roles: [] });
+        await capable(plain, []);
+        const id = await pending({ role: "executor" });
+        expect(await claim(plain)).toMatchObject({ kind: "claimed", runId: id });
       });
 
       it("a runner holds one browser job at a time, however much capacity it declares: two concurrent claims give exactly one, and a second after the first still waits", async () => {

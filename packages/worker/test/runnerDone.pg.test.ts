@@ -102,6 +102,8 @@ describe("runner done [pg]", () => {
       expires_at: new Date(T0 + 72 * 3_600_000).toISOString(),
       key_id: "k1",
       ...(o.check ? { check: o.check } : {}),
+      // D#749 V2c-1: the deploy verifier's job is signed with its browser method (the claim's schema refuses one without).
+      ...(o.role === "deploy-verifier" ? { browser_method: "chrome_runner" as const } : {}),
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, spec_version_id, created_at)

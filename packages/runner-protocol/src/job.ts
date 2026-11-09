@@ -17,7 +17,7 @@ import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "./contextSpi
 import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
 import { MAX_JOB_PINS, isPinPath } from "./pinRules.js";
 import { CheckSchema, JobAllowancesSchema } from "./sandboxAllowances.js";
-import { BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_VERIFIER_ROLE } from "./deployVerifier.js";
+import { BROWSER_CHROME_CAPABILITY, BROWSER_METHODS, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_VERIFIER_ROLE } from "./deployVerifier.js";
 import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
 
 /** Largest `spec.text`, in characters. It matches the cap on a request body. */
@@ -73,7 +73,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY] as const;
 /** D#6 PUBLIC-MERGE PR2a: `plane_merge_v1` gates no role either. A runner that lists it can claim and execute a merge order (messages.ts, plane-merge-*). */
 export const PLANE_MERGE_CAPABILITY = "plane_merge_v1" as const;
 /**
@@ -110,7 +110,12 @@ export const TIP_PUBLISH_CAPABILITY = "tip_publish_v1" as const;
  */
 export const MEM_PROPOSAL_CAPABILITY = "mem_proposal_v1" as const;
 export type RunnerCapability = (typeof RUNNER_CAPABILITIES)[number];
-export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst", [DEPLOY_VERIFIER_ROLE]: BROWSER_CHROME_CAPABILITY });
+export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst" });
+/**
+ * D#749 V2c-1: a role that needs ANY ONE of several capabilities. The deploy verifier runs with either browser method, so a runner that lists neither never sees the role. Which of the two a given
+ * job needs is the job's own signed `browser_method` (`BROWSER_CAPABILITY_FOR_METHOD`), which the claim's candidate query compares with the runner's list.
+ */
+export const RUNNER_ANY_CAPABILITY_FOR_ROLE: Readonly<Record<string, readonly RunnerCapability[]>> = Object.freeze({ [DEPLOY_VERIFIER_ROLE]: Object.freeze<RunnerCapability[]>([BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY]) });
 
 /**
  * D#6 C43-2a: the slot class of a job. The class comes from the job's signed role, so no new signed field exists. The runner and
@@ -345,6 +350,10 @@ export const JobSchema = z
     context_window: z.number().int().min(1).max(CONTEXT_WINDOW_MAX_TOKENS).optional(),
     // D#519 MQ4-e2-c1: see `JobConflictRoundSchema`. Omitted (never null) on every job that is not a conflict round.
     conflict_round: JobConflictRoundSchema.optional(),
+    // D#749 V2c-1: how a deploy verifier job drives its browser. Present exactly on a deploy-verifier job (the cross-field rule below), omitted on every other job so their canonical JSON and signature are
+    // unchanged. The cloud sets it when it issues the job; the claim hands the job only to a runner holding the method's capability; the signed tool digest covers the method's list; and the verify row's
+    // method is copied from this value, never from the run's output.
+    browser_method: z.enum(BROWSER_METHODS).optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),
@@ -362,6 +371,9 @@ export const SignedJobSchema = z
     job: JobSchema.superRefine((job, ctx) => {
       if (job.conflict_round !== undefined && (job.role !== "executor" || job.task.kind !== "fix" || job.continues === null)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "conflict_round is only on an executor fix job that continues a branch", path: ["conflict_round"] });
+      }
+      if ((job.role === DEPLOY_VERIFIER_ROLE) !== (job.browser_method !== undefined)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "browser_method is on a deploy-verifier job and on no other", path: ["browser_method"] });
       }
     }),
     signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();

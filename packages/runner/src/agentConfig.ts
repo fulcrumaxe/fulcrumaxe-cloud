@@ -18,7 +18,7 @@
  * nor use a tool its role was not given. The boundary that matters is still the sandbox VM, the egress firewall and the
  * gh-proxy's push and PR rules; these lists are least privilege on top of them, not a replacement.
  */
-import { CONFINED_READ_ROLES, CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, DEPLOY_VERIFIER_ROLE, DEPLOY_VERIFIER_RUNNER_TOOLS, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, DEPLOY_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, deployVerifierToolsFor, excludeDenyRules, verifierReadGuardHook, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 // D#600 CX-5c: the exclude helpers live in the protocol package, so the local runner writes the very same rules. Re-exported here under the names this package always had.
 export { EXCLUDE_PROMPT_LINE, MAX_EXCLUDE_RULES, disabledToolsFor, escapeRulePath, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 
@@ -139,8 +139,9 @@ export function toolsForRole(role: string): readonly string[] {
  * verifier: its sandbox list names the sandbox's checkout path, so a runner job carries the bare three (`PROPOSAL_VERIFIER_RUNNER_TOOLS`), which
  * the runner confines to its own checkout. Fails closed like `toolsForRole`.
  */
-export function runnerToolsForRole(role: string): readonly string[] {
-  if (role === DEPLOY_VERIFIER_ROLE) return DEPLOY_VERIFIER_RUNNER_TOOLS;
+export function runnerToolsForRole(role: string, browserMethod?: BrowserMethod): readonly string[] {
+  // D#749 V2c-1: the deploy verifier's list depends on how it drives its browser (no method: the Chrome list).
+  if (role === DEPLOY_VERIFIER_ROLE) return deployVerifierToolsFor(browserMethod);
   return CONFINED_READ_ROLES.has(role) ? PROPOSAL_VERIFIER_RUNNER_TOOLS : toolsForRole(role);
 }
 

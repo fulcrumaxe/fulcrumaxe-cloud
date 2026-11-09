@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { DEPLOY_VERIFIER_ROLE } from "@fulcrumaxe/runner-protocol";
+import { DEPLOY_VERIFIER_ROLE, isBrowserMethod, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import { overRepoDailyUsd, verifyStageRunKey } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { fileBugItem } from "@fx/core/src/verify/bugItem.js";
 import type { Journey } from "@fx/core/src/verify/journeys.js";
@@ -21,7 +21,7 @@ import type { ReadyOutcome, VerifyStageDeps } from "./verifyStage.js";
  *    `unverified: no_browser` (never a weaker silent check). Otherwise the repository's daily cap (`overRepoDailyUsd`, the claim verifier's own function, counting
  *    this stage's runs too) holds the row `deploying` and the next tick asks again. Otherwise the seat is resolved and ONE tester job starts through the runner starter,
  *    role deploy-verifier, the checkout pinned to the merge commit (on the paired public repository for a two-plane repository), keyed `verify-stage:<row_id>` so a replay
- *    starts nothing. The row moves to `running` with method `chrome_runner` and the run id.
+ *    starts nothing. The row moves to `running` with the run id and the method the job was SIGNED with (`browser_method`, read back from the run, never from anything the job later reports).
  *  - `settle` (the row is running): the job's end is read. A job that ended without succeeding ends the row `unverified: run_failed`. A succeeded job's envelope goes through
  *    the pipeline's strict rules (injected: this package does not import it), which turn it into the row's outcome; a hollow pass is `unverified`. The outcome, the
  *    `verify_*` fact and, for a failed row, the one bug item are written in ONE transaction. A cannot-verify outcome files no bug item (it is not a product defect). The
@@ -55,9 +55,18 @@ export interface VerifyRunDeps {
   limits: () => VerifyRunLimits;
   /** pipeline's `buildVerifyPrompt`. */
   prompt: (input: { baseUrl: string; mergeSha: string; deployedCommit: string; journeys: readonly Journey[] }) => string;
+  /** The `verify.browser_driver` setting of the repository (and the runner), when one is stored. Not given, or null: the default method. A throw fails closed: nothing starts. */
+  browserDriver?: (input: { accountId: string; repoId: string }) => Promise<string | null>;
   /** pipeline's `outcomeFromAnswer`. */
   outcome: (journeys: readonly Journey[], raw: unknown) => VerifyOutcome;
 }
+
+/**
+ * D#749 V2c-1: how the tester drives its browser. The runner's own Playwright browser unless the repository or the runner says `verify.browser_driver = "chrome"` (set only after the owner's smoke run
+ * shows the CLI attaches Claude in Chrome with the runner's token). Anything else, an unreadable value included, is the default. The choice is the cloud's: it goes into the job as `browser_method`,
+ * and the claim then hands the job only to a runner holding that method's capability.
+ */
+export const chooseBrowserMethod = (driver: string | null | undefined): BrowserMethod => (driver === "chrome" ? "chrome_runner" : "playwright_runner");
 
 const requestHash = (row: VerifyRow, deployed: string): string => createHash("sha256").update(JSON.stringify(["verify-stage", row.id, row.merge_sha, deployed])).digest("hex");
 
@@ -106,6 +115,14 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
     const clone = codeOwner && codeName ? { owner: codeOwner, name: codeName } : state.repo?.gh_owner && state.repo.gh_name ? { owner: state.repo.gh_owner, name: state.repo.gh_name } : null;
     if (clone === null || state.settings.baseUrl === null) return "held";
 
+    let browserMethod: BrowserMethod;
+    try {
+      browserMethod = chooseBrowserMethod(deps.browserDriver === undefined ? null : await deps.browserDriver({ accountId, repoId }));
+    } catch (err) {
+      reportError(err, { stage: "verify_run.browser_driver" });
+      return "held";
+    }
+
     const seat = await deps.resolveSeat({ accountId, repoId, role: DEPLOY_VERIFIER_ROLE, capUsd: limits.runUsd });
     if (!seat.ok) {
       reportError(new Error(seat.reason), { stage: "verify_run.seat", code: seat.reason });
@@ -118,6 +135,7 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       accountId,
       repoId,
       role: DEPLOY_VERIFIER_ROLE,
+      browserMethod,
       product: "team",
       expectedExecutionMode: mode,
       prompt: deps.prompt({ baseUrl: state.settings.baseUrl, mergeSha: row.merge_sha, deployedCommit, journeys: row.journeys }),
@@ -132,7 +150,17 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       await endUnverified(accountId, row.id, "run_failed");
       return "ended";
     }
-    await tenant(accountId, (client) => startRunning(client, accountId, row.id, { method: "chrome_runner", deployedCommit, runId: started.runId }));
+    // The row's method is read back from the job the run was signed with: the value the claim gated on and the tool digest covers. Nothing a run reports can reach it. A run without a valid one cannot be
+    // checked (the issuer never signs such a job), so the row ends rather than carry a guess.
+    const signed = await tenant(accountId, (client) =>
+      client.query<{ method: string | null }>("SELECT job_signed #>> '{job,browser_method}' AS method FROM agent_runs WHERE account_id = $1 AND id = $2 AND role = $3 AND head_sha = $4", [accountId, started.runId, DEPLOY_VERIFIER_ROLE, row.merge_sha]),
+    );
+    const signedMethod = signed.rows[0]?.method;
+    if (!isBrowserMethod(signedMethod)) {
+      await endUnverified(accountId, row.id, "run_failed");
+      return "ended";
+    }
+    await tenant(accountId, (client) => startRunning(client, accountId, row.id, { method: signedMethod, deployedCommit, runId: started.runId }));
     return "started";
   };
 
