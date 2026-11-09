@@ -200,7 +200,7 @@ export interface CreateWorkerOptions {
    * D#749 V3a: the post-merge verify stage's injected pieces: what the host says about a merge and a deployed commit, the reader of the app's /api/health, and the next
    * stage's entry. Absent, `sweepVerifyStage` runs nothing and answers `idle: "not_configured"`.
    */
-  verifyStage?: Pick<VerifyStageDeps, "host" | "health" | "ready">;
+  verifyStage?: Pick<VerifyStageDeps, "host" | "health" | "ready" | "settle">;
   /** D#483 S5-b1a-2: the auto-start gate's injected price of an item's first run (pipeline's `firstRunReservationUsd`). Absent, `sweepAutoStart` starts nothing and answers `idle: "not_configured"`. */
   autoStart?: Pick<AutoStartDeps, "firstRunUsd" | "child" | "followUp">;
   /**
@@ -480,8 +480,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
         ? createDocsCodeAnalysisSweep({ pool: pools.runnerPool, resolveSeat: resolveRunSeat, starter: previewStarter, ...(advanceStarter ? { runnerStarter: advanceStarter } : {}), visibility: repoVisibility, github: options.verify.github, settings: analysisSettings, prompt: options.analysis.prompt, parse: options.analysis.parse })
         : async (): Promise<DocsCodeAnalysisCounts> => ({ idle: "not_configured", listed: 0, started: 0, waiting: 0, recorded: 0, daily_cap: 0, skipped: 0, failed: 0 });
     const verifyStage = options.verifyStage
-      ? createVerifyStageSweep({ pool: pools.runnerPool, host: options.verifyStage.host, health: options.verifyStage.health, ...(options.verifyStage.ready ? { ready: options.verifyStage.ready } : {}) })
-      : async (): Promise<VerifyStageCounts> => ({ idle: "not_configured", listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 });
+      ? createVerifyStageSweep({ pool: pools.runnerPool, host: options.verifyStage.host, health: options.verifyStage.health, ...(options.verifyStage.ready ? { ready: options.verifyStage.ready } : {}), ...(options.verifyStage.settle ? { settle: options.verifyStage.settle } : {}) })
+      : async (): Promise<VerifyStageCounts> => ({ idle: "not_configured", listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, started: 0, held: 0, settled: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 });
     const autoStart = options.autoStart
       ? createAutoStartSweep({ receiptPool: pools.receiptPool, firstRunUsd: options.autoStart.firstRunUsd, ...(options.autoStart.child ? { child: options.autoStart.child } : {}), ...(options.autoStart.followUp ? { followUp: options.autoStart.followUp } : {}) }).sweepAutoStart
       : async (): Promise<AutoStartCounts> => ({ idle: "not_configured", listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 });

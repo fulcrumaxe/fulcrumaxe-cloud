@@ -22,7 +22,7 @@ import { reportError } from "@fx/telemetry";
  *       `unverified: deploy_failed`; an order that lapsed unclaimed is first let go by the cloud. A succeeded order starts the readiness poll of the app's /api/health, and the
  *       reported commit must qualify for the merge commit (equal, or a genuine sync commit that names the merge commit or a descendant). After READINESS_CAP_MINUTES without
  *       it, the row ends `unverified` with `deployment_unreachable` (the app never answered) or `commit_not_deployed` (it answered with another commit). A qualified row is handed to
- *       `ready` (the tester job is the next change; with none, the row stays `deploying` and is read again next tick). A `running` row is the tester's: the pass leaves it alone.
+ *       `ready` (verifyRun.ts starts the tester job; with none, the row stays `deploying` and is read again next tick). A `running` row is the tester's: the pass only asks `settle` whether its job has ended (verifyRun.ts, D#749 V3b).
  *  3. The pass is one at a time (a try-lock held for the pass), and bounded in time. A repository that fails never holds up the rest.
  */
 
@@ -59,6 +59,7 @@ export interface VerifyHostPort {
   /** How `head` relates to `base`, read from the host (`ahead`: head descends from base). */
   relation(target: VerifyTarget, base: string, head: string): Promise<CommitRelation>;
 }
+export type ReadyOutcome = "started" | "held" | "ended";
 export type HealthRead = { kind: "ok"; commit: string | null } | { kind: "unreachable" };
 
 export interface VerifyStageDeps {
@@ -67,8 +68,13 @@ export interface VerifyStageDeps {
   host: VerifyHostPort;
   /** One read of the app's /api/health at the base URL the settings name (the production reader pins the host and caps the body). */
   health: (baseUrl: string) => Promise<HealthRead>;
-  /** The next stage's entry: called once a deployed commit qualifies for a row. Absent: the row stays `deploying`. */
-  ready?: (input: { accountId: string; repoId: string; row: VerifyRow; deployedCommit: string }) => Promise<void>;
+  /**
+   * The next stage's entry: called once a deployed commit qualifies for a row (verifyRun.ts). Absent: the row stays `deploying`. It answers what it did:
+   * `started` (the tester job is running and the row is `running`), `held` (the repository's daily cap, or no seat yet: read again next tick), `ended` (it ended the row `unverified`).
+   */
+  ready?: (input: { accountId: string; repoId: string; row: VerifyRow; deployedCommit: string }) => Promise<ReadyOutcome | void>;
+  /** Reads a `running` row's tester job and, when it ended, writes the row's outcome (verifyRun.ts). Absent: a running row is left alone. `settled`: the row is finished. */
+  settle?: (input: { accountId: string; repoId: string; row: VerifyRow }) => Promise<"settled" | "waiting">;
   /** Tests only: replaces the cross-account list. */
   list?: () => Promise<Array<{ account_id: string; repo_id: string }>>;
   now?: () => number;
@@ -83,6 +89,12 @@ export interface VerifyStageCounts {
   /** Rows waiting on a runner, on the app, or on the tester. */
   waiting: number;
   ready: number;
+  /** Tester jobs started by this pass. */
+  started: number;
+  /** Rows held back by the repository's daily cap or a missing seat (tried again next tick). */
+  held: number;
+  /** Running rows whose tester job had ended and whose outcome this pass wrote. */
+  settled: number;
   /** Rows ended `unverified` by this pass. */
   unverified: number;
   /** Merges the host could not name a commit for (tried again next tick). */
@@ -91,7 +103,7 @@ export interface VerifyStageCounts {
   /** Rows still unfinished after the pass: the tick keeps coming while this is above zero. */
   active: number;
 }
-const emptyCounts = (): VerifyStageCounts => ({ listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 });
+const emptyCounts = (): VerifyStageCounts => ({ listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, started: 0, held: 0, settled: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 });
 
 interface RepoInfo {
   owner: string;
@@ -165,7 +177,13 @@ export function createVerifyStageSweep(deps: VerifyStageDeps): () => Promise<Ver
       }
       if (ok) {
         counts.ready += 1;
-        await deps.ready?.({ accountId, repoId, row, deployedCommit: deployed.toLowerCase() });
+        const outcome = await deps.ready?.({ accountId, repoId, row, deployedCommit: deployed.toLowerCase() });
+        if (outcome === "started") counts.started += 1;
+        if (outcome === "held") counts.held += 1;
+        if (outcome === "ended") {
+          counts.unverified += 1;
+          return true;
+        }
         return false;
       }
     }
@@ -184,6 +202,10 @@ export function createVerifyStageSweep(deps: VerifyStageDeps): () => Promise<Ver
     if (row === null) return false;
     counts.active += 1;
     if (row.status === "running") {
+      if (deps.settle !== undefined && (await deps.settle({ accountId, repoId, row })) === "settled") {
+        counts.settled += 1;
+        return true;
+      }
       counts.waiting += 1;
       return false;
     }

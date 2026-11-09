@@ -378,6 +378,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "verify_base_url_required",
   "verify_setting_invalid",
   "verify_row_invalid",
+  "verify_bug_item_not_attached",
   // Item pull request branch binding (D#599 PL-2b-2): the proxy and the ticket route refused a branch the run is not bound to.
   "runner_branch_unbound",
   "ticket_branch_unbound",

@@ -596,7 +596,7 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
     const repo = await newRepo(a);
     await mergedItem(a, repo, 1, { mergeSha: sha("1") });
     const counts: VerifyStageCounts = await sweep();
-    expect(Object.keys(counts).sort()).toEqual(["active", "failed", "listed", "no_merge_commit", "opened", "ordered", "ready", "unverified", "waiting"]);
+    expect(Object.keys(counts).sort()).toEqual(["active", "failed", "held", "listed", "no_merge_commit", "opened", "ordered", "ready", "settled", "started", "unverified", "waiting"]);
     expect(JSON.stringify(counts)).not.toContain(A_SHA);
   });
 });
