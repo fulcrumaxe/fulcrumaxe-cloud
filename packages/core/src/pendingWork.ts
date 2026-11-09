@@ -554,7 +554,7 @@ export const SWEEP_SCHEDULE_MS: Readonly<Record<SweepName, number>> = {
   "handoff-sweep": 60_000,
   "stage-resume-sweep": 15 * 60_000,
   "setup-request-check": 60_000,
-  "branch-cleanup": 60_000,
+  "branch-cleanup": 5 * 60_000,
   "proposal-verify-sweep": 15 * 60_000,
   "merge-queue-sweep": 60_000,
 };
@@ -640,6 +640,25 @@ export async function readCronCache(now: number = Date.now()): Promise<CronCache
   return { ticks, idle: !(activity.value !== null && now - activity.value < ACTIVITY_WINDOW_MS) && activity.state !== "error", store: true };
 }
 
+/**
+ * True for a `cron.gate` line of a tick that did NOT connect (an idle tick: no marker due, inside its slot). Those lines carry no news: an idle platform
+ * made one per sweep per minute, which is most of a quiet deployment's log volume. `apps/web/lib/cronLog.ts` leaves them out unless FX_LOG_SKIPPED_TICKS=1;
+ * a connecting tick's line (the one that says why it connected and whether work was found) is always kept, and so is every other line.
+ */
+export function isSkippedGateLine(line: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(line);
+    return typeof parsed === "object" && parsed !== null && (parsed as { event?: unknown }).event === "cron.gate" && (parsed as { connected?: unknown }).connected === false;
+  } catch {
+    return false; // fx-swallow-ok: not JSON, so not a gate line: it is logged as before
+  }
+}
+
+/** Whether the marker this gate read is due within `ms` from `now` (a pass that sleeps `ms` would find it due). A missing marker is not. */
+export function markerDueWithin(gate: Pick<TickGate, "markerValue">, now: number, ms: number): boolean {
+  return gate.markerValue !== null && gate.markerValue <= now + ms;
+}
+
 export interface GatedOutcome<T> {
   result: T;
   workFound: boolean;
@@ -656,7 +675,7 @@ export async function runGatedTick<T>(
   run: () => Promise<GatedOutcome<T>>,
   log: (line: string) => void = (line) => console.log(line),
   now: () => number = Date.now,
-  opts: { force?: boolean; /** false on the second pass of a two-pass cron call: the call is recorded once. */ recordTick?: boolean } = {},
+  opts: { force?: boolean; /** false on the second pass of a two-pass cron call: the call is recorded once. */ recordTick?: boolean; /** Called with the gate of a tick that did not connect. */ onSkipped?: (gate: TickGate) => void } = {},
 ): Promise<{ result: T } | null> {
   // CRON-OBS-1: every cron call leaves its time in the no-database store, skipped or not. A signed kick is not a cron call.
   if (!opts.force && opts.recordTick !== false) await recordCronTick(name, now());
@@ -665,6 +684,7 @@ export async function runGatedTick<T>(
   if (opts.force && !gate.connect) gate = { ...gate, connect: true, reason: "kick" };
   if (!gate.connect) {
     log(gateLine(gate));
+    opts.onSkipped?.(gate);
     return null;
   }
   const outcome = await run();

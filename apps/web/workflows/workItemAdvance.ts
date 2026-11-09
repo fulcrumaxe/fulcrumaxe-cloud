@@ -125,8 +125,20 @@ const PLACEMENT_RESTARTS_MAX = 3;
 const POLL_MS = 20_000;
 /** Past this, the workflow gives up waiting (the run's own timeout is shorter). */
 const CLASSIFY_WAIT_MS = 15 * 60_000;
-/** How often the build waits read the executor run (a run lasts up to four hours). */
-const BUILD_POLL_MS = 60_000;
+/**
+ * How a poll loop paces itself: the pause for a wait that has lasted `elapsed` is that of the last tier whose start it has passed. Long waits ask less
+ * often because the answer is rarely early: each ask is a step (a function call, a database read, workflow events), so a four-hour wait at one ask a
+ * minute is 240 steps and at the tiers below about 70. Every loop that uses it adds the pause it actually slept to its budget, so no budget changes
+ * length, and nothing else in the workflow depends on how often these asks are made (the waiting facts that the stalled-item check and the parked-stage
+ * sweep read are written by the capacity, build-slot and spend waits, which keep their own fixed polls).
+ */
+function tieredPause(elapsed: number, tiers: ReadonlyArray<readonly [startMs: number, pauseMs: number]>): number {
+  let pause = tiers[0]![1];
+  for (const [start, ms] of tiers) if (elapsed >= start) pause = ms;
+  return pause;
+}
+/** How often the build waits read the executor run (a run lasts up to four hours): every minute for ten minutes (a start that fails does so early), every two minutes to the first hour, every four after. */
+const BUILD_POLL_TIERS: ReadonlyArray<readonly [number, number]> = [[0, 60_000], [10 * 60_000, 120_000], [60 * 60_000, 240_000]];
 /** The run's own ceiling is 240 minutes and its watchdog adds five; the workflow gives up a little after that. */
 const BUILD_WAIT_MS = 250 * 60_000;
 /**
@@ -143,7 +155,7 @@ const CHECK_FIX_ROUNDS_CEILING = 20;
 const PR_GRACE_POLL_MS = 20_000;
 const PR_GRACE_POLLS = 9;
 /** Reviewer runs: how often they are read, and how long a review may take before the driver cancels it and counts it as a fail. */
-const REVIEW_POLL_MS = 30_000;
+const REVIEW_POLL_TIERS: ReadonlyArray<readonly [number, number]> = [[0, 30_000], [5 * 60_000, 60_000], [20 * 60_000, 120_000]];
 const REVIEW_WAIT_MS = 45 * 60_000;
 /** D#598 P7b: how often a round that met unfinished CI or repo-wide guards asks again, and how long it waits before the driver stops (`ci_wait_timeout`). */
 const CI_POLL_MS = 60_000;
@@ -153,9 +165,8 @@ const CI_POLL_MS = 60_000;
  */
 const MERGE_ORDER_POLL_MS = 30_000;
 const MERGE_ORDER_MAX_POLLS = 130;
-/** After the first ten minutes the round asks every two minutes: a long wait costs about half the GitHub calls. */
-const CI_POLL_SLOW_MS = 120_000;
-const CI_POLL_FAST_FOR_MS = 10 * 60_000;
+/** After the first ten minutes the round asks every two minutes, and after thirty every five: a long wait costs a fraction of the GitHub calls. */
+const CI_POLL_TIERS: ReadonlyArray<readonly [number, number]> = [[0, CI_POLL_MS], [10 * 60_000, 120_000], [30 * 60_000, 300_000]];
 const CI_WAIT_MS = 120 * 60_000;
 /**
  * A bound on review rounds in one workflow, so no path loops. The real bound is the fix-round limit (from the plan data), enforced by
@@ -1001,9 +1012,10 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   for (let restarts = 0; ; restarts++) {
     while (!outcome.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
       const queued = outcome.queuedOnRunner;
-      await sleep(BUILD_POLL_MS);
-      if (queued) pendingWaited += BUILD_POLL_MS;
-      else waited += BUILD_POLL_MS;
+      const pause = tieredPause(waited + pendingWaited, BUILD_POLL_TIERS);
+      await sleep(pause);
+      if (queued) pendingWaited += pause;
+      else waited += pause;
       outcome = await advanceBuildOutcomeStep(accountId, runId);
     }
     // D#599 PL-2: the run was queued on a side the item has left. The same step starts again on the new side; the wait goes on with that run.
@@ -1066,9 +1078,10 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     outcome = await advanceBuildOutcomeStep(accountId, runId);
     while (!outcome.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
       const queued = outcome.queuedOnRunner;
-      await sleep(BUILD_POLL_MS);
-      if (queued) pendingWaited += BUILD_POLL_MS;
-      else waited += BUILD_POLL_MS;
+      const pause = tieredPause(waited + pendingWaited, BUILD_POLL_TIERS);
+      await sleep(pause);
+      if (queued) pendingWaited += pause;
+      else waited += pause;
       outcome = await advanceBuildOutcomeStep(accountId, runId);
     }
     // D#2 H14c-3-3b-2: the same for a check fix round that ended at a limit.
@@ -1251,9 +1264,10 @@ async function waitForExecutorRun(accountId: string, runId: string): Promise<Bui
   let outcome = await advanceBuildOutcomeStep(accountId, runId);
   while (!outcome.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
     const queued = outcome.queuedOnRunner;
-    await sleep(BUILD_POLL_MS);
-    if (queued) pendingWaited += BUILD_POLL_MS;
-    else waited += BUILD_POLL_MS;
+    const pause = tieredPause(waited + pendingWaited, BUILD_POLL_TIERS);
+    await sleep(pause);
+    if (queued) pendingWaited += pause;
+    else waited += pause;
     outcome = await advanceBuildOutcomeStep(accountId, runId);
   }
   return outcome;
@@ -1334,9 +1348,10 @@ async function waitForReviewer(args: AdvanceStartArgs, role: string, firstRunId:
   for (let restarts = 0; ; restarts++) {
     while (!out.done && waited < REVIEW_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
       const queued = out.queuedOnRunner;
-      await sleep(REVIEW_POLL_MS);
-      if (queued) pendingWaited += REVIEW_POLL_MS;
-      else waited += REVIEW_POLL_MS;
+      const pause = tieredPause(waited + pendingWaited, REVIEW_POLL_TIERS);
+      await sleep(pause);
+      if (queued) pendingWaited += pause;
+      else waited += pause;
       out = await advanceReviewerOutcomeStep(accountId, runId);
     }
     // D#599 PL-2: the run was queued on a side the item has left; the same review starts again on the new side (keyed by the worker) and is waited for here.
@@ -1614,7 +1629,7 @@ async function awaitVerifiedQuiet(args: AdvanceStartArgs, ctx: ReviewCtx, first:
 async function recordWhenCiSettled(args: AdvanceStartArgs, input: Parameters<typeof advanceRecordRoundStep>[4]): Promise<RoundOut> {
   let round = await advanceRecordRoundStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
   for (let waited = 0; round.decision === "ci_pending" && waited < CI_WAIT_MS; ) {
-    const pause = waited < CI_POLL_FAST_FOR_MS ? CI_POLL_MS : CI_POLL_SLOW_MS;
+    const pause = tieredPause(waited, CI_POLL_TIERS);
     await sleep(pause);
     waited += pause;
     round = await advanceRecordRoundStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
@@ -1633,7 +1648,7 @@ async function recordWhenCiSettled(args: AdvanceStartArgs, input: Parameters<typ
 async function recheckMergeOnly(args: AdvanceStartArgs, input: Parameters<typeof advanceRecordMergeOnlyStep>[4]): Promise<MergeOnlyOut> {
   let out = await advanceRecordMergeOnlyStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
   for (let waited = 0; out.decision === "ci_pending" && waited < CI_WAIT_MS; ) {
-    const pause = waited < CI_POLL_FAST_FOR_MS ? CI_POLL_MS : CI_POLL_SLOW_MS;
+    const pause = tieredPause(waited, CI_POLL_TIERS);
     await sleep(pause);
     waited += pause;
     out = await advanceRecordMergeOnlyStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
@@ -1662,9 +1677,10 @@ async function followFix(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: n
   for (let restarts = 0; ; restarts++) {
     while (!fixed.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
       const queued = fixed.queuedOnRunner;
-      await sleep(BUILD_POLL_MS);
-      if (queued) pendingWaited += BUILD_POLL_MS;
-      else waited += BUILD_POLL_MS;
+      const pause = tieredPause(waited + pendingWaited, BUILD_POLL_TIERS);
+      await sleep(pause);
+      if (queued) pendingWaited += pause;
+      else waited += pause;
       fixed = await advanceBuildOutcomeStep(accountId, runId);
     }
     // D#599 PL-2: the fix run was queued on a side the item has left; the same fix round starts again on the new side (keyed by the worker).
@@ -1816,9 +1832,12 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
 async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; headSha: string }, afterConflict = false, reentries = 0): Promise<Result | null> {
   const { accountId, userId, workItemId } = args;
   if ((await advanceMergeQueueEnqueueStep(accountId, userId, workItemId, args.haltEpoch, { prNumber: pr.number, headSha: pr.headSha })).queued) {
+    // One line per change of state, not one per poll: every log line here is itself a step, and a long wait made as many of them as looks.
+    let loggedState: string | null = null;
     for (let waited = 0; waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
       const look = await advanceMergeQueueWaitStep(accountId, userId, workItemId, args.haltEpoch);
-      await advanceLogStep("advance.merge_queue", { work_item_id: workItemId, pr: pr.number, state: look.state });
+      if (look.state !== loggedState) await advanceLogStep("advance.merge_queue", { work_item_id: workItemId, pr: pr.number, state: look.state });
+      loggedState = look.state;
       if (look.state === "halted") return haltedEnd(args, "merge_queue");
       // Back in review: a person pushed, or a delta review found a problem. The review loop reads the PR's head and goes on from there.
       if (look.state === "in_review") return null;
@@ -1843,7 +1862,7 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
   if (busy()) return { status: "waiting", detail: "merge_repo_busy" };
   // A head a conflict round produced has had no CI yet: wait for it (same cadence and limit as a review's), and ask the gate again when it is the only thing missing.
   for (let waited = 0; afterConflict && gate.outcome === "ready_human_merges" && gate.reasons.length === 1 && gate.reasons[0] === "ci_not_green" && waited < CI_WAIT_MS; ) {
-    const pause = waited < CI_POLL_FAST_FOR_MS ? CI_POLL_MS : CI_POLL_SLOW_MS;
+    const pause = tieredPause(waited, CI_POLL_TIERS);
     await sleep(pause);
     waited += pause;
     gate = await askGate();
@@ -1896,9 +1915,11 @@ async function conflictRound(args: AdvanceStartArgs, pr: { number: number; headS
     return { status: "needs_human", detail: started.reason };
   }
   if (started.state === "waiting") return { status: "waiting", detail: "conflict_round_not_started" };
+  let loggedWait: string | null = null; // one line per change of state, not per poll (each log line is a step)
   for (let waited = 0; waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
     const look = await advanceConflictWaitStep(accountId, userId, workItemId, args.haltEpoch);
-    await advanceLogStep("advance.merge_conflict", { work_item_id: workItemId, pr: pr.number, state: `wait_${look.state}` });
+    if (look.state !== loggedWait) await advanceLogStep("advance.merge_conflict", { work_item_id: workItemId, pr: pr.number, state: `wait_${look.state}` });
+    loggedWait = look.state;
     if (look.state === "halted") return haltedEnd(args, "merge_conflict");
     // The round ended back in review (a person pushed, or the checks of its end said so): the review loop reads the head and goes on from there.
     if (look.state === "in_review") return null;

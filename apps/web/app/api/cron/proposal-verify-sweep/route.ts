@@ -1,6 +1,7 @@
 import type { NextRequest, NextResponse } from "next/server";
 import { getWorker } from "../../../../lib/worker";
 import { proposalVerifySweepHandler } from "./handler";
+import { cronLog } from "../../../../lib/cronLog";
 
 /**
  * The sweep starts verifier runs itself, and the sandbox target streams and finalizes each run in the invocation that started it (it asks
@@ -14,6 +15,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   return proposalVerifySweepHandler(req, {
     cronSecret: process.env.CRON_SECRET ?? "",
     getWorker,
-    log: (line) => console.log(line),
+    log: cronLog,
   });
 }

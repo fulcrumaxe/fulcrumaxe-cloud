@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { clampMarkerSince, finishTick, gateLine, isStagingPaused, readTickGate, recordCronConnected, recordCronTick } from "@fx/core/src/pendingWork";
+import { clampMarkerSince, finishTick, gateLine, isStagingPaused, markerDueWithin, readTickGate, recordCronConnected, recordCronTick } from "@fx/core/src/pendingWork";
 import type { OpsAlertSink } from "@fx/reconcile";
 import type { InvariantSweepWorker } from "../../../../lib/worker";
 import { cronAuthorized } from "../../../../lib/cronAuth";
@@ -16,6 +16,13 @@ import { cronAuthorized } from "../../../../lib/cronAuth";
  * cover. ASK-WIRE-1: raising an ask marks it too, dated at the ask's `answer_due_at`, and a connecting pass stores the soonest window still ahead as
  * the next marker (once the completion cover has lapsed), so an answer window that ends on a quiet account is acted on by the next tick. The half-hour backstop still connects once in a while, as for the other sweeps. While the staging project is paused
  * (FX_STAGING_PAUSED=1) the handler ends before reading anything. The reply carries counts only.
+ *
+ * Idle cost: the second pass is made only when it can find something the first could not. A first pass that connected is followed by the second (the cover
+ * above is counted in passes). A first pass that skipped is followed by one only when the marker it read falls due inside the gap (an ask window ending);
+ * with no marker, or one further out, the invocation ends at once instead of sleeping 30 s doing nothing, which on an idle platform was held function time
+ * twice a minute round the clock. A run that completes during an idle first pass's own 30 s (a marker dated now, with its own 30 s grace) is read by the
+ * next minute's first pass instead of this invocation's second: at most 30 s later than before, and nothing is missed, because the marker stays set until a
+ * connecting pass has handled it.
  */
 
 export const PASS_GAP_MS = 30_000;
@@ -53,6 +60,10 @@ export async function invariantSweepHandler(req: NextRequest, deps: InvariantSwe
     if (!gate.connect) {
       deps.log(gateLine(gate));
       passes.push({ skipped: true });
+      if (i === 0 && !markerDueWithin(gate, now(), PASS_GAP_MS)) {
+        passes.push({ skipped: true });
+        break;
+      }
       continue;
     }
     const worker = await deps.getWorker();

@@ -3,6 +3,7 @@ import { start } from "workflow/api";
 import { getWorker } from "../../../../lib/worker";
 import { runActionWorkflow } from "../../../../workflows/runAction";
 import { runActionSweepHandler } from "./handler";
+import { cronLog } from "../../../../lib/cronLog";
 
 /** Not under /api/v1 -- see handler.ts's header for the auth model. */
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -12,6 +13,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     startWorkflow: async (actionId) => {
       await start(runActionWorkflow, [actionId]);
     },
-    log: (line) => console.log(line),
+    log: cronLog,
   });
 }

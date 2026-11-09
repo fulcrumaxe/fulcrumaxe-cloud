@@ -39,6 +39,7 @@ import { setWorkerWiringForTests } from "../lib/worker";
 import { setInstallationHttpForTests } from "../lib/github/installationHttp";
 import { setIssueReaderForTests } from "../lib/github/issueRead";
 import { workItemAdvanceWorkflow } from "./workItemAdvance";
+import { BUILD_TIERS, CI_TIERS, REVIEW_TIERS, pollsFor } from "./pollTiers.testkit";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const ITEM = "22222222-2222-4222-8222-222222222222";
@@ -329,7 +330,7 @@ describe("reviews on the pull request's exact head", () => {
     const w = fresh({ verdict: (role) => (role === "code-reviewer" ? { status: "running", done: false, envelope: null } : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "" } }), realDecide: true });
     const t = setup(w);
     const out = await workItemAdvanceWorkflow(ARGS);
-    expect(world.sleeps).toBe(90);
+    expect(world.sleeps).toBe(pollsFor(REVIEW_TIERS, 45 * 60_000));
     expect(t.worker.advanceCancel).toHaveBeenCalledWith(WHO, expect.stringContaining("code-reviewer"));
     const input = t.worker.advanceRecordRound.mock.calls[0]![1];
     expect(input.verdicts.find((v) => v.role === "code-reviewer")).toMatchObject({ verdict: "fail", noVerdict: true, endCode: "wait_timeout" });
@@ -926,9 +927,10 @@ describe("what happens after the verdicts are recorded", () => {
   it("CI that never settles: after two hours the driver stops for a person (ci_wait_timeout), records the stop, and never asks the merge gate", async () => {
     const t = setup(fresh({ rounds: [{ decision: "ci_pending" }] }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ci_wait_timeout" });
-    // One-minute asks for the first ten minutes, two-minute asks after that, up to the two-hour cap.
-    expect(world.sleeps).toBe(10 + (120 - 10) / 2);
-    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(10 + (120 - 10) / 2 + 1);
+    // One-minute asks for the first ten minutes, two-minute asks to thirty, five-minute asks after that, up to the two-hour cap.
+    expect(world.sleeps).toBe(pollsFor(CI_TIERS, 120 * 60_000));
+    expect(world.sleeps).toBe(10 + (30 - 10) / 2 + (120 - 30) / 5);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(pollsFor(CI_TIERS, 120 * 60_000) + 1);
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
     expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "ci_wait_timeout" }));
@@ -1228,10 +1230,10 @@ describe("fix rounds", () => {
       const runner = await run("runner");
       expect(runner.out).toEqual({ status: "fix_failed", detail: "wait_timeout" });
       expect(runner.t.worker.advanceCancel).toHaveBeenCalledWith(WHO, "fix-1");
-      expect(runner.polls).toBe(1 + (73 * 3600) / 60);
+      expect(runner.polls).toBe(1 + pollsFor(BUILD_TIERS, 73 * 3600_000));
       const sandbox = await run("production");
       expect(sandbox.out).toEqual({ status: "fix_failed", detail: "wait_timeout" });
-      expect(sandbox.polls).toBe(1 + 250);
+      expect(sandbox.polls).toBe(1 + pollsFor(BUILD_TIERS, 250 * 60_000));
     });
 
     it("a reviewer that waits for a runner past the 45 minute review limit is not counted as a fail", async () => {
@@ -2190,6 +2192,15 @@ describe("the merge queue instead of the direct gate", () => {
     expect(world.sleeps).toBe(2);
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
     expect(events()).toContain("advance.merge_queue");
+  });
+
+  it("a long wait logs the queue state when it changes, not once per poll (each log line is a workflow step)", async () => {
+    queue.queued = true;
+    queue.looks = [{ state: "waiting" }, { state: "waiting" }, { state: "waiting" }, { state: "waiting" }, { state: "merged" }];
+    setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(queue.waits).toBe(5);
+    expect(logs.filter((l) => l.event === "advance.merge_queue").map((l) => l.state)).toEqual(["waiting", "merged"]);
   });
 
   it("a merge-only head is enqueued too, with no reviewer run", async () => {

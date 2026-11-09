@@ -25,6 +25,7 @@ import { setWorkerWiringForTests } from "../lib/worker";
 import { setIssueReaderForTests } from "../lib/github/issueRead";
 import { setInstallationHttpForTests } from "../lib/github/installationHttp";
 import { workItemAdvanceWorkflow } from "./workItemAdvance";
+import { BUILD_TIERS, pollsFor } from "./pollTiers.testkit";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const ITEM = "22222222-2222-4222-8222-222222222222";
@@ -247,7 +248,7 @@ describe("the build", () => {
     it("a child whose wait runs out ends like any run whose wait ran out: cancelled and recorded wait_timeout", async () => {
       const w = setup({ steps: [continued(1)], other: (id) => (id === CHILD(1) ? { status: "running", done: false, envelope: null, tailRunId: CHILD(1) } : undefined) });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_wait_timeout" });
-      expect(world.sleeps).toBe(250);
+      expect(world.sleeps).toBe(pollsFor(BUILD_TIERS, 250 * 60_000));
       expect(w.advanceCancel).toHaveBeenCalledWith(expect.objectContaining({ workItemId: ITEM }), CHILD(1));
     });
   });

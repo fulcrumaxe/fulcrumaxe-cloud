@@ -1,6 +1,7 @@
 import type { NextRequest, NextResponse } from "next/server";
 import { getWorker } from "../../../../lib/worker";
 import { computeSettleSweepHandler } from "./handler";
+import { cronLog } from "../../../../lib/cronLog";
 
 /**
  * The sweep settles runs one after another, and stops starting new ones at SWEEP_TIME_BUDGET_MS (packages/runner),
@@ -13,6 +14,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   return computeSettleSweepHandler(req, {
     cronSecret: process.env.CRON_SECRET ?? "",
     getWorker,
-    log: (line) => console.log(line),
+    log: cronLog,
   });
 }
