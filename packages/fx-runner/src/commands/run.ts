@@ -32,6 +32,7 @@ import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "..
 import { isPaused, loadSettings } from "../runnerSettings.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
+import { createVerifyLocal } from "../daemon/verifyLocal.js";
 import { readHostFacts } from "../hostFacts.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createRunnerClient } from "../daemon/client.js";
@@ -116,6 +117,9 @@ export interface RunHost {
   askTimed?: ((question: string, timeoutMs: number, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
   /** `XDG_RUNTIME_DIR`, looked up by name by the caller: where the user's systemd manager listens (per-job limits, D#6 C43-5). */
   xdgRuntimeDir?: string | undefined;
+  /** D#749 V2b: the user name the machine's Chrome bridge directory is named for, and the daemon's environment, of which a deploy command gets a short allowlist (deployOrder.ts). Absent: no browser job and no deploy order is served. */
+  username?: string | undefined;
+  env?: Readonly<Record<string, string | undefined>> | undefined;
 }
 
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
@@ -396,7 +400,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     // An unattended question holds its run's handler up to the question's time limit (120 seconds) before the proposal is kept as no.
     const memoryOfferDeps: MemoryOfferDeps = { stateDir, enabled: () => memProposalAccepted, interactive: host.interactive === true, ask: host.askTimed, signal: stopped.signal, say: (line) => ctx.out(line), send: (message) => client.memoryProposals(message) };
     hooks.onMemoryOfferBuilt?.(memoryOfferDeps);
+    // D#749 V2b: the local half of the post-merge verify stage. Off until the owner sets `verify.*` on this machine; what it advertises is decided by those settings and the probe.
+    const verifyLocal = createVerifyLocal({ stateDir, uid: host.uid ?? -1, username: host.username ?? "", env: host.env ?? {}, platform: host.platform, capture: host.engine.installCapture, signal: stopped.signal, say: (line) => ctx.out(line) });
     const handle = createJobHandler({
+      browserReady: () => verifyLocal.browserReady(),
       memoryOffer: createMemoryOffer(memoryOfferDeps),
       // D#519 MQ4-e2-c1: a conflict round's attestation; the handler is handed the function and never the log it reads.
       conflictAttest: (input) => computeConflictAttestation({ ...input, scratchRoot: path.join(ctx.stateDir, "conflict-attest"), pushLog }),
@@ -485,13 +492,18 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // D#605 FL-2: say what this build and machine are, once per start, before the first claim. Best effort and no gate: a cloud that is older, a network
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
       const facts = readHostFacts();
-      const helloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: RUNNER_BUILD_CAPABILITIES };
-      const hello = await client.hello(helloMessage).catch(() => undefined);
+      // D#749 V2b: the build's capabilities and, only while their settings and probe pass, `browser_chrome_v1` and `deploy_order_v1`. Said again when that set changes (see `betweenJobs`).
+      const helloMessage = async () => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: [...RUNNER_BUILD_CAPABILITIES, ...(await verifyLocal.capabilities())] });
+      const firstHello = await helloMessage();
+      let advertised = JSON.stringify(firstHello.capabilities);
+      let advertCheckedAt = clock.now().getTime();
+      const hello = await client.hello(firstHello).catch(() => undefined);
       // D#6 RUNNER-WAKE: the hello's grant, if the cloud sent one, seeds the wake state; every claim reply refreshes it.
       const wake = new WakeTracker(hello?.kind === "ok" ? hello.wake : undefined);
       // What the hello's answer decides. An answer that failed, or one that dropped the capability, leaves the field unsent: the card then keeps its plain sentence.
       const takeHello = (answer: typeof hello): void => {
         const dropped = answer?.kind === "ok" ? (answer.dropped ?? []) : undefined;
+        verifyLocal.refuse(dropped ?? []);
         memoryLimitAccepted = dropped !== undefined && !dropped.includes(MEMORY_LIMIT_CAPABILITY);
         conflictFactsAccepted = dropped !== undefined && !dropped.includes(CONFLICT_FACTS_CAPABILITY);
         hooks.onConflictFactsAccepted?.(conflictFactsAccepted);
@@ -515,7 +527,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const sayHelloAgain = async (): Promise<void> => {
         if (helloAnswered || passes++ === 0) return;
         if (skip > 0) return void skip--;
-        const again = await client.hello(helloMessage).catch(() => undefined);
+        const resent = await helloMessage();
+        advertised = JSON.stringify(resent.capabilities);
+        const again = await client.hello(resent).catch(() => undefined);
         if (again?.kind === "error" && again.status >= 400 && again.status < 500 && again.status !== 408 && again.status !== 429) {
           skip = backoff;
           backoff = Math.min(backoff * 2, 32);
@@ -524,6 +538,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         helloAnswered = true;
         takeHello(again);
       };
+      const deployOrder = verifyLocal.deployOrderHandler(client);
       const end = await pollLoop({
         client,
         wake,
@@ -543,8 +558,22 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         }),
         onClaimed: (claimed) => jobs.track(() => handle(claimed)),
         onMergeOrder: async () => ((await jobs.track(() => planeMerge())) === "none" ? "none" : "handled"),
+        ...(deployOrder === undefined ? {} : { onDeployOrder: async () => ((await jobs.track(() => deployOrder())) === "none" ? "none" : "handled") }),
         betweenJobs: async () => {
           await sayHelloAgain();
+          // D#749 V2b: the capabilities depend on the machine now (Chrome started or closed, a setting changed), so a changed set is said on a new hello. A hello that gets no answer is
+          // left for `sayHelloAgain`, which resends the current set; one the cloud answers is final until the set changes again.
+          // Looked at most every 30 seconds: the check lists this user's processes.
+          const nowMs = clock.now().getTime();
+          const due = helloAnswered && nowMs - advertCheckedAt >= 30_000;
+          if (due) advertCheckedAt = nowMs;
+          if (due && JSON.stringify([...RUNNER_BUILD_CAPABILITIES, ...(await verifyLocal.capabilities())]) !== advertised) {
+            const changed = await helloMessage();
+            advertised = JSON.stringify(changed.capabilities);
+            const answer = await client.hello(changed).catch(() => undefined);
+            if (answer?.kind === "ok") takeHello(answer);
+            else helloAnswered = false;
+          }
           if (autoUpdate === undefined || updateHost === undefined) return undefined;
           const outcome = await autoUpdate.tick();
           if (outcome.kind !== "applied") return undefined;

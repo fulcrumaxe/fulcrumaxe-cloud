@@ -17,7 +17,7 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { CONFINED_READ_ROLES, DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DONE_RETRY_AFTER_SECONDS, isBrowserJobRole, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
@@ -105,6 +105,12 @@ export interface JobHandlerDeps {
   shutdown?: AbortSignal;
   /** Called when a job is about to start, before any mirror or sandbox: an `api_key` runner reads its key file here. A closed failure code ends the run `runner_setup`; undefined goes on. */
   credentialsReady?: () => string | undefined;
+  /**
+   * D#749 V2b: asked when a browser job (the deploy verifier) is about to start, after the credentials: the daemon's own probe of Chrome and the Claude in Chrome extension (browserProbe.ts).
+   * A closed failure code ends the run `runner_setup` before any mirror or sandbox, so the agent never runs without a browser. Left out, a browser job is refused with `browser_not_connected`
+   * (fail closed); a role that is not a browser role never asks.
+   */
+  browserReady?: () => string | undefined | Promise<string | undefined>;
   /** D#6 R7c: builds a repo's Nix dev shell before a job that carries allowances. Absent (no `nix` on this machine, or none wired): no job gets one. */
   nix?: NixShellStep;
   /** Told the closed detail when the dev shell step is skipped. */
@@ -516,6 +522,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         // `runJob` keeps its own check for callers that do not come through here.
         if (cliModelFor(job, deps.run.defaultModel) === undefined) result = { status: "failed", reason: "model_unsupported" };
         else if ((notReady = deps.credentialsReady?.()) !== undefined) result = { status: "failed", reason: notReady };
+        else if (isBrowserJobRole(job.role) && (notReady = deps.browserReady === undefined ? "browser_not_connected" : await deps.browserReady()) !== undefined) result = { status: "failed", reason: notReady };
         else if (spillFails()) result = { status: "failed", reason: "context_spill_unwritable" };
         else {
           git.check(job, claimed);

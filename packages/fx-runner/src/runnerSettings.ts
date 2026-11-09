@@ -29,6 +29,38 @@ export interface RunnerSettings {
   heavyMemorySet?: true;
   /** The hard limits one job of each class runs under (D#6 C43-5): memory in whole GB and the most processes and threads it may hold. */
   budget: Record<JobClass, JobBudget>;
+  /** D#749 V2b: the post-merge verify stage's local half. Present only when one of its two values is set. */
+  verify?: VerifySettings;
+}
+
+/**
+ * D#749 V2b. Both values are the machine owner's own, set here and nowhere else: no cloud message carries either.
+ *  - `deployArgv`: the command that deploys a commit, as an argument vector (never a shell string): the program, then its arguments. A relative script among them is
+ *    looked up inside the repository's checkout and checked by `deployOrder.ts`.
+ *  - `deployDir`: the repository checkout on this machine the command runs in, an absolute path. The command's script is looked up below it and nowhere else.
+ *  - `testAccount`: the label of the account the machine's Chrome must be signed in as for the browser job.
+ */
+export interface VerifySettings {
+  deployArgv?: readonly string[];
+  deployDir?: string;
+  testAccount?: string;
+}
+
+export const VERIFY_DEPLOY_ARGV_KEY = "verify.deploy_argv";
+export const VERIFY_DEPLOY_DIR_KEY = "verify.deploy_dir";
+export const VERIFY_TEST_ACCOUNT_KEY = "verify.test_account";
+const VERIFY_KEYS = [VERIFY_DEPLOY_ARGV_KEY, VERIFY_DEPLOY_DIR_KEY, VERIFY_TEST_ACCOUNT_KEY] as const;
+/** Bounds on a deploy command: at most 32 words, each 1 to 500 characters with no control character (so no newline and no NUL). */
+export const MAX_DEPLOY_ARGV_WORDS = 32;
+const DEPLOY_WORD = /^[^\p{Cc}\p{Cf}\u2028\u2029]{1,500}$/u;
+const TEST_ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@+-]{0,99}$/;
+/** A checkout path: absolute, already normalized (no `.`, `..`, doubled or trailing slash), plain printable characters, at most 1024. */
+const isCheckoutPath = (value: unknown): value is string => typeof value === "string" && value.length <= 1024 && path.isAbsolute(value) && path.resolve(value) === value && /^[^\p{Cc}\p{Cf}\u2028\u2029]+$/u.test(value);
+
+/** The words of a deploy command, or undefined when the value is not an array of 1 to 32 plain strings. */
+export function parseDeployArgv(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_DEPLOY_ARGV_WORDS) return undefined;
+  return value.every((word) => typeof word === "string" && DEPLOY_WORD.test(word) && word.trim() !== "") ? (value as string[]).slice() : undefined;
 }
 
 export interface JobBudget {
@@ -45,7 +77,7 @@ export const BUDGET_TASKS: readonly [number, number] = [64, 65_536];
 
 export const DEFAULT_SETTINGS: RunnerSettings = { ceilingTotal: MAX_TOTAL_CAPACITY, ceilingHeavy: MAX_HEAVY_CAPACITY, budget: DEFAULT_BUDGET };
 const BUDGET_KEYS = ["budget.light.memory", "budget.light.tasks", "budget.heavy.memory", "budget.heavy.tasks"] as const;
-export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", ...BUDGET_KEYS];
+export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", ...BUDGET_KEYS, ...VERIFY_KEYS];
 
 const RANGES: Readonly<Record<string, readonly [number, number]>> = {
   "concurrency.total": [1, MAX_TOTAL_CAPACITY],
@@ -88,6 +120,12 @@ export function loadSettings(stateDir: string): RunnerSettings {
       }
       settings.budget[cls].tasks = whole(saved?.["tasks"], ...BUDGET_TASKS) ?? settings.budget[cls].tasks;
     }
+    // A value that does not parse is absent, like every other field here: a damaged deploy command means no deploy, never a guessed one.
+    const verify = parsed["verify"] as Record<string, unknown> | null | undefined;
+    const argv = parseDeployArgv(verify?.["deployArgv"]);
+    const account = typeof verify?.["testAccount"] === "string" && TEST_ACCOUNT.test(verify["testAccount"]) ? verify["testAccount"] : undefined;
+    const dir = isCheckoutPath(verify?.["deployDir"]) ? verify["deployDir"] : undefined;
+    if (argv !== undefined || dir !== undefined || account !== undefined) settings.verify = { ...(argv === undefined ? {} : { deployArgv: argv }), ...(dir === undefined ? {} : { deployDir: dir }), ...(account === undefined ? {} : { testAccount: account }) };
   } catch {
     // fx-swallow-ok: a missing or damaged settings file is the defaults
   }
@@ -101,8 +139,36 @@ function serialize(settings: RunnerSettings): string {
   return `${JSON.stringify({ ...rest, budget })}\n`;
 }
 
+/** Saves one of the two verify values. The deploy command is given as a JSON array of strings; anything else is refused and nothing is written. */
+function setVerify(stateDir: string, key: (typeof VERIFY_KEYS)[number], text: string): string {
+  const settings = loadSettings(stateDir);
+  const verify: VerifySettings = { ...settings.verify };
+  if (key === VERIFY_DEPLOY_ARGV_KEY) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // fx-swallow-ok: the refusal below is the report; the text is not repeated
+      parsed = undefined;
+    }
+    const argv = parseDeployArgv(parsed);
+    if (argv === undefined) throw new CliError(`${key} takes a JSON array of 1 to ${MAX_DEPLOY_ARGV_WORDS} words, for example '["bash", ".autonomous-team/deploy-staging.sh"]'`, 2);
+    verify.deployArgv = argv;
+  } else if (key === VERIFY_DEPLOY_DIR_KEY) {
+    if (!isCheckoutPath(text)) throw new CliError(`${key} takes the absolute path of a repository checkout on this machine, written plainly (no . or .. part, no trailing slash)`, 2);
+    verify.deployDir = text;
+  } else {
+    if (!TEST_ACCOUNT.test(text)) throw new CliError(`${key} takes an account label of 1 to 100 letters, digits and . _ @ + -`, 2);
+    verify.testAccount = text;
+  }
+  settings.verify = verify;
+  writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
+  return `${key} set; it applies from the next claim`;
+}
+
 /** Validates and saves one setting. A value out of range or not a whole number is refused with a message and nothing is written. */
 export function setSetting(stateDir: string, key: string, text: string): string {
+  if ((VERIFY_KEYS as readonly string[]).includes(key)) return setVerify(stateDir, key as (typeof VERIFY_KEYS)[number], text);
   const range = RANGES[key];
   if (range === undefined) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
   if ((key === "reserve-gb" || key === "cpu-reserve") && text === "auto") return unsetSetting(stateDir, key);
@@ -125,10 +191,19 @@ export function setSetting(stateDir: string, key: string, text: string): string 
 
 /** Returns one setting to its automatic default (the ceilings to their maxima, the reserve to 25% of RAM with a 2 GB minimum, the CPU reserve to 20% of the cores, the heavy memory budget to the one derived from measured footprints). */
 export function unsetSetting(stateDir: string, key: string): string {
-  if (RANGES[key] === undefined) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
+  if (RANGES[key] === undefined && !(VERIFY_KEYS as readonly string[]).includes(key)) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
   const target = budgetKey(key);
   const settings = loadSettings(stateDir);
-  if (key === "concurrency.total") settings.ceilingTotal = DEFAULT_SETTINGS.ceilingTotal;
+  if ((VERIFY_KEYS as readonly string[]).includes(key)) {
+    const left: VerifySettings = { ...settings.verify };
+    if (key === VERIFY_DEPLOY_ARGV_KEY) delete left.deployArgv;
+    else if (key === VERIFY_DEPLOY_DIR_KEY) delete left.deployDir;
+    else delete left.testAccount;
+    if (left.deployArgv === undefined && left.deployDir === undefined && left.testAccount === undefined) delete settings.verify;
+    else settings.verify = left;
+    writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
+    return `${key} is cleared; it applies from the next claim`;
+  } else if (key === "concurrency.total") settings.ceilingTotal = DEFAULT_SETTINGS.ceilingTotal;
   else if (key === "concurrency.heavy") settings.ceilingHeavy = DEFAULT_SETTINGS.ceilingHeavy;
   else if (target !== undefined) {
     settings.budget[target.cls][target.field] = DEFAULT_BUDGET[target.cls][target.field];

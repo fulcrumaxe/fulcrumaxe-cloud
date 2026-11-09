@@ -127,6 +127,8 @@ export class UnknownRoleError extends Error {
  * list. Own-property lookup only, so names like `constructor` and `__proto__` are unknown too.
  */
 export function toolsForRole(role: string): readonly string[] {
+  // D#749 V2b: the deploy verifier is a confined read role (runner-protocol) but a runner job only: the sandbox has no list for it, as before.
+  if (RUNNER_ONLY_ROLES.includes(role)) throw new UnknownRoleError(role);
   if (CONFINED_READ_ROLES.has(role)) return VERIFIER_ALLOW;
   if (typeof role !== "string" || !Object.hasOwn(TOOLS_BY_ROLE, role)) throw new UnknownRoleError(role);
   return TOOLS_BY_ROLE[role]!;
@@ -186,6 +188,7 @@ export const VERIFIER_READ_GUARD = verifierReadGuardHook(VERIFIER_WORKDIR);
  * are written before a fresh run and before a resumed one, so a resume has exactly the permissions of a start.
  */
 export function agentSettingsFor(role: string, excludes: readonly string[] = []): Record<string, unknown> {
+  if (RUNNER_ONLY_ROLES.includes(role)) throw new UnknownRoleError(role);
   if (CONFINED_READ_ROLES.has(role)) {
     return {
       ...FX_AGENT_SETTINGS,

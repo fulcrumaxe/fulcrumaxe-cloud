@@ -10,6 +10,8 @@
  * `VERIFIER_GUARD_MAX_INPUT` bytes, input it cannot read, another tool, or a path it cannot resolve is refused (exit 2).
  */
 
+import { DEPLOY_VERIFIER_ROLE } from "./deployVerifier.js";
+
 /** The role the platform runs to check a proposal's claims. Not in the role manifest. */
 export const PROPOSAL_VERIFIER_ROLE = "proposal-verifier";
 
@@ -19,8 +21,10 @@ export const DISCOVERY_ANALYST_ROLE = "discovery-analyst";
 /**
  * D#483 S4-f4 (R-C25-4): the platform roles that are a CONFINED READ-ONLY run (Read under the checkout, Glob and Grep, behind the one read guard). The cloud's
  * sandbox and a local runner both test membership here, never a comparison with one role's name.
+ * D#749 V2b: the deploy verifier is a member as well: the browser tools bring a page's text (an outsider's) into its prompt, so it reads the checkout only behind the one
+ * read guard and the `.git` and `.env*` denies. It is a runner job and nothing else (agentConfig.ts refuses it in the cloud's sandbox).
  */
-export const CONFINED_READ_ROLES: ReadonlySet<string> = new Set([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+export const CONFINED_READ_ROLES: ReadonlySet<string> = new Set([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, DEPLOY_VERIFIER_ROLE]);
 
 /**
  * The verifier's tools as a runner holds them, and as the cloud signs them for a runner job (`role_tools_sha256`): the bare names. The local

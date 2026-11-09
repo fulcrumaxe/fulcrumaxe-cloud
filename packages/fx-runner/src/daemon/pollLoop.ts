@@ -31,7 +31,7 @@ export type PollEvent =
   | { event: "sandbox_unavailable"; reason: SandboxUnavailableReason; waitSeconds: number }
   | { event: "claimed"; runId: string }
   | { event: "discarded"; runId: string }
-  | { event: "refused"; runId: string; reason: "class_full" }
+  | { event: "refused"; runId: string; reason: "class_full" | "browser_slot_full" }
   | { event: "job_error" }
   /** D#6 RUNNER-WAKE: a wake check said to claim (`reason`), or the safety slot came round (`safety`). */
   | { event: "wake_claim"; reason: "epoch" | "due" | "no_baseline" | "safety" }
@@ -64,6 +64,8 @@ export interface PollDeps {
    * adds no polling: the flag rides the claim that was being made anyway. After `handled` the loop claims again at once; after `none` it waits as it would.
    */
   onMergeOrder?: () => Promise<"handled" | "none">;
+  /** D#749 V2b: the same for a deploy order (`deploy_order`): claims it, runs the machine owner's own deploy command and reports. One at a time, like a merge order. */
+  onDeployOrder?: () => Promise<"handled" | "none">;
   /**
    * Resource-aware admission. With it the loop keeps claiming while the machine has room, so several runs are in hand at once; each claim says what
    * could be taken now. Without it the loop holds one run at a time.
@@ -142,29 +144,34 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
     const now = deps.admission.snapshot();
     return now.free.light > offered.free.light || now.free.heavy > offered.free.heavy;
   }
-  /** One merge order at a time: a second flag while one is being worked answers `none` and waits. */
-  let mergeBusy = false;
-  async function runMergeOrder(): Promise<"handled" | "none"> {
-    if (deps.onMergeOrder === undefined || mergeBusy) return "none";
-    mergeBusy = true;
-    try {
-      return await deps.onMergeOrder();
-    } catch {
-      // fx-swallow-ok: the handler reports its own failures in closed codes; whatever escapes is a job error (a pause), never text
-      log({ event: "job_error" });
-      jobErrors += 1;
-      return "none";
-    } finally {
-      mergeBusy = false;
+  /** One order of each kind at a time: a second flag while one is being worked answers `none` and waits. */
+  function orderRunner(handler: (() => Promise<"handled" | "none">) | undefined): { run(): Promise<"handled" | "none">; start(): void } {
+    let busy = false;
+    async function run(): Promise<"handled" | "none"> {
+      if (handler === undefined || busy) return "none";
+      busy = true;
+      try {
+        return await handler();
+      } catch {
+        // fx-swallow-ok: the handler reports its own failures in closed codes; whatever escapes is a job error (a pause), never text
+        log({ event: "job_error" });
+        jobErrors += 1;
+        return "none";
+      } finally {
+        busy = false;
+      }
     }
+    /** A claim that carried both a run and the order flag: the order is worked beside the run, tracked so the loop does not end under it. */
+    function start(): void {
+      if (handler === undefined || busy) return;
+      const work: Promise<void> = run().then(() => undefined);
+      running.add(work);
+      void work.then(() => running.delete(work));
+    }
+    return { run, start };
   }
-  /** A claim that carried both a run and the merge flag: the order is worked beside the run, tracked so the loop does not end under it. */
-  function startMergeOrder(): void {
-    if (deps.onMergeOrder === undefined || mergeBusy) return;
-    const work: Promise<void> = runMergeOrder().then(() => undefined);
-    running.add(work);
-    void work.then(() => running.delete(work));
-  }
+  const mergeOrders = orderRunner(deps.onMergeOrder);
+  const deployOrders = orderRunner(deps.onDeployOrder);
   let heldKey = "none|none";
   /** One `held` event per change of what is held back. */
   function noteHeld(snapshot: Snapshot): void {
@@ -269,9 +276,16 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
           await wait(backoff());
           continue;
         }
+        // D#749 V2b: a machine holds one browser job at a time (its one Chrome). The cloud offers a second only by mistake; it is not started and its lease runs out.
+        if (deps.admission?.browserSlotFull?.(reply) === true) {
+          log({ event: "refused", runId: reply.runId, reason: "browser_slot_full" });
+          await wait(backoff());
+          continue;
+        }
         log({ event: "claimed", runId: reply.runId });
         start(reply);
-        if (reply.mergeOrder === true) startMergeOrder();
+        if (reply.mergeOrder === true) mergeOrders.start();
+        if (reply.deployOrder === true) deployOrders.start();
       } else if (reply.kind === "idle" || reply.kind === "rate_limited") {
         failures = 0;
         if (reply.kind === "idle") deps.wake?.onClaim(reply.wake, deps.clock.now().getTime());
@@ -280,7 +294,10 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
         // status poll keeps the cloud's own cadence: no wake check can make it take a job.
         // A merge order waits for this runner: work it, and claim again at once when it was taken (an order is bounded work, never a spin: `none` falls through to the wait).
         if (reply.kind === "idle" && reply.mergeOrder === true && gate.open && deps.onMergeOrder !== undefined && !deps.signal.aborted) {
-          if ((await runMergeOrder()) === "handled") continue;
+          if ((await mergeOrders.run()) === "handled") continue;
+        }
+        if (reply.kind === "idle" && reply.deployOrder === true && gate.open && deps.onDeployOrder !== undefined && !deps.signal.aborted) {
+          if ((await deployOrders.run()) === "handled") continue;
         }
         if (reply.kind === "idle") await (gate.open ? waitIdle(reply.retryAfter) : waitForWork(reply.retryAfter));
         else await wait(reply.retryAfter);

@@ -125,6 +125,9 @@ runCli({
     term: process.env.TERM,
     uid: process.getuid?.(),
     xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
+    // D#749 V2b: the Chrome bridge directory is named for the user; a deploy command is given a short allowlist of this environment (src/daemon/deployOrder.ts).
+    username: userInfo().username,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, TMPDIR: process.env.TMPDIR, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME },
     // The take-over confirmation must be typed by a person: a piped stdin is not one.
     interactive: process.stdin.isTTY === true,
     // D#601 MEM-6: the memory-proposal question; the answer is read from the terminal only (src/ttyAsk.ts), and a timeout or a closed input is no answer.

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { DEPLOY_VERIFIER_BROWSER_TOOLS, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
 import { testLaunch } from "./helpers/launch.js";
@@ -57,8 +57,8 @@ describe("C44-5: plain Bash in the role tables", () => {
     // S4-f4: so is the discovery analyst (the same three, the same confinement).
     expect(roleToolsFor("proposal-verifier")).toEqual(["Read", "Glob", "Grep"]);
     expect(roleToolsFor("discovery-analyst")).toEqual(["Read", "Glob", "Grep"]);
-    // D#749 V2a: the deploy verifier holds the same three for now (no Bash, no Edit, no Write); the browser tools arrive with the runner side.
-    expect(roleToolsFor("deploy-verifier")).toEqual(["Read", "Glob", "Grep"]);
+    // D#749 V2b: the deploy verifier holds the same three and the browser tools (no Bash, no Edit, no Write).
+    expect(roleToolsFor("deploy-verifier")).toEqual(["Read", "Glob", "Grep", ...DEPLOY_VERIFIER_BROWSER_TOOLS]);
     const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !(PLAIN_BASH_ROLES as readonly string[]).includes(role) && role !== "proposal-verifier" && role !== "discovery-analyst" && role !== "deploy-verifier");
     expect(others.length).toBeGreaterThan(0);
     for (const role of others) {

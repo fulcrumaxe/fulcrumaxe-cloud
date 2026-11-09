@@ -66,6 +66,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/jobLimits.ts": ["path"], // D#6 C43-5: path joins and an absolute-path check; every program (systemd-run, systemctl, env) runs through the injected capture or the engine's own start
   "src/daemon/nestedGitfiles.ts": ["fs"], // D#6 RUNNER-HOSTREAD-FOLLOWUPS-527: readdir of the worktree looking for nested .git names; nothing is opened or written
   "src/daemon/workspacePin.ts": ["crypto", "fs", "path"], // D#6 RUNNER-HOSTREAD-GITDIR-SHAPE: lstat of the workspace git folder and its config, a SHA-256 of the config bytes, a realpath key; nothing is written
+  "src/daemon/deployOrder.ts": ["fs", "path"], // D#749 V2b: lstat of each part of the deploy script's path below the owner's checkout (a link is refused, nothing is opened or written); the command runs through the injected process-group capture
   "src/daemon/resumeClean.ts": ["fs", "path"], // D#6 RUNNER-RESUME-CLEAN: realpath of the workspace root before the purge
   "src/daemon/resumePurge.ts": ["fs", "path"], // D#6 RUNNER-RESUME-CLEAN: lstat, unlink and rmdir of ignored build output in a resumed workspace without following a link; realpath of each entry's parent
   "src/daemon/resumePurgeSandbox.ts": ["fs", "path"], // D#6 RESUME-CLEAN-MAC: a 0600 list file in a fresh directory under the state directory for the sandboxed purge child, removed afterwards; the child runs through the injected capture
@@ -99,6 +100,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/watch/tmux.ts": ["fs", "path"], // finds the tmux binary on the search path; tmux itself is run through the injected capture
   "src/engines/claude/takeover.ts": ["fs", "path"], // reads a taken-over run's transcript, session index and job files to resume its session
   "src/commands/attach.ts": [],
+  "src/daemon/browserProbe.ts": ["fs", "path"], // D#749 V2b: lstat and a directory listing of the Chrome bridge directory (a name built from the user name); the process list arrives through an injected port
   "src/commands/watchPane.ts": ["path"], // the transcript's path under the state directory
   "src/commands/run.ts": ["path"], // the composition root: the runner's own directory layout; the process start and the pid check arrive through its host argument
   "src/engines/claude/kit.ts": ["path"], // the engine's file layout under the state directory
