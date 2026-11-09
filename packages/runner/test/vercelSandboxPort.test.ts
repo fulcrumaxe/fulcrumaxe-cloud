@@ -22,6 +22,7 @@ import { githubProxyForwardUrl, loadGithubForwardConfig } from "../src/githubFor
 import { networkPolicy, type NetworkPolicyRule } from "../src/networkPolicy.js";
 import { FAKE_AUTH_VALUE, keyedPolicy } from "./helpers/keyedPolicy.js";
 import { sdkSessionStubs } from "./helpers/sdkSession.js";
+import { recordingSdk } from "./helpers/recorderSdk.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import type { NormalizedEvent } from "../src/types.js";
 import { buildTerminalReport } from "../src/targets/sandboxTarget.js";
@@ -137,7 +138,7 @@ function createSdkFake() {
         // D#600 CX-4a: the real service writes a path where the VM's user may, and a failed write rejects. This fake refuses any file under `writeRefusedUnder`,
         // and any path outside what the port legitimately writes: /fx/context/<code>.md (a lowercase name, no `..`, no subdirectory), the agent files and the prompt file.
         const legit = (p: string): boolean =>
-          /^\/fx\/context\/[a-z_]+\.md$/.test(p) || /^\/fx\/agent-config\/[A-Za-z0-9._-]+$/.test(p) || p === FX_RUN_LIMITS_PATH || /^\/tmp\/fx-prompt-[0-9a-f-]+$/.test(p);
+          /^\/fx\/context\/[a-z_]+\.md$/.test(p) || /^\/fx\/agent-config\/[A-Za-z0-9._-]+$/.test(p) || p === "/fx/run/.keep" || p === FX_RUN_LIMITS_PATH || /^\/tmp\/fx-prompt-[0-9a-f-]+$/.test(p);
         for (const f of files) if (!legit(f.path)) throw new Error(`write refused: ${f.path} is outside the paths the port may write`);
         if (knobs.writeRefusedUnder !== undefined && files.some((f) => f.path.startsWith(knobs.writeRefusedUnder!))) throw new Error("write refused");
         rec("writeFiles", { files, ...opts });
@@ -231,7 +232,7 @@ function createSdkFake() {
       return sandboxFor(creds, params.name);
     },
   };
-  return { sdk, calls, store, knobs, commandsStarted, cloneCommands };
+  return { sdk: recordingSdk(sdk), calls, store, knobs, commandsStarted, cloneCommands };
 }
 
 function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetachedOptions {
@@ -1189,7 +1190,7 @@ describe("D#2 H14c-3-2d-1: per-run limits travel on the launch, never through th
     expect(argv[argv.indexOf("--max-turns") + 1]).toBe("17");
     expect(limitsFileOf(fake)).toEqual({ started_epoch_s: T0 / 1000, deadline_epoch_s: T0 / 1000 + 540, max_model_calls: 40 });
 
-    await port.startDetached(handle, startOpts()).hookFired;
+    await port.startDetached(handle, startOpts({ runId: "run-2" })).hookFired; // a run id names its record file: a second command in this sandbox needs its own
     const again = agentArgv(fake);
     expect(again[again.indexOf("--max-turns") + 1]).toBe(String(DEFAULT_RUN_LIMITS.maxTurns));
     expect(limitsFileOf(fake)).toEqual({ started_epoch_s: T0 / 1000, deadline_epoch_s: T0 / 1000 + 3600, max_model_calls: DEFAULT_RUN_LIMITS.maxModelCalls });
@@ -1204,7 +1205,7 @@ describe("D#2 H14c-3-2d-1: per-run limits travel on the launch, never through th
     await expect(port.startDetached(handle, startOpts({ limits: RUN_LIMITS })).hookFired).rejects.toMatchObject({ limit: { kind: "model_calls", limit: 40, observed: 41 } });
     fake.knobs.stdout = Array.from({ length: 41 }, (_, i) => assistant(`n${i + 1}`)).concat(JSON.stringify(event(1, "result")) + "\n");
     fake.knobs.endlessLogs = false;
-    const last = await port.startDetached(handle, startOpts()).hookFired;
+    const last = await port.startDetached(handle, startOpts({ runId: "run-2" })).hookFired;
     expect(last?.type).toBe("result"); // 41 calls is nothing under the default 300
   });
 
@@ -1337,7 +1338,7 @@ describe("R-TOKEN-LIFETIME: a kill carries the credentials of the moment, never 
     const withToken = (c: SdkCommand, cmdId: string, t: string): SdkCommand => ({
       cmdId,
       logs: () => c.logs(),
-      wait: () => c.wait(),
+      wait: (p) => c.wait(p), // the real wait() takes { signal }
       kill: async () => {
         use(t);
         await c.kill();

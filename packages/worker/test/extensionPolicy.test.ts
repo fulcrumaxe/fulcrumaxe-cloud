@@ -8,6 +8,7 @@ import { networkPolicy } from "../../runner/src/networkPolicy.js";
 import { retentionPolicyFor } from "../../runner/src/sandboxNaming.js";
 import { keyedPolicy } from "../../runner/test/helpers/keyedPolicy.js";
 import { sdkSessionStubs } from "../../runner/test/helpers/sdkSession.js";
+import { recordingSdk } from "../../runner/test/helpers/recorderSdk.js";
 import { noGhWriteCounter, createExtensionPolicyFor } from "../src/extensionPolicy.js";
 import { RUN_TIME_CEILING_MS, runnerLimitsFrom, sandboxTimeFor } from "../src/seat.js";
 
@@ -135,7 +136,7 @@ describe("extension policy: end to end on the fake SDK port (9)", () => {
       ...sdkSessionStubs(),
     };
     const get = async () => sandbox as never;
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { create: get, get }, limits });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: recordingSdk({ create: get, get }), limits });
     const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 80_000_000, networkPolicy: [] });
     const onExtended = vi.fn();
     const extension: ExtensionPolicy = { ...policyFor(runOf({ role: role as never }))!, meteredUsd: () => 1, onExtended };

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { recordingSdk } from "../../runner/test/helpers/recorderSdk.js";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { CLAUDE_CLI_VERSION, CLONE_PINNED_SCRIPT, DISCOVERY_ANALYST_ROLE, VERIFIER_WORKDIR, createTestConnectionStatusPort, type SdkCommand, type SdkSandbox, type VercelSandboxSdk } from "@fx/runner";
@@ -69,7 +70,7 @@ function sdkFake(): VercelSandboxSdk {
     delete: async () => undefined,
     listSessions: async () => ({ sessions: [{ id: "sess-1", memory: 4096, region: "iad1", duration: 60_000, activeCpuDurationMs: 10_000, networkTransfer: { ingress: 5, egress: 100 } }], pagination: { next: null } }),
   });
-  return { create: async (p) => sandbox(p.name), get: async (p) => sandbox(p.name) };
+  return recordingSdk({ create: async (p) => sandbox(p.name), get: async (p) => sandbox(p.name) });
 }
 
 describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {

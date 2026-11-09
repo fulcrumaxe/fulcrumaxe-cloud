@@ -1,3 +1,4 @@
+import { recordingSdk } from "./recorderSdk.js";
 import {
   CLAUDE_CLI_VERSION,
   COUNTERS_SCRIPT,
@@ -116,7 +117,7 @@ export function createFrozenInvocationSdk(platform: Platform) {
   };
 
   return {
-    sdk,
+    sdk: recordingSdk(sdk),
     calls,
     /** How many agent commands the provider was asked to start. */
     agentCommandCount: () => agentCommands,

@@ -9,6 +9,7 @@ import { CLAUDE_CLI_VERSION, createVercelSandboxPort, type SdkSandbox } from "..
 import type { NormalizedEvent } from "../../src/types.js";
 import { keyedPolicy } from "./keyedPolicy.js";
 import { sdkSessionStubs } from "./sdkSession.js";
+import { recordingSdk } from "./recorderSdk.js";
 
 const NAME = "rn-9-reviewer-run-1";
 
@@ -55,7 +56,7 @@ export const claudeCodeConformanceDriver: ConformanceDriver = {
   async run(io): Promise<ConformanceRun> {
     const delivered: NormalizedEvent[] = [];
     const invalid: string[] = [];
-    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: scriptedSdk(io), onInvalidEvent: (r) => void invalid.push(r) });
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: recordingSdk(scriptedSdk(io) as never), onInvalidEvent: (r) => void invalid.push(r) });
     const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const { hookFired } = port.startDetached(handle, {
       runId: CONFORMANCE_RUN_ID,
