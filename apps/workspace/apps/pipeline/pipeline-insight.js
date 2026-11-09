@@ -297,6 +297,11 @@ export function publicChangeView(data) {
 export const SPEC_REFUSED_TAIL = " Nothing was saved. Edit the issue on GitHub and approve again, or close it.";
 export const SPEC_REFUSED_SENTENCES = Object.freeze({
   invalid_spec_output: "The Spec writer's output was incomplete, so no Spec was published." + SPEC_REFUSED_TAIL,
+  // The short Spec's named answer checks: each says which part of the Spec writer's answer could not be used. The step asked once more before stopping, so a person only sees these when the second answer failed too.
+  light_answer_missing: "The Spec writer finished, but its answer had no readable final block, so no Spec was published." + SPEC_REFUSED_TAIL,
+  light_answer_too_large: "The Spec writer's answer was too large to keep, so no Spec was published." + SPEC_REFUSED_TAIL,
+  light_spec_empty: "The Spec writer's answer had an empty Spec, so no Spec was published." + SPEC_REFUSED_TAIL,
+  light_split_flag_missing: "The Spec writer's answer didn't say whether the work should be split into several pull requests, so no Spec was published." + SPEC_REFUSED_TAIL,
   invalid_file_scope: "The Spec writer didn't give a readable list of the files the change may touch, so no Spec was published." + SPEC_REFUSED_TAIL,
   spec_list_unreadable: "The Spec could not be published: it did not list the files it allows. Press Try the Spec again.",
   invalid_planned_prs: "The Spec writer's list of planned pull requests couldn't be read, so no Spec was published." + SPEC_REFUSED_TAIL,

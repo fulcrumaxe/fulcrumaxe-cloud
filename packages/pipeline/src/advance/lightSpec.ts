@@ -25,8 +25,28 @@ export function isLightCategory(category: unknown): category is LightSpecCategor
   return typeof category === "string" && (LIGHT_SPEC_CATEGORIES as readonly string[]).includes(category);
 }
 
-export function buildLightSpecPrompt(input: { category: LightSpecCategory; title: string; body: string }): string {
+/**
+ * The checks of the PM's answer that name their own refusal. Each is a fixed code, so the card can say which check failed and the second ask can name it. A refusal
+ * with one of these codes is asked for ONCE more (the workflow), with the failed check named in the prompt; any other refusal stops at once.
+ */
+export const LIGHT_SPEC_RETRY_CODES = ["light_answer_missing", "light_answer_too_large", "light_spec_empty", "light_split_flag_missing"] as const;
+export type LightSpecRetryCode = (typeof LIGHT_SPEC_RETRY_CODES)[number];
+
+export function isLightRetryCode(code: unknown): code is LightSpecRetryCode {
+  return typeof code === "string" && (LIGHT_SPEC_RETRY_CODES as readonly string[]).includes(code);
+}
+
+/** What the second ask tells the PM about the check its first answer failed. Fixed words; no model text is ever quoted back. */
+const RETRY_NOTES: Readonly<Record<LightSpecRetryCode, string>> = Object.freeze({
+  light_answer_missing: "Your previous answer had no readable final block, so nothing could be used. End your final message with exactly one block in the form shown below, and nothing after it.",
+  light_answer_too_large: "Your previous answer was too large to keep, so nothing could be used. Keep the whole final block well under 100 KB: shorter Spec text, no quoted code beyond what an engineer needs.",
+  light_spec_empty: 'Your previous answer had an empty "spec". Unless the request is not feasible, "spec" must hold the numbered acceptance criteria and the tests to add.',
+  light_split_flag_missing: 'Your previous answer left out "split_proposed", or it was not a JSON true or false. Give it as a bare boolean, true only when "planned_prs" lists two or more rows.',
+});
+
+export function buildLightSpecPrompt(input: { category: LightSpecCategory; title: string; body: string; retry?: LightSpecRetryCode }): string {
   return [
+    ...(input.retry === undefined ? [] : [RETRY_NOTES[input.retry], ""]),
     `You are the project-manager. This work item was triaged as "${input.category}", so it skips the consensus panel.`,
     "Read the repository checked out in your working directory to ground the Spec. Do not change any file.",
     "Write a short Spec an engineer can implement directly: what to change, numbered pass/fail acceptance criteria,",
@@ -65,6 +85,9 @@ const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 export async function publishLightSpec(pool: Pool, accountId: string, workItemId: string, output: unknown): Promise<LightSpecOutcome> {
   const o = output !== null && typeof output === "object" && !Array.isArray(output) ? (output as Record<string, unknown>) : null;
+  // The answer the runner kept is an object. No object at all, or the marker the runner stores in place of an answer over its size cap, is its own named check.
+  if (o === null) return { status: "refused", reason: "light_answer_missing" };
+  if (Object.hasOwn(o, "dropped") && !Object.hasOwn(o, "spec") && !Object.hasOwn(o, "feasible")) return { status: "refused", reason: "light_answer_too_large" };
   const summary = typeof o?.summary === "string" ? o.summary : "";
   const spec = typeof o?.spec === "string" ? o.spec : "";
   // Only the exact JSON `false` is a verdict of "not feasible"; anything else goes on to the Spec checks, which fail closed.
@@ -72,18 +95,18 @@ export async function publishLightSpec(pool: Pool, accountId: string, workItemId
     const reason = typeof o.reason === "string" && o.reason.trim() ? o.reason.trim().slice(0, 600) : "The project manager judged this cannot be built as written.";
     return { status: "not_feasible", reason };
   }
-  if (spec.trim().length === 0) return { status: "refused", reason: "invalid_spec_output" };
+  if (spec.trim().length === 0) return { status: "refused", reason: "light_spec_empty" };
   // D#6 R4d-5a (C34 section 1.2): no readable file list, no Spec. With `feasible: false` the key is ignored (returned above).
-  const acceptanceFiles = o === null ? null : validAcceptanceFiles(ownData(o, "acceptance_files"));
+  const acceptanceFiles = validAcceptanceFiles(ownData(o, "acceptance_files"));
   if (acceptanceFiles === null) return { status: "refused", reason: "invalid_file_scope" };
   // D#483 S5-b2b: the optional Planned PRs table, read by the same parser as the panel Spec step. An unreadable one refuses with a named code and publishes nothing.
-  const planned = parsePlannedPrs(ownData(o as object, "planned_prs"));
+  const planned = parsePlannedPrs(ownData(o, "planned_prs"));
   if (planned.kind === "invalid") return { status: "refused", reason: "invalid_planned_prs" };
   if (planned.kind === "too_large") return { status: "refused", reason: "planned_prs_too_large" };
   const plannedPrs = planned.kind === "ok" ? planned.rows : undefined;
   // The PM states the split as a required boolean, so the table and the claim can never disagree silently (no reading of model prose).
-  const proposed = ownData(o as object, "split_proposed");
-  if (typeof proposed !== "boolean") return { status: "refused", reason: "invalid_spec_output" };
+  const proposed = ownData(o, "split_proposed");
+  if (typeof proposed !== "boolean") return { status: "refused", reason: "light_split_flag_missing" };
   if (proposed && plannedPrs === undefined) return { status: "refused", reason: "planned_split_missing" };
   if (!proposed && plannedPrs !== undefined) return { status: "refused", reason: "planned_split_unflagged" };
   const assembled = assembleSpecBodyChecked({ expectedRoles: [], postedRoles: new Set(), missingReasons: {}, round2Ran: false, summary, spec, acceptanceFiles, ...(plannedPrs === undefined ? {} : { plannedPrs }) });

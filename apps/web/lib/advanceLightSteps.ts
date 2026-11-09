@@ -1,5 +1,5 @@
 import type { AdvanceFacade, AdvanceRunStart } from "@fx/worker";
-import { buildLightSpecPrompt, isLightCategory, pauseOnDenial, siteStep } from "@fx/pipeline";
+import { buildLightSpecPrompt, isLightCategory, isLightRetryCode, pauseOnDenial, siteStep, type LightSpecRetryCode } from "@fx/pipeline";
 import type { StepWho } from "./advanceStageSteps";
 
 /**
@@ -14,18 +14,24 @@ import type { StepWho } from "./advanceStageSteps";
 export type LightStartWorker = Pick<AdvanceFacade, "advanceStartRun">;
 export type LightPublishWorker = Pick<AdvanceFacade, "advanceLightSpec">;
 
-export async function startLightSpecBody(worker: LightStartWorker | null, who: StepWho, input: { category: string; title: string; body: string }, actionId: string, attempt = 0): Promise<AdvanceRunStart> {
+/**
+ * `retry` is the named check the first answer failed (see `LIGHT_SPEC_RETRY_CODES`): the second ask has its own run key (`<approval>:rt`), so a replay of the first ask
+ * follows the first run and a replay of the second follows the second, and its prompt names the check. Anything that is not one of those codes asks nothing.
+ */
+export async function startLightSpecBody(worker: LightStartWorker | null, who: StepWho, input: { category: string; title: string; body: string }, actionId: string, attempt = 0, retry?: string): Promise<AdvanceRunStart> {
   if (!worker) return { ok: false, reason: "worker_unavailable" };
   if (!isLightCategory(input.category)) return { ok: false, reason: "invalid_input" };
+  if (retry !== undefined && !isLightRetryCode(retry)) return { ok: false, reason: "invalid_input" };
+  const named: LightSpecRetryCode | undefined = retry;
   // D#483 S5-k1c: a spending-limit denial is a named pause; each later ask is a new attempt with its own key.
   return pauseOnDenial(
     await worker.advanceStartRun({
       accountId: who.accountId,
       workItemId: who.workItemId,
       haltEpoch: who.haltEpoch,
-      step: siteStep("light_spec", actionId, attempt),
+      step: siteStep("light_spec", named === undefined ? actionId : `${actionId}:rt`, attempt),
       role: "project-manager",
-      prompt: buildLightSpecPrompt({ category: input.category, title: input.title, body: input.body }),
+      prompt: buildLightSpecPrompt({ category: input.category, title: input.title, body: input.body, ...(named === undefined ? {} : { retry: named }) }),
       clone: true,
     }),
   );
@@ -40,7 +46,7 @@ export interface LightPublished {
   split?: true;
 }
 
-export async function publishLightSpecBody(worker: LightPublishWorker | null, who: StepWho, runId: string, actionId: string): Promise<LightPublished> {
+export async function publishLightSpecBody(worker: LightPublishWorker | null, who: StepWho, runId: string, actionId: string, retried = false): Promise<LightPublished> {
   if (!worker) return { status: "refused", reason: "worker_unavailable", version: null };
-  return worker.advanceLightSpec(who, runId, actionId);
+  return retried ? worker.advanceLightSpec(who, runId, actionId, true) : worker.advanceLightSpec(who, runId, actionId);
 }

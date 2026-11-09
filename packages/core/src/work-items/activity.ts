@@ -185,6 +185,10 @@ export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasN
  */
 export const LIGHT_SPEC_REFUSAL_CODES: readonly string[] = Object.freeze([
   'invalid_spec_output',
+  'light_answer_missing',
+  'light_answer_too_large',
+  'light_spec_empty',
+  'light_split_flag_missing',
   'invalid_file_scope',
   'spec_list_unreadable', // SPEC_LIST_UNREADABLE_CODE: a first panel Spec's list, recorded by the worker (the app test reads this list as quoted strings)
   'invalid_planned_prs',

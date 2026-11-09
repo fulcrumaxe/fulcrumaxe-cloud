@@ -50,6 +50,8 @@ interface SetupOptions {
   stages?: string[];
   /** What publishing the short Spec answers. */
   light?: { status: string; reason: string | null; version: number | null; split?: true };
+  /** Short Spec publish answers, one per call, before `light` repeats. */
+  lightSequence?: Array<{ status: string; reason: string | null; version: number | null; split?: true }>;
   /** What the decision step answers (D#7 DP4b-2); `none` when absent. */
   decision?: DecisionStepCode;
   /** D#6 R-CHK-3: what the check fix start answers, one per call (the last repeats); a started run named `run-fix-<n>` when absent. */
@@ -93,7 +95,7 @@ function setup(o: SetupOptions = {}) {
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
     advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
     advanceLoadReview: vi.fn(async (): Promise<{ ok: false; reason: string } | { ok: true; ctx: Record<string, unknown> }> => ({ ok: false, reason: "no_spec" })),
-    advanceLightSpec: vi.fn(async (_who: unknown, _run: string, _action: string) => o.light ?? { status: "published", reason: null, version: 1 }),
+    advanceLightSpec: vi.fn(async (_who: unknown, _run: string, _action: string, _retried?: boolean) => (o.lightSequence?.length ? o.lightSequence.shift()! : undefined) ?? o.light ?? { status: "published", reason: null, version: 1 }),
   };
   setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => worker as unknown as Worker });
   setIssueReaderForTests(async () => issue);
@@ -816,6 +818,55 @@ describe("the short Spec for a small, bug or doc item (no panel)", () => {
     const w = setup({ triage: LIGHT, light: { status: "refused", reason: "invalid_spec_output", version: null } });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "light_spec_refused", detail: "invalid_spec_output" });
     expect(w.advanceBuild).not.toHaveBeenCalled();
+  });
+
+  // The answer checks of the short Spec name themselves; the first failure earns one more ask that names the check, under its own run key.
+  describe("a short Spec answer that failed a named check", () => {
+    const refused = (reason: string) => ({ status: "refused", reason, version: null });
+    const pmRuns = (w: ReturnType<typeof setup>) => w.advanceStartRun.mock.calls.map((c) => c[0]).filter((r) => r.role === "project-manager" && r.step.startsWith("light-spec:"));
+
+    it.each(["light_answer_missing", "light_answer_too_large", "light_spec_empty", "light_split_flag_missing"])("%s: the PM is asked once more with that check named, and the Spec the second answer gives is built", async (code) => {
+      const w = setup({ triage: LIGHT, lightSequence: [refused(code), { status: "published", reason: null, version: 5 }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+      const pm = pmRuns(w);
+      expect(pm.map((r) => r.step)).toEqual([`light-spec:${ARGS.actionId}`, `light-spec:${ARGS.actionId}:rt`]);
+      expect(pm[0]!.prompt).not.toContain("Your previous answer");
+      expect(pm[1]!.prompt).toContain("Your previous answer");
+      expect(w.advanceLightSpec.mock.calls.map((c) => c.slice(1))).toEqual([["run-1", ARGS.actionId], ["run-1", ARGS.actionId, true]]);
+      expect(w.advanceBuild).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 }, ARGS.actionId, 5);
+      expect(events()).toContain("advance.light_spec_retry");
+      expect(logs.find((l) => l.event === "advance.light_spec_retry")).toMatchObject({ reason: code });
+    });
+
+    it("the second answer failing too is the end: the code of THAT failure is the stop, and no third PM run starts", async () => {
+      const w = setup({ triage: LIGHT, lightSequence: [refused("light_spec_empty"), refused("light_split_flag_missing")] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "light_spec_refused", detail: "light_split_flag_missing" });
+      expect(pmRuns(w)).toHaveLength(2);
+      expect(w.advanceLightSpec).toHaveBeenCalledTimes(2);
+      expect(w.advanceBuild).not.toHaveBeenCalled();
+    });
+
+    it.each(["invalid_file_scope", "invalid_planned_prs", "planned_split_missing", "publish_failed", "invalid_spec_output"])("%s is not one of the named checks: it stops at once, with no second ask", async (code) => {
+      const w = setup({ triage: LIGHT, lightSequence: [refused(code)] });
+      const out = await workItemAdvanceWorkflow(ARGS);
+      expect(pmRuns(w)).toHaveLength(1);
+      expect(w.advanceLightSpec).toHaveBeenCalledTimes(1);
+      expect(w.advanceBuild).not.toHaveBeenCalled();
+      expect(out).toEqual({ status: "light_spec_refused", detail: code });
+    });
+
+    it("the second ask's own start refusal (a spending limit, no model) stops with that reason", async () => {
+      const w = setup({ triage: LIGHT, lightSequence: [refused("light_spec_empty")] });
+      w.advanceStartRun.mockImplementation(async (req: AdvanceRunRequest) => (req.step.endsWith(":rt") ? { ok: false as const, reason: "no_model" } : { ok: true as const, runId: "run-1" }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "light_spec_refused:no_model" });
+    });
+
+    it("the workflow's list of retried checks is the pipeline's (the workflow body imports no value from a package)", async () => {
+      const { LIGHT_SPEC_RETRY_CODES } = await import("@fx/pipeline");
+      const src = (await import("node:fs")).readFileSync(new URL("./workItemAdvance.ts", import.meta.url), "utf8");
+      const quoted = /const LIGHT_SPEC_RETRY_CODES: readonly string\[\] = \[([^\]]*)\]/.exec(src)?.[1] ?? "";
+      expect([...quoted.matchAll(/"([a-z_]+)"/g)].map((m) => m[1])).toEqual([...LIGHT_SPEC_RETRY_CODES]);
+    });
   });
 
   it("a PM that is refused to start (no model, spend) is a stop with the reason", async () => {

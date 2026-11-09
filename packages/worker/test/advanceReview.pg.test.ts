@@ -1248,6 +1248,18 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(await events(w)).toEqual([expect.objectContaining({ kind: "stopped", code: "invalid_spec_output" })]);
     });
 
+    it("a named-check refusal of the first answer and of the second ask are two recorded facts (the second under its own key); a replay of either adds nothing", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a, { stage: "triaged", kind: "bug", spec: false });
+      const run = await pmRun(a, w, {});
+      const m = build(lightDeps({ status: "refused", reason: "light_spec_empty" }).deps).module;
+      expect(await m.advanceLightSpec(who(a, w), run, action)).toEqual({ status: "refused", reason: "light_spec_empty", version: null });
+      expect(await m.advanceLightSpec(who(a, w), run, action, true)).toEqual({ status: "refused", reason: "light_spec_empty", version: null });
+      await m.advanceLightSpec(who(a, w), run, action);
+      await m.advanceLightSpec(who(a, w), run, action, true);
+      expect((await events(w)).filter((e) => e.kind === "stopped")).toEqual([expect.objectContaining({ code: "light_spec_empty" }), expect.objectContaining({ code: "light_spec_empty" })]);
+    });
+
     it("a replay after the Spec was published publishes nothing more (a second publish would add a version)", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, { stage: "spec_ready", kind: "bug", spec: true });
