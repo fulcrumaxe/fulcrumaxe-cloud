@@ -89,7 +89,12 @@ import {
  * is raw `stream-json` and UNTRUSTED (anything inside the VM can write it).
  * Usage and completion are read ONLY from the stdout and exit of the one
  * command `runCommand` returned for the agent (D#2 C46 MP-SRC/MP-PIN): never
- * stderr, never a file in the VM, never the version check's command. It is
+ * stderr, never a file in the VM, never the version check's command. (The
+ * run-log reader changes this: once its read loop lands, RLR-3b/4, the source
+ * is the recorder's framed, contiguous record file, cross-checked at exit
+ * against the recorder command's own stdout. `FX_RECORDER_SCRIPT` and
+ * `recordParser.ts` exist and are tested but nothing here calls them yet; the
+ * new invariant is written out in docs/ops/spend-metering.md.) It is
  * normalized HERE, outside the VM, by the mapper the local runtime
  * uses; `runId`, `role`, `seq` and `ts` are stamped by this file and never
  * read from a line. A line that is not a JSON object of a known `type` is

@@ -239,6 +239,11 @@ msg=
 exit 0
 `;
 
+/** Where the recorder script is written (mode 0444, rewritten before every agent command, like the hook). */
+export const FX_RECORDER_PATH = `${FX_AGENT_CONFIG_DIR}/recorder.mjs`;
+
+export { FX_RECORDER_SCRIPT, RECORDER_KILL_GRACE_MS, RECORDER_MAX_LINE_BYTES, RECORDER_PIPE_WAIT_MS } from "./recorderScript.js";
+
 /** The `/fx/run-limits.json` body (one line): numbers only, no secret or token. `timeWarningMinutes` appears once the runner's clock passes 80% of the window, `modelCallsRemaining` from 80% of the call limit. */
 export function runLimitsFileContent(p: {
   startedMs: number;
