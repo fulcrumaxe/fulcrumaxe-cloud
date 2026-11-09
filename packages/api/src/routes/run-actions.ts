@@ -232,8 +232,8 @@ async function approve(ctx: RouteContext, id: string) {
   const launched: { launch: { parentId: string; key: string } | null } = { launch: null };
   await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => {
     // The facts are the worker's (`performDriven`): a follow-up child carries its key (`child`) and its own kind and Spec, and has no discussion.
-    const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; follow_up: boolean; child: boolean; parent_id: string | null; planned_pr_key: string | null }>(
-      `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.follow_up_id IS NOT NULL) AS follow_up,
+    const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; parent_gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; follow_up: boolean; child: boolean; parent_id: string | null; planned_pr_key: string | null }>(
+      `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, (SELECT p.gh_number FROM work_items p WHERE p.account_id = w.account_id AND p.id = w.parent_id AND w.planned_pr_key IS NOT NULL) AS parent_gh_number, w.discussion_id, CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.follow_up_id IS NOT NULL) AS follow_up,
               (w.planned_pr_key IS NOT NULL) AS child, w.parent_id, w.planned_pr_key,
               EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${specOfItemSql("s", "w")}) AS has_spec
          FROM work_items w LEFT JOIN discussions d ON d.id = w.discussion_id
@@ -250,14 +250,15 @@ async function approve(ctx: RouteContext, id: string) {
     // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
     if (item.provenance !== "internal") throw new ExternalRequiresHumanError();
     if (item.repo_id === null) throw new NoRepoError();
-    // A follow-up child has no number of its own (it builds on its parent's issue): the advance table answers it, with its own sentence.
-    if (item.gh_number === null && !item.follow_up) throw new NotApprovableError("work item has no GitHub issue");
+    // A planned PR child has no number of its own (it builds on its parent's issue), so the parent's number answers for it. A follow-up child is also answered by the advance table, with its own sentence.
+    if (item.child ? item.parent_gh_number === null && !item.follow_up : item.gh_number === null) throw new NotApprovableError(item.child ? "the item this planned PR belongs to has no GitHub issue" : "work item has no GitHub issue");
     const verdict = advanceActionFor({ ...item, follow_up_start_supported: approveFollowUpDeps.startSupported, no_verdict_hold: item.stage === "needs_human" && (await readReviewHold(client, id)) });
     if (!verdict.ok) throw new NotApprovableError(verdict.message);
     const live = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE work_item_id = $1 AND NOT (status = ANY($2::text[]))", [id, TERMINAL_RUN_STATUSES]);
     if (Number(live.rows[0]!.n) > 0) throw new AlreadyRunningError();
-    // A follow-up child is held to its parent's approval, not one of its own (the receipts and the launch rule read the parent's), so no approval row is written for it.
-    if (item.follow_up) {
+    // A child (planned PR or follow-up) is held to its parent's approval, not one of its own (the receipts and the launch rule read the parent's), so no approval row is written for it.
+    // At `triaged` its Approve is the launch, made below by the same approver a click on the sub-item uses; at any later stage it is the ordinary advance request.
+    if (item.child) {
       if (item.stage === "triaged") launched.launch = { parentId: item.parent_id!, key: item.planned_pr_key! };
       return;
     }

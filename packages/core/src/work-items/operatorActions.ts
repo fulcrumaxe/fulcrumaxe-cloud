@@ -20,7 +20,7 @@ import { ADVANCE_PANEL_KINDS, advanceActionFor, type AdvanceFacts } from './adva
 import { reviewFixRoundsSql } from './driverEvents.js';
 import { QUEUE_ESCALATION_CODES, readEscalationCode } from './reviewHold.js';
 import { readMergeQueueState, type MergeQueueState } from './mergeReadiness.js';
-import { isLegalStageTransition } from './stages.js';
+import { isLegalStageTransition, specOfItemSql } from './stages.js';
 
 /**
  * Every transition Back to discussion records has a source that starts with this. The panel and the Spec step count them to
@@ -65,6 +65,13 @@ export interface OperatorFacts extends AdvanceFacts {
   provenance: string;
   repo_id: string | null;
   gh_number: string | number | null;
+  /**
+   * The item is a planned PR child (it carries a planned PR key). It has no issue number of its own and builds on its parent's, so its driven actions ask `parent_gh_number`
+   * instead. Absent or false: every other item, as before.
+   */
+  child?: boolean;
+  /** A planned PR child's parent's issue number, or null when the parent has none or is gone. Read only for a child. */
+  parent_gh_number?: string | number | null;
   /** Any agent run of the item is pending, running or paused. */
   live_run: boolean;
   /** The caller's role in the account. */
@@ -104,10 +111,13 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
   if (f.provenance !== 'internal') return no('external', 'only an internal work item can be moved from here');
   if (DRIVEN.includes(action)) {
     if (f.repo_id === null) return no('no_repo', 'work item has no repository');
-    if (f.gh_number === null) return no('no_issue', 'work item has no GitHub issue');
+    // A planned PR child builds on its parent's issue, so that number answers for it; the sentence names the parent when that is what is missing.
+    if (f.child === true) {
+      if (f.parent_gh_number === undefined || f.parent_gh_number === null) return no('no_issue', 'the item this planned PR belongs to has no GitHub issue');
+    } else if (f.gh_number === null) return no('no_issue', 'work item has no GitHub issue');
   }
   if (f.live_run) return no('live', 'agents are already working on this work item');
-  const stageFacts = { stage: f.stage, discussion_id: f.discussion_id, kind: f.kind, has_spec: f.has_spec, ...(f.follow_up === true ? { follow_up: true } : {}) };
+  const stageFacts = { stage: f.stage, discussion_id: f.discussion_id, kind: f.kind, has_spec: f.has_spec, ...(f.follow_up === true ? { follow_up: true } : {}), ...(f.child === true ? { child: true } : {}) };
   switch (action) {
     case 'request_changes': {
       const prStage = CLOSE_ON_GITHUB_STAGES.includes(f.stage);
@@ -123,6 +133,8 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
       return v.action === 'rebuild' ? { ok: true } : no('stage', `work item is ${f.stage}`);
     }
     case 'respec': {
+      // A planned PR is held to one version of its parent's Spec, and has no Spec of its own to write again: the parent is re-specced.
+      if (f.child === true) return no('state', 'a planned PR is built from its parent\'s Spec; re-spec the parent');
       // D#6 R4d-5b (C34 section 2.3): at Spec ready or Needs a person (the two stages a build can start from), when the latest Spec has no readable file list.
       // The stage and the buildable-kind rules are the build's own, asked of the one table, so the two cannot disagree about where a Spec is built.
       const v = advanceActionFor(stageFacts);
@@ -132,6 +144,7 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
       return { ok: true };
     }
     case 'back_to_discussion':
+      if (f.child === true) return no('state', 'a planned PR has no discussion of its own; send its parent back');
       if (f.stage !== 'needs_human' || !isLegalStageTransition(f.stage, 'discussing')) return no('stage', `work item is ${f.stage}`);
       if (f.discussion_id === null) return no('state', 'work item has no discussion');
       if (!f.has_spec) return no('state', 'work item has no published Spec');
@@ -179,9 +192,10 @@ export function closeOnGithub(f: Pick<OperatorFacts, 'stage' | 'provenance' | 'r
  * second sees the first's stage. Null when the item does not exist for this account.
  */
 export async function readOperatorFacts(client: PoolClient, workItemId: string, role: string, lock = false): Promise<OperatorFacts | null> {
-  const { rows } = await client.query<{ account_id: string; stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; follow_up: boolean; has_spec: boolean; acceptance_files: unknown; live_run: boolean; needs_human_from: string | null; fix_rounds_started: string }>(
-    `SELECT w.account_id, w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind, (w.follow_up_id IS NOT NULL) AS follow_up,
-            EXISTS (SELECT 1 FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
+  const { rows } = await client.query<{ account_id: string; stage: string; provenance: string; repo_id: string | null; gh_number: string | null; child: boolean; parent_gh_number: string | null; discussion_id: string | null; kind: string | null; follow_up: boolean; has_spec: boolean; acceptance_files: unknown; live_run: boolean; needs_human_from: string | null; fix_rounds_started: string }>(
+    `SELECT w.account_id, w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.follow_up_id IS NOT NULL) AS follow_up,
+            (w.planned_pr_key IS NOT NULL) AS child, (SELECT p.gh_number FROM work_items p WHERE p.account_id = w.account_id AND p.id = w.parent_id AND w.planned_pr_key IS NOT NULL) AS parent_gh_number,
+            EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${specOfItemSql('s', 'w')}) AS has_spec,
             (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
             EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = w.id AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled')) AS live_run,
             (SELECT t.from_stage FROM work_item_transitions t WHERE t.work_item_id = w.id AND t.to_stage = 'needs_human' ORDER BY t.at DESC, t.created_at DESC LIMIT 1) AS needs_human_from,
