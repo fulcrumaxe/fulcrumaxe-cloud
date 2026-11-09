@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { isRunnerMode, effectiveModeSql } from "@fx/runner";
+import { holdsSlotSql } from "@fx/core/src/work-items/slotRelease.js";
 import { BUILD_SLOT_STAGES, runnerClampedRepoIds, START_BUILDS_PER_ACCOUNT, START_BUILDS_PER_REPO, listSlotWaiters, resolveBuildLimits } from "../advance/buildSlots.js";
 import { estimateItem, type EstimateBasis } from "../estimate/estimateItem.js";
 import { runPlanFor } from "../estimate/runPlan.js";
@@ -234,7 +235,7 @@ async function loadItems(client: PoolClient, accountId: string, scope: Concurren
     await client.query<{ id: string; repo_id: string; kind: string | null; title: string | null; mode: string }>(
       `SELECT w.id, w.repo_id, w.kind, w.title, ${effectiveModeSql("w", "r")} AS mode
          FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
-        WHERE w.account_id = $1 AND w.stage = ANY($2::text[]) AND ($3::uuid IS NULL OR w.repo_id = $3::uuid)`,
+        WHERE w.account_id = $1 AND ${holdsSlotSql("w", "$2::text[]")} AND ($3::uuid IS NULL OR w.repo_id = $3::uuid)`,
       [accountId, [...BUILD_SLOT_STAGES], repoFilter],
     )
   ).rows;

@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { toQueueRank } from "@fx/core/src/work-items/priority.js";
+import { holdsSlotSql } from "@fx/core/src/work-items/slotRelease.js";
 import { compareQueueOrder } from "@fx/core/src/work-items/queueOrder.js";
 import { effectiveModeSql, isRunnerMode } from "@fx/runner";
 import { repoRunnerCanAttestOrder } from "../mergeQueue/runnerOrderCapability.js";
@@ -14,7 +15,8 @@ import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
  * and 4 per account. THIS MODULE DELIBERATELY IMPORTS NOTHING FROM THE PLAN-DATA PACKAGE (a test reads the import list): no plan tier can
  * set or lower a limit here.
  *
- * What holds a slot: an item at `in_progress`, `pr_opened`, `changes_requested` or `review_passed`. The driver moves an item into
+ * What holds a slot: an item at `in_progress`, `pr_opened`, `changes_requested` or `review_passed`, unless its pull request is stopped for a person (core `slotRelease.ts`: the
+ * newest driver fact is a stop only a person can restart; it counts again as soon as a later fact is written). The driver moves an item into
  * `in_progress` only by taking a slot (`takeBuildSlot`), under the account's advisory lock, so two builds starting at once cannot both
  * pass a limit that has room for one.
  *
@@ -121,7 +123,7 @@ export const WAITER_WINDOW_SECONDS = 3 * BUILD_SLOT_POLL_SECONDS;
  */
 const waiterSql = (): string => `
   SELECT w.id, w.priority, w.queue_rank, w.created_at, w.repo_id, ${effectiveModeSql("w", "r")} AS mode,
-         (SELECT count(*) FROM work_items h WHERE h.account_id = w.account_id AND h.repo_id = w.repo_id AND h.stage = ANY($3::text[])) AS repo_held,
+         (SELECT count(*) FROM work_items h WHERE h.account_id = w.account_id AND h.repo_id = w.repo_id AND ${holdsSlotSql("h", "$3::text[]")}) AS repo_held,
          COALESCE((SELECT s.max_builds FROM build_concurrency_settings s WHERE s.account_id = w.account_id AND s.repo_id = w.repo_id ORDER BY s.version DESC LIMIT 1), $8::int) AS repo_limit
     FROM work_items w
     JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
@@ -194,14 +196,14 @@ async function readSlotCounts(client: PoolClient, accountId: string, workItemId:
   const limits = resolveBuildLimits({ accountValue: await setting(null), repoValue: await setting(repoId), runnerClamped });
   const hosted = !isRunnerMode(item.mode);
   const repoHeld = Number(
-    (await client.query<{ n: string }>("SELECT count(*) AS n FROM work_items WHERE account_id = $1 AND repo_id = $2 AND stage = ANY($3::text[]) AND id <> $4", [accountId, repoId, [...BUILD_SLOT_STAGES], workItemId])).rows[0]!.n,
+    (await client.query<{ n: string }>(`SELECT count(*) AS n FROM work_items h WHERE h.account_id = $1 AND h.repo_id = $2 AND ${holdsSlotSql("h", "$3::text[]")} AND h.id <> $4`, [accountId, repoId, [...BUILD_SLOT_STAGES], workItemId])).rows[0]!.n,
   );
   const accountHeldHosted = hosted
     ? Number(
         (
           await client.query<{ n: string }>(
             `SELECT count(*) AS n FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
-              WHERE w.account_id = $1 AND w.stage = ANY($2::text[]) AND w.id <> $3 AND ${effectiveModeSql("w", "r")} NOT IN ('runner_local', 'runner_verified')`,
+              WHERE w.account_id = $1 AND ${holdsSlotSql("w", "$2::text[]")} AND w.id <> $3 AND ${effectiveModeSql("w", "r")} NOT IN ('runner_local', 'runner_verified')`,
             [accountId, [...BUILD_SLOT_STAGES], workItemId],
           )
         ).rows[0]!.n,

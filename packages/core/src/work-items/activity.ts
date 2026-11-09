@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import { isItemWaitingOnAnswer } from '@fx/db/src/decisionAsks.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { holdsSlotSql } from './slotRelease.js';
 import { HANDOFF_KIND, PROGRESS_EVENT_KINDS, RUNNER_EVENT_KIND, RUNNER_STATE_TYPES, RUNNER_WAITING_KIND, buildFeed } from '../onboarding/previewProgress.js';
 import { RUNNER_USAGE_COLUMN, runnerUsageStateOf, toRunnerUsage, type RunnerUsage, type RunnerUsageState } from '../runs/runnerUsage.js';
 import { commandIsClean } from '@fx/runtime/src/toolActivity.js';
@@ -636,7 +637,7 @@ async function readBuildWaitNotice(client: PoolClient, workItemId: string, stage
   const holder = (
     await client.query<{ gh_number: string | null; stage: string }>(
       `SELECT h.gh_number, h.stage FROM work_items h
-        WHERE h.repo_id = $2::uuid AND h.id <> $1::uuid AND h.stage = ANY($3::text[])
+        WHERE h.repo_id = $2::uuid AND h.id <> $1::uuid AND ${holdsSlotSql('h', '$3::text[]')}
           AND h.account_id = (SELECT account_id FROM work_items WHERE id = $1::uuid)
         ORDER BY h.created_at ASC, h.id ASC LIMIT 1`,
       [workItemId, repoId, [...BUILD_SLOT_HOLDING_STAGES]],
