@@ -141,3 +141,33 @@ describe("a re-entry does not reset the wait budget", () => {
     expect(clock.consume).not.toHaveBeenCalled();
   });
 });
+
+describe("the clock is told what the follower sees of a runner run", () => {
+  it("a pending read says it has not run; a running read says how long its own record shows; a sandbox run is never reported", async () => {
+    const clock = { pause: vi.fn(), resume: vi.fn(), observe: vi.fn() };
+    const reads: AdvanceRunOutcome[] = [
+      { status: "pending", done: false, envelope: null, runtime: "runner", runningMs: null },
+      { status: "running", done: false, envelope: null, runtime: "runner", runningMs: 90_000 },
+      { status: "succeeded", done: true, envelope: { comment: "ok" }, runtime: "runner", runningMs: 120_000 },
+    ];
+    const p = portsOver(() => reads.shift()!);
+    await createFollowedRunner(p, { pollMs: 1 }).panel.runSeat(seat, live(), clock);
+    expect(clock.observe.mock.calls).toEqual([[{ ran: false, runningMs: null }], [{ ran: true, runningMs: 90_000 }]]);
+
+    const sandbox = { pause: vi.fn(), resume: vi.fn(), observe: vi.fn() };
+    const sandboxReads: AdvanceRunOutcome[] = [
+      { status: "running", done: false, envelope: null, runtime: "production", runningMs: 50_000 },
+      { status: "succeeded", done: true, envelope: { comment: "ok" } },
+    ];
+    await createFollowedRunner(portsOver(() => sandboxReads.shift()!), { pollMs: 1 }).panel.runSeat(seat, live(), sandbox);
+    expect(sandbox.observe).not.toHaveBeenCalled();
+  });
+
+  it("a budget keeps the last look, and has none until it is given one", () => {
+    const budget = new WaitBudget(60_000, () => undefined);
+    expect(budget.observed).toBeNull();
+    budget.observe({ ran: true, runningMs: 5 });
+    expect(budget.observed).toEqual({ ran: true, runningMs: 5 });
+    budget.cancel();
+  });
+});

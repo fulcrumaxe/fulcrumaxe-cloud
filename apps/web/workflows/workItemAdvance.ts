@@ -230,6 +230,8 @@ const CAPACITY_WAIT_MS = 4 * 3_600_000;
 const NO_CHANGE_REPEATED = "fix_no_change_repeated";
 /** The short-Spec PM run: one run reading a repository, like the classify run. */
 const LIGHT_SPEC_WAIT_MS = 20 * 60_000;
+/** The Spec step's answer when the PM's deadline fired before its run had done the work (same value as the pipeline's refusal code; a test pins it). */
+const PM_TIMED_OUT_EARLY = "pm_timed_out_early";
 /** The short Spec's named answer checks that earn a second ask. Same values as `LIGHT_SPEC_RETRY_CODES` in @fx/pipeline (a workflow body imports no value from a package; a test pins the two equal). */
 const LIGHT_SPEC_RETRY_CODES: readonly string[] = ["light_answer_missing", "light_answer_too_large", "light_spec_empty", "light_split_flag_missing"];
 
@@ -814,7 +816,15 @@ async function specPhase(args: AdvanceStartArgs, rootId: string, firstAttempt: n
   if (panel.status !== "completed") return { status: "failed", detail: panel.status === "waiting" && panel.reason === QUEUED_ON_RUNNER ? "panel_wait_timeout" : `panel_${panel.status}:${panel.reason ?? "none"}` };
 
   // D#483 S5-k1c: the PM's start can be denied by a spending limit; the Spec step then answers the pause as its refusal and is asked again.
-  const specAsk = await askUntilAllowed(args, "spec", rootId, firstAttempt, (n) => reenter(() => advanceSpecStep(accountId, userId, rootId, args.haltEpoch, actionId, n > 0 ? n : undefined)), (r) => (r.status === "refused" ? r.reason : null));
+  const askSpec = (first: number) => askUntilAllowed(args, "spec", rootId, first, (n) => reenter(() => advanceSpecStep(accountId, userId, rootId, args.haltEpoch, actionId, n > 0 ? n : undefined)), (r) => (r.status === "refused" ? r.reason : null));
+  let specAsk = await askSpec(firstAttempt);
+  // The PM's deadline fired while its runner run had hardly been working (the budget went on something other than the PM): ask ONCE more, as a new ask with its own run key. A
+  // second early deadline is the plain `pm_timed_out`; a deadline after real work was never retried.
+  if (specAsk.pause === null && specAsk.answer.status === "refused" && specAsk.answer.reason === PM_TIMED_OUT_EARLY) {
+    await advanceLogStep("advance.pm_retry", { work_item_id: rootId, at: "spec", reason: PM_TIMED_OUT_EARLY });
+    specAsk = await askSpec(specAsk.attempt + 1);
+    if (specAsk.pause === null && specAsk.answer.status === "refused" && specAsk.answer.reason === PM_TIMED_OUT_EARLY) specAsk = { ...specAsk, answer: { ...specAsk.answer, reason: "pm_timed_out" } };
+  }
   const spec = specAsk.answer;
   if (specAsk.pause !== null) return pausedEnd(rootId, "spec", specAsk.pause, specAsk.attempt);
   if (spec.status === "waiting" && spec.reason === QUEUED_ON_RUNNER) {

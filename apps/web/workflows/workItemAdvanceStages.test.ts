@@ -39,6 +39,8 @@ interface SetupOptions {
   triage?: Record<string, unknown>;
   panel?: AdvanceStepResult;
   spec?: AdvanceStepResult;
+  /** Spec step answers, one per call, before `spec` repeats. */
+  specSequence?: AdvanceStepResult[];
   build?: AdvanceStepResult;
   /** Build step answers, one per call, before `build` (or the default start) repeats. */
   buildSequence?: AdvanceStepResult[];
@@ -81,7 +83,7 @@ function setup(o: SetupOptions = {}) {
     }),
     advanceTriage: vi.fn(async () => o.triage ?? { status: "triaged", stage: "discussing", workItemId: ROOT }),
     advancePanel: vi.fn(async (): Promise<AdvanceStepResult> => o.panel ?? { status: "completed", complete: true, missingRoles: [], round2Ran: false }),
-    advanceSpec: vi.fn(async (): Promise<AdvanceStepResult> => o.spec ?? { status: "published", stage: "spec_ready", version: 1 }),
+    advanceSpec: vi.fn(async (..._a: unknown[]): Promise<AdvanceStepResult> => (o.specSequence?.length ? o.specSequence.shift()! : undefined) ?? o.spec ?? { status: "published", stage: "spec_ready", version: 1 }),
     advanceBuild: vi.fn(async (): Promise<AdvanceStepResult> => (o.buildSequence?.length ? o.buildSequence.shift()! : undefined) ?? o.build ?? { status: "started", runId: "run-b", branch: "fx/issue-7" }),
     advanceBuildFailed: vi.fn(async (): Promise<AdvanceStepResult> => ({ status: "recorded", stage: "needs_human" })),
     advanceStartCheckFix: vi.fn(async (_who: unknown, _failed: string): Promise<AdvanceRunStart> => {
@@ -159,6 +161,39 @@ describe("the panel and the Spec after triage", () => {
     setup({ spec: { status: "refused", reason } });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: `spec_${reason}` });
     expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "spec", reason });
+  });
+
+  // The PM's deadline fired while its runner run had hardly been working: one more ask, as a new ask with its own run key (the attempt number is part of it).
+  describe("a PM deadline that fired before the PM had done the work", () => {
+    const early = { status: "refused", reason: "pm_timed_out_early" } as const;
+    const who = { accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 };
+
+    it("the Spec is asked once more under a new attempt, and the Spec that comes of it is the result", async () => {
+      const w = setup({ specSequence: [early, { status: "published", stage: "spec_ready", version: 2 }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "spec_ready" });
+      expect(w.advanceSpec.mock.calls).toEqual([[who, ARGS.actionId], [who, ARGS.actionId, 1]]);
+      expect(events()).toContain("advance.pm_retry");
+      expect(logs.at(-1)).toMatchObject({ event: "advance.spec_ready", version: 2 });
+    });
+
+    it("a second early deadline ends as the plain pm_timed_out, and nothing is asked a third time", async () => {
+      const w = setup({ specSequence: [early, early] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "spec_pm_timed_out" });
+      expect(w.advanceSpec).toHaveBeenCalledTimes(2);
+      expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "spec", reason: "pm_timed_out" });
+    });
+
+    it("a deadline after real work (pm_timed_out) is not retried", async () => {
+      const w = setup({ spec: { status: "refused", reason: "pm_timed_out" } });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "spec_pm_timed_out" });
+      expect(w.advanceSpec).toHaveBeenCalledTimes(1);
+      expect(events()).not.toContain("advance.pm_retry");
+    });
+
+    it("the second ask refused by something else ends with that reason", async () => {
+      setup({ specSequence: [early, { status: "refused", reason: "pm_failed" }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "spec_pm_failed" });
+    });
   });
 
   it("a Spec too large to store is needs_owner_action, said so in the result and the log", async () => {

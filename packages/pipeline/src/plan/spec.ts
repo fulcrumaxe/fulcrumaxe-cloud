@@ -106,7 +106,7 @@ export interface SpecStepDeps extends PanelDeps {
 }
 
 /** `ReservationPause` (D#483 S5-k1c): the Spec writer's start was denied by a spending limit; the item waits and the start is asked again, so it is no failure. */
-export type SpecRefusal = PanelRefusal | "invalid_spec_output" | "invalid_file_scope" | "invalid_planned_prs" | "planned_prs_too_large" | "pm_timed_out" | "pm_failed" | "item_halted" | StartWait;
+export type SpecRefusal = PanelRefusal | "invalid_spec_output" | "invalid_file_scope" | "invalid_planned_prs" | "planned_prs_too_large" | "pm_timed_out" | "pm_timed_out_early" | "pm_failed" | "item_halted" | StartWait;
 
 export type SpecStepOutcome =
   | { status: "refused"; reason: SpecRefusal }
@@ -668,7 +668,8 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
   // refusal named in the prompt, before the step stops. The second run has its own key (`:fl`), so a replay of this step follows both runs and never starts a third.
   const askPm = async (retry: boolean): Promise<{ refused: SpecRefusal } | { out: unknown }> => {
     const controller = new AbortController();
-    const budget = new WaitBudget(deps.writerTimeoutMs ?? DEFAULT_PANEL_TIMEOUT_MS, () => controller.abort());
+    const totalMs = deps.writerTimeoutMs ?? DEFAULT_PANEL_TIMEOUT_MS;
+    const budget = new WaitBudget(totalMs, () => controller.abort());
     let pm: PanelSeatResult | "timeout";
     try {
       const aborted = new Promise<"timeout">((resolve) => controller.signal.addEventListener("abort", () => resolve("timeout"), { once: true }));
@@ -695,7 +696,10 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
     } finally {
       budget.cancel();
     }
-    if (pm === "timeout") return { refused: "pm_timed_out" };
+    // A deadline that fired while the PM's runner run had hardly been working (it had not left pending, or its own record shows less than half the budget: no record counts as none) was spent on
+    // something other than the PM's work. That is not the PM taking too long: it is told apart so the driver can ask once more under a new key. A run with no such record
+    // (a sandbox run) is a real timeout.
+    if (pm === "timeout") return { refused: budget.observed !== null && (budget.observed.runningMs ?? 0) < totalMs / 2 ? "pm_timed_out_early" : "pm_timed_out" };
     return { out: pm !== null && typeof pm === "object" ? ownData(pm, "agentOutput") : undefined };
   };
   let asked = await askPm(false);

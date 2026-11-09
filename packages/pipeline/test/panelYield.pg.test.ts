@@ -182,6 +182,49 @@ describe("a sandbox panel is unchanged", () => {
   });
 });
 
+describe("a PM deadline that fired before the PM's runner run had done the work", () => {
+  /** The three seats start, the runner finishes them, and the panel step ends. */
+  async function panelDone(t: Awaited<ReturnType<typeof discussing>>) {
+    const panel = runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { pollMs: 5 });
+    await new Promise((r) => setTimeout(r, 40));
+    t.world.finish(() => true);
+    await panel;
+  }
+  /** The panel done, then the Spec step with a short PM budget; the runner claims the PM after the step has started it, and its record shows `runningMs` of work. */
+  async function specWith(runningMs: number, pmTimeoutMs: number) {
+    const t = await discussing("runner", "pending");
+    await panelDone(t);
+    const step = runSpecForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { pollMs: 5, pmTimeoutMs });
+    await new Promise((r) => setTimeout(r, 40));
+    t.world.claim((r) => r.role === "project-manager", runningMs);
+    return { t, out: await step };
+  }
+
+  it("a run whose own record shows little work when the budget ran out is pm_timed_out_early, and the run is cancelled", async () => {
+    const { t, out } = await specWith(300, 1_000);
+    expect(out).toEqual({ status: "refused", reason: "pm_timed_out_early" });
+    expect(t.world.cancelled).toHaveLength(1);
+  });
+
+  it("a run that really worked for the whole budget is the plain pm_timed_out", async () => {
+    const { out } = await specWith(900, 1_000);
+    expect(out).toEqual({ status: "refused", reason: "pm_timed_out" });
+  });
+
+  it("a run that never left the queue is never timed out while it waits: the step hands control back instead", async () => {
+    const t = await discussing("runner", "pending");
+    await panelDone(t);
+    expect(await runSpecForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { pollMs: 5, yieldAfterMs: 60, pmTimeoutMs: 20 })).toEqual({ status: "waiting", reason: "queued_on_runner" });
+    expect(t.world.cancelled).toEqual([]);
+  });
+
+  it("a sandbox run that never ends is a plain pm_timed_out (no record to tell it apart)", async () => {
+    const t = await discussing("production", "running");
+    await panelDone(t);
+    expect(await runSpecForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { pollMs: 5, pmTimeoutMs: 100 })).toEqual({ status: "refused", reason: "pm_timed_out" });
+  });
+});
+
 describe("the yield point leaves room inside the step's time limit", () => {
   it("the yield point plus one seat round, and plus the PM run, are each under the step limit", () => {
     expect(STEP_YIELD_MS + SEAT_ROUND_TIMEOUT_MS).toBeLessThan(STEP_LIMIT_MS);

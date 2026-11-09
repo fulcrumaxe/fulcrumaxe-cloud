@@ -100,6 +100,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
         if (!out.done) {
           // Only a queued RUNNER run waits on a person's machine; a pending sandbox or production run is the platform's own
           // delay and counts against the budget like any other wait.
+          if (out.runtime === "runner") clock?.observe?.({ ran: out.status !== "pending", runningMs: typeof out.runningMs === "number" ? out.runningMs : null });
           if (out.status === "pending" && out.runtime === "runner") clock?.pause();
           else {
             // A live runner run that is no longer pending has been working since its own recorded move out of pending: that time
