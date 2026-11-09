@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { applySettingsPatch, DEFAULT_VERIFY_SETTINGS, isEligible, parseBaseUrl, type VerifySettings } from '../src/verify/settings.js';
-import { canMove, FINISHED_STATUSES, nextStreak, ROW_MOVES, streakOf, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, type StreakInput, type VerifyRowStatus } from '../src/verify/rows.js';
+import { canMove, FINISHED_STATUSES, GATE_METHODS, nextStreak, ROW_MOVES, streakOf, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, type StreakInput, type VerifyRowStatus } from '../src/verify/rows.js';
 
 const MIGRATION = readFileSync(path.join(__dirname, '..', '..', 'db', 'migrations', '1003_verify_stage.sql'), 'utf8');
 const listIn = (constraint: string): string[] => {
@@ -57,8 +57,21 @@ describe('the streak rule', () => {
   it('a verified row deployed by someone else resets (that deploy was a person step)', () => {
     expect(nextStreak(2, { ...clean, deployByOrder: false })).toBe(0);
   });
-  it('a verified row driven by another method neither counts nor resets (the gate is the runner path)', () => {
-    for (const method of ['playwright_runner', 'playwright_sandbox', null] as const) expect(nextStreak(2, { ...clean, method }), String(method)).toBe(2);
+  it('a verified playwright_runner row counts', () => {
+    expect(nextStreak(2, { ...clean, method: 'playwright_runner' })).toBe(3);
+    expect(GATE_METHODS).toContain('playwright_runner');
+  });
+  it('a verified playwright_sandbox row or a null method neither counts nor resets', () => {
+    for (const method of ['playwright_sandbox', null] as const) expect(nextStreak(2, { ...clean, method }), String(method)).toBe(2);
+  });
+  it('a failed or unverified playwright_runner row resets, and a person-deployed one resets', () => {
+    const pw = { ...clean, method: 'playwright_runner' as const };
+    for (const status of ['failed', 'unverified'] as const) expect(nextStreak(2, { ...pw, status }), status).toBe(0);
+    expect(nextStreak(2, { ...pw, deployByOrder: false })).toBe(0);
+  });
+  it('a mixed chrome_runner then playwright_runner sequence counts both', () => {
+    expect(streakOf([clean, { ...clean, method: 'playwright_runner' }])).toBe(2);
+    expect(streakOf([clean, { ...clean, method: 'playwright_runner' }, { ...clean, method: 'playwright_sandbox' }, { ...clean, method: 'playwright_runner' }])).toBe(3);
   });
   it('a row that has not finished changes nothing', () => {
     for (const status of ['pending', 'deploying', 'running'] as VerifyRowStatus[]) expect(nextStreak(2, { ...clean, status }), status).toBe(2);
