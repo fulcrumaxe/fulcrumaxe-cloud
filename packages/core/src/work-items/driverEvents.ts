@@ -55,6 +55,10 @@ import { ACTOR_YOU, PERSON_REQUEUE_REASON, QUEUE_AGAIN_ACTION, queueAuditAtSql }
  *                         reasons: `actor_user` | `actor_app`; head_sha, pr_number; queue_entry_id when the head is the one the gate enqueued. One row per delivery, so the rows for a head count its removals.
  *   merged_via_queue      D#694: the merge queue merged the pull request (B6-2: written by the pull_request.closed delivery of an item that has a merge_enqueued fact; one row per pull request and head).
  *                         head_sha: the head GitHub merged. If it differs from the enqueued head an `escalated` fact (code: merged_head_differs) is written beside it. queue_entry_id names the entry.
+ *   verify_started       D#6 V1 (migration 1003): the post-merge verify stage started checking the merged item (run_id: the tester run; head_sha: the merge commit; pr_number). Written with the row's move.
+ *   verify_passed         every journey of the item's verify row passed with evidence.
+ *   verify_failed         a journey found a defect. reasons: the failing journey ids as codes (c1, s_sign_in).
+ *   verify_unverified     the check could not be made. code: the closed reason (no_browser, deploy_failed, commit_not_deployed, ...); never a pass.
  */
 export const DRIVER_EVENT_KINDS = [
   'build_refused',
@@ -81,6 +85,10 @@ export const DRIVER_EVENT_KINDS = [
   'merge_enqueued',
   'merge_dequeued',
   'merged_via_queue',
+  'verify_started',
+  'verify_passed',
+  'verify_failed',
+  'verify_unverified',
 ] as const;
 
 /**
