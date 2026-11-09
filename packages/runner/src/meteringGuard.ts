@@ -23,9 +23,9 @@ import type { NormalizedEvent } from "./types.js";
  * is given.
  */
 
-import { createUsageMeter, MAX_LINE_INPUT_SIDE_TOKENS, MAX_LINE_OUTPUT_TOKENS, MAX_METERED_IDS, type MeterRise, type TokenTotals, type UsageMeter, type UsageMeterOptions } from "@fulcrumaxe/runner-protocol";
-export { createUsageMeter, MAX_LINE_INPUT_SIDE_TOKENS, MAX_LINE_OUTPUT_TOKENS, MAX_METERED_IDS };
-export type { MeterRise, TokenTotals, UsageMeter, UsageMeterOptions };
+import { createUsageMeter, MAX_LINE_INPUT_SIDE_TOKENS, MAX_LINE_OUTPUT_TOKENS, MAX_METERED_IDS, isStoredKey, messageIdKey, newestWithinWindow, SNAPSHOT_ID_WINDOW, type MeterRise, type TokenTotals, type UsageMeter, type UsageMeterOptions, type UsageMeterSnapshot } from "@fulcrumaxe/runner-protocol";
+export { createUsageMeter, messageIdKey, MAX_LINE_INPUT_SIDE_TOKENS, MAX_LINE_OUTPUT_TOKENS, MAX_METERED_IDS, SNAPSHOT_ID_WINDOW };
+export type { MeterRise, TokenTotals, UsageMeter, UsageMeterOptions, UsageMeterSnapshot };
 
 /**
  * D#2 H14c-5b-2a (C46 MP-TURNS/MP-CLOCK/MP-SILENT, C48 LIMIT-END): the runner
@@ -115,6 +115,62 @@ export interface RunGuard {
   current(): Readonly<RunLimits>;
   /** Clears both timers. Idempotent. */
   stop(): void;
+  /** RLR-2: the guard's state as JSON (bounded); does not change the guard. */
+  snapshot(): GuardSnapshot;
+}
+
+/**
+ * RLR-2: what a reader checkpoints of the guard. The count of distinct message ids is kept whole, but only the
+ * newest ids themselves (`newestWithinWindow`): a forgotten id seen again counts once more, so a restore can only
+ * reach `maxModelCalls` earlier, never later. `startedMs` is the runner's clock when the command started; a
+ * restored guard re-arms its wall clock from it, so a handover does not extend the window.
+ */
+export interface GuardSnapshot {
+  limits: RunLimits;
+  startedMs: number;
+  /** The runner's clock when the silence window last began (the command's start or the last metered rise); null before the first start. A restored guard counts silence from here, so handovers cannot keep resetting it. */
+  silentSinceMs: number | null;
+  lastRiseMs: number | null;
+  idCount: number;
+  ids: string[];
+  meter: UsageMeterSnapshot;
+  /** The limit the guard ended the run at, once it has: a restored guard never fires, and never kills, a second time. */
+  fired: RunLimit | null;
+}
+
+const RUN_LIMIT_KINDS: readonly string[] = ["run_time", "model_calls", "per_run_usd", "turns", "silence"];
+
+function parseGuardSnapshot(raw: unknown): GuardSnapshot {
+  const r = raw as Record<string, unknown> | null;
+  if (typeof r !== "object" || r === null) throw new Error("guard snapshot: not a snapshot");
+  const limits = resolveRunLimits(r.limits as Partial<RunLimits>);
+  const num = (v: unknown, what: string): number => {
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw new Error(`guard snapshot: ${what} is not a count`);
+    return v;
+  };
+  if (!Array.isArray(r.ids) || r.ids.length > SNAPSHOT_ID_WINDOW || !r.ids.every((id) => typeof id === "string")) throw new Error("guard snapshot: bad ids");
+  const idCount = num(r.idCount, "idCount");
+  // Keys are stored as `messageIdKey` made them; a duplicate would make the held count smaller than the ids it stands for.
+  if (!(r.ids as unknown[]).every(isStoredKey) || new Set(r.ids as string[]).size !== r.ids.length) throw new Error("guard snapshot: bad ids");
+  if (idCount < r.ids.length) throw new Error("guard snapshot: idCount below the ids held");
+  let fired: RunLimit | null = null;
+  if (r.fired !== null) {
+    const f = r.fired as Record<string, unknown> | undefined;
+    if (typeof f !== "object" || f === null || !RUN_LIMIT_KINDS.includes(f.kind as string) || typeof f.limit !== "number" || typeof f.observed !== "number") {
+      throw new Error("guard snapshot: bad fired limit");
+    }
+    fired = { kind: f.kind as RunLimit["kind"], limit: f.limit, observed: f.observed };
+  }
+  return {
+    limits,
+    startedMs: num(r.startedMs, "startedMs"),
+    silentSinceMs: r.silentSinceMs === null ? null : num(r.silentSinceMs, "silentSinceMs"),
+    lastRiseMs: r.lastRiseMs === null ? null : num(r.lastRiseMs, "lastRiseMs"),
+    idCount,
+    ids: r.ids as string[],
+    meter: r.meter as UsageMeterSnapshot, // validated by createUsageMeter({ restore })
+    fired,
+  };
 }
 
 /** H14c-5c-2a (X-1/X-4): asked when `run_time` or `model_calls` is reached. */
@@ -129,23 +185,33 @@ export interface GuardExtension {
 
 export const DEFAULT_DECISION_TIMEOUT_MS = 30_000;
 
-/** `onLimit` is called at most once, with the first limit reached (an extended limit is not reached). */
-export function createRunGuard(initial: RunLimits, onLimit: (limit: RunLimit) => void, extension?: GuardExtension): RunGuard {
-  const limits = { ...initial };
-  const ids = new Set<string>();
-  const meter = createUsageMeter();
+/**
+ * `onLimit` is called at most once, with the first limit reached (an extended limit is not reached).
+ * `restore` (RLR-2) is a `GuardSnapshot` from an earlier guard of the same run: the limits in force, the clock's
+ * start, the id count, the meter and an already-reached limit come from it, and `initial` is ignored.
+ */
+export function createRunGuard(initial: RunLimits, onLimit: (limit: RunLimit) => void, extension?: GuardExtension, restore?: unknown): RunGuard {
+  const snap = restore === undefined ? undefined : parseGuardSnapshot(restore);
+  const limits = { ...(snap?.limits ?? initial) };
+  const ids = new Set<string>(snap?.ids);
+  /** Distinct ids counted that `ids` no longer holds (only a restore leaves any); the parse refused duplicates, so the set is the array. */
+  const idsDropped = snap === undefined ? 0 : snap.idCount - ids.size;
+  const idCount = (): number => idsDropped + ids.size;
+  const meter = createUsageMeter({ restore: snap?.meter });
   let wall: ReturnType<typeof setTimeout> | undefined;
   let silence: ReturnType<typeof setTimeout> | undefined;
   let decisionTimer: ReturnType<typeof setTimeout> | undefined;
-  let startedAt = 0;
-  let silentSince = 0;
-  let lastRise: number | undefined;
-  let fired = false;
+  let startedAt = snap?.startedMs ?? 0;
+  let silentSince = snap?.silentSinceMs ?? 0;
+  let lastRise: number | undefined = snap?.lastRiseMs ?? undefined;
+  let fired = snap?.fired != null;
+  let firedLimit: RunLimit | null = snap?.fired ?? null;
   let deciding = false;
   let stopped = false;
   const finish = (limit: RunLimit): void => {
     if (fired) return;
     fired = true;
+    firedLimit = limit;
     guard.stop();
     onLimit(limit);
   };
@@ -187,7 +253,7 @@ export function createRunGuard(initial: RunLimits, onLimit: (limit: RunLimit) =>
         }
         // Whichever limit was raised, the other may have run out while the decision was pending.
         armWall();
-        if (ids.size > limits.maxModelCalls) fire({ kind: "model_calls", limit: limits.maxModelCalls, observed: ids.size });
+        if (idCount() > limits.maxModelCalls) fire({ kind: "model_calls", limit: limits.maxModelCalls, observed: idCount() });
       });
   };
   const armWall = (): void => {
@@ -198,27 +264,30 @@ export function createRunGuard(initial: RunLimits, onLimit: (limit: RunLimit) =>
     );
     wall.unref?.();
   };
-  const armSilence = (): void => {
+  const armSilence = (since = Date.now()): void => {
     clearTimeout(silence);
-    silentSince = Date.now();
+    silentSince = since;
     silence = setTimeout(
       () => finish({ kind: "silence", limit: limits.meteringSilenceMs, observed: Date.now() - silentSince }),
-      limits.meteringSilenceMs,
+      Math.max(limits.meteringSilenceMs - (Date.now() - since), 0),
     );
     silence.unref?.();
   };
   const guard: RunGuard = {
     start() {
       stopped = false;
-      startedAt = Date.now();
+      // A restored guard keeps the original start, so a handover does not give the run a fresh window.
+      if (!(snap !== undefined && snap.startedMs > 0)) startedAt = Date.now();
+      if (fired) return; // the limit was already reached and acted on
       armWall();
-      armSilence();
+      // A restored guard counts silence from where the earlier one began it (as the wall clock counts from its start): a handover is not a rise.
+      armSilence(snap?.silentSinceMs != null && snap.silentSinceMs > 0 ? snap.silentSinceMs : undefined);
     },
     observe(event) {
       if (fired) return;
       if (event.type === "assistant" && typeof event.messageId === "string") {
-        ids.add(event.messageId);
-        if (ids.size > limits.maxModelCalls) fire({ kind: "model_calls", limit: limits.maxModelCalls, observed: ids.size });
+        ids.add(messageIdKey(event.messageId));
+        if (idCount() > limits.maxModelCalls) fire({ kind: "model_calls", limit: limits.maxModelCalls, observed: idCount() });
         if (fired) return;
       }
       if (meter.observe(event) !== undefined && silence !== undefined) {
@@ -227,12 +296,22 @@ export function createRunGuard(initial: RunLimits, onLimit: (limit: RunLimit) =>
       }
     },
     turnsLimit(resultSubtype) {
-      if (resultSubtype !== CLI_MAX_TURNS_SUBTYPE || ids.size < limits.maxTurns) return undefined;
-      return { kind: "turns", limit: limits.maxTurns, observed: ids.size };
+      if (resultSubtype !== CLI_MAX_TURNS_SUBTYPE || idCount() < limits.maxTurns) return undefined;
+      return { kind: "turns", limit: limits.maxTurns, observed: idCount() };
     },
-    modelCalls: () => ids.size,
+    modelCalls: idCount,
     lastRiseAt: () => lastRise,
     current: () => ({ ...limits }),
+    snapshot: () => ({
+      limits: { ...limits },
+      startedMs: startedAt,
+      silentSinceMs: silentSince > 0 ? silentSince : null,
+      lastRiseMs: lastRise ?? null,
+      idCount: idCount(),
+      ids: newestWithinWindow([...ids]),
+      meter: meter.snapshot(),
+      fired: firedLimit === null ? null : { ...firedLimit },
+    }),
     stop() {
       stopped = true;
       clearTimeout(wall);
