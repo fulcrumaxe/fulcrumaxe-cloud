@@ -12,7 +12,7 @@ import { PROPOSAL_VERIFY_PASS_MS, proposalVerifySweepHandler, type ProposalVerif
 const SECRET = "test-cron-secret";
 const NONE: ProposalVerifyCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_limit: 0, daily_cap: 0, skipped: 0, failed: 0 };
 const ANALYSIS_NONE: DocsCodeAnalysisCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_cap: 0, skipped: 0, failed: 0 };
-const STAGE_NONE: VerifyStageCounts = { listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 };
+const STAGE_NONE: VerifyStageCounts = { listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, started: 0, held: 0, settled: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 };
 const AUTO_NONE: AutoStartCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 };
 const DRAIN_NONE: DiscoveryDrainCounts = { accounts: 0, succeeded: 0, skipped: 0, failed: 0, errors: 0, more: false };
 const SCHEDULE_NONE: DiscoveryScheduleCounts = { listed: 0, queued: 0, analyses: 0, unchanged: 0, not_analysed: 0, errors: 0, more: false };

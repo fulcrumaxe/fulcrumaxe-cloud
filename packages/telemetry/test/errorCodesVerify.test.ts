@@ -9,7 +9,7 @@ describe("the verify stage codes", () => {
     "no_browser", "chrome_not_connected", "wrong_account", "sign_in_refused", "deploy_failed", "deployment_unreachable", "commit_not_deployed",
     "envelope_rejected", "hollow_pass", "journey_blocked", "journeys_missing", "run_failed", "verify_disabled",
   ];
-  const refusals = ["verify_base_url_invalid", "verify_base_url_required", "verify_setting_invalid", "verify_row_invalid"];
+  const refusals = ["verify_base_url_invalid", "verify_base_url_required", "verify_setting_invalid", "verify_row_invalid", "verify_bug_item_not_attached"];
   it("keeps every reason and refusal, next to each other", () => {
     const all = [...reasons, ...refusals];
     for (const code of all) expect(errorCodeOrOther(code), code).toBe(code);

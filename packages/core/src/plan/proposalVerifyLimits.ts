@@ -63,16 +63,25 @@ const verifierRunsToday = (externalOnly: boolean): string => `SELECT k.run_id FR
 export const ANALYSIS_KEY_PREFIX = 'docs-code-analysis:';
 export const analysisRunKey = (analysisId: string, attempt: number): string => `${ANALYSIS_KEY_PREFIX}${analysisId}:${attempt}`;
 
+/** D#749 V3b: the post-merge tester's run key, `verify-stage:<verify_row_id>`. The row id stays the second `:` field. */
+export const VERIFY_STAGE_KEY_PREFIX = 'verify-stage:';
+export const verifyStageRunKey = (rowId: string): string => `${VERIFY_STAGE_KEY_PREFIX}${rowId}`;
+
 /**
- * Every run that spends against the repository's day: its verifier runs and (S4-f3) its analyst runs, started this UTC day. One counter, so the
- * two roles share `perRepoDailyUsd`. The analysis prefix is a literal, so no caller can leave it out.
+ * Every run that spends against the repository's day: its verifier runs, (S4-f3) its analyst runs and (D#749 V3b) its post-merge tester runs, started this
+ * UTC day. One counter, so the roles share `perRepoDailyUsd`. The prefixes are literals, so no caller can leave one out.
  */
 const runsToday = (): string => `${verifierRunsToday(false)}
       UNION ALL
      SELECT k.run_id FROM agent_run_idempotency_keys k
        JOIN discovery_analyses d ON d.account_id = k.account_id AND d.id::text = split_part(k.idempotency_key, ':', 2)
       WHERE k.account_id = $1 AND k.idempotency_key LIKE '${ANALYSIS_KEY_PREFIX}%' AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-        AND d.repo_id = $2`;
+        AND d.repo_id = $2
+      UNION ALL
+     SELECT k.run_id FROM agent_run_idempotency_keys k
+       JOIN verify_rows v ON v.account_id = k.account_id AND v.id::text = split_part(k.idempotency_key, ':', 2)
+      WHERE k.account_id = $1 AND k.idempotency_key LIKE '${VERIFY_STAGE_KEY_PREFIX}%' AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        AND v.repo_id = $2`;
 
 /**
  * External proposals of one repository whose verifier run was started this UTC day. It counts run STARTS: every attempt's key is a row,
