@@ -147,6 +147,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#587 B-1, the microVM image build (`fx-runner vm build-image`). It reads no environment and starts no process itself: crane, tar and mke2fs run through the injected host (scripts/vm-main.mjs).
   "src/vm/buildImage.ts": ["crypto", "fs", "path"], // SHA-256 of the root disk and the guest files, a work directory per architecture, a sparse disk file of the computed size, and the staged guest files
   "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
+  // D#749 V2c-2a, the verify browser server. No environment read (the host environment, streams and job directory arrive as arguments) and no process of its own: Chromium is started by playwright-core.
+  "src/verifyBrowser/server.ts": ["fs", "path", "stream"], // the one answer.json in the job directory (exclusive create, 0600); stream is only the types of the injected input and output
+  "src/verifyBrowser/proxy.ts": ["http", "net"], // the origin proxy on 127.0.0.1: an http server for forwarded requests and CONNECT tunnels to the one base host and port; the upstream address is the base's own
+  "src/verifyBrowser/driver.ts": ["fs", "path"], // the job directory's HOME and TMPDIR (lstat of the job directory, non-recursive mkdir so nothing existing is reused, removal of exactly those two) and the lookup of an installed Chromium (directory listing, existence)
 };
 
 /**

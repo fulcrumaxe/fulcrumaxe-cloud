@@ -20,9 +20,11 @@
   "dependencies": {
     "@fulcrumaxe/runner-protocol": "workspace:*",
     "js-yaml": "4.3.2",
+    "playwright-core": "1.63.0",
     "tuf-js": "6.0.0"
   },
   "devDependencies": {
+    "@fx/pipeline": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/runtime": "workspace:*",
     "@fx/sitekit-checks": "workspace:*",

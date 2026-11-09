@@ -761,10 +761,16 @@ importers:
       js-yaml:
         specifier: 4.3.2
         version: 4.3.2
+      playwright-core:
+        specifier: 1.63.0
+        version: 1.63.0
       tuf-js:
         specifier: 6.0.0
         version: 6.0.0(supports-color@10.2.2)
     devDependencies:
+      '@fx/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner
