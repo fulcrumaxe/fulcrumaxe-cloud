@@ -172,6 +172,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "compute_cap_exceeded",
   // The runner's daily run limit (the admit refusal of RunnerTarget; also the code of the waiting fact a review parked for it leaves).
   "runner_daily_limit",
+  // The post-merge tester (D#749): its figures are missing, its run figure is above its own daily cap, or a row waits on that cap (reported once per repository per day).
+  "deploy_verify_unconfigured",
+  "deploy_verify_run_over_daily",
+  "deploy_verify_daily_cap",
   // Run handoff (D#599 HO-2a): the refusals of POST /runs/{id}/handoff and its cancel, thrown through a variable (the runner-cloud service's code), so the scan cannot see them.
   "run_not_movable",
   "already_on_that_side",

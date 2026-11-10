@@ -46,6 +46,10 @@ describe("the error-code allowlist", () => {
     }
   });
 
+  it("keeps the post-merge tester's three stop codes (D#749) instead of folding them into other", () => {
+    for (const code of ["deploy_verify_unconfigured", "deploy_verify_run_over_daily", "deploy_verify_daily_cap"]) expect(errorCodeOrOther(code), code).toBe(code);
+  });
+
   it("keeps the cloud Gate 1 stop (D#6 CLOUD-POSTS-FX-GATE1 PR 1c) instead of folding it into other", () => {
     expect(errorCodeOrOther("gate1_status_foreign")).toBe("gate1_status_foreign");
   });

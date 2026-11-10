@@ -479,11 +479,13 @@ describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {
 
     // The same counter the other way: the analyst's open reservations (its model figure and the run's compute estimate, 1.444 together) count against a
     // verifier run's day, as the verifier's own do.
-    expect(await overRepoDailyUsd(admin, a.accountId, repoId, 0.4, 1.8)).toBe(true);
-    expect(await overRepoDailyUsd(admin, a.accountId, repoId, 0.4, 1.9)).toBe(false);
+    expect(await overRepoDailyUsd(admin, a.accountId, repoId, 0.4, 1.8, "claims")).toBe(true);
+    expect(await overRepoDailyUsd(admin, a.accountId, repoId, 0.4, 1.9, "claims")).toBe(false);
+    // The post-merge tester has its own counter: none of that verifier and analyst spend is in it.
+    expect(await overRepoDailyUsd(admin, a.accountId, repoId, 0.4, 0.5, "tester")).toBe(false);
     // And a repository's other tenants are not counted.
     const other = await target();
-    expect(await overRepoDailyUsd(admin, other.a.accountId, other.repoId, 0.4, 1.8)).toBe(false);
+    expect(await overRepoDailyUsd(admin, other.a.accountId, other.repoId, 0.4, 1.8, "claims")).toBe(false);
     await ended(id);
   });
 
