@@ -108,6 +108,37 @@ describe('migration 0805: agent_runs.min_protocol_version (D#599 PL-2b-1)', () =
     }
   });
 
+  // 1007 (D#749 V3c): a job that carries a browser method is never written without the browser floor, protocol 16.
+  it('refuses a first job write that carries a browser method with no minimum or one below 16, and accepts it with 16 or more', async () => {
+    for (const method of ['chrome_runner', 'playwright_runner']) {
+      const withMethod = JSON.stringify({ job: { browser_method: method }, signature: 'x' });
+      for (const minimum of [null, '15', '8']) {
+        const id = await run(null);
+        await admin.query('BEGIN');
+        try {
+          if (minimum !== null) await admin.query("SELECT set_config('fx.job_min_protocol', $1, true)", [minimum]);
+          await expect(admin.query('UPDATE agent_runs SET job_signed = $2::jsonb WHERE id = $1', [id, withMethod]), `${method} ${minimum}`).rejects.toMatchObject({ code: '23514' });
+        } finally {
+          await admin.query('ROLLBACK');
+        }
+      }
+      for (const minimum of ['16', '17']) {
+        const id = await run(null);
+        await admin.query('BEGIN');
+        try {
+          await admin.query("SELECT set_config('fx.job_min_protocol', $1, true)", [minimum]);
+          await admin.query('UPDATE agent_runs SET job_signed = $2::jsonb WHERE id = $1', [id, withMethod]);
+          expect((await admin.query<{ v: number }>('SELECT min_protocol_version AS v FROM agent_runs WHERE id = $1', [id])).rows[0]!.v).toBe(Number(minimum));
+        } finally {
+          await admin.query('ROLLBACK');
+        }
+      }
+    }
+    // A job with no browser method is untouched by the rule: no minimum is fine.
+    const id = await run(null);
+    await admin.query('UPDATE agent_runs SET job_signed = $2::jsonb WHERE id = $1', [id, JSON.stringify({ job: { role: 'executor' }, signature: 'x' })]);
+  });
+
   it('app_user reads it and cannot write it; platform_ops and the public hold nothing on the column', async () => {
     expect(await q("SELECT has_column_privilege('app_user', 'public.agent_runs', 'min_protocol_version', 'SELECT') AS ok")).toBe(true);
     for (const priv of ['UPDATE', 'INSERT']) expect(await q(`SELECT has_column_privilege('app_user', 'public.agent_runs', 'min_protocol_version', '${priv}') AS ok`), priv).toBe(false);

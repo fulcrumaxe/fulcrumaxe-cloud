@@ -21,6 +21,17 @@ describe('parseEnvelope', () => {
     }
   });
 
+  it('D#749 V3c: reads the optional top-level signed_in_as (1 to 100 characters, no control character) and nothing else new', () => {
+    expect(parseEnvelope(env([journey()], { signed_in_as: 'fx-tester' }))).toMatchObject({ ok: true, signedInAs: 'fx-tester' });
+    expect(parseEnvelope(JSON.stringify(env([journey()], { signed_in_as: 'a'.repeat(100) })))).toMatchObject({ ok: true, signedInAs: 'a'.repeat(100) });
+    expect(parseEnvelope(env([journey()], { signed_in_as: 'x' }))).toMatchObject({ ok: true, signedInAs: 'x' });
+    const without = parseEnvelope(env([journey()]));
+    expect(without.ok && Object.hasOwn(without, 'signedInAs')).toBe(false);
+    for (const bad of ['', 'a'.repeat(101), 'a\nb', 'a\u0000b', 'a\u007fb', 'a\u009fb', 5, null, true, {}, ['x']]) expect(rejected(env([journey()], { signed_in_as: bad })), JSON.stringify(bad)).toBe('bad_value');
+    expect(rejected(env([journey()], { signed_in_as: 'x', account: 'y' }))).toBe('extra_key');
+    expect(rejected({ signed_in_as: 'x' })).toBe('bad_shape');
+  });
+
   it('rejects a key it does not know, at the top, in a journey and in a step', () => {
     expect(rejected(env([journey()], { verdict: 'pass' }))).toBe('extra_key');
     expect(rejected(env([journey({ notes: 'all good' })]))).toBe('extra_key');

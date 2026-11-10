@@ -14,6 +14,7 @@ import {
   CHECK_JOB_MIN_PROTOCOL,
   CONFLICT_ATTEST_JOB_MIN_PROTOCOL,
   SCOPE_JOB_MIN_PROTOCOL,
+  BROWSER_METHOD_JOB_MIN_PROTOCOL,
   JobConflictRoundSchema,
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
@@ -578,7 +579,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
         // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for pins (CX-5c2): the strict parse again. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason. And for a continuation's `base_sha` (R2-b): the strict parse again, and a runner that ignored it would pick its own diff base.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, continues !== null && isChildItemBranch(continues.branch) ? CHILD_BRANCH_JOB_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, candidate.conflict_round ? CONFLICT_ATTEST_JOB_MIN_PROTOCOL : 0, candidate.scope ? SCOPE_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, continues !== null && isChildItemBranch(continues.branch) ? CHILD_BRANCH_JOB_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, candidate.conflict_round ? CONFLICT_ATTEST_JOB_MIN_PROTOCOL : 0, candidate.scope ? SCOPE_JOB_MIN_PROTOCOL : 0, run.browserMethod !== undefined ? BROWSER_METHOD_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

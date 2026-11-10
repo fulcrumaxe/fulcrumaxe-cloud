@@ -163,6 +163,7 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   early `check_failed` return and runs the commit and scope-list tests as always (`no_commit`, `scope_unknown` stand), then ends the run `check_failed` with no pull request opened (opening one
   to read its files and closing it again would move the item through the webhook). The stored check carries `out_of_scope`, the branch is recorded for the fix round, and one log line
   `runner.done.scope_hint` is left. A file really outside the list is thus met by the check-fix round, not by a `scope_violation` record.
+- The deploy verifier's browser method (D#749 V3c): its job carries `browser_method` (`chrome_runner` or `playwright_runner`), signed with it. Such a job is gated at protocol 16 (`BROWSER_METHOD_JOB_MIN_PROTOCOL`): a runner below it is never offered one, whatever browser capability it advertises (its strict parse would refuse the key and fail its whole claim), and the run reads `waiting_for_runner_update` naming 16. No other job carries the key, so every other job keeps its floor.
 - `repo_runner_sandbox_allowances` is append-only (0770): one row per approval, newest wins, each with the set's sha256 and one audit row.
   Leaving `runner_local` sets the approved set aside in the same transaction (kept on record, ignored), so a repo that comes back is approved
   again first. Ruling: Chromium's `--no-sandbox` for test browsers is not an allowance kind in R7a or R7b; the self-build run (R7e) records it as a

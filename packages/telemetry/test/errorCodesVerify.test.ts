@@ -7,7 +7,7 @@ import { OWN_ERROR_CODES, errorCodeOrOther } from "../src/errorCodes.js";
 describe("the verify stage codes", () => {
   const reasons = [
     "no_browser", "chrome_not_connected", "wrong_account", "sign_in_refused", "deploy_failed", "deployment_unreachable", "commit_not_deployed",
-    "envelope_rejected", "hollow_pass", "journey_blocked", "journeys_missing", "run_failed", "verify_disabled",
+    "envelope_rejected", "hollow_pass", "journey_blocked", "journeys_missing", "run_failed", "verify_disabled", "account_unverifiable",
   ];
   const refusals = ["verify_base_url_invalid", "verify_base_url_required", "verify_setting_invalid", "verify_row_invalid", "verify_bug_item_not_attached"];
   it("keeps every reason and refusal, next to each other", () => {
@@ -18,9 +18,9 @@ describe("the verify stage codes", () => {
     const source = readFileSync(path.join(__dirname, "..", "src", "errorCodes.ts"), "utf8");
     expect(source).toContain("// Verify stage (D#6 V1)");
   });
-  it("names the same reasons the table's check accepts", () => {
+  it("names the same reasons the table's check accepts (the list 1007 replaced 1003's with)", () => {
     const dir = path.join(__dirname, "..", "..", "db", "migrations");
-    const sql = readFileSync(path.join(dir, "1003_verify_stage.sql"), "utf8");
+    const sql = readFileSync(path.join(dir, "1007_verify_browser_driver.sql"), "utf8");
     const list = /verify_rows_reason_check CHECK \(reason_code IN \(([^)]*)\)\)/.exec(sql)![1]!;
     expect([...list.matchAll(/'([a-z_]+)'/g)].map((m) => m[1])).toEqual(reasons);
   });

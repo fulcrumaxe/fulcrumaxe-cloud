@@ -1266,7 +1266,7 @@ describe("a cross-side fix round on the item's pull request branch (D#599 PL-2b-
   });
 
   it("sends the version this build declares, which is at least the cross-side floor and is the pins floor", () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(15);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(16);
     expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBe(3);
     expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(CONTINUES_CROSS_SIDE_MIN_PROTOCOL);
     expect(MEMORY_JOB_MIN_PROTOCOL).toBe(4);

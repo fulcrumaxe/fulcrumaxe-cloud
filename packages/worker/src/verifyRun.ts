@@ -5,7 +5,7 @@ import { DEPLOY_VERIFIER_ROLE, isBrowserMethod, type BrowserMethod } from "@fulc
 import { overRepoDailyUsd, verifyStageRunKey } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { fileBugItem } from "@fx/core/src/verify/bugItem.js";
 import type { Journey } from "@fx/core/src/verify/journeys.js";
-import { finishVerifyRow, readVerifyRow, startRunning, type FinishInput, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
+import { finishVerifyRow, readVerifyRow, startRunning, type FinishInput, type VerifyMethod, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
 import { readVerifySettings } from "@fx/core/src/verify/settings.js";
 import { cancelOpenOrders } from "@fx/core/src/verify/orders.js";
 import { VERIFIER_WORKDIR, isRunnerMode, readExecutionMode, type StartAgentRunInput } from "@fx/runner";
@@ -50,15 +50,15 @@ export interface VerifyRunDeps {
   /** A starter that leaves a queued runner run pending for a runner to claim (`queued: "accept"`). */
   starter: RunStarter;
   /** The tester's seat. Refused (no card, no model, no installation): the row waits and the refusal is reported. */
-  resolveSeat: (request: { accountId: string; repoId: string; role: string; capUsd: number }) => Promise<SeatResult>;
+  resolveSeat: (request: { accountId: string; repoId: string; role: string; purpose: "deploy_verify"; capUsd: number }) => Promise<SeatResult>;
   /** The figures, read when needed (plan data in production). A throw fails closed: nothing starts. */
   limits: () => VerifyRunLimits;
   /** pipeline's `buildVerifyPrompt`. */
   prompt: (input: { baseUrl: string; mergeSha: string; deployedCommit: string; journeys: readonly Journey[] }) => string;
   /** The `verify.browser_driver` setting of the repository (and the runner), when one is stored. Not given, or null: the default method. A throw fails closed: nothing starts. */
   browserDriver?: (input: { accountId: string; repoId: string }) => Promise<string | null>;
-  /** pipeline's `outcomeFromAnswer`. */
-  outcome: (journeys: readonly Journey[], raw: unknown) => VerifyOutcome;
+  /** pipeline's `outcomeFromAnswer`, given the repository's configured test account and the row's signed method (the account is judged from the envelope's `signed_in_as`, written by the verify server on a playwright runner only). */
+  outcome: (journeys: readonly Journey[], raw: unknown, context: { testAccountLabel: string | null; method: VerifyMethod | null }) => VerifyOutcome;
 }
 
 /**
@@ -67,6 +67,14 @@ export interface VerifyRunDeps {
  * and the claim then hands the job only to a runner holding that method's capability.
  */
 export const chooseBrowserMethod = (driver: string | null | undefined): BrowserMethod => (driver === "chrome" ? "chrome_runner" : "playwright_runner");
+
+/** The repository's `browser_driver` setting (migration 1007), read under its tenant. Null when the repository has no settings row. */
+export async function readBrowserDriver(pool: Pool, q: { accountId: string; repoId: string }): Promise<string | null> {
+  return withTenant(pool, q.accountId, async (client) => {
+    const { rows } = await client.query<{ browser_driver: string }>("SELECT browser_driver FROM verify_settings WHERE account_id = $1 AND repo_id = $2", [q.accountId, q.repoId]);
+    return rows[0]?.browser_driver ?? null;
+  });
+}
 
 const requestHash = (row: VerifyRow, deployed: string): string => createHash("sha256").update(JSON.stringify(["verify-stage", row.id, row.merge_sha, deployed])).digest("hex");
 
@@ -115,6 +123,16 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
     const clone = codeOwner && codeName ? { owner: codeOwner, name: codeName } : state.repo?.gh_owner && state.repo.gh_name ? { owner: state.repo.gh_owner, name: state.repo.gh_name } : null;
     if (clone === null || state.settings.baseUrl === null) return "held";
 
+    // The prompt refuses a journey whose id or source is not ours. The row's journeys never change, so that refusal never clears: the row ends rather than being tried every tick.
+    let prompt: string;
+    try {
+      prompt = deps.prompt({ baseUrl: state.settings.baseUrl, mergeSha: row.merge_sha, deployedCommit, journeys: row.journeys });
+    } catch (err) {
+      reportError(err, { stage: "verify_run.prompt" });
+      await endUnverified(accountId, row.id, "run_failed");
+      return "ended";
+    }
+
     let browserMethod: BrowserMethod;
     try {
       browserMethod = chooseBrowserMethod(deps.browserDriver === undefined ? null : await deps.browserDriver({ accountId, repoId }));
@@ -123,7 +141,7 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       return "held";
     }
 
-    const seat = await deps.resolveSeat({ accountId, repoId, role: DEPLOY_VERIFIER_ROLE, capUsd: limits.runUsd });
+    const seat = await deps.resolveSeat({ accountId, repoId, role: DEPLOY_VERIFIER_ROLE, purpose: "deploy_verify", capUsd: limits.runUsd });
     if (!seat.ok) {
       reportError(new Error(seat.reason), { stage: "verify_run.seat", code: seat.reason });
       return "held";
@@ -138,7 +156,7 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       browserMethod,
       product: "team",
       expectedExecutionMode: mode,
-      prompt: deps.prompt({ baseUrl: state.settings.baseUrl, mergeSha: row.merge_sha, deployedCommit, journeys: row.journeys }),
+      prompt,
       workdir: VERIFIER_WORKDIR,
       cloneRepo: { owner: clone.owner, name: clone.name, sha: row.merge_sha },
       headSha: row.merge_sha,
@@ -176,7 +194,7 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       } else if (run.status !== "succeeded") {
         return "waiting";
       } else {
-        const outcome = deps.outcome(fresh.journeys, run.envelope);
+        const outcome = deps.outcome(fresh.journeys, run.envelope, { testAccountLabel: (await readVerifySettings(client, fresh.repo_id)).testAccountLabel, method: fresh.method });
         input = outcome.input;
         failed = outcome.failedJourneyIds;
       }

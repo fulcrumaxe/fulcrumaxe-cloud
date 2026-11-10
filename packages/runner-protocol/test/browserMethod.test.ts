@@ -17,7 +17,7 @@ import {
 } from "../src/deployVerifier.js";
 import { JobSchema, RUNNER_CAPABILITIES, SignedJobSchema, sha256Text, type Job } from "../src/job.js";
 import { JobSignatureError, canonicalJson, signJob, verifyJob } from "../src/jobSignature.js";
-import { HelloMessage } from "../src/messages.js";
+import { BROWSER_METHOD_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HelloMessage, SCOPE_JOB_MIN_PROTOCOL } from "../src/messages.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -40,6 +40,13 @@ describe("the deploy verifier's two browser methods (D#749 V2c-1)", () => {
     expect(HelloMessage.safeParse({ ...hello, capabilities: ["browser_playwright_v2"] }).success).toBe(false);
     for (const good of BROWSER_METHODS) expect(isBrowserMethod(good)).toBe(true);
     for (const bad of ["chrome", "playwright_sandbox", "", "constructor", null, undefined, 3]) expect(isBrowserMethod(bad), String(bad)).toBe(false);
+  });
+
+  // D#749 V3c: a runner below this version parses a job strictly and would refuse the `browser_method` key, so the key's job is gated at it (the issuer records it; the claim honours it).
+  it("the key's protocol floor is 16, one above the last gate, and the current version is at least it", () => {
+    expect(BROWSER_METHOD_JOB_MIN_PROTOCOL).toBe(16);
+    expect(BROWSER_METHOD_JOB_MIN_PROTOCOL).toBe(SCOPE_JOB_MIN_PROTOCOL + 1);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(BROWSER_METHOD_JOB_MIN_PROTOCOL);
   });
 
   it("hold different tool lists: the Chrome list is unchanged and the Playwright list is the three read tools plus the twelve fxverify tools", () => {

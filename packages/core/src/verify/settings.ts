@@ -9,6 +9,9 @@ export const ELIGIBILITIES = ['all', 'ui_paths'] as const;
 export type Eligibility = (typeof ELIGIBILITIES)[number];
 export const DEPLOY_MODES = ['runner_command'] as const;
 export type DeployMode = (typeof DEPLOY_MODES)[number];
+/** How the tester drives its browser (D#749 V3c, migration 1007): the runner's own Playwright browser (the default), or Claude in Chrome on the runner. */
+export const BROWSER_DRIVERS = ['playwright', 'chrome'] as const;
+export type BrowserDriver = (typeof BROWSER_DRIVERS)[number];
 
 export interface VerifySettings {
   repoId: string;
@@ -19,6 +22,7 @@ export interface VerifySettings {
   deployMode: DeployMode;
   standingJourneys: StandingJourney[];
   testAccountLabel: string | null;
+  browserDriver: BrowserDriver;
   eligibility: Eligibility;
   eligibilityPaths: string[];
   batchSize: number;
@@ -32,6 +36,7 @@ export const DEFAULT_VERIFY_SETTINGS: Omit<VerifySettings, 'repoId'> = {
   deployMode: 'runner_command',
   standingJourneys: [],
   testAccountLabel: null,
+  browserDriver: 'playwright',
   eligibility: 'ui_paths',
   eligibilityPaths: [],
   batchSize: 1,
@@ -44,12 +49,13 @@ interface SettingsRow {
   deploy_mode: DeployMode;
   standing_journeys: StandingJourney[];
   test_account_label: string | null;
+  browser_driver: BrowserDriver;
   eligibility: Eligibility;
   eligibility_paths: string[];
   batch_size: number;
   batch_window_minutes: number | null;
 }
-const SETTINGS_COLUMNS = 'enabled, base_url, deploy_mode, standing_journeys, test_account_label, eligibility, eligibility_paths, batch_size, batch_window_minutes';
+const SETTINGS_COLUMNS = 'enabled, base_url, deploy_mode, standing_journeys, test_account_label, browser_driver, eligibility, eligibility_paths, batch_size, batch_window_minutes';
 
 /** The settings of a repository on a tenant-scoped client: the defaults (off) when none were saved. */
 export async function readVerifySettings(client: PoolClient, repoId: string): Promise<VerifySettings> {
@@ -64,6 +70,7 @@ export async function readVerifySettings(client: PoolClient, repoId: string): Pr
     deployMode: r.deploy_mode,
     standingJourneys: r.standing_journeys,
     testAccountLabel: r.test_account_label,
+    browserDriver: r.browser_driver,
     eligibility: r.eligibility,
     eligibilityPaths: r.eligibility_paths,
     batchSize: r.batch_size,
@@ -107,6 +114,7 @@ export interface VerifySettingsPatch {
   baseUrl?: string | null;
   standingJourneys?: unknown;
   testAccountLabel?: string | null;
+  browserDriver?: BrowserDriver;
   eligibility?: Eligibility;
   eligibilityPaths?: unknown;
 }
@@ -125,6 +133,10 @@ export function applySettingsPatch(current: VerifySettings, patch: VerifySetting
     if (l !== null && (typeof l !== 'string' || l.trim().length < 1 || l.length > 100 || /[\u0000-\u001f\u007f]/.test(l))) throw new VerifyInputError('verify_setting_invalid', 'the test account label is 1 to 100 characters');
     next.testAccountLabel = l === null ? null : l.trim();
   }
+  if (patch.browserDriver !== undefined) {
+    if (!BROWSER_DRIVERS.includes(patch.browserDriver)) throw new VerifyInputError('verify_setting_invalid', 'the browser driver is playwright or chrome');
+    next.browserDriver = patch.browserDriver;
+  }
   if (patch.eligibility !== undefined) {
     if (!ELIGIBILITIES.includes(patch.eligibility)) throw new VerifyInputError('verify_setting_invalid', 'unknown eligibility');
     next.eligibility = patch.eligibility;
@@ -142,13 +154,13 @@ export async function writeVerifySettings(client: PoolClient, accountId: string,
   const current = await readVerifySettings(client, repoId);
   const next = applySettingsPatch(current, patch);
   await client.query(
-    `INSERT INTO verify_settings (account_id, repo_id, enabled, base_url, standing_journeys, test_account_label, eligibility, eligibility_paths, updated_by)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::text[], $9)
+    `INSERT INTO verify_settings (account_id, repo_id, enabled, base_url, standing_journeys, test_account_label, browser_driver, eligibility, eligibility_paths, updated_by)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::text[], $10)
      ON CONFLICT (repo_id) DO UPDATE SET enabled = EXCLUDED.enabled, base_url = EXCLUDED.base_url, standing_journeys = EXCLUDED.standing_journeys,
-       test_account_label = EXCLUDED.test_account_label, eligibility = EXCLUDED.eligibility, eligibility_paths = EXCLUDED.eligibility_paths,
+       test_account_label = EXCLUDED.test_account_label, browser_driver = EXCLUDED.browser_driver, eligibility = EXCLUDED.eligibility, eligibility_paths = EXCLUDED.eligibility_paths,
        updated_by = EXCLUDED.updated_by, updated_at = now()`,
     // enabled_since is not written here: the table's trigger stamps it on the off -> on move alone (migration 1005), so a save that changes nothing moves nothing.
-    [accountId, repoId, next.enabled, next.baseUrl, JSON.stringify(next.standingJourneys), next.testAccountLabel, next.eligibility, next.eligibilityPaths, userId],
+    [accountId, repoId, next.enabled, next.baseUrl, JSON.stringify(next.standingJourneys), next.testAccountLabel, next.browserDriver, next.eligibility, next.eligibilityPaths, userId],
   );
   return { settings: { ...next, configured: true }, turnedOff: current.enabled && !next.enabled };
 }

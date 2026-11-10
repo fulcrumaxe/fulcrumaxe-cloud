@@ -24,6 +24,7 @@ export const GATE_METHODS: readonly VerifyMethod[] = ['chrome_runner', 'playwrig
 export const VERIFY_REASON_CODES = [
   'no_browser', 'chrome_not_connected', 'wrong_account', 'sign_in_refused', 'deploy_failed', 'deployment_unreachable',
   'commit_not_deployed', 'envelope_rejected', 'hollow_pass', 'journey_blocked', 'journeys_missing', 'run_failed', 'verify_disabled',
+  'account_unverifiable',
 ] as const;
 export type VerifyReasonCode = (typeof VERIFY_REASON_CODES)[number];
 export const JOURNEY_RESULTS = ['pass', 'fail', 'blocked', 'unverified'] as const;

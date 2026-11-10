@@ -5,8 +5,11 @@ import { applySettingsPatch, DEFAULT_VERIFY_SETTINGS, isEligible, parseBaseUrl, 
 import { canMove, FINISHED_STATUSES, GATE_METHODS, nextStreak, ROW_MOVES, streakOf, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, type StreakInput, type VerifyRowStatus } from '../src/verify/rows.js';
 
 const MIGRATION = readFileSync(path.join(__dirname, '..', '..', 'db', 'migrations', '1003_verify_stage.sql'), 'utf8');
+// The reason check was replaced by 1007 (one more word); the status and method checks are 1003's.
+const LATER_MIGRATION = readFileSync(path.join(__dirname, '..', '..', 'db', 'migrations', '1007_verify_browser_driver.sql'), 'utf8');
 const listIn = (constraint: string): string[] => {
-  const m = new RegExp(`${constraint} CHECK \\((?:status|method|reason_code) IN \\(([^)]*)\\)\\)`).exec(MIGRATION);
+  const source = constraint === 'verify_rows_reason_check' ? LATER_MIGRATION : MIGRATION;
+  const m = new RegExp(`${constraint} CHECK \\((?:status|method|reason_code) IN \\(([^)]*)\\)\\)`).exec(source);
   return [...m![1]!.matchAll(/'([a-z_]+)'/g)].map((x) => x[1]!);
 };
 
