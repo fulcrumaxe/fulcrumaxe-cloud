@@ -96,6 +96,11 @@ export class FakeDriver implements PageDriver {
   blocked(): { requests: number; navigations: number } {
     return { requests: this.blockedReq, navigations: this.blockedNav };
   }
+  /** What the app's identity route would answer for the saved session; undefined is a failed lookup. */
+  login: string | undefined = undefined;
+  async identity(): Promise<string | undefined> {
+    return this.login;
+  }
   async close(): Promise<void> {
     this.closed = true;
   }

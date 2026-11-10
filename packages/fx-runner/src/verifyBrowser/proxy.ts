@@ -42,7 +42,8 @@ export function startOriginProxy(base: BasePin): Promise<OriginProxy> {
       return refuse(res);
     }
     if (want.protocol !== "http:" || url.protocol !== "http:" || url.origin !== base.origin) return refuse(res);
-    const headers = Object.fromEntries(Object.entries(req.headers).filter(([name]) => !HOP_BY_HOP.has(name)));
+    // The Host header is the base's own, whatever the client sent: a raw local client could name another virtual host on the same address.
+    const headers = { ...Object.fromEntries(Object.entries(req.headers).filter(([name]) => !HOP_BY_HOP.has(name) && name !== "host")), host: new URL(base.href).host };
     const upstream = httpRequest({ host: want.host, port: want.port, method: req.method, path: `${url.pathname}${url.search}`, headers }, (reply) => {
       res.writeHead(reply.statusCode ?? 502, Object.fromEntries(Object.entries(reply.headers).filter(([name]) => !HOP_BY_HOP.has(name))) as Record<string, string | string[]>);
       reply.pipe(res);

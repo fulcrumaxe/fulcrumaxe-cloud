@@ -22,6 +22,8 @@ import { logsCommand } from "./commands/logs.js";
 import { runCommand, type RunHost } from "./commands/run.js";
 import { serviceCommand, type ServiceHost } from "./commands/service.js";
 import { statusCommand } from "./commands/status.js";
+import { verifyBrowserServerCommand, type VerifyServerHost } from "./commands/verifyBrowserServer.js";
+import { verifyLoginCommand, type VerifyLoginHost } from "./commands/verifyLogin.js";
 import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
 import { purgeChildCommand } from "./commands/purgeChild.js";
 import { configCommand, updateCommand } from "./commands/update.js";
@@ -59,6 +61,10 @@ export interface CliIo {
   vmHost?: BuildHost;
   /** What `update`, `config` and the daemon's self-update need from the machine. Only `bin/fx-runner.mjs` supplies it. */
   updateHost?: UpdateHost;
+  /** What `verify-browser-server` needs (the process's own streams and a short allowlist of its environment). Only `bin/fx-runner.mjs` supplies it. */
+  verifyServerHost?: VerifyServerHost;
+  /** What `verify-login` needs (a headed browser and the terminal). Only `bin/fx-runner.mjs` supplies it. */
+  verifyLoginHost?: VerifyLoginHost;
   /** Reads the API key from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
   readSecret?: () => Promise<string>;
   /** Reads the registration code or token from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
@@ -94,10 +100,15 @@ Commands:
                      Turn automatic updates, which happen between jobs only, on or off.
   config set concurrency.total <1-8> | concurrency.heavy <1-4> | reserve-gb <1-256|auto> | cpu-reserve <0-256 cores|auto>
   config set budget.light.memory <1-8 GB> | budget.heavy.memory <2-32 GB> | budget.light.tasks | budget.heavy.tasks <64-65536>
+  verify-login --base-url <address> | --forget
+                     Sign in once as the TEST account for the deploy check's own browser: a window opens on the app, you sign in and press Enter. Only the app's own session is saved, at mode 0600
+                     in ~/.config/fx-runner/verify/ (never printed). The address is https, or http on localhost. --forget deletes the saved session.
+  config set verify.browser.executable <absolute path> | verify.browser.storage_state <absolute path> | verify.browser.base_url <address>
+                     The deploy check's own browser: the Chrome or Chromium to run, the saved session (default ~/.config/fx-runner/verify/storage-state.json) and the app's address.
   config set verify.deploy_argv '["program", "script", ...]' | verify.deploy_dir <absolute path> | verify.test_account <label>
                      The post-merge deploy check's local half: the command (a JSON array of words, never a shell string) and the checkout on this machine it runs in (its script is looked
                      up below that folder, link-free), and the account label the machine's Chrome must be signed in as. All stay off until you set them; nothing the cloud sends can set or change them.
-  config unset concurrency.total | concurrency.heavy | reserve-gb | cpu-reserve | budget.<class>.memory | budget.<class>.tasks | verify.deploy_argv | verify.deploy_dir | verify.test_account
+  config unset concurrency.total | concurrency.heavy | reserve-gb | cpu-reserve | budget.<class>.memory | budget.<class>.tasks | verify.deploy_argv | verify.deploy_dir | verify.test_account | verify.browser.executable | verify.browser.storage_state | verify.browser.base_url
                      Return a setting to its automatic default.
                      Lower the most jobs held at once, or set the memory kept free for your own work. A change applies from the next claim; running jobs are never stopped.
                      The budget is the hard limit one job runs under (memory and processes); a job past it is stopped on its own, others go on.
@@ -129,6 +140,9 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   resume: { flags: [], switches: [] },
   credentials: { flags: [], switches: [] },
   assistant: { flags: [], switches: [], positionals: 1 },
+  "verify-login": { flags: ["base-url"], switches: ["forget"] },
+  // The MCP server the Claude CLI starts for a playwright deploy check; not in --help.
+  "verify-browser-server": { flags: ["job-dir", "base-url", "executable", "storage-state"], switches: [] },
   // Its own words, parsed in src/vm/command.ts.
   vm: { flags: [], switches: [] },
 };
@@ -177,6 +191,11 @@ export async function runCli(io: CliIo): Promise<number> {
     }
     if (!Object.hasOwn(COMMANDS, command)) throw new CliError(`unknown command ${command.slice(0, 40)}; run fx-runner --help`, 2);
     const parsed = command === "credentials" || command === "vm" ? undefined : parseFlags(command, rest);
+    // The MCP server the Claude CLI starts: it needs no state directory, home directory or cloud, and the environment it is given by the CLI may hold none of them.
+    if (command === "verify-browser-server") {
+      if (io.verifyServerHost === undefined) throw new CliError("verify-browser-server is only available from the fx-runner program");
+      return await verifyBrowserServerCommand(parsed!.flags, io.verifyServerHost);
+    }
     const ctx: CommandContext = {
       stateDir: stateDirFor(io.home, io.stateDirOverride),
       out: (line) => io.stdout(`${line}\n`),
@@ -211,6 +230,10 @@ export async function runCli(io: CliIo): Promise<number> {
       const named: Flags = positionals[0] === undefined ? flags : new Map([...flags, ["run", positionals[0]]]);
       if (command === "attach") return await attachCommand(named, ctx, io.host);
       return command === "__watch" ? await watchCommand(named, ctx) : await takeoverPaneCommand(named, ctx, io.host);
+    }
+    if (command === "verify-login") {
+      if (io.verifyLoginHost === undefined) throw new CliError("verify-login is only available from the fx-runner program");
+      return await verifyLoginCommand(flags, ctx, io.verifyLoginHost);
     }
     if (command === "__purge") return purgeChildCommand(positionals[0], positionals[1], ctx);
     if (command === "doctor") {

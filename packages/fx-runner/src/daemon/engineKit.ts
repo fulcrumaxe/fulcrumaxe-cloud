@@ -1,9 +1,10 @@
-import type { LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
+import type { BrowserMethod, LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
 import type { CleanEnvOptions, CredentialMode } from "../job/cleanEnv.js";
 import type { SessionPlan } from "../job/runJob.js";
 import type { InterruptibleRuntime } from "../sandbox/hostSandbox.js";
 import type { JobLimits } from "../sandbox/jobLimits.js";
 import type { ProtectedPaths } from "../sandbox/sandboxSettings.js";
+import type { VerifyServerSpec } from "../verifyBrowser/spec.js";
 import type { InstructionCanaryResult } from "../instructionCanaryState.js";
 import type { GitCapture } from "./git.js";
 
@@ -55,6 +56,8 @@ export interface EngineKit {
     jobEnv?: Readonly<Record<string, string>>;
     /** D#6 C43-5: the hard limits this job's agent runs under; absent where they cannot be enforced. */
     limits?: JobLimits;
+    /** D#749 V2c-2b: how a playwright deploy verifier job starts the `fxverify` server (this program and the owner's browser settings). Absent or undefined: such a job is refused at its start. */
+    verifyServer?: () => VerifyServerSpec | undefined;
   }): InterruptibleRuntime;
   /** Resume or fresh, from the local session index in the state directory. */
   planSession(stateDir: string, continues: { session_id: string | null; branch: string } | null): SessionPlan;
@@ -71,7 +74,7 @@ export interface EngineKit {
    */
   foreground(command: string, args: readonly string[], env: Record<string, string>): Promise<number | null>;
   /** Resumes a taken-over run's agent session interactively, in its workspace, under the job's own settings (D#6 R4a-7). Throws an `EngineRefusal` if the run has no session left to resume. */
-  takeOver(input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions; stateDir: string; runId: string; role: string }): Promise<number | null>;
+  takeOver(input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions; stateDir: string; runId: string; role: string; browserMethod?: BrowserMethod | undefined }): Promise<number | null>;
   /** D#6 C44-4: runs the host-side dependency install in a directory, in its own process group that is ended on the time limit or the stop signal. Absent: no install is wired. */
   installCapture?: InstallCapture;
   /** The same capture with a short piece of the error output kept too: what the sandbox probe (`doctor`) reads its reason from. */

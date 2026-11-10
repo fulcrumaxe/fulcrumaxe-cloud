@@ -284,6 +284,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
         ...(opts.excludes === undefined || opts.excludes.length === 0 ? {} : { excludes: opts.excludes }),
         ...(opts.spillDir === undefined ? {} : { spillDir: opts.spillDir }),
         ...(opts.checkArgv === undefined || opts.checkArgv.length === 0 ? {} : { checkArgv: opts.checkArgv }),
+        ...(opts.browserMethod === undefined ? {} : { browserMethod: opts.browserMethod }),
         ...(opts.contextWindowTokens === undefined ? {} : { contextWindowTokens: opts.contextWindowTokens }),
         ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
         onEvent: (event: NormalizedEvent) => {

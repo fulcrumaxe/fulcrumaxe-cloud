@@ -63,7 +63,7 @@ describe("bin/fx-runner.mjs", () => {
 
   it("reads the environment only by name, never as a whole", () => {
     const reads = [...text.matchAll(/process\.env(\.\w+|\[[^\]]*\]|[^\w.[])/g)].map((m) => m[1]);
-    expect(reads).toEqual([".HOME", ".XDG_CACHE_HOME", ".HOME", ".ANTHROPIC_API_KEY", ".ANTHROPIC_AUTH_TOKEN", ".FX_RUNNER_SERVICE", ".PATH", ".HOME", ".FX_RUNNER_HOME", ".XDG_CACHE_HOME", ".HOME", ".FX_RUNNER_HOME", ".FX_RUNNER_PROTECTION_BYPASS_FILE", ".XDG_CACHE_HOME", ".HOME", ".XDG_CACHE_HOME", ".TERM", ".XDG_RUNTIME_DIR", ".PATH", ".HOME", ".USER", ".LOGNAME", ".LANG", ".LC_ALL", ".TMPDIR", ".XDG_CONFIG_HOME", ".XDG_DATA_HOME", ".XDG_CACHE_HOME", ".HOME", ".SHELL", ".XDG_CACHE_HOME", ".XDG_RUNTIME_DIR", ".XDG_CONFIG_HOME", ".HOME", ".XDG_CONFIG_HOME", ".XDG_CACHE_HOME", ".PATH"]);
+    expect(reads).toEqual([".HOME", ".XDG_CACHE_HOME", ".HOME", ".ANTHROPIC_API_KEY", ".ANTHROPIC_AUTH_TOKEN", ".FX_RUNNER_SERVICE", ".PATH", ".HOME", ".FX_RUNNER_HOME", ".XDG_CACHE_HOME", ".HOME", ".FX_RUNNER_HOME", ".FX_RUNNER_PROTECTION_BYPASS_FILE", ".XDG_CACHE_HOME", ".HOME", ".XDG_CACHE_HOME", ".TERM", ".XDG_RUNTIME_DIR", ".PATH", ".HOME", ".USER", ".LOGNAME", ".LANG", ".LC_ALL", ".TMPDIR", ".XDG_CONFIG_HOME", ".XDG_DATA_HOME", ".XDG_CACHE_HOME", ".HOME", ".SHELL", ".XDG_CACHE_HOME", ".XDG_RUNTIME_DIR", ".XDG_CONFIG_HOME", ".PATH", ".LANG", ".LC_ALL", ".TZ", ".FONTCONFIG_FILE", ".FONTCONFIG_PATH", ".HOME", ".PATH", ".PLAYWRIGHT_BROWSERS_PATH", ".HOME", ".XDG_CONFIG_HOME", ".XDG_CACHE_HOME", ".PATH"]);
     expect(text).not.toMatch(/\.\.\.\s*process|Object\.\w+\(\s*process\.env|globalThis|\bglobal\b/);
   });
 

@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { findChromium, NO_POPUPS_FLAG, PROXY_BYPASS_FLAG, WEBRTC_FLAG } from "../../src/verifyBrowser/driver.js";
 import { startVerifyBrowserServer } from "../../src/verifyBrowser/server.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
+import { useSourcePlaywright } from "./sourceLoader.js";
 
 /**
  * D#749 V2c-2a: ONE real-browser test. A real Chromium (the browsers directory the dev shell exports, else a system Chrome or Chromium) is driven through the real
@@ -203,6 +204,8 @@ function browserPids(jobDir: string): number[] {
     })
     .map(Number);
 }
+
+useSourcePlaywright();
 
 describe.skipIf(EXE === undefined || process.platform !== "linux")("the verify browser against a real Chromium", () => {
   it("drives a page, keeps the pin, refuses what it must, and leaves nothing behind", async () => {

@@ -323,9 +323,11 @@ describe("the job directory", () => {
     expect(existsSync(path.join(real, "home"))).toBe(false);
   });
 
-  it("is not wired into the command line or the runner yet", () => {
+  // D#749 V2c-2b wired the server into the command line, through the command file alone: the command line imports no module of the browser itself.
+  it("reaches the command line only through its command file", () => {
     const here = path.resolve(import.meta.dirname, "../../src");
-    for (const file of ["cli.ts", "index.ts", "context.ts"]) expect(readFileSync(path.join(here, file), "utf8")).not.toContain("verifyBrowser");
+    for (const file of ["cli.ts", "index.ts", "context.ts"]) expect(readFileSync(path.join(here, file), "utf8")).not.toContain("verifyBrowser/");
+    expect(readFileSync(path.join(here, "commands", "verifyBrowserServer.ts"), "utf8")).toContain("verifyBrowser/server.js");
     expect(new PassThrough()).toBeDefined();
   });
 });

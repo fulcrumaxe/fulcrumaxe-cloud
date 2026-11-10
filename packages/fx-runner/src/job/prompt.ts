@@ -128,7 +128,7 @@ export const NIX_FLAKE_CHANGED_NOTE =
   "NOTE: The dev shell toolchain for this run was built from the default branch, not from this change. This change's edits to flake.nix or flake.lock were not applied to it.";
 
 /** The fields of a job the prompt reads. */
-export type PromptJob = Pick<Job, "role" | "task" | "role_card"> & Partial<Pick<Job, "memory" | "excludes">>;
+export type PromptJob = Pick<Job, "role" | "task" | "role_card"> & Partial<Pick<Job, "memory" | "excludes" | "browser_method">>;
 
 /**
  * The text written to the agent's standard input. The role card (the cloud's own text for the role, checked against
@@ -137,7 +137,7 @@ export type PromptJob = Pick<Job, "role" | "task" | "role_card"> & Partial<Pick<
  * argument list. An unknown role throws.
  */
 export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoMap?: { version: string; text: string }, taskPrompt: string = job.task.prompt, pinned: readonly { path: string; text: string }[] = []): string {
-  roleToolsFor(job.role);
+  roleToolsFor(job.role, job.browser_method);
   return [
     `You are a ${job.role} agent in the autonomous development team.`,
     "",

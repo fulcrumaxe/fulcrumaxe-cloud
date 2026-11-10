@@ -52,7 +52,7 @@ export async function takeoverPaneCommand(flags: Flags, ctx: CommandContext, hos
   ctx.out("You have taken over this run. The agent was stopped and nothing more is sent to the cloud for it; the runner pushes nothing.");
   ctx.out("Commit and push with your own git when you are done. Each action asks for your approval.");
   try {
-    return (await host.engine.takeOver({ binaryPath, credentials, envOptions: { extraPathDirs: toolDirs }, stateDir: ctx.stateDir, runId, role: entry.role })) ?? 1;
+    return (await host.engine.takeOver({ binaryPath, credentials, envOptions: { extraPathDirs: toolDirs }, stateDir: ctx.stateDir, runId, role: entry.role, browserMethod: entry.browser_method })) ?? 1;
   } finally {
     removeEntry(ctx.stateDir, runId);
     clearTakeover(ctx.stateDir, runId);

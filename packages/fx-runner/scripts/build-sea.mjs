@@ -172,7 +172,8 @@ export async function bundleRunner(epoch) {
     platform: "node",
     format: "cjs",
     target: "node22",
-    external: ["@anthropic-ai/*"],
+    // playwright-core cannot be bundled (it loads its browser-protocol packages by path): it is left out and loaded from the sidecar folder next to the binary (src/verifyBrowser/loadPlaywright.ts).
+    external: ["@anthropic-ai/*", "playwright-core"],
     legalComments: "none",
     logLevel: "silent",
     // No import.meta in a CommonJS bundle; bin/fx-runner.mjs only reads it when it is not the single executable.

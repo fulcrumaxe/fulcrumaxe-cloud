@@ -1361,3 +1361,68 @@ describe("a browser job needs a connected browser (D#749 V2b)", () => {
     expect(asked).toBe(0);
   });
 });
+
+// D#749 V2c-2b (fix round): each hop that carries the signed browser method from the handler to the engine, and the answer file back, has a test that goes red when the hop is removed.
+describe("a playwright deploy verifier job through the handler (D#749 V2c-2b)", () => {
+  const HEAD = "b".repeat(40);
+  const ENVELOPE = { journeys: [{ id: "counter", result: "pass", steps: [{ did: "looked", dom_fact: "count is 1", number: 1 }], console_errors: 0, undo_checked: true, reloaded: true }], signed_in_as: "octo-cat" };
+  const jobWith = (method: "playwright_runner" | "chrome_runner") => signedJob({ role: "deploy-verifier", browser_method: method, task: jobFor().task, role_tools_sha256: roleToolsDigest("deploy-verifier", method), review: { head_sha: HEAD } });
+  function wired(over: { answer?: Record<string, unknown> | undefined } = {}) {
+    const asked: Array<string | undefined> = [];
+    const read: string[] = [];
+    const began: Array<Record<string, unknown>> = [];
+    const watch: JobWatch = {
+      async begin(job) {
+        began.push({ ...job });
+        return undefined;
+      },
+    };
+    const rig = makeRig({
+      handler: {
+        browserReady: (method) => (asked.push(method), undefined),
+        verifyAnswer: (runId) => (read.push(runId), "answer" in over ? over.answer : ENVELOPE),
+        watch,
+      },
+    });
+    return { rig, asked, read, began };
+  }
+
+  it("asks the claim check for the signed method, starts the sandbox with it, tells the watch, and reports the answer file as the done payload", async () => {
+    const w = wired();
+    const claimed = await w.rig.claim(jobWith("playwright_runner"));
+    expect((await w.rig.handle(claimed)).status).toBe("completed");
+    expect(w.asked).toEqual(["playwright_runner"]);
+    expect(w.rig.port.starts.map((s) => s.browserMethod)).toEqual(["playwright_runner"]);
+    expect(w.began).toEqual([expect.objectContaining({ role: "deploy-verifier", browserMethod: "playwright_runner" })]);
+    expect(w.read).toEqual([claimed.runId]);
+    // the model's own final text ({ verdict: "done" }) is not what is reported: the answer file is
+    const body = cloud.seen.at(-1)?.body as { agentOutput?: unknown };
+    expect(sentToCloud().at(-1)).toBe("/api/runner/runs/:id/done");
+    expect(body.agentOutput).toEqual(ENVELOPE);
+  });
+
+  it("a run with no answer file reports no answer, never the model's text", async () => {
+    const w = wired({ answer: undefined });
+    const claimed = await w.rig.claim(jobWith("playwright_runner"));
+    expect((await w.rig.handle(claimed)).status).toBe("completed");
+    expect(w.read).toEqual([claimed.runId]);
+    expect(Object.keys(cloud.seen.at(-1)?.body as object)).not.toContain("agentOutput");
+  });
+
+  it("control: a Chrome deploy verifier job starts with its method, never reads the answer file, and reports the model's own output", async () => {
+    const w = wired();
+    const claimed = await w.rig.claim(jobWith("chrome_runner"));
+    expect((await w.rig.handle(claimed)).status).toBe("completed");
+    expect(w.asked).toEqual(["chrome_runner"]);
+    expect(w.rig.port.starts.map((s) => s.browserMethod)).toEqual(["chrome_runner"]);
+    expect(w.read).toEqual([]);
+    expect((cloud.seen.at(-1)?.body as { agentOutput?: unknown }).agentOutput).toEqual({ verdict: "done" });
+  });
+
+  it("a job of another role starts with no browser method", async () => {
+    const w = wired();
+    const claimed = await w.rig.claim();
+    expect((await w.rig.handle(claimed)).status).toBe("completed");
+    expect(w.rig.port.starts[0]!.browserMethod).toBeUndefined();
+  });
+});

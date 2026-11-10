@@ -132,6 +132,8 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     ...(job.context_window === undefined ? {} : { contextWindowTokens: job.context_window }),
     // D#6 RUNNER-AGENT-NO-FULLCHECK: the approved check is the runner's step after the agent; the engine denies it to the agent's shell.
     ...(job.check === undefined ? {} : { checkArgv: job.check.argv }),
+    // D#749 V2c-2b: the signed browser method, so the engine builds the playwright job's tool list and MCP file (a job without one keeps the Chrome list).
+    ...(job.browser_method === undefined ? {} : { browserMethod: job.browser_method }),
     capUsd: 0, // the runner settles no money
     networkPolicy: [{ host: MODEL_HOST, purpose: "model" }],
     env: cleanEnv(deps.credentials, deps.envOptions),

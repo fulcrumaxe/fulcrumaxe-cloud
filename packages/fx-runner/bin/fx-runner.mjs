@@ -7,8 +7,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import { createInterface } from "node:readline/promises";
+import { createRequire } from "node:module";
 import { isSea } from "node:sea";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runCli } from "../src/cli.js";
 import { RUNNER_VERSION } from "../src/version.js";
 import { API_KEY_MAX_BYTES } from "../src/credentials.js";
@@ -21,6 +22,9 @@ import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
 import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
+import { findChromium, openHeadedBrowser } from "../src/verifyBrowser/driver.js";
+import { setPlaywrightLoader, sidecarFor } from "../src/verifyBrowser/loadPlaywright.js";
+import { sidecarLibrary } from "./sidecarLibrary.mjs";
 
 // D#6 RUNNER-CWD-1: where every program the kit starts without a directory of its own is started (a fresh empty directory under it each time),
 // and the two places such a start may never be: the home directory and this process's working directory (read at each start). No home, no launches.
@@ -79,6 +83,25 @@ const updateHost = {
 // Run from the single-executable release build (scripts/build-sea.mjs), the program is process.execPath itself and there is no script file to name:
 // the bundle is CommonJS (no top-level await, no import.meta), so this file is one promise chain and the script path is only looked up when it exists.
 const sea = isSea();
+// D#749 V2c-2b: the Playwright library is never in the bundle. The single executable loads it from the folder laid down next to it; from source (or a plain bundle, where import.meta.url is the
+// bundle's own address) Node's lookup from this file finds it. src/ may not load modules by a computed route, so this is the one place that does (src/verifyBrowser/loadPlaywright.ts).
+// In the single executable the library must really lie inside that folder (bin/sidecarLibrary.mjs checks the resolved file, so a copy planted on NODE_PATH or in a parent folder is refused).
+const libraryRequire = sea ? undefined : createRequire(import.meta.url ?? pathToFileURL(process.argv[1]).href);
+setPlaywrightLoader(
+  sea
+    ? sidecarLibrary(sidecarFor(process.execPath))
+    : {
+        load: async () => libraryRequire("playwright-core"),
+        available: () => {
+          try {
+            libraryRequire.resolve("playwright-core");
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      },
+);
 // The account this runs as, for the lingering advice `doctor` prints; the account database, not the environment.
 const accountName = () => {
   try {
@@ -143,6 +166,25 @@ runCli({
   },
   doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
   vmHost: vmBuildHost,
+  // D#749 V2c-2b: the verify browser. The MCP server gets the process's own streams and ONLY the variables the browser may inherit (the driver allowlists again); `verify-login` gets a headed browser and the terminal.
+  verifyServerHost: {
+    input: process.stdin,
+    output: process.stdout,
+    env: { PATH: process.env.PATH, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, TZ: process.env.TZ, FONTCONFIG_FILE: process.env.FONTCONFIG_FILE, FONTCONFIG_PATH: process.env.FONTCONFIG_PATH },
+  },
+  verifyLoginHost: {
+    home: process.env.HOME,
+    findHeaded: () => findChromium({ PATH: process.env.PATH, PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH }, { headed: true }),
+    openHeaded: openHeadedBrowser,
+    waitForEnter: () =>
+      new Promise((resolve) => {
+        process.stdin.setEncoding("utf8");
+        process.stdin.once("data", () => {
+          process.stdin.pause();
+          resolve(undefined);
+        });
+      }),
+  },
   serviceHost: {
     home: process.env.HOME,
     platform: process.platform,

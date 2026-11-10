@@ -91,6 +91,7 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
         launch,
         ...(options.bashSandboxUnusable === undefined ? {} : { bashSandboxUnusable: options.bashSandboxUnusable }),
         ...(input.limits === undefined ? {} : { limits: input.limits }),
+        ...(input.verifyServer === undefined ? {} : { verifyServer: input.verifyServer }),
         onLocalEvent: input.onLocalEvent,
         ...(input.onNearLimit === undefined ? {} : { onNearLimit: input.onNearLimit }),
       }),

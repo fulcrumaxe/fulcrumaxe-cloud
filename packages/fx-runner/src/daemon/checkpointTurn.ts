@@ -20,7 +20,7 @@ const SANDBOX_MARGIN_MS = 60_000;
 export const CHECKPOINT_MAX_TURN_MS = 300_000;
 
 export interface CheckpointTurnInput {
-  job: Pick<Job, "run_id" | "role" | "role_card" | "model_hint"> & Partial<Pick<Job, "context_window">>;
+  job: Pick<Job, "run_id" | "role" | "role_card" | "model_hint"> & Partial<Pick<Job, "context_window" | "browser_method">>;
   /** The port the run itself used (with the job's read grants and allowances), so the resume sees what the first turn saw. */
   sandbox: SandboxPort;
   credentials: CredentialMode;
@@ -52,6 +52,8 @@ export async function runCheckpointTurn(input: CheckpointTurnInput): Promise<Che
     model,
     workdir: input.workspace,
     ...(job.context_window === undefined ? {} : { contextWindowTokens: job.context_window }),
+    // D#749 V2c-2b: the signed browser method, as in the job's own start, so a resumed turn builds the same tool list and MCP file.
+    ...(job.browser_method === undefined ? {} : { browserMethod: job.browser_method }),
     capUsd: 0, // the runner settles no money
     networkPolicy: [{ host: MODEL_HOST, purpose: "model" }],
     env: cleanEnv(input.credentials, input.envOptions),

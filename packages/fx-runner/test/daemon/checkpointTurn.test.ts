@@ -17,6 +17,27 @@ function portRecording(timeouts: number[]): SandboxPort {
   } as unknown as SandboxPort;
 }
 
+describe("the checkpoint turn keeps the job's signed browser method (D#749 V2c-2b)", () => {
+  const resumedWith = async (extra: Record<string, unknown>): Promise<Array<Record<string, unknown>>> => {
+    const opts: Array<Record<string, unknown>> = [];
+    const sandbox = {
+      async createSandbox(o: { sandboxName: string }) {
+        return { runId: "", sandboxName: o.sandboxName };
+      },
+      resume: (handle: unknown, _session: string, _prompt: string, o: Record<string, unknown>) => (opts.push(o), { handle, hookFired: Promise.resolve(undefined) }),
+      async stop() {},
+      async deleteSandbox() {},
+    } as unknown as SandboxPort;
+    await runCheckpointTurn({ job: { ...job, ...extra } as unknown as Job, sandbox, credentials: { mode: "subscription" }, defaultModel: "sonnet", workspace: "/w", sessionId: "s", signal: new AbortController().signal, limitMs: 90_000 });
+    return opts;
+  };
+
+  it("passes browser_method in the resume options when the job has one, and none otherwise", async () => {
+    expect((await resumedWith({ role: "deploy-verifier", browser_method: "playwright_runner" }))[0]!["browserMethod"]).toBe("playwright_runner");
+    expect((await resumedWith({}))[0]!["browserMethod"]).toBeUndefined();
+  });
+});
+
 describe("the checkpoint turn's own length cap (HO-3)", () => {
   const run = async (limitMs: number): Promise<number[]> => {
     const timeouts: number[] = [];

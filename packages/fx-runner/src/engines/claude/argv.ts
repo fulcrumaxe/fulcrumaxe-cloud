@@ -1,4 +1,4 @@
-import { isMcpToolName } from "@fulcrumaxe/runner-protocol";
+import { isBrowserJobRole, isMcpToolName, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 
 export interface ArgvInput {
   /** The CLI's own name for the model. */
@@ -32,6 +32,12 @@ export const REQUIRED_FLAGS: readonly string[] = Object.freeze([
 export function baseToolNames(entries: readonly string[]): string[] {
   return [...new Set(entries.filter((entry) => !isMcpToolName(entry)).map((entry) => entry.replace(/\(.*$/, "")))];
 }
+
+/**
+ * Whether the CLI is started with `--chrome`: only for the browser role, and only when its method drives the Claude in Chrome extension. A playwright job reaches its browser through
+ * the `fxverify` server in the MCP file, so it carries `--no-chrome` and never `--chrome` (a person's own "Chrome on by default" setting cannot add the extension's tools to it).
+ */
+export const chromeFlagFor = (role: string, method: BrowserMethod | undefined): boolean => isBrowserJobRole(role) && method !== "playwright_runner";
 
 /**
  * The agent's argument list. The prompt is never in it (it goes to standard input), and neither is any credential.
