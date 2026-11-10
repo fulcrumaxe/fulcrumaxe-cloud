@@ -25,6 +25,7 @@ import { vmBuildHost } from "../scripts/vm-host.mjs";
 import { findChromium, openHeadedBrowser } from "../src/verifyBrowser/driver.js";
 import { setPlaywrightLoader, sidecarFor } from "../src/verifyBrowser/loadPlaywright.js";
 import { sidecarLibrary } from "./sidecarLibrary.mjs";
+import { swapSidecar, unpackSidecar, verifySidecar } from "../scripts/sidecar.mjs";
 
 // D#6 RUNNER-CWD-1: where every program the kit starts without a directory of its own is started (a fresh empty directory under it each time),
 // and the two places such a start may never be: the home directory and this process's working directory (read at each start). No home, no launches.
@@ -45,7 +46,17 @@ if (process.env.ANTHROPIC_AUTH_TOKEN) shellVars.push("ANTHROPIC_AUTH_TOKEN");
 // FX_RUNNER_SERVICE=1), and a way to run a freshly installed program for its start check, in a clean environment and on a time limit, started in a
 // fresh launch directory of its own like every other short start (D#6 RUNNER-CWD-1); a launch directory that cannot be made fails the check.
 const execPath = realpathSync(process.execPath);
+// D#749 V2c-2c: the digest of the Playwright sidecar this program was built with (scripts/build-sea.mjs defines it); "" in a program that was not built with one, which then never has a sidecar it trusts.
+const sidecarDigest = typeof __FX_SIDECAR_DIGEST__ === "undefined" ? "" : __FX_SIDECAR_DIGEST__;
 const updateHost = {
+  // The updater installs a release's sidecar beside the binary with these (src/update/updater.ts); nothing under src/ imports a script.
+  sidecar: {
+    unpack: (bytes, dest) => {
+      unpackSidecar(bytes, dest);
+    },
+    swap: (next, final) => swapSidecar(next, final),
+    intact: (dir) => /^[0-9a-f]{64}$/.test(sidecarDigest) && verifySidecar(dir, sidecarDigest),
+  },
   version: RUNNER_VERSION,
   platform: process.platform,
   arch: process.arch,
@@ -89,7 +100,8 @@ const sea = isSea();
 const libraryRequire = sea ? undefined : createRequire(import.meta.url ?? pathToFileURL(process.argv[1]).href);
 setPlaywrightLoader(
   sea
-    ? sidecarLibrary(sidecarFor(process.execPath))
+    ? // D#749 V2c-2c: the release build bakes in the digest of the sidecar it ships with (scripts/build-sea.mjs defines __FX_SIDECAR_DIGEST__); a build that has none gets "", and nothing is available.
+      sidecarLibrary(sidecarFor(process.execPath), "playwright-core", { digest: sidecarDigest })
     : {
         load: async () => libraryRequire("playwright-core"),
         available: () => {

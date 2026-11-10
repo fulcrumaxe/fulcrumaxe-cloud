@@ -176,6 +176,17 @@ SHA-256, size) to `--out-dir`, and writes nothing if any step fails. A target is
 Two builds of one commit with the same `SOURCE_DATE_EPOCH` are byte-identical. The release file names are the
 `ARTIFACT_NAMES` constant in `scripts/release-manifest.mjs` (`node scripts/release-manifest.mjs --names` prints them).
 
+The Playwright library is not in the executable. The build (`scripts/sidecar.mjs`) lays the exact pinned `playwright-core` down as
+`<out-dir>/fx-runner-playwright/node_modules/playwright-core` (runtime files and licence files, no types, no browser), bakes the digest
+of that whole folder into the executable, and writes `fx-runner-playwright.fxsc`, the packed archive of it, which the manifest lists and
+the release signs as `v<version>/fx-runner-playwright.fxsc`. The release job must upload that archive with the binaries (the build job
+of one platform is enough: the bytes are the same everywhere) so that `release-manifest.mjs --dir files` lists it. A binary built or
+copied some other way gets the folder with `node scripts/sidecar-cli.mjs install --binary-dir <dir> [--digest <hex>]` (with the digest the binary carries, a different library fails the install and nothing is laid down; atomic; the old folder is put back if
+the swap fails); `verify --binary-dir <dir> [--digest <hex>]` checks one. Without a verified folder the runner never advertises
+`browser_playwright_v1` (probe reason `playwright_missing`).
+
+A single executable built BEFORE this change has no digest baked in, so it never trusts any sidecar folder: it must be rebuilt once with this `build-sea.mjs` (or replaced by a release built with it) before a sidecar works. `sidecar-cli.mjs install --binary-dir` is for a binary built by this `build-sea.mjs` and kept somewhere else, not a way to make an older binary use a sidecar.
+
 ## Supported platforms
 
 | Platform | v1 |
@@ -279,6 +290,10 @@ runs the link, so a switch takes effect at the next start.
 - Under the service unit (`FX_RUNNER_SERVICE=1`) `run` exits with 75 after a switch so systemd or launchd starts it on the new
   version; in the foreground it prints "Updated to {v}. Restart `fx-runner run` to use it." and goes on.
 - A crash between staging and switching leaves the old version in use; the next `run` removes the partial directory.
+- The Playwright sidecar (`fx-runner-playwright.fxsc`, a signed target of the same release) is fetched after the binary, unpacked and
+  checked in the same staging directory, and lands beside the binary in the same rename. A listed sidecar that fails a check refuses the
+  update (`sidecar_refused`, or the release client's own refusal); a release that lists none installs as before. For the version in use,
+  an update check lays a missing or mismatching sidecar down first (staged, then swapped in; the old folder is put back if that fails).
 - A Homebrew install (or a program that does not start out of `versions/`) never self-replaces: `--check` prints
   "A newer version is available: run brew upgrade fx-runner".
 - `doctor` has an `Updates` line: the version, pinned or not, automatic updates on or off, the last check, and "updates paused:

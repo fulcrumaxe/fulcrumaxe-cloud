@@ -10,7 +10,8 @@ import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, re
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Metadata, MetaFile, Signature, Snapshot, TargetFile, Targets, Timestamp } from "@tufjs/models";
-import { artifactName } from "./release-manifest.mjs";
+import { SIDECAR_ENTRY, artifactName } from "./release-manifest.mjs";
+import { SIDECAR_ARCHIVE } from "./sidecar.mjs";
 
 const DAY_MS = 86_400_000;
 const SPEC_VERSION = "1.0.31";
@@ -408,7 +409,8 @@ export function targetEntries(manifest) {
     if (typeof entry.version !== "string" || !SEMVER.test(entry.version)) fail("a manifest entry has a version that is not x.y.z");
     if (typeof entry.sha256 !== "string" || !SHA256_HEX.test(entry.sha256)) fail("a manifest entry has a sha256 that is not 64 lowercase hex digits");
     if (!Number.isSafeInteger(entry.size) || entry.size < 1) fail("a manifest entry has a size that is not a positive integer");
-    return { path: `v${entry.version}/${artifactName(entry.platform)}`, length: entry.size, hashes: { sha256: entry.sha256 } };
+    // D#749 V2c-2c: the Playwright sidecar archive of this release is one more signed target, `v<version>/fx-runner-playwright.fxsc` (the same file for every platform).
+    return { path: `v${entry.version}/${entry.artifact === SIDECAR_ENTRY ? SIDECAR_ARCHIVE : artifactName(entry.platform)}`, length: entry.size, hashes: { sha256: entry.sha256 } };
   });
 }
 

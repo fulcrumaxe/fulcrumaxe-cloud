@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Metadata, Signature } from "@tufjs/models";
 import { afterEach, describe, expect, it } from "vitest";
 import { writeManifest } from "../../scripts/release-manifest.mjs";
+import { SIDECAR_ARCHIVE, SIDECAR_DIR, buildSidecar, packSidecar } from "../../scripts/sidecar.mjs";
 import { main as keygen } from "../../scripts/tuf-keygen.mjs";
 import { ReleaseToolError, assertOutsideRepo, initRoot, loadSigner, publicHexFromJwk, refreshTimestamp, release, signerFromPem } from "../../scripts/tuf-lib.mjs";
 import { main as tool } from "../../scripts/tuf-release.mjs";
@@ -634,6 +635,67 @@ describe("the tools verify everything they build on against a trusted root befor
     const bad = w.run(["check", "--dir", w.meta, "--artifacts", artifacts]);
     expect(bad.code).toBe(1);
     expect(bad.err).toContain("does not match the length and SHA-256");
+  });
+});
+
+describe("the Playwright sidecar archive is a signed target (D#749 V2c-2c)", () => {
+  /** Releases 1.0.0 with the binary and the sidecar archive; the returned bytes are what the build produced. */
+  async function sidecarRelease() {
+    const w = await initialised();
+    const built = path.join(w.work, "sidecar-built", SIDECAR_DIR);
+    buildSidecar({ dest: built });
+    const archive = packSidecar(built);
+    const artifacts = path.join(w.work, "artifacts-sidecar");
+    mkdirSync(artifacts, { recursive: true });
+    writeFileSync(path.join(artifacts, "fx-runner-linux-x64"), bytesOf("1.0.0"));
+    writeFileSync(path.join(artifacts, SIDECAR_ARCHIVE), archive);
+    const { file } = writeManifest(artifacts, "1.0.0");
+    const released = w.run(["release", "--dir", w.meta, "--manifest", file, "--targets-key", w.keys.targets, "--online-key", w.keys.online]);
+    expect(released.err).toBe("");
+    expect(released.code).toBe(0);
+    w.server.files.set(T1, bytesOf("1.0.0"));
+    w.server.files.set(`v1.0.0/${SIDECAR_ARCHIVE}`, archive);
+    w.sync();
+    return { w, archive, artifacts };
+  }
+
+  it("is listed beside the binary, and the real client fetches it verified", async () => {
+    const { w, archive } = await sidecarRelease();
+    expect(w.run(["check", "--dir", w.meta]).out).toContain(`v1.0.0/${SIDECAR_ARCHIVE}`);
+    const outcome = await w.client().fetchTarget(`v1.0.0/${SIDECAR_ARCHIVE}`);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(sha(archive)).toBe(outcome.sha256);
+      expect(readFileSync(outcome.file).equals(archive)).toBe(true);
+    }
+  });
+
+  it("an archive swapped on the server after signing is refused by the client, and a swapped artifact fails the release check", async () => {
+    const { w, archive, artifacts } = await sidecarRelease();
+    const swapped = Buffer.from(archive);
+    swapped[swapped.length - 10] = swapped[swapped.length - 10]! ^ 0xff;
+    w.server.files.set(`v1.0.0/${SIDECAR_ARCHIVE}`, swapped);
+    refusedWith(await w.client().fetchTarget(`v1.0.0/${SIDECAR_ARCHIVE}`), "target_mismatch");
+    const dir = path.join(w.work, "check-sidecar", "v1.0.0");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "fx-runner-linux-x64"), bytesOf("1.0.0"));
+    writeFileSync(path.join(dir, SIDECAR_ARCHIVE), swapped);
+    const bad = w.run(["check", "--dir", w.meta, "--artifacts", path.dirname(dir)]);
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain("does not match the length and SHA-256");
+    expect(artifacts).toBeTruthy();
+  });
+
+  it("a released archive is never replaced by different bytes under the same version", async () => {
+    const { w } = await sidecarRelease();
+    const other = path.join(w.work, "artifacts-other");
+    mkdirSync(other, { recursive: true });
+    writeFileSync(path.join(other, "fx-runner-linux-x64"), bytesOf("1.0.0"));
+    writeFileSync(path.join(other, SIDECAR_ARCHIVE), Buffer.from("a different archive"));
+    const { file } = writeManifest(other, "1.0.0");
+    const again = w.run(["release", "--dir", w.meta, "--manifest", file, "--targets-key", w.keys.targets, "--online-key", w.keys.online]);
+    expect(again.code).toBe(1);
+    expect(again.err).toContain("already released with different contents");
   });
 });
 
