@@ -252,8 +252,8 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
         await endAnalysis(deps.pool, accountId, r.id, "skipped", "head_moved");
         return "skipped";
       }
-      // The shared daily rule (verifier and analyst spend, one counter) is read before anything is reserved.
-      const over = await withTenant(deps.pool, accountId, (client) => overRepoDailyUsd(client, accountId, r.repo_id, settings.analysisPerRunUsd, settings.perRepoDailyUsd));
+      // The shared daily rule (verifier and analyst spend, one counter; the post-merge tester is not in it) is read before anything is reserved.
+      const over = await withTenant(deps.pool, accountId, (client) => overRepoDailyUsd(client, accountId, r.repo_id, settings.analysisPerRunUsd, settings.perRepoDailyUsd, "claims"));
       if (over) {
         await holdAnalysis(deps.pool, accountId, r.id, "daily_cap");
         return "daily_cap";

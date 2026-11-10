@@ -93,7 +93,7 @@ export function envelopeDefaultMarginPct(): number | null {
 }
 
 export type DiscoverySettings =
-  | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number; analysisPerRunUsd?: number; deployVerifyPerRunUsd?: number }
+  | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number; analysisPerRunUsd?: number; deployVerifyPerRunUsd?: number; deployVerifyPerRepoDailyUsd?: number }
   | { on: false; code: 'discovery_unconfigured' };
 
 /**
@@ -124,16 +124,21 @@ export function analysisSettings(): AnalysisSettings {
   return { on: true, perRepoDailyUsd: d.perRepoDailyUsd, analysisPerRunUsd: d.analysisPerRunUsd };
 }
 
-export type DeployVerifySettings = { on: true; perRepoDailyUsd: number; perRunUsd: number } | { on: false; code: 'deploy_verify_unconfigured' };
+export type DeployVerifySettings =
+  | { on: true; perRepoDailyUsd: number; perRunUsd: number }
+  | { on: false; code: 'deploy_verify_unconfigured' | 'deploy_verify_run_over_daily' };
 
 /**
- * D#749 V3c: the post-merge tester's figures: what one job may reserve (`discovery.deployVerifyPerRunUsd`) and the shared per-repository daily cap (`discovery.perRepoDailyUsd`). On only when the
- * `discovery` block carries the per-run figure; otherwise `{ on: false, code: 'deploy_verify_unconfigured' }` and no job starts. There is no default figure. Never throws on missing data.
+ * D#749 V3c: the post-merge tester's figures: what one job may reserve (`discovery.deployVerifyPerRunUsd`) and ITS OWN per-repository daily cap (`discovery.deployVerifyPerRepoDailyUsd`;
+ * the shared `perRepoDailyUsd` belongs to the claim verifier and analysis, is counted over their runs only, and never reaches this stage; a repository's day is bounded by the two added). On only when the `discovery` block carries both; otherwise
+ * `{ on: false, code: 'deploy_verify_unconfigured' }` and no job starts. A per-run figure above the daily cap could never start a job, so that pair is `{ on: false, code: 'deploy_verify_run_over_daily' }`
+ * (a named reason, never a row held for ever in silence). There is no default figure. Never throws on missing data.
  */
 export function deployVerifySettings(): DeployVerifySettings {
   const d = discoverySettings();
-  if (!d.on || d.deployVerifyPerRunUsd === undefined) return { on: false, code: 'deploy_verify_unconfigured' };
-  return { on: true, perRepoDailyUsd: d.perRepoDailyUsd, perRunUsd: d.deployVerifyPerRunUsd };
+  if (!d.on || d.deployVerifyPerRunUsd === undefined || d.deployVerifyPerRepoDailyUsd === undefined) return { on: false, code: 'deploy_verify_unconfigured' };
+  if (d.deployVerifyPerRunUsd > d.deployVerifyPerRepoDailyUsd) return { on: false, code: 'deploy_verify_run_over_daily' };
+  return { on: true, perRepoDailyUsd: d.deployVerifyPerRepoDailyUsd, perRunUsd: d.deployVerifyPerRunUsd };
 }
 
 /**

@@ -8,7 +8,7 @@ import type { DiscoverySettings } from '@fx/plan-data';
  *  - `discovery.externalVerifiesPerRepoPerDay`: how many verifier runs for outsiders' proposals one repository may start in a UTC day.
  *    `overExternalDailyLimit` is the one predicate: the sweep starts nothing for a proposal it holds, and the detail route's `verify_wait`
  *    reads `daily_limit` from the same call, so the two cannot disagree (no second count).
- *  - `discovery.perRepoDailyUsd`: what one repository's verifier runs may spend in a UTC day. `overRepoDailyUsd` is checked by the sweep
+ *  - `discovery.perRepoDailyUsd`: what one repository's verifier and analyst runs may spend in a UTC day (the post-merge tester has its own cap and its own counter, see `DailySide`). `overRepoDailyUsd` is checked by the sweep
  *    before anything is reserved.
  *
  * `verifyHold` is the one function that decides which of the two (if either) holds a proposal. The sweep refuses by it and the detail
@@ -68,19 +68,24 @@ export const VERIFY_STAGE_KEY_PREFIX = 'verify-stage:';
 export const verifyStageRunKey = (rowId: string): string => `${VERIFY_STAGE_KEY_PREFIX}${rowId}`;
 
 /**
- * Every run that spends against the repository's day: its verifier runs, (S4-f3) its analyst runs and (D#749 V3b) its post-merge tester runs, started this
- * UTC day. One counter, so the roles share `perRepoDailyUsd`. The prefixes are literals, so no caller can leave one out.
+ * The repository's day is counted in TWO counters that never see each other's runs (D#749):
+ *  - 'claims': the claim verifier's runs and (S4-f3) the docs-and-code analyst's runs, started this UTC day, against the shared `discovery.perRepoDailyUsd`.
+ *  - 'tester': the post-merge tester's runs (D#749 V3b), started this UTC day, against the stage's own `discovery.deployVerifyPerRepoDailyUsd`.
+ * Each side counts its own ledger rows and its own open reservations only, so a tester run never holds a claim or an analysis, and their spend never holds the tester. One repository's
+ * total for a day is therefore bounded by the shared cap plus the tester's cap. `$1` account, `$2` repo, `$3` the first branch's key prefix pattern (a literal per side, see `overRepoDailyUsd`).
  */
-const runsToday = (): string => `${verifierRunsToday(false)}
+export type DailySide = 'claims' | 'tester';
+
+const claimRunsToday = (): string => `${verifierRunsToday(false)}
       UNION ALL
      SELECT k.run_id FROM agent_run_idempotency_keys k
        JOIN discovery_analyses d ON d.account_id = k.account_id AND d.id::text = split_part(k.idempotency_key, ':', 2)
       WHERE k.account_id = $1 AND k.idempotency_key LIKE '${ANALYSIS_KEY_PREFIX}%' AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-        AND d.repo_id = $2
-      UNION ALL
-     SELECT k.run_id FROM agent_run_idempotency_keys k
+        AND d.repo_id = $2`;
+
+const testerRunsToday = (): string => `SELECT k.run_id FROM agent_run_idempotency_keys k
        JOIN verify_rows v ON v.account_id = k.account_id AND v.id::text = split_part(k.idempotency_key, ':', 2)
-      WHERE k.account_id = $1 AND k.idempotency_key LIKE '${VERIFY_STAGE_KEY_PREFIX}%' AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+      WHERE k.account_id = $1 AND k.idempotency_key LIKE $3 AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
         AND v.repo_id = $2`;
 
 /**
@@ -136,7 +141,7 @@ export async function verifyHold(
   const started = await client.query('SELECT 1 FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2', [accountId, proposalVerifyKey(p)]);
   if (started.rows.length > 0) return null;
   if (await overExternalDailyLimit(client, accountId, p, limits.externalVerifiesPerRepoPerDay)) return 'daily_limit';
-  if (await overRepoDailyUsd(client, accountId, p.repo_id, limits.verifyPerProposalUsd, limits.perRepoDailyUsd)) return 'daily_spend';
+  if (await overRepoDailyUsd(client, accountId, p.repo_id, limits.verifyPerProposalUsd, limits.perRepoDailyUsd, 'claims')) return 'daily_spend';
   return null;
 }
 
@@ -161,17 +166,17 @@ export async function verifyWait(
 }
 
 /**
- * True when starting one more run (verifier or, S4-f3, analyst) that reserves `nextUsd` would take the repository past `capUsd` today: the ledger rows (model
- * and compute) of the repository's verifier and analyst runs started this UTC day, plus their open reservations, plus `nextUsd`. Settled reservations
- * are not counted (their spend is in the ledger), so nothing is counted twice. Compared in `numeric`, never in binary fractions.
+ * True when starting one more run that reserves `nextUsd` would take the repository past `capUsd` today, on ONE side (see `DailySide`): the ledger rows (model and compute) of
+ * that side's runs started this UTC day, plus their open reservations, plus `nextUsd`. 'claims' is the claim verifier and the analyst (against the shared cap); 'tester' is the
+ * post-merge tester alone (against its own cap). Settled reservations are not counted (their spend is in the ledger), so nothing is counted twice. Compared in `numeric`, never in binary fractions.
  */
-export async function overRepoDailyUsd(client: Query, accountId: string, repoId: string, nextUsd: number, capUsd: number): Promise<boolean> {
+export async function overRepoDailyUsd(client: Query, accountId: string, repoId: string, nextUsd: number, capUsd: number, side: DailySide): Promise<boolean> {
   const { rows } = await client.query<{ over: boolean }>(
-    `WITH runs AS (${runsToday()})
+    `WITH runs AS (${side === 'tester' ? testerRunsToday() : claimRunsToday()})
      SELECT (COALESCE((SELECT sum(l.usd) FROM ledger l WHERE l.account_id = $1 AND l.run_id IN (SELECT run_id FROM runs)), 0)
            + COALESCE((SELECT sum(s.usd_reserved) FROM spend_reservations s WHERE s.account_id = $1 AND s.state = 'open' AND s.run_id IN (SELECT run_id FROM runs)), 0)
            + $4::numeric) > $5::numeric AS over`,
-    [accountId, repoId, `${PROPOSAL_VERIFY_KEY_PREFIX}%`, String(nextUsd), String(capUsd)],
+    [accountId, repoId, side === 'tester' ? `${VERIFY_STAGE_KEY_PREFIX}%` : `${PROPOSAL_VERIFY_KEY_PREFIX}%`, String(nextUsd), String(capUsd)],
   );
   // No answer is no room: fail closed.
   return rows[0]?.over !== false;

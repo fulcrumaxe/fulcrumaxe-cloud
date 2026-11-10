@@ -5,7 +5,7 @@ import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { withTenant } from '../src/tenancy/withTenant.js';
 import { BugItemNotAttachedError, bugItemTitle, fileBugItem, insertAndAttach } from '../src/verify/bugItem.js';
-import { overRepoDailyUsd, verifyStageRunKey } from '../src/plan/proposalVerifyLimits.js';
+import { analysisRunKey, overRepoDailyUsd, proposalVerifyKey, verifyHold, verifyStageRunKey } from '../src/plan/proposalVerifyLimits.js';
 import { finishVerifyRow, openVerifyRow, readVerifyRow, saveVerifySettings, startDeploying, startRunning, type JourneyResult } from '../src/verify/rows.js';
 
 /** [pg] D#749 V3b: the bug item a failed verify row files (one item, no orphan, under a replay and a race), and the daily counter that now includes the tester's runs. */
@@ -132,7 +132,7 @@ describe('verify bug item and daily counter [pg]', { timeout: 120_000 }, () => {
     expect(Array.from(bugItemTitle(7, Array.from({ length: 8 }, () => 'x'.repeat(40)))).length).toBeLessThanOrEqual(120);
   });
 
-  describe('the daily counter counts the tester', () => {
+  describe('the daily counters are split: the tester has its own, the claim verifier and the analyst share the other', () => {
     /** A tester run of the repository started today holding `usd` in the ledger. */
     async function testerSpend(who: SeedRefs, repo: string, usd: number): Promise<string> {
       const { rowId } = await failedRow(who, repo);
@@ -143,17 +143,91 @@ describe('verify bug item and daily counter [pg]', { timeout: 120_000 }, () => {
       await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model')`, [who.accountId, usd, runId]);
       return key;
     }
+    let n = 0;
+    /** A claim verifier run of the repository started today holding `usd` in the ledger. */
+    async function verifierSpend(who: SeedRefs, repo: string, usd: number): Promise<void> {
+      const { rows } = await admin.query<{ id: string }>(
+        `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, title, provenance, owner_process) VALUES ($1, $2, $3, '{github_issue}', $4, 'spent', 'internal', 'internal_loop') RETURNING id`,
+        [who.accountId, repo, `gh:issue:${9000 + ++n}`, 9000 + n],
+      );
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, ended_at) VALUES ($1, $2, 'proposal-verifier', 'local', 'succeeded', now())`, [runId, who.accountId]);
+      await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [who.accountId, `proposal-verify:${rows[0]!.id}:aaaaaaaa:0`, runId, 'd'.repeat(64)]);
+      await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model')`, [who.accountId, usd, runId]);
+    }
+    /** An analyst run of the repository started today holding `usd` in the ledger. */
+    async function analysisSpend(who: SeedRefs, repo: string, usd: number): Promise<void> {
+      const { rows } = await admin.query<{ id: string }>(`INSERT INTO discovery_analyses (account_id, repo_id, head_sha, trigger) VALUES ($1, $2, $3, 'sweep') RETURNING id`, [who.accountId, repo, (++n).toString(16).padStart(40, '0')]);
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, ended_at) VALUES ($1, $2, 'discovery-analyst', 'local', 'succeeded', now())`, [runId, who.accountId]);
+      await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [who.accountId, analysisRunKey(rows[0]!.id, 1), runId, 'd'.repeat(64)]);
+      await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model')`, [who.accountId, usd, runId]);
+    }
+    /** An open reservation held by a run of the given kind: `claims` is a verifier run, `tester` a tester run. */
+    async function reservation(who: SeedRefs, repo: string, side: 'claims' | 'tester', usd: number): Promise<void> {
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status) VALUES ($1, $2, $3, 'local', 'running')`, [runId, who.accountId, side === 'tester' ? 'deploy-verifier' : 'proposal-verifier']);
+      if (side === 'tester') {
+        const { rowId } = await failedRow(who, repo, 20 + ++n);
+        await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [who.accountId, verifyStageRunKey(rowId), runId, 'd'.repeat(64)]);
+      } else {
+        const { rows } = await admin.query<{ id: string }>(
+          `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, title, provenance, owner_process) VALUES ($1, $2, $3, '{github_issue}', $4, 'held', 'internal', 'internal_loop') RETURNING id`,
+          [who.accountId, repo, `gh:issue:${9000 + ++n}`, 9000 + n],
+        );
+        await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [who.accountId, `proposal-verify:${rows[0]!.id}:aaaaaaaa:0`, runId, 'd'.repeat(64)]);
+      }
+      await admin.query(`INSERT INTO spend_reservations (account_id, run_id, budget, usd_reserved, state) VALUES ($1, $2, 'model', $3, 'open')`, [who.accountId, runId, usd]);
+    }
+    const pending = (repo: string) => ({ id: randomUUID(), repo_id: repo, provenance: 'internal', title: 'p', summary: null, gh_number: null, discussion_number: null, verify_attempts: 0, verify_requeues: 0, analysis_refs: null });
+    const limits = (perRepoDailyUsd: number) => ({ perRepoDailyUsd, verifyPerProposalUsd: 0.4, externalVerifiesPerRepoPerDay: 99 });
 
-    it('a tester run today counts against its repository, not another repository or account, and not yesterday', async () => {
+    it('a tester run today counts on the tester side against its repository, not another repository or account, and not yesterday', async () => {
       const repo = await newRepo(a);
       const other = await newRepo(a);
       const key = await testerSpend(a, repo, 1.7);
-      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0))).toBe(true);
-      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.2))).toBe(false);
-      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, other, 0.4, 2.0))).toBe(false);
-      expect(await as(b, (c) => overRepoDailyUsd(c, b.accountId, repo, 0.4, 2.0))).toBe(false);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0, 'tester'))).toBe(true);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.2, 'tester'))).toBe(false);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, other, 0.4, 2.0, 'tester'))).toBe(false);
+      expect(await as(b, (c) => overRepoDailyUsd(c, b.accountId, repo, 0.4, 2.0, 'tester'))).toBe(false);
       await admin.query(`UPDATE agent_run_idempotency_keys SET created_at = now() - interval '1 day' WHERE account_id = $1 AND idempotency_key = $2`, [a.accountId, key]);
-      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0))).toBe(false);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0, 'tester'))).toBe(false);
+    });
+
+    it('tester spend and tester reservations over the shared cap leave the claim verifier (verifyHold null) and the analyst (claims side) unheld', async () => {
+      const repo = await newRepo(a);
+      await testerSpend(a, repo, 7);
+      await reservation(a, repo, 'tester', 3.3);
+      // The same figures that hold the tester (7 + 3.3 + 0.4 > 2) say nothing against the claims side.
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0, 'tester'))).toBe(true);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0, 'claims'))).toBe(false);
+      expect(await as(a, (c) => verifyHold(c, a.accountId, pending(repo), limits(2.0)))).toBeNull();
+    });
+
+    it('claim verifier and analyst spend and reservations do not hold the tester, and each side is still held at its own cap', async () => {
+      const repo = await newRepo(a);
+      await verifierSpend(a, repo, 4);
+      await analysisSpend(a, repo, 3);
+      await reservation(a, repo, 'claims', 2.5);
+      // 9.5 of claim spend: the claims side is held by 2 and by 9.8 (9.5 + 0.4 > 9.8 is false, so 9.9 is room), the tester side sees none of it.
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0, 'claims'))).toBe(true);
+      expect(await as(a, (c) => verifyHold(c, a.accountId, pending(repo), limits(2.0)))).toBe('daily_spend');
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 9.8, 'claims'))).toBe(true);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 9.9, 'claims'))).toBe(false);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 0.5, 'tester'))).toBe(false);
+      // The tester's own spend holds it at its own cap, to the cent.
+      await testerSpend(a, repo, 1.6);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 1.9, 'tester'))).toBe(true);
+      expect(await as(a, (c) => overRepoDailyUsd(c, a.accountId, repo, 0.4, 2.0, 'tester'))).toBe(false);
+    });
+
+    it('a claim run key and a tester run key never cross: a proposal key is not a tester run, a verify-stage key is not a claim run', async () => {
+      const repo = await newRepo(a);
+      await testerSpend(a, repo, 5);
+      const p = pending(repo);
+      // A key of the proposal-verify shape for this id does not exist yet, so the hold is decided by spend alone.
+      expect(proposalVerifyKey(p).startsWith('proposal-verify:')).toBe(true);
+      expect(await as(a, (c) => verifyHold(c, a.accountId, p, limits(0.5)))).toBeNull();
     });
   });
 });

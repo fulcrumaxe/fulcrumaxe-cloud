@@ -120,8 +120,9 @@ export const planDataSchema = z
      * verifier spend per day, `verifyPerProposalUsd` is the most one verification may reserve, and `externalVerifiesPerRepoPerDay` is how
      * many proposals from outside authors one repo may have checked in a day (0 checks none). D#483 S4-f3: `analysisPerRunUsd` (optional) is the most one
      * docs-and-code analysis run may reserve; without it analysis is OFF (`analysis_unconfigured`) and verification is unaffected.
-     * D#749 V3c: `deployVerifyPerRunUsd` (optional) is the most one post-merge tester job may reserve; without it that stage starts no job (`deploy_verify_unconfigured`), and the
-     * shared `perRepoDailyUsd` is the daily cap its jobs count against.
+     * D#749 V3c: `deployVerifyPerRunUsd` (optional) is the most one post-merge tester job may reserve; without it that stage starts no job (`deploy_verify_unconfigured`).
+     * `deployVerifyPerRepoDailyUsd` (optional) is that stage's OWN per-repository daily cap, counted over the tester's runs only (the shared `perRepoDailyUsd` is the claim verifier's and
+     * analysis's, counted over their runs only, so one repository's day is bounded by the two caps added); without it the stage is off the same way, and a per-run figure above it is refused (`deploy_verify_run_over_daily`) because no job could ever start.
      */
     discovery: z
       .object({
@@ -130,6 +131,7 @@ export const planDataSchema = z
         externalVerifiesPerRepoPerDay: count,
         analysisPerRunUsd: z.number().finite().positive().optional(),
         deployVerifyPerRunUsd: z.number().finite().positive().optional(),
+        deployVerifyPerRepoDailyUsd: z.number().finite().positive().optional(),
       })
       .strict()
       .optional(),

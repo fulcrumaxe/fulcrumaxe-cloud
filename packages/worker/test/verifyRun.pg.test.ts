@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { BROWSER_METHODS, DEPLOY_VERIFIER_ROLE } from "@fulcrumaxe/runner-protocol";
 import type { StartAgentRunInput } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
+import { configureErrorReporter, type ErrorClass } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { placeDeployOrder } from "@fx/core/src/verify/orders.js";
@@ -307,12 +308,28 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
     });
 
     it("fails closed: figures that cannot be read, a seat that is refused, or a seat whose cap is not the figure start nothing and leave the row deploying", async () => {
+      const reported: ErrorClass[] = [];
+      configureErrorReporter({ service: "app", write: () => undefined, sink: { record: (event) => void reported.push(event) } });
       const repo = await newRepo(a);
       const { row } = await deployingRow(a, repo);
       limits = () => {
         throw new Error("plan data unreadable");
       };
       expect(await run().ready(readyInput(a, repo, row))).toBe("held");
+      // A named plan-data refusal keeps its name in the report; an unnamed failure folds into other.
+      for (const code of ["deploy_verify_unconfigured", "deploy_verify_run_over_daily"]) {
+        limits = () => {
+          throw new Error(code);
+        };
+        expect(await run().ready(readyInput(a, repo, row))).toBe("held");
+        expect(reported.some((r) => r.stage === "verify_run.limits" && r.code === code), code).toBe(true);
+      }
+      // Any other failure keeps the error's own code, even when its message happens to read like one of ours.
+      limits = () => {
+        throw Object.assign(new Error("deploy_verify_daily_cap"), { code: "validation_failed" });
+      };
+      expect(await run().ready(readyInput(a, repo, row))).toBe("held");
+      expect(reported.filter((r) => r.stage === "verify_run.limits").at(-1)?.code).toBe("validation_failed");
       limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 10 });
       seatAnswer = "refuse";
       expect(await run().ready(readyInput(a, repo, row))).toBe("held");
@@ -329,11 +346,76 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
       await testerSpend(a, repo, 8.9);
       const { row } = await deployingRow(a, repo);
       limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 10 });
-      expect(await tenant(a, (c) => overRepoDailyUsd(c, a.accountId, repo, RUN_USD, 10))).toBe(true);
+      expect(await tenant(a, (c) => overRepoDailyUsd(c, a.accountId, repo, RUN_USD, 10, "tester"))).toBe(true);
       expect(await run().ready(readyInput(a, repo, row))).toBe("held");
       expect(starter.calls).toEqual([]);
       expect(seatCalls).toEqual([]);
       expect((await reread(a, row.id))!.status).toBe("deploying");
+    });
+
+    it("the stage's own daily cap decides: tester spend over the shared (claim verifier) cap is not seen by that cap, and spend over the tester's cap is held", async () => {
+      const repo = await newRepo(a);
+      await testerSpend(a, repo, 5);
+      const { row } = await deployingRow(a, repo);
+      // The tester's spend is over a small figure on its own side and invisible to the claim side: the two counters do not cross.
+      expect(await tenant(a, (c) => overRepoDailyUsd(c, a.accountId, repo, RUN_USD, 2.5, "tester"))).toBe(true);
+      expect(await tenant(a, (c) => overRepoDailyUsd(c, a.accountId, repo, RUN_USD, 2.5, "claims"))).toBe(false);
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 21 });
+      expect(await run().ready(readyInput(a, repo, row))).toBe("started");
+      const repo2 = await newRepo(a);
+      await testerSpend(a, repo2, 19.9);
+      const held = await deployingRow(a, repo2, 8, sha("9"));
+      // 19.9 + 1.25 > 21: held. Raising only the tester's cap releases it.
+      expect(await run().ready(readyInput(a, repo2, held.row))).toBe("held");
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 21.25 });
+      expect(await run().ready(readyInput(a, repo2, held.row))).toBe("started");
+    });
+
+    it("claim verifier and analyst spend, and the open reservation of a verifier run, do not hold the tester", async () => {
+      const repo = await newRepo(a);
+      const proposal = (await admin.query<{ id: string }>(`INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, title, provenance, owner_process) VALUES ($1, $2, $3, '{github_issue}', $4, 'spent', 'internal', 'internal_loop') RETURNING id`, [a.accountId, repo, `gh:issue:${7000 + ++spentN}`, 7000 + spentN])).rows[0]!.id;
+      const claimRun = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status) VALUES ($1, $2, 'proposal-verifier', 'local', 'running')`, [claimRun, a.accountId]);
+      await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [a.accountId, `proposal-verify:${proposal}:aaaaaaaa:0`, claimRun, "d".repeat(64)]);
+      await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', 50, $2, 'model')`, [a.accountId, claimRun]);
+      await admin.query(`INSERT INTO spend_reservations (account_id, run_id, budget, usd_reserved, state) VALUES ($1, $2, 'model', 40, 'open')`, [a.accountId, claimRun]);
+      const analysis = (await admin.query<{ id: string }>(`INSERT INTO discovery_analyses (account_id, repo_id, head_sha, trigger) VALUES ($1, $2, $3, 'sweep') RETURNING id`, [a.accountId, repo, shaN(5000 + spentN)])).rows[0]!.id;
+      const analysisRun = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, ended_at) VALUES ($1, $2, 'discovery-analyst', 'local', 'succeeded', now())`, [analysisRun, a.accountId]);
+      await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [a.accountId, `docs-code-analysis:${analysis}:1`, analysisRun, "d".repeat(64)]);
+      await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', 30, $2, 'model')`, [a.accountId, analysisRun]);
+      const { row } = await deployingRow(a, repo);
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 10 });
+      expect(await tenant(a, (c) => overRepoDailyUsd(c, a.accountId, repo, RUN_USD, 10, "claims"))).toBe(true);
+      expect(await run().ready(readyInput(a, repo, row))).toBe("started");
+    });
+
+    it("a row held by the daily cap is reported, once per repository per day and never for a row that starts", async () => {
+      const reported: ErrorClass[] = [];
+      configureErrorReporter({ service: "app", write: () => undefined, sink: { record: (event) => void reported.push(event) } });
+      const repo = await newRepo(a);
+      const other = await newRepo(a);
+      await testerSpend(a, repo, 8.9);
+      await testerSpend(a, other, 8.9);
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 10 });
+      const first = await deployingRow(a, repo);
+      const second = await deployingRow(a, repo, 8, sha("9"));
+      const third = await deployingRow(a, other, 9, sha("8"));
+      const stage = run();
+      const capHolds = () => reported.filter((r) => r.stage === "verify_run.daily_cap").length;
+      expect(await stage.ready(readyInput(a, repo, first.row))).toBe("held");
+      expect(reported.find((r) => r.stage === "verify_run.daily_cap")?.code).toBe("deploy_verify_daily_cap");
+      expect(capHolds()).toBe(1);
+      expect(await stage.ready(readyInput(a, repo, first.row))).toBe("held");
+      expect(await stage.ready(readyInput(a, repo, second.row))).toBe("held");
+      expect(capHolds()).toBe(1);
+      expect(await stage.ready(readyInput(a, other, third.row))).toBe("held");
+      expect(capHolds()).toBe(2);
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 777 });
+      const quiet = await newRepo(a);
+      const fresh = await deployingRow(a, quiet, 10, sha("7"));
+      expect(await stage.ready(readyInput(a, quiet, fresh.row))).toBe("started");
+      expect(capHolds()).toBe(2);
     });
 
     it("room is exact at the boundary, another repository and another account are not counted, and a day later the row starts", async () => {
@@ -362,7 +444,7 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
       await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, head_sha, job_signed) VALUES ($1, $2, $3, 'local', 'running', $4, $5::jsonb)`, [runId, a.accountId, DEPLOY_VERIFIER_ROLE, row.merge_sha, JSON.stringify({ job: { role: DEPLOY_VERIFIER_ROLE, browser_method: "chrome_runner" } })]);
       await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [a.accountId, `verify-stage:${row.id}`, runId, "d".repeat(64)]);
       await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model')`, [a.accountId, 9.9, runId]);
-      expect(await tenant(a, (c) => overRepoDailyUsd(c, a.accountId, repo, RUN_USD, 10))).toBe(true);
+      expect(await tenant(a, (c) => overRepoDailyUsd(c, a.accountId, repo, RUN_USD, 10, "tester"))).toBe(true);
       expect(await run().ready(readyInput(a, repo, row))).toBe("started");
       // The row takes the method the surviving run was SIGNED with, not the one this pass would have chosen.
       expect((await reread(a, row.id))).toMatchObject({ status: "running", run_id: runId, method: "chrome_runner" });
