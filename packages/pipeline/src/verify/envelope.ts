@@ -7,7 +7,7 @@ import { JOURNEY_RESULTS, type JourneyResult, type JourneyResultWord } from '@fx
  *   { "journeys": [ { "id": "c1", "result": "pass" | "fail" | "blocked", "steps": [ { "did": "...", "dom_fact": "...", "number": 3 } ],
  *                    "console_errors": 0, "undo_checked": true, "reloaded": true } ] }
  *
- * Every key is required except a step's `number`; any other key, at any depth, rejects the whole envelope. An answer over one megabyte is rejected unread.
+ * Every key is required except a step's `number` and the top-level `signed_in_as` (a string of 1 to 100 characters with no control character, written only by the trusted verify server); any other key, at any depth, rejects the whole envelope. An answer over one megabyte is rejected unread.
  * What a page showed (`did`, `dom_fact`) is data: it is cut, stripped of control and invisible characters and markdown links, and kept as text. It never
  * decides anything and nothing here forwards it to a prompt.
  */
@@ -17,9 +17,14 @@ export const MAX_STEP_TEXT = 300;
 export const MAX_CONSOLE_ERRORS = 100_000;
 
 export type EnvelopeRejection = 'too_large' | 'not_json' | 'bad_shape' | 'extra_key' | 'duplicate_journey' | 'bad_value';
-export type ParsedEnvelope = { ok: true; journeys: JourneyResult[] } | { ok: false; rejection: EnvelopeRejection };
+/** `signedInAs` is present only when the envelope carried the optional top-level `signed_in_as`. */
+export type ParsedEnvelope = { ok: true; journeys: JourneyResult[]; signedInAs?: string } | { ok: false; rejection: EnvelopeRejection };
 
-const TOP_KEYS = ['journeys'];
+const TOP_REQUIRED = ['journeys'];
+/** `signed_in_as` is optional and written only by the trusted verify server (the account it read from the signed-in browser), never by the model. */
+const TOP_KEYS = ['journeys', 'signed_in_as'];
+export const MAX_SIGNED_IN_AS = 100;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 const JOURNEY_KEYS = ['id', 'result', 'steps', 'console_errors', 'undo_checked', 'reloaded'];
 const STEP_REQUIRED = ['did', 'dom_fact'];
 const STEP_KEYS = ['did', 'dom_fact', 'number'];
@@ -57,8 +62,14 @@ export function parseEnvelope(raw: unknown): ParsedEnvelope {
     if (size > MAX_ENVELOPE_BYTES) return { ok: false, rejection: 'too_large' };
   }
   if (!isObject(value)) return { ok: false, rejection: 'bad_shape' };
-  const top = keysIn(value, TOP_KEYS, TOP_KEYS);
+  const top = keysIn(value, TOP_KEYS, TOP_REQUIRED);
   if (top !== 'ok') return { ok: false, rejection: top };
+  let signedInAs: string | undefined;
+  if (Object.hasOwn(value, 'signed_in_as')) {
+    const s = value.signed_in_as;
+    if (typeof s !== 'string' || s.length < 1 || s.length > MAX_SIGNED_IN_AS || CONTROL_CHARS.test(s)) return { ok: false, rejection: 'bad_value' };
+    signedInAs = s;
+  }
   const list = value.journeys;
   if (!Array.isArray(list) || list.length > MAX_JOURNEYS) return { ok: false, rejection: 'bad_shape' };
 
@@ -91,5 +102,5 @@ export function parseEnvelope(raw: unknown): ParsedEnvelope {
     }
     journeys.push({ id, result: result as JourneyResultWord, steps: cleanSteps, console_errors: consoleErrors as number, undo_checked: undoChecked, reloaded });
   }
-  return { ok: true, journeys };
+  return signedInAs === undefined ? { ok: true, journeys } : { ok: true, journeys, signedInAs };
 }

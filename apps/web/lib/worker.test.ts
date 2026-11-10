@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreateWorkerOptions, Worker } from "@fx/worker";
 import { runActionDeps } from "@fx/api/src/routes/run-actions.js";
-import { buildPreviewPrompt } from "@fx/pipeline";
+import { buildPreviewPrompt, buildVerifyPrompt, outcomeFromAnswer } from "@fx/pipeline";
 import { getWorker, setWorkerWiringForTests, workerConfigured } from "./worker";
+import { verifyRunLimits } from "./verifyRunLimits";
 import { openVerifyHost } from "./github/planSource";
 import "../app/api/v1/[...path]/route";
 
@@ -79,5 +80,18 @@ describe("both ids present", () => {
     expect(typeof stage!.health).toBe("function");
     // No read-App settings in a test process: the first read is plain no answer (the stage retries), never a throw into the tick.
     expect(await stage!.host.mergeCommit({ repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets" }, 1)).toBeNull();
+  });
+
+  it("D#749 V3c: the tester hand-offs get pipeline's own prompt builder and answer rules by identity and the plan-data limits, so a qualified row starts a job in production", async () => {
+    vi.stubEnv("VERCEL_TEAM_ID", "team_1");
+    vi.stubEnv("VERCEL_PROJECT_ID", "prj_1");
+    const { seen } = captureFactory();
+    await getWorker();
+    const run = seen[0]!.verifyStage!.run;
+    expect(run).toBeDefined();
+    expect(Object.keys(run!).sort()).toEqual(["limits", "outcome", "prompt"]);
+    expect(run!.prompt).toBe(buildVerifyPrompt);
+    expect(run!.outcome).toBe(outcomeFromAnswer);
+    expect(run!.limits).toBe(verifyRunLimits);
   });
 });

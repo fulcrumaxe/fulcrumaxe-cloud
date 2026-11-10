@@ -94,6 +94,26 @@ describe('verify stage store', () => {
       await expect(withTenant(appPool, a.accountId, memberId, (c) => saveVerifySettings(c, a.accountId, other, memberId, { enabled: true, baseUrl: BASE_URL }))).rejects.toMatchObject({ code: '42501' });
     });
 
+    // D#749 V3c (migration 1007): the browser driver is a column of the same table, written under the same admin-only policy and read by the stage.
+    it('the browser driver defaults to playwright; an owner sets chrome; a member cannot change it; the application and the table refuse anything else', async () => {
+      const repo = await newRepo();
+      await turnOn(repo);
+      expect((await asWorker((c) => readVerifySettings(c, repo))).browserDriver).toBe('playwright');
+      expect((await asOwner((c) => saveVerifySettings(c, a.accountId, repo, a.userId, { browserDriver: 'chrome' }))).settings.browserDriver).toBe('chrome');
+      expect((await asWorker((c) => readVerifySettings(c, repo))).browserDriver).toBe('chrome');
+      // A save that does not name it keeps it.
+      await asOwner((c) => saveVerifySettings(c, a.accountId, repo, a.userId, { eligibility: 'all' }));
+      expect((await asWorker((c) => readVerifySettings(c, repo))).browserDriver).toBe('chrome');
+      await expect(withTenant(appPool, a.accountId, memberId, (c) => saveVerifySettings(c, a.accountId, repo, memberId, { browserDriver: 'playwright' }))).rejects.toMatchObject({ code: '42501' });
+      await expect(asWorker((c) => saveVerifySettings(c, a.accountId, repo, a.userId, { browserDriver: 'playwright' }))).rejects.toMatchObject({ code: '42501' });
+      expect((await asWorker((c) => readVerifySettings(c, repo))).browserDriver).toBe('chrome');
+      for (const bad of ['firefox', '', 'Chrome', null, 1]) {
+        await expect(asOwner((c) => saveVerifySettings(c, a.accountId, repo, a.userId, { browserDriver: bad as never })), String(bad)).rejects.toMatchObject({ code: 'verify_setting_invalid' });
+      }
+      await expect(admin.query(`UPDATE verify_settings SET browser_driver = 'firefox' WHERE repo_id = $1`, [repo])).rejects.toMatchObject({ constraint: 'verify_settings_browser_driver_check' });
+      await expect(admin.query(`UPDATE verify_settings SET browser_driver = NULL WHERE repo_id = $1`, [repo])).rejects.toMatchObject({ code: '23502' });
+    });
+
     it('refuses to switch on without a base URL, in the application and in the table', async () => {
       const repo = await newRepo();
       await expect(asOwner((c) => saveVerifySettings(c, a.accountId, repo, a.userId, { enabled: true }))).rejects.toMatchObject({ code: 'verify_base_url_required' });

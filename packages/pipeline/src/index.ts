@@ -62,3 +62,6 @@ export * from "./discovery/verifierPrompt.js";
 export * from "./discovery/verifierResult.js";
 export * from "./discovery/analystOutput.js";
 export * from "./discovery/analystPrompt.js";
+// D#749 V3c: the post-merge verify stage's prompt and answer rules, which apps/web hands to the worker's verify stage.
+export { buildVerifyPrompt, type VerifyPromptInput } from "./verify/prompt.js";
+export { outcomeFromAnswer, type RowOutcome, type OutcomeContext } from "./verify/rules.js";

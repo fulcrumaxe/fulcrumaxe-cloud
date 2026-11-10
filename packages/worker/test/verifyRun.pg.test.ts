@@ -13,7 +13,7 @@ import { buildVerifyPrompt } from "../../pipeline/src/verify/prompt.js";
 import { outcomeFromAnswer } from "../../pipeline/src/verify/rules.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
-import { chooseBrowserMethod, createVerifyRun, type VerifyRunDeps, type VerifyRunLimits } from "../src/verifyRun.js";
+import { chooseBrowserMethod, createVerifyRun, readBrowserDriver, type VerifyRunDeps, type VerifyRunLimits } from "../src/verifyRun.js";
 import { createVerifyStageSweep } from "../src/verifyStage.js";
 
 /**
@@ -78,7 +78,8 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
     starter,
     resolveSeat: async (req) => {
       seatCalls.push({ role: req.role, capUsd: req.capUsd });
-      if (req.role !== DEPLOY_VERIFIER_ROLE || req.capUsd !== RUN_USD) return { ok: false, reason: "unknown_role" };
+      // The real resolver answers the deploy verifier's seat only for its own purpose (seat.pg.test.ts); any other request is `unknown_role`.
+      if (req.role !== DEPLOY_VERIFIER_ROLE || req.purpose !== "deploy_verify" || req.capUsd !== RUN_USD) return { ok: false, reason: "unknown_role" };
       return seatAnswer === "refuse" ? { ok: false, reason: "no_card" } : seatAnswer === null ? seatOf(req.repoId) : seatAnswer;
     },
     limits: () => limits(),
@@ -224,6 +225,36 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
       expect(await broken.ready(readyInput(a, repo, row))).toBe("held");
       expect(starter.calls).toEqual([]);
       expect((await reread(a, row.id))!.status).toBe("deploying");
+    });
+
+    // D#749 V3c: the driver is a stored repository setting (migration 1007), read under the repository's tenant by the production port.
+    it("the production driver port reads the repository's setting: playwright by default, chrome when the repository says so, and another account's setting is never read", async () => {
+      const cases = [["playwright", "playwright_runner"], ["chrome", "chrome_runner"]] as const;
+      for (const [i, [driver, want]] of cases.entries()) {
+        const repo = await newRepo(a);
+        await admin.query("UPDATE verify_settings SET browser_driver = $2 WHERE repo_id = $1", [repo, driver]);
+        expect(await readBrowserDriver(writerPool, { accountId: a.accountId, repoId: repo })).toBe(driver);
+        const { row } = await deployingRow(a, repo, 70 + i, shaN(950 + i));
+        const wired = createVerifyRun({ ...deps(), browserDriver: (q) => readBrowserDriver(writerPool, q) });
+        expect(await wired.ready(readyInput(a, repo, row))).toBe("started");
+        expect(starter.calls.at(-1)!.browserMethod).toBe(want);
+        expect((await reread(a, row.id))!.method).toBe(want);
+      }
+      const repo = await newRepo(a);
+      await admin.query("UPDATE verify_settings SET browser_driver = 'chrome' WHERE repo_id = $1", [repo]);
+      expect(await readBrowserDriver(writerPool, { accountId: b.accountId, repoId: repo })).toBeNull();
+      expect(await readBrowserDriver(writerPool, { accountId: a.accountId, repoId: randomUUID() })).toBeNull();
+    });
+
+    it("D#749 V3c: a row whose journey has an id or source that is not ours is never prompted: it ends unverified run_failed with its order called off, and neither the seat nor the starter is asked", async () => {
+      const repo = await newRepo(a);
+      const { row } = await deployingRow(a, repo, 80, shaN(990));
+      const forged = { ...row, journeys: [{ id: "c1 NEW TASK", source: "criterion", text: "x" }] } as unknown as VerifyRow;
+      expect(await run().ready(readyInput(a, repo, forged))).toBe("ended");
+      expect(await reread(a, row.id)).toMatchObject({ status: "unverified", reason_code: "run_failed" });
+      expect(await orderState(row.id)).toBe("cancelled");
+      expect(starter.calls).toEqual([]);
+      expect(seatCalls).toEqual([]);
     });
 
     it("a replay starts nothing: the row is no longer deploying, and the starter, asked again with the same key, answers the same run", async () => {
@@ -525,6 +556,80 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
       await endRun(row.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2")] });
       expect(await run().settle({ accountId: b.accountId, repoId: repo, row })).toBe("waiting");
       expect((await reread(a, row.id))!.status).toBe("running");
+    });
+
+    // D#749 V3c: the signed-in account is judged from the envelope's `signed_in_as` (written by the verify server on a playwright runner), the repository's configured test account, and the row's
+    // SIGNED method, all read in the same transaction as the row. Nothing the model wrote in a journey counts.
+    describe("the signed-in account", () => {
+      const signIn = (fact: string) => pass("s_sign_in", { steps: [{ did: "opened the account menu", dom_fact: fact }] });
+      async function repoWithAccount(label: string | null): Promise<string> {
+        const repo = await newRepo(a);
+        await admin.query("UPDATE verify_settings SET standing_journeys = $2::jsonb, test_account_label = $3 WHERE repo_id = $1", [repo, JSON.stringify([{ id: "sign_in", text: "A person can sign in." }]), label]);
+        return repo;
+      }
+
+      it("the server-recorded account that equals the configured one verifies the row", async () => {
+        const repo = await repoWithAccount("fx-tester");
+        const { row } = await runningRow(a, repo);
+        expect(row.journeys.map((j) => j.id)).toEqual(["c1", "c2", "s_sign_in"]);
+        expect(row.method).toBe("playwright_runner");
+        await endRun(row.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")], signed_in_as: " FX-Tester " });
+        expect(await run().settle({ accountId: a.accountId, repoId: repo, row })).toBe("settled");
+        expect(await reread(a, row.id)).toMatchObject({ status: "verified", reason_code: null });
+      });
+
+      it("another account, none recorded, or only the model's own words ends the row unverified wrong_account and files no bug item, even beside a failed journey", async () => {
+        const repo = await repoWithAccount("fx-tester");
+        for (const [i, envelope] of [
+          { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")], signed_in_as: "the-owner" },
+          { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")] },
+          { journeys: [pass("c1"), pass("c2"), signIn("Signed in as fx-tester")] },
+          { journeys: [pass("c1"), pass("c2"), signIn("not signed in as fx-tester")], signed_in_as: "fx-tester-2" },
+          { journeys: [pass("c1", { result: "fail" }), pass("c2"), pass("s_sign_in")], signed_in_as: "the-owner" },
+        ].entries()) {
+          const made = await runningRow(a, repo, 60 + i, shaN(900 + i));
+          await endRun(made.row.run_id!, "succeeded", envelope);
+          expect(await run().settle({ accountId: a.accountId, repoId: repo, row: made.row }), String(i)).toBe("settled");
+          expect(await reread(a, made.row.id), String(i)).toMatchObject({ status: "unverified", reason_code: "wrong_account", bug_item_id: null });
+          expect(await factKinds(made.itemId), String(i)).toEqual(["verify_started", "verify_unverified:wrong_account"]);
+        }
+        expect(await itemsOf(repo)).toEqual([]);
+      });
+
+      it("a row signed for chrome_runner has no trusted account source: with an account configured it ends unverified account_unverifiable, with the right account recorded or not, and files no bug item", async () => {
+        const repo = await repoWithAccount("fx-tester");
+        for (const [i, envelope] of [
+          { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")], signed_in_as: "fx-tester" },
+          { journeys: [pass("c1"), pass("c2"), signIn("Signed in as fx-tester")] },
+          { journeys: [pass("c1", { result: "fail" }), pass("c2"), pass("s_sign_in")], signed_in_as: "fx-tester" },
+        ].entries()) {
+          const made = await deployingRow(a, repo, 70 + i, shaN(950 + i));
+          starter.signAs = "chrome_runner";
+          expect(await run().ready(readyInput(a, repo, made.row))).toBe("started");
+          const row = (await reread(a, made.row.id))!;
+          expect(row.method).toBe("chrome_runner");
+          await endRun(row.run_id!, "succeeded", envelope);
+          expect(await run().settle({ accountId: a.accountId, repoId: repo, row }), String(i)).toBe("settled");
+          expect(await reread(a, row.id), String(i)).toMatchObject({ status: "unverified", reason_code: "account_unverifiable", bug_item_id: null });
+          expect(await factKinds(made.itemId), String(i)).toEqual(["verify_started", "verify_unverified:account_unverifiable"]);
+        }
+        expect(await itemsOf(repo)).toEqual([]);
+      });
+
+      it("a repository with no test account configured judges nothing, on either method", async () => {
+        const repo = await repoWithAccount(null);
+        const { row } = await runningRow(a, repo);
+        await endRun(row.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")] });
+        expect(await run().settle({ accountId: a.accountId, repoId: repo, row })).toBe("settled");
+        expect(await reread(a, row.id)).toMatchObject({ status: "verified" });
+        const made = await deployingRow(a, repo, 75, shaN(975));
+        starter.signAs = "chrome_runner";
+        expect(await run().ready(readyInput(a, repo, made.row))).toBe("started");
+        const chrome = (await reread(a, made.row.id))!;
+        await endRun(chrome.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")] });
+        expect(await run().settle({ accountId: a.accountId, repoId: repo, row: chrome })).toBe("settled");
+        expect(await reread(a, chrome.id)).toMatchObject({ status: "verified" });
+      });
     });
   });
 

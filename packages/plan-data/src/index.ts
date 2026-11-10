@@ -93,7 +93,7 @@ export function envelopeDefaultMarginPct(): number | null {
 }
 
 export type DiscoverySettings =
-  | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number; analysisPerRunUsd?: number }
+  | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number; analysisPerRunUsd?: number; deployVerifyPerRunUsd?: number }
   | { on: false; code: 'discovery_unconfigured' };
 
 /**
@@ -122,6 +122,18 @@ export function analysisSettings(): AnalysisSettings {
   const d = discoverySettings();
   if (!d.on || d.analysisPerRunUsd === undefined) return { on: false, code: 'analysis_unconfigured' };
   return { on: true, perRepoDailyUsd: d.perRepoDailyUsd, analysisPerRunUsd: d.analysisPerRunUsd };
+}
+
+export type DeployVerifySettings = { on: true; perRepoDailyUsd: number; perRunUsd: number } | { on: false; code: 'deploy_verify_unconfigured' };
+
+/**
+ * D#749 V3c: the post-merge tester's figures: what one job may reserve (`discovery.deployVerifyPerRunUsd`) and the shared per-repository daily cap (`discovery.perRepoDailyUsd`). On only when the
+ * `discovery` block carries the per-run figure; otherwise `{ on: false, code: 'deploy_verify_unconfigured' }` and no job starts. There is no default figure. Never throws on missing data.
+ */
+export function deployVerifySettings(): DeployVerifySettings {
+  const d = discoverySettings();
+  if (!d.on || d.deployVerifyPerRunUsd === undefined) return { on: false, code: 'deploy_verify_unconfigured' };
+  return { on: true, perRepoDailyUsd: d.perRepoDailyUsd, perRunUsd: d.deployVerifyPerRunUsd };
 }
 
 /**

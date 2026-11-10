@@ -1,5 +1,5 @@
 import { sanitize } from '@fx/trust';
-import type { Journey } from '@fx/core/src/verify/journeys.js';
+import { JOURNEY_ID_RE, JOURNEY_SOURCES, VerifyInputError, type Journey } from '@fx/core/src/verify/journeys.js';
 import { MAX_STEPS, MAX_STEP_TEXT } from './envelope.js';
 
 /**
@@ -16,7 +16,20 @@ export interface VerifyPromptInput {
   journeys: readonly Journey[];
 }
 
+/**
+ * Refuses (throws `verify_row_invalid`) a journey whose id or source is not ours. Both come from the row, written by `openVerifyRow` from fixed patterns, so this is defence in depth: they
+ * sit OUTSIDE the untrusted-content fence, and a value that ever carried text would then be an instruction to the tester.
+ */
+function assertOurJourneys(journeys: readonly Journey[]): void {
+  for (const j of journeys) {
+    if (typeof j.id !== 'string' || !JOURNEY_ID_RE.test(j.id) || !(JOURNEY_SOURCES as readonly string[]).includes(j.source)) {
+      throw new VerifyInputError('verify_row_invalid', 'a journey of the row has an id or source that is not ours');
+    }
+  }
+}
+
 export function buildVerifyPrompt(input: VerifyPromptInput): string {
+  assertOurJourneys(input.journeys);
   const journeys = input.journeys.flatMap((j) => [`JOURNEY ${j.id} (${j.source}):`, sanitize(j.text)]);
   return [
     'Check the deployed app against the journeys below.',

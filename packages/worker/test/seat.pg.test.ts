@@ -117,6 +117,35 @@ describe("seat resolver [pg]", () => {
     expect(await before()).toEqual(start);
   });
 
+  it("D#749 V3c: a deploy-verify seat takes the verifier's model and limits, the deploy verifier's own platform card and the given cap; each purpose takes only its own role; it writes nothing", async () => {
+    const { loadPlatformCard } = await import("@fx/roles/cards");
+    const a = await team();
+    const before = async () => ({ ...(await counts(a)), workItems: Number((await admin.query("SELECT count(*) FROM work_items WHERE account_id = $1", [a.accountId])).rows[0].count) });
+    const start = await before();
+    const tester = await okSeat({ accountId: a.accountId, role: "deploy-verifier", repoId: a.repoId, purpose: "deploy_verify", capUsd: 1.5 });
+    const verify = await okSeat({ accountId: a.accountId, role: "proposal-verifier", repoId: a.repoId, purpose: "verify", capUsd: 0.25 });
+    expect(tester.roleCard).toBe(loadPlatformCard("deploy-verifier"));
+    expect(tester.roleCard).toBeTruthy();
+    expect(tester.roleCard).not.toBe(verify.roleCard);
+    expect([tester.capUsd, tester.spend.perSpawnCapUsd, tester.spend.estimateModelUsd]).toEqual([1.5, 1.5, 1.5]);
+    expect(tester.model).toBe(verify.model);
+    expect(tester.limits).toEqual(verify.limits);
+    expect(tester.maxExtensions).toBe(0);
+    expect(await before()).toEqual(start);
+    await refusedWith(a, { accountId: a.accountId, role: "proposal-verifier", repoId: a.repoId, purpose: "deploy_verify", capUsd: 1.5 }, "unknown_role");
+    await refusedWith(a, { accountId: a.accountId, role: "deploy-verifier", repoId: a.repoId, purpose: "verify", capUsd: 1.5 }, "unknown_role");
+    await refusedWith(a, { accountId: a.accountId, role: "deploy-verifier", repoId: a.repoId, purpose: "analyse", capUsd: 1.5 }, "unknown_role");
+    await refusedWith(a, { accountId: a.accountId, role: "deploy-verifier", repoId: a.repoId, purpose: "deploy_verify", capUsd: 0 }, "model_budget_unset");
+    // Without a purpose the role is no manifest role: the seat refuses it (no fallback card).
+    await refusedWith(a, { accountId: a.accountId, role: "deploy-verifier", workItemId: a.workItemId }, "unknown_role");
+    // It reads through either team App and through nothing else.
+    await setKind(a, "team_readonly");
+    expect((await okSeat({ accountId: a.accountId, role: "deploy-verifier", repoId: a.repoId, purpose: "deploy_verify", capUsd: 1.5 })).repoId).toBe(a.repoId);
+    await setKind(a, "sitekit");
+    await refusedWith(a, { accountId: a.accountId, role: "deploy-verifier", repoId: a.repoId, purpose: "deploy_verify", capUsd: 1.5 }, "no_installation");
+    expect(await before()).toEqual(start);
+  });
+
   it("D#6 R4d-1: the executor's card follows the mode its prompt was built for (the repository's own when none is named); no other role's card changes", async () => {
     const { loadProductCard } = await import("@fx/roles/cards");
     const a = await team();

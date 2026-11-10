@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { DEPLOY_VERIFIER_ROLE, SignedJobSchema, deployVerifierToolsFor, verifyJob, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
+import { BROWSER_METHOD_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, DEPLOY_VERIFIER_ROLE, SignedJobSchema, deployVerifierToolsFor, verifyJob, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest } from "../src/targets/jobIssuer.js";
 import { insertAgentRun } from "../src/runStatusWriter.js";
@@ -76,6 +76,20 @@ describe("the job issuer and the deploy verifier's browser method [pg]", () => {
     const odd = await run(w, DEPLOY_VERIFIER_ROLE, { browserMethod: "playwright_sandbox" as never });
     expect(await codeOf(issuer().issue({ run: odd }))).toBe("job_invalid");
     expect((await stored(odd.id)) ?? null).toBeNull();
+  });
+
+  // D#749 V3c: a job that carries `browser_method` is never offered to a runner whose strict parse predates the key (it would fail that runner's whole claim).
+  it.each(["chrome_runner", "playwright_runner"] as const)("records the protocol floor of a %s job with the job, so the claim never offers it to an older runner; any other role's job has none", async (method) => {
+    expect(BROWSER_METHOD_JOB_MIN_PROTOCOL).toBe(16);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(BROWSER_METHOD_JOB_MIN_PROTOCOL);
+    const w = await world();
+    const r = await run(w, DEPLOY_VERIFIER_ROLE, { browserMethod: method });
+    await issuer().issue({ run: r });
+    const floor = async (id: string) => (await db.admin.query<{ min_protocol_version: number | null }>("SELECT min_protocol_version FROM agent_runs WHERE id = $1", [id])).rows[0]!.min_protocol_version;
+    expect(await floor(r.id)).toBe(BROWSER_METHOD_JOB_MIN_PROTOCOL);
+    const other = await run(w, "code-reviewer", { headSha: SHA });
+    await issuer().issue({ run: other });
+    expect(await floor(other.id)).toBeNull();
   });
 
   it("leaves every other role's job without the key, so its signed bytes are what they were", async () => {

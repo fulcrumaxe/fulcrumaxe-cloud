@@ -101,6 +101,7 @@ import { createDiscoveryDrain, emptyDrainCounts, type DiscoveryDrainCounts, type
 import { createPreviewHints, type PreviewResultParser } from "./previewHints.js";
 import { createDocsCodeAnalysisSweep, type DocsCodeAnalysisCounts, type DocsCodeAnalysisDeps } from "./docsCodeAnalysis.js";
 import { createVerifyStageSweep, type VerifyStageCounts, type VerifyStageDeps } from "./verifyStage.js";
+import { createVerifyRun, readBrowserDriver, type VerifyRunDeps } from "./verifyRun.js";
 import { createAutoStartSweep, type AutoStartCounts, type AutoStartDeps } from "./autoStartSweep.js";
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
@@ -200,8 +201,11 @@ export interface CreateWorkerOptions {
   /**
    * D#749 V3a: the post-merge verify stage's injected pieces: what the host says about a merge and a deployed commit, the reader of the app's /api/health, and the next
    * stage's entry. Absent, `sweepVerifyStage` runs nothing and answers `idle: "not_configured"`.
+   * D#749 V3c: `run` holds the tester hand-offs' injected pieces (pipeline's prompt builder and answer rules, and the per-job and per-repository figures; this package imports neither
+   * @fx/pipeline nor plan data's figures). The seat (the real resolver), the starter (the one that accepts a run queued for a runner) and the repository's browser driver (its verify setting)
+   * are wired here. With `run`, the stage's `ready` and `settle` are the real ones (an explicit `ready` or `settle` wins, for a test); without it a qualified row stays `deploying`.
    */
-  verifyStage?: Pick<VerifyStageDeps, "host" | "health" | "ready" | "settle">;
+  verifyStage?: Pick<VerifyStageDeps, "host" | "health" | "ready" | "settle"> & { run?: Pick<VerifyRunDeps, "prompt" | "outcome" | "limits"> };
   /** D#483 S5-b1a-2: the auto-start gate's injected price of an item's first run (pipeline's `firstRunReservationUsd`). Absent, `sweepAutoStart` starts nothing and answers `idle: "not_configured"`. */
   autoStart?: Pick<AutoStartDeps, "firstRunUsd" | "child" | "followUp">;
   /**
@@ -489,8 +493,16 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       previewStarter && options.verify && options.analysis
         ? createDocsCodeAnalysisSweep({ pool: pools.runnerPool, resolveSeat: resolveRunSeat, starter: previewStarter, ...(advanceStarter ? { runnerStarter: advanceStarter } : {}), visibility: repoVisibility, github: options.verify.github, settings: analysisSettings, prompt: options.analysis.prompt, parse: options.analysis.parse })
         : async (): Promise<DocsCodeAnalysisCounts> => ({ idle: "not_configured", listed: 0, started: 0, waiting: 0, recorded: 0, daily_cap: 0, skipped: 0, failed: 0 });
+    // D#749 V3c: the tester hand-offs over the pieces this root already holds: the real seat resolver, the starter that accepts a run queued for a runner (the job waits for one; its end is
+    // the next pass's read) and the repository's browser driver, read from its verify settings. With no follower there is no starter, so nothing could start a job and no hand-off is wired.
+    const verifyRun =
+      options.verifyStage?.run && advanceStarter
+        ? createVerifyRun({ pool: pools.runnerPool, starter: advanceStarter, resolveSeat: resolveRunSeat, browserDriver: (q) => readBrowserDriver(pools.runnerPool, q), ...options.verifyStage.run })
+        : undefined;
+    const stageReady = options.verifyStage?.ready ?? verifyRun?.ready;
+    const stageSettle = options.verifyStage?.settle ?? verifyRun?.settle;
     const verifyStage = options.verifyStage
-      ? createVerifyStageSweep({ pool: pools.runnerPool, host: options.verifyStage.host, health: options.verifyStage.health, ...(options.verifyStage.ready ? { ready: options.verifyStage.ready } : {}), ...(options.verifyStage.settle ? { settle: options.verifyStage.settle } : {}) })
+      ? createVerifyStageSweep({ pool: pools.runnerPool, host: options.verifyStage.host, health: options.verifyStage.health, ...(stageReady ? { ready: stageReady } : {}), ...(stageSettle ? { settle: stageSettle } : {}) })
       : async (): Promise<VerifyStageCounts> => ({ idle: "not_configured", listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, started: 0, held: 0, settled: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 });
     const autoStart = options.autoStart
       ? createAutoStartSweep({ receiptPool: pools.receiptPool, firstRunUsd: options.autoStart.firstRunUsd, ...(options.autoStart.child ? { child: options.autoStart.child } : {}), ...(options.autoStart.followUp ? { followUp: options.autoStart.followUp } : {}) }).sweepAutoStart
