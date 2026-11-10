@@ -20,7 +20,7 @@ const OWN_REASON_CODES = ["push_rejected"];
 const MAPPED: ReadonlySet<string> = new Set([...RUNNER_SETUP_DETAILS, ...STOP_CODES, ...OWN_REASON_CODES]);
 
 describe("C1: each git-path code is reported under its own detail", () => {
-  const NEW = ["push_ref_refused", "snapshot_refused", "push_failed", "mirror_failed", "mirror_dir_insecure", "git_version_unsupported", "workspace_failed", "workspace_git_refused", "head_not_from_base", "sandbox_stub_committed", "review_sha_not_in_mirror"];
+  const NEW = ["push_ref_refused", "snapshot_refused", "push_failed", "mirror_failed", "mirror_dir_insecure", "git_version_unsupported", "workspace_failed", "workspace_git_refused", "head_not_from_base", "sandbox_stub_committed", "review_sha_not_in_mirror", "base_conflict"];
   for (const code of NEW) {
     it(`${code} is runner_setup / ${code}`, () => {
       expect(endOfFailure(code)).toEqual({ reason: "runner_setup", detail: code });
@@ -62,7 +62,7 @@ describe("C2: a new git-path code without a detail fails here", () => {
 
   it("the scan finds the codes this path really uses (it is not scanning nothing)", () => {
     const found = new Set(srcFiles().flatMap(([, text]) => codesIn(text)));
-    for (const code of ["push_ref_refused", "push_failed", "head_not_from_base", "sandbox_stub_committed", "workspace_git_refused", "mirror_failed", "workspace_failed", "review_sha_not_in_mirror"]) expect(found.has(code), code).toBe(true);
+    for (const code of ["push_ref_refused", "push_failed", "head_not_from_base", "sandbox_stub_committed", "workspace_git_refused", "mirror_failed", "workspace_failed", "review_sha_not_in_mirror", "base_conflict"]) expect(found.has(code), code).toBe(true);
   });
 });
 

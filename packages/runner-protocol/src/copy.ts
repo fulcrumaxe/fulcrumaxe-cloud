@@ -142,6 +142,7 @@ export const GIT_PATH_LINES = {
   workspace_failed: "The runner could not prepare a working folder for the agent. Check the disk space and git access on that machine, then Build again.",
   workspace_git_refused: COPY.workspaceGitRefused,
   head_not_from_base: COPY.headNotFromBase,
+  base_conflict: "The branch this run continues is behind the default branch and the two conflict, so the runner did not start the agent or run the check on a stale base. Resolve the conflict in the branch (or Build again), then retry.",
   sandbox_stub_committed: COPY.sandboxStubCommitted,
   review_sha_not_in_mirror: "The runner's copy of the repository does not have the commit to review on any branch, so the review did not start. If the pull request comes from a fork, it cannot be reviewed on your machine. Otherwise, review again.",
   context_spill_unwritable: "The runner could not save the longer text this run's prompt points to, so it did not start the agent with a reference to a file that is not there. Check the disk space and folder permissions on that machine, then Build again.",

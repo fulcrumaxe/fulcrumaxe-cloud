@@ -151,3 +151,48 @@ export async function runWorkspaceGit(git: Git, code: GitPathCode, workspace: st
   await vet(workspace, (file) => git.run("workspace_git_refused", CONFIG_LIST(file), undefined, undefined, NEUTRAL_ENV), args.touchesWorktree);
   return git.run(code, ["-C", workspace, ...args.argv], NEUTRAL_CONFIG, undefined, NEUTRAL_ENV);
 }
+
+/** What `mergeDefaultInto` found. `merged`: the branch now holds `target` (a merge commit, or a fast-forward when the branch had no commit of its own). `blocked`: the merge is clean but the working tree would not take it (local changes in the way); nothing was changed. */
+export type BranchUpdate = { kind: "current" } | { kind: "merged"; head: string } | { kind: "conflict" } | { kind: "blocked" };
+
+const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** The author and committer of the update's merge commit: fixed words, the same on every machine. */
+const UPDATE_IDENTITY: readonly string[] = ["-c", "user.name=fulcrumaxe runner", "-c", "user.email=runner@fulcrumaxe.invalid"];
+
+/**
+ * Brings the workspace's branch up to date with `target`, a commit of the repository's default branch that the runner read from its own mirror (`rev-parse HEAD` there, after the sync).
+ * Run before the agent starts, on a clone the daemon just made or on a resumed workspace it has just vetted, and vetted again here (pin, folder shape, config keys, nested repositories).
+ *  - `target` is already in the branch's history: `current`, nothing is written.
+ *  - `merge-tree --write-tree` decides whether the merge is clean, without touching the working tree. Exit 1 is git's "conflicts": `conflict`, nothing is written to the tree or the branch.
+ *    Any other failure is an error and throws.
+ *  - Clean: `git merge --no-edit` with a fixed identity; hooks are off (guard config) and no verification hook is asked for. History is never rewritten: the branch only gains the merge.
+ * The objects of `target` are read through the clone's alternates (its mirror); nothing is fetched.
+ */
+export async function mergeDefaultInto(git: Git, workspace: string, target: string): Promise<BranchUpdate> {
+  if (!COMMIT_ID.test(target)) throw new GitPathError("workspace_failed");
+  await vet(workspace, (file) => git.run("workspace_git_refused", CONFIG_LIST(file), undefined, undefined, NEUTRAL_ENV), true);
+  const inside = async (...args: string[]): Promise<string> => git.run("workspace_failed", ["-C", workspace, ...args], NEUTRAL_CONFIG, undefined, NEUTRAL_ENV);
+  try {
+    await inside("merge-base", "--is-ancestor", target, "HEAD");
+    return { kind: "current" };
+  } catch (error) {
+    if (!(error instanceof GitPathError) || error.exitCode !== 1) throw error;
+  }
+  try {
+    await inside("merge-tree", "--write-tree", "--no-messages", "HEAD", target);
+  } catch (error) {
+    if (error instanceof GitPathError && error.exitCode === 1) return { kind: "conflict" };
+    throw error;
+  }
+  try {
+    await inside(...UPDATE_IDENTITY, "merge", "--no-edit", "--no-verify", "--no-stat", "-m", "Bring the branch up to date with the default branch", target);
+  } catch (error) {
+    // `git merge` ends 1 for conflicts and 2 for a merge it refused to start (local changes would be overwritten); anything else (128: a fatal error) is not an answer.
+    if (!(error instanceof GitPathError) || (error.exitCode !== 1 && error.exitCode !== 2)) throw error;
+    // fx-swallow-ok: a clean merge the tree would not take (an untracked or changed file in the way): git refused before changing anything; the caller starts from a fresh clone instead
+    return { kind: "blocked" };
+  }
+  const head = (await inside("rev-parse", "--verify", "HEAD^{commit}")).trim();
+  if (!COMMIT_ID.test(head)) throw new GitPathError("workspace_failed");
+  return { kind: "merged", head };
+}

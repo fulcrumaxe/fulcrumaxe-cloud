@@ -57,8 +57,8 @@ export const ActivityField = z
   .strict();
 export type ActivityField = z.infer<typeof ActivityField>;
 
-/** D#6 C42-1: the stages a runner marks, once each per run. `workspace_ready` is stored as the sandbox runs' `sandbox_ready`. D#6 C44-4: `deps_installed` and `deps_install_failed` are the closed outcomes of the host-side dependency install, at most one of them per run. */
-export const RUNNER_STAGES = ["workspace_ready", "cloned", "deps_installed", "deps_install_failed", "writing_result"] as const;
+/** D#6 C42-1: the stages a runner marks, once each per run. `base_updated`: the runner merged the default branch into the branch a fix round continues, before the agent started. `workspace_ready` is stored as the sandbox runs' `sandbox_ready`. D#6 C44-4: `deps_installed` and `deps_install_failed` are the closed outcomes of the host-side dependency install, at most one of them per run. */
+export const RUNNER_STAGES = ["workspace_ready", "cloned", "deps_installed", "deps_install_failed", "base_updated", "writing_result"] as const;
 export const RunnerStage = z.enum(RUNNER_STAGES);
 export type RunnerStage = z.infer<typeof RunnerStage>;
 
@@ -118,6 +118,8 @@ export const RUNNER_SETUP_DETAILS = [
   "git_ticket_unavailable",
   // D#749 V2b (additive under C8 section 6; the cloud deploys first): a browser job (the deploy verifier) was claimed on a machine whose Chrome is not up, the Claude in Chrome extension is not connected, or no test account is configured. The run ended before the agent began.
   "browser_not_connected",
+  // The branch a fix round continues is behind the default branch and the merge conflicts: the run ended before the agent started and no check was spent on a stale base. Additive under C8 section 6; the cloud deploys first.
+  "base_conflict",
 ] as const;
 /**
  * D#599 HO-1 (additive under C8 section 6; the cloud deploys first): how a handed-off run ended its side of the move. `pushed`: the

@@ -469,7 +469,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     // renumbered as it is queued (a stage mark sent before the engine starts would otherwise share its numbers).
     const next = (): number => (lease.highestSeq() ?? -1) + 1;
     const detach = deps.events.attach(claimed.runId, (event) => lease.push({ ...event, seq: next() }));
-    const mark = (stage: "workspace_ready" | "cloned" | "deps_installed" | "deps_install_failed"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
+    const mark = (stage: "workspace_ready" | "cloned" | "deps_installed" | "deps_install_failed" | "base_updated"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
     let abandonSend = false;
     let usedPort: SandboxPort = deps.sandbox;
     /** One journal line for this run (`stepLog.ts`). */
@@ -510,7 +510,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       }
     };
     try {
-      const started: { base?: string } = {};
+      const started: { base?: string; updatedTo?: string } = {};
       const promptNotes: string[] = [];
       if (job.check !== undefined) promptNotes.push(checkNote(job.check, job.role));
       const checkHeld: { outcome?: CheckOutcome } = {};
@@ -541,10 +541,13 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             const resumed = await git.resume(job, claimed, wanted.workspace);
             if (resumed !== null) {
               started.base = resumed.base;
-              const resumedBase = planeBaseOf(job, resumed.base) ?? (firstPublishes(job) ? await mergeBaseOf(git, job, resumed.base) : undefined);
+              // The branch was behind the default branch and the runner merged it in: the public diff starts from the commit that was merged in, not from the older base the cloud signed or the branch's old merge-base.
+              if (resumed.updatedTo !== undefined) started.updatedTo = resumed.updatedTo;
+              const resumedBase = resumed.updatedTo !== undefined && (planeBaseOf(job, resumed.base) !== undefined || firstPublishes(job)) ? resumed.updatedTo : planeBaseOf(job, resumed.base) ?? (firstPublishes(job) ? await mergeBaseOf(git, job, resumed.base) : undefined);
               if (deps.planePush !== undefined && resumedBase !== undefined) deps.planePush.baseLedger.record(claimed.runId, resumedBase);
               mark("workspace_ready");
               mark("cloned");
+              if (resumed.updatedTo !== undefined) { mark("base_updated"); step(`branch brought up to date with the default branch (${resumed.updatedTo})`); }
               // The resumed session gets the same dev shell a fresh start would (same step, same skips), built at the resumed head.
               if (grant !== undefined) await prepareNix(job, git, grant, resumed.base, promptNotes);
               await prepareDeps(job, wanted.workspace, promptNotes, stopRun, mark);
@@ -558,11 +561,14 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const fill = async (workspace: string): Promise<void> => {
             // The job is verified, the sandbox gate has passed and the workspace directory exists; the mirror checkout comes next.
             mark("workspace_ready");
-            started.base = (await git.prepare(job, claimed, workspace)).base;
+            const prepared = await git.prepare(job, claimed, workspace);
+            started.base = prepared.base;
+            if (prepared.updatedTo !== undefined) started.updatedTo = prepared.updatedTo;
             // The start commit is recorded here, in the daemon's own memory, before the agent can run: the run-end hook reads this and never the checkout.
-            const planeBase = planeBaseOf(job, started.base) ?? (firstPublishes(job) ? await mergeBaseOf(git, job, started.base) : undefined);
+            const planeBase = prepared.updatedTo !== undefined && (planeBaseOf(job, started.base) !== undefined || firstPublishes(job)) ? prepared.updatedTo : planeBaseOf(job, started.base) ?? (firstPublishes(job) ? await mergeBaseOf(git, job, started.base) : undefined);
             if (deps.planePush !== undefined && planeBase !== undefined) deps.planePush.baseLedger.record(claimed.runId, planeBase);
             mark("cloned");
+            if (prepared.updatedTo !== undefined) { mark("base_updated"); step(`branch brought up to date with the default branch (${prepared.updatedTo})`); }
             await prepareMap(job, git, started.base, repoMapHeld);
             // D#600 CX-5c2: the job's pins, read from the checkout just made (at the start commit) before the agent can touch it. Never a reason to refuse the run.
             pinsHeld.read = await readJobPins(job, workspace);
@@ -623,7 +629,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             }
             // The files the check names are pinned to the merge-base of the branch tip with the default branch, read from the runner's mirror; without one the check fails.
             const mirror = git.mirrorDir?.(job);
-            const pin = mirror === undefined ? null : await git.checkBase?.(job, started.base).catch(() => null);
+            // A branch the runner brought up to date is pinned to the default-branch commit it merged in: the merge-base with the mirror's HEAD would still be the older one if the branch has not been pushed yet.
+            const pin = mirror === undefined ? null : started.updatedTo ?? (await git.checkBase?.(job, started.base).catch(() => null));
             if (mirror === undefined || pin === null || pin === undefined) {
               checkHeld.outcome = closed("the check was not run: the default branch's copy of its files could not be found", "base_missing"); step("check not run (base_missing)");
               return;

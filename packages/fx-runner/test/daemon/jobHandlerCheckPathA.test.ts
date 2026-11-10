@@ -68,7 +68,7 @@ const BASE_CHECK = (body: string): string => `#!/bin/sh\necho base check ran\n${
 const AGENT_CHECK = "#!/bin/sh\necho agent check ran\nexit 0\n";
 
 /** D#6 R-CHK-2c: a flake whose dev shell is told apart by the name in its first line (the stand-in `nix` reads it from the commit it is asked to build). */
-const FLAKE = (shell: string): string => `# shell: ${shell}\n{ outputs = { self }: {}; }\n`;
+const FLAKE = (shell: string): string => `# shell: ${shell}\n\n{ outputs = { self }: {}; }\n`;
 const LOCK = JSON.stringify({ version: 7, root: "root", nodes: { root: { inputs: {} } } });
 const ALLOWANCES = { entries: [{ kind: "domain" as const, value: "registry.npmjs.org", access: "connect" as const, reason: "install" }], command_timeout_s: 600 };
 const STORE_HASH = "a".repeat(32);
@@ -393,7 +393,8 @@ describe("a verified-mode job whose check needs the dev shell (path A, D#6 R-CHK
     const parent = "7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f";
     const prior = `fx/${parent}-g1`;
     const priorTip = upstreamFiles(prior, { "flake.nix": FLAKE("agent-shell"), "flake.lock": JSON.stringify({ version: 7, root: "root", nodes: { root: { inputs: {} } }, edited: true }) }, forkPoint);
-    upstreamFiles("main", { "flake.nix": FLAKE("later-shell") }); // the default branch moves on after the branch was cut
+    // The default branch moves on after the branch was cut. It edits another part of the file than the branch did, so the runner's update of the branch merges cleanly (a flake edited in the same place would be a base_conflict).
+    upstreamFiles("main", { "flake.nix": `${FLAKE("default-shell")}# later-shell\n` });
     const claimed = await r.claim(DEV_CHECK, { sandbox_allowances: ALLOWANCES, continues: { parent_run_id: parent, session_id: null, branch: prior } });
     expect((await r.handle(claimed)).status).toBe("completed");
     expect(r.skips).toEqual([]);

@@ -48,7 +48,7 @@ export function eventForStorage(clean: LocalOnlyEvent): LocalOnlyEvent {
 }
 
 /** The stages a runner event can become. The two dependency outcomes (D#6 C44-4) are stored as they are; the cloud sandbox recorder widens `RunStage` the same way. */
-type ProjectedStage = RunStage | "deps_installed" | "deps_install_failed";
+type ProjectedStage = RunStage | "deps_installed" | "deps_install_failed" | "base_updated";
 
 interface Row {
   seq: number;

@@ -14,12 +14,12 @@ import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
 import type { NixFromDefault, NixSource } from "./nixShell.js";
 import { LISTING_CAP, readRepoMap } from "./repoMap.js";
 import { sweepSnapshots } from "./snapshot.js";
-import { pinWorkspaceGit } from "./hostRead.js";
+import { mergeDefaultInto, pinWorkspaceGit } from "./hostRead.js";
 import { cleanResumedWorkspace, type SandboxedPurge } from "./resumeClean.js";
 import { pushSinkOf, type PushLog } from "./pushLog.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
-export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role" | "review"> & { job_id?: string };
+export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role" | "review"> & { check?: Job["check"]; job_id?: string };
 
 /** The only roles whose commits are pushed (C25 section 3.2). Any other role's commit stays in its workspace, which is discarded. */
 export const PUSHING_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
@@ -31,9 +31,9 @@ export interface GitPath {
    * A fix round only. Syncs the mirror and answers with the branch tip when the kept session's `workspace` is exactly at it, or null when
    * the workspace is not (stale, moved on, or not a clone this path made): the caller then starts a fresh workspace.
    */
-  resume(job: GitJob, lease: PushLease, workspace: string): Promise<{ base: string } | null>;
+  resume(job: GitJob, lease: PushLease, workspace: string): Promise<{ base: string; updatedTo?: string } | null>;
   /** `workspace` is a new, empty directory. Returns the commit the run starts from (a fix round: the branch's tip). */
-  prepare(job: GitJob, lease: PushLease, workspace: string): Promise<{ base: string }>;
+  prepare(job: GitJob, lease: PushLease, workspace: string): Promise<{ base: string; updatedTo?: string }>;
   /**
    * Pushes the workspace's commit to the run's branch (a fix round: `continues.branch`, non-forced), unless the run added none or the
    * job's role does not push. `stopped` is asked right before the push: after a stop reply nothing is pushed.
@@ -141,6 +141,25 @@ export async function mirrorNixSource(git: Git, dir: string, sha: string): Promi
   }
 }
 
+/**
+ * A fix round that carries a check continues a branch cut earlier, and the repository's default branch may have moved since: a fix that landed there (a test repaired, a file renamed)
+ * is missing from the branch, and the round's check fails again on what the default branch already settled. The cloud merges a pull request's base into the branch before a round,
+ * but only when the item has a pull request; a build whose check failed opened none, so its rounds got no update. This runs on the runner's side, whatever the cloud did, right after the
+ * mirror was synced and before the agent starts: the default branch (the mirror's HEAD) is merged into the workspace's branch (`mergeDefaultInto`).
+ *  - `updatedTo`: the default-branch commit that was merged in. The run's check pins its protected files to it and the scope test lists changes against it, so only the pull request's own changes are judged.
+ *  - a conflict throws `base_conflict` (the run ends before the agent starts, with no check spent).
+ *  - `blocked` (a clean merge the working tree would not take): null, the caller starts from a fresh clone.
+ * Only a job that pushes and carries a check, on a branch it continues, is touched; a review, a first build (cut from the default branch's tip a moment ago) and every other role are left as they are.
+ */
+export async function updateWorkspaceBranch(git: Git, mirrorDir: string, job: GitJob, workspace: string): Promise<{ updatedTo?: string } | null> {
+  if (job.continues === null || job.check === undefined || (job.review ?? null) !== null || !PUSHING_ROLES.has(job.role)) return {};
+  const target = (await git.run("mirror_failed", ["-C", mirrorDir, "rev-parse", "--verify", "HEAD^{commit}"])).trim();
+  const result = await mergeDefaultInto(git, workspace, target);
+  if (result.kind === "conflict") throw new GitPathError("base_conflict");
+  if (result.kind === "blocked") return null;
+  return result.kind === "merged" ? { updatedTo: target } : {};
+}
+
 /** What the ordinary capture keeps of an output (the engine's `runCapture` default, 64 K). */
 const SMALL_CAPTURE_CHARS = 64 * 1024;
 
@@ -167,17 +186,22 @@ export function createGitPath(deps: GitPathDeps): GitPath {
         await pinWorkspaceGit(listingGit, workspace, path.join(dir, "objects"));
         // At the tip and about to be reused: the first round's ignored build output must not reach this run's check (D#6 RUNNER-RESUME-CLEAN).
         await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP, deps.platform, deps.sandboxedPurge);
-        return { base: tip };
+        // Behind the default branch: brought up to date before the session goes on (a conflict ends the run; a merge the tree would not take starts a fresh clone).
+        const updated = await updateWorkspaceBranch(git, dir, job, workspace);
+        return updated === null ? null : { base: tip, ...updated };
       } catch (error) {
         // A kept workspace this path cannot read as a clone it made is not resumed. The mirror's own failures were thrown above.
-        if (error instanceof GitPathError) return null;
+        if (error instanceof GitPathError && error.code !== "base_conflict") return null;
         throw error;
       }
     },
     async prepare(job, lease, workspace) {
       // Setup: a git older than the May 2024 security releases is refused before any mirror or workspace is made.
       await assertGitVersion(git);
-      return mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
+      const prepared = await mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
+      const updated = await updateWorkspaceBranch(git, mirrors.dir(job.repo), job, workspace);
+      if (updated === null) throw new GitPathError("workspace_failed");
+      return { ...prepared, ...updated };
     },
     readGrants: (job) => [mirrors.objects(job.repo)],
     mirrorDir: (job) => mirrors.dir(job.repo),
