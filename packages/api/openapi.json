@@ -27420,6 +27420,418 @@
         }
       }
     },
+    "/api/v1/repos/{id}/verify-settings": {
+      "get": {
+        "operationId": "getRepoVerifySettings",
+        "summary": "A repository's verify settings: whether the post-merge check is on, the app's address, the browser driver and the standing journeys",
+        "description": "Off, with no address, for a repository nobody configured (`configured: false`). Owner or admin, session only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A repository's verify settings: whether the post-merge check is on, the app's address, the browser driver and the standing journeys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "configured": {
+                      "type": "boolean"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "base_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "browser_driver": {
+                      "type": "string",
+                      "enum": [
+                        "playwright",
+                        "chrome"
+                      ]
+                    },
+                    "test_account_label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "standing_journeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "maxLength": 64
+                          },
+                          "text": {
+                            "type": "string",
+                            "maxLength": 2000
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "eligibility": {
+                      "type": "string",
+                      "enum": [
+                        "all",
+                        "ui_paths"
+                      ]
+                    },
+                    "eligibility_paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "configured",
+                    "enabled",
+                    "base_url",
+                    "browser_driver",
+                    "test_account_label",
+                    "standing_journeys",
+                    "eligibility",
+                    "eligibility_paths"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "putRepoVerifySettings",
+        "summary": "Change a repository's verify settings. Only the keys sent change; one audit row per real change; turning it off ends the rows that had not started",
+        "description": "`base_url` is an https origin: a plain host, no port, no credentials, path, query or fragment; an empty or other value is refused (422 `verify_base_url_invalid`). A repository without a `base_url` cannot be switched on (422 `verify_base_url_required`). `browser_driver` is `playwright` or `chrome`. Turning `enabled` off stops the stage taking new rows for the repository and ends the rows that had not started as unverified (`ended_rows`); a row already running finishes. Owner or admin, session only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "base_url": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 300
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "browser_driver": {
+                    "type": "string",
+                    "enum": [
+                      "playwright",
+                      "chrome"
+                    ]
+                  },
+                  "test_account_label": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "standing_journeys": {
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {}
+                  },
+                  "eligibility": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "ui_paths"
+                    ]
+                  },
+                  "eligibility_paths": {
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {}
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Change a repository's verify settings. Only the keys sent change; one audit row per real change; turning it off ends the rows that had not started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "configured": {
+                      "type": "boolean"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "base_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "browser_driver": {
+                      "type": "string",
+                      "enum": [
+                        "playwright",
+                        "chrome"
+                      ]
+                    },
+                    "test_account_label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "standing_journeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "maxLength": 64
+                          },
+                          "text": {
+                            "type": "string",
+                            "maxLength": 2000
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "eligibility": {
+                      "type": "string",
+                      "enum": [
+                        "all",
+                        "ui_paths"
+                      ]
+                    },
+                    "eligibility_paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "changed": {
+                      "type": "boolean"
+                    },
+                    "ended_rows": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "configured",
+                    "enabled",
+                    "base_url",
+                    "browser_driver",
+                    "test_account_label",
+                    "standing_journeys",
+                    "eligibility",
+                    "eligibility_paths",
+                    "changed",
+                    "ended_rows"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`verify_base_url_invalid`, `verify_base_url_required` or `verify_setting_invalid` (nothing was written), or a body that does not validate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repos/{id}/runner-routing": {
       "put": {
         "operationId": "putRepoRunnerRouting",

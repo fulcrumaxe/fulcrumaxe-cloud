@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "verify_base_url_required",
+    "message": "a repository without a base URL cannot be switched on",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

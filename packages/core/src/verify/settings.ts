@@ -146,11 +146,31 @@ export function applySettingsPatch(current: VerifySettings, patch: VerifySetting
   return next;
 }
 
+/** The fields of a settings save that changed, as {from, to}: the audit row's payload. Standing journeys are counted, not copied (the audit row holds no free text). */
+export type VerifySettingsChanges = Record<string, { from: unknown; to: unknown }>;
+
+/** What differs between two settings, by the API's own field names. Pure. */
+export function diffVerifySettings(before: VerifySettings, after: VerifySettings): VerifySettingsChanges {
+  const out: VerifySettingsChanges = {};
+  const note = (field: string, from: unknown, to: unknown): void => {
+    if (JSON.stringify(from) !== JSON.stringify(to)) out[field] = { from, to };
+  };
+  note('enabled', before.enabled, after.enabled);
+  note('base_url', before.baseUrl, after.baseUrl);
+  note('browser_driver', before.browserDriver, after.browserDriver);
+  note('test_account_label', before.testAccountLabel, after.testAccountLabel);
+  note('eligibility', before.eligibility, after.eligibility);
+  note('eligibility_paths', before.eligibilityPaths, after.eligibilityPaths);
+  if (JSON.stringify(before.standingJourneys) !== JSON.stringify(after.standingJourneys)) out.standing_journeys = { from: before.standingJourneys.length, to: after.standingJourneys.length };
+  return out;
+}
+
 /**
- * Saves a patch (an upsert). The batch columns keep their defaults: only closure by size one is built, so they are not settable yet.
+ * Saves a patch (an upsert) and leaves ONE audit row, 'verify_settings.changed' (migration 1008), in the same transaction when the save created the row or changed a
+ * value; a save that changes nothing leaves none. The batch columns keep their defaults: only closure by size one is built, so they are not settable yet.
  * Returns the saved settings and whether this call turned an enabled repository off (the caller ends the rows that never started; see `saveVerifySettings`).
  */
-export async function writeVerifySettings(client: PoolClient, accountId: string, repoId: string, userId: string, patch: VerifySettingsPatch): Promise<{ settings: VerifySettings; turnedOff: boolean }> {
+export async function writeVerifySettings(client: PoolClient, accountId: string, repoId: string, userId: string, patch: VerifySettingsPatch): Promise<{ settings: VerifySettings; turnedOff: boolean; changes: VerifySettingsChanges }> {
   const current = await readVerifySettings(client, repoId);
   const next = applySettingsPatch(current, patch);
   await client.query(
@@ -162,7 +182,11 @@ export async function writeVerifySettings(client: PoolClient, accountId: string,
     // enabled_since is not written here: the table's trigger stamps it on the off -> on move alone (migration 1005), so a save that changes nothing moves nothing.
     [accountId, repoId, next.enabled, next.baseUrl, JSON.stringify(next.standingJourneys), next.testAccountLabel, next.browserDriver, next.eligibility, next.eligibilityPaths, userId],
   );
-  return { settings: { ...next, configured: true }, turnedOff: current.enabled && !next.enabled };
+  const changes = diffVerifySettings(current, next);
+  if (!current.configured || Object.keys(changes).length > 0) {
+    await client.query(`SELECT audit_write('verify_settings.changed', $1::jsonb)`, [JSON.stringify({ repo_id: repoId, created: !current.configured, changes })]);
+  }
+  return { settings: { ...next, configured: true }, turnedOff: current.enabled && !next.enabled, changes };
 }
 
 /**

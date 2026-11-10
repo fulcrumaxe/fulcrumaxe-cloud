@@ -1,0 +1,11 @@
+{
+  "repo_id": "22222222-2222-4222-8222-222222222222",
+  "configured": false,
+  "enabled": false,
+  "base_url": null,
+  "browser_driver": "playwright",
+  "test_account_label": null,
+  "standing_journeys": [],
+  "eligibility": "ui_paths",
+  "eligibility_paths": []
+}

@@ -3169,6 +3169,58 @@ export interface Operations {
       preview_hash: string;
     };
   };
+  getRepoVerifySettings: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      repo_id: string;
+      configured: boolean;
+      enabled: boolean;
+      base_url: string | null;
+      browser_driver: "playwright" | "chrome";
+      test_account_label: string | null;
+      standing_journeys: Array<{
+        id: string;
+        text: string;
+      }>;
+      eligibility: "all" | "ui_paths";
+      eligibility_paths: Array<string>;
+    };
+  };
+  putRepoVerifySettings: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      enabled?: boolean;
+      base_url?: (string) | (null);
+      browser_driver?: "playwright" | "chrome";
+      test_account_label?: (string) | (null);
+      standing_journeys?: Array<unknown>;
+      eligibility?: "all" | "ui_paths";
+      eligibility_paths?: Array<unknown>;
+    };
+    response: {
+      repo_id: string;
+      configured: boolean;
+      enabled: boolean;
+      base_url: string | null;
+      browser_driver: "playwright" | "chrome";
+      test_account_label: string | null;
+      standing_journeys: Array<{
+        id: string;
+        text: string;
+      }>;
+      eligibility: "all" | "ui_paths";
+      eligibility_paths: Array<string>;
+      changed: boolean;
+      ended_rows: number;
+    };
+  };
   putRepoRunnerRouting: {
     path: {
       id: string;
@@ -6385,6 +6437,28 @@ export const operations = {
   previewRepoBuildConcurrency: {
     method: "POST",
     path: "/api/v1/repos/{id}/build-concurrency/preview",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getRepoVerifySettings: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/verify-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  putRepoVerifySettings: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/verify-settings",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "verify_base_url_invalid",
+    "message": "the base URL must be an https origin: a host, with no port",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}
