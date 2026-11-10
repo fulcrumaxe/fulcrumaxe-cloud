@@ -286,7 +286,7 @@ export async function openHeadedBrowser(executable: string, url: string): Promis
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(url);
-    return { storageState: () => context.storageState(), close: () => browser.close() };
+    return { storageState: () => context.storageState(), currentUrl: () => page.url(), close: () => browser.close() };
   } catch (error) {
     await browser.close().catch(() => undefined);
     throw error;
