@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { CHROME_NOT_CONNECTED, probeBrowser, psProcesses, type BrowserProbeDeps, type ProcessInfo } from "../../src/daemon/browserProbe.js";
 import type { InstallCapture } from "../../src/daemon/engineKit.js";
 import { runInstall } from "../../src/engines/claude/capture.js";
-import { tmpRoot } from "../helpers/tmpRoot.js";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 
 /**
  * D#749 V2b: the daemon's own check that the machine can serve a browser job. The bridge directory is a real directory in a temporary tree with a real unix socket in it (made by
@@ -38,7 +38,7 @@ async function healthy(): Promise<void> {
 const deps = (list: readonly ProcessInfo[] | undefined = [CHROME, HOST], over: Partial<BrowserProbeDeps> = {}): BrowserProbeDeps => ({ testAccount: () => "fx-test-user", uid: UID, username: USER, platform: "linux", tmpRoot: tmp, processes: async () => list, ...over });
 
 beforeAll(() => {
-  base = mkdtempSync(path.join(tmpRoot(), "probe-"));
+  base = mkdtempSync(path.join(socketTmpRoot(), "probe-"));
 });
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 beforeEach(() => {

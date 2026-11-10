@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { socketTmpRoot } from "./helpers/tmpRoot.js";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
@@ -40,7 +40,7 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
 beforeEach(async () => {
   clock = t0;
   cloud = await startAssistantCloud(() => clock);
-  root = mkdtempSync(path.join(tmpdir(), "fxr-asst-"));
+  root = mkdtempSync(path.join(socketTmpRoot(), "fxr-asst-"));
   state = path.join(root, "state");
   mkdirSync(state, { mode: 0o700 });
   saveRegistration(state, { version: 1, cloud_origin: cloud.origin, runner_id: RUNNER, account_id: RUNNER, credential_mode: "subscription", jkt: "A".repeat(43), registered_at: new Date(clock).toISOString() });
