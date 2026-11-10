@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { CHROME_NOT_CONNECTED, probeBrowser, psProcesses, type BrowserProbeDeps, type ProcessInfo } from "../../src/daemon/browserProbe.js";
 import type { InstallCapture } from "../../src/daemon/engineKit.js";
 import { runInstall } from "../../src/engines/claude/capture.js";
+import { itUnixSockets } from "../helpers/needsHostSockets.js";
 import { socketTmpRoot } from "../helpers/tmpRoot.js";
 
 /**
@@ -50,7 +51,7 @@ afterEach(async () => {
 });
 
 describe("browser probe", () => {
-  it("passes when Chrome runs and its native host has a live socket in the user's private bridge directory", async () => {
+  itUnixSockets("passes when Chrome runs and its native host has a live socket in the user's private bridge directory", async () => {
     await healthy();
     expect(await probeBrowser(deps())).toEqual({ ok: true });
   });
@@ -59,29 +60,29 @@ describe("browser probe", () => {
     expect(CHROME_NOT_CONNECTED).toBe("chrome not connected");
   });
 
-  it("needs a test account: none configured, or an empty label, is not_configured whatever else holds", async () => {
+  itUnixSockets("needs a test account: none configured, or an empty label, is not_configured whatever else holds", async () => {
     await healthy();
     expect(await probeBrowser(deps(undefined, { testAccount: () => undefined }))).toEqual({ ok: false, reason: "not_configured" });
     expect(await probeBrowser(deps(undefined, { testAccount: () => "" }))).toEqual({ ok: false, reason: "not_configured" });
   });
 
-  it("is Linux only: any other platform is unsupported, never a guess", async () => {
+  itUnixSockets("is Linux only: any other platform is unsupported, never a guess", async () => {
     await healthy();
     for (const platform of ["darwin", "win32", "freebsd"] as const) expect(await probeBrowser(deps(undefined, { platform }))).toEqual({ ok: false, reason: "unsupported_platform" });
   });
 
-  it("a process list that could not be read fails closed", async () => {
+  itUnixSockets("a process list that could not be read fails closed", async () => {
     await healthy();
     expect(await probeBrowser(deps(undefined, { processes: async () => undefined }))).toEqual({ ok: false, reason: "processes_unreadable" });
   });
 
-  it("no Chrome process is chrome_not_running, even with a socket in place; look-alike names do not count", async () => {
+  itUnixSockets("no Chrome process is chrome_not_running, even with a socket in place; look-alike names do not count", async () => {
     await healthy();
     expect(await probeBrowser(deps([HOST]))).toEqual({ ok: false, reason: "chrome_not_running" });
     for (const comm of ["firefox", "chromedriver", "chrome-sandbox", "notchrome"]) expect(await probeBrowser(deps([{ ...CHROME, comm }, HOST])), comm).toEqual({ ok: false, reason: "chrome_not_running" });
   });
 
-  it("recognises the names Chrome and Chromium run under, with a wrapper's leading dot", async () => {
+  itUnixSockets("recognises the names Chrome and Chromium run under, with a wrapper's leading dot", async () => {
     await healthy();
     for (const comm of ["chromium", "google-chrome-s", ".chrome-wrapped", "chromium-browse"]) expect(await probeBrowser(deps([{ ...CHROME, comm }, HOST])), comm).toEqual({ ok: true });
   });
@@ -90,7 +91,7 @@ describe("browser probe", () => {
     expect(await probeBrowser(deps())).toEqual({ ok: false, reason: "bridge_not_connected" });
   });
 
-  it("a bridge directory open to others, one of another user, or a link to a good one, is not the user's bridge", async () => {
+  itUnixSockets("a bridge directory open to others, one of another user, or a link to a good one, is not the user's bridge", async () => {
     await healthy();
     chmodSync(path.join(tmp, BRIDGE), 0o750);
     expect(await probeBrowser(deps())).toEqual({ ok: false, reason: "bridge_not_connected" });
@@ -107,23 +108,23 @@ describe("browser probe", () => {
     return stat === undefined ? null : target(p) ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid }) : stat;
   };
 
-  it("a bridge directory of another user is refused even when the socket and the process are right", async () => {
+  itUnixSockets("a bridge directory of another user is refused even when the socket and the process are right", async () => {
     await healthy();
     expect(await probeBrowser(deps(undefined, { lstat: ownedBy((p) => p.endsWith(BRIDGE), UID + 1) }))).toEqual({ ok: false, reason: "bridge_not_connected" });
     expect(await probeBrowser(deps(undefined, { lstat: ownedBy(() => false, UID + 1) }))).toEqual({ ok: true });
   });
 
-  it("a socket of another user is refused even when the directory is the user's own", async () => {
+  itUnixSockets("a socket of another user is refused even when the directory is the user's own", async () => {
     await healthy();
     expect(await probeBrowser(deps(undefined, { lstat: ownedBy((p) => p.endsWith(".sock"), UID + 1) }))).toEqual({ ok: false, reason: "bridge_not_connected" });
   });
 
-  it("with a different uid asked for, directory and socket both fail closed", async () => {
+  itUnixSockets("with a different uid asked for, directory and socket both fail closed", async () => {
     await healthy();
     expect(await probeBrowser(deps(undefined, { uid: UID + 1 }))).toEqual({ ok: false, reason: "bridge_not_connected" });
   });
 
-  it("a name that is not a socket is refused: a plain file, a symlink to the real socket, a name that is not <pid>.sock", async () => {
+  itUnixSockets("a name that is not a socket is refused: a plain file, a symlink to the real socket, a name that is not <pid>.sock", async () => {
     mkdirSync(path.join(tmp, BRIDGE), { mode: 0o700 });
     writeFileSync(path.join(tmp, BRIDGE, "4242.sock"), "not a socket");
     expect(await probeBrowser(deps())).toEqual({ ok: false, reason: "bridge_not_connected" });
@@ -136,7 +137,7 @@ describe("browser probe", () => {
     expect(await probeBrowser(deps())).toEqual({ ok: false, reason: "bridge_not_connected" });
   });
 
-  it("a stale socket is refused: its process is gone, is not a native host, or only has a longer flag", async () => {
+  itUnixSockets("a stale socket is refused: its process is gone, is not a native host, or only has a longer flag", async () => {
     mkdirSync(path.join(tmp, BRIDGE), { mode: 0o700 });
     await socketAt(path.join(tmp, BRIDGE, "4242.sock"));
     expect(await probeBrowser(deps([CHROME]))).toEqual({ ok: false, reason: "bridge_not_connected" });
@@ -146,19 +147,19 @@ describe("browser probe", () => {
     expect(await probeBrowser(deps([CHROME, HOST]))).toEqual({ ok: true });
   });
 
-  it("a user name that could name another place is refused, not joined into a path", async () => {
+  itUnixSockets("a user name that could name another place is refused, not joined into a path", async () => {
     await healthy();
     for (const username of ["", "..", "a/b", "x y", "a".repeat(65)]) expect(await probeBrowser(deps(undefined, { username })), username).toEqual({ ok: false, reason: "bridge_not_connected" });
   });
 
-  it("the signed-in account is checked when a reader for it exists: a different label is wrong_account, an unreadable one account_unreadable", async () => {
+  itUnixSockets("the signed-in account is checked when a reader for it exists: a different label is wrong_account, an unreadable one account_unreadable", async () => {
     await healthy();
     expect(await probeBrowser(deps(undefined, { accountLabel: () => "fx-test-user" }))).toEqual({ ok: true });
     expect(await probeBrowser(deps(undefined, { accountLabel: () => "someone-else" }))).toEqual({ ok: false, reason: "wrong_account" });
     expect(await probeBrowser(deps(undefined, { accountLabel: () => undefined }))).toEqual({ ok: false, reason: "account_unreadable" });
   });
 
-  it("with no reader the account is not claimed to be checked: the probe passes on the facts it can read", async () => {
+  itUnixSockets("with no reader the account is not claimed to be checked: the probe passes on the facts it can read", async () => {
     await healthy();
     expect(await probeBrowser(deps(undefined, { accountLabel: undefined }))).toEqual({ ok: true });
   });

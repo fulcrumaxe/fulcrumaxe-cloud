@@ -14,6 +14,7 @@ import { roleToolsFor } from "../src/job/roleTools.js";
 import { protectedPaths } from "../src/sandbox/sandboxSettings.js";
 import { setSetting } from "../src/runnerSettings.js";
 import { signedJob, jobFor } from "./helpers/signedJob.js";
+import { itUnixSockets } from "./helpers/needsHostSockets.js";
 import { socketTmpRoot } from "./helpers/tmpRoot.js";
 
 /** D#749 V2b: the capability decision, the role's settings file, and the one-browser-job admission rule. */
@@ -53,7 +54,7 @@ describe("capabilities are advertised only when configured AND the check passes"
     expect(await local().browserReady()).toBe("browser_not_connected");
   });
 
-  it("the deploy order needs the command, the checkout and a script that passes; the browser needs the account and a connected Chrome", async () => {
+  itUnixSockets("the deploy order needs the command, the checkout and a script that passes; the browser needs the account and a connected Chrome", async () => {
     const v = local();
     setSetting(stateDir, "verify.deploy_argv", '["sh","deploy.sh"]');
     expect(await v.capabilities()).toEqual([]);
@@ -71,7 +72,7 @@ describe("capabilities are advertised only when configured AND the check passes"
     expect(await v.browserReady()).toBeUndefined();
   });
 
-  it("a capability the cloud refused is not offered again, and the other stays", async () => {
+  itUnixSockets("a capability the cloud refused is not offered again, and the other stays", async () => {
     await chromeUp();
     setSetting(stateDir, "verify.test_account", "fx-test-user");
     setSetting(stateDir, "verify.deploy_argv", '["sh","deploy.sh"]');

@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { findChromium, NO_POPUPS_FLAG, PROXY_BYPASS_FLAG, WEBRTC_FLAG } from "../../src/verifyBrowser/driver.js";
 import { startVerifyBrowserServer } from "../../src/verifyBrowser/server.js";
+import { chromiumSandboxRefused } from "../helpers/chromiumSandbox.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 import { useSourcePlaywright } from "./sourceLoader.js";
 
@@ -16,6 +17,7 @@ import { useSourcePlaywright } from "./sourceLoader.js";
  * real process's stdin and stdout belongs to a later change. Skipped, with the reason named, when no Chromium is installed.
  */
 const EXE = findChromium(process.env);
+const NO_SANDBOX = chromiumSandboxRefused(EXE);
 if (EXE === undefined) console.warn("SKIPPED verifyBrowser real-browser test: no Chromium found (PLAYWRIGHT_BROWSERS_PATH unset or empty, no google-chrome or chromium on PATH)");
 
 interface Rpc {
@@ -207,7 +209,7 @@ function browserPids(jobDir: string): number[] {
 
 useSourcePlaywright();
 
-describe.skipIf(EXE === undefined || process.platform !== "linux")("the verify browser against a real Chromium", () => {
+describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")("the verify browser against a real Chromium", () => {
   it("drives a page, keeps the pin, refuses what it must, and leaves nothing behind", async () => {
     const j = job(true);
     // The cookie from the storage state arrives; the app sees it on a protected path.

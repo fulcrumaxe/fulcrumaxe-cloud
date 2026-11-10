@@ -25,3 +25,14 @@ export const pythonCannotMakeUnixSocket = (): boolean => spawnSync("python3", ["
 export function unixSocketsRefused(env: NodeJS.ProcessEnv = process.env, probe: () => boolean = pythonCannotMakeUnixSocket): boolean {
   return (env.FX_RUNNER_CHECK === "1" || inRunnerJob(env)) && probe();
 }
+
+/** Why a Unix-socket case skipped, printed once when the probe says sockets are refused. */
+export const UNIX_SOCKETS_SKIP_REASON = "this sandbox refuses Unix-domain sockets (the runner's check and agent jobs run under a seccomp filter that does); the cases that listen on one skip here and run on a developer host and in CI";
+
+const socketsRefusedHere = unixSocketsRefused();
+if (socketsRefusedHere) console.info(`[skip] ${UNIX_SOCKETS_SKIP_REASON}`);
+
+/** `it` for a case that listens on a real Unix socket: skipped, with the reason printed, only where a sandbox marker is set and a socket really cannot be made. */
+export function itUnixSockets(name: string, fn: () => unknown, timeout?: number): void {
+  (socketsRefusedHere ? it.skip : it)(name, fn as () => Promise<void> | void, timeout);
+}

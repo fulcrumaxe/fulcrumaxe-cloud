@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { findChromium } from "../../src/verifyBrowser/driver.js";
 import { startVerifyBrowserServer } from "../../src/verifyBrowser/server.js";
 import { generateSelfSignedCert } from "../helpers/selfSignedCert.js";
+import { chromiumSandboxRefused } from "../helpers/chromiumSandbox.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 import { useSourcePlaywright } from "./sourceLoader.js";
 
@@ -15,6 +16,7 @@ import { useSourcePlaywright } from "./sourceLoader.js";
  * test-only option that accepts it is set; the second https server, on another port of the same host, must see no connection. Skipped when no Chromium is found.
  */
 const EXE = findChromium(process.env);
+const NO_SANDBOX = chromiumSandboxRefused(EXE);
 const { certPem, keyPem } = generateSelfSignedCert("127.0.0.1", 1, { ipAddresses: ["127.0.0.1"] });
 let app: Server;
 let spy: Server;
@@ -48,7 +50,7 @@ afterAll(() => {
 
 useSourcePlaywright();
 
-describe.skipIf(EXE === undefined || process.platform !== "linux")("an https base origin through the origin proxy", () => {
+describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")("an https base origin through the origin proxy", () => {
   it("loads over a CONNECT tunnel, reaches only the base origin, and refuses a redirect to another port", async () => {
     const jobDir = mkdtempSync(path.join(tmpRoot(), "vb-https-"));
     const input = new PassThrough();
