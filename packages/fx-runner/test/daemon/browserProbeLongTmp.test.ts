@@ -3,6 +3,7 @@ import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { probeBrowser, type BrowserProbeDeps, type ProcessInfo } from "../../src/daemon/browserProbe.js";
+import { itUnixSockets } from "../helpers/needsHostSockets.js";
 import { socketTmpRoot } from "../helpers/tmpRoot.js";
 
 /**
@@ -35,7 +36,7 @@ const deps = (tmpRoot: string): BrowserProbeDeps => ({ testAccount: () => "fx-te
 const listenAt = (server: net.Server, file: string): Promise<void> => new Promise<void>((resolve, reject) => server.once("error", reject).listen(file, resolve));
 
 describe("socket fixtures under a long TMPDIR", () => {
-  it("the fixture base falls back to a short path, and a healthy probe case passes there", async () => {
+  itUnixSockets("the fixture base falls back to a short path, and a healthy probe case passes there", async () => {
     vi.stubEnv("TMPDIR", longTmpdir());
     const base = socketTmpRoot();
     expect(base.length).toBeLessThanOrEqual(30);

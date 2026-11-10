@@ -11,6 +11,7 @@ import { readVerifyAnswer } from "../../src/daemon/answerFile.js";
 import { mcpConfigFor } from "../../src/engines/claude/settingsFile.js";
 import { findChromium } from "../../src/verifyBrowser/driver.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
+import { chromiumSandboxRefused } from "../helpers/chromiumSandbox.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 
 /**
@@ -21,6 +22,7 @@ import { tmpRoot } from "../helpers/tmpRoot.js";
  * Skipped, with the reason named, when no Chromium is installed.
  */
 const EXE = findChromium(process.env);
+const NO_SANDBOX = chromiumSandboxRefused(EXE);
 if (EXE === undefined) console.warn("SKIPPED verifyBrowser entry test: no Chromium found (PLAYWRIGHT_BROWSERS_PATH unset or empty, no google-chrome or chromium on PATH)");
 
 const RUN = "3f6c1a52-8d0e-4b7a-9c14-0a5e6d2b7f38";
@@ -128,7 +130,7 @@ describe.skipIf(EXE === undefined)("the fxverify server started from the MCP ent
     expect([...names].sort()).toEqual([...DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS].sort());
   });
 
-  it("drives a real page through the tools and produces a grounded answer.json the daemon's reader accepts", async () => {
+  it.skipIf(NO_SANDBOX)("drives a real page through the tools and produces a grounded answer.json the daemon's reader accepts", async () => {
     expect((await call("begin_journey", { id: "orders" })).isError).toBe(false);
     expect((await call("open", { path: "/" })).text).toContain("opened");
     const before = await call("snapshot");
@@ -158,7 +160,7 @@ describe.skipIf(EXE === undefined)("the fxverify server started from the MCP ent
     expect(total).toBe(4);
   }, 60_000);
 
-  it("where the server runs: a plain child of the starting process, in the same mount, network, user and pid namespaces, so outside any job sandbox of the CLI's own", async () => {
+  it.skipIf(NO_SANDBOX)("where the server runs: a plain child of the starting process, in the same mount, network, user and pid namespaces, so outside any job sandbox of the CLI's own", async () => {
     const pid = child!.pid!;
     const mine = namespaces("self");
     expect(namespaces(pid)).toEqual(mine);
