@@ -52,6 +52,9 @@ export class FakeTuf {
   fetchOutcome: Exclude<TufOutcome, { ok: true }> | undefined;
   /** Claim this hash for the file, whatever its bytes are (a file changed after it was verified). */
   lieAboutHash: string | undefined;
+  /** Per-target versions of the two above: claim this hash for one file only, or refuse one file only. */
+  lies = new Map<string, string>();
+  refusals = new Map<string, Exclude<TufOutcome, { ok: true }>>();
   constructor(private readonly dir: string) {}
 
   add(target: string, content: Buffer): void {
@@ -66,11 +69,13 @@ export class FakeTuf {
   async fetchTarget(target: string): Promise<TufOutcome> {
     this.fetchCalls.push(target);
     if (this.fetchOutcome !== undefined) return this.fetchOutcome;
+    const refused = this.refusals.get(target);
+    if (refused !== undefined) return refused;
     const content = this.files.get(target);
     if (content === undefined) return { ok: false, state: "refused", code: "target_not_found", message: "the release metadata does not list that file" };
     const file = path.join(this.dir, `dl-${this.fetchCalls.length}`);
     writeFileSync(file, content, { mode: 0o600 });
-    return { ok: true, file, remotePath: target, length: content.length, sha256: this.lieAboutHash ?? sha256(content) };
+    return { ok: true, file, remotePath: target, length: content.length, sha256: this.lies.get(target) ?? this.lieAboutHash ?? sha256(content) };
   }
 }
 

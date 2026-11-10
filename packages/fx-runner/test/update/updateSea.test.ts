@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SIDECAR_DIR, swapSidecar, unpackSidecar } from "../../scripts/sidecar.mjs";
+import { sidecarTarget } from "../../src/update/updater.js";
 import { linkedVersion, loadUpdateState } from "../../src/update/versions.js";
+import { CHROMIUM, startVerifyServer } from "../helpers/verifyServerClient.js";
 import { realRun, updateWorld } from "../helpers/updateWorld.js";
 
 /**
@@ -29,6 +32,7 @@ const REACHABLE = await nodejsReachable();
 describe.skipIf(!REACHABLE)("a real SEA through the updater", () => {
   let root: string;
   let sea: Buffer;
+  let archive: Buffer;
 
   beforeAll(async () => {
     root = mkdtempSync(path.join(tmpdir(), "fx-upd-sea-"));
@@ -37,6 +41,7 @@ describe.skipIf(!REACHABLE)("a real SEA through the updater", () => {
       execFile(process.execPath, [SCRIPT, "--out-dir", out], { env: { PATH: process.env.PATH ?? "", TMPDIR: tmpdir(), FX_FORBID_MODEL_CALLS: "1", SOURCE_DATE_EPOCH: "1780000000", FX_SEA_NODE_CACHE_DIR: path.join(root, "node-cache") } }, (error) => (error === null ? resolve() : reject(error)));
     });
     sea = readFileSync(path.join(out, "fx-runner-linux-x64"));
+    archive = readFileSync(path.join(out, "fx-runner-playwright.fxsc"));
   }, 300_000);
 
   afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -66,4 +71,34 @@ describe.skipIf(!REACHABLE)("a real SEA through the updater", () => {
     expect(result).toMatchObject({ ok: false, code: "start_check_failed" });
     expect(linkedVersion(w.stateDir)).toBe("0.0.9");
   }, 120_000);
+
+  // D#749 V2c-2c: the real sidecar archive of the real build, through the real updater, then the INSTALLED program opens a real page.
+  const sidecar = { unpack: (bytes: Buffer, dest: string): void => void unpackSidecar(bytes, dest), swap: (next: string, final: string): void => swapSidecar(next, final) };
+
+  it.skipIf(CHROMIUM === undefined)("installs the release with its sidecar beside the binary, and the installed program finds it; a tampered archive refuses the update", async () => {
+    const w = updateWorld({ current: "0.0.9", over: { sidecar } });
+    w.tuf.add("v0.1.1/fx-runner-linux-x64", sea);
+    w.tuf.add(sidecarTarget("0.1.1"), archive);
+    const probe = await realRun(path.join(root, "out", "fx-runner-linux-x64"), ["doctor", "--sandbox-only"], 60_000);
+    const result = await w.updater.applyLatest();
+    if (probe.code !== 0) {
+      expect(result).toMatchObject({ ok: false, code: "start_check_failed" });
+      return;
+    }
+    expect(result).toMatchObject({ ok: true, version: "0.1.1" });
+    expect(readFileSync(path.join(w.stateDir, "versions", "0.1.1", SIDECAR_DIR, "node_modules", "playwright-core", "package.json"), "utf8")).toContain('"version": "1.63.0"');
+    const server = await startVerifyServer(path.join(w.stateDir, "bin", "fx-runner"));
+    try {
+      expect(await server.open()).toMatchObject({ isError: false, text: expect.stringContaining("opened") });
+    } finally {
+      await server.close();
+    }
+    const bad = updateWorld({ current: "0.0.9", over: { sidecar } });
+    const tampered = Buffer.from(archive);
+    tampered[tampered.length - 200] = tampered[tampered.length - 200]! ^ 0xff;
+    bad.tuf.add("v0.1.1/fx-runner-linux-x64", sea);
+    bad.tuf.add(sidecarTarget("0.1.1"), tampered);
+    expect(await bad.updater.applyLatest()).toMatchObject({ ok: false, code: "sidecar_refused" });
+    expect(linkedVersion(bad.stateDir)).toBe("0.0.9");
+  }, 180_000);
 });

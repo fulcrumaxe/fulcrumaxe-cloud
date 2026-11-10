@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARTIFACT_NAMES, packageVersion } from "./release-manifest.mjs";
+import { SIDECAR_ARCHIVE, SIDECAR_DIR, listTree, treeDigest } from "./sidecar.mjs";
 
 class Refusal extends Error {}
 const fail = (message) => {
@@ -58,6 +59,14 @@ export function compare(dirA, dirB, stripSignature = false) {
   for (const name of a) {
     if (hashOf(path.join(dirA, name), stripSignature) !== hashOf(path.join(dirB, name), stripSignature)) fail(`${name} is not reproducible: two builds differ`);
   }
+  // D#749 V2c-2c: the Playwright sidecar (the archive and the folder it was packed from) has to reproduce too, and the two builds must agree on whether there is one.
+  for (const name of [SIDECAR_ARCHIVE]) {
+    const [inA, inB] = [existsSync(path.join(dirA, name)), existsSync(path.join(dirB, name))];
+    if (inA !== inB) fail(`the two builds disagree on whether ${name} exists`);
+    if (inA && sha256(path.join(dirA, name)) !== sha256(path.join(dirB, name))) fail(`${name} is not reproducible: two builds differ`);
+  }
+  const folder = (dir) => (existsSync(path.join(dir, SIDECAR_DIR)) ? treeDigest(listTree(path.join(dir, SIDECAR_DIR))) : undefined);
+  if (folder(dirA) !== folder(dirB)) fail(`${SIDECAR_DIR} is not reproducible: two builds differ`);
 }
 
 export function smoke(file, version) {
@@ -94,7 +103,9 @@ export function allChecked(outputFile, version) {
   const match = /artifacts checked: (\d+), not found \(not checked\): (.*)/.exec(readFileSync(outputFile, "utf8"));
   if (match === null) fail("the check output does not say which artifacts were checked (was --artifacts given?)");
   if (Number(match[1]) < Object.keys(ARTIFACT_NAMES).length) fail(`only ${match[1]} artifacts were checked; all ${Object.keys(ARTIFACT_NAMES).length} files of v${version} must be`);
-  const missed = Object.values(ARTIFACT_NAMES).filter((name) => match[2].includes(`v${version}/${name}`));
+  // The sidecar archive, when this version's signed list has it, is checked like a binary.
+  const sidecarListed = /listed: (.*)/.exec(readFileSync(outputFile, "utf8"))?.[1]?.includes(`v${version}/${SIDECAR_ARCHIVE}`) === true;
+  const missed = [...Object.values(ARTIFACT_NAMES), ...(sidecarListed ? [SIDECAR_ARCHIVE] : [])].filter((name) => match[2].includes(`v${version}/${name}`));
   if (missed.length > 0) fail(`not checked: ${missed.join(", ")}`);
 }
 

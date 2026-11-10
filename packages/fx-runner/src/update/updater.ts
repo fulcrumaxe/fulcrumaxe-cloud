@@ -13,6 +13,10 @@
  *    check, the link goes back and that version is marked failed so it is not tried again.
  *  - Fail closed. Any refusal or error leaves the link, and so the version that restarts next, where it was.
  *  - One previous version is kept; older ones are removed once a switch is complete.
+ *  - D#749 V2c-2c, the Playwright sidecar. A release also lists `v<v>/fx-runner-playwright.fxsc` (signed like the binary). It is fetched after the binary, checked against its verified hash, unpacked INTO THE
+ *    SAME STAGING DIRECTORY (every file checked against the archive's header and the whole tree against its digest), and so lands beside the binary in the one rename. A listed sidecar that fails any check
+ *    refuses the whole update; a release that lists none installs as before (the capability is then not advertised). `ensureSidecar` lays one down for the version already in use (a fresh install.sh
+ *    install has only the binary): staged beside it, then swapped in atomically, the old folder put back if the swap fails.
  *  - A running program is never changed: nothing is overwritten in place, only the link moves. A program that is running (a job in
  *    hand included) keeps the file it started from, so a switch takes effect at the next start. The daemon additionally checks only
  *    while it holds no lease (`AutoUpdate`), so no download competes with a job.
@@ -21,6 +25,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants, chmodSync, closeSync, copyFileSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
+import { SIDECAR_DIR } from "../verifyBrowser/loadPlaywright.js";
 import type { TufClient } from "./tuf.js";
 import { compareVersions, installedVersions, isVersion, layoutIsSafe, linkedVersion, loadUpdateState, saveUpdateState, switchLink, versionBinary, versionInstalled, versionsDir, stableBinary, type UpdateState } from "./versions.js";
 
@@ -36,6 +41,18 @@ export interface UpdateHost {
   inService: boolean;
   /** Runs a program with a clean environment and a time limit; never rejects. */
   run: (file: string, args: readonly string[], timeoutMs: number) => Promise<{ code: number | null; stdout: string }>;
+  /** The Playwright sidecar operations; without them the updater installs binaries only (a test host, or a program with no sidecar support). */
+  sidecar?: SidecarOps;
+}
+
+/** What the program's entry hands the updater for the sidecar (scripts/sidecar.mjs): nothing under `src/` imports a script. */
+export interface SidecarOps {
+  /** Unpacks the packed sidecar `bytes` (the very bytes the signed hash was just checked against, read once: never the file again) into `dest` (which must not exist), checking every file and the whole tree; throws, leaving nothing behind, on any mismatch. */
+  unpack(bytes: Buffer, dest: string): void;
+  /** Puts the folder `next` in place of `final` atomically, putting the old one back if that fails. */
+  swap(next: string, final: string): void;
+  /** Whether the folder at `dir` is the one the RUNNING program was built with (its baked digest). Only used for the version in use. */
+  intact?: (dir: string) => boolean;
 }
 
 export interface UpdaterDeps {
@@ -79,6 +96,10 @@ function realOr(file: string): string {
 }
 
 const sha256 = (file: string): string => createHash("sha256").update(readFileSync(file)).digest("hex");
+const sha256Bytes = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+
+/** The signed target of a release's sidecar archive. */
+export const sidecarTarget = (version: string): string => `v${version}/fx-runner-playwright.fxsc`;
 
 export class Updater {
   constructor(private readonly deps: UpdaterDeps) {}
@@ -179,7 +200,17 @@ export class Updater {
   private cleanupLocked(): void {
     if (!layoutIsSafe(this.stateDir)) return;
     try {
-      for (const name of readdirSync(versionsDir(this.stateDir))) if (name.startsWith(".staging-")) rmSync(path.join(versionsDir(this.stateDir), name), { recursive: true, force: true });
+      for (const name of readdirSync(versionsDir(this.stateDir))) {
+        if (name.startsWith(".staging-")) rmSync(path.join(versionsDir(this.stateDir), name), { recursive: true, force: true });
+        else {
+          // A sidecar swap that died half-way leaves `fx-runner-playwright.old-<hex>` beside the folder in that version's directory.
+          try {
+            for (const inner of readdirSync(path.join(versionsDir(this.stateDir), name))) if (inner.startsWith(`${SIDECAR_DIR}.old-`)) rmSync(path.join(versionsDir(this.stateDir), name, inner), { recursive: true, force: true });
+          } catch {
+            // fx-swallow-ok: not a directory or unreadable: nothing to clean there
+          }
+        }
+      }
     } catch {
       // fx-swallow-ok: no versions directory, nothing to clean
     }
@@ -262,6 +293,8 @@ export class Updater {
     if (blocked !== undefined) return blocked;
     const before = loadUpdateState(this.stateDir);
     if (before.damaged === true) return { ok: false, code: "state_damaged", message: "update.json is damaged, so automatic updates are off" };
+    // The version in use gets its sidecar first when it has none (a failure here never stops the update check below).
+    await this.ensureSidecar();
     if (before.pinned !== undefined) return { ok: true, message: `held at ${before.pinned} by a pin` };
     const checked = await this.check();
     if (!checked.ok) return { ok: false, code: checked.state, message: checked.message };
@@ -293,25 +326,35 @@ export class Updater {
 
     const reuse = state.previous === version && versionInstalled(this.stateDir, version);
     let verified: { file: string; sha256: string } | undefined;
+    let sidecarFile: { file: string; sha256: string } | undefined;
     if (!reuse) {
       if (!this.deps.tuf.configured) return { ok: false, code: "not_configured", message: "updates are not configured in this build" };
       const fetched = await this.deps.tuf.fetchTarget(`v${version}/fx-runner-${platform}`);
       if (!fetched.ok) return { ok: false, code: fetched.state === "refused" ? fetched.code : fetched.state, message: fetched.state === "paused" ? `updates paused: ${fetched.message.replace(/^updates paused: /, "")}` : fetched.message };
       verified = { file: fetched.file, sha256: fetched.sha256 };
+      if (this.deps.host.sidecar !== undefined) {
+        const got = await this.deps.tuf.fetchTarget(sidecarTarget(version));
+        if (got.ok) sidecarFile = { file: got.file, sha256: got.sha256 };
+        else if (!(got.state === "refused" && got.code === "target_not_found")) {
+          // Listed (or unverifiable) but not usable: the whole update is refused, never installed without it.
+          rmSync(verified.file, { force: true });
+          return { ok: false, code: got.state === "refused" ? got.code : got.state, message: `the Playwright sidecar of ${version} could not be fetched and verified; nothing was changed` };
+        }
+      }
     }
 
     state = { ...loadUpdateState(this.stateDir), applying: { version, from } };
     saveUpdateState(this.stateDir, state);
     const staging = path.join(versionsDir(this.stateDir), `.staging-${randomBytes(6).toString("hex")}`);
     const target = path.join(versionsDir(this.stateDir), version);
-    const abandon = (reason: string, mark: boolean): UpdateResult => {
+    const abandon = (reason: string, mark: boolean, code = "start_check_failed"): UpdateResult => {
       rmSync(staging, { recursive: true, force: true });
       if (!reuse) rmSync(target, { recursive: true, force: true });
       const now = loadUpdateState(this.stateDir);
       delete now.applying;
       if (mark) now.failed = version;
       saveUpdateState(this.stateDir, now);
-      return { ok: false, code: "start_check_failed", message: reason };
+      return { ok: false, code, message: reason };
     };
     try {
       if (verified !== undefined) {
@@ -320,9 +363,20 @@ export class Updater {
         copyFileSync(verified.file, staged, constants.COPYFILE_EXCL);
         chmodSync(staged, 0o755);
         if (sha256(staged) !== verified.sha256) return abandon("the staged file does not match the verified hash; nothing was changed", false);
+        if (sidecarFile !== undefined && this.deps.host.sidecar !== undefined) {
+          try {
+            // Read ONCE: the bytes that are hashed are the bytes that are unpacked, so a file swapped on disk after the check is never what gets installed.
+            const bytes = readFileSync(sidecarFile.file);
+            if (sha256Bytes(bytes) !== sidecarFile.sha256) return abandon("the sidecar file does not match the verified hash; nothing was changed", false, "sidecar_refused");
+            this.deps.host.sidecar.unpack(bytes, path.join(staging, SIDECAR_DIR));
+          } catch {
+            // fx-swallow-ok: a sidecar that fails its checks refuses the update; the error text may carry a path
+            return abandon("the Playwright sidecar did not pass its checks; nothing was changed", false, "sidecar_refused");
+          }
+        }
         chmodSync(staging, 0o755);
         rmSync(target, { recursive: true, force: true });
-        // The staged file is the only thing in the staging directory; moving the directory puts it at versions/<v>/fx-runner in one rename.
+        // The staged file (and the sidecar folder, when the release has one) are all the staging directory holds; moving the directory puts them at versions/<v>/ in one rename.
         renameSync(staging, target);
       }
       if (!(await this.startCheck(versionBinary(this.stateDir, version), version))) return abandon(`${version} did not pass its start check; ${from} stays in use`, true);
@@ -345,7 +399,58 @@ export class Updater {
       return { ok: false, code: "error", message: "the update stopped part-way; run: fx-runner update --rollback if the new version does not work" };
     } finally {
       if (verified !== undefined) rmSync(verified.file, { force: true });
+      if (sidecarFile !== undefined) rmSync(sidecarFile.file, { force: true });
     }
+  }
+
+  /**
+   * Lays the sidecar down for the version in use when that version has none (or has one that is not the one the running program was built with). Fetched through the signed metadata, unpacked
+   * and checked in a staging directory, then swapped in beside the binary atomically; on failure the old folder (if any) is back and nothing else changed. A release that lists no sidecar is left as it is.
+   */
+  async ensureSidecar(): Promise<UpdateResult> {
+    const ops = this.deps.host.sidecar;
+    if (ops === undefined) return { ok: true, message: "this program has no sidecar support" };
+    const blocked = this.guard();
+    if (blocked !== undefined) return blocked;
+    return this.withLock(
+      async (): Promise<UpdateResult> => {
+        if (!layoutIsSafe(this.stateDir)) return { ok: false, code: "unmanaged", message: "the versions or bin directory is not a real directory, so nothing is changed" };
+        this.cleanupLocked();
+        const version = linkedVersion(this.stateDir);
+        if (version === undefined || !versionInstalled(this.stateDir, version)) return { ok: false, code: "unmanaged", message: "the stable link is missing" };
+        const final = path.join(versionsDir(this.stateDir), version, SIDECAR_DIR);
+        let present = false;
+        try {
+          present = lstatSync(final).isDirectory();
+        } catch {
+          // fx-swallow-ok: no folder there is the answer "none yet"
+          present = false;
+        }
+        if (present && (version !== this.deps.host.version || ops.intact === undefined || ops.intact(final))) return { ok: true, message: "the Playwright sidecar is in place" };
+        if (!this.deps.tuf.configured) return { ok: false, code: "not_configured", message: "updates are not configured in this build" };
+        const got = await this.deps.tuf.fetchTarget(sidecarTarget(version));
+        if (!got.ok) {
+          if (got.state === "refused" && got.code === "target_not_found") return { ok: true, message: `${version} was released without a Playwright sidecar` };
+          return { ok: false, code: got.state === "refused" ? got.code : got.state, message: "the Playwright sidecar could not be fetched and verified; nothing was changed" };
+        }
+        const staging = path.join(versionsDir(this.stateDir), `.staging-${randomBytes(6).toString("hex")}`);
+        try {
+          const bytes = readFileSync(got.file); // read once: hashed and unpacked from the same bytes
+          if (sha256Bytes(bytes) !== got.sha256) return { ok: false, code: "sidecar_refused", message: "the sidecar file does not match the verified hash; nothing was changed" };
+          mkdirSync(staging, { recursive: true, mode: 0o700 });
+          ops.unpack(bytes, path.join(staging, SIDECAR_DIR));
+          ops.swap(path.join(staging, SIDECAR_DIR), final);
+          return { ok: true, message: `Laid down the Playwright sidecar for ${version}.`, version };
+        } catch {
+          // fx-swallow-ok: fail closed; the swap puts the old folder back itself, and the error text may carry a path
+          return { ok: false, code: "sidecar_refused", message: "the Playwright sidecar did not pass its checks or could not be put in place; the old one (if any) is unchanged" };
+        } finally {
+          rmSync(staging, { recursive: true, force: true });
+          rmSync(got.file, { force: true });
+        }
+      },
+      { ok: false, code: "busy", message: "another update is running" },
+    );
   }
 
   /** `--pin <v>`: hold that version, installing it (older ones included) when it is not the one in use. */

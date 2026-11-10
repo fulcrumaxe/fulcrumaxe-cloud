@@ -6,21 +6,24 @@
 // Steps: (1) bundle bin/fx-runner.mjs and src/** with esbuild into one CommonJS file (`@anthropic-ai/*` is external, and nothing needs it);
 // (2) download the exact Node release pinned below, and check it against nodejs.org's SHASUMS256.txt AND against the SHA-256 pinned in this
 // file; (3) make the SEA blob with that Node; (4) inject the blob with postject (on macOS: remove the signature, inject, sign ad hoc, verify);
-// (5) write release-manifest.json. Everything is built in a temporary folder and moved into --out-dir only when every step has passed, so a
+// (5) write release-manifest.json. D#749 V2c-2c: the Playwright library is not in the bundle; step 0 lays it down as `fx-runner-playwright/node_modules/playwright-core` (the exact pinned version, no
+// browser; scripts/sidecar.mjs), its whole-tree digest is baked into the program, and the folder and its packed archive (`fx-runner-playwright.fxsc`, the file the signed release lists) are written next
+// to the binary. Everything is built in a temporary folder and moved into --out-dir only when every step has passed, so a
 // failed build writes nothing.
 //
 // The build is reproducible: the same commit, the same SOURCE_DATE_EPOCH and the same pinned Node give the same bytes (R6-1 acceptance 2).
 // The blob is made by the pinned Node itself, so a target is built on a machine of the same platform (one hosted runner per target in R6-5).
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync, chmodSync, copyFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync, chmodSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import postject from "postject";
-import { ARTIFACT_NAMES, artifactName, packageVersion, writeManifest } from "./release-manifest.mjs";
+import { ARTIFACT_NAMES, MANIFEST_FILE, artifactName, packageVersion, writeManifest } from "./release-manifest.mjs";
+import { SIDECAR_ARCHIVE, SIDECAR_DIR, buildSidecar, installedLibrary, packSidecar, swapSidecar } from "./sidecar.mjs";
 
 const run = promisify(execFile);
 const PACKAGE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -163,7 +166,7 @@ export function assertSingleFile(text) {
 }
 
 /** Step 1: the one CommonJS file. */
-export async function bundleRunner(epoch) {
+export async function bundleRunner(epoch, sidecarDigest = "") {
   const result = await build({
     entryPoints: [path.join(PACKAGE_DIR, "bin", "fx-runner.mjs")],
     absWorkingDir: PACKAGE_DIR,
@@ -177,7 +180,8 @@ export async function bundleRunner(epoch) {
     legalComments: "none",
     logLevel: "silent",
     // No import.meta in a CommonJS bundle; bin/fx-runner.mjs only reads it when it is not the single executable.
-    define: { "import.meta.url": "undefined", __FX_BUILD_EPOCH__: JSON.stringify(String(epoch)) },
+    // __FX_SIDECAR_DIGEST__ is the digest of the sidecar folder this program is released with (bin/sidecarLibrary.mjs refuses any other); "" (no sidecar) makes the library never available.
+    define: { "import.meta.url": "undefined", __FX_BUILD_EPOCH__: JSON.stringify(String(epoch)), __FX_SIDECAR_DIGEST__: JSON.stringify(String(sidecarDigest)) },
   });
   if (result.outputFiles.length !== 1) throw new BuildError("bundle_failed", "esbuild did not produce exactly one file");
   const text = result.outputFiles[0].text;
@@ -211,23 +215,58 @@ async function makeExecutable({ nodePath, bundleText, platform, workDir, epoch, 
 }
 
 /** The whole build. Returns the file written and its manifest entry. Nothing is written to `outDir` unless every step passed. */
-export async function buildSea({ target = hostPlatform(), outDir, epoch, fetchFn = fetch, base = distBase(), cacheDir, runFn = (cmd, args, options) => run(cmd, args, options) }) {
+export async function buildSea({ target = hostPlatform(), outDir, epoch, fetchFn = fetch, base = distBase(), cacheDir, sidecarSource, runFn = (cmd, args, options) => run(cmd, args, options) }) {
   if (!Object.hasOwn(ARTIFACT_NAMES, target)) throw new BuildError("platform_unsupported", `${String(target).slice(0, 40)} is not one of ${Object.keys(ARTIFACT_NAMES).join(", ")}`);
   if (target !== hostPlatform()) throw new BuildError("cross_build_unsupported", `the blob is made by the pinned Node itself, so ${target} must be built on a ${target} machine`);
   const workDir = mkdtempSync(path.join(tmpdir(), "fx-sea-"));
   try {
     const { bytes, archive } = await pinnedNodeArchive({ platform: target, fetchFn, base, cacheDir });
     const nodePath = await extractNode(bytes, archive, workDir);
-    const bundleText = await bundleRunner(epoch);
+    const sidecar = buildSidecar({ dest: path.join(workDir, SIDECAR_DIR), source: sidecarSource ?? installedLibrary(), epoch });
+    const packed = packSidecar(path.join(workDir, SIDECAR_DIR));
+    const bundleText = await bundleRunner(epoch, sidecar.digest);
     const built = await makeExecutable({ nodePath, bundleText, platform: target, workDir, epoch, runFn });
+    // Everything is built in the work folder first, then put in place with the binary LAST; any failure puts back what was there before, so a failed build leaves the
+    // output folder as it was (never a new binary beside an old sidecar).
+    utimesSync(built, epoch, epoch);
     mkdirSync(outDir, { recursive: true });
     const finalPath = path.join(outDir, path.basename(built));
-    renameOrCopy(built, finalPath);
-    utimesSync(finalPath, epoch, epoch);
-    const { entries } = writeManifest(outDir, packageVersion());
-    return { file: finalPath, entry: entries.find((entry) => entry.platform === target) };
+    const archivePath = path.join(outDir, SIDECAR_ARCHIVE);
+    const sidecarPath = path.join(outDir, SIDECAR_DIR);
+    const manifestPath = path.join(outDir, MANIFEST_FILE);
+    const kept = path.join(workDir, "previous");
+    const touched = [finalPath, archivePath, sidecarPath, manifestPath];
+    mkdirSync(kept);
+    for (const [index, item] of touched.entries()) if (existsSync(item)) cpSync(item, path.join(kept, String(index)), { recursive: true, preserveTimestamps: true });
+    try {
+      // The folder goes beside the binary by the same atomic swap the installer and the updater use; the archive is the signed release file for it.
+      swapSidecar(path.join(workDir, SIDECAR_DIR), sidecarPath, renameOrCopyDir);
+      writeFileSync(archivePath, packed);
+      utimesSync(archivePath, epoch, epoch);
+      renameOrCopy(built, finalPath);
+      utimesSync(finalPath, epoch, epoch);
+      const { entries } = writeManifest(outDir, packageVersion());
+      return { file: finalPath, entry: entries.find((entry) => entry.platform === target) };
+    } catch (error) {
+      for (const [index, item] of touched.entries()) {
+        rmSync(item, { recursive: true, force: true });
+        if (existsSync(path.join(kept, String(index)))) cpSync(path.join(kept, String(index)), item, { recursive: true, preserveTimestamps: true });
+      }
+      throw error;
+    }
   } finally {
     rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+/** A folder rename that falls back to a copy when the temporary folder is on another file system. */
+function renameOrCopyDir(from, to) {
+  try {
+    renameSync(from, to);
+  } catch (error) {
+    if (error?.code !== "EXDEV") throw error;
+    cpSync(from, to, { recursive: true });
+    rmSync(from, { recursive: true, force: true });
   }
 }
 
@@ -260,7 +299,7 @@ async function main(argv) {
       epoch: await buildEpoch(),
       cacheDir: process.env.FX_SEA_NODE_CACHE_DIR,
     });
-    process.stdout.write(`${file}\nsha256 ${entry.sha256}\nsize ${entry.size}\n`);
+    process.stdout.write(`${file}\nsha256 ${entry.sha256}\nsize ${entry.size}\nsidecar ${path.join(path.dirname(file), SIDECAR_DIR)}\n`);
     return 0;
   } catch (error) {
     process.stderr.write(`build-sea: ${error instanceof Error ? error.message : "failed"}\n`);

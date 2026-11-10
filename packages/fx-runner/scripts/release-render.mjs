@@ -10,7 +10,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARTIFACT_NAMES } from "./release-manifest.mjs";
+import { ARTIFACT_NAMES, SIDECAR_ENTRY } from "./release-manifest.mjs";
+import { SIDECAR_ARCHIVE } from "./sidecar.mjs";
 
 const upper = (platform) => platform.toUpperCase().replace(/-/g, "_");
 
@@ -23,6 +24,11 @@ export function loadManifest(file) {
     throw new Error("the manifest could not be read as JSON");
   }
   if (!Array.isArray(entries)) throw new Error("the manifest is not a list");
+  // D#749 V2c-2c: the sidecar archive entry has no platform; it is kept apart so the four-platform rules below stay as they were.
+  const sidecars = entries.filter((entry) => entry?.artifact === SIDECAR_ENTRY);
+  entries = entries.filter((entry) => entry?.artifact !== SIDECAR_ENTRY);
+  if (sidecars.length > 1) throw new Error("the manifest lists the sidecar archive twice");
+  if (sidecars.length === 1 && !/^[0-9a-f]{64}$/.test(String(sidecars[0].sha256))) throw new Error("the sidecar entry has no SHA-256");
   const byPlatform = new Map(entries.map((entry) => [entry?.platform, entry]));
   for (const platform of Object.keys(ARTIFACT_NAMES)) {
     const entry = byPlatform.get(platform);
@@ -32,7 +38,8 @@ export function loadManifest(file) {
   if (entries.length !== Object.keys(ARTIFACT_NAMES).length) throw new Error("the manifest lists a platform twice or one that is not released");
   const versions = new Set(entries.map((entry) => entry.version));
   if (versions.size !== 1 || !/^\d+\.\d+\.\d+$/.test([...versions][0])) throw new Error("the manifest must name one x.y.z version");
-  return { version: [...versions][0], entries };
+  if (sidecars.length === 1 && sidecars[0].version !== [...versions][0]) throw new Error("the sidecar entry is of another version than the binaries");
+  return { version: [...versions][0], entries, sidecar: sidecars[0] };
 }
 
 /** Fills `@FX_VERSION@`, `@FX_SHA256_<PLATFORM>@` and `@FX_FILE_<PLATFORM>@`. Throws if any `@FX_` is left. */
@@ -47,7 +54,9 @@ export function renderTemplate(text, manifest) {
 }
 
 export function checksumsText(manifest) {
-  return manifest.entries.map((entry) => `${entry.sha256}  ${ARTIFACT_NAMES[entry.platform]}\n`).join("");
+  const lines = manifest.entries.map((entry) => `${entry.sha256}  ${ARTIFACT_NAMES[entry.platform]}\n`);
+  if (manifest.sidecar !== undefined) lines.push(`${manifest.sidecar.sha256}  ${SIDECAR_ARCHIVE}\n`);
+  return lines.join("");
 }
 
 function main(argv) {

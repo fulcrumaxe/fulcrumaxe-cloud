@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The release manifest: one { version, platform, sha256, size } entry for each fx-runner single-executable file in a directory, written as
+// The release manifest: one { version, platform, sha256, size } entry for each fx-runner single-executable file in a directory (and one { version, artifact, sha256, size } entry for the Playwright sidecar archive, when the directory holds it), written as
 // release-manifest.json. It carries no date, path or host name, so the same files always give the same manifest.
 //
 // ARTIFACT_NAMES is the one place the release file names are written down. The installer (R6-4) and the release workflow (R6-5) read it
@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SIDECAR_ARCHIVE } from "./sidecar.mjs";
 
 /** The platforms a release ships, and the file name each one has on the release page. The order is the order of the manifest. */
 export const ARTIFACT_NAMES = Object.freeze({
@@ -19,6 +20,12 @@ export const ARTIFACT_NAMES = Object.freeze({
   "linux-x64": "fx-runner-linux-x64",
   "linux-arm64": "fx-runner-linux-arm64",
 });
+
+/**
+ * D#749 V2c-2c: the manifest entry of the Playwright sidecar archive (scripts/sidecar.mjs): { version, artifact: "playwright-sidecar", sha256, size }. It has no platform (the library is plain JavaScript,
+ * the same bytes everywhere); the signed metadata lists it as `v<version>/fx-runner-playwright.fxsc` beside the four binaries.
+ */
+export const SIDECAR_ENTRY = "playwright-sidecar";
 
 export const MANIFEST_FILE = "release-manifest.json";
 
@@ -55,6 +62,18 @@ export function manifestFor(dir, version) {
     if (isFile) entries.push(manifestEntry({ file, platform, version }));
   }
   if (entries.length === 0) throw new Error(`no fx-runner artifact in ${dir}`);
+  const archive = path.join(dir, SIDECAR_ARCHIVE);
+  let hasArchive = false;
+  try {
+    hasArchive = statSync(archive).isFile();
+  } catch {
+    // no sidecar archive in this directory: a release made without one lists none
+    hasArchive = false;
+  }
+  if (hasArchive) {
+    const bytes = readFileSync(archive);
+    entries.push({ version, artifact: SIDECAR_ENTRY, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length });
+  }
   return entries;
 }
 

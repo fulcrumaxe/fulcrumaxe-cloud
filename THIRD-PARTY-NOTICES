@@ -108,3 +108,10 @@ INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
 DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
+
+Playwright (the fx-runner release's sidecar folder)
+===================================================
+
+The fx-runner release carries the playwright-core library, version 1.63.0, by Microsoft Corporation, under the
+Apache License, Version 2.0, in a folder laid down beside the executable (fx-runner-playwright/node_modules/playwright-core).
+The library's own LICENSE, NOTICE and ThirdPartyNotices.txt files travel inside that folder unchanged. It carries no browser.
