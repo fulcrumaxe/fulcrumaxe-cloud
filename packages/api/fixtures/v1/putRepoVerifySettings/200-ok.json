@@ -1,0 +1,18 @@
+{
+  "repo_id": "22222222-2222-4222-8222-222222222222",
+  "configured": true,
+  "enabled": true,
+  "base_url": "https://app.example.test",
+  "browser_driver": "playwright",
+  "test_account_label": "verify-bot",
+  "standing_journeys": [
+    {
+      "id": "sign_in",
+      "text": "Sign in and open the item card"
+    }
+  ],
+  "eligibility": "all",
+  "eligibility_paths": [],
+  "changed": true,
+  "ended_rows": 0
+}

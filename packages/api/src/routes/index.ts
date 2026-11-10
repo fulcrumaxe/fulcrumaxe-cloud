@@ -33,6 +33,7 @@ import { billingRoutes } from "./billing.js";
 import { runLimitRoutes } from "./run-limits.js";
 import { runnerConcurrencyRoutes } from "./runner-concurrency.js";
 import { buildConcurrencyRoutes } from "./build-concurrency.js";
+import { verifySettingsRoutes } from "./verify-settings.js";
 import { runnerRoutingRoutes } from "./runner-routing.js";
 import { auditLogRoutes } from "./audit-log.js";
 import { runActionRoutes } from "./run-actions.js";
@@ -107,6 +108,7 @@ export const ROUTES: RouteEntry[] = [
   ...runLimitRoutes,
   ...runnerConcurrencyRoutes,
   ...buildConcurrencyRoutes,
+  ...verifySettingsRoutes,
   ...runnerRoutingRoutes,
   ...auditLogRoutes,
   ...runActionRoutes,
