@@ -12,6 +12,7 @@ import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
 import { readStartDecision, type StartDecision } from './startDecision.js';
 import { readItemReceipts, type ItemReceipts } from './itemReceipts.js';
+import { readItemVerify, type ItemVerify } from './itemVerify.js';
 import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSentence } from './continuationStops.js';
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE, REPUBLISH_REPLACE_NO_CHANGE, REPUBLISH_REPLACE_FAILED, REPUBLISH_REPLACE_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN, REPUBLISH_STACK_PARENT_OFF_MAIN, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST, REPUBLISH_TIP_MOVED, republishFailedSentence } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
@@ -247,6 +248,8 @@ export interface WorkItemActivity {
   start_decision: StartDecision | null;
   /** D#7 DW-R5: the item's class 2 and class 3 receipts, newest first (at most 50), or null when it has none. */
   receipts: ItemReceipts | null;
+  /** D#749 V4b: the item's newest verify row (status, reason, method, journey counts, account check, bug item), or null when verification is off for its repository or it has no row. */
+  verify: ItemVerify | null;
   /** D#598 P8c-3: the setup request the item is paused on, read in this same call (no extra request). Null when no request holds it; the API words it. */
   setup_pause: { hold: SetupHold; request: SetupRequest | null } | null;
   /**
@@ -1061,6 +1064,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       branch_cleanup: await readBranchCleanup(client, workItemId, item.stage),
       start_decision: await readStartDecision(client, workItemId),
       receipts: await readItemReceipts(client, workItemId),
+      verify: await readItemVerify(client, workItemId),
       setup_pause: await setupPauseFor(client, workItemId),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,

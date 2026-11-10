@@ -275,6 +275,40 @@ describe('verify stage store', () => {
       expect(fact.rows[0]).toEqual({ head_sha: sha('a'), pr_number: 5, run_id: a.runId });
     });
 
+    it('D#749 V4b: the account check is written once, by the move that finishes the row, and the table refuses any other write of it', async () => {
+      const repo = await newRepo();
+      await turnOn(repo);
+      const item = await newItem(repo, 'merged', '1. It works');
+      const o = (await open(item)) as { rowId: string };
+      const setCheck = (v: string | null) => admin.query(`UPDATE verify_rows SET account_check = $2 WHERE id = $1`, [o.rowId, v]);
+      // Before it runs, a row cannot be given one (pending and deploying), and neither can a running row without finishing.
+      await expect(setCheck('matched')).rejects.toMatchObject({ code: '23514' });
+      await toRunning(o.rowId);
+      await expect(setCheck('matched')).rejects.toMatchObject({ code: '23514' });
+      // The closed values only, and a reason the check contradicts is refused by the store.
+      await expect(asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'verified', result: [evidenced('c1')], accountCheck: 'bogus' as never }))).rejects.toMatchObject({ code: 'verify_row_invalid' });
+      await expect(asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'unverified', reason: 'run_failed', accountCheck: 'mismatch' }))).rejects.toMatchObject({ code: 'verify_row_invalid' });
+      await expect(asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'unverified', reason: 'wrong_account' }))).rejects.toMatchObject({ code: 'verify_row_invalid' });
+      await expect(setCheck('someone')).rejects.toMatchObject({ code: '23514' });
+      const done = await asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'verified', result: [evidenced('c1')], accountCheck: 'matched' }));
+      expect(done).toMatchObject({ moved: true, row: { status: 'verified', account_check: 'matched' } });
+      // Finished: it never changes, not to another value and not to null.
+      await expect(setCheck('mismatch')).rejects.toMatchObject({ code: '23514' });
+      await expect(setCheck(null)).rejects.toMatchObject({ code: '23514' });
+      expect((await asWorker((c) => readVerifyRow(c, a.accountId, o.rowId)))?.account_check).toBe('matched');
+    });
+
+    it('D#749 V4b: a row finished without a check keeps NULL, and a later settings change does not write one', async () => {
+      const repo = await newRepo();
+      await turnOn(repo);
+      const item = await newItem(repo, 'merged', '1. It works');
+      const o = (await open(item)) as { rowId: string };
+      await toRunning(o.rowId);
+      await asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'verified', result: [evidenced('c1')] }));
+      await asOwner((c) => saveVerifySettings(c, a.accountId, repo, a.userId, { testAccountLabel: 'verify-bot' }));
+      expect((await asWorker((c) => readVerifyRow(c, a.accountId, o.rowId)))?.account_check).toBeNull();
+    });
+
     it('a failed row names its failing journeys in the fact and has no reason; the bug item is attached once', async () => {
       const repo = await newRepo();
       await turnOn(repo);

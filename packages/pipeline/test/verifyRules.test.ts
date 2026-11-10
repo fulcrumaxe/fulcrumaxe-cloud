@@ -113,6 +113,27 @@ describe('the signed-in account', () => {
     expect(outcomeFromAnswer(journeys, withAccount('x'), { testAccountLabel: ' X ', method: 'playwright_runner' }).input.status).toBe('verified');
   });
 
+  it('the account check stored with the verdict (D#749 V4b): matched only after the recorded account equalled the label, on every outcome that follows; mismatch and unverifiable with their reasons; absent with no label', () => {
+    const verified = outcomeFromAnswer(journeys, withAccount('FX-Tester'), ctx);
+    expect(verified.input).toMatchObject({ status: 'verified', accountCheck: 'matched' });
+    const failing = outcomeFromAnswer(journeys, withAccount('fx-tester', journeys.map((j) => answered(j.id, j.id === 'c1' ? { result: 'fail' } : {}))), ctx);
+    expect(failing.input).toMatchObject({ status: 'failed', accountCheck: 'matched' });
+    const blockedOut = outcomeFromAnswer(journeys, withAccount('fx-tester', journeys.map((j) => answered(j.id, j.id === 'c1' ? { result: 'blocked' } : {}))), ctx);
+    expect(blockedOut.input).toMatchObject({ reason: 'journey_blocked', accountCheck: 'matched' });
+    const hollow = outcomeFromAnswer(journeys, withAccount('fx-tester', journeys.map((j) => answered(j.id, j.id === 'c1' ? { reloaded: false } : {}))), ctx);
+    expect(hollow.input).toMatchObject({ reason: 'hollow_pass', accountCheck: 'matched' });
+    const missing = outcomeFromAnswer(journeys, withAccount('fx-tester', [answered('c1')]), ctx);
+    expect(missing.input).toMatchObject({ reason: 'journeys_missing', accountCheck: 'matched' });
+    expect(outcomeFromAnswer(journeys, withAccount('the-owner'), ctx).input).toMatchObject({ reason: 'wrong_account', accountCheck: 'mismatch' });
+    expect(outcomeFromAnswer(journeys, withAccount('fx-tester'), { testAccountLabel: 'fx-tester', method: 'chrome_runner' }).input).toMatchObject({ reason: 'account_unverifiable', accountCheck: 'unverifiable' });
+    // No label: nothing was judged, so nothing is claimed, whoever the recorded account is and on any method.
+    for (const method of ['playwright_runner', 'chrome_runner', null] as const) {
+      expect(outcomeFromAnswer(journeys, withAccount('fx-tester'), { testAccountLabel: null, method }).input, String(method)).not.toHaveProperty('accountCheck');
+    }
+    // An answer rejected before the check, or that names an unknown journey, claims nothing.
+    expect(outcomeFromAnswer(journeys, { not: 'an envelope' }, ctx).input).not.toHaveProperty('accountCheck');
+  });
+
   it('another account ends the row unverified: wrong_account, with the answer kept as the result', () => {
     const out = outcomeFromAnswer(journeys, withAccount('the-owner'), ctx);
     expect(out.input).toMatchObject(wrong);

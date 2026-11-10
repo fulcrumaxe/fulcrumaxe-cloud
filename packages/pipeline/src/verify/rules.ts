@@ -1,5 +1,5 @@
 import type { Journey } from '@fx/core/src/verify/journeys.js';
-import { isEvidencedPass, type FinishInput, type JourneyResult, type VerifyMethod } from '@fx/core/src/verify/rows.js';
+import { isEvidencedPass, type AccountCheck, type FinishInput, type JourneyResult, type VerifyMethod } from '@fx/core/src/verify/rows.js';
 import { parseEnvelope, type EnvelopeRejection } from './envelope.js';
 
 /**
@@ -48,11 +48,15 @@ export function outcomeFromAnswer(journeys: readonly Journey[], raw: unknown, co
   const held = new Set(journeys.map((j) => j.id));
   if (parsed.journeys.some((r) => !held.has(r.id))) return { input: { status: 'unverified', reason: 'envelope_rejected' }, failedJourneyIds: [], rejection: 'unknown_journey' };
   const answered = new Map(parsed.journeys.map((r) => [r.id, r]));
+  // What the account check found, stored on the row with the verdict: absent when no test account is set (nothing was judged); `matched` only after the recorded account equalled the label.
+  let accountCheck: AccountCheck | undefined;
   if (context.testAccountLabel !== null) {
-    if (context.method !== ACCOUNT_RECORDING_METHOD) return { input: { status: 'unverified', reason: 'account_unverifiable', result: parsed.journeys }, failedJourneyIds: [] };
-    if (!sameAccount(parsed.signedInAs, context.testAccountLabel)) return { input: { status: 'unverified', reason: 'wrong_account', result: parsed.journeys }, failedJourneyIds: [] };
+    if (context.method !== ACCOUNT_RECORDING_METHOD) return { input: { status: 'unverified', reason: 'account_unverifiable', result: parsed.journeys, accountCheck: 'unverifiable' }, failedJourneyIds: [] };
+    if (!sameAccount(parsed.signedInAs, context.testAccountLabel)) return { input: { status: 'unverified', reason: 'wrong_account', result: parsed.journeys, accountCheck: 'mismatch' }, failedJourneyIds: [] };
+    accountCheck = 'matched';
   }
-  if (journeys.length === 0 || journeys.some((j) => !answered.has(j.id))) return { input: { status: 'unverified', reason: 'journeys_missing' }, failedJourneyIds: [] };
+  const checked = accountCheck === undefined ? {} : { accountCheck };
+  if (journeys.length === 0 || journeys.some((j) => !answered.has(j.id))) return { input: { status: 'unverified', reason: 'journeys_missing', ...checked }, failedJourneyIds: [] };
 
   // In the row's own order, with a pass that shows nothing rewritten.
   const result: JourneyResult[] = journeys.map((j) => {
@@ -60,10 +64,10 @@ export function outcomeFromAnswer(journeys: readonly Journey[], raw: unknown, co
     return r.result === 'pass' && !isEvidencedPass(r) ? { ...r, result: 'unverified' } : r;
   });
   const failed = result.filter((r) => r.result === 'fail').map((r) => r.id);
-  if (failed.length > 0) return { input: { status: 'failed', result }, failedJourneyIds: failed };
-  if (result.some((r) => r.result === 'blocked')) return { input: { status: 'unverified', reason: 'journey_blocked', result }, failedJourneyIds: [] };
-  if (result.some((r) => r.result === 'unverified')) return { input: { status: 'unverified', reason: 'hollow_pass', result }, failedJourneyIds: [] };
-  return { input: { status: 'verified', result }, failedJourneyIds: [] };
+  if (failed.length > 0) return { input: { status: 'failed', result, ...checked }, failedJourneyIds: failed };
+  if (result.some((r) => r.result === 'blocked')) return { input: { status: 'unverified', reason: 'journey_blocked', result, ...checked }, failedJourneyIds: [] };
+  if (result.some((r) => r.result === 'unverified')) return { input: { status: 'unverified', reason: 'hollow_pass', result, ...checked }, failedJourneyIds: [] };
+  return { input: { status: 'verified', result, ...checked }, failedJourneyIds: [] };
 }
 
 /** The key a failing journey's bug item is filed under: one item per row and journey, so a replay files once. */

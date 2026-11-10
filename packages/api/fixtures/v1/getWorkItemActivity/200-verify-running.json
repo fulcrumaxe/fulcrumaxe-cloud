@@ -1,0 +1,30 @@
+{
+  "stage": "merged",
+  "halted": false,
+  "waiting_on_answer": false,
+  "repo": null,
+  "issue_number": null,
+  "pr_number": 57,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [],
+  "close_on_github": false,
+  "request_changes_blocked": null,
+  "change_requests": [],
+  "verify": {
+    "status": "running",
+    "reason": null,
+    "method": "playwright_runner",
+    "journeys": null,
+    "account": null,
+    "bug_item_id": null,
+    "pr_number": 57,
+    "at": "2026-11-10T12:00:00.000Z"
+  }
+}

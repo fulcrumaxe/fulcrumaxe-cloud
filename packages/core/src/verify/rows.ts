@@ -27,6 +27,12 @@ export const VERIFY_REASON_CODES = [
   'account_unverifiable',
 ] as const;
 export type VerifyReasonCode = (typeof VERIFY_REASON_CODES)[number];
+/**
+ * The account check stored on a finished row (migration 1009): `matched` when the repository named a test account and the trusted verify server recorded exactly
+ * that account, `mismatch` for `unverified: wrong_account`, `unverifiable` for `unverified: account_unverifiable`. Null: the account was not judged.
+ */
+export const ACCOUNT_CHECKS = ['matched', 'mismatch', 'unverifiable'] as const;
+export type AccountCheck = (typeof ACCOUNT_CHECKS)[number];
 export const JOURNEY_RESULTS = ['pass', 'fail', 'blocked', 'unverified'] as const;
 export type JourneyResultWord = (typeof JOURNEY_RESULTS)[number];
 
@@ -69,6 +75,7 @@ export interface VerifyRow {
   result: JourneyResult[] | null;
   reason_code: VerifyReasonCode | null;
   bug_item_id: string | null;
+  account_check: AccountCheck | null;
   run_id: string | null;
   deploy_by_order: boolean;
   person_step: boolean;
@@ -76,7 +83,7 @@ export interface VerifyRow {
   finished_at: Date | null;
   created_at: Date;
 }
-const ROW_COLUMNS = `id, repo_id, batch_id, work_item_id, pr_number, merge_sha, status, method, deployed_commit, journeys, result, reason_code, bug_item_id, run_id,
+const ROW_COLUMNS = `id, repo_id, batch_id, work_item_id, pr_number, merge_sha, status, method, deployed_commit, journeys, result, reason_code, bug_item_id, account_check, run_id,
   deploy_by_order, person_step, started_at, finished_at, created_at`;
 
 function bad(message: string): VerifyInputError {
@@ -238,8 +245,8 @@ export async function startRunning(client: PoolClient, accountId: string, rowId:
 }
 
 export type FinishInput =
-  | { status: 'verified' | 'failed'; result: JourneyResult[] }
-  | { status: 'unverified'; reason: VerifyReasonCode; result?: JourneyResult[] | null };
+  | { status: 'verified' | 'failed'; result: JourneyResult[]; accountCheck?: AccountCheck | null }
+  | { status: 'unverified'; reason: VerifyReasonCode; result?: JourneyResult[] | null; accountCheck?: AccountCheck | null };
 
 /**
  * running -> verified | failed | unverified, and pending / deploying -> unverified. Writes the matching fact in the same transaction. The result must name
@@ -261,9 +268,12 @@ export async function finishVerifyRow(client: PoolClient, accountId: string, row
   if (input.status === 'unverified' && input.result != null) assertResultMatches(row.journeys, input.result);
   const result = input.result == null ? null : JSON.stringify(input.result);
   const reason = input.status === 'unverified' ? input.reason : null;
+  const accountCheck = input.accountCheck ?? null;
+  if (accountCheck !== null && !ACCOUNT_CHECKS.includes(accountCheck)) throw bad('unknown account check');
+  if ((accountCheck === 'mismatch') !== (reason === 'wrong_account') || (accountCheck === 'unverifiable') !== (reason === 'account_unverifiable')) throw bad('the account check must agree with the reason');
   const r = await client.query<VerifyRow>(
-    `UPDATE verify_rows SET status = $3, result = $4::jsonb, reason_code = $5, finished_at = now() WHERE id = $1 AND account_id = $2 AND status = $6 RETURNING ${ROW_COLUMNS}`,
-    [rowId, accountId, input.status, result, reason, row.status],
+    `UPDATE verify_rows SET status = $3, result = $4::jsonb, reason_code = $5, account_check = $7, finished_at = now() WHERE id = $1 AND account_id = $2 AND status = $6 RETURNING ${ROW_COLUMNS}`,
+    [rowId, accountId, input.status, result, reason, row.status, accountCheck],
   );
   if (r.rows[0] === undefined) return { moved: false, status: (await readRow(client, accountId, rowId))?.status ?? null };
   await writeFact(client, accountId, r.rows[0], input.status);

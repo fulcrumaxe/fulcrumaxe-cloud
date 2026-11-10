@@ -1030,6 +1030,31 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(body.runs[0]!.id).toBe(runIds[4]);
   });
 
+  it('D#749 V4b: `verify` is absent without a row or with the check off, and carries the newest row (closed values only) while it is on', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const { itemId, repoId } = await seedItem(accountId, { stage: 'merged' });
+    const activity = async (): Promise<Record<string, unknown>> => {
+      const body = (await (await get(itemId, { accountId, userId })).json()) as Record<string, unknown>;
+      expect(activityResponseSchema.parse(body)).toEqual(body);
+      return body;
+    };
+    expect(await activity()).not.toHaveProperty('verify');
+    await admin.query(`INSERT INTO verify_settings (account_id, repo_id, enabled, base_url, test_account_label) VALUES ($1, $2, true, 'https://staging.example', 'tester')`, [accountId, repoId]);
+    expect(await activity()).not.toHaveProperty('verify');
+    const batch = await admin.query<{ id: string }>(`INSERT INTO verify_batches (account_id, repo_id) VALUES ($1, $2) RETURNING id`, [accountId, repoId]);
+    const row = await admin.query<{ id: string }>(
+      `INSERT INTO verify_rows (account_id, repo_id, batch_id, work_item_id, pr_number, merge_sha, journeys) VALUES ($1, $2, $3, $4, 57, $5, '[]'::jsonb) RETURNING id`,
+      [accountId, repoId, batch.rows[0]!.id, itemId, 'a'.repeat(40)],
+    );
+    expect((await activity()).verify).toMatchObject({ status: 'pending', reason: null, method: null, journeys: null, account: null, bug_item_id: null, pr_number: 57 });
+    await admin.query(`UPDATE verify_rows SET status = 'unverified', reason_code = 'wrong_account', account_check = 'mismatch', finished_at = now() WHERE id = $1`, [row.rows[0]!.id]);
+    const v = (await activity()).verify as Record<string, unknown>;
+    expect(v).toMatchObject({ status: 'unverified', reason: 'wrong_account', account: 'mismatch' });
+    expect(JSON.stringify(v)).not.toMatch(/staging\.example|tester/);
+    await admin.query(`UPDATE verify_settings SET enabled = false WHERE repo_id = $1`, [repoId]);
+    expect(await activity()).not.toHaveProperty('verify');
+  });
+
   it('answers 404 for an unknown id, a malformed id and another account\'s item', async () => {
     const a = await seedAccountWithMember(admin);
     const b = await seedAccountWithMember(admin);
