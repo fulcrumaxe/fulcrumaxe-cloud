@@ -20,22 +20,46 @@ import { APP_SESSION_COOKIE, cookieIsOfHost, keepBaseOrigin } from "../verifyBro
 export interface LoginSession {
   /** The browser context's storage state (cookies and local storage), as the library returns it. */
   storageState(): Promise<unknown>;
+  /** The address of the page the browser is showing now (the app may have redirected the sign-in to its canonical address). Absent in a host that cannot tell. */
+  currentUrl?(): string | undefined;
   close(): Promise<void>;
 }
 
 export interface VerifyLoginHost {
   home: string | undefined;
+  /** Whether standard input is a terminal. The command waits for Enter, so it refuses to start without one. */
+  interactive: boolean;
   /** A Chromium or Chrome with a window, found when the owner has not set `verify.browser.executable`. */
   findHeaded(): string | undefined;
   /** Opens a headed browser on `url` (nothing is loaded in it but that address). */
   openHeaded(executable: string, url: string): Promise<LoginSession>;
-  /** Resolves when the owner has pressed Enter in the terminal. */
-  waitForEnter(): Promise<void>;
+  /** Resolves when the owner has pressed Enter in the terminal, or with `"eof"` when standard input ended first (nobody can press Enter any more). */
+  waitForEnter(): Promise<void | "eof">;
 }
 
 /** The app's session cookies kept in the state, as their expiry times (seconds since the epoch, -1 for a session cookie). */
 const sessionExpiries = (cookies: Array<Record<string, unknown>>, host: string): number[] =>
   cookies.filter((c) => c["name"] === APP_SESSION_COOKIE && cookieIsOfHost(c["domain"], host)).map((c) => (typeof c["expires"] === "number" ? c["expires"] : -1));
+
+/**
+ * The app may redirect the sign-in to its own canonical address. When the app's session cookie is not on the base host but the open page is on another https origin that holds it,
+ * that origin is returned so the owner can run again with it. Nothing of that origin is ever saved by this run.
+ */
+function redirectedOrigin(state: unknown, pageUrl: string | undefined, base: { origin: string }): string | undefined {
+  if (pageUrl === undefined) return undefined;
+  let page: URL;
+  try {
+    page = new URL(pageUrl);
+  } catch {
+    // fx-swallow-ok: an unreadable page address means no advice, and the plain "no session" message follows
+    return undefined;
+  }
+  if (page.protocol !== "https:" || page.origin === base.origin) return undefined;
+  const cookies = (state as { cookies?: unknown } | null)?.cookies;
+  if (!Array.isArray(cookies)) return undefined;
+  const held = cookies.some((c: Record<string, unknown>) => c !== null && typeof c === "object" && c["name"] === APP_SESSION_COOKIE && cookieIsOfHost(c["domain"], page.hostname));
+  return held ? page.origin : undefined;
+}
 
 /** `--forget`: removes the saved state file. `unlink` never follows a link, so a planted link is removed itself and its target is untouched. */
 function forget(ctx: CommandContext, host: VerifyLoginHost): number {
@@ -77,18 +101,26 @@ export async function verifyLoginCommand(flags: Flags, ctx: CommandContext, host
   const target = storageStateFor(host.home, settings);
   if (!inCredentialFloor(host.home, target)) throw new CliError("the storage-state file must be inside ~/.config/fx-runner, where a job's tools can never read it", 2);
 
+  if (!host.interactive) throw new CliError("run this in a terminal: it waits for you to press Enter after signing in", 2);
+
   ctx.out(`A browser window opens on ${base.origin}. Sign in there as the TEST account, then come back here and press Enter.`);
   const session = await host.openHeaded(executable, base.href);
   let state: unknown;
+  let pageUrl: string | undefined;
   try {
-    await host.waitForEnter();
+    if ((await host.waitForEnter()) === "eof") throw new CliError("standard input closed before you pressed Enter; nothing was saved. Run this again in a terminal", 1);
     state = await session.storageState();
+    pageUrl = session.currentUrl?.();
   } finally {
     await session.close().catch(() => undefined);
   }
   // Only the app's own origin is kept; the browser may also hold the identity provider's sign-in, which must never reach a job.
   const kept = keepBaseOrigin(state, base);
   const live = sessionExpiries(kept.cookies, base.host);
+  if (live.length === 0) {
+    const elsewhere = redirectedOrigin(state, pageUrl, base);
+    if (elsewhere !== undefined) throw new CliError(`the app signed you in at ${elsewhere}; run again with --base-url ${elsewhere}. Nothing was saved`, 1);
+  }
   if (live.length === 0) throw new CliError("no session of the app was found in the browser (only its own session cookie is kept); nothing was saved. Sign in, then run this again", 1);
   writePrivateFile(path.dirname(target), path.basename(target), `${JSON.stringify(kept)}\n`);
   // Saved settings: the address (and the browser, when it was found rather than set). Never the state itself.

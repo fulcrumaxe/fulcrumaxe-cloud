@@ -188,13 +188,23 @@ runCli({
     home: process.env.HOME,
     findHeaded: () => findChromium({ PATH: process.env.PATH, PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH }, { headed: true }),
     openHeaded: openHeadedBrowser,
+    interactive: process.stdin.isTTY === true,
+    // Resolves on a line, or with "eof" when standard input ends first (never a hang).
     waitForEnter: () =>
       new Promise((resolve) => {
-        process.stdin.setEncoding("utf8");
-        process.stdin.once("data", () => {
+        const done = (value) => {
+          process.stdin.off("data", onData);
+          process.stdin.off("end", onEnd);
+          process.stdin.off("close", onEnd);
           process.stdin.pause();
-          resolve(undefined);
-        });
+          resolve(value);
+        };
+        const onData = () => done(undefined);
+        const onEnd = () => done("eof");
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", onData);
+        process.stdin.once("end", onEnd);
+        process.stdin.once("close", onEnd);
       }),
   },
   serviceHost: {

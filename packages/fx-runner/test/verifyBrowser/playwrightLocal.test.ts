@@ -320,17 +320,18 @@ describe("the capability and the claim check", () => {
 
 describe("fx-runner verify-login", () => {
   const STATE = { cookies: [{ name: APP_SESSION_COOKIE, value: "LOGIN-SECRET-VALUE", domain: "app.example.test", path: "/", expires: 1893456000, httpOnly: true, secure: true, sameSite: "Lax" }], origins: [{ origin: "https://app.example.test", localStorage: [{ name: "token", value: "LS-SECRET" }] }] };
-  const rig = (state: unknown = STATE) => {
+  const rig = (state: unknown = STATE, pageUrl?: string) => {
     const m = machine("login");
     rmSync(m.state);
     const out: string[] = [];
     const calls: string[] = [];
     const host: VerifyLoginHost = {
       home: m.home,
+      interactive: true,
       findHeaded: () => m.exe,
       openHeaded: async (exe, url) => {
         calls.push(`open ${path.basename(exe)} ${url}`);
-        return { storageState: async () => state, close: async () => void calls.push("close") };
+        return { storageState: async () => state, ...(pageUrl === undefined ? {} : { currentUrl: () => pageUrl }), close: async () => void calls.push("close") };
       },
       waitForEnter: async () => void calls.push("enter"),
     };
@@ -446,6 +447,83 @@ describe("fx-runner verify-login", () => {
     await expect(broken.run("https://app.example.test")).rejects.toThrow("terminal closed");
     expect(broken.calls).toContain("close");
     expect(existsSync(broken.m.state)).toBe(false);
+  });
+
+  describe("a terminal is required", () => {
+    it("refuses at once without a terminal: no browser opens, nothing is waited for, nothing is saved", async () => {
+      const r = rig();
+      r.host.interactive = false;
+      await expect(r.run("https://app.example.test")).rejects.toMatchObject({ exitCode: 2, message: expect.stringContaining("run this in a terminal: it waits for you to press Enter after signing in") });
+      expect(r.calls).toEqual([]);
+      expect(existsSync(r.m.state)).toBe(false);
+    });
+
+    it("treats end of input as an abort with a message, closes the browser, and saves nothing", async () => {
+      const r = rig();
+      r.host.waitForEnter = async () => {
+        r.calls.push("enter");
+        return "eof";
+      };
+      await expect(r.run("https://app.example.test")).rejects.toMatchObject({ exitCode: 1, message: expect.stringContaining("standard input closed before you pressed Enter") });
+      expect(r.calls).toEqual(["open chromium https://app.example.test/", "enter", "close"]);
+      expect(existsSync(r.m.state)).toBe(false);
+    });
+
+    it("with a terminal it still works end to end", async () => {
+      const r = rig();
+      expect(r.host.interactive).toBe(true);
+      expect(await r.run("https://app.example.test")).toBe(0);
+      expect(existsSync(r.m.state)).toBe(true);
+    });
+
+    it("the program's own host: no terminal on standard input means interactive is false", () => {
+      const text = readFileSync(path.join(import.meta.dirname, "../../bin/fx-runner.mjs"), "utf8");
+      const block = text.slice(text.indexOf("verifyLoginHost"), text.indexOf("serviceHost"));
+      expect(block).toContain("interactive: process.stdin.isTTY === true");
+      expect(block).toContain('process.stdin.once("end", onEnd)');
+    });
+  });
+
+  describe("a sign-in the app moved to its canonical address", () => {
+    const CANON = "https://canonical.example.test";
+    const canonState = { cookies: [{ name: APP_SESSION_COOKIE, value: "CANON-SECRET-VALUE", domain: "canonical.example.test", path: "/", expires: 1893456000 }, { name: "other", value: "v", domain: "app.example.test", expires: -1 }], origins: [{ origin: CANON, localStorage: [{ name: "t", value: "CANON-LS" }] }] };
+
+    it("names the origin to use, saves nothing and never prints the state", async () => {
+      const r = rig(canonState, `${CANON}/home`);
+      await expect(r.run("https://app.example.test")).rejects.toMatchObject({ exitCode: 1, message: `the app signed you in at ${CANON}; run again with --base-url ${CANON}. Nothing was saved` });
+      expect(existsSync(r.m.state)).toBe(false);
+      expect(r.calls).toContain("close");
+      expect(r.out.join("\n")).not.toContain("SECRET");
+    });
+
+    it("the advised run then succeeds, and the file holds only that origin", async () => {
+      const r = rig(canonState, `${CANON}/home`);
+      expect(await r.run(CANON)).toBe(0);
+      const text = readFileSync(r.m.state, "utf8");
+      expect(text).not.toContain("app.example.test");
+      expect(loadSettings(r.m.stateDir).verify?.browser?.baseUrl).toBe(`${CANON}/`);
+    });
+
+    it("gives the plain 'no session' message when the other origin does not hold the app cookie, when it is not https, or when the page address is unknown", async () => {
+      for (const [state, page] of [
+        [{ cookies: [{ name: "x", value: "v", domain: "canonical.example.test", expires: -1 }], origins: [] }, `${CANON}/`],
+        [canonState, "http://canonical.example.test/"],
+        [canonState, undefined],
+        [canonState, "not a url"],
+      ] as const) {
+        const r = rig(state, page);
+        const failure = await r.run("https://app.example.test").catch((e: Error) => e);
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toMatch(/nothing was saved/);
+        expect((failure as Error).message).not.toMatch(/signed you in at/);
+        expect(existsSync(r.m.state)).toBe(false);
+      }
+    });
+
+    it("does not advise when the app's own cookie is present on the base host (the base state is saved as before)", async () => {
+      const r = rig(STATE, `${CANON}/home`);
+      expect(await r.run("https://app.example.test")).toBe(0);
+    });
   });
 
   it("refuses a storage-state file outside the credential floor", async () => {
