@@ -7,7 +7,7 @@ import { escapeFenceLookalikes } from "@fx/pipeline";
 import { decisionStartFor } from "./decisionStart.js";
 import { checkFixRound } from "@fx/spend";
 import { REPUBLISH_BASE_MISSING } from "@fx/core/src/work-items/baseSync.js";
-import { CHECK_FAILED_OUTSIDE_CHANGE, failedOutsideChange } from "@fx/core/src/work-items/checkFailure.js";
+import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_NOT_RUN_OUT_OF_SCOPE, failedOutsideChange } from "@fx/core/src/work-items/checkFailure.js";
 import { BASE_SYNCED_PROMPT_LINE, FIX_BASE_EVENT, hasPublicCopy } from "./fixRoundBase.js";
 import { PRIVATE_PR_MARKER } from "./planePublish.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
@@ -32,7 +32,7 @@ export const CHECK_ROUNDS_USED = "check_rounds_used";
  */
 export const CHECK_FIX_BRANCH_UNKNOWN = "check_fix_branch_unknown";
 
-export { CHECK_FAILED_OUTSIDE_CHANGE };
+export { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_NOT_RUN_OUT_OF_SCOPE };
 
 export interface CheckFixDeps {
   pool: Pool;
@@ -91,8 +91,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   if (!UUID.test(who.accountId) || !UUID.test(who.workItemId) || !UUID.test(failedRunId)) return { ok: false, reason: "invalid_input" };
   const key = `advance:${who.workItemId}:checkfix:${failedRunId}`;
   const facts = await withTenant(deps.pool, who.accountId, async (client) => {
-    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; failed_files: unknown; failed_files_more: unknown; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; gh_owner: string | null; gh_name: string | null }>(
-      `SELECT w.repo_id, ar.spec_version_id, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary,
+    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; check_reason: string | null; failed_files: unknown; failed_files_more: unknown; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; gh_owner: string | null; gh_name: string | null }>(
+      `SELECT w.repo_id, ar.spec_version_id, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary, c.reason AS check_reason,
               (SELECT e.payload->'failed_files' FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.check_ended' ORDER BY e.seq DESC LIMIT 1) AS failed_files,
               (SELECT e.payload->'failed_files_more' FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.check_ended' ORDER BY e.seq DESC LIMIT 1) AS failed_files_more,
               (SELECT run_id FROM agent_run_idempotency_keys k WHERE k.account_id = $1 AND k.idempotency_key = $4) AS prior
@@ -116,14 +116,29 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
       [who.accountId, failedRunId],
     );
     const live = await client.query("SELECT 1 FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND role = 'executor' AND status IN ('pending', 'running') LIMIT 1", [who.accountId, who.workItemId]);
-    return { row, round: chain.rows[0]!.n, live: (live.rowCount ?? 0) > 0 };
+    // The chain's FIRST failed check (the oldest run of the parent chain that ended check_failed and stored a check): what the change was before any fix round edited anything. The run itself on a first check.
+    const rootRow = await client.query<{ summary: string | null; timed_out: boolean | null }>(
+      `WITH RECURSIVE chain AS (
+         SELECT id, parent_run_id, 0 AS depth FROM agent_runs WHERE account_id = $1 AND id = $2
+         UNION ALL
+         SELECT a.id, a.parent_run_id, c.depth + 1 FROM agent_runs a JOIN chain c ON a.id = c.parent_run_id WHERE a.account_id = $1
+       )
+       SELECT k.summary, k.timed_out FROM chain c JOIN run_checks k ON k.account_id = $1 AND k.run_id = c.id
+        WHERE EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = $1 AND e.run_id = c.id AND e.kind = 'run.status_changed' AND e.payload->>'failureReason' = 'check_failed')
+        ORDER BY c.depth DESC LIMIT 1`,
+      [who.accountId, failedRunId],
+    );
+    return { row, round: chain.rows[0]!.n, live: (live.rowCount ?? 0) > 0, rootSummary: rootRow.rows[0]?.timed_out === true ? null : (rootRow.rows[0]?.summary ?? null) };
   });
   if (facts === null) return { ok: false, reason: "not_check_failed" };
   if (facts.row.prior !== null) return { ok: true, runId: facts.row.prior };
   // A check that failed only in test files the change did not touch is not something a fix round can repair (the environment, or code already on the base branch):
   // the item goes to a person and no attempt is spent. A check stopped at its time limit has only partial output, so it is never decided here. Anything the summary
   // does not prove keeps the fix round (see failedOutsideChange).
-  if (facts.row.timed_out !== true && failedOutsideChange(facts.row.summary)) return { ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE };
+  // A check the runner did not run because the run's changed files lie outside the Spec's list: the same agent with the same list would only change more outside it, so no round
+  // starts, on this round as on the first. Decided from the stored reason (what the cloud recorded), never from text.
+  if (facts.row.check_reason === "out_of_scope") return { ok: false, reason: CHECK_NOT_RUN_OUT_OF_SCOPE };
+  if (facts.row.timed_out !== true && failedOutsideChange(facts.row.summary, facts.rootSummary)) return { ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE };
   if (checkFixRound(facts.round) === "escalate") return { ok: false, reason: CHECK_ROUNDS_USED };
   if (facts.live) return { ok: false, reason: "already_running" };
   const { row } = facts;
