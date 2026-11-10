@@ -6,7 +6,7 @@ import { DeployOrderReportMessage } from "@fulcrumaxe/runner-protocol";
 import { createDeployOrderHandler, checkDeployScript, outputTailOf, runDeployOrder, type DeployOrderDeps, type DeployOutcome } from "../../src/daemon/deployOrder.js";
 import type { InstallCapture } from "../../src/daemon/engineKit.js";
 import { runInstall } from "../../src/engines/claude/capture.js";
-import { tmpRoot } from "../helpers/tmpRoot.js";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 
 /**
  * D#749 V2b: the runner's deploy order executor, on real files and real processes. The checkout is a real directory, the capture is the engine's own process-group capture
@@ -50,7 +50,7 @@ function write(file: string, text: string, mode = 0o755): void {
 }
 
 beforeAll(() => {
-  root = mkdtempSync(path.join(tmpRoot(), "deploy-order-"));
+  root = mkdtempSync(path.join(socketTmpRoot(), "deploy-order-"));
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 

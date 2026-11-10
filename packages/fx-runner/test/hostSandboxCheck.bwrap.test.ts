@@ -8,7 +8,7 @@ import { cleanEnv } from "../src/job/cleanEnv.js";
 import { createHostSandbox, type InterruptibleRuntime } from "../src/sandbox/hostSandbox.js";
 import type { SandboxHandle } from "../src/sandbox/port.js";
 import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
-import { tmpRoot } from "./helpers/tmpRoot.js";
+import { socketTmpRoot } from "./helpers/tmpRoot.js";
 
 /**
  * D#6 R-CHK-2 with real bubblewrap: the check is started under the very settings the agent's sandbox was built with, with the dev shell's variables only when asked, and
@@ -48,7 +48,7 @@ function sh(script: string, devShell: boolean, filter = true) {
 describe.skipIf(!usable)("R-CHK-2: the check under the job's own sandbox rules", () => {
   beforeAll(async () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-token-value-for-the-agent";
-    root = mkdtempSync(path.join(tmpRoot(), "rchk2-bwrap-"));
+    root = mkdtempSync(path.join(socketTmpRoot(), "rchk2-bwrap-"));
     home = path.join(root, "home");
     workspace = path.join(home, ".cache", "fx-runner", "workspaces", "run-1");
     const tempRoot = path.join(home, ".cache", "fx-runner", "tmp");

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { saveRegistration } from "../../src/config.js";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CliError } from "../../src/cliError.js";
@@ -26,7 +26,7 @@ let stateDir: string;
 const servers: net.Server[] = [];
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "fxr-a-"));
+  root = mkdtempSync(path.join(socketTmpRoot(), "fxr-a-"));
   stateDir = path.join(root, "state");
   mkdirSync(stateDir, { mode: 0o700 });
 });

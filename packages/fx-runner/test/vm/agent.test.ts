@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -44,7 +44,7 @@ describe.skipIf(!hasPython || unixSocketsRefusedHere)("agent.py over a Unix sock
   let proc: ChildProcess;
   let client: AgentClient;
   beforeAll(async () => {
-    dir = mkdtempSync(path.join(tmpdir(), "fx-agent-"));
+    dir = mkdtempSync(path.join(socketTmpRoot(), "fx-agent-"));
     const sock = path.join(dir, "a.sock");
     proc = spawn("python3", ["-I", path.join(GUEST_DIR, "agent.py"), "--unix", sock], { stdio: "ignore" });
     for (let i = 0; i < 200 && !existsSync(sock); i++) await new Promise((r) => setTimeout(r, 25));

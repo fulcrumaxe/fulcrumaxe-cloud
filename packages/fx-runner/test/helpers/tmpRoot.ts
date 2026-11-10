@@ -11,3 +11,15 @@ export function tmpRoot(): string {
   const dir = tmpdir().replace(/\/+$/, "");
   return dir.startsWith("/tmp/") ? dir : "/tmp";
 }
+
+/** The longest temp base a Unix-socket fixture may sit under: `sun_path` holds 107 bytes, and the deepest fixtures add about 75 of their own. */
+export const SOCKET_BASE_MAX = 30;
+
+/**
+ * Where a test builds a directory that will hold a real Unix socket: `tmpRoot()`, unless that is so deeply nested (a nix-shell inside a probe
+ * directory, as the check gate runs it) that `listen()` would fail with EINVAL on the path length; then the short `/tmp` itself.
+ */
+export function socketTmpRoot(): string {
+  const dir = tmpRoot();
+  return dir.length <= SOCKET_BASE_MAX ? dir : "/tmp";
+}

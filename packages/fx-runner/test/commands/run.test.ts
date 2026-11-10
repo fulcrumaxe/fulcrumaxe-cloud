@@ -2,7 +2,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpRoot } from "../helpers/tmpRoot.js";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -58,8 +58,8 @@ function register(origin: string): void {
 }
 
 beforeEach(async () => {
-  // tmpRoot, not tmpdir: a job's TMPDIR is long enough that the watch's socket path under it would pass the limit, and the daemon then (rightly) runs without one.
-  root = mkdtempSync(path.join(tmpRoot(), "fxr-run-"));
+  // socketTmpRoot, not tmpdir: a long TMPDIR (a job's, or a nested one) is long enough that the watch's socket path under it would pass the limit, and the daemon then (rightly) runs without one.
+  root = mkdtempSync(path.join(socketTmpRoot(), "fxr-run-"));
   home = path.join(root, "home");
   stateDir = path.join(home, ".fx-runner");
   mkdirSync(home);

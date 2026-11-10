@@ -13,7 +13,7 @@ import { createHostSandbox, type InterruptibleRuntime } from "../../src/sandbox/
 import type { SandboxHandle } from "../../src/sandbox/port.js";
 import { bwrapCanCreateNamespaces } from "../helpers/bwrapProbe.js";
 import { testLaunch } from "../helpers/launch.js";
-import { tmpRoot } from "../helpers/tmpRoot.js";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 
 /**
  * D#6 RUNNER-SECCOMP-FD-1: the check launched end to end the way the daemon does it, with real bubblewrap. The launch comes from `HostSandbox.checkLaunch`, the
@@ -49,7 +49,7 @@ function runCheck(argv: string[], over: { timeout_s?: number; signal?: AbortSign
 
 describe.skipIf(!usable)("RUNNER-SECCOMP-FD-1: the check under real bubblewrap through the production kit", () => {
   beforeAll(async () => {
-    root = mkdtempSync(path.join(tmpRoot(), "seccomp-fd-"));
+    root = mkdtempSync(path.join(socketTmpRoot(), "seccomp-fd-"));
     const home = path.join(root, "home");
     workspace = path.join(home, ".cache", "fx-runner", "workspaces", "run-1");
     const tempRoot = path.join(home, ".cache", "fx-runner", "tmp");

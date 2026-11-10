@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { watchCommand } from "../../src/commands/watchPane.js";
@@ -22,7 +22,7 @@ let stateDir: string;
 const servers: net.Server[] = [];
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "fxr-w-"));
+  root = mkdtempSync(path.join(socketTmpRoot(), "fxr-w-"));
   stateDir = path.join(root, "state");
   mkdirSync(stateDir, { mode: 0o700 });
 });

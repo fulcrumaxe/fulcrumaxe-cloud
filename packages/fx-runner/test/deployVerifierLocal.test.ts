@@ -14,11 +14,11 @@ import { roleToolsFor } from "../src/job/roleTools.js";
 import { protectedPaths } from "../src/sandbox/sandboxSettings.js";
 import { setSetting } from "../src/runnerSettings.js";
 import { signedJob, jobFor } from "./helpers/signedJob.js";
-import { tmpRoot } from "./helpers/tmpRoot.js";
+import { socketTmpRoot } from "./helpers/tmpRoot.js";
 
 /** D#749 V2b: the capability decision, the role's settings file, and the one-browser-job admission rule. */
 const UID = process.getuid?.() ?? 0;
-const root = mkdtempSync(path.join(tmpRoot(), "dv-local-"));
+const root = mkdtempSync(path.join(socketTmpRoot(), "dv-local-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const servers: net.Server[] = [];
 afterEach(async () => {
