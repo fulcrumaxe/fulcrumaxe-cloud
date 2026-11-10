@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** Most tests here make real repositories and run real `git` (clone, fetch, push to a local bare remote) through the production capture; a CI run loads the host and vitest's 5 s default has failed them while they pass alone, so each async test sets its own bound. A stuck git fails on it with its output; the global `testTimeout` is left alone. */
+const REAL_GIT_TEST_TIMEOUT = 60_000;
 import { createGit, GitPathError, GUARD_CONFIG, guardConfigEnv, type GitCapture } from "../../src/daemon/git.js";
 import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { githubUrl } from "../../src/daemon/mirror.js";
@@ -154,7 +157,7 @@ describe("the push target is built from the lease alone", () => {
     "--mirror",
     "",
   ];
-  it("runPush refuses every other refspec and runs no process for it", async () => {
+  it("runPush refuses every other refspec and runs no process for it", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const calls: unknown[] = [];
     const git = createGit({ capture: async (...call) => (calls.push(call), { code: 0, stdout: "", timedOut: false }) });
     for (const refspec of OTHER_REFS) {
@@ -166,7 +169,7 @@ describe("the push target is built from the lease alone", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("the push command line has no force flag and ends with the url and the planned refspec", async () => {
+  it("the push command line has no force flag and ends with the url and the planned refspec", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const calls: Array<readonly string[]> = [];
     const git = createGit({ capture: async (_c, args) => (calls.push(args), { code: 0, stdout: "", timedOut: false }) });
     await runPush(git, "/m", remoteUrl, pushPlan(lease).refspec, lease);
@@ -190,7 +193,7 @@ describe("the push target is built from the lease alone", () => {
 });
 
 describe("mirror, workspace and push against a real repository", () => {
-  it("clones a mirror into the 0700 state directory, a workspace from it on the run's branch, and pushes the agent's commit there only", async () => {
+  it("clones a mirror into the 0700 state directory, a workspace from it on the run's branch, and pushes the agent's commit there only", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, cacheDir, calls } = makeGitPath();
     const job = jobFor();
     const workspace = newWorkspace();
@@ -222,7 +225,7 @@ describe("mirror, workspace and push against a real repository", () => {
     expect(push.args.slice(0, 2)).toEqual(["-C", mirror]);
   });
 
-  it("pushes nothing when the agent added no commit, and leaves no branch behind", async () => {
+  it("pushes nothing when the agent added no commit, and leaves no branch behind", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath } = makeGitPath();
     const job = jobFor();
     const workspace = newWorkspace();
@@ -231,7 +234,7 @@ describe("mirror, workspace and push against a real repository", () => {
     expect(refsOf(remote)).toEqual(["refs/heads/main"]);
   });
 
-  it("an agent that commits on main still lands on the run's branch only: the remote's main is never moved", async () => {
+  it("an agent that commits on main still lands on the run's branch only: the remote's main is never moved", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath } = makeGitPath();
     const job = jobFor();
     const workspace = newWorkspace();
@@ -245,7 +248,7 @@ describe("mirror, workspace and push against a real repository", () => {
     expect(refsOf(remote)).toEqual([`refs/heads/${pushPlan(lease).branch}`, "refs/heads/main"]);
   });
 
-  it("runPush cannot move another branch of the real remote, whatever refspec it is given", async () => {
+  it("runPush cannot move another branch of the real remote, whatever refspec it is given", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, cacheDir } = makeGitPath();
     const job = jobFor();
     const workspace = newWorkspace();
@@ -261,7 +264,7 @@ describe("mirror, workspace and push against a real repository", () => {
     expect(refsOf(remote).map((r) => `${r} ${tip(remote, r)}`)).toEqual(before);
   });
 
-  it("a second job reuses the mirror (no new clone), sees what was pushed to the remote since, and follows a changed default branch", async () => {
+  it("a second job reuses the mirror (no new clone), sees what was pushed to the remote since, and follows a changed default branch", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, calls, cacheDir } = makeGitPath();
     const job = jobFor();
     await gitPath.prepare(job, lease, newWorkspace("a"));
@@ -289,7 +292,7 @@ describe("mirror, workspace and push against a real repository", () => {
     expect(readdirSync(path.join(cacheDir, "mirrors"))).toEqual([`${job.repo.id}.git`]);
   });
 
-  it("a first clone that fails leaves no half-made mirror and throws a closed code", async () => {
+  it("a first clone that fails leaves no half-made mirror and throws a closed code", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, cacheDir } = makeGitPath({ remoteUrl: pathToFileURL(path.join(root, "missing.git")).href });
     const job = jobFor();
     const workspace = newWorkspace();
@@ -298,7 +301,7 @@ describe("mirror, workspace and push against a real repository", () => {
     expect(readdirSync(workspace)).toEqual([]);
   });
 
-  it("a mirrors directory that is a link, or open to others, is not used", async () => {
+  it("a mirrors directory that is a link, or open to others, is not used", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, cacheDir } = makeGitPath();
     mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
     const elsewhere = path.join(root, "elsewhere");
@@ -334,7 +337,7 @@ describe("nothing the agent or the machine's hooks can plant runs, and nothing i
     }
   }
 
-  it("hooks named by the user's own config, by the mirror's hooks directory or by the workspace never run", async () => {
+  it("hooks named by the user's own config, by the mirror's hooks directory or by the workspace never run", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const marker = path.join(root, "hook-ran");
     // The user's own config points every repository at a hooks directory (a common setup).
     const userHooks = path.join(root, "user-hooks");
@@ -359,7 +362,7 @@ describe("nothing the agent or the machine's hooks can plant runs, and nothing i
     expect(refsOf(remote)).toContain(`refs/heads/${pushPlan(lease).branch}`);
   });
 
-  it("the control: the same planted hooks do run when git is not given the guard config", async () => {
+  it("the control: the same planted hooks do run when git is not given the guard config", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const marker = path.join(root, "hook-ran");
     const userHooks = path.join(root, "user-hooks");
     plantHooks(userHooks, marker);
@@ -374,7 +377,7 @@ describe("nothing the agent or the machine's hooks can plant runs, and nothing i
     expect(existsSync(marker)).toBe(true);
   });
 
-  it("a workspace config that rewrites urls, remotes and commands changes neither where the push goes nor what runs", async () => {
+  it("a workspace config that rewrites urls, remotes and commands changes neither where the push goes nor what runs", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath } = makeGitPath();
     const job = jobFor();
     const workspace = newWorkspace();
@@ -446,7 +449,7 @@ describe("the user's own credential helper, and nothing else of ours, is what gi
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it("asks the helper from the user's config for the push, sends what it returns, and gives the helper no Claude credential", async () => {
+  it("asks the helper from the user's config for the push, sends what it returns, and gives the helper no Claude credential", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const log = path.join(root, "helper.log");
     const helper = path.join(root, "helper.sh");
     writeFileSync(helper, `#!/bin/sh\necho "$1 token=$CLAUDE_CODE_OAUTH_TOKEN key=$ANTHROPIC_API_KEY" >> ${log}\nif [ "$1" = get ]; then cat > /dev/null; echo username=runner-user; echo password=fake-pass; fi\n`);
@@ -479,7 +482,7 @@ describe("the user's own credential helper, and nothing else of ours, is what gi
     }
   });
 
-  it("the mirror's fetch and clone use the same helper", async () => {
+  it("the mirror's fetch and clone use the same helper", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const log = path.join(root, "helper.log");
     const helper = path.join(root, "helper.sh");
     writeFileSync(helper, `#!/bin/sh\necho "$1" >> ${log}\nif [ "$1" = get ]; then cat > /dev/null; echo username=u; echo password=p; fi\n`);
@@ -566,7 +569,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     });
   }
 
-  it("runPush for a fix round refuses every refspec but its own target: not main, not the lease's own fx branch, not another run branch, not a force", async () => {
+  it("runPush for a fix round refuses every refspec but its own target: not main, not the lease's own fx branch, not another run branch, not a force", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const calls: unknown[] = [];
     const git = createGit({ capture: async (...call) => (calls.push(call), { code: 0, stdout: "", timedOut: false }) });
     const own = fixPlan(RUN_BRANCH);
@@ -581,7 +584,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect(calls).toHaveLength(1);
   });
 
-  it("a fast-forward continuation, from a second real clone through the snapshot path, updates the PR branch and nothing else", async () => {
+  it("a fast-forward continuation, from a second real clone through the snapshot path, updates the PR branch and nothing else", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, calls, cacheDir } = makeGitPath();
     const job = jobFor();
     const first = await firstRun(gitPath, job);
@@ -615,7 +618,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     for (const push of pushes) expect(push.args.filter((a) => /^--(force|mirror|delete|force-with-lease)/.test(a) || /^-[a-zA-Z]*f/.test(a) || a.startsWith("+") || a.includes(":+"))).toEqual([]);
   });
 
-  it("a remote that moved during the run gives push_rejected, pushes nothing, and leaves the remote branch as the person left it", async () => {
+  it("a remote that moved during the run gives push_rejected, pushes nothing, and leaves the remote branch as the person left it", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, calls } = makeGitPath();
     const job = jobFor();
     const first = await firstRun(gitPath, job);
@@ -630,7 +633,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect(pushCalls(calls).length).toBe(pushesBefore);
   });
 
-  it("a branch that moves between the check and the push is rejected by the remote as non-fast-forward: push_rejected, remote unchanged, no retry", async () => {
+  it("a branch that moves between the check and the push is rejected by the remote as non-fast-forward: push_rejected, remote unchanged, no retry", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const real = recordingCapture();
     const arm: { branch?: string } = {};
     let theirs: string | undefined;
@@ -658,7 +661,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect(pushes.length - pushesBefore).toBe(1); // tried once, not retried
   });
 
-  it("a branch that is gone at prepare stops everything: continuation_branch_missing, nothing in the workspace, no clone of a workspace", async () => {
+  it("a branch that is gone at prepare stops everything: continuation_branch_missing, nothing in the workspace, no clone of a workspace", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, calls } = makeGitPath();
     const job = jobFor();
     const workspace = newWorkspace("second");
@@ -669,7 +672,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect(refsOf(remote)).toEqual(["refs/heads/main"]);
   });
 
-  it("a branch deleted after prepare is not pushed: continuation_branch_missing, and the branch is not re-created", async () => {
+  it("a branch deleted after prepare is not pushed: continuation_branch_missing, and the branch is not re-created", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, calls } = makeGitPath();
     const job = jobFor();
     const first = await firstRun(gitPath, job);
@@ -684,7 +687,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect(pushCalls(calls).length).toBe(pushesBefore);
   });
 
-  it("after a stop reply nothing is pushed: the check passed, the commit is ready, and the remote is untouched", async () => {
+  it("after a stop reply nothing is pushed: the check passed, the commit is ready, and the remote is untouched", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, calls } = makeGitPath();
     const job = jobFor();
     const first = await firstRun(gitPath, job);
@@ -700,7 +703,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect((await gitPath.publish(fixJob, FIX_LEASE, second, base, () => false)).pushed).toBe(true);
   });
 
-  it("a kept session's workspace is resumed only when it is exactly at the branch's tip after a fresh mirror sync", async () => {
+  it("a kept session's workspace is resumed only when it is exactly at the branch's tip after a fresh mirror sync", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath } = makeGitPath();
     const job = jobFor();
     const first = await firstRun(gitPath, job);
@@ -721,7 +724,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     await expect(gitPath.resume(fixJob, FIX_LEASE, first.workspace)).rejects.toMatchObject({ code: "continuation_branch_missing" });
   });
 
-  it("a resumed workspace loses the first round's ignored build output, and a workspace that is not resumed is not touched", async () => {
+  it("a resumed workspace loses the first round's ignored build output, and a workspace that is not resumed is not touched", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const lines: string[] = [];
     const recorded = recordingCapture();
     const gitPath = createGitPath({ platform: "linux", capture: recorded.capture, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => remoteUrl, log: (line) => lines.push(line) });
@@ -760,7 +763,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect(lines[0]).toMatch(/removed 2 ignored files/);
   });
 
-  it("the mirror shows the branch after the sync, and the workspace has the branch's history, not the default branch's", async () => {
+  it("the mirror shows the branch after the sync, and the workspace has the branch's history, not the default branch's", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath, cacheDir } = makeGitPath();
     const job = jobFor();
     const first = await firstRun(gitPath, job);
@@ -792,7 +795,7 @@ describe("a fix round on the item's own pull request branch (D#599 PL-2b-3)", ()
     }
   });
 
-  it("fast-forwards the bound branch from a fresh workspace, on a real remote, with no plus and no force flag", async () => {
+  it("fast-forwards the bound branch from a fresh workspace, on a real remote, with no plus and no force flag", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const base = openItemBranch();
     const { gitPath, calls } = makeGitPath();
     const job = jobFor({ continues: itemContinues });
@@ -812,7 +815,7 @@ describe("a fix round on the item's own pull request branch (D#599 PL-2b-3)", ()
     for (const push of pushes) expect(forceish(push.args)).toEqual([]);
   });
 
-  it("refuses to push when the remote's HEAD names the branch: push_ref_refused, nothing pushed, the remote unchanged", async () => {
+  it("refuses to push when the remote's HEAD names the branch: push_ref_refused, nothing pushed, the remote unchanged", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const base = openItemBranch();
     sh("-C", remote, "symbolic-ref", "HEAD", `refs/heads/${ITEM_BRANCH}`);
     const { gitPath, calls } = makeGitPath();
@@ -825,7 +828,7 @@ describe("a fix round on the item's own pull request branch (D#599 PL-2b-3)", ()
     expect(pushCalls(calls)).toEqual([]);
   });
 
-  it("the same refusal covers a run branch the remote names as its HEAD", async () => {
+  it("the same refusal covers a run branch the remote names as its HEAD", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     sh("-C", remote, "branch", RUN_BRANCH, "main");
     const base = tip(remote, `refs/heads/${RUN_BRANCH}`);
     sh("-C", remote, "symbolic-ref", "HEAD", `refs/heads/${RUN_BRANCH}`);
@@ -838,7 +841,7 @@ describe("a fix round on the item's own pull request branch (D#599 PL-2b-3)", ()
     expect(pushCalls(calls)).toEqual([]);
   });
 
-  it("a remote whose HEAD names another branch does not stop it (the control for the refusal above)", async () => {
+  it("a remote whose HEAD names another branch does not stop it (the control for the refusal above)", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const base = openItemBranch();
     expect(sh("-C", remote, "symbolic-ref", "HEAD").trim()).toBe("refs/heads/main");
     const { gitPath } = makeGitPath();
@@ -850,7 +853,7 @@ describe("a fix round on the item's own pull request branch (D#599 PL-2b-3)", ()
     expect(tip(remote, `refs/heads/${ITEM_BRANCH}`)).toBe(fix);
   });
 
-  it("a branch that moved since dispatch ends push_rejected, and no force push is tried", async () => {
+  it("a branch that moved since dispatch ends push_rejected, and no force push is tried", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const base = openItemBranch();
     const { gitPath, calls } = makeGitPath();
     const job = jobFor({ continues: itemContinues });
@@ -870,7 +873,7 @@ describe("a fix round on the item's own pull request branch (D#599 PL-2b-3)", ()
     expect(pushCalls(calls)).toEqual([]);
   });
 
-  it("a branch that is gone at prepare is continuation_branch_missing", async () => {
+  it("a branch that is gone at prepare is continuation_branch_missing", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { gitPath } = makeGitPath();
     const workspace = newWorkspace("item-gone");
     await expect(gitPath.prepare(jobFor({ continues: itemContinues }), ITEM_LEASE, workspace)).rejects.toMatchObject({ code: "continuation_branch_missing" });

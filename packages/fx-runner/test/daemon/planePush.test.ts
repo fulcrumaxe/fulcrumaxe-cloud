@@ -27,6 +27,12 @@ const RUN = "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f";
 const PAIRING = { codeRepo: "acme/widgets", overlayGlobs: ["docs/ops/", "rules/"], identifierRulesPath: "rules/ids.txt" as string | null, planDataRulesPath: "rules/plan.json" as string | null };
 const PR = { title: "Change from fulcrumaxe run 0b1b6c52", body: "Opened by a fulcrumaxe run, id 0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f." };
 const IDENTITY = { name: "Fulcrumaxe Bot", email: "bot@example.test" };
+/**
+ * Every test that builds, scans or pushes does so with real git: it makes a private repository, a bare mirror and a public bare repository, and talks to `git http-backend` over loopback (many
+ * `git` processes, each tens of ms idle and several times that when a CI run loads the host). Vitest's 5 s default has failed these under load while they pass alone, so each sets its own bound.
+ * The ceiling is generous on purpose: a stuck git fails on it with its output, and the global `testTimeout` is left alone.
+ */
+const REAL_GIT_TEST_TIMEOUT = 60_000;
 
 const cleanEnv = (): NodeJS.ProcessEnv => ({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_") && k !== "P13B_COUNT_FILE")), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
 const sh = (dir: string, ...args: string[]): string =>
@@ -232,7 +238,7 @@ const workDirs = (): string[] => (existsSync(world.workRoot) ? readdirSync(world
 describe("a paired run ends with a public pull request (C4 acceptance 13, 15, 20; C6 P1f-3-a, P1f-3-c)", () => {
   const ITEM = { "src/a.ts": "export const a = 1;\nexport const a2 = 3;\n", "src/new/c.ts": "export const c = 4;\n", "PR_BODY.md": "Title: steal the title\n\nThis text must never be the pull request body.\n" };
 
-  it("opens one commit on the public tip whose only changes are the item's paths, with the cloud's text and identity", async () => {
+  it("opens one commit on the public tip whose only changes are the item's paths, with the cloud's text and identity", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith(ITEM, ["src/b.ts"]);
     const before = branches();
     const t0 = Date.now();
@@ -255,7 +261,7 @@ describe("a paired run ends with a public pull request (C4 acceptance 13, 15, 20
     expect(Date.now() - t0).toBeLessThan(30_000);
   });
 
-  it("asks the cloud for the pairing exactly twice, the second after the scan and before the push, and reports each phase in order", async () => {
+  it("asks the cloud for the pairing exactly twice, the second after the scan and before the push, and reports each phase in order", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const h = harness();
     await h.run(runWith(ITEM));
     expect(h.state).toEqual({ pairing: 2, token: 1 });
@@ -267,7 +273,7 @@ describe("a paired run ends with a public pull request (C4 acceptance 13, 15, 20
     expect(h.reports[1]).toMatchObject({ phase: "pushed", branch: BRANCH, head_sha: commit, tip_sha: tip, pairing_digest: pairingDigest(PAIRING) });
   });
 
-  it("the token reaches the push only in the Authorization header of the receive-pack requests, is in no file and no line, and is revoked", async () => {
+  it("the token reaches the push only in the Authorization header of the receive-pack requests, is in no file and no line, and is revoked", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const h = harness();
     await h.run(runWith(ITEM));
     // The git server saw it only on pushes, never in a URL; reads were anonymous.
@@ -293,7 +299,7 @@ describe("a paired run ends with a public pull request (C4 acceptance 13, 15, 20
     expect(workDirs()).toEqual([]);
   });
 
-  it("builds from a mirror whose branch ref is gone (objects only), and never writes to the mirror", async () => {
+  it("builds from a mirror whose branch ref is gone (objects only), and never writes to the mirror", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith(ITEM);
     expect(sh(world.mirror, "for-each-ref")).not.toContain("fx/run");
     const mirrorBefore = sh(world.mirror, "for-each-ref", "--format=%(refname) %(objectname)");
@@ -303,7 +309,7 @@ describe("a paired run ends with a public pull request (C4 acceptance 13, 15, 20
     expect(readFileSync(path.join(world.mirror, "config"), "utf8")).toBe(configBefore);
   });
 
-  it("is the same from the built output moved to another directory (nothing reads a path baked in at build time)", async () => {
+  it("is the same from the built output moved to another directory (nothing reads a path baked in at build time)", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { buildSync } = await import("esbuild");
     const built = mkdtempSync(path.join(tmpdir(), "p13b-built-"));
     const moved = mkdtempSync(path.join(tmpdir(), "p13b-moved-"));
@@ -331,7 +337,7 @@ describe("a paired run ends with a public pull request (C4 acceptance 13, 15, 20
 });
 
 describe("a run that is not paired never enters the hook (acceptance 14)", () => {
-  it("is told 403 by the token route and then does nothing: no pairing read, no report, no git, no throwaway repository, no GitHub call", async () => {
+  it("is told 403 by the token route and then does nothing: no pairing read, no report, no git, no throwaway repository, no GitHub call", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith({ "src/c.ts": "export const c = 1;\n" });
     const h = harness({ token: () => ({ kind: "not_paired" }) });
     const { value, calls } = await countingGit(() => h.run(head));
@@ -344,7 +350,7 @@ describe("a run that is not paired never enters the hook (acceptance 14)", () =>
     expect(h.lines).toEqual([]);
   });
 
-  it("a run that added no commit reports no_change without a token; an unpaired one is told 403 by that report and stops", async () => {
+  it("a run that added no commit reports no_change without a token; an unpaired one is told 403 by that report and stops", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const paired = harness();
     expect(await paired.run(undefined)).toEqual({ kind: "no_change" });
     expect(paired.events).toEqual(["report:no_change"]);
@@ -356,7 +362,7 @@ describe("a run that is not paired never enters the hook (acceptance 14)", () =>
     expect(existsSync(world.workRoot)).toBe(false);
   });
 
-  it("a cloud that cannot be asked for the token (a network error, an old cloud) leaves the run exactly as it was", async () => {
+  it("a cloud that cannot be asked for the token (a network error, an old cloud) leaves the run exactly as it was", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const h = harness({ token: () => ({ kind: "error", status: 0 }) });
     const { value, calls } = await countingGit(() => h.run(runWith({ "src/c.ts": "export const c = 1;\n" })));
     expect(value).toEqual({ kind: "not_entered", why: "unavailable" });
@@ -364,7 +370,7 @@ describe("a run that is not paired never enters the hook (acceptance 14)", () =>
     expect(h.reports).toEqual([]);
   });
 
-  it("a run whose start commit was never recorded, or that was told to stop before the hook, asks for nothing", async () => {
+  it("a run whose start commit was never recorded, or that was told to stop before the hook, asks for nothing", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith({ "src/c.ts": "export const c = 1;\n" });
     const noBase = harness({}, { base: null });
     expect(await noBase.run(head)).toEqual({ kind: "not_entered", why: "no_base" });
@@ -380,7 +386,7 @@ describe("a run that is not paired never enters the hook (acceptance 14)", () =>
 describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 5)", () => {
   const ITEM = { "src/c.ts": "export const c = 1;\n" };
 
-  it("a pairing edited between the first and second read refuses pairing_changed, pushes nothing and revokes the token", async () => {
+  it("a pairing edited between the first and second read refuses pairing_changed, pushes nothing and revokes the token", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith(ITEM);
     const before = branches();
     const edited = { ...PAIRING, overlayGlobs: ["docs/ops/", "rules/", "extra/"] };
@@ -394,7 +400,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     expect(world.tokens.has(TOKEN)).toBe(false);
   });
 
-  it("every kind of edit between the two reads refuses: a glob removed, reordered, a rule path changed or cleared, another repo", async () => {
+  it("every kind of edit between the two reads refuses: a glob removed, reordered, a rule path changed or cleared, another repo", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith(ITEM);
     const before = branches();
     for (const edit of [{ overlayGlobs: ["docs/ops/"] }, { overlayGlobs: ["rules/", "docs/ops/"] }, { planDataRulesPath: null }, { identifierRulesPath: "rules/other.txt" }, { codeRepo: "acme/other" }]) {
@@ -406,7 +412,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     }
   });
 
-  it("a 409 from the second read (the cloud's own digest check) refuses the same way", async () => {
+  it("a 409 from the second read (the cloud's own digest check) refuses the same way", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith(ITEM);
     const before = branches();
     const h = harness({ pairing: (n) => (n === 1 ? pairingResult() : { kind: "pairing_changed" }) });
@@ -414,7 +420,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     expect(branches()).toBe(before);
   });
 
-  it("a pairing reply the client cannot believe costs no local work: the git call count is 0 and nothing is built", async () => {
+  it("a pairing reply the client cannot believe costs no local work: the git call count is 0 and nothing is built", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith(ITEM);
     const h = harness({ pairing: () => ({ kind: "error", status: 200, code: "invalid_reply" }) });
     const { value, calls } = await countingGit(() => h.run(head));
@@ -425,14 +431,14 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     expect(last(h.reports)).toMatchObject({ phase: "refused", code: "public_unavailable", token_revoked: true });
   });
 
-  it("a read that fails on the network or a 5xx is tried again (it has no side effect), and then goes on", async () => {
+  it("a read that fails on the network or a 5xx is tried again (it has no side effect), and then goes on", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith(ITEM);
     const h = harness({ pairing: (n) => (n < 3 ? { kind: "error", status: n === 1 ? 0 : 503 } : pairingResult()) });
     expect((await h.run(head)).kind).toBe("pr_opened");
     expect(h.state.pairing).toBe(4);
   });
 
-  it("the cloud's rule-file paths decide which rules apply: a run that changed a declared rule file is refused (it would be scanned by its own rules)", async () => {
+  it("the cloud's rule-file paths decide which rules apply: a run that changed a declared rule file is refused (it would be scanned by its own rules)", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const before = branches();
     const weakened = runWith({ "rules/ids.txt": "=== FORBIDDEN_PATTERNS_START ===\nnothing-at-all\n=== FORBIDDEN_PATTERNS_END ===\n", "src/leak.ts": "export const host = 'acme-internal-host';\n" });
     const h = harness();
@@ -442,7 +448,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     expect(branches()).toBe(before);
   });
 
-  it("the same for the plan-data file: a run that edited it is refused, and nothing reaches the public repo", async () => {
+  it("the same for the plan-data file: a run that edited it is refused, and nothing reaches the public repo", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const before = branches();
     const edited = runWith({ "rules/plan.json": JSON.stringify({ priceUsdPerMonth: 918273645 }), "src/price.ts": "export const price = 7391;\n" });
     const h = harness();
@@ -451,7 +457,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     expect(branches()).toBe(before);
   });
 
-  it("rules updated on the default branch after the run started apply to the run: a value newly listed there is refused", async () => {
+  it("rules updated on the default branch after the run started apply to the run: a value newly listed there is refused", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const before = branches();
     const head = runWith({ "src/vault.ts": "export const host = 'acme-staging-vault';\n" });
     // The default branch moves on after the run's start commit: its identifier rules gain a value.
@@ -466,7 +472,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     expect(branches()).toBe(before);
   });
 
-  it("a stored pairing whose rule files are not private paths is refused on the runner path too, before anything is pushed", async () => {
+  it("a stored pairing whose rule files are not private paths is refused on the runner path too, before anything is pushed", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const before = branches();
     const legacy = { ...PAIRING, overlayGlobs: ["docs/ops/"] };
     const h = harness({ pairing: () => pairingResult(legacy) });
@@ -502,7 +508,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
 });
 
 describe("the text, the identity and the branch are the token reply's alone (P1f-3-c)", () => {
-  it("the route input takes title, body, identity and branch from the grant, and a hostile file in the item changes none of them", async () => {
+  it("the route input takes title, body, identity and branch from the grant, and a hostile file in the item changes none of them", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const text = readFileSync(path.resolve(__dirname, "../../src/daemon/planePush.ts"), "utf8");
     for (const field of ["branch: grant.branch", "title: grant.pr.title", "body: grant.pr.body", "identity: grant.identity"]) expect(text).toContain(field);
     const head = runWith({ ".github/pull_request_template.md": "body from the agent\n", "PR_TITLE.txt": "title from the agent\n", "src/c.ts": "export const c = 1;\n" });
@@ -514,7 +520,7 @@ describe("the text, the identity and the branch are the token reply's alone (P1f
 });
 
 describe("the start commit is the daemon's record, not the checkout's (P1f-3-d)", () => {
-  it("a base that is not an ancestor of the run's head is refused bad_input and nothing is pushed", async () => {
+  it("a base that is not an ancestor of the run's head is refused bad_input and nothing is pushed", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const before = branches();
     // A commit the mirror holds but that is not in the run's history: the public tip's own commit, pushed to the mirror on a side branch.
     sh(world.pubWork, "push", "-q", world.mirror, "HEAD:refs/heads/side");
@@ -526,7 +532,7 @@ describe("the start commit is the daemon's record, not the checkout's (P1f-3-d)"
     expect(world.tokens.has(TOKEN)).toBe(false);
   });
 
-  it("a base on the run branch but not on the mirror's default branch is refused too", async () => {
+  it("a base on the run branch but not on the mirror's default branch is refused too", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const before = branches();
     sh(world.priv, "checkout", "-q", "-B", "fx/run", world.base);
     put(world.priv, { "src/c.ts": "export const c = 1;\n" });
@@ -607,7 +613,7 @@ describe("every refusal leaves the public repository's branches as they were (ac
     }, 60_000);
   }
 
-  it("a hook that is never told the token pushes nothing: a refusal before the scan makes no push request at all", async () => {
+  it("a hook that is never told the token pushes nothing: a refusal before the scan makes no push request at all", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith({ "docs/ops/new.md": "private\n" });
     await harness().run(head);
     expect(world.server.seen.filter((s) => s.path.includes("git-receive-pack"))).toEqual([]);
@@ -615,7 +621,7 @@ describe("every refusal leaves the public repository's branches as they were (ac
 });
 
 describe("the pull request is not opened (acceptance 17)", () => {
-  it("a pull request GitHub refuses after the push reports pr_failed with the pushed branch, and the branch stays", async () => {
+  it("a pull request GitHub refuses after the push reports pr_failed with the pushed branch, and the branch stays", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith({ "src/c.ts": "export const c = 1;\n" });
     world.api.failNextPull(422);
     const h = harness();
@@ -631,7 +637,7 @@ describe("the pull request is not opened (acceptance 17)", () => {
 });
 
 describe("no product-path change (acceptance 18)", () => {
-  it("a run whose change the public repository already has reports no_change, pushes nothing and revokes the token", async () => {
+  it("a run whose change the public repository already has reports no_change, pushes nothing and revokes the token", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     // The public repo already has the item's edit of README.md.
     put(world.pubWork, { "README.md": "# widgets, newer\n" });
     commitAll(world.pubWork, "public edits the readme");
@@ -648,7 +654,7 @@ describe("no product-path change (acceptance 18)", () => {
 });
 
 describe("a run the cloud ended (acceptance 19)", () => {
-  it("a stop on the first pairing read ends the hook with nothing built, nothing pushed and the token revoked, and reports nothing more", async () => {
+  it("a stop on the first pairing read ends the hook with nothing built, nothing pushed and the token revoked, and reports nothing more", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith({ "src/c.ts": "export const c = 1;\n" });
     const h = harness({ pairing: () => ({ kind: "stop", reason: "stale_generation" }) });
     const { value, calls } = await countingGit(() => h.run(head));
@@ -658,7 +664,7 @@ describe("a run the cloud ended (acceptance 19)", () => {
     expect(world.tokens.has(TOKEN)).toBe(false);
   });
 
-  it("a stop on the scanning report ends it before the build is pushed", async () => {
+  it("a stop on the scanning report ends it before the build is pushed", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const head = runWith({ "src/c.ts": "export const c = 1;\n" });
     const before = branches();
     const h = harness({ report: (m) => (m.phase === "scanning" ? { kind: "stop", reason: "stale_generation" } : { kind: "recorded" }) });
@@ -668,7 +674,7 @@ describe("a run the cloud ended (acceptance 19)", () => {
     expect(world.tokens.has(TOKEN)).toBe(false);
   });
 
-  it("a report that fails on the network or a 5xx is tried three times and never stops the push; a 4xx is not tried again", async () => {
+  it("a report that fails on the network or a 5xx is tried three times and never stops the push; a 4xx is not tried again", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     let scanning = 0;
     const flaky = harness({ report: (m) => (m.phase === "scanning" && ++scanning < 3 ? { kind: "error", status: scanning === 1 ? 0 : 503 } : { kind: "recorded" }) });
     expect((await flaky.run(runWith({ "src/c.ts": "export const c = 1;\n" }))).kind).toBe("pr_opened");
@@ -687,7 +693,7 @@ describe("a run the cloud ended (acceptance 19)", () => {
 });
 
 describe("the throwaway repository and its directory (no-follow file operations)", () => {
-  it("a link at the work root is refused: nothing is created through it and nothing behind it is touched", async () => {
+  it("a link at the work root is refused: nothing is created through it and nothing behind it is touched", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const target = path.join(world.root, "elsewhere");
     mkdirSync(target);
     writeFileSync(path.join(target, "keep.txt"), "keep");
@@ -722,7 +728,7 @@ describe("the throwaway repository and its directory (no-follow file operations)
     expect(readdirSync(outside)).toEqual(["precious.txt"]);
   });
 
-  it("creating the hook sweeps the work root, and the root it makes is private", async () => {
+  it("creating the hook sweeps the work root, and the root it makes is private", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     mkdirSync(world.workRoot, { recursive: true, mode: 0o700 });
     mkdirSync(path.join(world.workRoot, "p-stale1"));
     harness();
@@ -793,7 +799,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     return { token: () => tokenResult({ replaces_head: stamp, token: TOKEN2 }) };
   };
 
-  it("replaces the branch with ONE commit whose only parent is the new public tip: no private commit goes along, the diff is the item's paths, and an overlay change that came in with the sync is not in it", async () => {
+  it("replaces the branch with ONE commit whose only parent is the new public tip: no private commit goes along, the diff is the item's paths, and an overlay change that came in with the sync is not in it", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { stamp } = await published();
     const callsBefore = world.api.seen.length;
     const { base2, tip2, head2 } = fixRound();
@@ -817,7 +823,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     expect(world.api.seen.slice(callsBefore).map((s) => `${s.method} ${s.path}`)).toEqual([`GET /repos/acme/widgets/git/ref/heads/${BRANCH}`, "DELETE /installation/token"]);
   });
 
-  it("is a compare-and-swap: a commit someone pushes to the branch between the check and the push is kept, and the update is refused public_branch_moved", async () => {
+  it("is a compare-and-swap: a commit someone pushes to the branch between the check and the push is kept, and the update is refused public_branch_moved", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { stamp } = await published();
     const { base2, head2 } = fixRound();
     let person = "";
@@ -839,7 +845,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     expect(last(h.reports)).toMatchObject({ phase: "refused", code: "public_branch_moved" });
   });
 
-  it("a push the server applied but the client reported as failed is an update that stands: the branch is at our commit, not a person's, and the report says updated", async () => {
+  it("a push the server applied but the client reported as failed is an update that stands: the branch is at our commit, not a person's, and the report says updated", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { stamp } = await published();
     const { base2, tip2, head2 } = fixRound();
     const h = harness(withStamp(stamp), {
@@ -858,7 +864,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     expect(last(h.reports)).toMatchObject({ phase: "updated", head_sha: commit, tip_sha: tip2 });
   });
 
-  it("a failed push that left the branch at the stamp is push_failed, not a moved branch", async () => {
+  it("a failed push that left the branch at the stamp is push_failed, not a moved branch", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { stamp } = await published();
     const { base2, head2 } = fixRound();
     const h = harness(withStamp(stamp), {
@@ -869,7 +875,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
   });
 
-  it("a branch already moved before the update is refused the same way without a push", async () => {
+  it("a branch already moved before the update is refused the same way without a push", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { stamp } = await published();
     const { base2, head2 } = fixRound();
     put(world.pubWork, { "src/person.ts": "export const p = 1;\n" });
@@ -881,7 +887,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     expect(sh(world.bare, "rev-parse", BRANCH)).toBe(person);
   });
 
-  it("a private branch force-pushed after the sync (the signed base is no longer in its history) refuses at push time and leaves the public branch alone", async () => {
+  it("a private branch force-pushed after the sync (the signed base is no longer in its history) refuses at push time and leaves the public branch alone", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { stamp } = await published();
     const { base2, head2 } = fixRound({ dropBase: true });
     const h = harness(withStamp(stamp), { base: base2 });
@@ -890,7 +896,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
   });
 
-  it("a signed base that is not on the default branch (a stacked change) is refused at push time too", async () => {
+  it("a signed base that is not on the default branch (a stacked change) is refused at push time too", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const { stamp } = await published();
     const { base2, head2 } = fixRound();
     // The mirror's default branch does not hold the base: it is some other branch's tip.
@@ -912,7 +918,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     /** The cloud as it answers once it has marked the round: a grant with the lease on the authorized head. */
     const grantsTip = (authorized: string) => ({ token: () => tokenResult({ replaces_head: authorized, token: TOKEN2 }) });
 
-    it("asks for the tip, publishes the branch tip it fetched as ONE commit with the lease on the authorized head, and the diff is the one the private branch holds", async () => {
+    it("asks for the tip, publishes the branch tip it fetched as ONE commit with the lease on the authorized head, and the diff is the one the private branch holds", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
       const { stamp } = await published();
       const { base2, tip2, head2 } = fixRound();
       const person = personPushes("person");
@@ -936,7 +942,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
       expect(h.tokenInRepo()).toBe(false);
     });
 
-    it("the lease is on the authorized head: a commit that lands after the person confirmed Replace is kept and the update is refused public_branch_moved", async () => {
+    it("the lease is on the authorized head: a commit that lands after the person confirmed Replace is kept and the update is refused public_branch_moved", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
       await published();
       const { base2, head2 } = fixRound();
       const person = personPushes("person");
@@ -958,7 +964,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
       expect(last(h.reports)).toMatchObject({ phase: "refused", code: "public_branch_moved" });
     });
 
-    it("a daemon that did not keep the capability (or a build without it) never asks: the round is reported as no change, nothing is pushed and no token is requested", async () => {
+    it("a daemon that did not keep the capability (or a build without it) never asks: the round is reported as no change, nothing is pushed and no token is requested", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
       const { stamp } = await published();
       const { base2, head2 } = fixRound();
       const person = personPushes("person");
@@ -974,7 +980,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
       expect(person).not.toBe(stamp);
     });
 
-    it("an ordinary round that added nothing: the cloud refuses the request (no_changes), the run is reported as no change exactly as without asking, and nothing is pushed; a failed request is reported refused public_unavailable", async () => {
+    it("an ordinary round that added nothing: the cloud refuses the request (no_changes), the run is reported as no change exactly as without asking, and nothing is pushed; a failed request is reported refused public_unavailable", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
       const { stamp } = await published();
       const { base2, head2 } = fixRound();
       const h = harness({ token: () => ({ kind: "refused", code: "no_changes" }) }, { base: base2, tipPublish: true });
@@ -994,7 +1000,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
       }
     });
 
-    it("a stop or an unpaired answer ends the hook as for any token request; a refusal the cloud recorded (a closed pull request) is reported, not turned into no change", async () => {
+    it("a stop or an unpaired answer ends the hook as for any token request; a refusal the cloud recorded (a closed pull request) is reported, not turned into no change", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
       await published();
       const { base2, head2 } = fixRound();
       expect(await harness({ token: () => ({ kind: "stop", reason: "lease_expired" }) }, { base: base2, tipPublish: true }).run(undefined, { tipHead: head2 })).toEqual({ kind: "stopped", reason: "lease_expired" });
@@ -1005,7 +1011,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
       expect(closed.reports.map((r) => r.phase)).toEqual(["refused"]);
     });
 
-    it("a round that added a commit publishes it as before: the request does not ask for the tip, and the tip it also holds is not used", async () => {
+    it("a round that added a commit publishes it as before: the request does not ask for the tip, and the tip it also holds is not used", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
       await published();
       const { base2, tip2, head2 } = fixRound();
       const person = personPushes("person");
@@ -1016,7 +1022,7 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
       expect(sh(world.bare, "diff", "--name-only", tip2, sh(world.bare, "rev-parse", BRANCH)).split("\n").sort()).toEqual(["src/a.ts", "src/new/c.ts", "src/new/d.ts"]);
     });
 
-    it("a tip that is the signed base itself is nothing to publish: no request is made", async () => {
+    it("a tip that is the signed base itself is nothing to publish: no request is made", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
       await published();
       const { base2 } = fixRound();
       const h = harness(grantsTip(personPushes("person")), { base: base2, tipPublish: true });

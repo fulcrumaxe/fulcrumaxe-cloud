@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** These tests read a real mirror with real `git` processes; vitest's 5 s default has failed them under CI load while they pass alone, so each sets its own bound. The global `testTimeout` is left alone. */
+const REAL_GIT_TEST_TIMEOUT = 60_000;
 import type { GitCapture } from "../../src/daemon/git.js";
 import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
@@ -50,7 +53,7 @@ const makeGitPath = (large: boolean) =>
   createGitPath({ platform: "linux", capture: capture(), ...(large ? { captureLarge: capture(8 * 1024 * 1024) } : {}), mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => remoteUrl });
 
 describe("GitPath.repoMap over a real mirror (D#600 CX-3b)", () => {
-  it("is the map of the commit the workspace starts from, with the test command and the manifest, read from the mirror", async () => {
+  it("is the map of the commit the workspace starts from, with the test command and the manifest, read from the mirror", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     for (const large of [true, false]) {
       const git = makeGitPath(large);
       const j = job();
@@ -65,7 +68,7 @@ describe("GitPath.repoMap over a real mirror (D#600 CX-3b)", () => {
     }
   });
 
-  it("is null for a commit the mirror does not hold, and for a repo that has no mirror yet", async () => {
+  it("is null for a commit the mirror does not hold, and for a repo that has no mirror yet", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
     const git = makeGitPath(true);
     const j = job();
     const workspace = path.join(root, "work", "w");

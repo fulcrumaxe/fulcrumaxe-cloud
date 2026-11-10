@@ -22,6 +22,13 @@ import { CHECK_PNPM_ENV } from "../src/sandbox/hostSandbox.js";
 const probe = spawnSync("pnpm", ["--version"], { encoding: "utf8", timeout: 30_000 });
 const major = probe.status === 0 ? Number(probe.stdout.trim().split(".")[0]) : 0;
 
+/**
+ * Every test below runs real pnpm processes (a lockfile-only install, the host install, then the command under test: up to three runs of 1-4 s each on an idle host, several times that under
+ * the load of a full CI run). Vitest's 5 s default is below the idle total for most of them, so each test sets its own bound. It is the same ceiling as `pnpm()`'s own kill timer (90 s) plus
+ * headroom for the registry setup, so a hung pnpm fails on that kill with its output rather than as an anonymous test timeout; the global `testTimeout` is left alone.
+ */
+const REAL_PNPM_TEST_TIMEOUT = 120_000;
+
 const NAME = "fx-offline-demo";
 const VERSION = "1.0.0";
 
@@ -103,7 +110,7 @@ async function installedProject(name: string): Promise<{ project: string; store:
 }
 
 describe.skipIf(major < 11)("the check's plain `pnpm install --frozen-lockfile` over the tree the runner installed", () => {
-  it("control: with the check's cache empty and no fix, pnpm goes back to the registry for metadata (the request that waits forever with no network)", async () => {
+  it("control: with the check's cache empty and no fix, pnpm goes back to the registry for metadata (the request that waits forever with no network)", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, store, dirs } = await installedProject("control");
     requests = [];
     // The check gets a fresh, empty cache (its own temp directory); the store is the repository's. Retries off, so the control ends at once.
@@ -113,7 +120,7 @@ describe.skipIf(major < 11)("the check's plain `pnpm install --frozen-lockfile` 
     expect(requests.filter((line) => line.startsWith("GET"))).not.toEqual([]);
   });
 
-  it("with the environment the check is given, it makes no request at all and succeeds", async () => {
+  it("with the environment the check is given, it makes no request at all and succeeds", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, store, dirs } = await installedProject("fixed");
     requests = [];
     const given = CHECK_PNPM_ENV;
@@ -123,7 +130,7 @@ describe.skipIf(major < 11)("the check's plain `pnpm install --frozen-lockfile` 
     expect(requests).toEqual([]);
   });
 
-  it("an install that does need a package the store lacks fails at once and names the cause, instead of waiting", async () => {
+  it("an install that does need a package the store lacks fails at once and names the cause, instead of waiting", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, dirs } = await installedProject("missing");
     requests = [];
     // A store the install did not use: the package is in node_modules' virtual store only through the store, so removing node_modules and pointing at an empty store needs a download.
@@ -178,7 +185,7 @@ describe.skipIf(major < 11)("a pnpm command a test starts inside the check, from
   }
   const tree = (project: string, store: string): string => `${readFileSync(path.join(project, "node_modules", ".modules.yaml"), "utf8")}|${String(readdirSync(path.join(store, "v11", "files"), { recursive: true }).length)}`;
 
-  it("control: with the real home, the nested build is sent to install, which cannot run (no terminal), and the script does not run", async () => {
+  it("control: with the real home, the nested build is sent to install, which cannot run (no terminal), and the script does not run", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, dirs } = await installedWorkspace("nested-control");
     requests = [];
     const out = await pnpm(["--filter", "web", "build"], filtered(SCAN_FILTER, envFor({ home: dirs.home, cache: path.join(root, "nested-control", "check-cache") }, {})), project);
@@ -187,7 +194,7 @@ describe.skipIf(major < 11)("a pnpm command a test starts inside the check, from
     expect(existsSync(path.join(project, "apps", "web", "built.txt"))).toBe(false);
   });
 
-  it("control: with the store settings kept and the real home, the nested command goes back to the registry to verify the lockfile (the request that waits forever with no network)", async () => {
+  it("control: with the store settings kept and the real home, the nested command goes back to the registry to verify the lockfile (the request that waits forever with no network)", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, store, dirs } = await installedWorkspace("nested-proxy-control");
     requests = [];
     const env = filtered(PROXY_FILTER, envFor({ home: dirs.home, cache: path.join(root, "nested-proxy-control", "check-cache") }, { pnpm_config_store_dir: store, pnpm_config_verify_store_integrity: "true", pnpm_config_fetch_retries: "0" }));
@@ -195,7 +202,7 @@ describe.skipIf(major < 11)("a pnpm command a test starts inside the check, from
     expect(requests.filter((line) => line.startsWith("GET"))).not.toEqual([]);
   });
 
-  it("with the check's home, `pnpm --filter web build` exits 0, makes no registry request, changes nothing in node_modules or the store files, and reads no .npmrc of the host", async () => {
+  it("with the check's home, `pnpm --filter web build` exits 0, makes no registry request, changes nothing in node_modules or the store files, and reads no .npmrc of the host", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, store, dirs, tmp } = await installedWorkspace("nested-fixed");
     requests = [];
     const home = prepareCheckHome(tmp, store);
@@ -214,7 +221,7 @@ describe.skipIf(major < 11)("a pnpm command a test starts inside the check, from
     expect(readFileSync(path.join(project, "apps", "web", "node_modules", NAME, "index.js"), "utf8")).toContain("module.exports");
   });
 
-  it("the same holds for a test that keeps CI and the store settings in its list: `pnpm exec` makes no registry request and exits 0", async () => {
+  it("the same holds for a test that keeps CI and the store settings in its list: `pnpm exec` makes no registry request and exits 0", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, store, dirs, tmp } = await installedWorkspace("nested-proxy-fixed");
     requests = [];
     const home = prepareCheckHome(tmp, store);
@@ -226,7 +233,7 @@ describe.skipIf(major < 11)("a pnpm command a test starts inside the check, from
     expect(requests).toEqual([]);
   });
 
-  it("a nested `pnpm install` is still not let through to delete node_modules: it stops, makes no request, and leaves the tree as it was", async () => {
+  it("a nested `pnpm install` is still not let through to delete node_modules: it stops, makes no request, and leaves the tree as it was", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const { project, store, dirs, tmp } = await installedWorkspace("nested-install");
     requests = [];
     const home = prepareCheckHome(tmp, store);

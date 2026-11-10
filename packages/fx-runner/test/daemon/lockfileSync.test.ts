@@ -4,6 +4,9 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** Most tests run a real pnpm (and git) on a scratch workspace; the fixture helper's own pnpm calls are bounded at 60 s each, and vitest's 5 s default has failed these under CI load while they pass alone. Each async test sets its own bound above that helper bound; the global `testTimeout` is left alone. */
+const REAL_PNPM_TEST_TIMEOUT = 120_000;
 import { createChangedFiles } from "../../src/daemon/checkStep.js";
 import { lockfileSyncFor } from "../../src/commands/run.js";
 import { PM_ON_FAIL_FLAG } from "../../src/daemon/depsInstall.js";
@@ -78,7 +81,7 @@ function subject(over: { calls?: string[]; said?: string[]; timeoutMs?: number; 
 }
 
 describe("a change that adds a dependency on another workspace package", () => {
-  it("fails the frozen install before the update, and passes it after: the lockfile now matches the manifests", async () => {
+  it("fails the frozen install before the update, and passes it after: the lockfile now matches the manifests", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const stale = pnpm(["install", "--frozen-lockfile", "--offline"]);
     expect(stale.code).not.toBe(0);
@@ -102,7 +105,7 @@ describe("a change that adds a dependency on another workspace package", () => {
     expect(pnpm(["install", "--frozen-lockfile", "--offline"]).code).toBe(0);
   });
 
-  it("a dependency removed again, and a new package added to the workspace, are brought along too", async () => {
+  it("a dependency removed again, and a new package added to the workspace, are brought along too", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     expect(await subject().run()).toEqual({ kind: "updated" });
     git("add", "-A");
@@ -121,7 +124,7 @@ describe("a change that adds a dependency on another workspace package", () => {
 });
 
 describe("what is left alone", () => {
-  it("no manifest changed: pnpm is not started and the lockfile is not touched", async () => {
+  it("no manifest changed: pnpm is not started and the lockfile is not touched", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/index.js", "module.exports = 2;\n");
     put("a/new.js", "x\n");
     const before = statSync(path.join(ws, "pnpm-lock.yaml"));
@@ -134,14 +137,14 @@ describe("what is left alone", () => {
     expect([after.mtimeMs, after.ino]).toEqual([before.mtimeMs, before.ino]);
   });
 
-  it("a manifest changed in a way the lockfile does not record (a script): pnpm runs and the lockfile stays byte for byte", async () => {
+  it("a manifest changed in a way the lockfile does not record (a script): pnpm runs and the lockfile stays byte for byte", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", {}, { scripts: { test: "echo ok" } }));
     expect(await subject().run()).toEqual({ kind: "unchanged" });
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a repository with no lockfile, or only the empty stub the agent's sandbox leaves, is not touched", async () => {
+  it("a repository with no lockfile, or only the empty stub the agent's sandbox leaves, is not touched", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     rmSync(path.join(ws, "pnpm-lock.yaml"));
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const calls: string[] = [];
@@ -152,7 +155,7 @@ describe("what is left alone", () => {
     expect(read("pnpm-lock.yaml")).toBe("");
   });
 
-  it("a package-lock.json repository is out of scope: nothing runs", async () => {
+  it("a package-lock.json repository is out of scope: nothing runs", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     rmSync(path.join(ws, "pnpm-lock.yaml"));
     put("package-lock.json", JSON.stringify({ lockfileVersion: 3, packages: { "": {} } }));
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
@@ -163,7 +166,7 @@ describe("what is left alone", () => {
 });
 
 describe("which changed files count as manifests", () => {
-  it("a package.json under node_modules or .git is not the project's manifest: nothing runs", async () => {
+  it("a package.json under node_modules or .git is not the project's manifest: nothing runs", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("node_modules/dep/package.json", pkg("dep", { "@x/b": "workspace:*" }));
     put("vendor/node_modules/dep/package.json", pkg("dep"));
     const calls: string[] = [];
@@ -173,7 +176,7 @@ describe("which changed files count as manifests", () => {
     expect(calls).toEqual([]);
   });
 
-  it("a deleted package.json is a change: the project leaves the lockfile", async () => {
+  it("a deleted package.json is a change: the project leaves the lockfile", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     expect(read("pnpm-lock.yaml")).toContain("  b: {}");
     rmSync(path.join(ws, "b/package.json"));
     const calls: string[] = [];
@@ -188,7 +191,7 @@ describe("the daemon's wiring (lockfileSyncFor, as run.ts builds the handler's d
   const gitCapture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048);
   const installCapture = (command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tail: number, signal: AbortSignal | undefined, feed: Buffer | undefined) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed);
 
-  it("with both captures it yields an update that really runs pnpm on the workspace and brings the lockfile along", async () => {
+  it("with both captures it yields an update that really runs pnpm on the workspace and brings the lockfile along", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const said: string[] = [];
     const wired = lockfileSyncFor({ installCapture, captureLarge: gitCapture }, {}, (line) => said.push(line), scratch);
     expect(wired.lockfileSync).toBeDefined();
@@ -206,7 +209,7 @@ describe("the daemon's wiring (lockfileSyncFor, as run.ts builds the handler's d
 });
 
 describe("a dependency that needs the registry", () => {
-  it("fails at once with the closed code needs_network, puts the lockfile back byte for byte and leaves nothing behind", async () => {
+  it("fails at once with the closed code needs_network, puts the lockfile back byte for byte and leaves nothing behind", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }));
     const r = subject({ timeoutMs: 45_000 });
@@ -245,7 +248,7 @@ describe("a lockfile that lists registry packages (the release-age policy needs 
     expect(r.out).toMatch(/ERR_PNPM_NO_OFFLINE_META/);
   });
 
-  it("a description change updates (the lockfile is judged without the network) and the registry entry is untouched", async () => {
+  it("a description change updates (the lockfile is judged without the network) and the registry entry is untouched", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }, { description: "changed" }));
     const r = subject();
     const outcome = await r.run();
@@ -255,7 +258,7 @@ describe("a lockfile that lists registry packages (the release-age policy needs 
     expect(read("pnpm-lock.yaml")).toBe(registryLock);
   });
 
-  it("known limit, unchanged by this row: a change that does alter the lockfile makes pnpm re-resolve the registry entries, which needs their metadata: needs_network, closed", async () => {
+  it("known limit, unchanged by this row: a change that does alter the lockfile makes pnpm re-resolve the registry entries, which needs their metadata: needs_network, closed", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0", "@x/b": "workspace:*" }));
     const r = subject({ timeoutMs: 45_000 });
     expect(await r.run()).toEqual({ kind: "failed", why: "needs_network" });
@@ -265,7 +268,7 @@ describe("a lockfile that lists registry packages (the release-age policy needs 
     expect(read("pnpm-lock.yaml")).toBe(registryLock);
   });
 
-  it("a dependency that really is new still needs the network: needs_network, the lockfile back byte for byte", async () => {
+  it("a dependency that really is new still needs the network: needs_network, the lockfile back byte for byte", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0", "is-odd": "3.0.1" }));
     const r = subject({ timeoutMs: 45_000 });
     expect(await r.run()).toEqual({ kind: "failed", why: "needs_network" });
@@ -273,7 +276,7 @@ describe("a lockfile that lists registry packages (the release-age policy needs 
     expect(r.said[0]).toMatch(/lockfile_sync_failed: needs_network/);
   });
 
-  it("the settings file sits in pnpm's config directory inside the run's own scratch (0600, one key), never in the workspace, and the scratch is removed afterwards", async () => {
+  it("the settings file sits in pnpm's config directory inside the run's own scratch (0600, one key), never in the workspace, and the scratch is removed afterwards", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "left-pad": "1.3.0" }, { description: "changed" }));
     const seen: Array<{ file: string; text: string; mode: number; underScratch: boolean }> = [];
     await subject({
@@ -309,7 +312,7 @@ describe("a lockfile that lists registry packages (the release-age policy needs 
     expect(LOCK_SYNC_SETTINGS).toEqual(["minimumReleaseAge: 0"]);
   });
 
-  it("a repository that tries to set the policy, the network mode or another registry itself is refused before pnpm starts", async () => {
+  it("a repository that tries to set the policy, the network mode or another registry itself is refused before pnpm starts", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const attempts: Array<[string, string]> = [
       ["pnpm-workspace.yaml", "packages:\n  - a\n  - b\nminimumReleaseAge: 10080\n"],
       ["pnpm-workspace.yaml", "packages:\n  - a\n  - b\noffline: false\n"],
@@ -341,7 +344,7 @@ describe("what the update refuses or puts back", () => {
     vi.stubEnv("PATH", `${bin}:${process.env.PATH ?? ""}`);
   }
 
-  it("a lockfile pnpm wrote with a dependency from another host is refused and the original is put back", async () => {
+  it("a lockfile pnpm wrote with a dependency from another host is refused and the original is put back", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     fakePnpm(`cat > pnpm-lock.yaml <<'EOF'\nlockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      evil:\n        specifier: github:evil/evil\n        version: github.com/evil/evil/abc\nEOF`);
@@ -352,7 +355,7 @@ describe("what the update refuses or puts back", () => {
     expect(r.said[0]).toMatch(/^fx-runner: lockfile update refused \(lockfile_sync_refused: /);
   });
 
-  it("a pnpm that leaves a partial file and fails: the original is put back", async () => {
+  it("a pnpm that leaves a partial file and fails: the original is put back", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     chmodSync(path.join(ws, "pnpm-lock.yaml"), 0o640);
@@ -364,7 +367,7 @@ describe("what the update refuses or puts back", () => {
     expect(existsSync(path.join(ws, "pnpm-lock.yaml.fx-tmp"))).toBe(false);
   });
 
-  it("a stuck pnpm is ended at the time limit and the lockfile is as it was", async () => {
+  it("a stuck pnpm is ended at the time limit and the lockfile is as it was", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     fakePnpm("echo half > pnpm-lock.yaml; exec sleep 60");
@@ -372,7 +375,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a stop from the daemon ends it too", async () => {
+  it("a stop from the daemon ends it too", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     fakePnpm("exec sleep 60");
     const stop = new AbortController();
@@ -381,7 +384,7 @@ describe("what the update refuses or puts back", () => {
     expect(await pending).toEqual({ kind: "failed", why: "aborted" });
   });
 
-  it("a changed manifest that is a link, or sits behind one, is refused and pnpm never starts", async () => {
+  it("a changed manifest that is a link, or sits behind one, is refused and pnpm never starts", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const calls: string[] = [];
     rmSync(path.join(ws, "b/package.json"));
     symlinkSync("../a/package.json", path.join(ws, "b/package.json"));
@@ -389,7 +392,7 @@ describe("what the update refuses or puts back", () => {
     expect(calls).toEqual([]);
   });
 
-  it("a project directory the change added as a link to a directory outside the workspace is refused before pnpm starts, and nothing behind it is read", async () => {
+  it("a project directory the change added as a link to a directory outside the workspace is refused before pnpm starts, and nothing behind it is read", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const outside = path.join(root, "outside");
     mkdirSync(outside);
     writeFileSync(path.join(outside, "package.json"), pkg("@evil/outside"));
@@ -405,7 +408,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a package.json that is a link inside a real directory git ignores is refused before pnpm starts (git never lists it, so the changed-file list cannot see it)", async () => {
+  it("a package.json that is a link inside a real directory git ignores is refused before pnpm starts (git never lists it, so the changed-file list cannot see it)", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const outsideFile = path.join(root, "outside-package.json");
     writeFileSync(outsideFile, pkg("@evil/b", { "left-pad": "1.3.0" }));
     put(".gitignore", "packages/b/\n");
@@ -421,7 +424,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a linked package.yaml beside a regular package.json is refused before pnpm starts (pnpm reads that manifest too)", async () => {
+  it("a linked package.yaml beside a regular package.json is refused before pnpm starts (pnpm reads that manifest too)", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const outsideFile = path.join(root, "outside-package.yaml");
     writeFileSync(outsideFile, "name: '@evil/a'\ndependencies:\n  left-pad: 1.3.0\n");
     symlinkSync(outsideFile, path.join(ws, "a/package.yaml"));
@@ -433,7 +436,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a plain package.json5 or package.yaml next to the real package.json is refused too: this product uses package.json only", async () => {
+  it("a plain package.json5 or package.yaml next to the real package.json is refused too: this product uses package.json only", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     for (const name of ["package.json5", "package.yaml"]) {
       put(`a/${name}`, name === "package.yaml" ? "name: '@x/a'\n" : "{ name: '@x/a' }\n");
       put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
@@ -444,7 +447,7 @@ describe("what the update refuses or puts back", () => {
     }
   });
 
-  it("an importer with a manifest of another format that is a link or not a file is refused after pnpm wrote the lockfile", async () => {
+  it("an importer with a manifest of another format that is a link or not a file is refused after pnpm wrote the lockfile", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     const outsideFile = path.join(root, "outside-package.yaml");
     writeFileSync(outsideFile, "name: x\n");
@@ -454,7 +457,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a link named pnpm-workspace.yaml or .npmrc below the root is refused the same way", async () => {
+  it("a link named pnpm-workspace.yaml or .npmrc below the root is refused the same way", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     for (const name of ["pnpm-workspace.yaml", ".npmrc"]) {
       const target = path.join(root, `outside-${name}`);
       writeFileSync(target, "x: 1\n");
@@ -465,7 +468,7 @@ describe("what the update refuses or puts back", () => {
     }
   });
 
-  it("an importer whose package.json is a link in the lockfile pnpm wrote is refused and the original is put back", async () => {
+  it("an importer whose package.json is a link in the lockfile pnpm wrote is refused and the original is put back", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     // Reached after the walk: the link is made by the stand-in pnpm itself, as a process that outlived the walk could.
     const outsideFile = path.join(root, "outside-package.json");
@@ -476,7 +479,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a link to a directory with no manifest is not a project and does not stop the update", async () => {
+  it("a link to a directory with no manifest is not a project and does not stop the update", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const docs = path.join(root, "docs");
     mkdirSync(docs);
     symlinkSync(docs, path.join(ws, "docs"));
@@ -484,7 +487,7 @@ describe("what the update refuses or puts back", () => {
     expect(await subject().run()).toEqual({ kind: "updated" });
   });
 
-  it("a lockfile whose link: target runs through a link (or leaves the workspace) is refused after pnpm wrote it, and the original is put back", async () => {
+  it("a lockfile whose link: target runs through a link (or leaves the workspace) is refused after pnpm wrote it, and the original is put back", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     const docs = path.join(root, "docs");
     mkdirSync(docs);
@@ -498,7 +501,7 @@ describe("what the update refuses or puts back", () => {
     }
   });
 
-  it("a lockfile pnpm wrote with an importer that runs through a link is refused with check new_project_path, and the original is put back", async () => {
+  it("a lockfile pnpm wrote with an importer that runs through a link is refused with check new_project_path, and the original is put back", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     const docs = path.join(root, "docs");
     mkdirSync(docs);
@@ -509,7 +512,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a lockfile that is a link is refused with check lockfile_read before anything else is looked at", async () => {
+  it("a lockfile that is a link is refused with check lockfile_read before anything else is looked at", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const target = path.join(root, "elsewhere.yaml");
     writeFileSync(target, read("pnpm-lock.yaml"));
     rmSync(path.join(ws, "pnpm-lock.yaml"));
@@ -518,7 +521,7 @@ describe("what the update refuses or puts back", () => {
     expect(await subject().run()).toEqual({ kind: "refused", reason: "lockfile_not_regular", check: "lockfile_read" });
   });
 
-  it("a pnpm that leaves a link where the lockfile was is refused with check lockfile_after, and the original is put back", async () => {
+  it("a pnpm that leaves a link where the lockfile was is refused with check lockfile_after, and the original is put back", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     const target = path.join(root, "elsewhere.yaml");
     writeFileSync(target, "x: 1\n");
@@ -529,7 +532,7 @@ describe("what the update refuses or puts back", () => {
     expect(lstatSync(path.join(ws, "pnpm-lock.yaml")).isFile()).toBe(true);
   });
 
-  it("a pnpm that is a corepack shim is refused with check pnpm_binary", async () => {
+  it("a pnpm that is a corepack shim is refused with check pnpm_binary", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const shim = path.join(root, "corepack");
     mkdirSync(shim);
@@ -539,7 +542,7 @@ describe("what the update refuses or puts back", () => {
     expect(await subject().run()).toEqual({ kind: "refused", reason: "corepack_shim", check: "pnpm_binary" });
   });
 
-  it("a pnpm that would rewrite the lockfile in another format version is refused and the original is put back", async () => {
+  it("a pnpm that would rewrite the lockfile in another format version is refused and the original is put back", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     fakePnpm(`sed -i "s/^lockfileVersion: .*/lockfileVersion: '10.0'/" pnpm-lock.yaml`);
@@ -547,7 +550,7 @@ describe("what the update refuses or puts back", () => {
     expect(read("pnpm-lock.yaml")).toBe(original);
   });
 
-  it("a capture that throws puts the lockfile back, removes the scratch and reports the closed failure without the error text", async () => {
+  it("a capture that throws puts the lockfile back, removes the scratch and reports the closed failure without the error text", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     const original = read("pnpm-lock.yaml");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const r = subject({ capture: async (_c, _a, _e, cwd) => { writeFileSync(path.join(cwd, "pnpm-lock.yaml"), "half\n"); throw new Error("spawn failed at /home/someone/secret"); } });
@@ -557,7 +560,7 @@ describe("what the update refuses or puts back", () => {
     expect(r.said.join("\n")).not.toContain("someone");
   });
 
-  it("pnpm starts with pm-on-fail=ignore in its environment as well as on its command line", async () => {
+  it("pnpm starts with pm-on-fail=ignore in its environment as well as on its command line", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const seen: Array<Record<string, string>> = [];
     await subject({ capture: async (_c, _a, env) => { seen.push(env); return { code: 0, timedOut: false, aborted: false, tail: "" }; } }).run();
@@ -566,7 +569,7 @@ describe("what the update refuses or puts back", () => {
     expect(seen[0]!.npm_config_manage_package_manager_versions).toBe("false");
   });
 
-  it("a run that was stopped before the update began never starts pnpm", async () => {
+  it("a run that was stopped before the update began never starts pnpm", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const calls: string[] = [];
     const stop = new AbortController();
@@ -575,7 +578,7 @@ describe("what the update refuses or puts back", () => {
     expect(calls).toEqual([]);
   });
 
-  it("a repo setting that moves the registry is refused before pnpm starts", async () => {
+  it("a repo setting that moves the registry is refused before pnpm starts", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put(".npmrc", "registry=https://evil.example/\n");
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const calls: string[] = [];
@@ -584,7 +587,7 @@ describe("what the update refuses or puts back", () => {
     expect(calls).toEqual([]);
   });
 
-  it("no pnpm on the machine is the closed failure tool_missing", async () => {
+  it("no pnpm on the machine is the closed failure tool_missing", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     // git stays reachable (it names the changed files); pnpm does not.
     const bin = path.join(root, "only-git");
@@ -596,14 +599,14 @@ describe("what the update refuses or puts back", () => {
     expect(r.said[0]).toContain("pnpm not found");
   });
 
-  it("when git cannot name the changed files (the listing answers null) the lockfile is left alone, and a line says why", async () => {
+  it("when git cannot name the changed files (the listing answers null) the lockfile is left alone, and a line says why", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const r = subject({ changedFiles: async () => null });
     expect(await r.run()).toEqual({ kind: "none" });
     expect(r.said).toEqual(["fx-runner: lockfile update skipped (lockfile_sync_unknown_changes)"]);
   });
 
-  it("when the git folder has no shape the sandbox leaves, the lockfile is refused and left alone, and a line says why", async () => {
+  it("when the git folder has no shape the sandbox leaves, the lockfile is refused and left alone, and a line says why", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     rmSync(path.join(ws, ".git"), { recursive: true, force: true });
     const r = subject();
@@ -653,7 +656,7 @@ describe("a monorepo shaped like this repository, with the sandbox's stubs in pl
     writeFileSync(path.join(ws, ".env"), "");
   }
 
-  it("a dependency added to one package is brought into the lockfile, and the run is not refused", async () => {
+  it("a dependency added to one package is brought into the lockfile, and the run is not refused", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     monorepo();
     sandboxStubs();
     put("apps/web/package.json", pkg("@x/web", { "@x/ui": "workspace:*" }));
@@ -663,7 +666,7 @@ describe("a monorepo shaped like this repository, with the sandbox's stubs in pl
     expect(lockNow()).toContain("link:../../packages/ui");
   });
 
-  it("the same change refuses when the marker directory has anything in it, and the line names the check", async () => {
+  it("the same change refuses when the marker directory has anything in it, and the line names the check", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     monorepo();
     sandboxStubs();
     writeFileSync(path.join(ws, ".git", "info", MARKER, "x"), "");
@@ -673,7 +676,7 @@ describe("a monorepo shaped like this repository, with the sandbox's stubs in pl
     expect(r.said).toEqual(["fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe, check: git_dir_info_entry)"]);
   });
 
-  it("a nested git folder, and a git config changed after the pin, are told apart from a bad git folder", async () => {
+  it("a nested git folder, and a git config changed after the pin, are told apart from a bad git folder", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     monorepo();
     sandboxStubs();
     put("apps/web/package.json", pkg("@x/web", { "@x/ui": "workspace:*" }));
@@ -692,7 +695,7 @@ describe("a monorepo shaped like this repository, with the sandbox's stubs in pl
     ["a changed manifest behind a linked directory", "changed_manifest_path", () => (rmSync(path.join(ws, "apps/web"), { recursive: true }), symlinkSync("../packages/ui", path.join(ws, "apps/web")))],
   ];
   for (const [name, check, make] of CASES) {
-    it(`${name} is refused with check ${check}, and pnpm never starts`, async () => {
+    it(`${name} is refused with check ${check}, and pnpm never starts`, { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
       monorepo();
       sandboxStubs();
       put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
@@ -705,7 +708,7 @@ describe("a monorepo shaped like this repository, with the sandbox's stubs in pl
     });
   }
 
-  it("a directory the walk cannot list is refused with check walk_unlistable (the changed list is given, so git's own listing does not hide it)", async () => {
+  it("a directory the walk cannot list is refused with check walk_unlistable (the changed list is given, so git's own listing does not hide it)", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     monorepo();
     put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
     mkdirSync(path.join(ws, "apps", "closed"));
@@ -718,7 +721,7 @@ describe("a monorepo shaped like this repository, with the sandbox's stubs in pl
     }
   });
 
-  it("a scratch directory that cannot be made is refused with check scratch_dir", async () => {
+  it("a scratch directory that cannot be made is refused with check scratch_dir", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     monorepo();
     put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
     writeFileSync(path.join(root, "not-a-dir"), "");
@@ -728,7 +731,7 @@ describe("a monorepo shaped like this repository, with the sandbox's stubs in pl
     expect(said).toEqual(["fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe, check: scratch_dir)"]);
   });
 
-  it("a repo setting that moves the registry is refused with check settings_files, and a lockfile with another host's tarball with lockfile_content", async () => {
+  it("a repo setting that moves the registry is refused with check settings_files, and a lockfile with another host's tarball with lockfile_content", { timeout: REAL_PNPM_TEST_TIMEOUT }, async () => {
     monorepo();
     put("packages/core/package.json", pkg("@x/core", {}, { description: "changed" }));
     put(".npmrc", "registry=https://evil.example/\n");
