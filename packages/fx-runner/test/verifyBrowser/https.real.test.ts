@@ -8,6 +8,7 @@ import { findChromium } from "../../src/verifyBrowser/driver.js";
 import { startVerifyBrowserServer } from "../../src/verifyBrowser/server.js";
 import { generateSelfSignedCert } from "../helpers/selfSignedCert.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
+import { useSourcePlaywright } from "./sourceLoader.js";
 
 /**
  * D#749 V2c-2a: an https base origin through the origin proxy (a CONNECT tunnel to the base host and port), against a real Chromium. The certificate is self-signed, so the
@@ -44,6 +45,8 @@ afterAll(() => {
   app?.close();
   spy?.close();
 });
+
+useSourcePlaywright();
 
 describe.skipIf(EXE === undefined || process.platform !== "linux")("an https base origin through the origin proxy", () => {
   it("loads over a CONNECT tunnel, reaches only the base origin, and refuses a redirect to another port", async () => {

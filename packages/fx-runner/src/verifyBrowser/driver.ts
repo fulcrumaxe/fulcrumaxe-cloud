@@ -1,14 +1,18 @@
 import { existsSync, promises as fs, readdirSync } from "node:fs";
 import path from "node:path";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import type { LoginSession } from "../commands/verifyLogin.js";
+import { signedInAs } from "./identity.js";
+import { loadPlaywright } from "./loadPlaywright.js";
+import { readScopedState } from "./stateScope.js";
 import { hostRulesArg, isAllowedUrl, type BasePin } from "./pin.js";
 import { startOriginProxy, type OriginProxy } from "./proxy.js";
 import { SNAPSHOT_SCRIPT, type RawElement } from "./snapshot.js";
 
 /**
  * D#749 V2c-2a: the one place a browser is started. Chromium comes from the runner's settings (the browsers directory first, then the system's Chrome or
- * Chromium), never from a running Chrome of the person's. Every job gets a fresh browser and a context built from the storage-state FILE PATH it is given: Playwright
- * reads that file, this code never opens, parses or logs it, and nothing is written back to it. The browser's environment is a short allowlist plus a throwaway HOME
+ * Chromium), never from a running Chrome of the person's. Every job gets a fresh browser and a context built from the storage-state file it is given: `readScopedState` (stateScope.ts)
+ * reads it once, refuses it when it holds another origin, and hands the checked object to the context; it is never logged and nothing is written back to it. The browser's environment is a short allowlist plus a throwaway HOME
  * and TMPDIR inside the job directory, so no token of the runner's reaches it. Playwright puts the browser's profile in a fresh temp directory of its own and removes
  * it when the browser closes; the job's HOME and TMPDIR are removed by `close` below.
  */
@@ -46,6 +50,8 @@ export interface PageDriver {
   textOf(ref: string): Promise<string>;
   /** Requests the route refused: all of them, and the ones that were page navigations. */
   blocked(): { requests: number; navigations: number };
+  /** The GitHub login the saved session is signed in as, from the app's own identity route (identity.ts), or undefined when the lookup gives nothing usable. Never throws. */
+  identity(): Promise<string | undefined>;
   close(): Promise<void>;
 }
 
@@ -53,7 +59,7 @@ export interface DriverConfig {
   base: BasePin;
   executablePath: string;
   jobDir: string;
-  /** Path of a Playwright storage-state file; passed on as a path and never read here. */
+  /** Path of a Playwright storage-state file; read once and checked by stateScope.ts before anything starts. */
   storageStatePath?: string | undefined;
   hostEnv: Readonly<Record<string, string | undefined>>;
   /** Tests only: accept the self-signed certificate of a local https server. Nothing in production sets it. */
@@ -62,7 +68,7 @@ export interface DriverConfig {
 }
 
 /** The Chromium to run: the browsers directory named by PLAYWRIGHT_BROWSERS_PATH first (headless shell, then full Chromium), then Chrome or Chromium on PATH. */
-export function findChromium(env: Readonly<Record<string, string | undefined>>): string | undefined {
+export function findChromium(env: Readonly<Record<string, string | undefined>>, opts: { headed?: boolean } = {}): string | undefined {
   const dirs = (root: string, prefix: string): string[] => {
     try {
       return readdirSync(root).filter((n) => n.startsWith(prefix)).sort().reverse().map((n) => path.join(root, n));
@@ -73,7 +79,9 @@ export function findChromium(env: Readonly<Record<string, string | undefined>>):
   };
   const browsers = env.PLAYWRIGHT_BROWSERS_PATH;
   if (browsers !== undefined && path.isAbsolute(browsers)) {
+    // The headless shell has no window, so the sign-in step (`verify-login`) skips it.
     for (const [prefix, sub, bin] of [["chromium_headless_shell-", "chrome-headless-shell", "chrome-headless-shell"], ["chromium-", "chrome-linux", "chrome"]] as const) {
+      if (opts.headed === true && prefix.includes("headless")) continue;
       for (const dir of dirs(browsers, prefix)) {
         for (const inner of dirs(dir, sub)) if (existsSync(path.join(inner, bin))) return path.join(inner, bin);
       }
@@ -96,6 +104,14 @@ function classify(error: unknown): ToolError {
 export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
   const info = await fs.lstat(cfg.jobDir);
   if (!path.isAbsolute(cfg.jobDir) || !info.isDirectory() || info.isSymbolicLink()) throw new ToolError("bad_job_dir");
+  // The saved sign-in is read once, here, and refused when it holds anything of another origin (an older or hand-written file could carry a GitHub session); the browser is given
+  // the checked object, never the path again. Nothing is started before this passes.
+  let scoped: Exclude<NonNullable<NonNullable<Parameters<Browser["newContext"]>[0]>["storageState"]>, string> | undefined;
+  if (cfg.storageStatePath !== undefined) {
+    const read = readScopedState(cfg.storageStatePath, cfg.base);
+    if (!read.ok) throw new ToolError(read.code);
+    scoped = read.state as typeof scoped;
+  }
   const home = path.join(cfg.jobDir, "home");
   const tmp = path.join(cfg.jobDir, "tmp");
   // A plain mkdir (not recursive): a path that already exists, a planted link included, is refused rather than reused or removed.
@@ -108,7 +124,7 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
   }
   let pw: typeof import("playwright-core");
   try {
-    pw = await import("playwright-core");
+    pw = (await loadPlaywright()) as typeof import("playwright-core");
   } catch {
     // fx-swallow-ok: reported as a closed code; the loader's message names paths
     throw new ToolError("playwright_missing");
@@ -129,7 +145,7 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
       acceptDownloads: false,
       permissions: [],
       ...(cfg.ignoreHttpsErrors === true ? { ignoreHTTPSErrors: true } : {}),
-      ...(cfg.storageStatePath === undefined ? {} : { storageState: cfg.storageStatePath }),
+      ...(scoped === undefined ? {} : { storageState: scoped }),
     });
     context.setDefaultTimeout(ACTION_MS);
     context.setDefaultNavigationTimeout(NAVIGATION_MS);
@@ -234,6 +250,8 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
       },
       textOf: (ref) => guard(async () => (await target(ref)).innerText()),
       blocked: () => ({ requests: blockedRequests + (proxy?.refused() ?? 0), navigations: blockedNavigations }),
+      // One GET with no redirect followed and a short time limit; the context's request API carries the saved session's cookies.
+      identity: () => signedInAs((url) => context.request.get(url, { maxRedirects: 0, timeout: ACTION_MS, failOnStatusCode: false, headers: { accept: "application/json" } }), cfg.base),
       close: async () => {
         await browser?.close().catch(() => undefined);
         await proxy?.close();
@@ -247,5 +265,30 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
     await fs.rm(home, { recursive: true, force: true });
     await fs.rm(tmp, { recursive: true, force: true });
     throw classify(error);
+  }
+}
+
+/**
+ * The headed browser of `fx-runner verify-login`. A fresh Chromium with a window and no saved state (Playwright keeps its profile in a temporary folder it removes on close), opened on the
+ * app's sign-in address only. There is no origin pin here on purpose: the sign-in goes through the identity provider. The caller reads the state out of the context once, saves it at mode 0600
+ * and never shows it.
+ */
+export async function openHeadedBrowser(executable: string, url: string): Promise<LoginSession> {
+  let pw: typeof import("playwright-core");
+  try {
+    pw = (await loadPlaywright()) as typeof import("playwright-core");
+  } catch {
+    // fx-swallow-ok: reported as a closed code; the loader's message names paths
+    throw new ToolError("playwright_missing");
+  }
+  const browser = await pw.chromium.launch({ executablePath: executable, headless: false, chromiumSandbox: true });
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(url);
+    return { storageState: () => context.storageState(), close: () => browser.close() };
+  } catch (error) {
+    await browser.close().catch(() => undefined);
+    throw error;
   }
 }

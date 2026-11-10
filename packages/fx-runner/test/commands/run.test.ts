@@ -6,13 +6,16 @@ import { tmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CURRENT_PROTOCOL_VERSION, HelloMessage } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, HelloMessage, sha256Text } from "@fulcrumaxe/runner-protocol";
 import { spillRootFor } from "../../src/job/spillFiles.js";
 import { CliError } from "../../src/cliError.js";
 import { readHostFacts } from "../../src/hostFacts.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_VERSION } from "../../src/version.js";
 import { loadRegistration, saveRegistration } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
+import { roleToolsDigest } from "../../src/job/roleTools.js";
+import { setSetting } from "../../src/runnerSettings.js";
+import { setPlaywrightLoader } from "../../src/verifyBrowser/loadPlaywright.js";
 import type { CommandContext } from "../../src/context.js";
 import { claimBlockReason, readCanaryState } from "../../src/instructionCanaryState.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
@@ -1172,4 +1175,53 @@ describe("a 401 on the claim poll", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET);
     expect(claims()).toBe(1);
   });
+});
+
+// D#749 V2c-2b (fix round): the two wires `run` makes from the machine to the engine and back: the verify server settings (verifyServer) and the answer file (verifyAnswer). The agent is the
+// fake binary (the claude CLI is never run); it copies a prepared answer into the job's folder the way the fxverify server would.
+describe("a playwright deploy verifier job in the composed daemon (D#749 V2c-2b)", () => {
+  const ENVELOPE = { journeys: [{ id: "counter", result: "pass", steps: [{ did: "looked", dom_fact: "count is 1", number: 1 }], console_errors: 0, undo_checked: true, reloaded: true }], signed_in_as: "octo-cat" };
+  afterEach(() => setPlaywrightLoader(undefined));
+
+  it("builds the fxverify entry from the machine's verify settings (verifyServer), and reports the answer file, not the model's text (verifyAnswer)", async () => {
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    const head = git("-C", seed, "rev-parse", "HEAD").trim();
+    // a machine that passes the playwright probe
+    const exe = path.join(root, "chromium");
+    writeFileSync(exe, "#!/bin/sh\n", { mode: 0o755 });
+    const verifyDir = path.join(home, ".config", "fx-runner", "verify");
+    mkdirSync(verifyDir, { recursive: true, mode: 0o700 });
+    const state = path.join(verifyDir, "storage-state.json");
+    writeFileSync(state, JSON.stringify({ cookies: [{ name: "__Host-fx_session", value: "v", domain: "app.example.test", path: "/", expires: -1 }], origins: [] }), { mode: 0o600 });
+    chmodSync(state, 0o600);
+    setSetting(stateDir, "verify.test_account", "fx-test-user");
+    setSetting(stateDir, "verify.browser.base_url", "https://app.example.test");
+    setSetting(stateDir, "verify.browser.executable", exe);
+    setPlaywrightLoader({ available: () => true, load: async () => ({}) });
+    // the fake agent: ends with the fixture's result, after copying the prepared answer into the folder its settings file sits in
+    fake.set("stream.jsonl", fixtureText("stream.subscription.jsonl"));
+    fake.set("answer.src", JSON.stringify(ENVELOPE));
+    const script = readFileSync(fake.binary, "utf8").replace('cat "$D/stream.jsonl"', () => 'J="$(printf \'%s\\n\' "$@" | grep \'/settings.json$\' | head -1)"; [ -f "$D/answer.src" ] && { cp "$D/answer.src" "${J%/settings.json}/answer.json"; chmod 600 "${J%/settings.json}/answer.json"; }\ncat "$D/stream.jsonl"');
+    writeFileSync(fake.binary, script);
+    const job = signedJob({ role: "deploy-verifier", browser_method: "playwright_runner", task: { kind: "review", prompt: "Check the deploy.\n", prompt_sha256: sha256Text("Check the deploy.\n") }, role_tools_sha256: roleToolsDigest("deploy-verifier", "playwright_runner"), review: { head_sha: head }, issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+    cloud.enqueue(job);
+    const run = start({ host: { selfCommand: ["/opt/fx/fx-runner", "--flag"], uid: process.getuid!(), username: "tester", env: { PATH: process.env.PATH } }, hooks: { searchPath: toolbin, remoteUrl: () => pathToFileURL(remote).href } });
+    await until(() => cloud.seen.some((s) => s.path.endsWith("/done")), 20_000);
+    const argv = fake.argv();
+    expect(argv).toContain("--no-chrome");
+    expect(argv).toContain("mcp__fxverify__submit_answer");
+    const mcp = JSON.parse(readFileSync(argv[argv.indexOf("--mcp-config") + 1]!, "utf8")) as { mcpServers: Record<string, { command: string; args: string[] }> };
+    expect(mcp.mcpServers["fxverify"]?.command).toBe("/opt/fx/fx-runner");
+    expect(mcp.mcpServers["fxverify"]?.args).toEqual(expect.arrayContaining(["--flag", "verify-browser-server", "--base-url", "https://app.example.test/", "--executable", exe, "--storage-state", state]));
+    const done = cloud.seen.filter((s) => s.path.endsWith("/done"));
+    expect((done[0]!.body as { agentOutput?: unknown }).agentOutput).toEqual(ENVELOPE);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
 });

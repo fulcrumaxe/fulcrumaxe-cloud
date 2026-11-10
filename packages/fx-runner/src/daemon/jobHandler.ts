@@ -17,7 +17,7 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { CONFINED_READ_ROLES, DONE_RETRY_AFTER_SECONDS, isBrowserJobRole, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DONE_RETRY_AFTER_SECONDS, isBrowserJobRole, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type BrowserMethod, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
@@ -43,6 +43,7 @@ import type { Published } from "./push.js";
 import { clearCliStubs, stubBaseline, type StubBaseline } from "./workspaceStubs.js";
 import { startLease, type Clock, type Lease, type LeaseEnd, type EventRelay } from "./lease.js";
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
+import { withAnswerFile } from "./answerFile.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
 import { closedWord, observedClient, type StepSink } from "./stepLog.js";
 import type { JobWatch, WatchedJob } from "./watch.js";
@@ -110,7 +111,12 @@ export interface JobHandlerDeps {
    * A closed failure code ends the run `runner_setup` before any mirror or sandbox, so the agent never runs without a browser. Left out, a browser job is refused with `browser_not_connected`
    * (fail closed); a role that is not a browser role never asks.
    */
-  browserReady?: () => string | undefined | Promise<string | undefined>;
+  /**
+   * D#749 V2c-2b: the answer of a playwright deploy verifier run, read from the answer file the `fxverify` server wrote (answerFile.ts). That file is the run's answer and the model's own final text
+   * is dropped; no file or an invalid one is no answer. Absent: such a run has no answer. No other role or method is touched.
+   */
+  verifyAnswer?: (runId: string) => Record<string, unknown> | undefined;
+  browserReady?: (method?: BrowserMethod) => string | undefined | Promise<string | undefined>;
   /** D#6 R7c: builds a repo's Nix dev shell before a job that carries allowances. Absent (no `nix` on this machine, or none wired): no job gets one. */
   nix?: NixShellStep;
   /** Told the closed detail when the dev shell step is skipped. */
@@ -468,7 +474,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     let usedPort: SandboxPort = deps.sandbox;
     /** One journal line for this run (`stepLog.ts`). */
     const step: StepSink = (text) => deps.onStep?.(`fx-runner: run ${claimed.runId}: ${text}`);
-    const watched = await deps.watch?.begin({ runId: claimed.runId, role: job.role, repo: `${job.repo.owner}/${job.repo.name}`, started: deps.clock.now() });
+    const watched = await deps.watch?.begin({ runId: claimed.runId, role: job.role, repo: `${job.repo.owner}/${job.repo.name}`, started: deps.clock.now(), ...(job.browser_method === undefined ? {} : { browserMethod: job.browser_method }) });
     watched?.onTakeOver(() => {
       if (!takeoverOpen) return;
       tookOver = true;
@@ -522,7 +528,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         // `runJob` keeps its own check for callers that do not come through here.
         if (cliModelFor(job, deps.run.defaultModel) === undefined) result = { status: "failed", reason: "model_unsupported" };
         else if ((notReady = deps.credentialsReady?.()) !== undefined) result = { status: "failed", reason: notReady };
-        else if (isBrowserJobRole(job.role) && (notReady = deps.browserReady === undefined ? "browser_not_connected" : await deps.browserReady()) !== undefined) result = { status: "failed", reason: notReady };
+        else if (isBrowserJobRole(job.role) && (notReady = deps.browserReady === undefined ? "browser_not_connected" : await deps.browserReady(job.browser_method)) !== undefined) result = { status: "failed", reason: notReady };
         else if (spillFails()) result = { status: "failed", reason: "context_spill_unwritable" };
         else {
           git.check(job, claimed);
@@ -641,7 +647,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               step("check ended (not run: it is not set up on this runner)");
             }
           };
-          result = await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
+          result = withAnswerFile(job, await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger }), deps.verifyAnswer, claimed.runId);
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.

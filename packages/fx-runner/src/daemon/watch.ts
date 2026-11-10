@@ -4,6 +4,7 @@
  * the request is a 0600 file in the private state directory, and nothing the cloud sends reaches it. A failure here never touches the job:
  * with no tmux, or a tmux that will not start, the job simply runs without a watch.
  */
+import type { BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import { clearTakeover, markTakeoverReady, removeEntry, takeoverState, writeEntry } from "../watch/layout.js";
 import { endWatch, startWatch, swapToTakeover, type TmuxConfig } from "../watch/tmux.js";
 import type { Clock } from "./lease.js";
@@ -21,7 +22,7 @@ export interface WatchedJob {
 
 export interface JobWatch {
   /** Undefined when there is no watch for this job (no tmux, or it would not start). */
-  begin(job: { runId: string; role: string; repo: string; started: Date }): Promise<WatchedJob | undefined>;
+  begin(job: { runId: string; role: string; repo: string; started: Date; browserMethod?: BrowserMethod | undefined }): Promise<WatchedJob | undefined>;
 }
 
 export function createJobWatch(deps: { tmux: TmuxConfig; clock: Clock; pollMs?: number }): JobWatch {
@@ -36,7 +37,7 @@ export function createJobWatch(deps: { tmux: TmuxConfig; clock: Clock; pollMs?: 
         started = false;
       }
       if (!started) return undefined;
-      const entry = { run_id: job.runId, role: job.role, repo: job.repo, started: job.started.toISOString() };
+      const entry = { run_id: job.runId, role: job.role, repo: job.repo, started: job.started.toISOString(), ...(job.browserMethod === undefined ? {} : { browser_method: job.browserMethod }) };
       try {
         clearTakeover(stateDir, job.runId);
         writeEntry(stateDir, entry);

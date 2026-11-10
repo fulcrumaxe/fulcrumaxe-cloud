@@ -1,12 +1,12 @@
 import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { CONTEXT_WARN_PCT, ContextLedgerCapture, createUsageMeter, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, isBrowserJobRole, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WARN_PCT, ContextLedgerCapture, createUsageMeter, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type BrowserMethod, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
 import type { JobLimits } from "../../sandbox/jobLimits.js";
-import { claudeArgv } from "./argv.js";
+import { chromeFlagFor, claudeArgv } from "./argv.js";
 import { confineFileTools, readRulesFor } from "./filePermissions.js";
 import { authPresent } from "./authStatus.js";
 import type { SpawnFn } from "./capture.js";
@@ -17,7 +17,7 @@ import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 import { readSessionIndex, recordSession } from "./session.js";
 import { bashSandboxUnusableFor, type SettingsWithDeny } from "./bashSandboxProbe.js";
-import { writeJobFiles } from "./settingsFile.js";
+import { clearVerifyLeftovers, writeJobFiles, type VerifyServerSpec } from "./settingsFile.js";
 import { LineBuffer, createRunLog, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
 
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
@@ -67,6 +67,11 @@ export interface EngineConfig {
   onLocalEvent?: (event: LocalOnlyEvent) => void | Promise<void>;
   /** The agent's near-limit warning (D#6 C43-6); `resetsAtMs` when it named a reset time. Nothing about it is uploaded. */
   onNearLimit?: (info: { resetsAtMs?: number }) => void;
+  /**
+   * D#749 V2c-2b: how the CLI starts the `fxverify` MCP server for a playwright job: this program's own command and the owner's three browser settings (read again at each start).
+   * Absent, or undefined at a start: a playwright job is refused before anything is spawned.
+   */
+  verifyServer?: () => VerifyServerSpec | undefined;
 }
 
 /** How a run ended. `failureReason` is a closed code; no model text is ever in it. */
@@ -82,7 +87,7 @@ export interface RunOutcome {
 }
 
 /** The start options this engine reads. `resumeSessionId` is set by the session planner when a workspace and session are both still there. */
-export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[]; /** D#600 CX-4b: the run's spill directory; the file tools may read it. */ spillDir?: string; /** D#600 CX-6b: the model's context window in tokens, from the job. Absent: no context percentage is computed and no note is ever delivered. */ contextWindowTokens?: number; /** D#6 RUNNER-AGENT-NO-FULLCHECK: the job's approved check, denied to the agent's shell on every start and resume (the runner runs it itself). */ checkArgv?: readonly string[] };
+export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[]; /** D#600 CX-4b: the run's spill directory; the file tools may read it. */ spillDir?: string; /** D#600 CX-6b: the model's context window in tokens, from the job. Absent: no context percentage is computed and no note is ever delivered. */ contextWindowTokens?: number; /** D#6 RUNNER-AGENT-NO-FULLCHECK: the job's approved check, denied to the agent's shell on every start and resume (the runner runs it itself). */ checkArgv?: readonly string[]; /** D#749 V2c-2b: the deploy verifier's signed browser method; it picks the tool list, the MCP file and the chrome flag. */ browserMethod?: BrowserMethod };
 
 /** How a run ended: the promise every handle this engine returns carries. */
 export function outcomeOf(handle: AgentHandle): Promise<RunOutcome> {
@@ -131,7 +136,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
   async function run(opts: EngineStartOptions, resumeSessionId: string | undefined): Promise<{ handle: AgentHandle }> {
     let roleTools: readonly string[];
     try {
-      roleTools = roleToolsFor(opts.role);
+      roleTools = roleToolsFor(opts.role, (opts as EngineStartOptions).browserMethod);
     } catch (error) {
       if (error instanceof UnknownRoleError) throw new EngineRefusal("unknown_role");
       throw error;
@@ -149,10 +154,16 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     if (!(await authPresent(config.credentials.mode, { binaryPath: binary.path, env, spawn: spawnFn, launch: config.launch })).present) throw new EngineRefusal("auth_missing");
 
     const excludes = (opts as EngineStartOptions).excludes;
-    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes, (opts as EngineStartOptions).spillDir, (opts as EngineStartOptions).checkArgv);
+    const browserMethod = (opts as EngineStartOptions).browserMethod;
+    // D#749 V2c-2b: a playwright job needs the fxverify server's settings from this machine. Without them the job is not started (the daemon's probe has refused it already; this is the second lock).
+    const verifyServer = browserMethod === "playwright_runner" ? config.verifyServer?.() : undefined;
+    if (browserMethod === "playwright_runner" && verifyServer === undefined) throw new EngineRefusal("bad_start_options", "the verify browser is not configured on this machine");
+    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes, (opts as EngineStartOptions).spillDir, (opts as EngineStartOptions).checkArgv, { browserMethod, verifyServer });
+    // A run id that is started again (a re-claim after a crash) must not read the last attempt's answer or trip over its browser folders.
+    if (browserMethod === "playwright_runner") clearVerifyLeftovers(jobDir);
     // The shell sandbox must be able to start a Bash call under this job's own rules. If bubblewrap refuses, every Bash call would fail and the agent would loop to "incomplete", so the run ends now.
     if (await (config.bashSandboxUnusable ?? bashSandboxUnusableFor)(files.settings, workdir, path.join(jobDir, "probe"), { env, spawn: spawnFn, launch: config.launch })) throw new EngineRefusal("sandbox_unusable");
-    const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: [...confineFileTools(roleTools, path.resolve(workdir)), ...((opts as EngineStartOptions).spillDir === undefined ? [] : readRulesFor((opts as EngineStartOptions).spillDir!))], ...files, chrome: isBrowserJobRole(opts.role), ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
+    const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: [...confineFileTools(roleTools, path.resolve(workdir)), ...((opts as EngineStartOptions).spillDir === undefined ? [] : readRulesFor((opts as EngineStartOptions).spillDir!))], ...files, chrome: chromeFlagFor(opts.role, (opts as EngineStartOptions).browserMethod), ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);
 

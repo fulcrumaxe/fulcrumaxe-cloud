@@ -14,6 +14,9 @@ const JOURNEY_ID = /^[a-z][a-z0-9_]{0,39}$/;
 const RESULTS = ["pass", "fail", "blocked"];
 const JOURNEY_KEYS = ["id", "result", "steps", "console_errors", "undo_checked", "reloaded"];
 
+/** The signed-in account's GitHub login, as the server recorded it: 1 to 100 characters, no control character. */
+export const SIGNED_IN_AS = /^[^\u0000-\u001f\u007f]{1,100}$/;
+
 export type Verdict = { ok: true; json: string } | { ok: false; reason: string };
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -21,7 +24,7 @@ const onlyKeys = (o: Record<string, unknown>, allowed: readonly string[], requir
   Object.keys(o).every((k) => allowed.includes(k)) && required.every((k) => Object.hasOwn(o, k));
 
 /** Why a step is refused, or undefined when it is well formed and grounded. Names the journey and step, never repeats the quoted text. */
-function stepProblem(journey: string, step: unknown, trace: Trace): string | undefined {
+function stepProblem(journey: string, step: unknown, trace: Pick<Trace, "sawFact" | "sawNumber">): string | undefined {
   if (!isObject(step) || !onlyKeys(step, ["did", "dom_fact", "number"], ["did", "dom_fact"])) return "bad_shape";
   const { did, dom_fact: fact, number } = step;
   if (typeof did !== "string" || typeof fact !== "string" || did.length > MAX_STEP_TEXT || fact.length > MAX_STEP_TEXT) return "bad_value";
@@ -33,8 +36,11 @@ function stepProblem(journey: string, step: unknown, trace: Trace): string | und
   return undefined;
 }
 
-/** Checks an answer (an object, or JSON text) against the V1 shape and the trace. */
-export function groundAnswer(raw: unknown, trace: Trace): Verdict {
+/**
+ * Checks an answer (an object, or JSON text) against the V1 shape and the trace. `signedInAs`: whether the optional top-level `signed_in_as` is accepted. The server never accepts it
+ * from the model (it records the account itself, after this check); the runner's reader of the finished file does.
+ */
+export function groundAnswer(raw: unknown, trace: Pick<Trace, "sawFact" | "sawNumber">, opts: { signedInAs?: boolean } = {}): Verdict {
   let value = raw;
   if (typeof raw === "string") {
     if (Buffer.byteLength(raw, "utf8") > MAX_ENVELOPE_BYTES) return { ok: false, reason: "too_large" };
@@ -45,7 +51,11 @@ export function groundAnswer(raw: unknown, trace: Trace): Verdict {
       return { ok: false, reason: "not_json" };
     }
   }
-  if (!isObject(value) || !onlyKeys(value, ["journeys"], ["journeys"]) || !Array.isArray(value.journeys) || value.journeys.length > MAX_JOURNEYS) return { ok: false, reason: "bad_shape" };
+  if (isObject(value) && Object.hasOwn(value, "signed_in_as")) {
+    if (opts.signedInAs !== true) return { ok: false, reason: "signed_in_as_not_allowed" };
+    if (typeof value.signed_in_as !== "string" || !SIGNED_IN_AS.test(value.signed_in_as)) return { ok: false, reason: "bad_value" };
+  }
+  if (!isObject(value) || !onlyKeys(value, ["journeys", "signed_in_as"], ["journeys"]) || !Array.isArray(value.journeys) || value.journeys.length > MAX_JOURNEYS) return { ok: false, reason: "bad_shape" };
   const seen = new Set<string>();
   for (const [j, entry] of value.journeys.entries()) {
     if (!isObject(entry) || !onlyKeys(entry, JOURNEY_KEYS, JOURNEY_KEYS)) return { ok: false, reason: `journey ${j}: bad_shape` };

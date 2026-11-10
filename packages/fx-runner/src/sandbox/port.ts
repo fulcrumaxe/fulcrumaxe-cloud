@@ -1,4 +1,4 @@
-import type { AgentHandle, NormalizedEvent, StartOptions } from "@fulcrumaxe/runner-protocol";
+import type { AgentHandle, BrowserMethod, NormalizedEvent, StartOptions } from "@fulcrumaxe/runner-protocol";
 import type { JobAllowanceGrant } from "./allowances.js";
 
 /**
@@ -49,6 +49,8 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   contextWindowTokens?: number;
   /** D#6 RUNNER-AGENT-NO-FULLCHECK: the job's approved check (the signed vector). It becomes `Bash` deny entries in the agent's settings, for a start and a resume alike: the runner runs it, the agent does not. Absent: no check. */
   checkArgv?: readonly string[];
+  /** D#749 V2c-2b: the browser method the deploy verifier job signed. The engine builds the job's tool list, MCP file and chrome flag from it, on a start and a resume alike. Absent: the Chrome list, as before the second method. */
+  browserMethod?: BrowserMethod;
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
   onEvent: (event: NormalizedEvent) => void | Promise<void>;
 }

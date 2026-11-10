@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { SESSION_ID_PATTERN } from "@fulcrumaxe/runner-protocol";
+import { SESSION_ID_PATTERN, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
 import { baseToolNames } from "./argv.js";
 import { jobDirFor } from "./engine.js";
@@ -33,7 +33,7 @@ export function sessionOfRun(logFile: string): string | undefined {
  * The interactive resume of a taken-over run (D#6 R4a-7): the same job settings file (which carries the sandbox), the same MCP file and tool
  * list, no `-p`, and `--permission-mode default` so the person approves each action. The workspace is the one the session index recorded.
  */
-export function takeoverCommand(input: { stateDir: string; runId: string; role: string }): { argv: string[]; cwd: string } {
+export function takeoverCommand(input: { stateDir: string; runId: string; role: string; browserMethod?: BrowserMethod | undefined }): { argv: string[]; cwd: string } {
   const jobDir = jobDirFor(path.join(input.stateDir, "jobs"), input.runId);
   const settingsPath = path.join(jobDir, "settings.json");
   const mcpPath = path.join(jobDir, "mcp.json");
@@ -47,10 +47,12 @@ export function takeoverCommand(input: { stateDir: string; runId: string; role: 
     "--settings", settingsPath,
     "--strict-mcp-config",
     "--mcp-config", mcpPath,
-    "--tools", baseToolNames(roleToolsFor(input.role)).join(","),
+    "--tools", baseToolNames(roleToolsFor(input.role, input.browserMethod)).join(","),
     "--disallowedTools", "WebFetch", "WebSearch",
     "--disable-slash-commands",
     "--permission-mode", "default",
+    // A playwright job drives the fxverify server in its MCP file; the person's own "Chrome on by default" setting must not add the extension's tools to it (as in the job's own command line).
+    ...(input.browserMethod === "playwright_runner" ? ["--no-chrome"] : []),
   ];
   return { argv, cwd: known.workspace };
 }

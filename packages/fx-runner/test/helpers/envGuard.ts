@@ -149,6 +149,12 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
   // D#749 V2c-2a, the verify browser server. No environment read (the host environment, streams and job directory arrive as arguments) and no process of its own: Chromium is started by playwright-core.
   "src/verifyBrowser/server.ts": ["fs", "path", "stream"], // the one answer.json in the job directory (exclusive create, 0600); stream is only the types of the injected input and output
+  "src/commands/verifyBrowserServer.ts": ["path"], // D#749 V2c-2b: the server entry checks its path flags are plain absolute paths; nothing is read or written here
+  "src/commands/verifyLogin.ts": ["fs", "path"], // D#749 V2c-2b: the folder and name of the storage-state file (written by the private-file writer); `--forget` looks at it with lstat and removes exactly that one name (a link is removed, never followed)
+  "src/daemon/answerFile.ts": ["fs", "path"], // D#749 V2c-2b: one answer.json in a job directory, opened without following a link and judged by the open handle (fstat), a bounded read, then its removal
+  "src/daemon/playwrightProbe.ts": ["fs", "path"], // D#749 V2c-2b: stat of the browser program, lstat and a bounded read of the storage-state file for its cookie names, hosts and expiry (content never returned or logged)
+  "src/verifyBrowser/stateScope.ts": ["fs"], // D#749 V2c-2b: the server reads the storage-state file once: opened without following a link, judged by the open handle (plain file, mode, size), parsed and checked for foreign origins
+  "src/verifyBrowser/loadPlaywright.ts": ["path"], // D#749 V2c-2b: the sidecar folder's path; the loader that opens it is built in bin/fx-runner.mjs
   "src/verifyBrowser/proxy.ts": ["http", "net"], // the origin proxy on 127.0.0.1: an http server for forwarded requests and CONNECT tunnels to the one base host and port; the upstream address is the base's own
   "src/verifyBrowser/driver.ts": ["fs", "path"], // the job directory's HOME and TMPDIR (lstat of the job directory, non-recursive mkdir so nothing existing is reused, removal of exactly those two) and the lookup of an installed Chromium (directory listing, existence)
 };

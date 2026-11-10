@@ -40,7 +40,7 @@ beforeAll(async () => {
       };
       return pump();
     }
-    res.writeHead(200, { "x-seen-proxy-headers": String(req.headers["proxy-authorization"] ?? "") }).end(`hello ${req.method} ${req.url}`);
+    res.writeHead(200, { "x-seen-proxy-headers": String(req.headers["proxy-authorization"] ?? ""), "x-seen-host": String(req.headers.host) }).end(`hello ${req.method} ${req.url}`);
   });
   appPort = await listen(app);
   echo = createTcpServer((socket) => socket.pipe(socket));
@@ -55,9 +55,9 @@ afterAll(async () => {
 });
 
 /** A plain forward-proxy request: the request line carries the whole address. */
-function viaProxy(address: string, method = "GET"): Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }> {
+function viaProxy(address: string, method = "GET", host?: string): Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: "127.0.0.1", port: proxy.port, method, path: address, headers: { host: address.startsWith("http") ? new URL(address).host : "x", "proxy-authorization": "secret" } }, (res) => {
+    const req = request({ host: "127.0.0.1", port: proxy.port, method, path: address, headers: { host: host ?? (address.startsWith("http") ? new URL(address).host : "x"), "proxy-authorization": "secret" } }, (res) => {
       const parts: Buffer[] = [];
       res.on("data", (c: Buffer) => parts.push(c));
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(parts).toString("utf8"), headers: res.headers }));
@@ -92,6 +92,14 @@ function tunnel(authority: string): Promise<{ status: string; echoed: string }> 
 }
 
 describe("the origin proxy", () => {
+  // D#749 V2c-2b (from the 2a review): a raw local client can send a Host header that names another virtual host on the base's address. The proxy puts the base's own in its place.
+  it("overwrites the Host header with the base's own, whatever the client sent", async () => {
+    const out = await viaProxy(`http://127.0.0.1:${appPort}/h`, "GET", "evil.example");
+    expect(out.status).toBe(200);
+    expect(out.headers["x-seen-host"]).toBe(`127.0.0.1:${appPort}`);
+    expect((await viaProxy(`http://127.0.0.1:${appPort}/h`, "GET", "127.0.0.1:1")).headers["x-seen-host"]).toBe(`127.0.0.1:${appPort}`);
+  });
+
   it("passes a request to the exact base origin, without the proxy's own headers", async () => {
     const out = await viaProxy(`http://127.0.0.1:${appPort}/x?y=1`);
     expect(out.status).toBe(200);

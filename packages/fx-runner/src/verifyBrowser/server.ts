@@ -171,7 +171,11 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
       if (accepted) return fail("already_submitted");
       const verdict = groundAnswer(a.envelope, trace);
       if (!verdict.ok) return fail("answer_rejected", verdict.reason);
-      await fs.writeFile(path.join(opts.jobDir, "answer.json"), verdict.json, { flag: "wx", mode: 0o600 });
+      // The signed-in account is recorded here, by the server, from the app's own identity route through the saved session. The model cannot set it (a `signed_in_as` of its own was
+      // refused above); when the lookup gives nothing the field is left out, and the cloud then fails the row closed.
+      const login = driver === undefined ? undefined : await driver.identity().catch(() => undefined);
+      const json = login === undefined ? verdict.json : JSON.stringify({ ...(JSON.parse(verdict.json) as Record<string, unknown>), signed_in_as: login });
+      await fs.writeFile(path.join(opts.jobDir, "answer.json"), json, { flag: "wx", mode: 0o600 });
       accepted = true;
       return ok("answer accepted");
     }

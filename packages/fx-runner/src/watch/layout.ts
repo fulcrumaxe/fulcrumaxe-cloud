@@ -5,6 +5,7 @@
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { isBrowserMethod, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** What one read of a log returns at most. */
@@ -50,6 +51,8 @@ export interface WatchEntry {
   started: string;
   /** Set when the job was handed over to the person: the entry is then not listed as a running job, and `__takeover` reads its role from it. */
   taken_over?: true;
+  /** D#749 V2c-2b: the deploy verifier's signed browser method, so a take-over resumes the session with the tool list the job really held. */
+  browser_method?: BrowserMethod;
 }
 
 const entryFile = (stateDir: string, runId: string): string => path.join(watchDir(stateDir), `${checkedId(runId)}.json`);
@@ -73,7 +76,7 @@ function parseEntry(text: string): WatchEntry | undefined {
   try {
     const value = JSON.parse(text) as Partial<Record<keyof WatchEntry, unknown>>;
     if (typeof value.run_id === "string" && RUN_ID.test(value.run_id) && typeof value.role === "string" && typeof value.repo === "string" && typeof value.started === "string") {
-      return { run_id: value.run_id.toLowerCase(), role: value.role, repo: value.repo, started: value.started, ...(value.taken_over === true ? { taken_over: true as const } : {}) };
+      return { run_id: value.run_id.toLowerCase(), role: value.role, repo: value.repo, started: value.started, ...(value.taken_over === true ? { taken_over: true as const } : {}), ...(isBrowserMethod(value.browser_method) ? { browser_method: value.browser_method } : {}) };
     }
   } catch {
     // fx-swallow-ok: a damaged record is a job that is not listed

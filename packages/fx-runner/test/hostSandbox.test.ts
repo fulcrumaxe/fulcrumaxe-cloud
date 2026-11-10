@@ -61,6 +61,17 @@ function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envO
 
 afterEach(() => vi.useRealTimers());
 
+describe("hostSandbox: the signed browser method reaches the runtime on a start and on a resume (D#749 V2c-2b)", () => {
+  it("passes browserMethod to runtime.start both ways, and nothing when the options carry none", async () => {
+    const t = setup();
+    const handle = await t.create();
+    await t.host.startDetached(handle, t.opts({ browserMethod: "playwright_runner" })).hookFired;
+    await t.host.resume(handle, "sess-1", "next", t.opts({ browserMethod: "playwright_runner" })).hookFired;
+    await t.host.startDetached(handle, t.opts()).hookFired;
+    expect(t.starts.map((s) => (s as { browserMethod?: string }).browserMethod)).toEqual(["playwright_runner", "playwright_runner", undefined]);
+  });
+});
+
 describe("hostSandbox: refusals happen before anything is built or started", () => {
   const rules: Array<[string, NetworkRule]> = [
     ["an authHeader rule", { host: "api.anthropic.com", purpose: "model", authHeader: "x-api-key" }],

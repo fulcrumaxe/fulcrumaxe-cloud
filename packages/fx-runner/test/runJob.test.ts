@@ -164,6 +164,20 @@ describe("runJob: one path through the port", () => {
     expect(created).toEqual([]);
   });
 
+  it("hands the job's signed browser method to the sandbox on a start and on a resume, and none when the job has none (D#749 V2c-2b)", async () => {
+    const fresh = recordingPort();
+    await runJob(jobWith({ browser_method: "playwright_runner" } as Partial<RunnableJob>), depsFor(fresh.port).deps);
+    expect(fresh.calls).toContain("start");
+    expect(fresh.started[0]!.browserMethod).toBe("playwright_runner");
+    const resumed = recordingPort();
+    await runJob(jobWith({ browser_method: "playwright_runner", continues: { parent_run_id: RUN, session_id: "sess-7", branch: "fx/x" } } as Partial<RunnableJob>), depsFor(resumed.port, { planSession: () => ({ kind: "resume", sessionId: "sess-7", workspace: "/work/old" }) }).deps);
+    expect(resumed.calls).toContain("resume:sess-7");
+    expect(resumed.started[0]!.browserMethod).toBe("playwright_runner");
+    const none = recordingPort();
+    await runJob(jobWith(), depsFor(none.port).deps);
+    expect(none.started[0]!.browserMethod).toBeUndefined();
+  });
+
   it("resumes a session this machine holds, in its own workspace, and creates no workspace", async () => {
     const { port, calls, started } = recordingPort();
     const { deps, created } = depsFor(port, { planSession: () => ({ kind: "resume", sessionId: "sess-7", workspace: "/work/old" }) });

@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { saveRegistration } from "../../src/config.js";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -307,6 +309,31 @@ describe("the interactive resume of a taken-over run", () => {
   it("a session id that could pass as a flag is never used", async () => {
     await jobFiles([JSON.stringify({ kind: "stdout", line: JSON.stringify({ session_id: "--dangerously-skip-permissions" }) })]);
     expect(() => takeoverCommand({ stateDir, runId: RUN_A, role: "executor" })).toThrow(/no session/);
+  });
+});
+
+describe("the take-over pane command passes the run's signed browser method (D#749 V2c-2b)", () => {
+  async function takeOverWith(method: "playwright_runner" | "chrome_runner" | undefined) {
+    const r = rig();
+    saveRegistration(stateDir, { version: 1, cloud_origin: "https://cloud.example.test", runner_id: randomUUID(), account_id: randomUUID(), credential_mode: "subscription", jkt: "k".repeat(43), registered_at: new Date().toISOString() });
+    writeEntry(stateDir, { run_id: RUN_A, role: "deploy-verifier", repo: "acme/app", started: "2026-10-08T10:00:00.000Z", taken_over: true, ...(method === undefined ? {} : { browser_method: method }) });
+    const taken: Array<Record<string, unknown>> = [];
+    const engine = r.host.engine as unknown as Record<string, unknown>;
+    engine["locate"] = () => "/bin/claude";
+    engine["takeOver"] = async (input: Record<string, unknown>) => (taken.push(input), 0);
+    (r.host as { osrelease?: string }).osrelease = "6.1.0";
+    expect(await takeoverPaneCommand(flags([["run", RUN_A]]), r.ctx, r.host)).toBe(0);
+    return taken;
+  }
+
+  it("a playwright run is taken over with its method, so the person's session has the playwright tool list", async () => {
+    expect(await takeOverWith("playwright_runner")).toEqual([expect.objectContaining({ runId: RUN_A, role: "deploy-verifier", browserMethod: "playwright_runner" })]);
+  });
+
+  it("control: a Chrome run and a run with no method are taken over with theirs", async () => {
+    expect((await takeOverWith("chrome_runner"))[0]).toMatchObject({ browserMethod: "chrome_runner" });
+    const none = (await takeOverWith(undefined))[0]!;
+    expect(none["browserMethod"]).toBeUndefined();
   });
 });
 

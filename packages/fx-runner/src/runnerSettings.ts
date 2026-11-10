@@ -8,6 +8,7 @@ import path from "node:path";
 import { MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, type JobClass } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "./cliError.js";
 import { writePrivateFile } from "./config.js";
+import { parseBase } from "./verifyBrowser/pin.js";
 
 /** Jobs held at once, light and heavy together, never exceed the light maximum (8). */
 const MAX_TOTAL_CAPACITY = MAX_LIGHT_CAPACITY;
@@ -44,12 +45,39 @@ export interface VerifySettings {
   deployArgv?: readonly string[];
   deployDir?: string;
   testAccount?: string;
+  /** D#749 V2c-2b: the runner-owned Playwright browser. All three are the machine owner's; none of them lives in a repository. */
+  browser?: BrowserSettings;
+}
+
+/**
+ * D#749 V2c-2b. `executable`: the Chromium (or Chrome) the verify browser runs, an absolute path, never the person's running Chrome. `storageState`: the Playwright storage-state file `fx-runner verify-login`
+ * wrote (default `~/.config/fx-runner/verify/storage-state.json`, mode 0600, inside the credential floor). `baseUrl`: the app under test, https (or loopback http).
+ */
+export interface BrowserSettings {
+  executable?: string;
+  storageState?: string;
+  baseUrl?: string;
+}
+
+export const VERIFY_BROWSER_EXECUTABLE_KEY = "verify.browser.executable";
+export const VERIFY_BROWSER_STORAGE_STATE_KEY = "verify.browser.storage_state";
+export const VERIFY_BROWSER_BASE_URL_KEY = "verify.browser.base_url";
+const BROWSER_KEYS = [VERIFY_BROWSER_EXECUTABLE_KEY, VERIFY_BROWSER_STORAGE_STATE_KEY, VERIFY_BROWSER_BASE_URL_KEY] as const;
+/** The storage-state file of a runner that was not told another: under the credential floor's `.config/fx-runner`. */
+export const DEFAULT_STORAGE_STATE = [".config", "fx-runner", "verify", "storage-state.json"] as const;
+export const storageStateFor = (home: string, settings: BrowserSettings | undefined): string => settings?.storageState ?? path.join(home, ...DEFAULT_STORAGE_STATE);
+/** A base URL as stored: https, or http on a loopback host (the same rule as the browser's origin pin), with no credentials, no query and no fragment, at most 200 characters. */
+export function parseBaseUrlSetting(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 200) return undefined;
+  const pin = parseBase(value);
+  const u = pin === undefined ? undefined : new URL(pin.href);
+  return pin === undefined || u === undefined || u.search !== "" || u.hash !== "" ? undefined : pin.href;
 }
 
 export const VERIFY_DEPLOY_ARGV_KEY = "verify.deploy_argv";
 export const VERIFY_DEPLOY_DIR_KEY = "verify.deploy_dir";
 export const VERIFY_TEST_ACCOUNT_KEY = "verify.test_account";
-const VERIFY_KEYS = [VERIFY_DEPLOY_ARGV_KEY, VERIFY_DEPLOY_DIR_KEY, VERIFY_TEST_ACCOUNT_KEY] as const;
+const VERIFY_KEYS = [VERIFY_DEPLOY_ARGV_KEY, VERIFY_DEPLOY_DIR_KEY, VERIFY_TEST_ACCOUNT_KEY, ...BROWSER_KEYS] as const;
 /** Bounds on a deploy command: at most 32 words, each 1 to 500 characters with no control character (so no newline and no NUL). */
 export const MAX_DEPLOY_ARGV_WORDS = 32;
 const DEPLOY_WORD = /^[^\p{Cc}\p{Cf}\u2028\u2029]{1,500}$/u;
@@ -125,7 +153,12 @@ export function loadSettings(stateDir: string): RunnerSettings {
     const argv = parseDeployArgv(verify?.["deployArgv"]);
     const account = typeof verify?.["testAccount"] === "string" && TEST_ACCOUNT.test(verify["testAccount"]) ? verify["testAccount"] : undefined;
     const dir = isCheckoutPath(verify?.["deployDir"]) ? verify["deployDir"] : undefined;
-    if (argv !== undefined || dir !== undefined || account !== undefined) settings.verify = { ...(argv === undefined ? {} : { deployArgv: argv }), ...(dir === undefined ? {} : { deployDir: dir }), ...(account === undefined ? {} : { testAccount: account }) };
+    const saved = verify?.["browser"] as Record<string, unknown> | null | undefined;
+    const executable = isCheckoutPath(saved?.["executable"]) ? saved["executable"] : undefined;
+    const storageState = isCheckoutPath(saved?.["storageState"]) ? saved["storageState"] : undefined;
+    const baseUrl = parseBaseUrlSetting(saved?.["baseUrl"]);
+    const browser: BrowserSettings = { ...(executable === undefined ? {} : { executable }), ...(storageState === undefined ? {} : { storageState }), ...(baseUrl === undefined ? {} : { baseUrl }) };
+    if (argv !== undefined || dir !== undefined || account !== undefined || Object.keys(browser).length > 0) settings.verify = { ...(argv === undefined ? {} : { deployArgv: argv }), ...(dir === undefined ? {} : { deployDir: dir }), ...(account === undefined ? {} : { testAccount: account }), ...(Object.keys(browser).length > 0 ? { browser } : {}) };
   } catch {
     // fx-swallow-ok: a missing or damaged settings file is the defaults
   }
@@ -154,6 +187,18 @@ function setVerify(stateDir: string, key: (typeof VERIFY_KEYS)[number], text: st
     const argv = parseDeployArgv(parsed);
     if (argv === undefined) throw new CliError(`${key} takes a JSON array of 1 to ${MAX_DEPLOY_ARGV_WORDS} words, for example '["bash", ".autonomous-team/deploy-staging.sh"]'`, 2);
     verify.deployArgv = argv;
+  } else if ((BROWSER_KEYS as readonly string[]).includes(key)) {
+    const browser: BrowserSettings = { ...verify.browser };
+    if (key === VERIFY_BROWSER_BASE_URL_KEY) {
+      const url = parseBaseUrlSetting(text);
+      if (url === undefined) throw new CliError(`${key} takes the app's address: https, or http on a loopback host, with no credentials, query or fragment`, 2);
+      browser.baseUrl = url;
+    } else {
+      if (!isCheckoutPath(text)) throw new CliError(`${key} takes an absolute path, written plainly (no . or .. part, no trailing slash)`, 2);
+      if (key === VERIFY_BROWSER_EXECUTABLE_KEY) browser.executable = text;
+      else browser.storageState = text;
+    }
+    verify.browser = browser;
   } else if (key === VERIFY_DEPLOY_DIR_KEY) {
     if (!isCheckoutPath(text)) throw new CliError(`${key} takes the absolute path of a repository checkout on this machine, written plainly (no . or .. part, no trailing slash)`, 2);
     verify.deployDir = text;
@@ -198,8 +243,16 @@ export function unsetSetting(stateDir: string, key: string): string {
     const left: VerifySettings = { ...settings.verify };
     if (key === VERIFY_DEPLOY_ARGV_KEY) delete left.deployArgv;
     else if (key === VERIFY_DEPLOY_DIR_KEY) delete left.deployDir;
-    else delete left.testAccount;
-    if (left.deployArgv === undefined && left.deployDir === undefined && left.testAccount === undefined) delete settings.verify;
+    else if (key === VERIFY_TEST_ACCOUNT_KEY) delete left.testAccount;
+    else {
+      const browser: BrowserSettings = { ...left.browser };
+      if (key === VERIFY_BROWSER_EXECUTABLE_KEY) delete browser.executable;
+      else if (key === VERIFY_BROWSER_STORAGE_STATE_KEY) delete browser.storageState;
+      else delete browser.baseUrl;
+      if (Object.keys(browser).length === 0) delete left.browser;
+      else left.browser = browser;
+    }
+    if (left.deployArgv === undefined && left.deployDir === undefined && left.testAccount === undefined && left.browser === undefined) delete settings.verify;
     else settings.verify = left;
     writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
     return `${key} is cleared; it applies from the next claim`;
