@@ -657,7 +657,23 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
         expect(row.method).toBe("playwright_runner");
         await endRun(row.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")], signed_in_as: " FX-Tester " });
         expect(await run().settle({ accountId: a.accountId, repoId: repo, row })).toBe("settled");
-        expect(await reread(a, row.id)).toMatchObject({ status: "verified", reason_code: null });
+        expect(await reread(a, row.id)).toMatchObject({ status: "verified", reason_code: null, account_check: "matched" });
+      });
+
+      it("a failed journey beside the matching account stores `matched` too: the proof is of the account, not of the verdict", async () => {
+        const repo = await repoWithAccount("fx-tester");
+        const { row } = await runningRow(a, repo);
+        await endRun(row.run_id!, "succeeded", { journeys: [pass("c1", { result: "fail" }), pass("c2"), pass("s_sign_in")], signed_in_as: "fx-tester" });
+        expect(await run().settle({ accountId: a.accountId, repoId: repo, row })).toBe("settled");
+        expect(await reread(a, row.id)).toMatchObject({ status: "failed", account_check: "matched" });
+      });
+
+      it("a run that fails before any answer stores no account check, even with an account configured", async () => {
+        const repo = await repoWithAccount("fx-tester");
+        const { row } = await runningRow(a, repo);
+        await endRun(row.run_id!, "failed", null);
+        expect(await run().settle({ accountId: a.accountId, repoId: repo, row })).toBe("settled");
+        expect(await reread(a, row.id)).toMatchObject({ status: "unverified", reason_code: "run_failed", account_check: null });
       });
 
       it("another account, none recorded, or only the model's own words ends the row unverified wrong_account and files no bug item, even beside a failed journey", async () => {
@@ -672,7 +688,7 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
           const made = await runningRow(a, repo, 60 + i, shaN(900 + i));
           await endRun(made.row.run_id!, "succeeded", envelope);
           expect(await run().settle({ accountId: a.accountId, repoId: repo, row: made.row }), String(i)).toBe("settled");
-          expect(await reread(a, made.row.id), String(i)).toMatchObject({ status: "unverified", reason_code: "wrong_account", bug_item_id: null });
+          expect(await reread(a, made.row.id), String(i)).toMatchObject({ status: "unverified", reason_code: "wrong_account", bug_item_id: null, account_check: "mismatch" });
           expect(await factKinds(made.itemId), String(i)).toEqual(["verify_started", "verify_unverified:wrong_account"]);
         }
         expect(await itemsOf(repo)).toEqual([]);
@@ -692,7 +708,7 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
           expect(row.method).toBe("chrome_runner");
           await endRun(row.run_id!, "succeeded", envelope);
           expect(await run().settle({ accountId: a.accountId, repoId: repo, row }), String(i)).toBe("settled");
-          expect(await reread(a, row.id), String(i)).toMatchObject({ status: "unverified", reason_code: "account_unverifiable", bug_item_id: null });
+          expect(await reread(a, row.id), String(i)).toMatchObject({ status: "unverified", reason_code: "account_unverifiable", bug_item_id: null, account_check: "unverifiable" });
           expect(await factKinds(made.itemId), String(i)).toEqual(["verify_started", "verify_unverified:account_unverifiable"]);
         }
         expect(await itemsOf(repo)).toEqual([]);
@@ -703,14 +719,14 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
         const { row } = await runningRow(a, repo);
         await endRun(row.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")] });
         expect(await run().settle({ accountId: a.accountId, repoId: repo, row })).toBe("settled");
-        expect(await reread(a, row.id)).toMatchObject({ status: "verified" });
+        expect(await reread(a, row.id)).toMatchObject({ status: "verified", account_check: null });
         const made = await deployingRow(a, repo, 75, shaN(975));
         starter.signAs = "chrome_runner";
         expect(await run().ready(readyInput(a, repo, made.row))).toBe("started");
         const chrome = (await reread(a, made.row.id))!;
         await endRun(chrome.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2"), pass("s_sign_in")] });
         expect(await run().settle({ accountId: a.accountId, repoId: repo, row: chrome })).toBe("settled");
-        expect(await reread(a, chrome.id)).toMatchObject({ status: "verified" });
+        expect(await reread(a, chrome.id)).toMatchObject({ status: "verified", account_check: null });
       });
     });
   });

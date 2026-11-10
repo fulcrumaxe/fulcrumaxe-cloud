@@ -478,6 +478,69 @@ export function receiptsSection(data) {
 }
 
 /**
+ * D#749 V4b: the check on the deployed app, for the card. The server sends `verify` only while the post-merge check is on for the item's repository and the
+ * item has a row, so a repository without it draws nothing, and switching it off takes the section away on the next refresh. Everything shown is words: a
+ * row that has not started reads "Waiting to start" with no reason, a finished row says verified, failed or not verified, and a row that could not be checked
+ * says why in a plain sentence for each of the closed reasons (a reason this build does not know gets the general sentence; the code itself is never shown).
+ * The method is a badge, the step counts are numbers from the row, and the bug item a failed row filed is a button that opens it.
+ */
+export const VERIFY_HEADING = "Check on the deployed app";
+export const VERIFY_STATUS_WORDS = {
+  pending: "Waiting to start.",
+  deploying: "Waiting to start.",
+  running: "Being checked now.",
+  verified: "Verified on the deployed app.",
+  failed: "Failed: the deployed app has a problem.",
+  unverified: "Not verified: the check could not be made.",
+};
+export const VERIFY_REASON_SENTENCES = {
+  no_browser: "No browser was available to drive, so the app was not checked.",
+  chrome_not_connected: "Chrome was not connected on your runner, so the app was not checked.",
+  wrong_account: "The browser was signed in as a different account than the one set for checking, so nothing it did counts.",
+  sign_in_refused: "The app refused the sign-in for the checking account, so it could not be checked.",
+  deploy_failed: "The new version did not deploy, so there was nothing to check.",
+  deployment_unreachable: "The deployed app could not be reached, so it was not checked.",
+  commit_not_deployed: "The app was still running a different version than this merge, so it was not checked.",
+  envelope_rejected: "The tester's answer could not be read, so its result was not trusted.",
+  hollow_pass: "The tester said everything passed without showing its work, so the pass does not count.",
+  journey_blocked: "A step could not be completed, so the check reached no verdict.",
+  journeys_missing: "The tester did not report on every step it was given, so its result was not trusted.",
+  run_failed: "The checking run itself failed before it gave an answer.",
+  verify_disabled: "Checking was switched off before this one started.",
+  account_unverifiable: "The signed-in account could not be confirmed with this browser method, so the result was not trusted.",
+};
+export const VERIFY_REASON_UNKNOWN = "The check could not be made.";
+export const VERIFY_METHOD_WORDS = {
+  chrome_runner: "Chrome on your runner",
+  playwright_runner: "Playwright on your runner",
+  playwright_sandbox: "Playwright in the sandbox",
+};
+export const VERIFY_BUG_LABEL = "Open the bug item";
+const countOf = (n) => (Number.isInteger(n) && n >= 0 ? n : null);
+export function verifySection(data) {
+  const v = data && data.verify;
+  if (!isObj(v) || typeof v.status !== "string" || !Object.hasOwn(VERIFY_STATUS_WORDS, v.status)) return null;
+  const held = v.status === "pending" || v.status === "deploying";
+  const finished = v.status === "verified" || v.status === "failed";
+  const total = isObj(v.journeys) ? countOf(v.journeys.total) : null;
+  const passed = isObj(v.journeys) ? countOf(v.journeys.passed) : null;
+  const failed = isObj(v.journeys) ? countOf(v.journeys.failed) : null;
+  const counts = finished && total !== null && passed !== null && failed !== null ? passed + " of " + total + " steps passed" + (failed > 0 ? ", " + failed + " failed" : "") + "." : null;
+  const reason = v.status === "unverified" ? (typeof v.reason === "string" && Object.hasOwn(VERIFY_REASON_SENTENCES, v.reason) ? VERIFY_REASON_SENTENCES[v.reason] : VERIFY_REASON_UNKNOWN) : null;
+  const when = !held && typeof v.at === "string" ? formatWhen(v.at) : "";
+  return {
+    heading: VERIFY_HEADING,
+    status: held ? "waiting" : v.status,
+    text: VERIFY_STATUS_WORDS[v.status] + (when !== "" ? " " + when + "." : ""),
+    reason,
+    counts,
+    method: !held && typeof v.method === "string" && Object.hasOwn(VERIFY_METHOD_WORDS, v.method) ? { id: v.method, label: VERIFY_METHOD_WORDS[v.method] } : null,
+    account: v.account === "matched" ? "Signed in as the account set for checking." : null,
+    bugItemId: v.status === "failed" && typeof v.bug_item_id === "string" && ITEM_ID.test(v.bug_item_id) ? v.bug_item_id.toLowerCase() : null,
+  };
+}
+
+/**
  * D#7 DP7-2f: the Reverse control. `GET /work-items/{id}/receipts` (any member) says per receipt what it costs to reverse and where a reversal stands; every
  * line below is the server's own fixed sentence (`deadline_text`, `price_text`, the reversal's `text`) or one of the words here. A reversal is never undone:
  * "Reversed" has no control. A failed reversal is shown with its reason; it has a "Try again" control only where the server says `can_retry` (a failed re-run
@@ -926,6 +989,7 @@ export function buildInsight(data, timeZone) {
     setupPause: setupPauseLine(data),
     startDecision: startDecisionLine(data),
     receipts: receiptsSection(data),
+    verify: verifySection(data),
     childLaunch: childLaunchLine(data),
     banner: readyBanner(data),
     queueLine: queueLine(data, timeZone),
@@ -1033,6 +1097,19 @@ export function createInsightPanel(deps) {
       h("p", { role: "status", "data-testid": "pl-public-change-sentence" }, c.sentence),
       h("p", { class: "pl-muted", "data-testid": "pl-public-change-where" }, c.repo, c.branch ? " · " + c.branch : "", c.prText ? " · " + c.prText : ""),
       c.prUrl ? h("a", { href: c.prUrl, target: "_blank", rel: "noopener noreferrer", "data-testid": "pl-public-change-link" }, "Open the public pull request on GitHub") : null
+    );
+  }
+
+  function verifyBlock(v) {
+    return h(
+      "section",
+      { class: "pl-ins-verify", "data-testid": "pl-verify", "data-status": v.status },
+      h("h3", { class: "pl-detail-sub", "data-testid": "pl-verify-heading" }, v.heading),
+      h("p", { role: "status", "data-testid": "pl-verify-status" }, v.text, v.method ? [" ", h("span", { class: "pl-verify-badge", "data-testid": "pl-verify-method", "data-method": v.method.id }, v.method.label)] : null),
+      v.reason ? h("p", { "data-testid": "pl-verify-reason" }, v.reason) : null,
+      v.counts ? h("p", { class: "pl-muted", "data-testid": "pl-verify-counts" }, v.counts) : null,
+      v.account ? h("p", { class: "pl-muted", "data-testid": "pl-verify-account" }, v.account) : null,
+      v.bugItemId && deps.onOpenItem ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-verify-bug", onClick: () => deps.onOpenItem(v.bugItemId) }, VERIFY_BUG_LABEL) : null
     );
   }
 
@@ -1268,6 +1345,7 @@ export function createInsightPanel(deps) {
       m.recheck ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-review-recheck" }, m.recheck) : [],
       m.publicChange ? publicChangeBlock(m.publicChange) : [],
       m.branchCleanup ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-branch-cleanup" }, m.branchCleanup) : [],
+      m.verify ? verifyBlock(m.verify) : [],
       m.receipts
         ? [
             h("h3", { class: "pl-detail-sub", "data-testid": "pl-receipts-heading" }, m.receipts.heading),

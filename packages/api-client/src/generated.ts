@@ -590,6 +590,21 @@ export interface Operations {
         rejected: string;
       }>;
       receipts_total?: number;
+      verify?: {
+        status: "pending" | "deploying" | "running" | "verified" | "failed" | "unverified";
+        reason: ("no_browser" | "chrome_not_connected" | "wrong_account" | "sign_in_refused" | "deploy_failed" | "deployment_unreachable" | "commit_not_deployed" | "envelope_rejected" | "hollow_pass" | "journey_blocked" | "journeys_missing" | "run_failed" | "verify_disabled" | "account_unverifiable") | (null);
+        method: ("chrome_runner" | "playwright_runner" | "playwright_sandbox") | (null);
+        journeys: ({
+          total: number;
+          passed: number;
+          failed: number;
+          other: number;
+        }) | (null);
+        account: ("matched" | "mismatch" | "unverifiable") | (null);
+        bug_item_id: (string) | (null);
+        pr_number: number;
+        at: string;
+      };
       actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr" | "remove_from_queue" | "queue_again">;
       close_on_github: boolean;
       request_changes_blocked: ("live" | "rounds") | (null);
