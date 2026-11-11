@@ -38,10 +38,12 @@ trap cleanup EXIT
 
 initdb -D "$PGDATA_DIR" -U postgres --auth=trust --no-locale >"$PG_TMP_DIR/initdb.log" 2>&1
 
+# Loopback TCP only, no Unix socket: the runner's sandbox refuses AF_UNIX, so a socket
+# directory would stop the cluster starting inside a job. Every client below passes -h/-p.
 {
   echo "listen_addresses = '127.0.0.1'"
   echo "port = $PG_PORT"
-  echo "unix_socket_directories = '$PG_TMP_DIR'"
+  echo "unix_socket_directories = ''"
 } >> "$PGDATA_DIR/postgresql.conf"
 
 pg_ctl -D "$PGDATA_DIR" -l "$PG_TMP_DIR/postgres.log" -w start
