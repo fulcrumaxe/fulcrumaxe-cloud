@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { operatorVerdict, type OperatorFacts } from '../work-items/operatorActions.js';
 import { readPlanePush } from './planePushRecord.js';
-import { PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND, isPublicChangeState, publicChangeSentence, type PublicChangeState } from './publicChangeCopy.js';
+import { OVERLAY_PATH_REFUSAL_KIND, PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND, isPublicChangeState, publicChangeSentence, type PublicChangeState } from './publicChangeCopy.js';
 
 /** What the caller may do to a public change. `build_again` is reserved for the runner-run refusal: the item's top-level `actions` already lists it. */
 export type PublicChangeAction = 'retry_push' | 'open_pr' | 'build_again';
@@ -34,6 +34,15 @@ function failureClassSentence(push: { state: string; code: string | null; refusa
 }
 
 /**
+ * The code the card words. A refusal stored as `scan_refused` whose every entry is a private-only path (a record from before the code existed) reads as the new code, so an
+ * item already stuck on it gets the sentence that names the paths.
+ */
+function shownCode(push: { state: string; code: string | null; refusals: ReadonlyArray<{ kind: string; place: string }> }): string | null {
+  if (push.state === 'refused' && push.code === 'scan_refused' && push.refusals.length > 0 && push.refusals.every((r) => r.kind === OVERLAY_PATH_REFUSAL_KIND)) return 'private_path_change';
+  return push.code;
+}
+
+/**
  * Reads `plane_pushes` and the latest attempt (only to word a refusal on a run on the person's machine). Null for an item with no push record,
  * so a single-repository item is unchanged. The record is a stamp: it is shown as recorded. `actions` come from the same table the action routes ask.
  */
@@ -44,10 +53,12 @@ export async function readPublicChange(client: Pick<PoolClient, 'query'>, accoun
     'SELECT runtime FROM plane_push_attempts WHERE account_id = $1 AND plane_push_id = $2 ORDER BY created_at DESC, attempt_no DESC LIMIT 1',
     [accountId, push.id],
   );
+  const code = shownCode(push);
+  const paths = push.refusals.filter((r) => r.kind === OVERLAY_PATH_REFUSAL_KIND && r.place !== '' && r.place !== '-').map((r) => r.place);
   return {
     state: push.state,
-    code: push.state === 'refused' ? push.code : null,
-    sentence: publicChangeSentence(push.state, push.code, attempt.rows[0]?.runtime ?? null) + failureClassSentence(push, facts),
+    code: push.state === 'refused' ? code : null,
+    sentence: publicChangeSentence(push.state, code, attempt.rows[0]?.runtime ?? null, [...new Set(paths)]) + failureClassSentence(push, facts),
     repo: push.codeRepo,
     branch: push.branch,
     pr_number: push.prNumber,

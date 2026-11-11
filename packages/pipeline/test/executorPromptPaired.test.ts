@@ -62,3 +62,19 @@ describe("the paired sandbox prompt", () => {
     expect(buildExecutorPrompt(BUILD)).toContain("curl -s -X POST https://api.github.com/repos/acme/widgets/pulls");
   });
 });
+
+describe("the private-only paths line of a paired repository's prompt", () => {
+  const PRIVATE = ["docs/ops/", "plan/*.json"];
+
+  it.each([["sandbox", {}], ["runner", { runtime: "runner" as const }]])("%s: names every private-only path and tells the builder not to edit them", (_name, extra) => {
+    const p = buildExecutorPrompt({ ...BUILD, ...extra, privatePaths: PRIVATE });
+    expect(p).toContain("`docs/ops/`, `plan/*.json`");
+    expect(p).toContain("private-only and are never published");
+    expect(p).toContain("Do not create, change or delete a file under them");
+  });
+
+  it("no private paths (an unpaired repository, or none listed) leaves the prompt byte-identical", () => {
+    expect(buildExecutorPrompt({ ...BUILD, privatePaths: [] })).toBe(buildExecutorPrompt(BUILD));
+    expect(buildExecutorPrompt({ ...BUILD, runtime: "runner", privatePaths: [] })).toBe(buildExecutorPrompt({ ...BUILD, runtime: "runner" }));
+  });
+});

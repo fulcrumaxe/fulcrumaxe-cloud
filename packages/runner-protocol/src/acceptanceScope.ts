@@ -21,6 +21,8 @@
  * spec version.
  */
 
+import { compileOverlay } from "./overlayPaths.js";
+
 /** `reason` is set only by a loader that read the database (runner-cloud `loadAcceptanceScope`): `absent` is no list or an empty one, `unreadable` is anything else. The parser never sets it. */
 export type AcceptanceScope = { kind: "known"; entries: readonly string[] } | { kind: "unknown"; reason?: "absent" | "unreadable" };
 
@@ -176,4 +178,21 @@ export function pathInScope(scope: AcceptanceScope, path: string): boolean {
 /** The changed paths that fall outside the scope, in the order given. With an unknown scope, every path does. */
 export function pathsOutsideScope(scope: AcceptanceScope, paths: readonly string[]): string[] {
   return paths.filter((p) => !pathInScope(scope, p));
+}
+
+/**
+ * Paired repositories (a private repository whose changes are published to a public one): the changed paths that sit on the repository's private-only (overlay) list and are not
+ * allowed. The public push refuses every such path, so a build that edits one can never be published. A private-only edit is allowed only when the Spec lists it in `private_files`
+ * (same three entry forms as `acceptance_files`, read by `parsePrivateFiles`); listing a path in `acceptance_files` alone does not allow it. Returns the paths in the order given.
+ * An overlay list that does not compile covers nothing here: the push route refuses it on its own.
+ */
+export function privateOnlyEditsNotAllowed(overlayGlobs: readonly string[], privateFiles: AcceptanceScope, paths: readonly string[]): string[] {
+  const overlay = compileOverlay(overlayGlobs);
+  if ("error" in overlay) return [];
+  return paths.filter((p) => overlay.match(p) && !pathInScope(privateFiles, p));
+}
+
+/** The Spec's optional `private_files`: absent, empty or unreadable is an unknown scope, which allows no private-only edit. */
+export function parsePrivateFiles(value: unknown): AcceptanceScope {
+  return parseAcceptanceScope(value);
 }

@@ -1,4 +1,4 @@
-import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, privateOnlyEditsNotAllowed, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_REPLACE_ROUND_KIND, RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
@@ -16,7 +16,7 @@ import {
   type RunnerHttpResponse,
 } from "./http.js";
 import { stopReply } from "./heartbeat.js";
-import { loadAcceptanceScope, pathInScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
+import { loadAcceptanceScope, loadPrivateOnlyRule, pathInScope, type AcceptanceScope, type PrivateOnlyRule, type TenantQueryable } from "./acceptanceScope.js";
 import { RunPullRequestError, loadRunPullRequestText, type PullRequestRef, type PullRequestRepo, type RunPullRequestPort, type RunPullRequestText } from "./runPullRequest.js";
 import { normaliseCheck } from "./checkResult.js";
 import { checkConflictAttestation, storeConflictAttestation } from "./conflictAttest.js";
@@ -141,6 +141,8 @@ interface DoneContext {
   /** The branch head recorded at this run's dispatch, if a continuation recorded one. `oid` is null when the branch did not exist then. */
   dispatchBase: { oid: string | null } | null;
   scope: AcceptanceScope;
+  /** A paired repository's private-only list and the Spec's `private_files`; null when the repository is not paired. */
+  privateOnly: PrivateOnlyRule | null;
   text: RunPullRequestText | null;
   /** The runner sent a `taken_over` event for this run: its owner stopped the agent and took over by hand (D#6 R4a-7). */
   takenOver: boolean;
@@ -179,6 +181,7 @@ async function loadContext(client: TenantQueryable, i: { accountId: string; runI
     job: parsed.success ? parsed.data.job : null,
     dispatchBase: base.rows.length === 1 ? { oid: base.rows[0]!.head_oid } : null,
     scope: await loadAcceptanceScope(client, i),
+    privateOnly: await loadPrivateOnlyRule(client, i),
     text: await loadRunPullRequestText(client, i),
   };
 }
@@ -424,7 +427,11 @@ async function judgeCommit(
     if (!changed.complete) return closeAnd("scope_violation", { total: null, paths: [] });
     const odd = changed.files.find((f) => !PASSING_CHANGE_TYPES.has(f.changeType));
     if (odd) return closeAnd("scope_unknown", { total: 1, paths: [odd.path] }, { detail: odd.changeType === "RENAMED" ? "renamed" : "unknown_change_type" });
-    const outside = changed.files.filter((f) => !pathInScope(ctx.scope, f.path)).map((f) => f.path);
+    // A paired repository's private-only paths never reach the public repository, so a change that edits one cannot be published. It is out of scope here, whatever the file list says,
+    // unless the Spec lists the path in `private_files`. Caught now, with the paths named, instead of after the review at the public push.
+    const outside = changed.files
+      .filter((f) => !pathInScope(ctx.scope, f.path) || (ctx.privateOnly !== null && privateOnlyEditsNotAllowed(ctx.privateOnly.overlayGlobs, ctx.privateOnly.privateFiles, [f.path]).length > 0))
+      .map((f) => f.path);
     if (outside.length > 0) return closeAnd("scope_violation", { total: outside.length, paths: outside });
 
     // After a ready-PR fallback (or a pull request someone marked ready) there is nothing to mark.

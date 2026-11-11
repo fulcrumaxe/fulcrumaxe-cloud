@@ -119,6 +119,8 @@ describe("done route [pg]", () => {
     drafts?: boolean;
     /** The Spec's `acceptance_files`; `false` attaches no spec version at all. */
     scope?: unknown;
+    /** The Spec's `private_files`; absent writes none. */
+    privateFiles?: unknown;
     continues?: { branch: string } | null;
     /** The job's task kind; a continuation is `fix` unless this says otherwise. */
     taskKind?: Job["task"]["kind"];
@@ -148,7 +150,7 @@ describe("done route [pg]", () => {
       await h.admin.query(
         `INSERT INTO spec_versions (id, account_id, work_item_id, version, body, body_sha256, frontmatter, created_by_kind)
          VALUES ($1, $2, $3, (SELECT COALESCE(max(version), 0) + 1 FROM spec_versions WHERE work_item_id = $3), 'spec', $4, $5::jsonb, 'system')`,
-        [specId, A.accountId, A.workItemId, sha256Text("spec"), JSON.stringify({ acceptance_files: o.scope === undefined ? ["src/**"] : o.scope })],
+        [specId, A.accountId, A.workItemId, sha256Text("spec"), JSON.stringify({ acceptance_files: o.scope === undefined ? ["src/**"] : o.scope, ...(o.privateFiles === undefined ? {} : { private_files: o.privateFiles }) })],
       );
     }
     const job: Job = {
@@ -693,6 +695,51 @@ describe("done route [pg]", () => {
       expect(s.repo.branches.has(s.branch)).toBe(true);
       expect(labels(s.fake)).toEqual(["A2", "A1 RunBranchState", "A3", "A4", "A1 PullRequestFiles", "A5"]);
       expect(labels(s.fake)).not.toContain("A1 MarkReady");
+    });
+
+    describe("a paired repository's private-only paths", () => {
+      const pair = (globs: string[]) =>
+        h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3::text[])", [A.repoId, A.accountId, globs]);
+      const unpair = () => h.admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [A.repoId]);
+
+      it("a file on the private list is out of scope even when the Spec's file list names it: the pull request is closed with scope_violation", async () => {
+        await pair(["docs/ops/"]);
+        try {
+          const s = await scene({ scope: ["src/**", "docs/ops/plan.md"], files: [file("src/app.ts"), file("docs/ops/plan.md", "ADDED")] });
+          expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+          expect(s.repo.pulls[0]!.state).toBe("closed");
+          expect(noted[0]).toMatchObject({ refusal: { reason: "scope_violation", paths: ["docs/ops/plan.md"] } });
+        } finally {
+          await unpair();
+        }
+      });
+
+      it("the Spec's private_files allows exactly the private path it lists, and no other", async () => {
+        await pair(["docs/ops/"]);
+        try {
+          const allowed = await scene({ scope: ["src/**", "docs/ops/**"], privateFiles: ["docs/ops/plan.md"], files: [file("src/app.ts"), file("docs/ops/plan.md")] });
+          expect(parsedDone(await allowed.call())).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+          const other = await scene({ scope: ["src/**", "docs/ops/**"], privateFiles: ["docs/ops/plan.md"], files: [file("docs/ops/other.md")] });
+          expect(parsedDone(await other.call())).toMatchObject({ failure_reason: "scope_violation" });
+        } finally {
+          await unpair();
+        }
+      });
+
+      it("an unreadable private_files allows nothing", async () => {
+        await pair(["docs/ops/"]);
+        try {
+          const s = await scene({ scope: ["src/**", "docs/ops/**"], privateFiles: "docs/ops/plan.md", files: [file("docs/ops/plan.md")] });
+          expect(parsedDone(await s.call())).toMatchObject({ failure_reason: "scope_violation" });
+        } finally {
+          await unpair();
+        }
+      });
+
+      it("a repository that is not paired is unchanged: the same file in the file list succeeds", async () => {
+        const s = await scene({ scope: ["src/**", "docs/ops/plan.md"], files: [file("src/app.ts"), file("docs/ops/plan.md", "ADDED")] });
+        expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+      });
     });
 
     it("a lockfile change next to a manifest the Spec names succeeds: the lockfile is derived from the manifest", async () => {
