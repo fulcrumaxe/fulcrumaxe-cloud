@@ -78,7 +78,7 @@ export const promptRuntimeOf = (executionMode: string | null | undefined, role?:
  * know whether there is one, so it says "if"; the runner adds the exact command when the job carries it, and denies that command to the agent's shell.
  */
 export const RUNNER_TESTS_LINE =
-  "Run only the tests that cover the files this change touches, and say which ones you ran. Do not run the repository's whole check or full test suite (such as its top-level check script), not even piped through tail or grep: a run on your machine has its own memory limit, and the whole suite can exceed it and end your run. If the repository has an approved check, the runner runs it on this commit itself, separately, after you finish.";
+  "Run only the tests that cover the files this change touches, and say which ones you ran. Do not run the repository's whole check or full test suite (such as its top-level check script), not even piped through tail or grep: a run on your machine has its own memory limit, and the whole suite can exceed it and end your run. Real-browser end-to-end tests (Playwright) cannot run inside this job: the staging verify stage covers them after deploy, so do not try them and do not block on them. If the repository has an approved check, the runner runs it on this commit itself, separately, after you finish.";
 
 /**
  * D#599 PL-2b-2: whether a round is on the other side of the one that opened the pull request. `opened` is the mode of the item's newest executor run (the
