@@ -30,7 +30,7 @@ import { checkNote, DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, N
 import type { DepsInstaller } from "./depsInstall.js";
 import type { LockfileSync } from "./lockfileSync.js";
 import { scopeVerdict, type ChangedFiles } from "./scopeStep.js";
-import { readDerivedRules, verifyDerivedOutputs } from "./derivedStep.js";
+import { readDerivedRules, verifyDerivedOutputs, type GeneratorFailure } from "./derivedStep.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
@@ -645,12 +645,17 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // runner cannot read (no list it understands, no listing) is not a verdict: the check runs as it did before the field existed.
             // #751: a changed generated file (the OpenAPI document and client beside a route) is lifted out of that count only when a fresh run of its generators on this workspace, under the check's own
             // sandbox rules and time limit, reproduces it byte for byte. The files vouched for are named on `done` beside a passing check; a run without a pass vouches for nothing.
-            const generate = async (argv: readonly string[]): Promise<boolean> =>
-              (await checkStep({ check: { argv: [...argv], dev_shell: check.dev_shell, timeout_s: check.timeout_s }, workspace, base: pin, baseDir: mirror, launch: (a, devShell) => checkLaunch(sandboxHandle, a, devShell), baseFile, home: deps.checkHome, signal: stopRun })).passed;
+            const generate = async (argv: readonly string[]): Promise<boolean | GeneratorFailure> => {
+              const ran = await checkStep({ check: { argv: [...argv], dev_shell: check.dev_shell, timeout_s: check.timeout_s }, workspace, base: pin, baseDir: mirror, launch: (a, devShell) => checkLaunch(sandboxHandle, a, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+              if (ran.passed) return true;
+              return ran.body.timed_out ? "timeout" : ran.body.exit_code === null ? "refused" : "nonzero";
+            };
             const rules = job.scope === undefined ? [] : await readDerivedRules(baseFile, mirror, pin);
-            const verdict = await scopeVerdict({ scope: job.scope, changedFiles: deps.changedFiles, workspace, base: pin, rules, verifyDerived: deps.headBlob === undefined || deps.indexHidesChanges === undefined ? undefined : (rules, paths, changedNow) => verifyDerivedOutputs({ workspace, rules, paths, run: generate, dirty: async () => deps.changedFiles!(workspace, "HEAD"), changed: changedNow, headBlob: async (relative) => deps.headBlob!(workspace, relative), hidden: async () => deps.indexHidesChanges!(workspace) }) });
+            const verdict = await scopeVerdict({ scope: job.scope, changedFiles: deps.changedFiles, workspace, base: pin, rules, verifyDerived: deps.headBlob === undefined || deps.indexHidesChanges === undefined ? undefined : (rules, paths, changedNow, note) => verifyDerivedOutputs({ workspace, rules, paths, run: generate, ...(note === undefined ? {} : { note }), dirty: async () => deps.changedFiles!(workspace, "HEAD"), changed: changedNow, headBlob: async (relative) => deps.headBlob!(workspace, relative), hidden: async () => deps.indexHidesChanges!(workspace) }) });
             const outside = verdict === null ? null : verdict.outside;
             if (verdict !== null && verdict.derivedFresh.length > 0) step(`generated files checked against a fresh run (${String(verdict.derivedFresh.length)} equal)`);
+            const notLifted = verdict?.derivedWhy === undefined ? "" : `generated files not lifted (rules ${String(verdict.derivedWhy.rules)}, candidates ${String(verdict.derivedWhy.candidates)}, reason ${verdict.derivedWhy.reason})`;
+            if (notLifted !== "" && outside !== null && outside > 0) step(notLifted);
             if (outside !== null && outside > 0) {
               checkHeld.outcome = closed(`the check was not run: ${String(outside)} changed ${outside === 1 ? "file is" : "files are"} outside the Spec's file list`, "out_of_scope"); step(`check not run (out_of_scope, ${String(outside)} ${outside === 1 ? "file" : "files"})`);
               return;

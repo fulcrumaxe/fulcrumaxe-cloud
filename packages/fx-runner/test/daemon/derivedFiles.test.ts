@@ -23,8 +23,8 @@ describe("scopeVerdict: generated files beside a listed route (#751)", () => {
   const base = { scope, workspace: "/w", base: "b", rules };
 
   it("counts a generated file outside the list when nothing vouches for it, as before", async () => {
-    expect(await scopeVerdict({ ...base, changedFiles: listing(ROUTE, OPENAPI, CLIENT) })).toEqual({ outside: 2, derivedFresh: [] });
-    expect(await scopeVerdict({ ...base, changedFiles: listing(ROUTE, OPENAPI, CLIENT), verifyDerived: async () => [] })).toEqual({ outside: 2, derivedFresh: [] });
+    expect(await scopeVerdict({ ...base, changedFiles: listing(ROUTE, OPENAPI, CLIENT) })).toMatchObject({ outside: 2, derivedFresh: [] });
+    expect(await scopeVerdict({ ...base, changedFiles: listing(ROUTE, OPENAPI, CLIENT), verifyDerived: async () => [] })).toEqual({ outside: 2, derivedFresh: [], derivedWhy: { rules: 1, candidates: 2, reason: "not_equal" } });
   });
 
   it("lifts the files a fresh generator run reproduced, and reports them", async () => {
@@ -44,8 +44,8 @@ describe("scopeVerdict: generated files beside a listed route (#751)", () => {
   it("does not verify at all when the route is not in the list, or there is no table", async () => {
     let called = false;
     const verifyDerived: VerifyDerived = async (_r, p) => ((called = true), [...p]);
-    expect(await scopeVerdict({ ...base, scope: ["api/test/x.test.ts"], changedFiles: listing("api/test/x.test.ts", OPENAPI), verifyDerived })).toEqual({ outside: 1, derivedFresh: [] });
-    expect(await scopeVerdict({ ...base, rules: [], changedFiles: listing(ROUTE, OPENAPI), verifyDerived })).toEqual({ outside: 1, derivedFresh: [] });
+    expect(await scopeVerdict({ ...base, scope: ["api/test/x.test.ts"], changedFiles: listing("api/test/x.test.ts", OPENAPI), verifyDerived })).toEqual({ outside: 1, derivedFresh: [], derivedWhy: { rules: 1, candidates: 0, reason: "inputs_not_in_scope" } });
+    expect(await scopeVerdict({ ...base, rules: [], changedFiles: listing(ROUTE, OPENAPI), verifyDerived })).toEqual({ outside: 1, derivedFresh: [], derivedWhy: { rules: 0, candidates: 0, reason: "no_rules" } });
     expect(called).toBe(false);
   });
 
@@ -53,7 +53,7 @@ describe("scopeVerdict: generated files beside a listed route (#751)", () => {
     let calls = 0;
     const changedFiles = async () => (calls++ === 0 ? [ROUTE, OPENAPI] : [ROUTE, OPENAPI, "extra.ts"]);
     expect(await scopeVerdict({ ...base, changedFiles, verifyDerived: async (_r, p) => [...p] })).toEqual({ outside: 1, derivedFresh: [OPENAPI] });
-    expect(await scopeVerdict({ ...base, changedFiles: listing(ROUTE, OPENAPI), verifyDerived: async () => { throw new Error("boom"); } })).toEqual({ outside: 1, derivedFresh: [] });
+    expect(await scopeVerdict({ ...base, changedFiles: listing(ROUTE, OPENAPI), verifyDerived: async () => { throw new Error("boom"); } })).toEqual({ outside: 1, derivedFresh: [], derivedWhy: { rules: 1, candidates: 1, reason: "unreadable" } });
   });
 
   it("is still null when the runner cannot say (no list, an unreadable list, no listing)", async () => {

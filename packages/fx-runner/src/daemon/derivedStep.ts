@@ -20,6 +20,9 @@ export async function readDerivedRules(baseFile: (dir: string, base: string, rel
   }
 }
 
+/** How a generator that did not succeed ended: a non-zero exit, the time limit, or not started (refused by the sandbox or thrown). */
+export type GeneratorFailure = "nonzero" | "timeout" | "refused";
+
 /** The largest generated file read for the comparison; a bigger one is never vouched for. */
 const MAX_DERIVED_BYTES = 8 * 1024 * 1024;
 
@@ -82,18 +85,22 @@ function writeBack(workspace: string, relative: string, bytes: Buffer): boolean 
  * Every output of the rules is read first and put back as it was if the generators rewrote it, so a stale or hand-edited output is neither vouched for nor silently repaired.
  * A generator that fails, a file that cannot be read or put back, or any throw vouches for nothing.
  */
-export async function verifyDerivedOutputs(input: { workspace: string; rules: readonly DerivedFileRule[]; paths: readonly string[]; run: (argv: readonly string[]) => Promise<boolean>; dirty: () => Promise<string[] | null>; changed: readonly string[]; headBlob: (relative: string) => Promise<Buffer | null>; hidden: () => Promise<boolean | null> }): Promise<string[]> {
+export async function verifyDerivedOutputs(input: { workspace: string; rules: readonly DerivedFileRule[]; paths: readonly string[]; run: (argv: readonly string[]) => Promise<boolean | GeneratorFailure>; dirty: () => Promise<string[] | null>; changed: readonly string[]; headBlob: (relative: string) => Promise<Buffer | null>; hidden: () => Promise<boolean | null>; note?: (reason: string) => void }): Promise<string[]> {
+  const no = (reason: string): string[] => {
+    input.note?.(reason);
+    return [];
+  };
   const clean = async (): Promise<boolean> => {
     const listed = await input.dirty().catch(() => null);
     return listed !== null && listed.length === 0;
   };
-  if (!(await clean())) return [];
+  if (!(await clean())) return no("tree_dirty");
   // `git diff` and `git status` trust the index: an assume-unchanged or skip-worktree entry hides a changed file from them, so with any such entry the listing above proves nothing.
-  if ((await input.hidden().catch(() => null)) !== false) return [];
+  if ((await input.hidden().catch(() => null)) !== false) return no("index_hides");
   const before = new Map<string, Buffer>();
   for (const p of input.paths) {
     const bytes = readPlain(input.workspace, p);
-    if (bytes === null) return [];
+    if (bytes === null) return no("unreadable");
     before.set(p, bytes);
   }
   // Each file the verdict rests on is compared with the blob HEAD holds in the object database, which neither the index nor the working tree can fake: every path to be vouched (it must have a
@@ -103,24 +110,28 @@ export async function verifyDerivedOutputs(input: { workspace: string; rules: re
   try {
     for (const p of input.paths) {
       const head = await input.headBlob(p);
-      if (head === null || !head.equals(before.get(p)!)) return [];
+      if (head === null) return no("no_head_blob");
+      if (!head.equals(before.get(p)!)) return no("not_equal");
     }
     for (const p of inputs) {
       const head = await input.headBlob(p);
       const now = readPlain(input.workspace, p);
-      if ((head === null) !== (now === null) || (head !== null && now !== null && !head.equals(now))) return [];
+      if ((head === null) !== (now === null) || (head !== null && now !== null && !head.equals(now))) return no("not_equal");
     }
   } catch {
     // fx-swallow-ok: a blob that cannot be read exactly is a comparison that cannot be made; nothing is vouched
-    return [];
+    return no("unreadable");
   }
   // The rules' other outputs are put back too (a generator may rewrite a sibling that is in scope), but are not vouched for.
   for (const rule of input.rules) for (const p of rule.outputs) if (!before.has(p)) { const bytes = readPlain(input.workspace, p); if (bytes !== null) before.set(p, bytes); }
   let ran = true;
+  let failure: GeneratorFailure = "nonzero";
   for (const rule of input.rules) {
     for (const argv of rule.generators ?? []) {
       if (!ran) break;
-      ran = await input.run(argv).catch(() => false);
+      const outcome = await input.run(argv).catch((): GeneratorFailure => "refused");
+      ran = outcome === true;
+      if (typeof outcome === "string") failure = outcome;
     }
   }
   const fresh: string[] = [];
@@ -133,5 +144,9 @@ export async function verifyDerivedOutputs(input: { workspace: string; rules: re
     }
     if (!writeBack(input.workspace, p, bytes)) restored = false;
   }
-  return ran && restored && (await clean()) ? fresh : [];
+  if (!ran) return no(`generator_failed:${failure}`);
+  if (!restored) return no("unreadable");
+  if (!(await clean())) return no("tree_dirty");
+  if (fresh.length === 0) return no("not_equal");
+  return fresh;
 }
