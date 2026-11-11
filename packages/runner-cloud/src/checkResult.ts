@@ -1,4 +1,5 @@
-import { checkNotRunReason, readCheckFailedFiles, CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { checkNotRunReason, readCheckFailedFiles, readDerivedFresh, CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { DERIVED_FILE_RULES } from "@fx/core/src/specs/derivedFileRules.js";
 
 /**
  * D#6 R-CHK-3: what a runner's check result may hold for the cloud to store it. The bounds are the ones `run_checks` (migration 0888) enforces. The protocol schema refuses most of
@@ -56,5 +57,7 @@ export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContr
   const read = readCheckFailedFiles(check.failed_files, check.failed_files_more);
   const failedFilesDropped = !read.ok || (read.value !== null && (exit === 0 || check.timed_out === true));
   const files = read.ok && !failedFilesDropped && read.value !== null ? { failed_files: read.value.files, ...(read.value.more === 0 ? {} : { failed_files_more: read.value.more }) } : {};
-  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary, ...reason, ...files }, outOfContract: bad, failedFilesDropped };
+  // #751: the runner's vouching for generated files is kept only on a check that passed outright (exit 0, no cap kill, no reason); anywhere else it is dropped.
+  const vouched = exit === 0 && check.timed_out !== true && check.reason === undefined ? readDerivedFresh(DERIVED_FILE_RULES, check.derived_fresh) : [];
+  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary, ...reason, ...files, ...(vouched.length === 0 ? {} : { derived_fresh: vouched }) }, outOfContract: bad, failedFilesDropped };
 }

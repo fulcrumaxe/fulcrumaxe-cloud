@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "api-routes",
+      "kind": "generated",
+      "inputs": ["packages/api/src/routes/**"],
+      "outputs": ["packages/api/openapi.json", "packages/api-client/src/generated.ts"],
+      "generators": [
+        ["pnpm", "--filter", "@fx/api", "gen-openapi"],
+        ["pnpm", "--filter", "@fx/api-client", "gen"]
+      ]
+    },
+    {
+      "id": "error-codes",
+      "kind": "companion",
+      "inputs": ["packages/*/src/errors.ts", "packages/core/src/*/errors.ts"],
+      "outputs": ["packages/telemetry/src/errorCodes.ts"]
+    }
+  ]
+}

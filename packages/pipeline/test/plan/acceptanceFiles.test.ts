@@ -116,3 +116,22 @@ describe("the Spec body's file section (F8)", () => {
     expect(assembleSpecBodyChecked({ ...base, spec, acceptanceFiles: entries })).toEqual({ ok: false, reason: "spec_too_large" });
   });
 });
+
+/** #751: files the repository's generators require beside a listed one are added by the pipeline, in the list the person approves and the one the guards hold a run to. */
+describe("validAcceptanceFiles adds the derived files", () => {
+  const ROUTE = "packages/api/src/routes/runs.ts";
+
+  it("a Spec that adds a route gets the OpenAPI document and the client", () => {
+    expect(validAcceptanceFiles([ROUTE, "packages/api/test/runs.test.ts"])).toEqual([ROUTE, "packages/api/test/runs.test.ts", "packages/api/openapi.json", "packages/api-client/src/generated.ts"]);
+  });
+
+  it("a Spec that lists them already is returned as given, and a Spec with no input is untouched", () => {
+    const full = [ROUTE, "packages/api/openapi.json", "packages/api-client/src/generated.ts"];
+    expect(validAcceptanceFiles(full)).toEqual(full);
+    expect(validAcceptanceFiles(["src/app/page.tsx"])).toEqual(["src/app/page.tsx"]);
+  });
+
+  it("the widened list is one the parser reads", () => {
+    expect(parseAcceptanceScope(validAcceptanceFiles([ROUTE])!).kind).toBe("known");
+  });
+});

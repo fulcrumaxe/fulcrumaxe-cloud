@@ -132,6 +132,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/jobEnvFile.ts": ["fs", "path"], // D#6 C44-1: the per-job env file: lstat of the temp dir, an exclusive no-follow create (0600)
   "src/sandbox/writeScratch.ts": ["fs", "path"], // D#6 R7b: the job-scoped write directories: lstat, a fresh 0700 mkdir, and a removal that follows no link
   "src/sandbox/sandboxSettings.ts": ["fs", "path"],
+  "src/daemon/derivedStep.ts": ["fs", "path"], // #751: a generated file's bytes before and after its generators: realpath, a no-follow open, a bounded read, and a put-back into a file that existed; no process is started here
   "src/sandbox/toolchain.ts": ["fs", "path"], // the toolchain found at setup (D#6 R4d-3): stat, executable check and realpath of the tools; no process is started
 
   "src/job/plainSegment.ts": ["path"],

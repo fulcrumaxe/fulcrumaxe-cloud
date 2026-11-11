@@ -29,7 +29,7 @@ export const CONFIG_KEY_ALLOWLIST: readonly RegExp[] = Object.freeze([
 ]);
 
 /** The environment and arguments every host read adds: no system or user-level config, no attributes file outside the repository. */
-const NEUTRAL_ENV: Readonly<Record<string, string>> = Object.freeze({ GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1" });
+const NEUTRAL_ENV: Readonly<Record<string, string>> = Object.freeze({ GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_NO_REPLACE_OBJECTS: "1" });
 /**
  * Also in every read: git should not descend into a nested repository. A directory with its own `.git` (a committed gitlink, an untracked nested repo, a
  * submodule whose `.git` is a gitfile) is read by `git diff` and `git status` through a CHILD git started inside it, which reads that repository's own config,
@@ -47,7 +47,7 @@ const NEUTRAL_CONFIG: ReadonlyArray<readonly [string, string]> = Object.freeze([
 const NEUTRAL_ARGS: readonly string[] = Object.freeze(NEUTRAL_CONFIG.flatMap(([key, value]) => ["-c", `${key}=${value}`]));
 
 /** The git verbs a host read may run. Only the diff family (`diff`, `status`) inspects submodules. */
-export type HostGitVerb = "diff" | "status" | "ls-files" | "for-each-ref" | "rev-parse" | "symbolic-ref";
+export type HostGitVerb = "diff" | "status" | "ls-files" | "for-each-ref" | "rev-parse" | "symbolic-ref" | "cat-file";
 const SUBMODULE_VERBS: ReadonlySet<HostGitVerb> = new Set<HostGitVerb>(["diff", "status"]);
 /** The verbs that name worktree paths. The others read refs and the object store only and never touch a nested repository. */
 const WORKTREE_VERBS: ReadonlySet<HostGitVerb> = new Set<HostGitVerb>(["diff", "status", "ls-files"]);

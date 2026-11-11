@@ -755,6 +755,9 @@ export const DoneCheck = z
     // Read with `readCheckFailedFiles` by the cloud, not refused here: a malformed list is dropped and must not turn the whole `done` into a 400.
     failed_files: z.unknown().optional(),
     failed_files_more: z.unknown().optional(),
+    // #751: the generated files the runner found equal to a fresh generator run on the result, so the cloud's scope check may count them in scope. Read with `readDerivedFresh`, not refused
+    // here: anything but a short list of known outputs is no vouching, and the rest of the check stands.
+    derived_fresh: z.unknown().optional(),
   })
   .strict()
   // A check stopped at its cap did not exit.
