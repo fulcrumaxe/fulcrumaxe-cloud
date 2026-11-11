@@ -13,6 +13,8 @@ import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
 export type GitPathCode = "mirror_failed" | "mirror_dir_insecure" | "workspace_failed" | "push_failed" | "push_ref_refused" | "continuation_branch_missing" | "push_rejected" | "snapshot_refused" | "git_version_unsupported"
   // D#6 R4d-2 (C32 sections 2 and 3): the workspace's git folder is not a shape the sandbox is known to leave; HEAD does not grow from the run's base; the commit adds an empty placeholder the sandbox made.
   | "workspace_git_refused" | "head_not_from_base" | "sandbox_stub_committed"
+  // The branch a fix round continues is behind the repository's default branch and cannot be brought up to date without a conflict: the run ends before the agent starts, so no check is spent on a stale base.
+  | "base_conflict"
   // D#6 R4d-4 (C33 section 1.3): the commit a review job names is not on any branch of the mirror.
   | "review_sha_not_in_mirror"
   // D#6 R5a-3 (C27 section 4): path A. `git_stopped` and `git_revoked` are the relay's 409 and 401 (the run ends quietly, as for a lease stop);
@@ -25,6 +27,8 @@ export class GitPathError extends Error {
   sizeMb?: number;
   /** Only on a workspace-folder refusal: which check said no, a word from a closed list in the daemon's own source (never a path, a name or text from git or the agent). */
   detail?: string;
+  /** The exit code of the git command that failed (not set for a time-out or a code raised outside a command). Lets a caller tell git's "no" (1) from an error (128). */
+  exitCode?: number;
   constructor(code: GitPathCode, sizeMb?: number, detail?: string) {
     // The one setup error that names a requirement: a fixed text, never git's output.
     super(code === "git_version_unsupported" ? `${code}: git ${MIN_GIT_VERSION} or newer is required` : code);
@@ -158,7 +162,11 @@ export function createGit(deps: GitDeps): Git {
       const env = { ...gitEnv(deps.envOptions), ...(config === undefined ? guardConfigEnv() : configEnv(config)), ...extraEnv };
       // A per-call limit can only shorten the command's time, never lengthen it.
       const result = await deps.capture("git", args, env, Math.min(deps.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, timeoutMs ?? Number.POSITIVE_INFINITY));
-      if (result.timedOut || result.code !== 0) throw new GitPathError((deps.mapHttp === true && !result.timedOut ? httpFailureCode(result.stderr) : undefined) ?? code);
+      if (result.timedOut || result.code !== 0) {
+        const failure = new GitPathError((deps.mapHttp === true && !result.timedOut ? httpFailureCode(result.stderr) : undefined) ?? code);
+        if (!result.timedOut && typeof result.code === "number") failure.exitCode = result.code;
+        throw failure;
+      }
       return result.stdout;
     },
   };

@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { GitTicketResult } from "./client.js";
 import { assertGitVersion, createGit, GitPathError, type Git, type GitCapture, type GitDeps } from "./git.js";
-import { mirrorCheckBase, mirrorNixSource, PUSHING_ROLES, type GitJob, type GitPath, type GitPathDeps } from "./gitPath.js";
+import { mirrorCheckBase, mirrorNixSource, PUSHING_ROLES, updateWorkspaceBranch, type GitJob, type GitPath, type GitPathDeps } from "./gitPath.js";
 import { createMirrors, githubUrl, type Mirrors, type RepoRef } from "./mirror.js";
 import { LISTING_CAP } from "./repoMap.js";
 import { pinWorkspaceGit } from "./hostRead.js";
@@ -157,16 +157,21 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
         await pinWorkspaceGit(listingGit, workspace, path.join(dir, "objects"));
         // At the tip and about to be reused: drop the first round's ignored build output (D#6 RUNNER-RESUME-CLEAN). A local read, so the plain git, no ticket.
         await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? 64 * 1024 : LISTING_CAP, platform, deps.sandboxedPurge);
-        return { base: tip };
+        // Behind the default branch: brought up to date here, with local git only (no ticket); see `updateWorkspaceBranch`.
+        const updated = await updateWorkspaceBranch(git, dir, job, workspace);
+        return updated === null ? null : { base: tip, ...updated };
       } catch (error) {
-        if (error instanceof GitPathError && !["git_stopped", "git_revoked", "clone_limited", "git_proxy_unpinned", "git_ticket_refused", "git_ticket_unavailable"].includes(error.code)) return null;
+        if (error instanceof GitPathError && !["base_conflict", "git_stopped", "git_revoked", "clone_limited", "git_proxy_unpinned", "git_ticket_refused", "git_ticket_unavailable"].includes(error.code)) return null;
         throw error;
       }
     },
     async prepare(job, lease, workspace) {
       const session = await open(job, lease);
       await assertGitVersion(session.git);
-      return session.mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
+      const prepared = await session.mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
+      const updated = await updateWorkspaceBranch(git, forObjects.dir(job.repo), job, workspace);
+      if (updated === null) throw new GitPathError("workspace_failed");
+      return { ...prepared, ...updated };
     },
     readGrants: (job) => [forObjects.objects(job.repo)],
     mirrorDir: (job) => forObjects.dir(job.repo),

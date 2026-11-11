@@ -71,7 +71,7 @@ const inCopy = (line) => COPY_SRC.includes(line);
 const ended = (e) => runnerEventLine({ type: "run_ended", ...e });
 const SETUP_WITH_OWN_LINE = [
   "clone_limited", "push_ref_refused", "snapshot_refused", "push_failed", "mirror_failed", "mirror_dir_insecure",
-  "git_version_unsupported", "workspace_failed", "workspace_git_refused", "head_not_from_base", "sandbox_stub_committed", "git_ticket_unavailable",
+  "git_version_unsupported", "workspace_failed", "workspace_git_refused", "head_not_from_base", "sandbox_stub_committed", "git_ticket_unavailable", "base_conflict",
 ];
 const SETUP_PLAIN = ["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "model_unsupported", "other"];
 

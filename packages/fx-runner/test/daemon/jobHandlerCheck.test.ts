@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CONFINED_READ_ROLES, type DoneCheck, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import type { CheckOutcome } from "../../src/daemon/checkStep.js";
+import { GitPathError } from "../../src/daemon/git.js";
 import { createJobHandler, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import type { LockSyncOutcome } from "../../src/daemon/lockfileSync.js";
 import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
@@ -53,13 +54,15 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> } } = {}) {
+function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> } } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
   const order: string[] = [];
   let held = "";
   const starts: StartDetachedOptions[] = [];
+  const spiedLedger = createPlaneBaseLedger();
+  const recordedBases: string[] = [];
   const checkInputs: Array<{ base: string; baseDir: string; argv: readonly string[]; devShell: boolean | undefined }> = [];
   const port: SandboxPort = {
     async createSandbox(opts) { return { runId: "", sandboxName: opts.sandboxName }; },
@@ -75,7 +78,7 @@ function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: A
     async extendTimeout() {}, async stop() { if (over.lockfile !== undefined || over.recordStop === true) order.push("agent_stopped"); if (over.lockfile?.stopFails === true) throw new Error("group survived at /home/someone/x"); }, async deleteSandbox() { order.push("sandbox_deleted"); }, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
   const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
-  const git = fakeGitPath({ prepare: async (_job, _claimed, workspace) => { held = workspace; return { base: BASE }; }, publish: async () => (order.push("publish"), { pushed: true, branch: BRANCH, sha: HEAD }) });
+  const git = fakeGitPath({ prepare: async (_job, _claimed, workspace) => { held = workspace; if (over.prepareThrows !== undefined) throw over.prepareThrows; return { base: BASE, ...(over.updatedTo === undefined ? {} : { updatedTo: over.updatedTo }) }; }, publish: async () => (order.push("publish"), { pushed: true, branch: BRANCH, sha: HEAD }) });
   git.mirrorDir = (job) => `/mirrors/${job.repo.id}.git`;
   // The pin is the merge-base with the default branch, never the commit the run started from (BASE).
   git.checkBase = async () => (over.pin === undefined ? PIN : over.pin);
@@ -100,7 +103,7 @@ function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: A
     ...(over.skipHook === true ? { runJobFn: (async (job: never, d: RunJobDeps) => { const done = await runJob(job, { ...d, afterAgent: undefined }); return done; }) as typeof runJob } : {}),
     // D#749 V2b: a browser job (the deploy verifier, one of the confined roles below) starts only when the daemon's own probe says Chrome is connected.
     browserReady: () => undefined,
-    planePush: { baseLedger: createPlaneBaseLedger(), run: async () => (order.push("hook"), { kind: "pr_opened" as const, number: 9, seconds: 1 }) },
+    planePush: { baseLedger: { ...spiedLedger, record: (runId: string, b: string) => (recordedBases.push(b), spiedLedger.record(runId, b)) }, run: async () => (order.push("hook"), { kind: "pr_opened" as const, number: 9, seconds: 1 }) },
     ...(over.wired === false ? {} : {
       checkStep: async (input) => {
         order.push("check");
@@ -122,7 +125,7 @@ function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: A
     }),
   };
   return {
-    order, starts, checkInputs, deps, handle: createJobHandler(deps), client,
+    order, starts, checkInputs, recordedBases, deps, handle: createJobHandler(deps), client,
     async claim(job: ReturnType<typeof jobFor>): Promise<Claimed> {
       cloud.enqueue(signRaw(job) as never);
       const claimed = await client.claim();
@@ -520,4 +523,60 @@ it("an executor job still gets its lockfile update (the guard above names the co
   const r = rig({ lockfile });
   await r.handle(await r.claim(withCheck()));
   expect(r.order).toContain("lockfile");
+});
+
+describe("a branch the runner brought up to date with the default branch", () => {
+  const MERGED_IN = "d".repeat(40);
+  const stageEvents = () => bodies("/events").flatMap((b) => (b.events as Array<Record<string, unknown>>).filter((e) => e.type === "stage").map((e) => e.stage));
+
+  it("is checked against the commit that was merged in, not the older merge-base: the check pin and the scope listing both use it", async () => {
+    const changed = { files: ["a.txt"] as string[] | null, calls: [] as Array<{ workspace: string; base: string }> };
+    const r = rig({ updatedTo: MERGED_IN, changed });
+    const job = { ...withCheck(), scope: ["a.txt"] } as ReturnType<typeof withCheck>;
+    await r.handle(await r.claim(job));
+    expect(r.checkInputs.map((c) => c.base)).toEqual([MERGED_IN]);
+    expect(changed.calls.map((c) => c.base)).toEqual([MERGED_IN]);
+  });
+
+  it("is recorded as a run event (stage base_updated) before the agent starts, with the commit on the step line", async () => {
+    const steps: string[] = [];
+    const r = rig({ updatedTo: MERGED_IN, steps });
+    await r.handle(await r.claim(withCheck()));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stageEvents()).toContain("base_updated");
+    expect(steps.some((l) => l.includes("branch brought up to date with the default branch") && l.includes(MERGED_IN))).toBe(true);
+  });
+
+  it("a branch that needed no update is checked against the merge-base as before and records no such event", async () => {
+    const r = rig();
+    await r.handle(await r.claim(withCheck()));
+    expect(r.checkInputs.map((c) => c.base)).toEqual([PIN]);
+    expect(stageEvents()).not.toContain("base_updated");
+  });
+
+  const CONT = { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7 };
+  const SIGNED = "e".repeat(40);
+  const recordedFor = async (updatedTo: string | undefined, continues: Record<string, unknown>): Promise<string[]> => {
+    const r = rig(updatedTo === undefined ? {} : { updatedTo });
+    await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 }, check: CHECK, continues } as never)));
+    return r.recordedBases;
+  };
+
+  it("the public diff of a round that republishes (signed base) starts from the commit that was merged in", async () => {
+    expect(await recordedFor(MERGED_IN, { ...CONT, base_sha: SIGNED })).toEqual([MERGED_IN]);
+    expect(await recordedFor(undefined, { ...CONT, base_sha: SIGNED })).toEqual([SIGNED]);
+  });
+
+  it("the public diff of a first publish (merge-base) starts from the commit that was merged in", async () => {
+    expect(await recordedFor(MERGED_IN, CONT)).toEqual([MERGED_IN]);
+  });
+
+  it("a conflict ends the run before the agent starts: no agent, no check, run_ended runner_setup / base_conflict", async () => {
+    const r = rig({ prepareThrows: new GitPathError("base_conflict") });
+    const result = await r.handle(await r.claim(withCheck()));
+    expect(result.status).toBe("failed");
+    expect(r.order).not.toContain("agent");
+    expect(r.order).not.toContain("check");
+    expect(runEnded()).toEqual([expect.objectContaining({ reason: "runner_setup", detail: "base_conflict" })]);
+  });
 });

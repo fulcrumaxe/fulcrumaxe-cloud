@@ -257,6 +257,43 @@ describe("a resumed workspace on path A loses the first round's ignored build ou
   });
 });
 
+describe("path A brings a continued branch up to date with the default branch", () => {
+  const CHECK = { argv: ["bash", "scripts/check.sh"], dev_shell: false, timeout_s: 60 };
+
+  it("resume and prepare merge the mirror's default tip into a branch that is behind, and a conflict is base_conflict", { timeout: 60_000 }, async () => {
+    const { gitPath } = makePathA();
+    const job = jobFor();
+    const first = newWorkspace("first");
+    const { base } = await gitPath.prepare(job, lease, first);
+    const commit = agentCommit(first, "agent.txt", 100);
+    await gitPath.publish(job, lease, first, base);
+    const fix = jobFor({ repo: job.repo, check: CHECK, continues: { parent_run_id: "7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f", session_id: null, branch: BRANCH } as never });
+    // The default branch moves on (a repaired test), after the branch was cut.
+    const other = path.join(root, "main-moves");
+    sh("clone", "--branch", "main", upstream, other);
+    writeFileSync(path.join(other, "repaired.test.txt"), "fixed\n");
+    sh("-C", other, "add", "repaired.test.txt");
+    sh("-C", other, "commit", "-m", "repair");
+    sh("-C", other, "push", "origin", "main");
+    const main = tip(other, "HEAD");
+    expect(await gitPath.resume(fix, lease, first)).toEqual({ base: commit, updatedTo: main });
+    expect(existsSync(path.join(first, "repaired.test.txt"))).toBe(true);
+    const fresh = newWorkspace("fresh");
+    expect(await gitPath.prepare(fix, lease, fresh)).toEqual({ base: commit, updatedTo: main });
+    expect(existsSync(path.join(fresh, "repaired.test.txt"))).toBe(true);
+    // A second kept workspace, still at the branch tip (a job with no check is not updated).
+    const kept = newWorkspace("kept");
+    await gitPath.prepare({ ...fix, check: undefined }, lease, kept);
+    // A conflicting change on the default branch ends the round before the agent.
+    writeFileSync(path.join(other, "agent.txt"), "main wrote it too\n");
+    sh("-C", other, "add", "agent.txt");
+    sh("-C", other, "commit", "-m", "conflict");
+    sh("-C", other, "push", "origin", "main");
+    await expect(gitPath.prepare(fix, lease, newWorkspace("conflict"))).rejects.toMatchObject({ code: "base_conflict" });
+    await expect(gitPath.resume(fix, lease, kept)).rejects.toMatchObject({ code: "base_conflict" });
+  });
+});
+
 describe("the proxy must be the pinned one, before any git runs", () => {
   const cases: Array<[string, () => Promise<GitTicketResult>]> = [
     ["another https origin", async () => ({ kind: "ticket", ticket: makeTicket(), expiresAt: "2026-10-08T12:05:00.000Z", proxyOrigin: "https://elsewhere.example.test" })],

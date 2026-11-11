@@ -136,6 +136,8 @@ export function lineFor(kind: string, f: EventFields): string | null {
     // D#6 C44-6b: the closed install outcomes of a run. Fixed text only; an absent stage shows nothing.
     if (f.stage === 'deps_installed') return 'Dependencies installed';
     if (f.stage === 'deps_install_failed') return 'Dependencies did not install';
+    // The runner merged the default branch into the branch a fix round continues, before the agent started.
+    if (f.stage === 'base_updated') return 'The branch was brought up to date with the default branch before this run.';
     if (f.stage === 'writing_result') return 'Writing up the result';
     // FIXROUND-REFRESH-HEAD: a fix round found its pull request's branch ahead of the head the cloud had recorded.
     if (f.stage === 'branch_moved') return "The pull request's branch had moved; the fix round started from its latest commit.";

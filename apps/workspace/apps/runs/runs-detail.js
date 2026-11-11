@@ -128,11 +128,12 @@ const SETUP_LINES = {
   git_version_unsupported: "The git on the runner machine is too old. Update git, then Build again.",
   workspace_failed: "The runner could not prepare a working folder for the agent. Check the disk space and git access on that machine, then Build again.",
   workspace_git_refused: "The runner could not safely read the agent's git folder, so nothing was published. Update fx-runner, then Build again.",
+  base_conflict: "The branch this run continues is behind the default branch and the two conflict, so the runner did not start the agent or run the check on a stale base. Resolve the conflict in the branch (or Build again), then retry.",
   head_not_from_base: "The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.",
   git_ticket_unavailable: "The cloud is not set up for Cloud-verified runs yet (it cannot sign git access for your runner). An admin needs to finish the setup; your runner is fine.",
   sandbox_stub_committed: "The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.",
 };
-const STAGE_LINES = { workspace_ready: "The secure sandbox is ready", cloned: "Repository cloned", deps_installed: "Dependencies installed", deps_install_failed: "Dependencies did not install", writing_result: "Writing up the result" };
+const STAGE_LINES = { workspace_ready: "The secure sandbox is ready", cloned: "Repository cloned", deps_installed: "Dependencies installed", deps_install_failed: "Dependencies did not install", base_updated: "The branch was brought up to date with the default branch", writing_result: "Writing up the result" };
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const num = (v) => (Number.isFinite(v) ? v : null);
 
