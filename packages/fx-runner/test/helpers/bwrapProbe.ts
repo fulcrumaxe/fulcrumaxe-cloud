@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { accessSync, constants } from "node:fs";
 
 /**
  * Whether bubblewrap can really create the namespaces the runner's own views ask for, here. Finding a `bwrap` binary is not enough: a host that has one but
@@ -44,3 +45,26 @@ export const BWRAP_SKIP_REASON = "bwrap cannot create namespaces here";
 
 /** Why a suite skipped inside a runner job. */
 export const JOB_SKIP_REASON = "inside a runner job (FX_RUNNER_JOB=1): the nested bubblewrap view fails here";
+
+/** Why a suite that starts the runner's check skipped without socat. */
+export const SOCAT_SKIP_REASON = "socat is not on PATH here: the runner refuses a check without it (socat_missing), as it must";
+
+/**
+ * Whether the machine can start the runner's check at all. `bwrapCanCreateNamespaces` is not enough: `host.checkLaunch` resolves bubblewrap AND socat on the search path
+ * (`resolveSandboxTools`) and refuses a check when either is missing, which is the product working as designed. The hosted ubuntu-26.04 image ships bubblewrap but not
+ * socat, and the suites that call `checkLaunch` then failed with "no launch". They skip with a named reason instead.
+ */
+export function checkCanLaunch(bwrap: string | undefined): boolean {
+  if (!bwrapCanCreateNamespaces(bwrap)) return false;
+  const found = (process.env["PATH"] ?? "").split(":").some((dir) => {
+    if (dir === "") return false;
+    try {
+      accessSync(`${dir}/socat`, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (!found) console.info(`[skip] ${SOCAT_SKIP_REASON}`);
+  return found;
+}

@@ -7,7 +7,7 @@ import type { AgentHandle } from "@fulcrumaxe/runner-protocol";
 import { cleanEnv } from "../src/job/cleanEnv.js";
 import { createHostSandbox, type InterruptibleRuntime } from "../src/sandbox/hostSandbox.js";
 import type { SandboxHandle } from "../src/sandbox/port.js";
-import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
+import { checkCanLaunch } from "./helpers/bwrapProbe.js";
 import { socketTmpRoot } from "./helpers/tmpRoot.js";
 
 /**
@@ -15,7 +15,7 @@ import { socketTmpRoot } from "./helpers/tmpRoot.js";
  * with no model credential, no env file and no network. The agent itself is a stub that ends at once; the rules are the host sandbox's own.
  */
 const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap"].find((candidate) => existsSync(candidate));
-const usable = BWRAP !== undefined && bwrapCanCreateNamespaces(BWRAP);
+const usable = BWRAP !== undefined && checkCanLaunch(BWRAP);
 const CANARY = "FX-RCHK2-CANARY";
 const USER_RUNTIME = ["", "run", "user"].join("/");
 

@@ -11,7 +11,7 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { cleanEnv } from "../../src/job/cleanEnv.js";
 import { createHostSandbox, type InterruptibleRuntime } from "../../src/sandbox/hostSandbox.js";
 import type { SandboxHandle } from "../../src/sandbox/port.js";
-import { bwrapCanCreateNamespaces } from "../helpers/bwrapProbe.js";
+import { checkCanLaunch } from "../helpers/bwrapProbe.js";
 import { testLaunch } from "../helpers/launch.js";
 import { socketTmpRoot } from "../helpers/tmpRoot.js";
 
@@ -22,7 +22,7 @@ import { socketTmpRoot } from "../helpers/tmpRoot.js";
  * ("Can't read seccomp data"); the other suites hand the descriptor over themselves, which is why none of them saw it.
  */
 const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap"].find((candidate) => existsSync(candidate));
-const usable = BWRAP !== undefined && bwrapCanCreateNamespaces(BWRAP);
+const usable = BWRAP !== undefined && checkCanLaunch(BWRAP);
 
 let root: string;
 let workspace: string;

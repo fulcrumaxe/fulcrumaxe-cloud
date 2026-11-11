@@ -8,7 +8,7 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { cleanEnv } from "../../src/job/cleanEnv.js";
 import { createHostSandbox, type InterruptibleRuntime } from "../../src/sandbox/hostSandbox.js";
 import type { SandboxHandle } from "../../src/sandbox/port.js";
-import { bwrapCanCreateNamespaces } from "../helpers/bwrapProbe.js";
+import { bwrapCanCreateNamespaces, checkCanLaunch } from "../helpers/bwrapProbe.js";
 import { testLaunch } from "../helpers/launch.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 
@@ -20,6 +20,7 @@ import { tmpRoot } from "../helpers/tmpRoot.js";
  */
 const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap"].find((candidate) => existsSync(candidate));
 const usable = process.platform === "linux" && BWRAP !== undefined && bwrapCanCreateNamespaces(BWRAP);
+const canLaunchCheck = usable && checkCanLaunch(BWRAP);
 const SITEKIT = path.resolve(import.meta.dirname, "../../../sitekit-checks");
 const BROWSERS = process.env.PLAYWRIGHT_BROWSERS_PATH;
 const STORE_BROWSERS = BROWSERS !== undefined && /^\/nix\/store\/[A-Za-z0-9._+-]+$/.test(BROWSERS) && existsSync(BROWSERS) ? BROWSERS : undefined;
@@ -120,7 +121,7 @@ function resolvePlaywright(): { core: string; executable: string } | undefined {
 const playwright = STORE_BROWSERS === undefined ? undefined : resolvePlaywright();
 const browserReady = playwright !== undefined && existsSync(playwright.executable);
 
-describe.skipIf(!usable || !browserReady)("real bubblewrap: the browser the dev shell names runs inside the job's sandbox", () => {
+describe.skipIf(!canLaunchCheck || !browserReady)("real bubblewrap: the browser the dev shell names runs inside the job's sandbox", () => {
   const program = [
     "const { chromium } = require(process.argv[1]);",
     "(async () => {",
