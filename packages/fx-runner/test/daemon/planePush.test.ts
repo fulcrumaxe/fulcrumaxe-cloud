@@ -569,7 +569,7 @@ describe("every refusal leaves the public repository's branches as they were (ac
   }
   const MATCHED = ["acme-internal-host", "7391"];
   const cases: Case[] = [
-    { name: "an overlay path", files: { "docs/ops/new.md": "private\n" }, code: "scan_refused", refusal: { kind: "overlay_path", place: "docs/ops/new.md" } },
+    { name: "an overlay path", files: { "docs/ops/new.md": "private\n" }, code: "private_path_change", refusal: { kind: "overlay_path", place: "docs/ops/new.md" } },
     { name: "an identifier hit", files: { "src/a.ts": "export const a = 1;\nconst host = 'acme-internal-host';\n" }, code: "scan_refused", refusal: { kind: "identifier_hit", place: "src/a.ts:2", rule_key: "identifier-rule#1" } },
     { name: "a plan-data key", files: { "src/a.ts": "export const a = 1;\nconst o = { priceUsdPerMonth: 7391 };\n" }, code: "scan_refused", refusal: { kind: "plan_data_hit", place: "src/a.ts:2", rule_key: "priceUsdPerMonth" } },
     { name: "a binary file", files: { "src/blob.dat": Buffer.from([1, 2, 0, 3]) }, code: "scan_refused", refusal: { kind: "binary_file", place: "src/blob.dat" } },

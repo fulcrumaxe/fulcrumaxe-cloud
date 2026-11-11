@@ -242,7 +242,7 @@ describe("every refusal leaves the public branches as they were (item 27)", () =
     proxy?: (p: PublishProxyFake) => void;
   }
   const cases: Case[] = [
-    { name: "an overlay path", files: { "docs/ops/new.md": "private\n" }, code: "scan_refused", refusal: { kind: "overlay_path", place: "docs/ops/new.md" } },
+    { name: "an overlay path", files: { "docs/ops/new.md": "private\n" }, code: "private_path_change", refusal: { kind: "overlay_path", place: "docs/ops/new.md" } },
     { name: "an identifier hit", files: { "src/a.ts": "export const a = 1;\nconst host = 'acme-internal-host';\n" }, code: "scan_refused", refusal: { kind: "identifier_hit", place: "src/a.ts:2", rule_key: "identifier-rule#1" } },
     { name: "a plan-data key", files: { "src/a.ts": "export const a = 1;\nconst o = { priceUsdPerMonth: 7391 };\n" }, code: "scan_refused", refusal: { kind: "plan_data_hit", place: "src/a.ts:2", rule_key: "priceUsdPerMonth" } },
     { name: "a binary file", files: { "src/blob.dat": Buffer.from([1, 2, 0, 3]) }, code: "scan_refused", refusal: { kind: "binary_file", place: "src/blob.dat" } },
@@ -627,7 +627,7 @@ describe("a change on the default branch whose branch merged the default branch 
 
   it("control: signed with the build's start commit, the default branch's private-only change refuses the publish", async () => {
     const { lines } = await runHook(inputFor(merged, { privateDefaultTip: moved }));
-    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "overlay_path", place: "docs/ops/plan.md" }] });
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "private_path_change", refusals: [{ kind: "overlay_path", place: "docs/ops/plan.md" }] });
   }, 60_000);
 
   it("with the flag, only the item's own paths are published", async () => {
@@ -725,7 +725,7 @@ describe("a change stacked on a parent branch whose branch merged the parent's t
 
   it("control: signed with the commit the child was cut at, the parent's merged-in work refuses the publish on its private-only doc", async () => {
     const { lines } = await runHook(inputFor(head, { privateBase: world.base }));
-    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "scan_refused" });
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "private_path_change" });
   }, 60_000);
 
   it("with the parent's tip, the merge base is the tip the child merged, though the parent moved further: only the child's own path is published", async () => {

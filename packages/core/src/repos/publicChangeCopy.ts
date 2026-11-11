@@ -33,6 +33,8 @@ export const PUBLIC_CHANGE_REFUSAL_REASON: Readonly<Record<string, string>> = {
   base_diverged: 'the public repository changed the same files since the build started',
   no_changes: 'there was nothing to send',
   scan_refused: 'the scan found something that must not be public',
+  // The words come from `privatePathChangeSentence`, which names the paths; this is the reason when no path is known.
+  private_path_change: 'the change edits private-only paths, which the public repository never receives',
   scan_identity_mismatch: 'the scan did not check the change that was built',
   rule_files_not_private: 'the rule files are not private paths; add them to the private paths in the pairing',
   public_unavailable: 'the public repository could not be reached',
@@ -74,8 +76,24 @@ export const PUBLIC_CHANGE_UNKNOWN_REFUSAL = 'Refused: the change was not sent';
 /** Added after a refusal on a run on the person's machine: that run has ended and cannot push again, so the way forward is a new build. */
 export const PUBLIC_CHANGE_RUNNER_HINT = 'Use Build again to try once more.';
 
-export function publicChangeSentence(state: PublicChangeState, code: string | null, runtime: string | null = null): string {
+/** The refusal entry kind the push scan gives a changed path that is on the repository's private (overlay) list. */
+export const OVERLAY_PATH_REFUSAL_KIND = 'overlay_path';
+const MAX_SHOWN_PATHS = 5;
+
+/**
+ * The card's sentence for a change that edits private-only paths. It names the PATHS (never their contents) and says what to change: a Build again would
+ * rebuild the same file set and be refused the same way, so unlike the other refusals it carries no "Build again" hint.
+ */
+export function privatePathChangeSentence(paths: readonly string[]): string {
+  const shown = paths.slice(0, MAX_SHOWN_PATHS).join(', ');
+  const more = paths.length > MAX_SHOWN_PATHS ? ` and ${paths.length - MAX_SHOWN_PATHS} more` : '';
+  const which = paths.length === 0 ? '' : ` (${shown}${more})`;
+  return `Refused: the change edits private-only paths${which}, which the public repository never receives. Take them out of the Spec's file list and build the change without them, or make that edit in the private repository by hand. The other checks run once the private paths are gone.`;
+}
+
+export function publicChangeSentence(state: PublicChangeState, code: string | null, runtime: string | null = null, paths: readonly string[] = []): string {
   if (state !== 'refused') return PUBLIC_CHANGE_STATE_SENTENCE[state];
+  if (code === 'private_path_change') return privatePathChangeSentence(paths);
   if (code === null || !Object.hasOwn(PUBLIC_CHANGE_REFUSAL_REASON, code)) return PUBLIC_CHANGE_UNKNOWN_REFUSAL;
   const base = `Refused: ${PUBLIC_CHANGE_REFUSAL_REASON[code]}`;
   return runtime === 'runner' && code !== 'retry_limit' ? `${base}. ${PUBLIC_CHANGE_RUNNER_HINT}` : base;

@@ -56,7 +56,7 @@ const NO_STORE = { "cache-control": "no-store" } as const;
  * runner cannot store a code the item view has no sentence for. `report_mismatch` is the cloud's own and is not on the list.
  */
 export const PLANE_PUSH_REPORT_CODES: readonly string[] = [
-  "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
+  "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "private_path_change", "scan_identity_mismatch", "public_unavailable",
   "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
   "rule_files_not_private", "private_read_failed", "base_not_ancestor", "base_unavailable", "base_not_on_default", "base_not_on_parent", "merge_in_change",
   "republish_pr_closed", "republish_pr_merged", "republish_pairing_off",

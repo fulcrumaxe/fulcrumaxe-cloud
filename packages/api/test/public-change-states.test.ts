@@ -28,6 +28,8 @@ interface Seed {
   /** The runtime of the latest push attempt, and how many push attempts the item has. */
   attempts?: { runtime: 'runner' | 'sandbox'; count: number };
   expected: string;
+  /** The stored refusal entries, when the row carries them. */
+  refusals?: Array<{ kind: string; place: string; rule_key: string }>;
   /** What an owner is offered under the change (P1f-6b): the same predicate the action routes ask. */
   actions?: string[];
 }
@@ -53,6 +55,11 @@ const SEEDS: Seed[] = [
   { name: 'refused-no_issue_link', state: 'refused', code: 'no_issue_link', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the item this planned PR belongs to has no GitHub issue', actions: ['retry_push'] },
   { name: 'refused-not_found', state: 'refused', code: 'not_found', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the item could not be found', actions: ['retry_push'] },
   { name: 'refused-child_body_closing_keyword', state: 'refused', code: 'child_body_closing_keyword', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the pull request text would have closed an issue, so nothing was sent', actions: ['retry_push'] },
+  { name: 'refused-private_path_change', state: 'refused', code: 'private_path_change', attempts: { runtime: 'runner', count: 1 }, refusals: [{ kind: 'overlay_path', place: 'docs/ops/plan.md', rule_key: 'overlay_path' }], expected: "Refused: the change edits private-only paths (docs/ops/plan.md), which the public repository never receives. Take them out of the Spec's file list and build the change without them, or make that edit in the private repository by hand. The other checks run once the private paths are gone." },
+  // A record written before the code existed: every entry is a private-only path, so it reads with the same words.
+  { name: 'refused-scan_refused-overlay-only', state: 'refused', code: 'scan_refused', attempts: { runtime: 'runner', count: 1 }, refusals: [{ kind: 'overlay_path', place: 'docs/ops/a.md', rule_key: 'overlay_path' }, { kind: 'overlay_path', place: 'docs/ops/b.md', rule_key: 'overlay_path' }], expected: "Refused: the change edits private-only paths (docs/ops/a.md, docs/ops/b.md), which the public repository never receives. Take them out of the Spec's file list and build the change without them, or make that edit in the private repository by hand. The other checks run once the private paths are gone." },
+  // A mix of a private-only path and a real hit stays a scan refusal.
+  { name: 'refused-scan_refused-mixed', state: 'refused', code: 'scan_refused', attempts: { runtime: 'sandbox', count: 1 }, refusals: [{ kind: 'overlay_path', place: 'docs/ops/a.md', rule_key: 'overlay_path' }, { kind: 'identifier_hit', place: 'src/a.ts:2', rule_key: 'identifier-rule#1' }], expected: 'Refused: the scan found something that must not be public', actions: ['retry_push'] },
 ];
 
 /** D#598 P1f-6a against real Postgres: the activity read of every state of a change to a paired public repo, pinned as fixtures. */
@@ -115,9 +122,9 @@ describe('public_change through getWorkItemActivity (D#598 P1f-6a)', { timeout: 
       const shaped = ['pushed', 'pr_opened', 'pushed_pr_not_opened'].includes(s.state);
       const pr = s.state === 'pr_opened';
       await admin.query(
-        `INSERT INTO plane_pushes (id, account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state, code)
-         VALUES ($1, $2, $3, $4, 'acme/docs-public', $5, $6, $7, $8, $9, $10, $11)`,
-        [pushId, me.accountId, itemId, repoId, 'c'.repeat(64), shaped ? SHA : null, shaped ? TIP : null, pr ? 88 : null, pr ? 'https://github.com/acme/docs-public/pull/88' : null, s.state, s.code ?? null],
+        `INSERT INTO plane_pushes (id, account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state, code, refusals)
+         VALUES ($1, $2, $3, $4, 'acme/docs-public', $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
+        [pushId, me.accountId, itemId, repoId, 'c'.repeat(64), shaped ? SHA : null, shaped ? TIP : null, pr ? 88 : null, pr ? 'https://github.com/acme/docs-public/pull/88' : null, s.state, s.code ?? null, JSON.stringify(s.refusals ?? [])],
       );
       if (s.attempts) {
         for (let k = 1; k <= s.attempts.count; k++) {

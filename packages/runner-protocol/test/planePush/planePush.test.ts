@@ -394,9 +394,10 @@ describe("round 3: names, identity, exact regex, normalisation", () => {
 });
 
 describe("module shape", () => {
-  it("the pure module imports nothing, so it reads no file and runs no process", () => {
+  it("the pure module imports nothing but the pure overlay-path module, so it reads no file and runs no process", () => {
     const src = readFileSync(new URL("../../src/planePush/planePush.ts", import.meta.url), "utf8");
-    expect(src).not.toMatch(/^\s*import\s/m);
+    expect(src.match(/^[ \t]*import\s.*$/gm)).toEqual(['import { compileOverlay } from "../overlayPaths.js";']);
+    expect(readFileSync(new URL("../../src/overlayPaths.ts", import.meta.url), "utf8")).not.toMatch(/^\s*import\s|\brequire\(|process\./m);
     expect(src).not.toMatch(/\brequire\(|process\.|import\.meta|__dirname/);
   });
 });

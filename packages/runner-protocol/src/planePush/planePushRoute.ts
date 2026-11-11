@@ -44,6 +44,7 @@ export type PlaneRefusalCode =
   | "base_diverged"
   | "no_changes"
   | "scan_refused"
+  | "private_path_change"
   | "scan_identity_mismatch"
   | "public_unavailable"
   | "public_tip_moved"
@@ -67,7 +68,7 @@ export type PlaneRefusalCode =
   | "republish_pairing_off";
 
 export const PLANE_REFUSAL_CODES: readonly PlaneRefusalCode[] = [
-  "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
+  "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "private_path_change", "scan_identity_mismatch", "public_unavailable",
   "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
   "rule_files_not_private", "private_read_failed", "base_not_ancestor", "base_unavailable", "base_not_on_default", "base_not_on_parent", "merge_in_change",
   // The stops the cloud refuses a fix round's token with (the route never throws them): a new runner reports the code it was refused with.
@@ -416,6 +417,12 @@ async function routeAndPushOnce(input: PlaneRouteInput, deps: PlaneRouteDeps): P
         ...scanText("pull request body", input.body, { identifierRules, planData }),
       );
     }
+  }
+  // A change whose ONLY refusals are overlay (private-only) paths is not a leak the scan found in text: the item edited a file the public repo never receives. It gets
+  // its own code so the card can name the paths and say what to change, instead of the generic "something must not be public".
+  if (refusals.length > 0 && refusals.every((r) => r.kind === "overlay_path")) {
+    const paths = [...new Set(refusals.map((r) => r.path).filter((p): p is string => typeof p === "string"))];
+    throw new PlaneRouteError("private_path_change", `the change edits private-only paths and was not sent: ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ` (and ${paths.length - 5} more)` : ""}`, refusals.slice(0, 100));
   }
   if (refusals.length > 0) {
     throw new PlaneRouteError("scan_refused", `the change was not sent: ${refusals.slice(0, 5).map((r) => r.message).join("; ")}${refusals.length > 5 ? ` (and ${refusals.length - 5} more)` : ""}`, refusals.slice(0, 100));

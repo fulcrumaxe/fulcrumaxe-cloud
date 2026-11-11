@@ -231,11 +231,17 @@ describe("refusals push nothing (acceptance 3, 4, 5)", () => {
     return e;
   }
 
-  it("an overlay path among the item's paths names the path and sends nothing", async () => {
+  it("an overlay path among the item's paths names the path and sends nothing, under its own code", async () => {
     const e = await refused({ "src/c.ts": "export const c = 1;\n", "docs/ops/new.md": "more private text\n" });
-    expect(e.code).toBe("scan_refused");
+    expect(e.code).toBe("private_path_change");
     expect(e.message).toContain("docs/ops/new.md");
     expect(e.refusals).toEqual([expect.objectContaining({ kind: "overlay_path", path: "docs/ops/new.md" })]);
+  });
+
+  it("an overlay path together with a real identifier hit stays a scan refusal", async () => {
+    const e = await refused({ "docs/ops/new.md": "more private text\n", "src/a.ts": "const host = 'acme-internal-host';\n" });
+    expect(e.code).toBe("scan_refused");
+    expect(e.refusals.map((r) => r.kind).sort()).toEqual(["identifier_hit", "overlay_path"]);
   });
 
   it("an identifier hit and a plan-data hit name file, line and rule key and never the matched text", async () => {
@@ -884,7 +890,7 @@ describe("a first publish after a round merged the base into the branch", () => 
     sh(priv, "checkout", "-q", "item");
     sh(priv, "merge", "-q", "--no-ff", "-m", "again", tip2);
     const e = await refusal(routeAndPush(input({ privateBase, privateDefaultTip: tip2 }), deps()));
-    expect(e.code).toBe("scan_refused");
+    expect(e.code).toBe("private_path_change");
     expect(e.message).toContain("docs/ops/plan.md");
     const r = await routeAndPush(input({ privateBase: tip2, privateDefaultTip: tip2 }), deps());
     if (r.plane !== "paired") throw new Error("unreachable");

@@ -396,6 +396,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "base_diverged",
   "no_changes",
   "scan_refused",
+  "private_path_change",
   "scan_identity_mismatch",
   "rule_files_not_private",
   "private_read_failed",
