@@ -8,4 +8,7 @@ export interface VerifyServerSpec {
   baseUrl: string;
   executable: string;
   storageState: string;
+  /** Set only with a usable protection bypass file whose registered cloud origin is the base's origin: the PATH of the file (never its content) and that origin. */
+  bypassFile?: string;
+  cloudOrigin?: string;
 }

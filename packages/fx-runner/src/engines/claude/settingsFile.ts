@@ -101,7 +101,7 @@ export function mcpConfigFor(job: { role: string; browserMethod?: BrowserMethod 
       [VERIFY_SERVER_NAME]: {
         type: "stdio",
         command: server.command,
-        args: [...server.args, "verify-browser-server", "--job-dir", jobDir, "--base-url", server.baseUrl, "--executable", server.executable, "--storage-state", server.storageState],
+        args: [...server.args, "verify-browser-server", "--job-dir", jobDir, "--base-url", server.baseUrl, "--executable", server.executable, "--storage-state", server.storageState, ...(server.bypassFile === undefined || server.cloudOrigin === undefined ? [] : ["--bypass-file", server.bypassFile, "--cloud-origin", server.cloudOrigin])],
         env: {},
       },
     },
