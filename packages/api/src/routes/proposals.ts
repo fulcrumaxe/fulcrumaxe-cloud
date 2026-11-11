@@ -101,7 +101,7 @@ export const proposalRoutes: RouteEntry[] = [
       "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. " +
       "`claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. " +
       "`excerpt` and claim `text` are untrusted and returned as stored; render them as plain text. " +
-      "`verify_wait` says why a `pending` proposal is waiting: `daily_limit` (its repository's daily limit on checks of outside proposals is used up), `daily_spend` (its repository's daily checking budget is used up), `runner_check_not_built` (its repository runs work on the owner's own runner, where checking proposals is not built yet) or `queued`.",
+      "`verify_wait` says why a `pending` proposal is waiting: `daily_limit` (its repository's daily limit on checks of outside proposals is used up), `daily_spend` (its repository's daily checking budget is used up), `runner_check_not_built` (its repository runs work on the owner's own runner, so it is never checked here; the Inbox lists it under `not_checked`) or `queued`.",
     principals: ["session", "token"],
     minRole: "member",
     scope: "read",
@@ -120,7 +120,7 @@ export const proposalRoutes: RouteEntry[] = [
     operationId: "approveProposal",
     summary: "Approve a proposal onto the roadmap",
     description:
-      "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction, together with the item's spend `envelope`. " +
+      "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. A proposal whose check has not finished (`verification` is `pending`, `not_checked` or `check_failed`) can be approved: the check informs the decision, it never gates it. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction, together with the item's spend `envelope`. " +
       "The envelope is pre-filled to the priced estimate times (1 + the default margin), capped at what the account can still spend this month. The body is optional: `amount_usd` sets the limit yourself, and is required when the proposal cannot be priced yet (a question, or no category), which otherwise answers 400 `amount_required` and writes nothing. " +
       "A limit below the first run's reservation is refused 409 `envelope_below_first_run` (the smallest limit that would be accepted is in `data.minimum_usd`), and one above the remaining budget 409 `over_account_budget`. " +
       "Then, when the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item, for every kind of proposal: an issue-backed one is read from its issue, any other from the proposal's own title and summary, fenced as untrusted in every prompt. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` and the work item waits at Triaged. " +

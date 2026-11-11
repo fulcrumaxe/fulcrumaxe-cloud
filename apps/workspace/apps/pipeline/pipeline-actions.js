@@ -663,7 +663,7 @@ export const FILTERS = [
   { key: "new", label: "New", query: "state=new&owner=product&section=new", empty: "Nothing is waiting for a decision. New proposals appear here once they've been checked." },
   { key: "being_checked", label: "Being checked", query: "state=new&owner=product&section=being_checked", intro: "We're checking these against your repository. They move to New when the check is done.", empty: "Nothing is being checked right now." },
   { key: "couldnt_confirm", label: "Couldn't confirm", query: "state=new&owner=product&section=couldnt_confirm", intro: "We couldn't confirm these against your repository. Read what didn't match before you approve one.", empty: "Nothing here. Every proposal we checked was confirmed." },
-  { key: "not_checked", label: "Not checked", query: "state=new&owner=product&section=not_checked", empty: "Every proposal has been checked or is being checked." },
+  { key: "not_checked", label: "Not checked", query: "state=new&owner=product&section=not_checked", intro: "Not checked yet, either because checks aren't set up for this repository or because it runs work on your own runner. You can still approve any of these.", empty: "Every proposal has been checked or is being checked." },
   { key: "approved", label: "Approved", query: "state=approved", empty: "Nothing has been approved yet." },
   { key: "rejected", label: "Rejected", query: "state=rejected", empty: "Nothing has been rejected." },
   { key: "withdrawn", label: "Closed at source", query: "state=withdrawn", empty: "Nothing has been closed or finished at its source since the last import." },
@@ -676,7 +676,7 @@ export const EXTERNAL_SENTENCE = "From someone without admin or maintain access.
 export const AGENT_RUN_SENTENCE = "Opened by a fulcrumaxe agent run. A person decides.";
 export const PARTLY_SENTENCE = "Part of this was confirmed. Read the parts that weren't before you approve it.";
 export const NOT_CHECKED_SENTENCE = "Not checked yet: add a model key or connect a runner";
-export const BEING_CHECKED_SENTENCE = "You can approve this once it's been checked.";
+export const BEING_CHECKED_SENTENCE = "We're still checking this. You can approve it now without waiting for the check.";
 export const RETRY_SENTENCE = "The check didn't finish. We'll try again at the next check.";
 export const NO_EVIDENCE_SENTENCE = "No evidence was found for this proposal.";
 export const NO_CLAIMS_SENTENCE = "There was nothing to check in this proposal.";
@@ -689,7 +689,7 @@ export const DETAIL_FAILED_SENTENCE = "The check didn't finish, so there are no 
 export const VERIFY_WAIT_SENTENCES = {
   daily_limit: "Waiting: today's limit for checking outside proposals is reached — it is checked tomorrow.",
   daily_spend: "Waiting: this repository's daily checking budget is used — it is checked tomorrow.",
-  runner_check_not_built: "This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.",
+  runner_check_not_built: "This repository runs work on your own runner, so we don't check its proposals here. You can approve this one as it is.",
 };
 
 /**
@@ -760,8 +760,11 @@ export function checkSentences(p) {
   return out;
 }
 
-/** The sentence that explains a disabled Approve, from the section the server put the proposal in. "" when Approve is open. */
-export const approveBlock = (p) => (p.inbox_section === "being_checked" ? BEING_CHECKED_SENTENCE : p.inbox_section === "not_checked" ? NOT_CHECKED_SENTENCE : "");
+/** The sentence under Approve while the check has not finished (`being_checked` or `not_checked`); "" once it has (or for a row with no section). The check informs the decision; it never disables Approve. */
+export const approveSentence = (p) => (p.inbox_section === "being_checked" ? BEING_CHECKED_SENTENCE : p.inbox_section === "not_checked" ? NOT_CHECKED_SENTENCE : "");
+
+/** Whether the proposal's section should turn Approve off. Always false: no section gates Approve any more, only the row's own request, the rate limit and a disconnected repository do (see `button()`). Named, rather than inlined, so that rule has one place to change and this file's own test catches a regression. */
+export const sectionBlocksApprove = () => false;
 
 /** Shown instead of "Enter a higher one" when the remaining monthly budget is below the first run's cost. Fixed text. */
 export const LOW_BUDGET_SENTENCE = "Your remaining budget this month is lower than the cost of the first run. Raise the monthly budget to approve this.";
@@ -1250,10 +1253,10 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
 
   function button(label, p, path, extra) {
     const repo = getRepo();
-    const unchecked = path === "approve" && approveBlock(p) !== "";
-    const blocked = sending.has(p.id) || limited > 0 || unchecked || (path === "approve" && !!repo && !repo.connected);
+    const hasSentence = path === "approve" && approveSentence(p) !== "";
+    const blocked = sending.has(p.id) || limited > 0 || (path === "approve" && sectionBlocksApprove(p)) || (path === "approve" && !!repo && !repo.connected);
     // aria-disabled, not disabled: a disabled button drops keyboard focus while the request is out. Clicks are ignored instead.
-    const describe = path === "approve" || path === "reject" ? { "aria-describedby": "pl-inbox-title-" + p.id + (unchecked ? " pl-inbox-why-" + p.id : "") } : {};
+    const describe = path === "approve" || path === "reject" ? { "aria-describedby": "pl-inbox-title-" + p.id + (hasSentence ? " pl-inbox-why-" + p.id : "") } : {};
     return h("button", { type: "button", class: "pl-btn", "data-testid": "pl-inbox-" + path, "data-focus": p.id + ":" + path, "aria-disabled": blocked ? "true" : "false", ...describe, onClick: () => !blocked && act(p, path), ...extra }, label);
   }
 
@@ -1297,7 +1300,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
         est && est.basis === "none" ? h("p", { class: "pl-inbox-line", id: aid + "-line", "data-testid": "pl-inbox-amount-line" }, AMOUNT_SENTENCE) : null,
         h("label", { class: "pl-inbox-amountlabel", for: aid }, AMOUNT_LABEL, amountInput),
         button("Approve", p, "approve"),
-        approveBlock(p) ? h("p", { class: "pl-inbox-line", id: "pl-inbox-why-" + p.id, "data-testid": "pl-inbox-approve-why" }, approveBlock(p)) : null,
+        approveSentence(p) ? h("p", { class: "pl-inbox-line", id: "pl-inbox-why-" + p.id, "data-testid": "pl-inbox-approve-why" }, approveSentence(p)) : null,
         repo && !repo.connected ? h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-detached" }, DETACHED_SENTENCE) : null,
         h("label", { class: "pl-inbox-notelabel", for: id }, h("span", { class: "pl-sr" }, "Reason for rejecting " + p.title + " (optional)"), input),
         button("Reject", p, "reject"),

@@ -56,7 +56,10 @@ export const proposalSchema = z.object({
   inbox_section: z
     .enum(INBOX_SECTIONS)
     .nullable()
-    .describe("Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."),
+    .describe(
+      "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. " +
+        "A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there.",
+    ),
   claim_counts: z.object({
     supported: z.number().int(),
     refuted: z.number().int(),
@@ -96,7 +99,7 @@ export const proposalDetailSchema = proposalSchema.extend({
     .enum(VERIFY_WAITS)
     .nullable()
     .describe(
-      "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `runner_check_not_built`: its repository runs work on the owner's own runner, where checking proposals is not built yet, so it waits with no check coming. `queued`: it waits for the next check pass or its check is running.",
+      "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `runner_check_not_built`: its repository runs work on the owner's own runner, so its proposals are never checked here; the Inbox lists it under `not_checked`, not as waiting for a check that is coming. `queued`: it waits for the next check pass or its check is running.",
     ),
 });
 

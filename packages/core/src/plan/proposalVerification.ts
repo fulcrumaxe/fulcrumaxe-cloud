@@ -4,7 +4,9 @@
  * Three pure pieces, shared by the routes, the verifier (S4-b) and the Inbox (S4-h):
  *   - MAX_VERIFY_ATTEMPTS: the retry cap, defined once so the verifier that counts and the read that reports cannot disagree.
  *   - inboxSection: which Inbox section a proposal belongs in. The mapping lives in one table; the SQL filter on the list
- *     route is generated from the same table, so the field and the filter cannot drift apart.
+ *     route is generated from the same table, so the field and the filter cannot drift apart. A `pending` proposal reads
+ *     `not_checked` instead of `being_checked` when its repository is `LOCAL_ONLY_MODE` (`runner_local`): the hosted check
+ *     never reaches such a repository, so no "being checked" is actually happening.
  *   - buildEvidenceUrl: the link behind one piece of evidence. It is built from the repository row's owner and name plus a
  *     parsed path, line range and commit; nothing stored as link text is ever echoed.
  *
@@ -30,9 +32,20 @@ export const SECTION_BY_VERIFICATION: Readonly<Record<Verification, InboxSection
   not_checked: 'not_checked',
 };
 
-/** The section of a proposal, or null for anything that is not a new, product-owned proposal. */
-export function inboxSection(p: { state: string; owner_process: string; verification: Verification }): InboxSection | null {
+/**
+ * The repository mode the hosted check never reads: the verifier's own lister (0893/0953) leaves such a repository out, because
+ * the cloud never reads its files. Kept here, beside `SECTION_BY_VERIFICATION`, so `inboxSection` below and the list route's SQL
+ * filter (`proposals.ts`) read the same rule and cannot drift apart.
+ */
+export const LOCAL_ONLY_MODE = 'runner_local';
+
+/** The section of a proposal, or null for anything that is not a new, product-owned proposal. `repo` is optional; omitted (or a mode other than `LOCAL_ONLY_MODE`) leaves `pending` at `being_checked`. */
+export function inboxSection(
+  p: { state: string; owner_process: string; verification: Verification },
+  repo?: { execution_mode: string | null },
+): InboxSection | null {
   if (p.state !== 'new' || p.owner_process !== 'product') return null;
+  if (p.verification === 'pending' && repo?.execution_mode === LOCAL_ONLY_MODE) return 'not_checked';
   return SECTION_BY_VERIFICATION[p.verification] ?? null;
 }
 

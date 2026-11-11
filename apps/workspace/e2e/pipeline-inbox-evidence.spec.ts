@@ -43,7 +43,7 @@ test.describe("D#483 S4-h: sections", () => {
     const cases = [
       ["being_checked", "We're checking these against your repository. They move to New when the check is done.", "Nothing is being checked right now."],
       ["couldnt_confirm", "We couldn't confirm these against your repository. Read what didn't match before you approve one.", "Nothing here. Every proposal we checked was confirmed."],
-      ["not_checked", null, "Every proposal has been checked or is being checked."],
+      ["not_checked", "Not checked yet, either because checks aren't set up for this repository or because it runs work on your own runner. You can still approve any of these.", "Every proposal has been checked or is being checked."],
     ] as const;
     for (const [key, intro, empty] of cases) {
       await press(page, filter(page, key));
@@ -134,26 +134,22 @@ test.describe("D#483 S4-h: the line about a proposal's check", () => {
     await clean(page, errors);
   });
 
-  test("Approve is off in Being checked and in Not checked, each with its sentence, and a click sends nothing", async ({ page }) => {
+  test("Approve stays open in Being checked and in Not checked, each still showing its own reason sentence", async ({ page }) => {
     const m = newMock();
     m.proposals = [proposal(1, { verification: "pending", title: "Waiting" }), proposal(2, { verification: "not_checked", title: "No key" })];
     const { errors } = await start(page, m);
     await press(page, filter(page, "being_checked"));
     const approve = tid(page, "pl-inbox-approve");
-    await expect(approve).toHaveAttribute("aria-disabled", "true");
-    await expect(tid(page, "pl-inbox-approve-why")).toHaveText("You can approve this once it's been checked.");
+    await expect(approve).toHaveAttribute("aria-disabled", "false");
+    await expect(tid(page, "pl-inbox-approve-why")).toHaveText("We're still checking this. You can approve it now without waiting for the check.");
     const why = await tid(page, "pl-inbox-approve-why").getAttribute("id");
     expect(await approve.getAttribute("aria-describedby")).toContain(why);
     await axeClean(page);
-    await approve.dispatchEvent("click"); // aria-disabled, so Playwright would wait for it to be enabled
-    expect(m.posts).toEqual([]);
     await press(page, filter(page, "not_checked"));
-    await expect(tid(page, "pl-inbox-approve")).toHaveAttribute("aria-disabled", "true");
+    await expect(tid(page, "pl-inbox-approve")).toHaveAttribute("aria-disabled", "false");
     await expect(tid(page, "pl-inbox-approve-why")).toHaveText("Not checked yet: add a model key or connect a runner");
     await axeClean(page);
-    await tid(page, "pl-inbox-approve").dispatchEvent("click");
-    expect(m.posts).toEqual([]);
-    // Undo path: once the check has run the proposal is in New and Approve is open again.
+    // Undo path: once the check has run the proposal is in New, with no reason line any more.
     m.proposals[1] = proposal(2, { verification: "verified", title: "No key" });
     await press(page, filter(page, "new"));
     await expect(tid(page, "pl-inbox-approve")).toHaveAttribute("aria-disabled", "false");
@@ -287,25 +283,33 @@ test.describe("D#483 S4-h: opening a proposal", () => {
     await clean(page, errors);
   });
 
-  test("a pending proposal on a repository that runs work on your own runner says why it waits, and Approve stays off", async ({ page }) => {
+  test("a pending proposal on a repository that runs work on your own runner reads Not checked and says why it waits; Approve stays open there and in Being checked", async ({ page }) => {
     const m = newMock();
-    m.proposals = [proposal(1, { verification: "pending", title: "On my runner" }), proposal(2, { verification: "pending", title: "On the cloud" })];
+    m.proposals = [
+      proposal(1, { verification: "pending", title: "On my runner", inbox_section: "not_checked" }),
+      proposal(2, { verification: "pending", title: "On the cloud" }),
+    ];
     m.details[String(m.proposals[0].id)] = { claims: [], evidence: [], verify_wait: "runner_check_not_built" };
     m.details[String(m.proposals[1].id)] = { claims: [], evidence: [], verify_wait: "queued" };
     const { errors } = await start(page, m);
-    await press(page, filter(page, "being_checked"));
+    await press(page, filter(page, "not_checked"));
     const toggle = tid(page, "pl-inbox-toggle");
     await press(page, toggle.first());
-    await expect(tid(page, "pl-check-status")).toHaveText("This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.");
+    await expect(tid(page, "pl-check-status")).toHaveText("This repository runs work on your own runner, so we don't check its proposals here. You can approve this one as it is.");
     const box = await tid(page, "pl-check-status").boundingBox();
     const win = await page.locator(WIN).boundingBox();
     expect(box!.width).toBeGreaterThan(100);
     expect(box!.x + box!.width).toBeLessThanOrEqual(win!.x + win!.width + 1);
-    await expect(tid(page, "pl-inbox-approve").first()).toHaveAttribute("aria-disabled", "true");
+    const approve = tid(page, "pl-inbox-approve").first();
+    await expect(approve).toHaveAttribute("aria-disabled", "false");
+    const why = await tid(page, "pl-inbox-approve-why").first().getAttribute("id");
+    expect(await approve.getAttribute("aria-describedby")).toContain(why);
     await axeClean(page);
-    // A proposal that is only queued keeps the plain pending sentence.
     await press(page, toggle.first());
-    await press(page, toggle.nth(1));
+    // Being checked (the one still pending on the cloud) is open too, and keeps the plain pending sentence.
+    await press(page, filter(page, "being_checked"));
+    await expect(tid(page, "pl-inbox-approve")).toHaveAttribute("aria-disabled", "false");
+    await press(page, toggle.first());
     await expect(tid(page, "pl-check-status")).toHaveText("Not checked yet. Claims and evidence show here once the check is done.");
     await clean(page, errors);
   });

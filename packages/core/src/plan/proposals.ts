@@ -4,6 +4,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import { recordStage } from '../work-items/recordStage.js';
 import { IllegalStageTransitionError, WorkItemHaltedError } from '../work-items/stages.js';
 import {
+  LOCAL_ONLY_MODE,
   MAX_VERIFY_ATTEMPTS,
   buildEvidenceUrl,
   inboxSection,
@@ -158,19 +159,22 @@ export const PROPOSAL_COLUMNS = `p.id, p.repo_id, p.dedupe_key, p.sources, p.gh_
   p.owner_process, p.state, p.decided_at, p.reject_note, p.reject_kind, p.resurface_after, p.resurfaced_at, p.roadmap_position, p.work_item_id, w.stage AS work_item_stage,
   EXISTS (SELECT 1 FROM start_gate g WHERE g.account_id = p.account_id AND g.work_item_id = p.work_item_id AND g.outcome = 'started' AND g.decided_by = 'policy' AND g.preset = 'balanced') AS auto_started,
   p.created_at, p.updated_at, p.verification, p.verified_at, p.verified_sha, p.verify_attempts,
+  r.execution_mode AS __repo_execution_mode,
   to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts`;
 export const PROPOSAL_FROM = `FROM proposals p
   LEFT JOIN plan_tasks t ON t.id = p.plan_task_id AND t.account_id = p.account_id
   LEFT JOIN plan_milestones m ON m.repo_id = t.repo_id AND m.key = t.milestone_key
-  LEFT JOIN work_items w ON w.id = p.work_item_id AND w.account_id = p.account_id`;
+  LEFT JOIN work_items w ON w.id = p.work_item_id AND w.account_id = p.account_id
+  LEFT JOIN repos r ON r.id = p.repo_id AND r.account_id = p.account_id`;
 
 function iso(v: unknown): string | null {
   return v == null ? null : new Date(v as string).toISOString();
 }
 
 export function toProposalRow(r: Record<string, unknown>): ProposalRow {
-  const { cursor_ts: _cursor, ...rest } = r;
+  const { cursor_ts: _cursor, __repo_execution_mode: repoExecutionMode, ...rest } = r;
   void _cursor;
+  const repo = { execution_mode: (repoExecutionMode as string | null | undefined) ?? null };
   return {
     ...(rest as unknown as ProposalRow),
     decided_at: iso(r.decided_at),
@@ -181,7 +185,7 @@ export function toProposalRow(r: Record<string, unknown>): ProposalRow {
     verified_at: iso(r.verified_at),
     verify_attempts_max: MAX_VERIFY_ATTEMPTS,
     verify_retry: verifyRetry(r as { verification: Verification; verify_attempts: number }),
-    inbox_section: inboxSection(r as { state: string; owner_process: string; verification: Verification }),
+    inbox_section: inboxSection(r as { state: string; owner_process: string; verification: Verification }, repo),
     claim_counts: { supported: 0, refuted: 0, unverifiable: 0, pending: 0 },
     evidence_count: 0,
     auto_started: r.auto_started === true,
@@ -264,7 +268,18 @@ export async function listProposals(ctx: ProposalCtx, f: ListProposalsFilter): P
     const members = verificationsInSection(f.section);
     if (members.length === 0) throw new ProposalRefusedError('invalid_filter');
     args.push(members);
-    where.push(`p.owner_process = 'product' AND p.verification = ANY($${args.length}::text[])`);
+    const verificationClause = `p.verification = ANY($${args.length}::text[])`;
+    // `pending` is split by the repository's mode, the same rule `inboxSection` applies on read (LOCAL_ONLY_MODE, proposalVerification.ts):
+    // a Local-only repository's pending proposal lists under `not_checked`, never `being_checked`.
+    if (f.section === 'not_checked') {
+      args.push(LOCAL_ONLY_MODE);
+      where.push(`p.owner_process = 'product' AND (${verificationClause} OR (p.verification = 'pending' AND r.execution_mode = $${args.length}))`);
+    } else if (f.section === 'being_checked') {
+      args.push(LOCAL_ONLY_MODE);
+      where.push(`p.owner_process = 'product' AND ${verificationClause} AND r.execution_mode IS DISTINCT FROM $${args.length}`);
+    } else {
+      where.push(`p.owner_process = 'product' AND ${verificationClause}`);
+    }
   }
   if (f.cursor !== undefined) {
     const m = CURSOR_RE.exec(f.cursor);

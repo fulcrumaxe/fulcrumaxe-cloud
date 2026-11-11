@@ -6,7 +6,7 @@
 // survives an unknown outcome only.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiFailure, api } from "../apps/_lib/api.js";
-import { DETAIL_FAILED_SENTENCE, DETAIL_PENDING_SENTENCE, NOT_CHECKED_SENTENCE, VERIFY_WAIT_SENTENCES, unfinishedCheckLine, approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, amountPlaceholder, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, rowCheckSentences, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
+import { DETAIL_FAILED_SENTENCE, DETAIL_PENDING_SENTENCE, NOT_CHECKED_SENTENCE, VERIFY_WAIT_SENTENCES, unfinishedCheckLine, approveSentence, sectionBlocksApprove, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, amountPlaceholder, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, rowCheckSentences, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
 
 const BAD = /\b(null|undefined|NaN|\[object)/;
 const base = { id: "p1", title: "Add dark mode", state: "new", sources: ["github_issue"], gh_number: 12, discussion_number: null, task_key: null, category_hint: null, estimate_usd: null, milestone_key: null, milestone_title: null };
@@ -86,14 +86,17 @@ describe("S4-h: the check on a proposal", () => {
     expect(unfinishedCheckLine({ verification: "check_failed" }, "daily_limit")).toBe(DETAIL_FAILED_SENTENCE);
     expect(unfinishedCheckLine({ verification: "not_checked" }, "daily_spend")).toBe(NOT_CHECKED_SENTENCE);
     expect(unfinishedCheckLine({ verification: "verified" }, "daily_spend")).toBe("");
-    expect(unfinishedCheckLine(pending, "runner_check_not_built")).toBe("This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.");
+    expect(unfinishedCheckLine(pending, "runner_check_not_built")).toBe("This repository runs work on your own runner, so we don't check its proposals here. You can approve this one as it is.");
     expect(unfinishedCheckLine({ verification: "not_checked" }, "runner_check_not_built")).toBe(NOT_CHECKED_SENTENCE);
     for (const s of Object.values(VERIFY_WAIT_SENTENCES)) expect(s).not.toMatch(BAD);
   });
-  it("approveBlock names why Approve is off in Being checked and Not checked only", () => {
-    expect(approveBlock({ inbox_section: "being_checked" })).toBe("You can approve this once it's been checked.");
-    expect(approveBlock({ inbox_section: "not_checked" })).toBe("Not checked yet: add a model key or connect a runner");
-    for (const s of ["new", "couldnt_confirm", null, undefined]) expect(approveBlock({ inbox_section: s })).toBe("");
+  it("approveSentence names the check's state in Being checked and Not checked only; empty everywhere else", () => {
+    expect(approveSentence({ inbox_section: "being_checked" })).toBe("We're still checking this. You can approve it now without waiting for the check.");
+    expect(approveSentence({ inbox_section: "not_checked" })).toBe("Not checked yet: add a model key or connect a runner");
+    for (const s of ["new", "couldnt_confirm", null, undefined]) expect(approveSentence({ inbox_section: s })).toBe("");
+  });
+  it("sectionBlocksApprove is false for every section: the check informs the decision, it never gates it", () => {
+    for (const s of ["new", "being_checked", "couldnt_confirm", "not_checked"]) expect(sectionBlocksApprove({ inbox_section: s })).toBe(false);
   });
 });
 

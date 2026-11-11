@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
@@ -154,6 +155,18 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       expect(reqs).toEqual([{ kind: 'advance_work_item', target_id: out.work_item_id, principal_kind: 'session' }]);
       expect(signal.sent).toHaveLength(1);
       expect(await n(`SELECT count(*) n FROM audit_log WHERE account_id = $1 AND action = 'proposal.approved'`, [who.accountId])).toBe(1);
+    });
+
+    it("a proposal whose check has not finished (verification is still pending) still approves 200, moving it to approved with a work item: the check informs the decision, it never gates it", async () => {
+      const who = await person('owner');
+      const repo = await repoFor(who, 'team');
+      const id = await proposalFor(who, repo);
+      expect((await admin.query('SELECT verification FROM proposals WHERE id = $1', [id])).rows[0].verification).toBe('pending');
+      const res = await approve(who, id);
+      expect(res.status).toBe(200);
+      const out = await body<ApproveBody>(res);
+      expect(out).toMatchObject({ started: true, not_started_reason: null, proposal: { id, state: 'approved' } });
+      expect(out.work_item_id).toBeTruthy();
     });
 
     it('a replay with the same Idempotency-Key answers the same and creates nothing; a repeat with another key creates no second work item and no second request', async () => {
@@ -866,6 +879,15 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       expect(out.proposal).toMatchObject({ verification: 'verified', claim_counts: { supported: 1, refuted: 0, unverifiable: 0, pending: 0 }, evidence_count: 1, inbox_section: null });
       expect(out.proposal).not.toHaveProperty('claims');
     });
+  });
+});
+
+describe('the committed openapi.json documents that an unfinished check never blocks approval', () => {
+  it('the approve route description says a check still in progress can be approved', () => {
+    const spec = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')) as { paths: Record<string, Record<string, { description: string }>> };
+    const desc = spec.paths['/api/v1/proposals/{id}/approve']!.post!.description;
+    expect(desc).toMatch(/check has not finished/);
+    expect(desc).toContain('it never gates it');
   });
 });
 

@@ -34843,7 +34843,7 @@
                                 "type": "null"
                               }
                             ],
-                            "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                            "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there."
                           },
                           "claim_counts": {
                             "type": "object",
@@ -35031,7 +35031,7 @@
       "get": {
         "operationId": "getProposal",
         "summary": "One proposal",
-        "description": "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. `claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. `excerpt` and claim `text` are untrusted and returned as stored; render them as plain text. `verify_wait` says why a `pending` proposal is waiting: `daily_limit` (its repository's daily limit on checks of outside proposals is used up), `daily_spend` (its repository's daily checking budget is used up), `runner_check_not_built` (its repository runs work on the owner's own runner, where checking proposals is not built yet) or `queued`.",
+        "description": "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. `claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. `excerpt` and claim `text` are untrusted and returned as stored; render them as plain text. `verify_wait` says why a `pending` proposal is waiting: `daily_limit` (its repository's daily limit on checks of outside proposals is used up), `daily_spend` (its repository's daily checking budget is used up), `runner_check_not_built` (its repository runs work on the owner's own runner, so it is never checked here; the Inbox lists it under `not_checked`) or `queued`.",
         "security": [
           {
             "session": []
@@ -35308,7 +35308,7 @@
                               "type": "null"
                             }
                           ],
-                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there."
                         },
                         "claim_counts": {
                           "type": "object",
@@ -35488,7 +35488,7 @@
                               "type": "null"
                             }
                           ],
-                          "description": "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `runner_check_not_built`: its repository runs work on the owner's own runner, where checking proposals is not built yet, so it waits with no check coming. `queued`: it waits for the next check pass or its check is running."
+                          "description": "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `runner_check_not_built`: its repository runs work on the owner's own runner, so its proposals are never checked here; the Inbox lists it under `not_checked`, not as waiting for a check that is coming. `queued`: it waits for the next check pass or its check is running."
                         }
                       },
                       "required": [
@@ -35620,7 +35620,7 @@
       "post": {
         "operationId": "approveProposal",
         "summary": "Approve a proposal onto the roadmap",
-        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction, together with the item's spend `envelope`. The envelope is pre-filled to the priced estimate times (1 + the default margin), capped at what the account can still spend this month. The body is optional: `amount_usd` sets the limit yourself, and is required when the proposal cannot be priced yet (a question, or no category), which otherwise answers 400 `amount_required` and writes nothing. A limit below the first run's reservation is refused 409 `envelope_below_first_run` (the smallest limit that would be accepted is in `data.minimum_usd`), and one above the remaining budget 409 `over_account_budget`. Then, when the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item, for every kind of proposal: an issue-backed one is read from its issue, any other from the proposal's own title and summary, fenced as untrusted in every prompt. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` and the work item waits at Triaged. An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal, work item and envelope and creates nothing; if its start was never requested it is requested now. If the start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
+        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. A proposal whose check has not finished (`verification` is `pending`, `not_checked` or `check_failed`) can be approved: the check informs the decision, it never gates it. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction, together with the item's spend `envelope`. The envelope is pre-filled to the priced estimate times (1 + the default margin), capped at what the account can still spend this month. The body is optional: `amount_usd` sets the limit yourself, and is required when the proposal cannot be priced yet (a question, or no category), which otherwise answers 400 `amount_required` and writes nothing. A limit below the first run's reservation is refused 409 `envelope_below_first_run` (the smallest limit that would be accepted is in `data.minimum_usd`), and one above the remaining budget 409 `over_account_budget`. Then, when the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item, for every kind of proposal: an issue-backed one is read from its issue, any other from the proposal's own title and summary, fenced as untrusted in every prompt. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` and the work item waits at Triaged. An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal, work item and envelope and creates nothing; if its start was never requested it is requested now. If the start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
         "security": [
           {
             "session": []
@@ -35912,7 +35912,7 @@
                               "type": "null"
                             }
                           ],
-                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there."
                         },
                         "claim_counts": {
                           "type": "object",
@@ -36509,7 +36509,7 @@
                               "type": "null"
                             }
                           ],
-                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there."
                         },
                         "claim_counts": {
                           "type": "object",
@@ -36977,7 +36977,7 @@
                               "type": "null"
                             }
                           ],
-                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there."
                         },
                         "claim_counts": {
                           "type": "object",
@@ -37435,7 +37435,7 @@
                               "type": "null"
                             }
                           ],
-                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there."
                         },
                         "claim_counts": {
                           "type": "object",
@@ -38199,7 +38199,7 @@
                                     "type": "null"
                                   }
                                 ],
-                                "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                                "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`. A `pending` proposal on a repository that runs work on its own runner reads `not_checked`, never `being_checked`: no hosted check will ever run there."
                               },
                               "claim_counts": {
                                 "type": "object",

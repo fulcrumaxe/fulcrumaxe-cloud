@@ -145,6 +145,61 @@ describe('proposal verification read (S4-i)', () => {
     it('the pure rule maps every value, and check_failed to Could not confirm', () => {
       for (const v of VERIFICATIONS) expect(INBOX_SECTIONS).toContain(inboxSection({ state: 'new', owner_process: 'product', verification: v }));
       expect(inboxSection({ state: 'new', owner_process: 'product', verification: 'check_failed' })).toBe('couldnt_confirm');
+      // With no second argument (or any mode other than runner_local) pending is unchanged: being_checked.
+      expect(inboxSection({ state: 'new', owner_process: 'product', verification: 'pending' })).toBe('being_checked');
+    });
+  });
+
+  describe('S4i-2b: a repository that runs work on its own runner is never checked, so pending reads not_checked', () => {
+    async function proposalOnMode(mode: string | null, verification: Verification): Promise<string> {
+      const repo = await newRepo(a, 'acme', `mode-${randomUUID().slice(0, 8)}`);
+      if (mode !== null) await admin.query('UPDATE repos SET execution_mode = $1 WHERE id = $2', [mode, repo]);
+      const id = await newProposal(a, repo);
+      if (verification !== 'pending') await record(a, id, { verification });
+      return id;
+    }
+    it('a pending proposal on runner_local reads not_checked and verify_wait runner_check_not_built; sandbox, runner_verified and a NULL mode read being_checked', async () => {
+      const local = await getProposal(ctxOf(a), await proposalOnMode('runner_local', 'pending'));
+      expect(local.inbox_section).toBe('not_checked');
+      expect(local.verify_wait).toBe('runner_check_not_built');
+      for (const mode of ['sandbox', 'runner_verified', null] as const) {
+        const id = await proposalOnMode(mode, 'pending');
+        expect((await getProposal(ctxOf(a), id)).inbox_section, String(mode)).toBe('being_checked');
+      }
+    });
+    it('verified, refuted and check_failed on a runner_local repository keep new, couldnt_confirm and couldnt_confirm', async () => {
+      expect((await getProposal(ctxOf(a), await proposalOnMode('runner_local', 'verified'))).inbox_section).toBe('new');
+      expect((await getProposal(ctxOf(a), await proposalOnMode('runner_local', 'refuted'))).inbox_section).toBe('couldnt_confirm');
+      expect((await getProposal(ctxOf(a), await proposalOnMode('runner_local', 'check_failed'))).inbox_section).toBe('couldnt_confirm');
+    });
+    it('listProposals: section=not_checked lists the Local-only pending proposal, section=being_checked does not (and does list a cloud one)', async () => {
+      const localId = await proposalOnMode('runner_local', 'pending');
+      const cloudId = await proposalOnMode('sandbox', 'pending');
+      const notChecked = (await listProposals(ctxOf(a), { state: 'new', section: 'not_checked' })).proposals.map((p) => p.id);
+      expect(notChecked).toContain(localId);
+      expect(notChecked).not.toContain(cloudId);
+      const beingChecked = (await listProposals(ctxOf(a), { state: 'new', section: 'being_checked' })).proposals.map((p) => p.id);
+      expect(beingChecked).toContain(cloudId);
+      expect(beingChecked).not.toContain(localId);
+    });
+    it('for each of the three modes plus NULL, every verification lands in exactly one of the four sections (the sections stay total and disjoint)', async () => {
+      const expectedByMode: Record<string, Record<Verification, (typeof INBOX_SECTIONS)[number]>> = {
+        runner_local: { verified: 'new', partly_verified: 'new', pending: 'not_checked', refuted: 'couldnt_confirm', check_failed: 'couldnt_confirm', not_checked: 'not_checked' },
+        sandbox: { verified: 'new', partly_verified: 'new', pending: 'being_checked', refuted: 'couldnt_confirm', check_failed: 'couldnt_confirm', not_checked: 'not_checked' },
+        runner_verified: { verified: 'new', partly_verified: 'new', pending: 'being_checked', refuted: 'couldnt_confirm', check_failed: 'couldnt_confirm', not_checked: 'not_checked' },
+        null: { verified: 'new', partly_verified: 'new', pending: 'being_checked', refuted: 'couldnt_confirm', check_failed: 'couldnt_confirm', not_checked: 'not_checked' },
+      };
+      for (const mode of ['runner_local', 'sandbox', 'runner_verified', null] as const) {
+        const bySection = new Map<string, number>();
+        for (const v of VERIFICATIONS) {
+          const id = await proposalOnMode(mode, v);
+          const section = (await getProposal(ctxOf(a), id)).inbox_section;
+          expect(section, `${mode}/${v}`).toBe(expectedByMode[mode === null ? 'null' : mode]![v]);
+          bySection.set(section!, (bySection.get(section!) ?? 0) + 1);
+        }
+        // every verification counted exactly once, split across the four sections: total and disjoint
+        expect([...bySection.values()].reduce((sum, n) => sum + n, 0), String(mode)).toBe(VERIFICATIONS.length);
+      }
     });
   });
 
