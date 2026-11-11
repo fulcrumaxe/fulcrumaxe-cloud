@@ -435,6 +435,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "update_lease_changed",
   // A check that failed only in test files the change did not touch (no fix round is started).
   "check_failed_outside_change",
+  // A check the runner did not run because the run changed files outside the Spec's list (no fix round is started).
+  "check_not_run_out_of_scope",
   "public_branch_moved",
   "base_synced",
   "pull_request_unreadable",

@@ -3,6 +3,25 @@ import { failedOutsideChange } from '../src/work-items/checkFailure.js';
 
 const tail = '\nsome output tail\n';
 
+describe('failedOutsideChange against the chain first check', () => {
+  const first = 'failed test files (2): packages/a/test/a.test.ts, apps/ops/test/o.test.ts\nchanged files (1): packages/a/src/a.ts\nFAIL x';
+  const later = 'failed test files (1): apps/ops/test/o.test.ts\nchanged files (2): apps/ops/src/o.ts, packages/a/src/a.ts\nFAIL x';
+  it('a package only a later round edited is not part of the change', () => {
+    expect(failedOutsideChange(later)).toBe(false);
+    expect(failedOutsideChange(later, first)).toBe(true);
+  });
+  it('a first list that was cut, missing or unreadable falls back to the later summary', () => {
+    expect(failedOutsideChange(later, 'failed test files (1): apps/ops/test/o.test.ts\nchanged files (9): packages/a/src/a.ts (and 8 more)\n')).toBe(false);
+    expect(failedOutsideChange(later, 'FAIL x')).toBe(false);
+    expect(failedOutsideChange(later, null)).toBe(false);
+    expect(failedOutsideChange(later, '')).toBe(false);
+  });
+  it('a failure in a package the first check touched stays a fix round, and an incomplete failed list is never decided', () => {
+    expect(failedOutsideChange('failed test files (1): packages/a/test/a.test.ts\nchanged files (1): packages/a/src/a.ts\n', first)).toBe(false);
+    expect(failedOutsideChange('failed test files (5): apps/ops/test/o.test.ts (and 4 more)\nchanged files (1): packages/a/src/a.ts\n', first)).toBe(false);
+  });
+});
+
 describe('failedOutsideChange: a check that failed only in test files the change did not touch', () => {
   it('every failed file in a package the change did not touch: true', () => {
     expect(failedOutsideChange(`failed test files (2): apps/ops/test/a.test.ts, apps/web/test/b.test.ts\nchanged files (2): packages/fx-runner/src/x.ts, packages/fx-runner/src/y.ts${tail}`)).toBe(true);

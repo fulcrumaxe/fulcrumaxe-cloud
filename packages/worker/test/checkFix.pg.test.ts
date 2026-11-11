@@ -11,7 +11,7 @@ import type { BranchSyncOutcome } from "@fx/github";
 import { createStackBasePort } from "@fx/pipeline";
 import { BASE_SYNCED_PROMPT_LINE, checkFixBeforeStart } from "../src/fixRoundBase.js";
 const withSync = (beforeStart: ReturnType<typeof checkFixBeforeStart>) => ({ beforeStart, baseSync: () => beforeStart.state });
-import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, FAILED_FILES_PROMPT_LEAD, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
+import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_NOT_RUN_OUT_OF_SCOPE, CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, FAILED_FILES_PROMPT_LEAD, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
 
 /**
  * [pg] D#6 R-CHK-3 (C47): the fix round that follows a run whose approved check failed. The ids and names in this file are its own (`chkfix-`): the runs are made here,
@@ -104,7 +104,7 @@ describe("check fix round [pg]", () => {
   });
 
   /** A finished executor run: `reason` is its failure reason (null: succeeded). `parent` makes it a fix round of that run. */
-  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean; sandbox?: boolean }): Promise<string> {
+  async function ended(o: { checkReason?: string; reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean; sandbox?: boolean }): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "widgets", private: true }, role: "executor", mode: "local", spec: null,
@@ -121,7 +121,7 @@ describe("check fix round [pg]", () => {
     // The cloud's own record of the binding, written by the job issuer when it signed the job.
     if (o.onItemBranch?.bound) await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, $3, $4::jsonb)", [A.accountId, id, RUNNER_CONTINUES_BOUND_KIND, JSON.stringify({ branch: "fx/issue-42", pr_number: o.onItemBranch.pr })]);
     if (o.check !== false && o.reason === "check_failed") {
-      await admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary) VALUES ($1, $2, $3, 60000, $4, $5)", [A.accountId, id, o.exit === undefined ? 1 : o.exit, o.timedOut ?? false, o.summary ?? "FAIL src/a.test.ts"]);
+      await admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary, reason) VALUES ($1, $2, $3, 60000, $4, $5, $6)", [A.accountId, id, o.exit === undefined ? 1 : o.exit, o.timedOut ?? false, o.summary ?? "FAIL src/a.test.ts", o.checkReason ?? null]);
     }
     return id;
   }
@@ -222,6 +222,114 @@ describe("check fix round [pg]", () => {
       const first = await startCheckFixRound(deps(), who(), failed);
       await admin.query("UPDATE run_checks SET summary = $2 WHERE run_id = $1", [failed, outside]);
       expect(await startCheckFixRound(deps(), who(), failed)).toEqual(first);
+    });
+  });
+
+  describe("every round of a chain is judged the same way (not only the first check)", () => {
+    const mixed = "failed test files (3): packages/a/test/a.test.ts, packages/a/test/b.test.ts, apps/ops/test/other.test.ts\nchanged files (2): packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL x";
+    const outsideOnly = "failed test files (2): apps/ops/test/other.test.ts, apps/ops/test/more.test.ts\nchanged files (2): packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL x";
+    const notRun = "the check was not run: 1 changed file is outside the Spec's file list";
+
+    /** Starts the round that follows `failed` and returns the run it made. */
+    async function roundOf(failed: string): Promise<string> {
+      const out = await startCheckFixRound(deps(), who(), failed);
+      if (!out.ok) throw new Error(`the round did not start: ${out.reason}`);
+      return out.runId;
+    }
+    /** The round's own run ends with its check failing: the real shape (a run of the chain, with the check row the cloud stored for it). */
+    async function endsCheckFailed(runId: string, o: { summary: string; exit?: number | null; checkReason?: string }): Promise<string> {
+      await admin.query("UPDATE agent_runs SET status = 'failed' WHERE account_id = $1 AND id = $2", [A.accountId, runId]);
+      const seq = (await admin.query<{ n: number }>("SELECT coalesce(max(seq), 0)::int + 1 AS n FROM run_events WHERE account_id = $1 AND run_id = $2", [A.accountId, runId])).rows[0]!.n;
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, $3, 'run.status_changed', $4::jsonb)", [A.accountId, runId, seq, JSON.stringify({ from: "running", to: "failed", failureReason: "check_failed" })]);
+      await admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary, reason) VALUES ($1, $2, $3, 60000, false, $4, $5)", [A.accountId, runId, o.exit === undefined ? 1 : o.exit, o.summary, o.checkReason ?? null]);
+      return runId;
+    }
+
+    it("round 1 failed in the change and outside it: a round starts; that round's check failed only outside it: the next one stops, spends no attempt and starts nothing", async () => {
+      const first = await ended({ reason: "check_failed", summary: mixed });
+      const second = await endsCheckFailed(await roundOf(first), { summary: outsideOnly });
+      expect(resumed).toHaveLength(1);
+      expect(await startCheckFixRound(deps(), who(), second)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+      expect(resumed).toHaveLength(1);
+      expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2", [A.accountId, second])).rows[0].n).toBe(0);
+      // asking again (a replayed step) gives the same answer
+      expect(await startCheckFixRound(deps(), who(), second)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+    });
+
+    it("a round-2 failure that still includes a file of the change keeps its round (mixed is mixed on every round)", async () => {
+      const first = await ended({ reason: "check_failed", summary: mixed });
+      const second = await endsCheckFailed(await roundOf(first), { summary: mixed });
+      expect((await startCheckFixRound(deps(), who(), second)).ok).toBe(true);
+      expect(resumed).toHaveLength(2);
+    });
+
+    it("a round that edited a package the change never touched does not make a failure there part of the change: the chain is judged against its first check's list", async () => {
+      const first = await ended({ reason: "check_failed", summary: mixed });
+      // The round's agent was told to start with the failing files and edited one in apps/ops; the next check still fails only there, and its changed list now names that file.
+      const edited = "failed test files (2): apps/ops/test/other.test.ts, apps/ops/test/more.test.ts\nchanged files (3): apps/ops/src/other.ts, packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL x";
+      const second = await endsCheckFailed(await roundOf(first), { summary: edited });
+      expect(await startCheckFixRound(deps(), who(), second)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+      expect(resumed).toHaveLength(1);
+    });
+
+    it("the same changed list on a first check is the change itself: a failure in a package it touched keeps its round", async () => {
+      const edited = "failed test files (2): apps/ops/test/other.test.ts, apps/ops/test/more.test.ts\nchanged files (3): apps/ops/src/other.ts, packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL x";
+      const first = await ended({ reason: "check_failed", summary: edited });
+      expect((await startCheckFixRound(deps(), who(), first)).ok).toBe(true);
+    });
+
+    const cutFirst = "failed test files (3): packages/a/test/a.test.ts, packages/a/test/b.test.ts, apps/ops/test/other.test.ts\nchanged files (90): packages/a/src/a.ts (and 89 more)\nFAIL x";
+    it("a first check whose changed list was cut cannot vouch for a later round: the later summary's own list decides (it touches the package: a round)", async () => {
+      const first = await ended({ reason: "check_failed", summary: cutFirst });
+      const edited = "failed test files (1): apps/ops/test/other.test.ts\nchanged files (2): apps/ops/src/other.ts, packages/a/src/a.ts\nFAIL x";
+      expect((await startCheckFixRound(deps(), who(), await endsCheckFailed(await roundOf(first), { summary: edited }))).ok).toBe(true);
+    });
+
+    it("... and when the later summary's own complete list shows the failure outside the change, it stops", async () => {
+      const first = await ended({ reason: "check_failed", summary: cutFirst });
+      const second = await endsCheckFailed(await roundOf(first), { summary: outsideOnly });
+      expect(await startCheckFixRound(deps(), who(), second)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+    });
+
+    it("outside-only on the very first check stops with no round", async () => {
+      const first = await ended({ reason: "check_failed", summary: outsideOnly });
+      expect(await startCheckFixRound(deps(), who(), first)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+      expect(resumed).toHaveLength(0);
+    });
+
+    it("a check the runner refused to run (out_of_scope) ends the chain with that reason: no round, no attempt, on the first run and on a later round", async () => {
+      const first = await ended({ reason: "check_failed", summary: notRun, exit: null, checkReason: "out_of_scope" });
+      expect(await startCheckFixRound(deps(), who(), first)).toEqual({ ok: false, reason: CHECK_NOT_RUN_OUT_OF_SCOPE });
+      expect(resumed).toHaveLength(0);
+    });
+
+    it("the same on a later round: a round whose own check was refused out_of_scope starts no further round", async () => {
+      const first = await ended({ reason: "check_failed", summary: mixed });
+      const later = await endsCheckFailed(await roundOf(first), { summary: notRun, exit: null, checkReason: "out_of_scope" });
+      expect(await startCheckFixRound(deps(), who(), later)).toEqual({ ok: false, reason: CHECK_NOT_RUN_OUT_OF_SCOPE });
+      expect(resumed).toHaveLength(1);
+      expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2", [A.accountId, later])).rows[0].n).toBe(0);
+    });
+
+    it("a check that was not run for another reason keeps today's round", async () => {
+      const other = await ended({ reason: "check_failed", summary: notRun, exit: null, checkReason: "not_set_up" });
+      expect((await startCheckFixRound(deps(), who(), other)).ok).toBe(true);
+    });
+
+    it("out_of_scope is read from the stored reason, never from the summary text", async () => {
+      const textOnly = await ended({ reason: "check_failed", summary: `${notRun}\nout_of_scope`, exit: 1 });
+      expect((await startCheckFixRound(deps(), who(), textOnly)).ok).toBe(true);
+    });
+
+    it("the round limit still applies: outside-only is judged first, and a mixed failure past the limit is refused check_rounds_used", async () => {
+      let failed = await ended({ reason: "check_failed", summary: mixed });
+      let last = "";
+      for (let i = 0; i < 12 && last !== CHECK_ROUNDS_USED; i++) {
+        const out = await startCheckFixRound(deps(), who(), failed);
+        if (!out.ok) { last = out.reason; break; }
+        failed = await endsCheckFailed(out.runId, { summary: mixed });
+      }
+      expect(last).toBe(CHECK_ROUNDS_USED);
     });
   });
 
