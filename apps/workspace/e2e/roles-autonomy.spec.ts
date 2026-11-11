@@ -49,6 +49,14 @@ const DEBATER_ENTRY = { role: "debater", mode: "off", allowed_modes: ["off", "fe
 const ROLES_WITH_DEBATER = { data: [...ROLES.data, DEBATER_ENTRY] };
 const MODE_SANDBOX = { execution_mode: "sandbox", auto_merge: false };
 const MODE_RUNNER_LOCAL = (autoMerge: boolean) => ({ execution_mode: "runner_local", auto_merge: autoMerge });
+// Two installed repos sharing the same `product`, so only `full_name` tells them apart.
+const TWO_REPOS = {
+  data: [
+    { ...REPOS.data[0], id: "66666666-6666-4666-8666-666666666666", product: "team", full_name: "acme/widgets" },
+    { ...REPOS.data[0], id: "77777777-7777-4777-8777-777777777777", product: "team", full_name: "acme/docs" },
+  ],
+  next_cursor: null,
+};
 
 const WIN = `#windows-container .fulc-window[data-app-id="roles"]`;
 const tid = (page: Page, id: string) => page.locator(`${WIN} [data-testid="${id}"]`);
@@ -70,30 +78,37 @@ interface Opts {
   settings?: unknown;
   roles?: unknown;
   mode?: unknown;
+  /** The listRepos reply, in place of the REPOS fixture. */
+  repos?: unknown;
 }
 interface Seen {
   gets: { dials: number; ask: number };
+  /** The repo id named in each decision-settings / ask-settings read's path, in read order. */
+  dialsRepos: string[];
+  askRepos: string[];
   merge: { settings: number; roles: number; mode: number };
   posts: { tail: string; body: Record<string, unknown> }[];
   appErrors: string[];
 }
 
 async function boot(page: Page, opts: Opts = {}): Promise<Seen> {
-  const seen: Seen = { gets: { dials: 0, ask: 0 }, merge: { settings: 0, roles: 0, mode: 0 }, posts: [], appErrors: [] };
+  const seen: Seen = { gets: { dials: 0, ask: 0 }, dialsRepos: [], askRepos: [], merge: { settings: 0, roles: 0, mode: 0 }, posts: [], appErrors: [] };
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && seen.appErrors.push(m.text()));
   page.on("pageerror", (e) => seen.appErrors.push(`pageerror: ${e.message}`));
   await page.route("**/api/v1/repos**", async (route) => {
     const url = new URL(route.request().url());
     const m = url.pathname.match(/^\/api\/v1\/repos\/([^/]+)\/(.+)$/);
-    if (!m) return json(route, 200, REPOS);
+    if (!m) return json(route, 200, opts.repos ?? REPOS);
     const tail = m[2];
     if (route.request().method() === "GET") {
       if (tail === "decision-settings") {
         seen.gets.dials++;
+        seen.dialsRepos.push(m[1]);
         return json(route, 200, opts.dials ?? DIALS);
       }
       if (tail === "ask-settings") {
         seen.gets.ask++;
+        seen.askRepos.push(m[1]);
         return json(route, 200, typeof opts.ask === "function" ? (opts.ask as (n: number) => unknown)(seen.gets.ask) : (opts.ask ?? ASK));
       }
       if (tail === "settings") {
@@ -531,6 +546,30 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-apply")).toBeVisible();
     await askRow(page, "test_strategy_choice").scrollIntoViewIfNeeded();
     await expect(askRow(page, "test_strategy_choice").getByTestId("au-ask-save")).toBeVisible();
+  });
+
+  test("every option names its repository, never the product label", async ({ page }) => {
+    await boot(page, { repos: TWO_REPOS });
+    await openAutonomy(page);
+    await expect(tid(page, "au-repo").locator("option")).toHaveText(["acme/widgets", "acme/docs"]);
+    for (const text of await tid(page, "au-repo").locator("option").allInnerTexts()) {
+      expect(text).not.toBe("team");
+      expect(text).not.toBe(TWO_REPOS.data[0].id);
+      expect(text).not.toBe(TWO_REPOS.data[1].id);
+    }
+    await expect(tid(page, "au-scope").locator("option").nth(1)).toHaveText("acme/widgets");
+  });
+
+  test("opens on the repo last picked in the Roles app", async ({ page }) => {
+    const seen = await boot(page, { repos: TWO_REPOS });
+    await openAutonomy(page);
+    await expect(tid(page, "au-repo")).toHaveValue(TWO_REPOS.data[0].id);
+    await tid(page, "roles-tab-roles").click();
+    await tid(page, "roles-repo").selectOption(TWO_REPOS.data[1].id);
+    await tid(page, "roles-tab-autonomy").click();
+    await expect(tid(page, "au-repo")).toHaveValue(TWO_REPOS.data[1].id);
+    expect(seen.dialsRepos).toEqual([TWO_REPOS.data[0].id, TWO_REPOS.data[1].id]);
+    expect(seen.askRepos).toEqual([TWO_REPOS.data[0].id, TWO_REPOS.data[1].id]);
   });
 });
 

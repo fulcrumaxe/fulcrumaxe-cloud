@@ -64,6 +64,22 @@ export function sourceText(dial, presets) {
 
 const repoPath = (id, tail) => "/api/v1/repos/" + encodeURIComponent(id) + "/" + tail;
 
+const text = (v) => (typeof v === "string" ? v.trim() : "");
+/** A repo's name as it should ever be shown: its full name, else its product, else a plain placeholder. Never the id. */
+export function repoLabel(repo) {
+  return text(repo && repo.full_name) || text(repo && repo.product) || "A repository";
+}
+
+/** The repo id to show, by the fixed order: an in-flight save, draft or open preview keeps `current`; otherwise the repo
+ * last picked in the Roles app wins; otherwise `current`; otherwise the first installed repo; otherwise none. */
+export function pickRepoId(repos, { current, saved, busy }) {
+  const has = (id) => repos.some((r) => r.id === id);
+  if (busy && has(current)) return current;
+  if (has(saved)) return saved;
+  if (has(current)) return current;
+  return repos.length ? repos[0].id : null;
+}
+
 // ---- D#483 S5-h: the numbers behind "how much the team may do on its own", on the Autonomy view of the Roles app: how many items build at once
 // (the account and the open repo), the weekly auto-start limit, the default margin and how often the repo is discovered again. This file
 // reads and writes through the existing routes and decides nothing:
@@ -886,7 +902,8 @@ export function mountAutonomy(host, ctx) {
     const bounds = ask.bounds;
     const wide = scope === "account";
     const section = h("section", { class: "au-section", "aria-labelledby": "au-h-ask" }, h("h3", { class: "au-h", id: "au-h-ask" }, "When an agent asks you a question"));
-    const repoName = (repos.find((r) => r.id === repoId) || {}).product || "this repo";
+    const shownRepo = repos.find((r) => r.id === repoId);
+    const repoName = shownRepo ? repoLabel(shownRepo) : "this repo";
     if (canChange()) {
       section.append(
         h(
@@ -995,7 +1012,7 @@ export function mountAutonomy(host, ctx) {
     const focusKey = at && body.contains(at) ? at.getAttribute("data-focus") : null;
     status.textContent = error || note;
     status.classList.toggle("au-failed", !!error);
-    picker.replaceChildren(...repos.map((r) => h("option", { value: r.id, selected: r.id === repoId }, r.product)));
+    picker.replaceChildren(...repos.map((r) => h("option", { value: r.id, selected: r.id === repoId }, repoLabel(r))));
     picker.hidden = repos.length === 0;
     if (!dial || !ask) {
       body.replaceChildren();
@@ -1037,8 +1054,13 @@ export function mountAutonomy(host, ctx) {
     try {
       repos = await ctx.loadRepos(signal);
       if (mine !== seq) return;
-      const saved = getItem(ctx.repoKey);
-      if (!repos.some((r) => r.id === repoId)) repoId = repos.some((r) => r.id === saved) ? saved : repos.length ? repos[0].id : null;
+      const busy = saving || drafts.size > 0 || preview !== null;
+      const picked = pickRepoId(repos, { current: repoId, saved: getItem(ctx.repoKey), busy });
+      if (picked !== repoId) {
+        preview = null;
+        rowErrors.clear();
+      }
+      repoId = picked;
       if (repoId) await loadView(signal);
       else {
         dial = null;
@@ -1219,6 +1241,13 @@ export function mountAutonomy(host, ctx) {
   load();
 
   return {
+    /** Called when the Autonomy tab is shown again. Re-syncs with the repo last picked in the Roles app, unless that would
+     * discard an in-flight save, a typed draft or an open preview. */
+    show() {
+      const saved = getItem(ctx.repoKey);
+      const busy = saving || drafts.size > 0 || preview !== null;
+      if (typeof saved === "string" && saved !== "" && saved !== repoId && !busy) load();
+    },
     destroy() {
       closed = true;
       off();
