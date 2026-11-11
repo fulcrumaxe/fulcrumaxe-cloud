@@ -12,6 +12,10 @@
 
 import { readFileSync } from "node:fs";
 import { defineConfig, devices } from "@playwright/test";
+import { skipInsideRunnerSandbox } from "./e2e/runner-job-guard.mjs";
+
+// Inside a runner job or check this prints the named skip and exits before any server starts, so it can never hang there.
+skipInsideRunnerSandbox();
 
 // The web servers get the public plan-data fixture through FX_PLAN_DATA, the setting production reads.
 const PLAN_DATA_FIXTURE = readFileSync(

@@ -75,6 +75,13 @@ describe("buildReviewPrompt by runtime", () => {
     expect(buildReviewPrompt({ ...BASE, role })).not.toContain("Run only the tests");
   });
 
+  it.each(ROLES)("RUNNER-BROWSER-E2E: the runner prompt for %s says real-browser e2e cannot run in the job and the deploy verify stage covers it; the sandbox prompt does not say it", (role) => {
+    const sentence = "Real-browser end-to-end tests (Playwright) cannot run inside this job: the staging verify stage covers them after deploy, so do not try them and do not block on them.";
+    expect(RUNNER_TESTS_LINE).toContain(sentence);
+    expect(buildReviewPrompt({ ...BASE, role, runtime: "runner" })).toContain(sentence);
+    expect(buildReviewPrompt({ ...BASE, role })).not.toContain("Playwright");
+  });
+
   it("RUNNER-AGENT-NO-FULLCHECK: the runner fix prompt carries the same line; the sandbox and cross-side fix prompts do not", () => {
     expect(buildFixPrompt({ ...FIX, runtime: "runner" })).toContain(RUNNER_TESTS_LINE);
     expect(buildFixPrompt(FIX)).not.toContain(RUNNER_TESTS_LINE);
