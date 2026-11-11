@@ -9,6 +9,7 @@ import { PLANE_TITLE_LINE } from "./planePushText.js";
 export type { RepoPairing };
 import { compileOverlay, parseIdentifierRules, parsePlanData, scanPlanePush, scanText, type IdentifierRuleSet, type PlanData, type Refusal } from "./planePush.js";
 import { git, gitCommitSource } from "./planePushGit.js";
+import { privateSourceRefusals } from "./planePushPrivateSource.js";
 import { PUBLIC_BASE_BRANCH, branchNameOk, type PublicGitTransport } from "./planePushTransport.js";
 
 /**
@@ -382,6 +383,11 @@ async function routeAndPushOnce(input: PlaneRouteInput, deps: PlaneRouteDeps): P
   const changes = await itemChanges(input.repoDir, input.privateBase, input.privateHead);
   if (changes.length === 0) throw new PlaneRouteError("no_changes", "the item changes no files");
   await assertNoBaseGap(input.repoDir, changes, input.privateBase, input.privateHead, tip, overlay.match);
+  // Content that comes from a private-only path is refused whatever name it has on the public side (rename, copy, same blob, symlink).
+  const fromPrivate = await privateSourceRefusals(input.repoDir, changes, input.privateBase, input.privateHead, overlay.match);
+  if (fromPrivate.length > 0) {
+    throw new PlaneRouteError("private_path_change", `the change takes content from private-only paths and was not sent: ${fromPrivate.slice(0, 5).map((r) => r.message).join("; ")}${fromPrivate.length > 5 ? ` (and ${fromPrivate.length - 5} more)` : ""}`, fromPrivate.slice(0, 100));
+  }
   const commit = await buildCommit(input, changes, tip);
 
   // The scan: changed files by git object, then every other line of text that will be published, with the same rules.
