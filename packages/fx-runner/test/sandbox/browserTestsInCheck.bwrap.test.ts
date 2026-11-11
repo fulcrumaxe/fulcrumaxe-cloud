@@ -8,7 +8,7 @@ import { cleanEnv } from "../../src/job/cleanEnv.js";
 import { createHostSandbox, type InterruptibleRuntime } from "../../src/sandbox/hostSandbox.js";
 import type { SandboxHandle } from "../../src/sandbox/port.js";
 import { findChromium } from "../../src/verifyBrowser/driver.js";
-import { bwrapCanCreateNamespaces } from "../helpers/bwrapProbe.js";
+import { checkCanLaunch } from "../helpers/bwrapProbe.js";
 import { CHROMIUM_SANDBOX_SKIP_REASON } from "../helpers/chromiumSandbox.js";
 import { UNIX_SOCKETS_SKIP_REASON } from "../helpers/needsHostSockets.js";
 import { testLaunch } from "../helpers/launch.js";
@@ -22,7 +22,7 @@ import { tmpRoot } from "../helpers/tmpRoot.js";
  * its sandbox on. This suite runs them in the check and requires exit 0, the named reasons, and that the cases which do not need either capability still ran and passed.
  */
 const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap"].find((candidate) => existsSync(candidate));
-const usable = process.platform === "linux" && BWRAP !== undefined && bwrapCanCreateNamespaces(BWRAP);
+const usable = process.platform === "linux" && BWRAP !== undefined && checkCanLaunch(BWRAP);
 const PKG = path.resolve(import.meta.dirname, "../..");
 const REPO = path.resolve(PKG, "../..");
 const VITEST = path.join(PKG, "node_modules", "vitest", "vitest.mjs");

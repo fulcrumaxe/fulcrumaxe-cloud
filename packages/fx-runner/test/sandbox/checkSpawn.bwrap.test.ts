@@ -12,7 +12,7 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { cleanEnv } from "../../src/job/cleanEnv.js";
 import { createHostSandbox, type InterruptibleRuntime } from "../../src/sandbox/hostSandbox.js";
 import type { SandboxHandle } from "../../src/sandbox/port.js";
-import { bwrapCanCreateNamespaces } from "../helpers/bwrapProbe.js";
+import { checkCanLaunch } from "../helpers/bwrapProbe.js";
 import { findOnPath } from "../helpers/findOnPath.js";
 import { testLaunch } from "../helpers/launch.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
@@ -24,7 +24,7 @@ import { tmpRoot } from "../helpers/tmpRoot.js";
  * `socketpair` and raw `syscall` reach the calls directly), each beside a control run of the same program without the filter.
  */
 const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap"].find((candidate) => existsSync(candidate));
-const usable = process.platform === "linux" && BWRAP !== undefined && bwrapCanCreateNamespaces(BWRAP);
+const usable = process.platform === "linux" && BWRAP !== undefined && checkCanLaunch(BWRAP);
 const CALLS: Record<string, { unshare: number } | undefined> = { x64: { unshare: 272 }, arm64: { unshare: 97 } };
 const calls = CALLS[os.arch()];
 const CLONE_NEWUSER = 0x10000000;
