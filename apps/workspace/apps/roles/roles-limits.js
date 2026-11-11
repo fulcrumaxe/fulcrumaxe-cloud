@@ -322,6 +322,10 @@ export function addRunLimitsView(app, extras = []) {
       o.panel.hidden = o !== v;
     }
     if (v.mount && !mounted.has(v.id)) mounted.set(v.id, v.mount(v.panel));
+    else {
+      const m = mounted.get(v.id);
+      if (m && typeof m.show === "function") m.show();
+    }
     if (focus) v.tab.focus();
   };
   views.forEach((v, i) => {

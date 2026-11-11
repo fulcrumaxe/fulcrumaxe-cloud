@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { COPY, DISPOSITION_TEXT, NOTIFY_TEXT, OUTCOME_TEXT, failureText, parseWindow, sourceText, word } from "../apps/roles/roles-autonomy.js";
+import { COPY, DISPOSITION_TEXT, NOTIFY_TEXT, OUTCOME_TEXT, failureText, parseWindow, pickRepoId, repoLabel, sourceText, word } from "../apps/roles/roles-autonomy.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1");
 const fx = (...p) => JSON.parse(readFileSync(join(V1, ...p), "utf8"));
@@ -65,6 +65,45 @@ describe("failureText", () => {
     expect(failureText({ status: 409, message: "secret" })).toBe("That changed while you were saving. The latest settings are shown.");
     expect(failureText({ status: 500, message: "secret" })).toBe("That change couldn't be saved. Try again.");
     expect(failureText(null)).toBe("That change couldn't be saved. Try again.");
+  });
+});
+
+describe("repoLabel", () => {
+  it("names the repo by its full name", () => {
+    expect(repoLabel({ full_name: "acme/widgets", product: "team" })).toBe("acme/widgets");
+  });
+  it("falls back to product, then a placeholder, never the id", () => {
+    for (const full_name of [null, undefined, "", "   "]) expect(repoLabel({ id: "r1", full_name, product: "team" })).toBe("team");
+    for (const full_name of [null, undefined, "", "   "]) for (const product of [null, undefined, "", "   "]) expect(repoLabel({ id: "r1", full_name, product })).toBe("A repository");
+    const label = repoLabel({ id: "only-the-id" });
+    expect(label).toBe("A repository");
+    expect(label).not.toContain("only-the-id");
+  });
+  it("trims whitespace", () => {
+    expect(repoLabel({ full_name: "  acme/widgets  " })).toBe("acme/widgets");
+    expect(repoLabel({ full_name: null, product: "  team  " })).toBe("team");
+  });
+});
+
+describe("pickRepoId", () => {
+  const repos = [{ id: "r1" }, { id: "r2" }];
+  it("prefers the saved repo when it is in the list, even over a still-valid current", () => {
+    expect(pickRepoId(repos, { current: "r1", saved: "r2", busy: false })).toBe("r2");
+  });
+  it("falls back to current when the saved id names no repo in the list", () => {
+    expect(pickRepoId(repos, { current: "r1", saved: "gone", busy: false })).toBe("r1");
+  });
+  it("falls back to the first repo when neither current nor saved is in the list", () => {
+    expect(pickRepoId(repos, { current: "gone", saved: "gone", busy: false })).toBe("r1");
+  });
+  it("returns null for an empty list", () => {
+    expect(pickRepoId([], { current: "r1", saved: "r1", busy: false })).toBe(null);
+  });
+  it("keeps the current repo while busy, even when the saved id names a different repo in the list", () => {
+    expect(pickRepoId(repos, { current: "r1", saved: "r2", busy: true })).toBe("r1");
+  });
+  it("falls through to saved when busy but the current repo is no longer in the list", () => {
+    expect(pickRepoId(repos, { current: "gone", saved: "r2", busy: true })).toBe("r2");
   });
 });
 
