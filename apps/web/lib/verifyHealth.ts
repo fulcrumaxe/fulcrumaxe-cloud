@@ -11,11 +11,46 @@ import { nodeHttpsPinnedRequester, type PinnedRequester } from "../app/api/gh-pr
  * credentials, a port (the settings check, parseBaseUrl, refuses one too, so a saved address is always readable) or a scheme other than https is refused before anything is resolved. Anything that is not a plain JSON answer from the app
  * (a 3xx, a 5xx other than the health route's own 503, a body too large or not JSON, a refused address, a timeout) reads as `unreachable`; the stage never acts on page text.
  * The answer carries the commit only when it is a commit id.
+ *
+ * Deployment Protection: the staging app answers a bare request with a 302 to Vercel's sign-in, which reads as unreachable. When the platform-provided
+ * VERCEL_AUTOMATION_BYPASS_SECRET is set, the request to THIS project's own host (and only that) carries `x-vercel-protection-bypass`. "Own host" is decided from the
+ * platform's own variables, never from the untrusted base URL: the base URL's hostname must equal, exactly (case-folded, no wildcard, no suffix match), one of the hosts in
+ * VERCEL_URL, VERCEL_BRANCH_URL, VERCEL_PROJECT_PRODUCTION_URL, or the optional comma list FX_VERIFY_OWN_HOSTS (for a custom domain of this project that the
+ * platform variables do not name). Both inputs are read once, when the reader is built. A foreign host gets no header, a redirect is never followed (so the secret cannot
+ * ride one), and the secret is scrubbed from any error text before it is reported.
  */
 export const MAX_BODY_BYTES = 16_384;
 export const TIMEOUT_MS = 10_000;
 const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const unreachable: HealthRead = { kind: "unreachable" };
+export const BYPASS_HEADER = "x-vercel-protection-bypass";
+const HOSTNAME = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
+
+/** The secret, only when it is one value of printable characters (as the runner's own reader requires); anything else reads as unset. */
+function readBypassSecret(env: Record<string, string | undefined>): string | undefined {
+  const v = env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  return v !== undefined && v.length > 0 && v.length <= 256 && /^[\x21-\x7e]+$/.test(v) ? v : undefined;
+}
+
+/** This project's own hostnames, from the platform's variables (bare hosts, no scheme) and the optional list. A value that is not a bare hostname is dropped. */
+function ownHosts(env: Record<string, string | undefined>): Set<string> {
+  const out = new Set<string>();
+  const raw = [env.VERCEL_URL, env.VERCEL_BRANCH_URL, env.VERCEL_PROJECT_PRODUCTION_URL, ...(env.FX_VERIFY_OWN_HOSTS ?? "").split(",")];
+  for (const r of raw) {
+    const h = (r ?? "").trim().toLowerCase();
+    if (HOSTNAME.test(h) && h.includes(".") && !/^[0-9.]+$/.test(h)) out.add(h);
+  }
+  return out;
+}
+
+function scrub(err: unknown, secret: string | undefined): unknown {
+  if (secret === undefined) return err;
+  const clean = (t: string) => t.split(secret).join("[redacted]");
+  const e = new Error(clean(err instanceof Error ? err.message : String(err)));
+  e.name = err instanceof Error ? err.name : "Error";
+  if (err instanceof Error && err.stack !== undefined) e.stack = clean(err.stack);
+  return e;
+}
 
 async function readCapped(stream: ReadableStream<Uint8Array> | null): Promise<string | null> {
   if (stream === null) return "";
@@ -35,9 +70,12 @@ async function readCapped(stream: ReadableStream<Uint8Array> | null): Promise<st
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export function createVerifyHealthReader(deps: { resolveUpstream?: (host: string) => Promise<string[]>; forwardPinned?: PinnedRequester; timeoutMs?: number } = {}): (baseUrl: string) => Promise<HealthRead> {
+export function createVerifyHealthReader(deps: { resolveUpstream?: (host: string) => Promise<string[]>; forwardPinned?: PinnedRequester; timeoutMs?: number; env?: Record<string, string | undefined> } = {}): (baseUrl: string) => Promise<HealthRead> {
   const resolveUpstream = deps.resolveUpstream ?? ((host: string) => resolveChecked(host));
   const forwardPinned = deps.forwardPinned ?? nodeHttpsPinnedRequester;
+  const env = deps.env ?? process.env;
+  const secret = readBypassSecret(env);
+  const own = secret === undefined ? new Set<string>() : ownHosts(env);
   return async (baseUrl) => {
     let url: URL;
     try {
@@ -52,7 +90,7 @@ export function createVerifyHealthReader(deps: { resolveUpstream?: (host: string
       try {
         const address = (await resolveUpstream(url.hostname))[0];
         if (address === undefined) return unreachable;
-        const res = await forwardPinned({ host: url.hostname, address, method: "GET", path: "/api/health", headers: { "user-agent": "fulcrumaxe-cloud", accept: "application/json" }, body: null });
+        const res = await forwardPinned({ host: url.hostname, address, method: "GET", path: "/api/health", headers: { "user-agent": "fulcrumaxe-cloud", accept: "application/json", ...(secret !== undefined && own.has(url.hostname.toLowerCase()) ? { [BYPASS_HEADER]: secret } : {}) }, body: null });
         // The health route answers 200 (settings complete) or 503 (incomplete); both carry the identity. A redirect is never followed.
         if (res.status !== 200 && res.status !== 503) {
           await res.bodyStream?.cancel().catch(() => undefined);
@@ -65,7 +103,7 @@ export function createVerifyHealthReader(deps: { resolveUpstream?: (host: string
         const commit = (body as { commit?: unknown }).commit;
         return { kind: "ok", commit: typeof commit === "string" && COMMIT_ID.test(commit) ? commit : null };
       } catch (err) {
-        reportError(err, { stage: "verify_stage.health" });
+        reportError(scrub(err, secret), { stage: "verify_stage.health" });
         return unreachable;
       }
     })();
