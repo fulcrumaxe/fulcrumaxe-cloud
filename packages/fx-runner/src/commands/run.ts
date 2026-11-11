@@ -402,7 +402,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const memoryOfferDeps: MemoryOfferDeps = { stateDir, enabled: () => memProposalAccepted, interactive: host.interactive === true, ask: host.askTimed, signal: stopped.signal, say: (line) => ctx.out(line), send: (message) => client.memoryProposals(message) };
     hooks.onMemoryOfferBuilt?.(memoryOfferDeps);
     // D#749 V2b: the local half of the post-merge verify stage. Off until the owner sets `verify.*` on this machine; what it advertises is decided by those settings and the probe.
-    const verifyLocal = createVerifyLocal({ stateDir, uid: host.uid ?? -1, username: host.username ?? "", env: host.env ?? {}, platform: host.platform, capture: host.engine.installCapture, signal: stopped.signal, say: (line) => ctx.out(line), home, selfCommand: host.selfCommand });
+    const verifyLocal = createVerifyLocal({ stateDir, uid: host.uid ?? -1, username: host.username ?? "", env: host.env ?? {}, platform: host.platform, capture: host.engine.installCapture, signal: stopped.signal, say: (line) => ctx.out(line), home, selfCommand: host.selfCommand, ...(ctx.bypass?.kind === "ok" && ctx.bypassFile !== undefined ? { bypass: { file: ctx.bypassFile, cloudOrigin: registration.cloud_origin } } : {}) });
     const handle = createJobHandler({
       browserReady: (method) => verifyLocal.browserReady(method),
       verifyAnswer: (runId) => readVerifyAnswer(path.join(ctx.stateDir, "jobs"), runId, host.uid),

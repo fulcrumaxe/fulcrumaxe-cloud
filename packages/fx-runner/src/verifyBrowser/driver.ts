@@ -5,6 +5,7 @@ import type { LoginSession } from "../commands/verifyLogin.js";
 import { signedInAs } from "./identity.js";
 import { loadPlaywright } from "./loadPlaywright.js";
 import { readScopedState } from "./stateScope.js";
+import { headersWithBypass } from "./bypass.js";
 import { hostRulesArg, isAllowedUrl, type BasePin } from "./pin.js";
 import { startOriginProxy, type OriginProxy } from "./proxy.js";
 import { SNAPSHOT_SCRIPT, type RawElement } from "./snapshot.js";
@@ -64,6 +65,8 @@ export interface DriverConfig {
   hostEnv: Readonly<Record<string, string | undefined>>;
   /** Tests only: accept the self-signed certificate of a local https server. Nothing in production sets it. */
   ignoreHttpsErrors?: boolean | undefined;
+  /** The Vercel protection bypass secret, only when the server found the base origin to be the registered cloud origin. Sent to the base origin alone (bypass.ts); never logged or reported. */
+  bypassSecret?: string | undefined;
   onConsole(type: string, text: string): void;
 }
 
@@ -158,7 +161,7 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
     await context.addInitScript(NO_WEBRTC_SCRIPT);
     await context.route("**/*", async (route) => {
       const request = route.request();
-      if (isAllowedUrl(request.url(), cfg.base)) return route.continue();
+      if (isAllowedUrl(request.url(), cfg.base)) return cfg.bypassSecret === undefined ? route.continue() : route.continue({ headers: headersWithBypass(request.headers(), request.url(), cfg.base, cfg.bypassSecret) });
       recordBlocked(request.isNavigationRequest());
       return route.abort("blockedbyclient");
     });

@@ -194,7 +194,8 @@ export async function runCli(io: CliIo): Promise<number> {
     // The MCP server the Claude CLI starts: it needs no state directory, home directory or cloud, and the environment it is given by the CLI may hold none of them.
     if (command === "verify-browser-server") {
       if (io.verifyServerHost === undefined) throw new CliError("verify-browser-server is only available from the fx-runner program");
-      return await verifyBrowserServerCommand(parsed!.flags, io.verifyServerHost);
+      // The bypass file is judged by the same facts the other commands use (uid, home, platform, cache home), taken from the program's own io rather than read again from the environment.
+      return await verifyBrowserServerCommand(parsed!.flags, { ...io.verifyServerHost, uid: io.uid, home: io.home, platform: io.platform, xdgCacheHome: io.xdgCacheHome });
     }
     const ctx: CommandContext = {
       stateDir: stateDirFor(io.home, io.stateDirOverride),

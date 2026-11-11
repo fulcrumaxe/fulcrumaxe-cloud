@@ -14,6 +14,7 @@
  */
 import { BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import type { VerifyServerSpec } from "../verifyBrowser/spec.js";
+import { parseBase } from "../verifyBrowser/pin.js";
 import { playwrightAvailable } from "../verifyBrowser/loadPlaywright.js";
 import { probePlaywright, type PlaywrightProbeDeps, type PlaywrightProbeResult } from "./playwrightProbe.js";
 import { loadSettings, storageStateFor } from "../runnerSettings.js";
@@ -36,6 +37,8 @@ export interface VerifyLocalDeps {
   home?: string | undefined;
   /** This program's own command (`host.selfCommand`), which the CLI runs as the `fxverify` server. Absent: the playwright method is never offered. */
   selfCommand?: readonly string[] | undefined;
+  /** The protection bypass: the path of its file and the registered cloud origin, passed only when the file loaded (run.ts). The verify server is handed the path, never the secret. */
+  bypass?: { file: string; cloudOrigin: string } | undefined;
   /** Replaceable by a test: the clock, the library check and the file stat of the playwright probe. */
   playwrightProbe?: Partial<Pick<PlaywrightProbeDeps, "now" | "playwrightAvailable" | "lstat">>;
   signal?: AbortSignal;
@@ -97,7 +100,9 @@ export function createVerifyLocal(deps: VerifyLocalDeps): VerifyLocal {
       const browser = loadSettings(deps.stateDir).verify?.browser;
       const self = deps.selfCommand;
       if (self === undefined || self.length === 0 || browser?.baseUrl === undefined || browser.executable === undefined || deps.home === undefined) return undefined;
-      return { command: self[0]!, args: self.slice(1), baseUrl: browser.baseUrl, executable: browser.executable, storageState: storageStateFor(deps.home, browser) };
+      const spec: VerifyServerSpec = { command: self[0]!, args: self.slice(1), baseUrl: browser.baseUrl, executable: browser.executable, storageState: storageStateFor(deps.home, browser) };
+      // Only for a base that is the registered cloud origin: the same host the runner's token is already trusted for.
+      return deps.bypass !== undefined && parseBase(browser.baseUrl)?.origin === deps.bypass.cloudOrigin ? { ...spec, bypassFile: deps.bypass.file, cloudOrigin: deps.bypass.cloudOrigin } : spec;
     },
     deployOrderHandler(client) {
       const capture = deps.capture;

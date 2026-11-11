@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { bypassAllowedFor } from "./bypass.js";
 import { findChromium, launchDriver, ToolError, type DriverConfig, type PageDriver } from "./driver.js";
 import { groundAnswer } from "./ground.js";
 import { isAllowedUrl, parseBase, resolveOpenPath, type BasePin } from "./pin.js";
@@ -81,6 +82,9 @@ export interface ServerOptions {
   /** Tests only: accept a self-signed certificate. */
   ignoreHttpsErrors?: boolean;
   executablePath?: string;
+  /** The protection bypass secret and the registered cloud origin. The secret reaches the browser only when the base origin equals that origin (bypass.ts). */
+  bypassSecret?: string;
+  cloudOrigin?: string;
   now?: () => number;
   /** Replaced in tests; the default starts Chromium. */
   openDriver?: (cfg: DriverConfig) => Promise<PageDriver>;
@@ -98,6 +102,7 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
   const trace = new Trace(now());
   const base: BasePin | undefined = parseBase(opts.baseUrl);
   const open = opts.openDriver ?? launchDriver;
+  const scrub = (text: string): string => (opts.bypassSecret === undefined || opts.bypassSecret === "" ? text : text.split(opts.bypassSecret).join("[redacted]"));
   let driver: PageDriver | undefined;
   let accepted = false;
   let stopped = false;
@@ -122,7 +127,7 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
     if (driver !== undefined) return driver;
     const executablePath = opts.executablePath ?? findChromium(opts.hostEnv);
     if (executablePath === undefined) throw new ToolError("no_browser");
-    const started = await open({ base, executablePath, jobDir: opts.jobDir, storageStatePath: opts.storageStatePath, hostEnv: opts.hostEnv, ignoreHttpsErrors: opts.ignoreHttpsErrors, onConsole: (t, x) => trace.console(t, cleanPageText(x, 300)) });
+    const started = await open({ base, executablePath, jobDir: opts.jobDir, storageStatePath: opts.storageStatePath, hostEnv: opts.hostEnv, ignoreHttpsErrors: opts.ignoreHttpsErrors, ...(opts.bypassSecret !== undefined && bypassAllowedFor(base, opts.cloudOrigin) ? { bypassSecret: opts.bypassSecret } : {}), onConsole: (t, x) => trace.console(t, cleanPageText(x, 300)) });
     // The job may have been stopped while the browser was starting: nothing launched after a stop is kept.
     if (stopped) {
       await started.close().catch(() => undefined);
@@ -175,7 +180,7 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
       // refused above); when the lookup gives nothing the field is left out, and the cloud then fails the row closed.
       const login = driver === undefined ? undefined : await driver.identity().catch(() => undefined);
       const json = login === undefined ? verdict.json : JSON.stringify({ ...(JSON.parse(verdict.json) as Record<string, unknown>), signed_in_as: login });
-      await fs.writeFile(path.join(opts.jobDir, "answer.json"), json, { flag: "wx", mode: 0o600 });
+      await fs.writeFile(path.join(opts.jobDir, "answer.json"), scrub(json), { flag: "wx", mode: 0o600 });
       accepted = true;
       return ok("answer accepted");
     }
@@ -248,7 +253,7 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
     return (await afterAction(d, blockedBefore)) ?? reply;
   };
 
-  const call = async (name: unknown, args: unknown): Promise<Reply> => {
+  const callRaw = async (name: unknown, args: unknown): Promise<Reply> => {
     if (stopped) return fail("job_stopped");
     const def = typeof name === "string" && Object.hasOwn(TOOLS, name) ? TOOLS[name] : undefined;
     if (def === undefined || typeof name !== "string") return fail("unknown_tool");
@@ -261,6 +266,12 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
       // fx-swallow-ok: a failed action is answered with a closed error code; the browser's message can carry page text and is not forwarded
       return fail(error instanceof ToolError ? error.code : "action_failed");
     }
+  };
+
+  /** Every reply goes through here last: the exact bypass secret, should a page echo the header it was sent, is replaced by a fixed placeholder. */
+  const call = async (name: unknown, args: unknown): Promise<Reply> => {
+    const reply = await callRaw(name, args);
+    return { ...reply, text: scrub(reply.text) };
   };
 
   const send = (message: unknown): void => void opts.output.write(`${JSON.stringify(message)}\n`);
