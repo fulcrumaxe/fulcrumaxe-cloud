@@ -92,14 +92,15 @@ cleanup() {
 trap cleanup EXIT
 
 initdb -D "$PGDATA_DIR" -U postgres --auth=trust --no-locale >"$PG_TMP_DIR/initdb.log" 2>&1
+# TCP only, no Unix socket (the runner sandbox refuses AF_UNIX); clients use -h 127.0.0.1.
 {
-  echo "listen_addresses = ''"
+  echo "listen_addresses = '127.0.0.1'"
   echo "port = $PG_PORT"
-  echo "unix_socket_directories = '$PG_TMP_DIR'"
+  echo "unix_socket_directories = ''"
 } >> "$PGDATA_DIR/postgresql.conf"
 pg_ctl -D "$PGDATA_DIR" -l "$PG_TMP_DIR/postgres.log" -w start
 
-PSQL=(psql -h "$PG_TMP_DIR" -p "$PG_PORT" -U postgres -X -q -v ON_ERROR_STOP=1)
+PSQL=(psql -h 127.0.0.1 -p "$PG_PORT" -U postgres -X -q -v ON_ERROR_STOP=1)
 
 "${PSQL[@]}" -d postgres -c "CREATE DATABASE replay_merge;"
 "${PSQL[@]}" -d postgres -c "CREATE DATABASE replay_lexical;"
