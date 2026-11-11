@@ -7,6 +7,12 @@
 // at once with the reason printed; the staging verify stage covers the real browser after deploy.
 //
 // A developer host and CI never set the markers, so the suite runs there exactly as before.
+//
+// One exception: a unit test that merely imports the config (apps/live-e2e's device-parity test reads its projects) runs in a
+// vitest worker, where ending the process fails the whole file ("process.exit unexpectedly called") and, in the runner's check,
+// the whole check. Importing starts no server and no browser, so vitest (which sets VITEST=true) is let through. The Playwright
+// CLI never sets it, and the real-CLI tests in test/runner-job-guard.test.mjs build the child's environment from a short list
+// that leaves it out.
 
 /** The one sentence printed when the guard fires. */
 export const RUNNER_JOB_SKIP_REASON =
@@ -23,6 +29,7 @@ export function insideRunnerSandbox(env = process.env) {
  */
 export function skipInsideRunnerSandbox(env = process.env, exit = process.exit, log = console.info) {
   if (!insideRunnerSandbox(env)) return false;
+  if (env.VITEST === "true") return false;
   log(RUNNER_JOB_SKIP_REASON);
   exit(0);
   return true;
