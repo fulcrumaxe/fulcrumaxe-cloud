@@ -289,6 +289,55 @@ describe("done route [pg]", () => {
       expect(finished[0]!.check).toEqual(report());
     });
 
+    // #751: a generated file beside a route in the Spec's list is in scope only when the runner's passing check vouched that it equals a fresh generator run.
+    describe("generated files beside a listed route (#751)", () => {
+      const ROUTE = "packages/api/src/routes/runs.ts";
+      const OPENAPI = "packages/api/openapi.json";
+      const CLIENT = "packages/api-client/src/generated.ts";
+      const withRoute = { scope: [ROUTE], check: APPROVED, files: [file(ROUTE), file(OPENAPI), file(CLIENT)] };
+      const vouch = (s: Scene, derived_fresh: unknown, over: Partial<DoneCheck> = {}) => ({ body: { run_id: s.runId, lease_generation: s.gen, check: { ...report(over), derived_fresh } } });
+
+      it("a regenerated file the runner vouched for is in scope: the run succeeds and the pull request is marked ready", async () => {
+        const s = await scene(withRoute);
+        expect(parsedDone(await s.call(vouch(s, [OPENAPI, CLIENT])))).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+      });
+
+      it("a generated file nobody vouched for stays out of scope: scope_violation naming both, and the pull request is closed", async () => {
+        const s = await scene(withRoute);
+        expect(parsedDone(await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report() } }))).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+        expect(noted[0]).toMatchObject({ refusal: { reason: "scope_violation", paths: [OPENAPI, CLIENT] } });
+      });
+
+      it("only the file vouched for is lifted: a hand-edited sibling still ends scope_violation", async () => {
+        const s = await scene(withRoute);
+        expect(parsedDone(await s.call(vouch(s, [CLIENT])))).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+        expect(noted[0]).toMatchObject({ refusal: { paths: [OPENAPI] } });
+      });
+
+      it("a vouching for a path that is not a generated output is no vouching at all", async () => {
+        const s = await scene({ ...withRoute, files: [file(ROUTE), file(OPENAPI), file("packages/api/src/openapi.ts")] });
+        expect(parsedDone(await s.call(vouch(s, [OPENAPI, "packages/api/src/openapi.ts"])))).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+        expect(noted[0]).toMatchObject({ refusal: { paths: [OPENAPI, "packages/api/src/openapi.ts"] } });
+      });
+
+      it("a job that carried no check cannot have a generated file vouched for: its done is refused scope_violation", async () => {
+        const s = await scene({ scope: [ROUTE], files: [file(ROUTE), file(OPENAPI), file(CLIENT)] });
+        expect(parsedDone(await s.call(vouch(s, [OPENAPI, CLIENT])))).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+        expect(noted[0]).toMatchObject({ refusal: { paths: [OPENAPI, CLIENT] } });
+      });
+
+      it("a vouching is not lifted when the route itself is not in the Spec's list", async () => {
+        const s = await scene({ ...withRoute, scope: ["packages/api/test/runs.test.ts"], files: [file("packages/api/test/runs.test.ts"), file(OPENAPI)] });
+        expect(parsedDone(await s.call(vouch(s, [OPENAPI])))).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      });
+
+      it("a vouching on a check that did not pass is dropped from what is recorded", async () => {
+        const s = await scene(withRoute);
+        expect(parsedDone(await s.call(vouch(s, [OPENAPI, CLIENT], { exit_code: 1 })))).toMatchObject({ failure_reason: "check_failed" });
+        expect(finished[0]!.check).not.toHaveProperty("derived_fresh");
+      });
+    });
+
     it.each([
       ["exit status 1", report({ exit_code: 1, summary: "FAIL src/a.test.ts" })],
       ["a kill at the cap", report({ exit_code: null, timed_out: true, duration_ms: 5_400_000 })],

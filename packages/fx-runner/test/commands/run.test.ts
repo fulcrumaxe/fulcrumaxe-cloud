@@ -918,9 +918,17 @@ describe("the scope test wiring (SCOPE-IN-JOB)", () => {
     const text = readFileSync(path.join(PACKAGE_DIR, "src", "commands", "run.ts"), "utf8");
     expect(text).toMatch(/baseFile: createBaseFile\(host\.engine\.captureLarge, envOptions\), changedFiles: createChangedFiles\(host\.engine\.captureLarge, envOptions\)/);
     const handler = readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "jobHandler.ts"), "utf8");
-    const at = handler.indexOf("outOfScopeCount({");
+    const at = handler.indexOf("scopeVerdict({");
     expect(at).toBeGreaterThan(handler.indexOf("git.checkBase?.(job, started.base)"));
     expect(at).toBeLessThan(handler.indexOf("check started (time limit"));
+  });
+});
+
+describe("the verify browser's protection bypass wiring", () => {
+  it("createVerifyLocal is handed the bypass file and the cloud origin when the bypass is set up, and the job handler gets the HEAD readers the derived-file check needs", () => {
+    const text = readFileSync(path.join(PACKAGE_DIR, "src", "commands", "run.ts"), "utf8");
+    expect(text).toMatch(/createVerifyLocal\(\{[^\n]*\.\.\.\(ctx\.bypass\?\.kind === "ok" && ctx\.bypassFile !== undefined \? \{ bypass: \{ file: ctx\.bypassFile, cloudOrigin: registration\.cloud_origin \} \} : \{\}\) \}\);/);
+    expect(text).toMatch(/changedFiles: createChangedFiles\(host\.engine\.captureLarge, envOptions\), headBlob: createHeadBlob\(host\.engine\.captureLarge, envOptions\), indexHidesChanges: createIndexHidesChanges\(host\.engine\.captureLarge, envOptions\)/);
   });
 });
 

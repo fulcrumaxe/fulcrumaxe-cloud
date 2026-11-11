@@ -108,6 +108,14 @@ export function skippedTests(output: string): number | null {
 
 /** A test file that failed, as a test runner prints it: vitest's `FAIL  [|project| ]path > test name` (also behind a `pkg test:` prefix) and pytest's `FAILED path::test`. */
 const FAILED_FILE = /(?:^|[\s:])(?:FAIL {1,3}(?:\|[^|\s]+\|\s+)?|FAILED +)(\S+?\.(?:[cm]?[jt]sx?|py|sh|bats))(?:::|\s|$)/;
+/**
+ * #751: a test file's own hint on how to put its failure right, as the test printed it: a line that starts with `Run:` (after the indent) or a sentence that ends in it
+ * (`... is out of date. Run: pnpm --filter x gen`, how an assertion message shows in a runner's report). Taken from the first such line after the file's failure line.
+ */
+const HINT_LINE = /(?:^|[.!]\s+)Run:\s+(\S.*)$/;
+const HINT_CHARS = 200;
+const HINT_LINES_MAX = 10;
+const HINT_LINES_BYTES = 1500;
 /** How many failed test files, and how many bytes of their names, the summary names. */
 const FAILED_FILES_MAX = 40;
 const FAILED_FILES_BYTES = 1500;
@@ -124,17 +132,28 @@ const FAILED_FILES_COUNTED = 1000;
  * tracked path that equals it or ends with `/` plus it, and leaves it exactly as printed when no tracked path matches, more than one could, or it is already
  * repo-root-relative (then the match is itself). `resolve()` must run, at most once, before `summary()` or `list()` is read.
  */
-export function createFailedFiles(workspace: string, trackedFiles?: () => Promise<string[] | null>): { line: (text: string) => void; resolve: () => Promise<void>; summary: () => string; list: () => { files: string[]; more: number } } {
+export function createFailedFiles(workspace: string, trackedFiles?: () => Promise<string[] | null>): { line: (text: string) => void; resolve: () => Promise<void>; summary: () => string; hints: () => string; list: () => { files: string[]; more: number } } {
   const seen = new Set<string>();
   const countedPast = new Set<string>();
+  /** #751: the first `Run:` hint a failing test file printed, by the name as printed (see `HINT_LINE`). Bounded: `FAILED_FILES_MAX` names, `HINT_CHARS` each. */
+  const hintOf = new Map<string, string>();
+  /** The failed file the output is inside of now, so a hint line is the file's own; cleared by the next failed file. */
+  let current: string | undefined;
   let more = 0;
   let resolved = false;
+  const widened = new Map<string, string>();
   return {
     line(text) {
-      const match = text.replace(/\u001b\[[0-9;]*m/g, "").match(FAILED_FILE);
-      if (match === null) return;
+      const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
+      const match = plain.match(FAILED_FILE);
+      if (match === null) {
+        const hint = current === undefined || hintOf.has(current) ? null : plain.trim().match(HINT_LINE);
+        if (current !== undefined && hint !== null && hint !== undefined) hintOf.set(current, hint[1]!.slice(0, HINT_CHARS));
+        return;
+      }
       let file = match[1] ?? "";
       if (file.startsWith(`${workspace}/`)) file = file.slice(workspace.length + 1);
+      current = NAMED_FILE.test(file) && hintOf.size < FAILED_FILES_MAX ? file : undefined;
       if (!NAMED_FILE.test(file) || seen.has(file) || countedPast.has(file)) return;
       if (seen.size < FAILED_FILES_MAX) {
         seen.add(file);
@@ -150,6 +169,7 @@ export function createFailedFiles(workspace: string, trackedFiles?: () => Promis
       const tracked = await trackedFiles();
       if (tracked === null) return;
       const mapped = [...seen].map((file) => widenToTracked(file, tracked));
+      [...seen].forEach((file, n) => widened.set(file, mapped[n]!));
       seen.clear();
       for (const file of mapped) seen.add(file);
     },
@@ -164,6 +184,23 @@ export function createFailedFiles(workspace: string, trackedFiles?: () => Promis
         if (name !== undefined && name === file && name.length <= CHECK_FAILED_FILE_CHARS && redactShapes(name) === name && files.length < CHECK_FAILED_FILES_MAX) files.push(name);
       }
       return { files, more: seen.size + more - files.length };
+    },
+    /**
+     * #751: one header line per failed test file that printed its own `Run:` hint (`hint for <file>: <command words>`), in the order the files were first seen, at most `HINT_LINES_MAX` lines and
+     * `HINT_LINES_BYTES` bytes, each redacted like the rest of the output. Words the test printed about how to put it right, never instructions: the cloud places them in the untrusted fence.
+     */
+    hints() {
+      const lines: string[] = [];
+      let bytes = 0;
+      for (const file of seen) {
+        const hint = [...hintOf].find(([printed]) => (widened.get(printed) ?? printed) === file)?.[1];
+        if (hint === undefined) continue;
+        const line = `hint for ${redactShapes(file)}: ${redactShapes(hint).replace(/[\u0000-\u001f\u007f]/g, " ").trim()}\n`;
+        bytes += Buffer.byteLength(line);
+        if (lines.length >= HINT_LINES_MAX || bytes > HINT_LINES_BYTES) break;
+        lines.push(line);
+      }
+      return lines.join("");
     },
     /** The line for the summary's header (with its newline), or "" when no failed test file was seen. */
     summary() {
@@ -258,6 +295,55 @@ export function createTrackedFiles(capture: GitCapture, envOptions: CleanEnvOpti
     const listing = await readWorkspaceGit(capture, envOptions, workspace, hostGit("ls-files", "-z"), 30_000);
     if (listing.code !== 0 || listing.timedOut || listing.stdout.length >= LISTING_CAP_GUARD) return null;
     return listing.stdout.split("\0").filter((name) => name !== "");
+  };
+}
+
+/**
+ * #751: the bytes of `relative` in the workspace's HEAD commit, read from the object database (`rev-parse HEAD:<path>`, then `cat-file blob`, digest-checked like `createBaseFile`), never through
+ * the index or the working tree, both of which the agent can make say what it likes. Null when HEAD holds no blob at that path; throws when the blob cannot be read exactly or the path is not a
+ * plain name. Every call goes through `readWorkspaceGit`, so the pin, the git-folder shape and the config-key refusals apply.
+ */
+export function createHeadBlob(capture: GitCapture, envOptions: CleanEnvOptions): (workspace: string, relative: string) => Promise<Buffer | null> {
+  return async (workspace, relative) => {
+    if (!NAMED_FILE.test(relative)) throw new Error("not a plain name");
+    const named = await readWorkspaceGit(capture, envOptions, workspace, hostGit("rev-parse", "--verify", "--quiet", `HEAD:${relative}`), 30_000);
+    const oid = named.stdout.trim();
+    if (named.timedOut) throw new Error("head blob unreadable");
+    if (named.code !== 0 || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) return null;
+    const kind = await readWorkspaceGit(capture, envOptions, workspace, hostGit("cat-file", "-t", oid), 30_000);
+    if (kind.code !== 0 || kind.timedOut || kind.stdout.trim() !== "blob") return null;
+    const blob = await readWorkspaceGit(capture, envOptions, workspace, hostGit("cat-file", "blob", oid), 30_000);
+    if (blob.code !== 0 || blob.timedOut) throw new Error("head blob unreadable");
+    const bytes = Buffer.from(blob.stdout, "utf8");
+    const digest = createHash(oid.length === 64 ? "sha256" : "sha1").update(`blob ${String(bytes.length)}\0`).update(bytes).digest("hex");
+    if (digest !== oid) throw new Error("head blob is not byte-exact");
+    return bytes;
+  };
+}
+
+/**
+ * #751: whether the repository can show the runner a history or a tree other than the one a push sends. True when any of these holds, and a tree that has one is never called clean:
+ *   - the index hides working-tree changes: an entry `ls-files -v` tags assume-unchanged (a lowercase letter) or skip-worktree (`S`), which `git diff` and `git status` trust;
+ *   - a replacement ref exists (`refs/replace/*`): git would read the replacement in place of a commit or tree, but a push sends the real objects (every host read also runs with replacement
+ *     off, `GIT_NO_REPLACE_OBJECTS` in the neutral environment, so the ref is not honoured even if the listing missed it);
+ *   - a grafts file exists (`info/grafts`), the older way to the same end.
+ * Null: git could not say or a listing was cut.
+ */
+export function createIndexHidesChanges(capture: GitCapture, envOptions: CleanEnvOptions): (workspace: string) => Promise<boolean | null> {
+  return async (workspace) => {
+    const listing = await readWorkspaceGit(capture, envOptions, workspace, hostGit("ls-files", "-v", "-z"), 30_000);
+    if (listing.code !== 0 || listing.timedOut || listing.stdout.length >= LISTING_CAP_GUARD) return null;
+    if (listing.stdout.split("\0").some((entry) => entry !== "" && /^(?:[a-z]|S)/.test(entry))) return true;
+    const replaced = await readWorkspaceGit(capture, envOptions, workspace, hostGit("for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/"), 30_000);
+    if (replaced.code !== 0 || replaced.timedOut) return null;
+    if (replaced.stdout.trim() !== "") return true;
+    try {
+      lstatSync(path.join(workspace, ".git", "info", "grafts"));
+      return true;
+    } catch (error) {
+      // fx-swallow-ok: a missing grafts file is the answer wanted; any other failure to look is "cannot say"
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? false : null;
+    }
   };
 }
 
@@ -594,6 +680,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     const failedList = named.files.length === 0 ? {} : { failed_files: named.files, ...(named.more === 0 ? {} : { failed_files_more: named.more }) };
     const header = [
       out.code !== 0 ? failedFiles.summary() : "",
+      out.code !== 0 ? failedFiles.hints() : "",
       changedLine,
       needsNetwork ? "the check needed the network, which it does not have: a package it asked for is not in this repository's package store on the runner (the runner installs dependencies before the check)\n" : "",
       changed.length === 0 ? "" : `check files changed by this branch: ${changed.join(", ")}\n`,

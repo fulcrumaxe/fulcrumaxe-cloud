@@ -29,7 +29,8 @@ import { SpillRefused, prepareSpill, removeSpill, type SpillHandle } from "../jo
 import { checkNote, DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import type { DepsInstaller } from "./depsInstall.js";
 import type { LockfileSync } from "./lockfileSync.js";
-import { outOfScopeCount, type ChangedFiles } from "./scopeStep.js";
+import { scopeVerdict, type ChangedFiles } from "./scopeStep.js";
+import { readDerivedRules, verifyDerivedOutputs } from "./derivedStep.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
@@ -166,6 +167,10 @@ export interface JobHandlerDeps {
    * D#6 SCOPE-IN-JOB: lists the files the workspace changed against a base (`createChangedFiles`), for the job's `scope` test that runs before the check. Absent: no scope test, the check runs as before.
    */
   changedFiles?: ChangedFiles;
+  /** #751: a file's bytes in the workspace's HEAD commit, from the object database (`createHeadBlob`); null when HEAD holds none. With `indexHidesChanges`, what lets the runner vouch for a generated file: absent, nothing is verified. */
+  headBlob?: (workspace: string, relative: string) => Promise<Buffer | null>;
+  /** #751: whether the index hides working-tree changes anywhere (assume-unchanged or skip-worktree entries; `createIndexHidesChanges`). */
+  indexHidesChanges?: (workspace: string) => Promise<boolean | null>;
   /**
    * One journal line per step of a run (`stepLog.ts`): the agent's turn starting and ending, the check starting and ending, and what the cloud answered to the run's end. Fixed words, the run id,
    * numbers and closed codes only. Absent: no lines.
@@ -638,7 +643,14 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // D#6 SCOPE-IN-JOB: a job that carries the Spec's file list tests the files this run changed (against the same merge-base the check is pinned to) with the shared matcher before it spends a
             // check on them. Any file outside the list: the check is not run, the branch is pushed below as for any run, and the cloud, which judges the pull request itself, is told the count only. Anything the
             // runner cannot read (no list it understands, no listing) is not a verdict: the check runs as it did before the field existed.
-            const outside = await outOfScopeCount({ scope: job.scope, changedFiles: deps.changedFiles, workspace, base: pin });
+            // #751: a changed generated file (the OpenAPI document and client beside a route) is lifted out of that count only when a fresh run of its generators on this workspace, under the check's own
+            // sandbox rules and time limit, reproduces it byte for byte. The files vouched for are named on `done` beside a passing check; a run without a pass vouches for nothing.
+            const generate = async (argv: readonly string[]): Promise<boolean> =>
+              (await checkStep({ check: { argv: [...argv], dev_shell: check.dev_shell, timeout_s: check.timeout_s }, workspace, base: pin, baseDir: mirror, launch: (a, devShell) => checkLaunch(sandboxHandle, a, devShell), baseFile, home: deps.checkHome, signal: stopRun })).passed;
+            const rules = job.scope === undefined ? [] : await readDerivedRules(baseFile, mirror, pin);
+            const verdict = await scopeVerdict({ scope: job.scope, changedFiles: deps.changedFiles, workspace, base: pin, rules, verifyDerived: deps.headBlob === undefined || deps.indexHidesChanges === undefined ? undefined : (rules, paths, changedNow) => verifyDerivedOutputs({ workspace, rules, paths, run: generate, dirty: async () => deps.changedFiles!(workspace, "HEAD"), changed: changedNow, headBlob: async (relative) => deps.headBlob!(workspace, relative), hidden: async () => deps.indexHidesChanges!(workspace) }) });
+            const outside = verdict === null ? null : verdict.outside;
+            if (verdict !== null && verdict.derivedFresh.length > 0) step(`generated files checked against a fresh run (${String(verdict.derivedFresh.length)} equal)`);
             if (outside !== null && outside > 0) {
               checkHeld.outcome = closed(`the check was not run: ${String(outside)} changed ${outside === 1 ? "file is" : "files are"} outside the Spec's file list`, "out_of_scope"); step(`check not run (out_of_scope, ${String(outside)} ${outside === 1 ? "file" : "files"})`);
               return;
@@ -646,6 +658,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             step(`check started (time limit ${String(check.timeout_s)} s)`);
             try {
               checkHeld.outcome = await checkStep({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+              if (checkHeld.outcome.passed && verdict !== null && verdict.derivedFresh.length > 0) checkHeld.outcome = { ...checkHeld.outcome, body: { ...checkHeld.outcome.body, derived_fresh: verdict.derivedFresh } };
               const body = checkHeld.outcome.body;
               step(`check ended (exit ${body.exit_code === null ? "none" : String(body.exit_code)}, ${String(body.duration_ms)} ms, timed_out ${String(body.timed_out)}${stopRun.aborted ? ", stopped" : ""}${body.reason === undefined ? "" : `, ${closedWord(body.reason)}`})`);
             } catch {

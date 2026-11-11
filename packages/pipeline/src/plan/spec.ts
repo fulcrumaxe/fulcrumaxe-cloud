@@ -1,5 +1,7 @@
 import { reportError } from "@fx/telemetry";
 import { randomBytes } from "node:crypto";
+import { withDerivedFiles } from "@fulcrumaxe/runner-protocol";
+import { DERIVED_FILE_RULES } from "@fx/core/src/specs/derivedFileRules.js";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
@@ -292,7 +294,9 @@ export type SpecBody = { ok: true; body: string } | { ok: false; reason: "spec_t
 export function validAcceptanceFiles(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every((e) => typeof e === "string")) return null;
   const list = Array.from(value as string[]);
-  return parseAcceptanceScope(list).kind === "known" ? list : null;
+  // #751: files the repository's generators and guards require beside a listed one (the OpenAPI document and client beside a route) are added here, by the pipeline, so the list the person
+  // approves and the one the guards hold a run to already carry them. A list that was not readable is not widened.
+  return parseAcceptanceScope(list).kind === "known" ? withDerivedFiles(DERIVED_FILE_RULES, list) : null;
 }
 
 /** The section the pipeline appends after the quoted Spec. The entries cannot hold a backtick, a space or a newline (the parser's character set), so a plain fence is safe. */

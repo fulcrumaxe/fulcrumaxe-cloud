@@ -1,5 +1,6 @@
-import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, privateOnlyEditsNotAllowed, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, privateOnlyEditsNotAllowed, readDerivedFresh, pathsOutsideScopeFresh, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
+import { DERIVED_FILE_RULES } from "@fx/core/src/specs/derivedFileRules.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_REPLACE_ROUND_KIND, RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
 import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
@@ -16,7 +17,7 @@ import {
   type RunnerHttpResponse,
 } from "./http.js";
 import { stopReply } from "./heartbeat.js";
-import { loadAcceptanceScope, loadPrivateOnlyRule, pathInScope, type AcceptanceScope, type PrivateOnlyRule, type TenantQueryable } from "./acceptanceScope.js";
+import { loadAcceptanceScope, loadPrivateOnlyRule, type AcceptanceScope, type PrivateOnlyRule, type TenantQueryable } from "./acceptanceScope.js";
 import { RunPullRequestError, loadRunPullRequestText, type PullRequestRef, type PullRequestRepo, type RunPullRequestPort, type RunPullRequestText } from "./runPullRequest.js";
 import { normaliseCheck } from "./checkResult.js";
 import { checkConflictAttestation, storeConflictAttestation } from "./conflictAttest.js";
@@ -234,7 +235,7 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
   // A check the runner did not run on a scope hint did not pass on the head, so it never lends the fix round its no-commit exception either.
   const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined && !scopeHint;
   const log = deps.log ?? ((line: string) => console.warn(line));
-  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log), (close) => holdCloudClose(deps, i, close, log), scopeHint);
+  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log), (close) => holdCloudClose(deps, i, close, log), scopeHint, checkPassedOnHead && reported !== undefined ? readDerivedFresh(DERIVED_FILE_RULES, reported.derived_fresh) : []);
   // A check that passed (or that the runner reported it did not run on its scope hint) is recorded beside whatever the commit and scope tests decided.
   return judged.kind === "verdict" && ctx.job.check !== undefined && reported !== undefined ? { ...judged, check: reported } : judged;
 }
@@ -308,8 +309,8 @@ export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }
 const headOf = (s: { headOid: string | null } | null): { headOid?: string } => (s !== null && s.headOid !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s.headOid) ? { headOid: s.headOid } : {});
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
-async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope, holdClose: HoldCloudClose, scopeHint = false): Promise<Decision> {
-  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse, holdClose, scopeHint);
+async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope, holdClose: HoldCloudClose, scopeHint = false, derivedFresh: readonly string[] = []): Promise<Decision> {
+  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse, holdClose, scopeHint, derivedFresh);
   if (decision.kind !== "verdict" || decision.verdict.prNumber === null) return decision;
   return verdictOf({ ...decision.verdict, branch: branchOf(job, i) });
 }
@@ -354,6 +355,7 @@ async function judgeCommit(
   refuse: RefuseScope,
   holdClose: HoldCloudClose,
   scopeHint: boolean,
+  derivedFresh: readonly string[] = [],
 ): Promise<Decision> {
   // A fresh run's branch is `<prefix><run>-g<generation>`: a stale generation's branch is never looked at. A continuation works on exactly
   // the branch our issuer put in its signed job (the one recorded for the pull request it fixes).
@@ -429,8 +431,11 @@ async function judgeCommit(
     if (odd) return closeAnd("scope_unknown", { total: 1, paths: [odd.path] }, { detail: odd.changeType === "RENAMED" ? "renamed" : "unknown_change_type" });
     // A paired repository's private-only paths never reach the public repository, so a change that edits one cannot be published. It is out of scope here, whatever the file list says,
     // unless the Spec lists the path in `private_files`. Caught now, with the paths named, instead of after the review at the public push.
+    // #751: a generated file (the OpenAPI document and client beside a route) is in scope when its rule's input is and the runner, whose check passed on this head, vouched that it equals a fresh
+    // generator run (`derivedFresh`; empty for every run whose runner did not). Everything else is held to the list as before.
+    const notInScope = new Set(pathsOutsideScopeFresh(DERIVED_FILE_RULES, ctx.scope, changed.files.map((f) => f.path), derivedFresh));
     const outside = changed.files
-      .filter((f) => !pathInScope(ctx.scope, f.path) || (ctx.privateOnly !== null && privateOnlyEditsNotAllowed(ctx.privateOnly.overlayGlobs, ctx.privateOnly.privateFiles, [f.path]).length > 0))
+      .filter((f) => notInScope.has(f.path) || (ctx.privateOnly !== null && privateOnlyEditsNotAllowed(ctx.privateOnly.overlayGlobs, ctx.privateOnly.privateFiles, [f.path]).length > 0))
       .map((f) => f.path);
     if (outside.length > 0) return closeAnd("scope_violation", { total: outside.length, paths: outside });
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -54,7 +54,7 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> } } = {}) {
+function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> }; derived?: { table: object; files: Record<string, string>; generated: Record<string, string>; ran: string[]; dirty?: string[]; head?: Record<string, string | null>; hidden?: boolean } } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -71,6 +71,8 @@ function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?
       starts.push(opts);
       // What the agent CLI leaves behind: an empty placeholder over a protected name, made during the run (it was not there at the baseline).
       if (over.lockfile?.stubSeen !== undefined) writeFileSync(path.join(held, ".npmrc"), "");
+      // #751: the files the agent left behind (a route's generated output, as it committed it).
+      for (const [rel, text] of Object.entries(over.derived?.files ?? {})) { mkdirSync(path.dirname(path.join(held, rel)), { recursive: true }); writeFileSync(path.join(held, rel), text); }
       const event: NormalizedEvent = { runId: opts.runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } };
       return { handle, hookFired: Promise.resolve(event) };
     },
@@ -88,11 +90,18 @@ function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?
     ...(over.steps === undefined ? {} : { onStep: (line: string) => over.steps!.push(line) }),
     ...(over.shell === false ? {} : { nix: withShell }),
     ...(over.changed === undefined ? {} : { changedFiles: async (workspace: string, base: string) => {
+      // #751: the listing against HEAD (what the working tree holds that the pushed commit does not).
+      if (base === "HEAD") return over.derived?.dirty ?? [];
       order.push("changed_files");
       over.changed!.calls.push({ workspace, base });
       if (over.changed!.files === "throws") throw new Error("boom at /home/someone/secret");
       return over.changed!.files;
     } }),
+    ...(over.derived === undefined ? {} : {
+      // #751: HEAD's blob of a file (by default the bytes the agent left, as if committed) and whether the index hides changes.
+      headBlob: async (_workspace: string, relative: string) => { const text = over.derived!.head !== undefined && relative in over.derived!.head ? over.derived!.head[relative] : over.derived!.files[relative]; return text === undefined || text === null ? null : Buffer.from(text); },
+      indexHidesChanges: async () => over.derived!.hidden === true,
+    }),
     ...(over.lockfile === undefined ? {} : { lockfileSync: { run: async (input: { base: string; registryHost?: string | undefined }) => {
       order.push("lockfile");
       over.lockfile!.stubSeen?.push(existsSync(path.join(held, ".npmrc")));
@@ -106,6 +115,14 @@ function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?
     planePush: { baseLedger: { ...spiedLedger, record: (runId: string, b: string) => (recordedBases.push(b), spiedLedger.record(runId, b)) }, run: async () => (order.push("hook"), { kind: "pr_opened" as const, number: 9, seconds: 1 }) },
     ...(over.wired === false ? {} : {
       checkStep: async (input) => {
+        // #751: a generator the table names, run through the check step: it rewrites its output from the "truth" the test gives (the real step runs it under the sandbox).
+        const generated = over.derived?.generated[input.check.argv[0] ?? ""];
+        if (generated !== undefined) {
+          over.derived!.ran.push(input.check.argv[0]!);
+          const target = input.check.argv[0] === "gen-openapi" ? "api/openapi.json" : "client/generated.ts";
+          writeFileSync(path.join(input.workspace, target), generated);
+          return { passed: true, body: PASSED };
+        }
         order.push("check");
         // The sandbox still exists while the check runs: it is deleted after.
         checkInputs.push({ base: input.base, baseDir: input.baseDir, argv: input.check.argv, devShell: input.check.dev_shell });
@@ -121,7 +138,7 @@ function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?
         return over.outcome ?? { passed: true, body: PASSED };
       },
       checkLaunch: () => ({ tool: "x", args: [], env: {} }),
-      baseFile: async () => null,
+      baseFile: async (_dir: string, _base: string, relative: string) => (over.derived !== undefined && relative === ".fulcrumaxe/derived-files.json" ? Buffer.from(JSON.stringify(over.derived.table)) : null),
     }),
   };
   return {
@@ -338,6 +355,88 @@ describe("a check that is blocked, and a run the cloud has stopped", () => {
     expect(bodies("/done")).toEqual([]);
     expect(steps.some((line) => line.includes("heartbeat answered stop (run_terminal, http 409)"))).toBe(true);
     expect(steps.some((line) => /check ended \(exit none, 7 ms, timed_out false, stopped\)/.test(line))).toBe(true);
+  });
+});
+
+// #751: a generated file beside a listed route is lifted out of the scope test only by a fresh generator run, and the files vouched for travel on `done` with the passing check.
+describe("a job with a check whose Spec lists a route (#751)", () => {
+  const ROUTE = "api/src/routes/runs.ts";
+  const TABLE = { version: 1, rules: [{ id: "routes", kind: "generated", inputs: ["api/src/routes/**"], outputs: ["api/openapi.json", "client/generated.ts"], generators: [["gen-openapi"], ["gen-client"]] }] };
+  const scoped = () => jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 }, check: CHECK, scope: [ROUTE] });
+  const changed = () => ({ files: [ROUTE, "api/openapi.json", "client/generated.ts"] as string[] | null | "throws", calls: [] as Array<{ workspace: string; base: string }> });
+  const FILES = { "api/openapi.json": "doc\n", "client/generated.ts": "client\n" };
+
+  it("equal to a fresh run: the check runs, nothing is reported out of scope, and done names the files that were checked", async () => {
+    const ran: string[] = [];
+    const steps: string[] = [];
+    const r = rig({ changed: changed(), steps, derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "client\n" }, ran } });
+    await r.handle(await r.claim(scoped()));
+    expect(ran).toEqual(["gen-openapi", "gen-client"]);
+    expect(r.order).toContain("check");
+    expect(bodies("/done")[0]!.check).toEqual({ ...PASSED, derived_fresh: ["api/openapi.json", "client/generated.ts"] });
+    expect(steps.some((l) => l.includes("out_of_scope"))).toBe(false);
+    expect(steps.some((l) => l.includes("generated files checked against a fresh run (2 equal)"))).toBe(true);
+  });
+
+  it("a hand-edited file: the check is not run and the run ends out_of_scope with a count, as before", async () => {
+    const ran: string[] = [];
+    const r = rig({ changed: changed(), derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "other client\n" }, ran } });
+    await r.handle(await r.claim(scoped()));
+    expect(r.order).not.toContain("check");
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope", summary: "the check was not run: 1 changed file is outside the Spec's file list" });
+    expect(bodies("/done")[0]!.check).not.toHaveProperty("derived_fresh");
+  });
+
+  it("no table on the default branch: nothing is generated and both files count as outside", async () => {
+    const ran: string[] = [];
+    const r = rig({ changed: changed() });
+    await r.handle(await r.claim(scoped()));
+    expect(ran).toEqual([]);
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope", summary: "the check was not run: 2 changed files are outside the Spec's file list" });
+  });
+
+  it("a file missing from the workspace is not vouched for", async () => {
+    const ran: string[] = [];
+    const r = rig({ changed: changed(), derived: { table: TABLE, files: { "api/openapi.json": "doc\n" }, generated: { "gen-openapi": "doc\n", "gen-client": "client\n" }, ran } });
+    await r.handle(await r.claim(scoped()));
+    expect(ran).toEqual([]);
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope" });
+  });
+
+  it("a working tree that differs from HEAD vouches for nothing: the runner pushes HEAD, not loose bytes", async () => {
+    const ran: string[] = [];
+    const r = rig({ changed: changed(), derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "client\n" }, ran, dirty: ["client/generated.ts"] } });
+    await r.handle(await r.claim(scoped()));
+    expect(ran).toEqual([]);
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope" });
+  });
+
+  it("a committed file that is not what the working tree holds, or an index that hides changes, vouches for nothing", async () => {
+    const ran: string[] = [];
+    const generated = { "gen-openapi": "doc\n", "gen-client": "client\n" };
+    const forged = rig({ changed: changed(), derived: { table: TABLE, files: FILES, generated, ran, head: { "client/generated.ts": "HAND WRITTEN\n" } } });
+    await forged.handle(await forged.claim(scoped()));
+    const hidden = rig({ changed: changed(), derived: { table: TABLE, files: FILES, generated, ran, hidden: true } });
+    await hidden.handle(await hidden.claim(scoped()));
+    expect(ran).toEqual([]);
+    expect(bodies("/done").map((b) => (b.check as DoneCheck).reason)).toEqual(["out_of_scope", "out_of_scope"]);
+  });
+
+  it("a copy of the table in the workspace, different from the default branch's, is ignored", async () => {
+    const ran: string[] = [];
+    const evil = { version: 1, rules: [{ id: "evil", kind: "generated", inputs: ["api/src/routes/**"], outputs: ["secrets/out.json"], generators: [["gen-evil"]] }] };
+    const c = { files: [ROUTE, "secrets/out.json"] as string[] | null | "throws", calls: [] as Array<{ workspace: string; base: string }> };
+    const r = rig({ changed: c, derived: { table: TABLE, files: { ".fulcrumaxe/derived-files.json": JSON.stringify(evil), "secrets/out.json": "x" }, generated: { "gen-evil": "x" }, ran } });
+    await r.handle(await r.claim(scoped()));
+    expect(ran).toEqual([]);
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope", summary: "the check was not run: 1 changed file is outside the Spec's file list" });
+  });
+
+  it("a check that fails after the files were checked vouches for nothing", async () => {
+    const ran: string[] = [];
+    const r = rig({ changed: changed(), outcome: { passed: false, body: { exit_code: 1, duration_ms: 5, timed_out: false, skipped_tests: null, summary: "FAIL" } }, derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "client\n" }, ran } });
+    await r.handle(await r.claim(scoped()));
+    expect(bodies("/done")[0]!.check).not.toHaveProperty("derived_fresh");
   });
 });
 
