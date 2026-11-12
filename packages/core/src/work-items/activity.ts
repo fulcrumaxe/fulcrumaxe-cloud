@@ -16,7 +16,7 @@ import { readItemVerify, type ItemVerify } from './itemVerify.js';
 import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSentence } from './continuationStops.js';
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE, REPUBLISH_REPLACE_NO_CHANGE, REPUBLISH_REPLACE_FAILED, REPUBLISH_REPLACE_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN, REPUBLISH_STACK_PARENT_OFF_MAIN, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST, REPUBLISH_TIP_MOVED, republishFailedSentence } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
-import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE, CHECK_NOT_RUN_OUT_OF_SCOPE, CHECK_NOT_RUN_OUT_OF_SCOPE_SENTENCE } from './checkFailure.js';
+import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE, CHECK_NOT_RUN_OUT_OF_SCOPE, CHECK_NOT_RUN_OUT_OF_SCOPE_SENTENCE, checkFailureFiles, type CheckFailureFiles } from './checkFailure.js';
 import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalSentence } from './scopeRefusal.js';
 import { openPrStopSentence } from './baseSync.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
@@ -127,6 +127,8 @@ export interface ActivityStep {
  * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
+  /** `needs_human` only, on the outside-only check stop: the failing test files (repo-relative, capped) with each one's `Run:` hint. The API route maps it to `failed_files`. */
+  failedFiles?: CheckFailureFiles;
   /** `needs_human` only, and only for an executor run the runner ended `resource_limit`: how it ended. The API route puts the memory-limit sentence in `reason` and drops this; it never leaves the API. */
   ended?: RunEndedWhy;
   kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'superseded' | 'review_limit_wait' | 'public_update_stopped';
@@ -961,6 +963,13 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
             kind: 'needs_human',
             reason: summary ?? (ex ? `The executor run ${ex.status.replace(/_/g, ' ')} without a pull request.` : 'The pipeline stopped and needs a person.'),
           };
+      // D#6 CHECK-FAILURE-NAMES-ON-CARD: the outside-only stop says which test files failed (and each one's `Run:` hint), read from the newest executor run's recorded check summary,
+      // so a person can tell a runner-environment flake from a base-branch break. Names and hint words only, capped; the sentence above is unchanged.
+      if (branchStop && rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE && ex && notice !== null) {
+        const failedCheck = (await client.query<{ summary: string | null }>(`SELECT left(summary, 4096) AS summary FROM run_checks WHERE run_id = $1::uuid AND exit_code IS NOT NULL AND exit_code <> 0 AND NOT timed_out`, [ex.id])).rows[0];
+        const named = checkFailureFiles(failedCheck?.summary);
+        if (named !== null) notice = { ...notice, failedFiles: named };
+      }
     } else if (item.stage === 'in_progress' || item.stage === 'pr_opened' || item.stage === 'changes_requested' || item.stage === 'review_passed') {
       // "Check the build" could not decide: its newest recorded stop names why, by a fixed code.
       const stop = (

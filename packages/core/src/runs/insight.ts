@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import { checkNotRunReason, readCheckFailedFiles, type CheckNotRunReason } from '@fulcrumaxe/runner-protocol';
+import { checkFailureFiles } from '../work-items/checkFailure.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { resolveRunLimits } from '../run-limits/resolve.js';
@@ -101,7 +102,7 @@ export interface RunCheck {
   timeout_s: number;
   no_dev_shell: boolean;
   /** `reason` is the runner's closed code for a check it could not run safely (D#6 R-CHK-3d); null when it sent none (an older runner, or an ordinary pass or failure). */
-  result: { exit_code: number | null; duration_ms: number; timed_out: boolean; skipped_tests: number | null; summary: string; reason: CheckNotRunReason | null; /** D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files the runner named (at most 20, names only) and how many more it counted; absent when it named none. */ failed_files?: string[]; failed_files_more?: number } | null;
+  result: { exit_code: number | null; duration_ms: number; timed_out: boolean; skipped_tests: number | null; summary: string; reason: CheckNotRunReason | null; /** D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files the runner named (at most 20, names only) and how many more it counted; absent when it named none. */ failed_files?: string[]; failed_files_more?: number; /** D#6 CHECK-FAILURE-NAMES-ON-CARD: the `Run:` hint a failing test file printed, read from the summary header (plain text, capped), for the files above that printed one. */ failed_file_hints?: { file: string; hint: string }[] } | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -172,6 +173,13 @@ async function readFailedFiles(client: Pick<PoolClient, 'query'>, id: string): P
   return read.ok ? read.value : null;
 }
 
+/** The `Run:` hints from the summary header, only for files the cloud also recorded as failed (so a hint never names a file the list does not). */
+function hintsOf(files: readonly string[] | undefined, summary: string): { file: string; hint: string }[] {
+  if (files === undefined || files.length === 0) return [];
+  const recorded = new Set(files);
+  return (checkFailureFiles(summary)?.files ?? []).flatMap((f) => (f.hint !== undefined && recorded.has(f.name) ? [{ file: f.name, hint: f.hint }] : []));
+}
+
 /** The run's check, read from facts the cloud itself recorded: the signed job's `check`, the `run_checks` row and the runner's `check_no_dev_shell` run_ended event. Null when the job carried none. */
 async function readRunCheck(client: Pick<PoolClient, 'query'>, id: string, job: unknown): Promise<RunCheck | null> {
   const j = job !== null && typeof job === 'object' && !Array.isArray(job) ? (job as Record<string, unknown>) : null;
@@ -195,7 +203,7 @@ async function readRunCheck(client: Pick<PoolClient, 'query'>, id: string, job: 
     dev_shell: j.dev_shell,
     timeout_s: j.timeout_s as number,
     no_dev_shell: noDevShell,
-    result: row ? { exit_code: row.exit_code, duration_ms: Number(row.duration_ms), timed_out: row.timed_out, skipped_tests: row.skipped_tests, summary: row.summary, reason: row.reason === null ? null : checkNotRunReason(row.reason), ...(named === null ? {} : { failed_files: named.files, ...(named.more === 0 ? {} : { failed_files_more: named.more }) }) } : null,
+    result: row ? { exit_code: row.exit_code, duration_ms: Number(row.duration_ms), timed_out: row.timed_out, skipped_tests: row.skipped_tests, summary: row.summary, reason: row.reason === null ? null : checkNotRunReason(row.reason), ...(named === null ? {} : { failed_files: named.files, ...(named.more === 0 ? {} : { failed_files_more: named.more }) }), ...(hintsOf(named?.files, row.summary).length === 0 ? {} : { failed_file_hints: hintsOf(named?.files, row.summary) }) } : null,
   };
 }
 

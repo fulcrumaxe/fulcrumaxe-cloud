@@ -63,7 +63,7 @@ export const activityResponseSchema = z.object({
       finished_at: z.string().nullable(),
     }),
   ),
-  notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed", "no_file_list", "respec_failed", "build_slot_wait", "resume_refused", "spec_refused", "superseded", "review_limit_wait", "public_update_stopped"]), reason: z.string(), resets_at: z.string().optional() }).nullable(),
+  notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed", "no_file_list", "respec_failed", "build_slot_wait", "resume_refused", "spec_refused", "superseded", "review_limit_wait", "public_update_stopped"]), reason: z.string(), resets_at: z.string().optional(), failed_files: z.array(z.object({ name: z.string(), hint: z.string().optional() })).max(20).optional(), failed_files_more: z.number().int().min(1).optional() }).nullable(),
   // D#598 P7c: present only while the newest review round was a merge-only re-check; `sentence` is the approved line.
   review_recheck: z.object({ kind: z.literal("merge_only"), sentence: z.string() }).nullable().optional(),
   // D#598 P1f-6a: the item's change to its paired public repo; absent when the item has none. `sentence` is fixed words; `actions` is empty until the actions ship.
@@ -231,6 +231,11 @@ export const workItemActivityRoutes: RouteEntry[] = [
       // The review stops of a cloud-verified item do the same (D#6 R5b-2b-i).
       const key = (Object.values(REVIEW_STOP_COPY_KEY) as string[]).find((k) => n !== null && n.kind === "check_failed" && n.reason === k);
       if (n !== null && key !== undefined) return { ...activity, notice: { kind: n.kind, reason: COPY[key as (typeof REVIEW_STOP_COPY_KEY)[keyof typeof REVIEW_STOP_COPY_KEY]] } };
+      // D#6 CHECK-FAILURE-NAMES-ON-CARD: the outside-only stop carries the failing test files and their hints, mapped to the wire names.
+      if (n !== null && n.failedFiles !== undefined) {
+        const { failedFiles, ...bare } = n;
+        return { ...activity, notice: { kind: bare.kind, reason: bare.reason, failed_files: failedFiles.files, ...(failedFiles.more > 0 ? { failed_files_more: failedFiles.more } : {}) } };
+      }
       return activity;
     },
   },

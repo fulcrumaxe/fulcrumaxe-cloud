@@ -37,6 +37,7 @@ export const CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE =
 /** The header lines the runner writes before the output tail. Anything else ends the header. */
 const HEADER_PREFIXES = [
   'failed test files (',
+  'hint for ',
   'changed files (',
   'the check needed the network',
   'check files changed by this branch:',
@@ -114,4 +115,47 @@ export function failedOutsideChange(summary: string | null | undefined, chainRoo
     if (pkg === null || touched.has(pkg)) return false;
   }
   return true;
+}
+
+/** The card shows at most this many failing test files; the rest are counted. */
+export const CHECK_FAILURE_FILES_MAX = 20;
+/** A hint is a test's own words, cut to this many characters. */
+export const CHECK_FAILURE_HINT_CHARS = 200;
+
+export interface CheckFailureFile {
+  /** A plain repo-relative path (the runner's own closed shape). */
+  name: string;
+  /** The `Run:` command words the failing test printed, as plain text only; absent when it printed none. */
+  hint?: string;
+}
+export interface CheckFailureFiles {
+  files: CheckFailureFile[];
+  /** Failing files counted but not named here (past the cap, or cut by the runner). */
+  more: number;
+}
+
+/**
+ * The failing test files a check's summary header names, each with the `Run:` hint it printed, for the card. Only the header at the top of the summary is read (never the output tail), a name
+ * must be a plain relative path (`NAMED_FILE`), at most {@link CHECK_FAILURE_FILES_MAX} are kept and the rest counted. A hint is plain text for the caller to draw as text only: control and
+ * format characters become spaces and it is cut to {@link CHECK_FAILURE_HINT_CHARS}. Null when the header names no failing file.
+ */
+export function checkFailureFiles(summary: string | null | undefined): CheckFailureFiles | null {
+  if (typeof summary !== 'string' || summary === '') return null;
+  let failed: FileLine | null = null;
+  const hints = new Map<string, string>();
+  for (const line of summary.split('\n')) {
+    if (!HEADER_PREFIXES.some((p) => line.startsWith(p))) break;
+    failed ??= readFileLine(line, 'failed test files (');
+    const hint = line.match(/^hint for ([A-Za-z0-9_@+][A-Za-z0-9_./@+-]{0,255}): (\S[^\n]*)$/);
+    if (hint !== null && !hints.has(hint[1]!)) {
+      const words = hint[2]!.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, CHECK_FAILURE_HINT_CHARS);
+      if (words !== '') hints.set(hint[1]!, words);
+    }
+  }
+  if (failed === null || failed.files.size === 0) return null;
+  const shown = [...failed.files].slice(0, CHECK_FAILURE_FILES_MAX);
+  return {
+    files: shown.map((name) => (hints.has(name) ? { name, hint: hints.get(name)! } : { name })),
+    more: Math.max(0, failed.count - shown.length),
+  };
 }

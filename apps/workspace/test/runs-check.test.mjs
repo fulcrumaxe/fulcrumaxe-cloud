@@ -18,7 +18,7 @@ describe("the Check block, one state each", () => {
   it("failing test files: the names the runner sent as a short list with a count of the rest, in fixed words; none for a pass, an odd list, or a run that sent none (D#6 CHECK-FAILFILES-TO-CLOUD)", () => {
     const v = view("failed-files");
     expect(v.state).toBe("failed");
-    expect(v.failed).toEqual({ files: ["apps/ops/test/scan.test.ts", "packages/db/test/a.pg.test.ts"], more: 3 });
+    expect(v.failed).toEqual({ files: ["apps/ops/test/scan.test.ts", "packages/db/test/a.pg.test.ts"], hints: new Map([["packages/db/test/a.pg.test.ts", "pnpm --filter @fx/db gen"]]), more: 3 });
     expect(CHECK_FAILED_FILES_LABEL).toBe("Failing test files");
     expect(CHECK_FAILED_FILES_MORE(3)).toBe("+3 more");
     expect(view("failed").failed).toBeNull();

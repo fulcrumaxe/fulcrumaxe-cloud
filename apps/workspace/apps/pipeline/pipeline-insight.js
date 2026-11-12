@@ -367,6 +367,24 @@ export function resumeRefusedSentence(code) {
   return RESUME_REFUSED_GENERIC;
 }
 
+/** The failing-files heading on a needs-a-person card (D#6 CHECK-FAILURE-NAMES-ON-CARD). */
+export const NOTICE_FAILED_FILES_LABEL = "Failing test files:";
+export const NOTICE_FAILED_FILES_MORE = (n) => "+" + n + " more";
+/**
+ * The failing test files a notice carries (repo-relative names, each with the hint it printed, at most 20), drawn as text only. A malformed list (a non-string name, a hint that is not a string, too many)
+ * draws nothing, so an odd payload never hides the sentence itself. `{}` when there is nothing to show.
+ */
+export function noticeFailedFiles(n) {
+  const list = n && n.failed_files;
+  if (!Array.isArray(list) || list.length === 0 || list.length > 20) return {};
+  const files = [];
+  for (const f of list) {
+    if (!f || typeof f.name !== "string" || f.name === "" || (f.hint !== undefined && typeof f.hint !== "string")) return {};
+    files.push(f.hint ? { name: f.name, hint: f.hint } : { name: f.name });
+  }
+  return { files, filesMore: Number.isInteger(n.failed_files_more) && n.failed_files_more > 0 ? n.failed_files_more : 0 };
+}
+
 /**
  * The notice banner: why the pipeline stopped and wants a person. `reason` is model text, returned as plain text and drawn
  * as a text node or a <pre> only, never markup. Any other kind, or a malformed notice, draws nothing.
@@ -376,7 +394,7 @@ export function noticeBanner(data) {
   if (!n || typeof n.reason !== "string") return null;
   if (n.kind === "not_feasible") return { kind: "not_feasible", title: "Stopped before building. ", lead: "The project manager says this can't be built as written: ", tail: " Edit the issue on GitHub and approve again, or close it.", reason: n.reason };
   if (n.kind === "check_failed") return { kind: "check_failed", title: "Couldn't check the build. ", lead: "", tail: "", reason: n.reason };
-  if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason };
+  if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason, ...noticeFailedFiles(n) };
   // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words of its own around it.
   if (n.kind === "no_file_list" || n.kind === "respec_failed" || n.kind === "build_slot_wait" || n.kind === "public_update_stopped") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
   if (n.kind === "review_limit_wait") return { kind: n.kind, title: "", lead: "", tail: limitResetTail(n.resets_at), reason: n.reason };
@@ -1218,6 +1236,7 @@ export function createInsightPanel(deps) {
       n.lead,
       needsHuman ? text(n.reason) : h("span", { "data-testid": "pl-notice-reason" }, n.reason),
       n.tail,
+      n.files ? h("div", { "data-testid": "pl-notice-failed-files" }, h("p", null, NOTICE_FAILED_FILES_LABEL), h("ul", null, n.files.map((f) => h("li", { "data-testid": "pl-notice-failed-file" }, h("code", null, f.name), f.hint ? [" Run: ", h("code", { "data-testid": "pl-notice-failed-hint" }, f.hint)] : null)), n.filesMore ? h("li", { "data-testid": "pl-notice-failed-more" }, NOTICE_FAILED_FILES_MORE(n.filesMore)) : null)) : null,
       n.rootId && deps.onOpenItem ? [" ", h("button", { type: "button", class: "pl-act", "data-testid": "pl-superseded-link", onClick: () => deps.onOpenItem(n.rootId) }, SUPERSEDED_LINK_LABEL)] : null
     );
   }

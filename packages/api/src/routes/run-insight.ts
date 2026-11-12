@@ -83,7 +83,7 @@ export const runInsightResponseSchema = z.object({
       timeout_s: z.number().int(),
       no_dev_shell: z.boolean(),
       result: z
-        .object({ exit_code: z.number().int().nullable(), duration_ms: z.number().int(), timed_out: z.boolean(), skipped_tests: z.number().int().nullable(), summary: z.string(), reason: z.enum(CHECK_NOT_RUN_REASONS).nullable(), failed_files: z.array(z.string()).max(CHECK_FAILED_FILES_MAX).optional(), failed_files_more: z.number().int().min(1).optional() })
+        .object({ exit_code: z.number().int().nullable(), duration_ms: z.number().int(), timed_out: z.boolean(), skipped_tests: z.number().int().nullable(), summary: z.string(), reason: z.enum(CHECK_NOT_RUN_REASONS).nullable(), failed_files: z.array(z.string()).max(CHECK_FAILED_FILES_MAX).optional(), failed_files_more: z.number().int().min(1).optional(), failed_file_hints: z.array(z.object({ file: z.string(), hint: z.string() })).max(CHECK_FAILED_FILES_MAX).optional() })
         .nullable(),
     })
     .optional(),

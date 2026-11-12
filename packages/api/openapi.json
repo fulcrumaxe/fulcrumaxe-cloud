@@ -3991,6 +3991,30 @@
                             },
                             "resets_at": {
                               "type": "string"
+                            },
+                            "failed_files": {
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "hint": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "name"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "failed_files_more": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 9007199254740991
                             }
                           },
                           "required": [
@@ -6993,6 +7017,26 @@
                                   "type": "integer",
                                   "minimum": 1,
                                   "maximum": 9007199254740991
+                                },
+                                "failed_file_hints": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "file": {
+                                        "type": "string"
+                                      },
+                                      "hint": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "file",
+                                      "hint"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "required": [
