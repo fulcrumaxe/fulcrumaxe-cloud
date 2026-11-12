@@ -117,6 +117,90 @@ describe("GET /api/runners/repos/:id/execution-mode [pg]", () => {
     expect(body(await get(f, f.o1, id)).full_name).toBeNull();
   });
 
+  // D#767: the confirm step's three new facts (criteria 1-3).
+  describe("pending_runner_runs and the allowance flags", () => {
+    async function queuedRun(f: F2Fixture, repoId: string, status = "pending", runtime = "runner"): Promise<string> {
+      const id = randomUUID();
+      await h.admin.query("INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, 'code-reviewer', $3, $4, $5, $6)", [id, f.accountId, runtime, status, runtime === "runner" ? "runner_local" : "sandbox", repoId]);
+      return id;
+    }
+    async function approve(f: F2Fixture, repoId: string, entries: unknown[], opts: { setAside?: boolean; checkArgv?: string[] | null } = {}): Promise<void> {
+      await h.admin.query(
+        "INSERT INTO repo_runner_sandbox_allowances (account_id, repo_id, version, entries, command_timeout_s, set_sha256, set_aside, approved_by, check_argv, check_dev_shell, check_timeout_s) VALUES ($1, $2, 1, $3::jsonb, $4, $5, $6, $7, $8, $9, $10)",
+        [f.accountId, repoId, JSON.stringify(entries), entries.length > 0 ? 60 : null, createHash("sha256").update(randomUUID()).digest("hex"), opts.setAside ?? false, f.o1, opts.checkArgv ?? null, opts.checkArgv ? true : null, opts.checkArgv ? 60 : null],
+      );
+    }
+
+    it("counts only this repo's pending runner runs: 0 with none, excluding running, finished, sandbox-runtime and another repo's runs", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      const other = await repo(f, "runner_local");
+      expect(body(await get(f, f.o1, id)).pending_runner_runs).toBe(0);
+      const a = await queuedRun(f, id);
+      const b = await queuedRun(f, id);
+      await queuedRun(f, id, "running");
+      await queuedRun(f, id, "succeeded");
+      await queuedRun(f, id, "pending", "production");
+      await queuedRun(f, other);
+      expect(body(await get(f, f.o1, id)).pending_runner_runs).toBe(2);
+      expect(body(await get(f, f.o1, other)).pending_runner_runs).toBe(1);
+      expect([a, b]).toHaveLength(2);
+    });
+
+    it("another account's pending runner runs never count", async () => {
+      const f = await fresh();
+      const other = await fresh();
+      const id = await repo(f, "runner_local");
+      const theirs = await repo(other, "runner_local");
+      await queuedRun(other, theirs);
+      expect(body(await get(f, f.o1, id)).pending_runner_runs).toBe(0);
+    });
+
+    it("allowances_in_force and allowances_set_aside are both false with no approved row", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      expect(body(await get(f, f.o1, id))).toMatchObject({ allowances_in_force: false, allowances_set_aside: false });
+    });
+
+    it("an approved set with an entry, not set aside, is in force; set aside turns it off and flips allowances_set_aside", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      await approve(f, id, [{ kind: "env", value: "X", access: "read", reason: "r" }]);
+      expect(body(await get(f, f.o1, id))).toMatchObject({ allowances_in_force: true, allowances_set_aside: false });
+    });
+
+    it("a check alone (no entries) is in force too", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      await approve(f, id, [], { checkArgv: ["npm", "test"] });
+      expect(body(await get(f, f.o1, id))).toMatchObject({ allowances_in_force: true, allowances_set_aside: false });
+    });
+
+    it("a set aside row is never in force, and allowances_set_aside is true", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      await approve(f, id, [{ kind: "env", value: "X", access: "read", reason: "r" }], { setAside: true });
+      expect(body(await get(f, f.o1, id))).toMatchObject({ allowances_in_force: false, allowances_set_aside: true });
+    });
+
+    it("an approved set with no entries and no check is not in force and not set aside", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      await approve(f, id, []);
+      expect(body(await get(f, f.o1, id))).toMatchObject({ allowances_in_force: false, allowances_set_aside: false });
+    });
+  });
+
+  it("carries the four new COPY strings in the copy map", async () => {
+    const f = await fresh();
+    const id = await repo(f);
+    const c = body(await get(f, f.o1, id)).copy as Record<string, string>;
+    expect(c.leaveQueued).toBe(COPY.modeLeaveQueued);
+    expect(c.leaveSetsAside).toBe(COPY.modeLeaveSetsAside);
+    expect(c.leaveAutoMergeOff).toBe(COPY.modeLeaveAutoMergeOff);
+    expect(c.needsReapproval).toBe(COPY.modeNeedsReapproval);
+  });
+
   describe("runner_blocked: a repo on a runner is re-read live, and one that is not private now shows as blocked", () => {
     type Seen = "private" | "public" | "unknown" | "throw";
     function reader(answer: () => Seen) {

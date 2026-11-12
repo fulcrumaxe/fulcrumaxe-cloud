@@ -30,6 +30,11 @@ export const COPY = {
   modeSaving: "Saving...",
   modeSaved: "Saved. The mode changed.",
   modeLeaveCancels: "Moving this repo to the sandbox cancels its queued runner runs. A run that is already running is not stopped.",
+  /** D#767: the confirm step's effect sentences, before Apply. `{n}` is the repo's `pending_runner_runs`. */
+  modeLeaveQueued: "Queued runner runs that this change cancels and that need starting again: {n}.",
+  modeLeaveSetsAside: "The allowances and check command you approved for this repo are set aside when it leaves your runner, so approve them again before any job carries them.",
+  modeLeaveAutoMergeOff: "Auto-merge for this repo is turned off by this change.",
+  modeNeedsReapproval: "This repo's approved allowances and check command are set aside. Approve them again in this repo's runner sandbox settings before any job carries them.",
   modeAdminOnly: "Only owners and admins can change this.",
   modeSaveFailed: "That change couldn't be saved. Try again.",
   modeNameMismatch: "That isn't the repository's name. Type it exactly, including capital letters.",

@@ -8,9 +8,12 @@ import { MODES, UNAVAILABLE_TEXT, createModeController, modeUrl, pickerModel, re
 const REPO = "99999999-9999-4999-8999-999999999999";
 const NAME = "Acme/widgets";
 const HASH = "ab".repeat(32);
-const KEYS = ["title", "sandbox", "sandboxHelp", "localOnly", "localOnlyHelp", "cloudVerified", "cloudVerifiedHelp", "keyRequired", "keyRequiredWhy", "typeName", "apply", "cancel", "saving", "saved", "leaveCancels", "adminOnly", "saveFailed", "nameMismatch", "copyChanged", "keyGone", "publicRepo", "visibilityUnknown"];
+const KEYS = ["title", "sandbox", "sandboxHelp", "localOnly", "localOnlyHelp", "cloudVerified", "cloudVerifiedHelp", "keyRequired", "keyRequiredWhy", "typeName", "apply", "cancel", "saving", "saved", "leaveCancels", "leaveQueued", "leaveSetsAside", "leaveAutoMergeOff", "needsReapproval", "adminOnly", "saveFailed", "nameMismatch", "copyChanged", "keyGone", "publicRepo", "visibilityUnknown"];
 const COPY = Object.fromEntries(KEYS.map((k) => [k, "copy:" + k]));
-const body = (over = {}) => ({ repo_id: REPO, execution_mode: "sandbox", full_name: NAME, key_required: false, copy_sha256: HASH, can_change: true, copy: COPY, ...over });
+const body = (over = {}) => ({
+  repo_id: REPO, execution_mode: "sandbox", full_name: NAME, key_required: false, copy_sha256: HASH, can_change: true,
+  pending_runner_runs: 0, allowances_in_force: false, allowances_set_aside: false, auto_merge: false, copy: COPY, ...over,
+});
 const fail = (status, code) => Object.assign(new Error("server text that must never be shown"), { status, code });
 
 /** A call() that answers by "METHOD path"; a function value is called each time, an Error is thrown. */
@@ -122,7 +125,7 @@ describe("the typed name gate", () => {
   it("picking another mode opens the confirmation with the apply button off; it turns on only for the exact name", async () => {
     const { call, ctl } = await ready();
     ctl.choose("runner_local");
-    expect(model(ctl).confirm).toMatchObject({ target: "runner_local", applyDisabled: true, showWording: false, leaveNote: "" });
+    expect(model(ctl).confirm).toMatchObject({ target: "runner_local", applyDisabled: true, showWording: false, effects: [] });
     expect(option(model(ctl), "runner_local").checked).toBe(true);
     for (const wrong of ["acme/widgets", "Acme/widgets ", " Acme/widgets", "Acme/widget", "widgets", ""]) {
       ctl.type(wrong);
@@ -177,14 +180,76 @@ describe("what is sent", () => {
   it("leaving to the sandbox from a runner mode says the queued runs are cancelled; going between runner modes does not", async () => {
     const { ctl } = await ready({ execution_mode: "runner_verified" });
     ctl.choose("sandbox");
-    expect(model(ctl).confirm.leaveNote).toBe("copy:leaveCancels");
+    expect(model(ctl).confirm.effects[0]).toBe("copy:leaveCancels");
     ctl.choose("runner_local");
-    expect(model(ctl).confirm.leaveNote).toBe("");
+    expect(model(ctl).confirm.effects).toEqual([]);
   });
-  it("from the sandbox there is nothing to cancel, so no leave note", async () => {
+  it("from the sandbox with no set-aside allowances there is nothing to confirm beyond the mode itself", async () => {
     const { ctl } = await ready({ execution_mode: "sandbox" });
     ctl.choose("runner_local");
-    expect(model(ctl).confirm.leaveNote).toBe("");
+    expect(model(ctl).confirm.effects).toEqual([]);
+  });
+});
+
+// D#767: the confirm step's ordered effect sentences (criteria 5-8).
+describe("the confirm step's effect sentences", () => {
+  it("criterion 5: leaving a runner mode for the sandbox with a pending run, an allowance in force and auto-merge on shows all four, in order", async () => {
+    const { ctl } = await ready({ execution_mode: "runner_local", pending_runner_runs: 1, allowances_in_force: true, auto_merge: true });
+    ctl.choose("sandbox");
+    expect(model(ctl).confirm.effects).toEqual(["copy:leaveCancels", "copy:leaveQueued", "copy:leaveSetsAside", "copy:leaveAutoMergeOff"]);
+  });
+  it("the {n} placeholder in leaveQueued is filled with the pending count", async () => {
+    const COPY_N = { ...COPY, leaveQueued: "Queued: {n}." };
+    const { ctl } = await ready({ execution_mode: "runner_local", pending_runner_runs: 3, copy: COPY_N });
+    ctl.choose("sandbox");
+    expect(model(ctl).confirm.effects[1]).toBe("Queued: 3.");
+  });
+  it("with no pending run, no allowance in force and auto-merge off, only the two fixed sentences show", async () => {
+    const { ctl } = await ready({ execution_mode: "runner_verified", pending_runner_runs: 0, allowances_in_force: false, auto_merge: false });
+    ctl.choose("sandbox");
+    expect(model(ctl).confirm.effects).toEqual(["copy:leaveCancels", "copy:leaveQueued"]);
+  });
+  it("criterion 6: from the sandbox with allowances set aside, choosing runner_local or runner_verified shows exactly the re-approval sentence", async () => {
+    const { ctl } = await ready({ execution_mode: "sandbox", allowances_set_aside: true });
+    ctl.choose("runner_local");
+    expect(model(ctl).confirm.effects).toEqual(["copy:needsReapproval"]);
+    ctl.choose("runner_verified");
+    expect(model(ctl).confirm.effects).toEqual(["copy:needsReapproval"]);
+  });
+  it("with allowances_set_aside false, moving onto a runner mode shows no effect sentence", async () => {
+    const { ctl } = await ready({ execution_mode: "sandbox", allowances_set_aside: false });
+    ctl.choose("runner_local");
+    expect(model(ctl).confirm.effects).toEqual([]);
+  });
+  it("criterion 7: runner_local and runner_verified show no effect sentences, either direction", async () => {
+    const a = await ready({ execution_mode: "runner_local", allowances_set_aside: true, pending_runner_runs: 5 });
+    a.ctl.choose("runner_verified");
+    expect(model(a.ctl).confirm.effects).toEqual([]);
+    const b = await ready({ execution_mode: "runner_verified", allowances_set_aside: true, pending_runner_runs: 5 });
+    b.ctl.choose("runner_local");
+    expect(model(b.ctl).confirm.effects).toEqual([]);
+  });
+  it("an older body with no sign of the three new facts still reads as ready, with nothing to show for them", async () => {
+    const ctl = createModeController({ call: fakeCall({ GET: body({ pending_runner_runs: undefined, allowances_in_force: undefined, allowances_set_aside: undefined }) }), repoId: REPO });
+    await ctl.load();
+    const m = model(ctl);
+    expect(m.kind).toBe("ready");
+    ctl.choose("runner_verified");
+    expect(model(ctl).confirm.effects).toEqual([]);
+  });
+  it("a present but malformed pending_runner_runs or allowance flag reads as nothing to show for it, not a half picker", async () => {
+    for (const bad of [{ pending_runner_runs: -1 }, { pending_runner_runs: 1.5 }, { allowances_in_force: "no" }, { allowances_set_aside: null }]) {
+      const ctl = createModeController({ call: fakeCall({ GET: body(bad) }), repoId: REPO });
+      await ctl.load();
+      expect(model(ctl).kind, JSON.stringify(bad)).toBe("ready");
+    }
+  });
+});
+
+describe("criterion 8: opening the picker sends one GET and nothing else until Apply", () => {
+  it("still sends exactly one GET on load, whatever the new fields carry", async () => {
+    const { call } = await ready({ pending_runner_runs: 2, allowances_in_force: true, allowances_set_aside: true, auto_merge: true });
+    expect(call.log).toEqual([["GET", modeUrl(REPO), undefined]]);
   });
 });
 

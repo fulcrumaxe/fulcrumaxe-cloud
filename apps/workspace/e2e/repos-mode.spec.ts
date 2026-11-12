@@ -41,6 +41,10 @@ const COPY = {
   saving: "Saving...",
   saved: "Saved. The mode changed.",
   leaveCancels: "Moving this repo to the sandbox cancels its queued runner runs. A run that is already running is not stopped.",
+  leaveQueued: "Queued runner runs that this change cancels and that need starting again: {n}.",
+  leaveSetsAside: "The allowances and check command you approved for this repo are set aside when it leaves your runner, so approve them again before any job carries them.",
+  leaveAutoMergeOff: "Auto-merge for this repo is turned off by this change.",
+  needsReapproval: "This repo's approved allowances and check command are set aside. Approve them again in this repo's runner sandbox settings before any job carries them.",
   adminOnly: "Only owners and admins can change this.",
   saveFailed: "That change couldn't be saved. Try again.",
   nameMismatch: "That isn't the repository's name. Type it exactly, including capital letters.",
@@ -50,7 +54,8 @@ const COPY = {
   visibilityUnknown: "The repository's visibility couldn't be read. Try again in a moment.",
 };
 const view = (over: Record<string, unknown> = {}) => ({
-  repo_id: WEB, execution_mode: "sandbox", full_name: NAME, key_required: false, copy_sha256: HASH, can_change: true, copy: COPY, ...over,
+  repo_id: WEB, execution_mode: "sandbox", full_name: NAME, key_required: false, copy_sha256: HASH, can_change: true,
+  pending_runner_runs: 0, allowances_in_force: false, allowances_set_aside: false, auto_merge: false, copy: COPY, ...over,
 });
 
 interface Mock {
@@ -186,13 +191,42 @@ test.describe("D#6 R5b-2b-iii: repo mode picker (mocked API)", () => {
     const { mock } = await setup(page, { view: view({ execution_mode: "runner_verified", key_required: true }) });
     await expect(tid(page, "repos-mode-runner_verified")).toBeChecked();
     await pick(page, "runner_local");
-    await expect(tid(page, "repos-mode-leave")).toHaveCount(0);
+    await expect(tid(page, "repos-mode-effects")).toHaveCount(0);
     await pick(page, "sandbox");
-    await expect(tid(page, "repos-mode-leave")).toHaveText(COPY.leaveCancels);
+    await expect(tid(page, "repos-mode-effect")).toHaveText([COPY.leaveCancels, COPY.leaveQueued.replace("{n}", "0")]);
     await tid(page, "repos-mode-name").fill(NAME);
     await tid(page, "repos-mode-apply").click();
     await expect(tid(page, "repos-mode-saved")).toHaveText(COPY.saved);
     expect(mock.posts).toEqual([{ mode: "sandbox", confirm_repo: NAME }]);
+  });
+
+  // D#767 criterion 5: leaving a runner mode for the sandbox with a pending run, an allowance in force and auto-merge on.
+  test("leaving local-only for the sandbox with a pending run, an approved allowance and auto-merge on shows all four effect sentences, in order", async ({ page }) => {
+    await setup(page, { view: view({ execution_mode: "runner_local", pending_runner_runs: 1, allowances_in_force: true, auto_merge: true }) });
+    await pick(page, "sandbox");
+    await expect(tid(page, "repos-mode-effect")).toHaveText([COPY.leaveCancels, COPY.leaveQueued.replace("{n}", "1"), COPY.leaveSetsAside, COPY.leaveAutoMergeOff]);
+  });
+
+  // D#767 criterion 6: moving from the sandbox onto a runner mode with the repo's allowances set aside.
+  test("from the sandbox with allowances set aside, choosing local-only (and, separately, cloud-verified) shows only the re-approval sentence", async ({ page }) => {
+    await setup(page, { view: view({ execution_mode: "sandbox", allowances_set_aside: true }) });
+    await pick(page, "runner_local");
+    await expect(tid(page, "repos-mode-effect")).toHaveText([COPY.needsReapproval]);
+    await pick(page, "runner_verified");
+    await expect(tid(page, "repos-mode-effect")).toHaveText([COPY.needsReapproval]);
+  });
+
+  test("from the sandbox with allowances not set aside, choosing a runner mode shows no effect sentence", async ({ page }) => {
+    await setup(page, { view: view({ execution_mode: "sandbox", allowances_set_aside: false }) });
+    await pick(page, "runner_local");
+    await expect(tid(page, "repos-mode-effects")).toHaveCount(0);
+  });
+
+  // D#767 criterion 7: between the two runner modes, neither direction shows an effect sentence.
+  test("local-only to cloud-verified and back show no effect sentences, even with a pending run and allowances set aside", async ({ page }) => {
+    await setup(page, { view: view({ execution_mode: "runner_local", allowances_set_aside: true, pending_runner_runs: 5 }) });
+    await pick(page, "runner_verified");
+    await expect(tid(page, "repos-mode-effects")).toHaveCount(0);
   });
 
   test("while saving the button reads Saving and everything is off; a 500 shows the app's own sentence, focus lands on it, and the choice is kept", async ({ page }) => {
