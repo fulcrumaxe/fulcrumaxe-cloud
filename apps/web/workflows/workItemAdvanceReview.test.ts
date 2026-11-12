@@ -1163,6 +1163,16 @@ describe("fix rounds", () => {
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_round_failed", code: `run_${status}` }));
   });
 
+  it("REVIEWFIX-OUTSIDE-STOP: a fix run whose check was not run (files outside the Spec's list) moves the item to Needs a person, with the closed code, and records no failed round", async () => {
+    const t = setup(fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }], fixOutcome: { status: "failed", done: true, envelope: null, runtime: "runner", failureReason: "check_failed", checkNotRun: "out_of_scope" } }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "check_not_run_out_of_scope" });
+    expect(t.worker.advanceBuildFailed).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceBuildFailed).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.any(String), "check_not_run_out_of_scope");
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "check_not_run_out_of_scope" }));
+    expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_round_failed" }));
+    expect(t.started).toHaveLength(2);
+  });
+
   describe("D#2 H14c-3-3b-2: a fix round that ended at a limit is continued before it is recorded as failed", () => {
     const CHILD = "99999999-9999-4999-8999-000000000001";
     const withContinue = (t: ReturnType<typeof setup>, answer: unknown) => {

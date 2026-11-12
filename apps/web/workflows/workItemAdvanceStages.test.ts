@@ -486,6 +486,25 @@ describe("the build for an item at Spec ready", () => {
       expect(events()).not.toContain("advance.failed");
     });
 
+    it("FIRSTBUILD-OUTSIDE-STOP: a first build whose check was not run (files outside the Spec's list) stops in Needs human before the dial is asked, even when the dial would ask", async () => {
+      const outside: AdvanceRunOutcome = { ...checkFailed("run-b"), checkNotRun: "out_of_scope" };
+      const w = setup({ item: AT_SPEC, buildOutcomes: [outside], fixGate: () => ({ proceed: false, reason: "asked", blockedBy: null }) });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "check_not_run_out_of_scope" });
+      expect(w.advanceFixGate).not.toHaveBeenCalled();
+      expect(w.advanceStartCheckFix).not.toHaveBeenCalled();
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "check_not_run_out_of_scope");
+      expect(w.advanceRecordEvent).toHaveBeenCalledWith(WHO, { kind: "stopped", dedupeKey: "build:run-b", code: "check_not_run_out_of_scope", runId: "run-b" });
+      expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "check_fix", reason: "check_not_run_out_of_scope" });
+    });
+
+    it("the same stop on a later round: a fix round whose own check was not run ends the chain at that round", async () => {
+      const outside: AdvanceRunOutcome = { ...checkFailed("run-fix-1"), checkNotRun: "out_of_scope" };
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: (id) => (id === "run-fix-1" ? outside : undefined) });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "check_not_run_out_of_scope" });
+      expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(1);
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-fix-1", "check_not_run_out_of_scope");
+    });
+
     it("a fix round that cannot tell which branch to continue ends in Needs human under its own code, with the stopped fact, not as a generic failed run", async () => {
       const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], checkFix: [{ ok: false, reason: "check_fix_branch_unknown" }] });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_check_fix_branch_unknown" });

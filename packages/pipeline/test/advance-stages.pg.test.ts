@@ -1327,6 +1327,19 @@ describe("markBuildNeedsHuman", () => {
     expect(await markBuildNeedsHuman(h.runWriterPool, u.accountId, u.workItemId, u.runId, code)).toEqual({ status: "unchanged", stage: "changes_requested" });
   });
 
+  // REVIEWFIX-OUTSIDE-STOP: a review-requested fix round whose check was never run (files outside the Spec's list) ends at the pull request stage it started from; only that code does.
+  it.each(["pr_opened", "changes_requested"])("an item at %s whose fix run's check was not run (check_not_run_out_of_scope) goes to Needs a person, naming the run; another code leaves it where it is", async (stage) => {
+    const t = await inProgress();
+    await h.admin.query("UPDATE work_items SET stage = $2 WHERE id = $1", [t.workItemId, stage]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, "check_failed_outside_change")).toEqual({ status: "unchanged", stage });
+    expect(await markBuildNeedsHuman(h.runWriterPool, t.accountId, t.workItemId, t.runId, "check_not_run_out_of_scope")).toEqual({ status: "recorded", stage: "needs_human" });
+    expect((await h.admin.query("SELECT from_stage, source_ref FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'needs_human'", [t.workItemId])).rows).toEqual([{ from_stage: stage, source_ref: `build_failed:check_not_run_out_of_scope:${t.runId}` }]);
+    // Review passed is a different place: left alone.
+    const u = await inProgress();
+    await h.admin.query("UPDATE work_items SET stage = 'review_passed' WHERE id = $1", [u.workItemId]);
+    expect(await markBuildNeedsHuman(h.runWriterPool, u.accountId, u.workItemId, u.runId, "check_not_run_out_of_scope")).toEqual({ status: "unchanged", stage: "review_passed" });
+  });
+
   // D#6 SCOPE-REFUSAL-FOLLOWUPS: a run that failed after the cloud closed the pull request it opened (it recorded `run.cloud_pr_closed` first) leaves the item at PR opened when the opened delivery came first.
   it("an item at PR opened whose run recorded a cloud close goes to Needs a person on run_failed; a run with no such record, another code, and another stage stay where they are", async () => {
     const t = await inProgress();

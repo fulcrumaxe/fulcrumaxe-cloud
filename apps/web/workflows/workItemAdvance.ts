@@ -1065,6 +1065,8 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   // D#6 R-CHK-3 (C47): a run whose approved check failed has no pull request, and its work is on the run branch. Each fix round resumes it and is waited for like the build;
   // the worker refuses a round past the plan's `maxFixRounds()` (`escalated`), and the item then goes to Needs human. Bounded here as well, so the loop cannot run on.
   for (let round = 1; round <= CHECK_FIX_ROUNDS_CEILING && outcome.done && outcome.status === "failed" && outcome.failureReason === "check_failed"; round++) {
+    // A check that was never run because the changed files lie outside the Spec's list: no round can help, so nothing is asked and nothing starts (the worker refuses it as well).
+    if (outcome.checkNotRun === "out_of_scope") return stopOutsideScope(args, runId, outcome.tailRunId, "check_fix");
     // D#483 S5-b2a part 3: the dial decides whether THIS check fix round (the failed run it resumes) starts. An ask ends the workflow waiting; the answer files an advance that comes back here.
     const checkGate = await fixGatePhase(args, outcome.tailRunId);
     if (checkGate !== null) return checkGate;
@@ -1238,6 +1240,21 @@ async function checkBuildPhase(args: AdvanceStartArgs, pinned: number | null, ex
 /** A build that ended without a pull request, as a fact of the item: a fixed code and the executor's run, whose summary says why. */
 async function buildStopped(args: AdvanceStartArgs, runId: string | null, code: string, reasons: string[] = []): Promise<void> {
   await advanceEventStep(args.accountId, args.userId, args.workItemId, { kind: "stopped", dedupeKey: `build:${runId ?? args.actionId}`, code: code.replace(/[^a-z0-9_]/g, "_").slice(0, 64), ...(reasons.length === 0 ? {} : { reasons }), ...(runId === null ? {} : { runId }) });
+}
+
+/** The closed code a run stops with when its check was never run because the files it changed lie outside the Spec's list (the worker's `CHECK_NOT_RUN_OUT_OF_SCOPE`). */
+const CHECK_NOT_RUN_OUT_OF_SCOPE = "check_not_run_out_of_scope";
+
+/**
+ * A build or fix run ended `check_failed` with its check not run, the changed files being outside the Spec's file list. Another round resumes the same agent with the same list, so none
+ * starts, and none is asked for (the dial could only ask about a round that cannot help). The item moves to Needs a person with the closed code, which frees the repository's build
+ * slot, and the stop is recorded for the card. Used for the first build, every check fix round, and a review-requested fix round (the item is then at a pull request stage).
+ */
+async function stopOutsideScope(args: AdvanceStartArgs, runId: string, tailRunId: string, at: string): Promise<Result> {
+  const recorded = await advanceBuildFailedStep(args.accountId, args.workItemId, tailRunId, CHECK_NOT_RUN_OUT_OF_SCOPE);
+  await buildStopped(args, tailRunId, CHECK_NOT_RUN_OUT_OF_SCOPE);
+  await advanceLogStep("advance.failed", { work_item_id: args.workItemId, run_id: runId, at, reason: CHECK_NOT_RUN_OUT_OF_SCOPE, recorded: recorded.status });
+  return { status: "failed", detail: CHECK_NOT_RUN_OUT_OF_SCOPE };
 }
 
 /**
@@ -1778,6 +1795,7 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx, answered =
     if (decision === "parked") return { end: await waitingOnAnswer(args, fixed.tailRunId) };
   }
   const noCommit = fixed.status === "failed" && fixed.failureReason === "no_commit";
+  if (fixed.status === "failed" && fixed.checkNotRun === "out_of_scope") return { end: await stopOutsideScope(args, runId, fixed.tailRunId, "person_fix") };
   if (fixed.status !== "succeeded" && !noCommit) return failed(`run_${fixed.status}`.replace(/[^a-z0-9_]/g, "_"));
   const after = await advanceFindPrStep(next);
   if (!after.ok) {
@@ -2157,6 +2175,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     // A runner fix run whose agent finished and pushed nothing ends `failed no_commit`; a sandbox one ends `succeeded` with the head unmoved. Both are
     // "no change", and the head decides it (below), so only a fix that failed some other way, or is not the runner's no-commit, stops here.
     const noCommit = fixed.status === "failed" && fixed.failureReason === "no_commit";
+    // The fix run's check was never run (its changed files lie outside the Spec's list): the item goes to a person and frees the slot, not left at Changes requested with no notice.
+    if (fixed.status === "failed" && fixed.checkNotRun === "out_of_scope") return stopOutsideScope(args, followed.runId, fixed.tailRunId, "fix");
     if (fixed.status !== "succeeded" && !noCommit) {
       await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code: `run_${fixed.status}`.replace(/[^a-z0-9_]/g, "_"), headSha: pr.headSha, runId: fix.runId });
       return { status: "fix_failed", detail: fixed.status };
