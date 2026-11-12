@@ -536,6 +536,23 @@ export const VERIFY_REASON_SENTENCES = {
   no_visible_journeys: "Nothing in this request's checklist is something a browser can check, so only the code checks and reviews covered it.",
 };
 export const VERIFY_REASON_UNKNOWN = "The check could not be made.";
+/**
+ * D#749: the closed code the server sends beside an `unverified` reason (`verify.detail`): why the tester's answer was refused, or how the runner ended a check that could not be made.
+ * Fixed text; the code itself is never shown, and a code this build does not know draws no line.
+ */
+export const VERIFY_DETAIL_SENTENCES = {
+  too_large: "The answer was too large to read.",
+  not_json: "The answer was not in the expected form.",
+  bad_shape: "The answer was missing parts it must have.",
+  extra_key: "The answer held parts it must not have.",
+  duplicate_journey: "The answer reported the same step twice.",
+  bad_value: "The answer held a value that is not allowed.",
+  unknown_journey: "The answer reported a step it was not given.",
+  browser_not_connected: "The runner's browser was not ready when the check was due to start.",
+  verify_signin_missing: "The runner's saved sign-in for the checking account is missing or expired. Run fx-runner verify-login on the runner, then Verify again.",
+  verify_browser_unavailable: "The runner's test browser did not start, so the tester had no browser to use.",
+  verify_answer_missing: "The tester finished without handing in an answer through the browser, so there was nothing to judge.",
+};
 export const VERIFY_METHOD_WORDS = {
   chrome_runner: "Chrome on your runner",
   playwright_runner: "Playwright on your runner",
@@ -587,6 +604,7 @@ export function verifySection(data) {
     status: held ? "waiting" : v.status,
     text: VERIFY_STATUS_WORDS[v.status] + (when !== "" ? " " + when + "." : ""),
     reason,
+    detail: v.status === "unverified" && typeof v.detail === "string" && Object.hasOwn(VERIFY_DETAIL_SENTENCES, v.detail) ? VERIFY_DETAIL_SENTENCES[v.detail] : null,
     hold: holdWhy === null ? null : holdWhy + (holdWhen !== "" ? " Waiting since " + holdWhen + "." : ""),
     counts,
     method: !held && typeof v.method === "string" && Object.hasOwn(VERIFY_METHOD_WORDS, v.method) ? { id: v.method, label: VERIFY_METHOD_WORDS[v.method] } : null,
@@ -1185,6 +1203,7 @@ export function createInsightPanel(deps) {
       h("h3", { class: "pl-detail-sub", "data-testid": "pl-verify-heading" }, v.heading),
       h("p", { role: "status", "data-testid": "pl-verify-status" }, v.text, v.method ? [" ", h("span", { class: "pl-verify-badge", "data-testid": "pl-verify-method", "data-method": v.method.id }, v.method.label)] : null),
       v.reason ? h("p", { "data-testid": "pl-verify-reason" }, v.reason) : null,
+      v.detail ? h("p", { class: "pl-muted", "data-testid": "pl-verify-detail" }, v.detail) : null,
       v.hold ? h("p", { "data-testid": "pl-verify-hold" }, v.hold) : null,
       v.counts ? h("p", { class: "pl-muted", "data-testid": "pl-verify-counts" }, v.counts) : null,
       v.criteria && v.criteria.browser ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-browser" }, v.criteria.browser) : null,

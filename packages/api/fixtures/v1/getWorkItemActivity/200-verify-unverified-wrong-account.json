@@ -20,6 +20,7 @@
   "verify": {
     "status": "unverified",
     "reason": "wrong_account",
+    "detail": null,
     "method": "playwright_runner",
     "journeys": null,
     "account": "mismatch",

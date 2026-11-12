@@ -601,6 +601,7 @@ export interface Operations {
       verify?: {
         status: "pending" | "deploying" | "running" | "verified" | "failed" | "unverified";
         reason: ("no_browser" | "chrome_not_connected" | "wrong_account" | "sign_in_refused" | "deploy_failed" | "deployment_unreachable" | "commit_not_deployed" | "envelope_rejected" | "hollow_pass" | "journey_blocked" | "journeys_missing" | "run_failed" | "verify_disabled" | "account_unverifiable" | "no_visible_journeys") | (null);
+        detail: ("too_large" | "not_json" | "bad_shape" | "extra_key" | "duplicate_journey" | "bad_value" | "unknown_journey" | "browser_not_connected" | "verify_signin_missing" | "verify_browser_unavailable" | "verify_answer_missing") | (null);
         method: ("chrome_runner" | "playwright_runner" | "playwright_sandbox") | (null);
         journeys: ({
           total: number;

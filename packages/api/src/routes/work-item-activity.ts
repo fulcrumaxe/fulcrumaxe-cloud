@@ -4,7 +4,7 @@ import { COPY, checkNotRunReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
-import { VERIFY_HOLD_REASONS, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES } from "@fx/core/src/verify/rows.js";
+import { VERIFY_DETAIL_CODES, VERIFY_HOLD_REASONS, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES } from "@fx/core/src/verify/rows.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import { STACKED_WAIT_STATES, readConflictState, readMergeQueueState, readQueueWait, readSiblingConflict, readStackedWait } from "@fx/core/src/work-items/mergeReadiness.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
@@ -142,6 +142,8 @@ export const activityResponseSchema = z.object({
     .object({
       status: z.enum(VERIFY_ROW_STATUSES),
       reason: z.enum(VERIFY_REASON_CODES).nullable(),
+      // D#749: a closed code beside an `unverified` reason (why the answer was refused, or the runner's named end of the job); null otherwise.
+      detail: z.enum(VERIFY_DETAIL_CODES).nullable(),
       method: z.enum(VERIFY_METHODS).nullable(),
       journeys: z.object({ total: z.number().int(), passed: z.number().int(), failed: z.number().int(), other: z.number().int() }).nullable(),
       account: z.enum(["matched", "mismatch", "unverifiable"]).nullable(),

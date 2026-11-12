@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildInsight, verifySection, VERIFY_BUG_LABEL, VERIFY_HEADING, VERIFY_HOLD_SENTENCES, VERIFY_METHOD_WORDS, VERIFY_REASON_SENTENCES, VERIFY_REASON_UNKNOWN, VERIFY_STATUS_WORDS } from "../apps/pipeline/pipeline-insight.js";
+import { buildInsight, verifySection, VERIFY_BUG_LABEL, VERIFY_DETAIL_SENTENCES, VERIFY_HEADING, VERIFY_HOLD_SENTENCES, VERIFY_METHOD_WORDS, VERIFY_REASON_SENTENCES, VERIFY_REASON_UNKNOWN, VERIFY_STATUS_WORDS } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fx = (name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", "getWorkItemActivity", name), "utf8"));
@@ -45,6 +45,29 @@ describe("D#749 V4b: verify section words", () => {
 
   it("covers every row status", () => {
     expect(Object.keys(VERIFY_STATUS_WORDS).sort()).toEqual(coreList("VERIFY_ROW_STATUSES").sort());
+  });
+});
+
+describe("D#749: the detail line beside an unverified reason", () => {
+  it("has a plain sentence for each closed detail code the store allows, and no others", () => {
+    const codes = coreList("VERIFY_DETAIL_CODES");
+    expect(Object.keys(VERIFY_DETAIL_SENTENCES).sort()).toEqual([...codes].sort());
+    for (const code of codes) {
+      const s = verifySection(row({ reason: "run_failed", detail: code }));
+      expect(s.detail, code).toBe(VERIFY_DETAIL_SENTENCES[code]);
+      expect(s.detail, code).not.toMatch(/_|null|undefined/);
+      expect(s.detail.endsWith("."), code).toBe(true);
+    }
+  });
+
+  it("draws no line for no detail, an unknown code, or a row that is not unverified", () => {
+    for (const detail of [null, undefined, "", "push_failed", "__proto__", 3]) expect(verifySection(row({ detail })).detail, String(detail)).toBeNull();
+    expect(verifySection(row({ status: "verified", reason: null, detail: "verify_answer_missing" })).detail).toBeNull();
+  });
+
+  it("the tool-less run: no browser server names the browser and the sign-in line tells the person what to run", () => {
+    expect(verifySection(row({ detail: "verify_browser_unavailable" })).detail).toMatch(/test browser did not start/);
+    expect(verifySection(row({ detail: "verify_signin_missing" })).detail).toMatch(/fx-runner verify-login/);
   });
 });
 

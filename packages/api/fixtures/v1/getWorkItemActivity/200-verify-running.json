@@ -20,6 +20,7 @@
   "verify": {
     "status": "running",
     "reason": null,
+    "detail": null,
     "method": "playwright_runner",
     "journeys": null,
     "account": null,

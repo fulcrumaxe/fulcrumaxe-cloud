@@ -85,12 +85,14 @@ export function createVerifyLocal(deps: VerifyLocalDeps): VerifyLocal {
     refuse(dropped) {
       for (const capability of dropped) refused.add(capability);
     },
-    // A failed playwright probe ends the claim `runner_setup` with the same closed code as a failed Chrome one; the named reason (`probePlaywright().reason`) goes to the person's terminal.
+    // A failed playwright probe ends the claim `runner_setup`: `verify_signin_missing` when the saved sign-in is what is wrong (run `fx-runner verify-login` again), else the same closed code as a
+    // failed Chrome one. The probe's own reason (`probePlaywright().reason`) goes to the person's terminal.
     browserReady: async (method) => {
       if (method === "playwright_runner") {
         const checked = playwright();
-        if (!checked.ok) deps.say?.(`fx-runner: the verify browser cannot start a job (${checked.reason})`);
-        return checked.ok ? undefined : "browser_not_connected";
+        if (checked.ok) return undefined;
+        deps.say?.(`fx-runner: the verify browser cannot start a job (${checked.reason})`);
+        return checked.reason.startsWith("storage_state_") ? "verify_signin_missing" : "browser_not_connected";
       }
       return (await probe()).ok ? undefined : "browser_not_connected";
     },

@@ -218,7 +218,7 @@ describe('item verify section [pg]', { timeout: 120_000 }, () => {
     await worker((c) => finishVerifyRow(c, a.accountId, row, { status: 'verified', result: ['c1', 'c2'].map((id) => ev(id)) }));
     const text = JSON.stringify(await read(item));
     expect(text).not.toMatch(/app\.example|verify-bot|First thing|opened the page|heading reads/);
-    expect(Object.keys((await read(item))!).sort()).toEqual(['account', 'at', 'bug_item_id', 'criteria', 'journeys', 'method', 'pr_number', 'reason', 'status']);
+    expect(Object.keys((await read(item))!).sort()).toEqual(['account', 'at', 'bug_item_id', 'criteria', 'detail', 'journeys', 'method', 'pr_number', 'reason', 'status']);
   });
 
   it('another account cannot read the row', async () => {

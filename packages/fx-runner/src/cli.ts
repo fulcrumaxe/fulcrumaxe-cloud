@@ -145,8 +145,9 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   credentials: { flags: [], switches: [] },
   assistant: { flags: [], switches: [], positionals: 1 },
   "verify-login": { flags: ["base-url"], switches: ["forget"] },
-  // The MCP server the Claude CLI starts for a playwright deploy check; not in --help.
-  "verify-browser-server": { flags: ["job-dir", "base-url", "executable", "storage-state"], switches: [] },
+  // The MCP server the Claude CLI starts for a playwright deploy check; not in --help. Its flags are exactly the ones `mcpConfigFor` (settingsFile.ts) writes, the protection bypass pair
+  // included: a flag missing here makes the server exit before it speaks, and the CLI then runs the job with no browser tools (the server flags test starts the written entry, the bypass pair included).
+  "verify-browser-server": { flags: ["job-dir", "base-url", "executable", "storage-state", "bypass-file", "cloud-origin"], switches: [] },
   // Its own words, parsed in src/vm/command.ts.
   vm: { flags: [], switches: [] },
 };

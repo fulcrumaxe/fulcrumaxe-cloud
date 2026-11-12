@@ -1401,12 +1401,13 @@ describe("a playwright deploy verifier job through the handler (D#749 V2c-2b)", 
     expect(body.agentOutput).toEqual(ENVELOPE);
   });
 
-  it("a run with no answer file reports no answer, never the model's text", async () => {
+  it("a run with no answer file reports no answer, never the model's text: it ends runner_setup / verify_answer_missing (D#749)", async () => {
     const w = wired({ answer: undefined });
     const claimed = await w.rig.claim(jobWith("playwright_runner"));
-    expect((await w.rig.handle(claimed)).status).toBe("completed");
+    await w.rig.handle(claimed);
     expect(w.read).toEqual([claimed.runId]);
-    expect(Object.keys(cloud.seen.at(-1)?.body as object)).not.toContain("agentOutput");
+    expect(JSON.stringify(cloud.seen)).not.toContain('"agentOutput"');
+    expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "verify_answer_missing" });
   });
 
   it("control: a Chrome deploy verifier job starts with its method, never reads the answer file, and reports the model's own output", async () => {

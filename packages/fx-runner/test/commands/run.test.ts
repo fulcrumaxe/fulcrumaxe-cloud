@@ -1214,7 +1214,8 @@ describe("a playwright deploy verifier job in the composed daemon (D#749 V2c-2b)
     setSetting(stateDir, "verify.browser.executable", exe);
     setPlaywrightLoader({ available: () => true, load: async () => ({}) });
     // the fake agent: ends with the fixture's result, after copying the prepared answer into the folder its settings file sits in
-    fake.set("stream.jsonl", fixtureText("stream.subscription.jsonl"));
+    // Its init line lists the fxverify server as connected, as the CLI does once the server answered its start-up (an init line without it ends the job verify_browser_unavailable).
+    fake.set("stream.jsonl", fixtureText("stream.subscription.jsonl").replace('"mcp_servers":[]', '"mcp_servers":[{"name":"fxverify","status":"connected"}]'));
     fake.set("answer.src", JSON.stringify(ENVELOPE));
     const script = readFileSync(fake.binary, "utf8").replace('cat "$D/stream.jsonl"', () => 'J="$(printf \'%s\\n\' "$@" | grep \'/settings.json$\' | head -1)"; [ -f "$D/answer.src" ] && { cp "$D/answer.src" "${J%/settings.json}/answer.json"; chmod 600 "${J%/settings.json}/answer.json"; }\ncat "$D/stream.jsonl"');
     writeFileSync(fake.binary, script);

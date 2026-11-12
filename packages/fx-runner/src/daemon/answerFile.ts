@@ -46,14 +46,17 @@ export function readVerifyAnswer(jobsDir: string, runId: string, uid: number | u
   }
 }
 
+/** The closed code a playwright deploy verifier run ends with when its turn finished but the server accepted no answer. */
+export const VERIFY_ANSWER_MISSING = "verify_answer_missing";
+
 /**
  * The finished run with its answer taken from the file, for the one role and method that has one; every other run is returned unchanged. A playwright deploy verifier run whose file
- * gives no answer loses whatever the model wrote.
+ * gives no answer loses whatever the model wrote and ends `failed` with `verify_answer_missing` (D#749): a turn that never reached the server's `submit_answer` (no browser tools, or
+ * the model stopped early) is named as such, not handed on as a run that succeeded with nothing in it.
  */
-export function withAnswerFile<R extends { status: string; agentOutput?: Record<string, unknown> }>(job: { role: string; browser_method?: BrowserMethod | undefined }, result: R, read: ((runId: string) => Record<string, unknown> | undefined) | undefined, runId: string): R {
+export function withAnswerFile<R extends { status: string; agentOutput?: Record<string, unknown>; workspace?: string }>(job: { role: string; browser_method?: BrowserMethod | undefined }, result: R, read: ((runId: string) => Record<string, unknown> | undefined) | undefined, runId: string): R | { status: "failed"; reason: typeof VERIFY_ANSWER_MISSING; workspace?: string } {
   if (result.status !== "done" || job.role !== DEPLOY_VERIFIER_ROLE || job.browser_method !== "playwright_runner") return result;
-  const rest: { status: string; agentOutput?: Record<string, unknown> } = { ...result };
-  delete rest.agentOutput;
   const answer = read?.(runId);
-  return (answer === undefined ? rest : { ...rest, agentOutput: answer }) as R;
+  if (answer === undefined) return { status: "failed", reason: VERIFY_ANSWER_MISSING, ...(result.workspace === undefined ? {} : { workspace: result.workspace }) };
+  return { ...result, agentOutput: answer };
 }

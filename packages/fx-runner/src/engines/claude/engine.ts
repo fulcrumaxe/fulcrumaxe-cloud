@@ -17,7 +17,7 @@ import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 import { readSessionIndex, recordSession } from "./session.js";
 import { bashSandboxUnusableFor, type SettingsWithDeny } from "./bashSandboxProbe.js";
-import { clearVerifyLeftovers, writeJobFiles, type VerifyServerSpec } from "./settingsFile.js";
+import { clearVerifyLeftovers, verifyServerUp, writeJobFiles, type VerifyServerSpec } from "./settingsFile.js";
 import { LineBuffer, createRunLog, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
 
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
@@ -77,7 +77,7 @@ export interface EngineConfig {
 /** How a run ended. `failureReason` is a closed code; no model text is ever in it. */
 export interface RunOutcome {
   status: "ok" | "failed";
-  failureReason?: "credential_mismatch" | "no_init_line" | "claude_flags_unsupported" | "permission_mode_forced" | "agent_error" | "agent_exit" | "resource_limit";
+  failureReason?: "credential_mismatch" | "no_init_line" | "claude_flags_unsupported" | "permission_mode_forced" | "agent_error" | "agent_exit" | "resource_limit" | "verify_browser_unavailable";
   /** The agent build the run used. */
   engineVersion: string;
   sessionId?: string;
@@ -190,6 +190,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
       let mismatch = false;
       let noInit = false;
       let modeForced = false;
+      // D#749: a playwright job whose `fxverify` server is not up at the init line ends before its first turn, under its own closed code (never a tool-less answer).
+      let browserDown = false;
       let result: Record<string, unknown> | undefined;
       let sessionId: string | undefined;
       let agentOutput: Record<string, unknown> | undefined;
@@ -206,7 +208,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
 
       const handleLine = async (line: string): Promise<void> => {
         log.write("stdout", line);
-        if (mismatch || noInit || modeForced || line.trim() === "") return;
+        if (mismatch || noInit || modeForced || browserDown || line.trim() === "") return;
         let message: unknown;
         try {
           message = JSON.parse(line);
@@ -231,6 +233,11 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
             return;
           }
           sawInit = true;
+          if (browserMethod === "playwright_runner" && !verifyServerUp(message)) {
+            browserDown = true;
+            void terminateGroup(child, graceMs);
+            return;
+          }
         }
         // Integers only leave the capture (no text, no path); the result line comes last, so its snapshot covers the whole command.
         ledger.observe(message);
@@ -272,8 +279,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
         lineBuffer.end().forEach(enqueue);
         void chain.then(async () => {
           // A clean end needs no question; any other end may be the kernel enforcing the memory budget, which only the scope can say.
-          const limited = config.limits !== undefined && code !== 0 && !mismatch && !noInit && !modeForced ? await config.limits.exceeded(opts.runId).catch(() => false) : false;
-          if (sessionId !== undefined && !mismatch && !noInit && !modeForced) {
+          const limited = config.limits !== undefined && code !== 0 && !mismatch && !noInit && !modeForced && !browserDown ? await config.limits.exceeded(opts.runId).catch(() => false) : false;
+          if (sessionId !== undefined && !mismatch && !noInit && !modeForced && !browserDown) {
             try {
               const windowTokens = (opts as EngineStartOptions).contextWindowTokens;
               const pctNow = windowTokens === undefined ? undefined : contextPct(ledger.lastContextTokens(), windowTokens);
@@ -288,6 +295,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
           else if (modeForced) resolve({ status: "failed", failureReason: "permission_mode_forced", engineVersion });
           else if (mismatch) resolve({ status: "failed", failureReason: "credential_mismatch", engineVersion });
           else if (noInit) resolve({ status: "failed", failureReason: "no_init_line", engineVersion });
+          else if (browserDown) resolve({ status: "failed", failureReason: "verify_browser_unavailable", engineVersion });
           // Backstop for a build that dropped a flag after the --help check: an unknown-option exit before any init line.
           else if (!sawInit && code !== 0 && /unknown (option|argument)|unrecognized (option|argument)|invalid option/i.test(stderrTail)) resolve({ status: "failed", failureReason: "claude_flags_unsupported", engineVersion });
           else if (result === undefined) resolve({ status: "failed", failureReason: "agent_exit", ...base });

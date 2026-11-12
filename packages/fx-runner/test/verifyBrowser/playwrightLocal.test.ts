@@ -291,8 +291,11 @@ describe("the capability and the claim check", () => {
     expect(await local(m).browserReady("playwright_runner")).toBeUndefined();
     rmSync(m.state);
     expect(await local(m).capabilities()).toEqual([]);
-    expect(await local(m).browserReady("playwright_runner")).toBe("browser_not_connected");
+    // D#749: a missing saved sign-in is named as such, so the person knows to run `fx-runner verify-login` again.
+    expect(await local(m).browserReady("playwright_runner")).toBe("verify_signin_missing");
     expect(local(m).probePlaywright()).toEqual({ ok: false, reason: "storage_state_missing" });
+    // Anything else the probe refuses keeps the browser code.
+    expect(await local(m, { playwright: false }).browserReady("playwright_runner")).toBe("browser_not_connected");
   });
 
   it("no program command to run, or no loadable library, means no capability; a cloud that refused it is not offered it again", async () => {
@@ -609,9 +612,10 @@ describe("the answer file is the job's answer", () => {
     const done = { status: "done", agentOutput: { journeys: "model text" } } as const;
     const answer = { journeys: [] };
     expect(withAnswerFile({ role: DEPLOY_VERIFIER_ROLE, browser_method: "playwright_runner" }, done, () => answer, "r")).toEqual({ status: "done", agentOutput: answer });
-    // no file, no answer: the model's text is dropped, never kept
-    expect(withAnswerFile({ role: DEPLOY_VERIFIER_ROLE, browser_method: "playwright_runner" }, done, () => undefined, "r")).toEqual({ status: "done" });
-    expect(withAnswerFile({ role: DEPLOY_VERIFIER_ROLE, browser_method: "playwright_runner" }, done, undefined, "r")).toEqual({ status: "done" });
+    // no file, no answer: the model's text is dropped, never kept, and the run ends under its own closed code (D#749), not as a run that succeeded with nothing in it
+    expect(withAnswerFile({ role: DEPLOY_VERIFIER_ROLE, browser_method: "playwright_runner" }, done, () => undefined, "r")).toEqual({ status: "failed", reason: "verify_answer_missing" });
+    expect(withAnswerFile({ role: DEPLOY_VERIFIER_ROLE, browser_method: "playwright_runner" }, done, undefined, "r")).toEqual({ status: "failed", reason: "verify_answer_missing" });
+    expect(withAnswerFile({ role: DEPLOY_VERIFIER_ROLE, browser_method: "playwright_runner" }, { ...done, workspace: "/w" }, () => undefined, "r")).toEqual({ status: "failed", reason: "verify_answer_missing", workspace: "/w" });
     for (const job of [{ role: DEPLOY_VERIFIER_ROLE, browser_method: "chrome_runner" as const }, { role: DEPLOY_VERIFIER_ROLE }, { role: "executor" }, { role: "executor", browser_method: "playwright_runner" as const }]) {
       expect(withAnswerFile(job, done, () => answer, "r"), JSON.stringify(job)).toBe(done);
     }

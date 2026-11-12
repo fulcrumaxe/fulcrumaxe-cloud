@@ -4603,6 +4603,29 @@
                             }
                           ]
                         },
+                        "detail": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "too_large",
+                                "not_json",
+                                "bad_shape",
+                                "extra_key",
+                                "duplicate_journey",
+                                "bad_value",
+                                "unknown_journey",
+                                "browser_not_connected",
+                                "verify_signin_missing",
+                                "verify_browser_unavailable",
+                                "verify_answer_missing"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "method": {
                           "anyOf": [
                             {
@@ -4743,6 +4766,7 @@
                       "required": [
                         "status",
                         "reason",
+                        "detail",
                         "method",
                         "journeys",
                         "account",
