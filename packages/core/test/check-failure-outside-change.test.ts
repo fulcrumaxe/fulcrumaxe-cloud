@@ -10,6 +10,15 @@ describe('failedOutsideChange against the chain first check', () => {
     expect(failedOutsideChange(later)).toBe(false);
     expect(failedOutsideChange(later, first)).toBe(true);
   });
+  it('a file the later check itself lists as changed is inside the change: a regenerated file in an untouched package is not falsely stopped', () => {
+    const regenerated = 'failed test files (1): apps/ops/src/generated/client.test.ts\nchanged files (2): apps/ops/src/generated/client.test.ts, packages/a/src/a.ts\nFAIL x';
+    expect(failedOutsideChange(regenerated, first)).toBe(false);
+    // only the file itself counts, not a sibling in the same package
+    expect(failedOutsideChange(later, first)).toBe(true);
+    // a later list that was cut cannot vouch for any file
+    const cut = 'failed test files (1): apps/ops/src/generated/client.test.ts\nchanged files (9): apps/ops/src/generated/client.test.ts, packages/a/src/a.ts (and 7 more)\nFAIL x';
+    expect(failedOutsideChange(cut, first)).toBe(true);
+  });
   it('a first list that was cut, missing or unreadable falls back to the later summary', () => {
     expect(failedOutsideChange(later, 'failed test files (1): apps/ops/test/o.test.ts\nchanged files (9): packages/a/src/a.ts (and 8 more)\n')).toBe(false);
     expect(failedOutsideChange(later, 'FAIL x')).toBe(false);

@@ -272,6 +272,25 @@ describe("check fix round [pg]", () => {
       expect(resumed).toHaveLength(1);
     });
 
+    it("a regenerated file the later check lists as changed, in a package the first check never touched, is not falsely stopped", async () => {
+      const first = await ended({ reason: "check_failed", summary: mixed });
+      const regenerated = "failed test files (1): apps/ops/src/generated/client.test.ts\nchanged files (3): apps/ops/src/generated/client.test.ts, packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL x";
+      const second = await endsCheckFailed(await roundOf(first), { summary: regenerated });
+      expect((await startCheckFixRound(deps(), who(), second)).ok).toBe(true);
+      expect(resumed).toHaveLength(2);
+    });
+
+    it("a chain whose root check timed out has no first list to vouch for the change: the later summary's own list decides, so an outside-only failure there is not read against a partial root", async () => {
+      // The root stopped at its time limit (partial output); its changed list is not trusted. The later round's own complete list says the failure is outside the change.
+      const root = await ended({ reason: "check_failed", summary: mixed, exit: null, timedOut: true });
+      const second = await endsCheckFailed(await roundOf(root), { summary: outsideOnly });
+      expect(await startCheckFixRound(deps(), who(), second)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+      // ... and a later list that includes the failing package keeps the round, which the (ignored) root list alone would have stopped.
+      const root2 = await ended({ reason: "check_failed", summary: mixed, exit: null, timedOut: true });
+      const edited = "failed test files (2): apps/ops/test/other.test.ts, apps/ops/test/more.test.ts\nchanged files (3): apps/ops/src/other.ts, packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL x";
+      expect((await startCheckFixRound(deps(), who(), await endsCheckFailed(await roundOf(root2), { summary: edited }))).ok).toBe(true);
+    });
+
     it("the same changed list on a first check is the change itself: a failure in a package it touched keeps its round", async () => {
       const edited = "failed test files (2): apps/ops/test/other.test.ts, apps/ops/test/more.test.ts\nchanged files (3): apps/ops/src/other.ts, packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL x";
       const first = await ended({ reason: "check_failed", summary: edited });
