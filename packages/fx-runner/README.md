@@ -299,6 +299,16 @@ runs the link, so a switch takes effect at the next start.
 - `doctor` has an `Updates` line: the version, pinned or not, automatic updates on or off, the last check, and "updates paused:
   {reason}" when they are.
 
+### Upgrading by hand: `fx-runner drain`
+
+There is no safe moment to restart a busy runner: it claims the next job within about a second of finishing one, so a restart
+"between jobs" can kill a run that was only just handed over. To replace the program yourself (for example `brew upgrade`), run
+`fx-runner drain` first. The running runner finishes the jobs it holds, claims nothing more (no orders either) and exits 0, and the
+command returns when it has; then upgrade and start the runner again. Under a service unit the exit 0 leaves it stopped
+(`Restart=on-failure`; launchd restarts on failure only), so start it again after the upgrade. `drain --no-wait` only asks and returns
+at once. With no runner running, `drain` does nothing and says so. Ctrl-C while waiting stops the waiting, not the drain.
+A plain stop (SIGTERM or Ctrl-C) while a run is held reports it as ended by the runner shutting down; a kill gives the cloud nothing to go on. The drain exists so neither happens.
+
 ## Third-party components
 
 Claude Code is not part of this release. You install it yourself from Anthropic, under Anthropic's terms, and the runner only

@@ -124,6 +124,19 @@ describe("admission under the usage gate", () => {
     expect(admission.snapshot().free.light).toBeGreaterThan(0);
   });
 
+  it("near the limit (one job at a time) is marked near; reached is not (RUNNER-NEAR-LIMIT-WORDING)", () => {
+    let state = { blocked: false, single: true };
+    const admission = admissionWith(() => state);
+    admission.begin(claimedAs("security-reviewer"));
+    const near = admission.snapshot();
+    expect(near.limitedBy).toBe("usage_limit");
+    expect(near.usageNear).toBe(true);
+    state = { blocked: true, single: true };
+    expect(admission.snapshot().usageNear).toBe(false);
+    state = { blocked: false, single: false };
+    expect(admission.snapshot().usageNear).toBe(false);
+  });
+
   it("blocked on an empty runner: the progress floor does not push one job through", () => {
     const admission = admissionWith(() => ({ blocked: true, single: false }));
     expect(admission.snapshot().free).toEqual({ light: 0, heavy: 0 });

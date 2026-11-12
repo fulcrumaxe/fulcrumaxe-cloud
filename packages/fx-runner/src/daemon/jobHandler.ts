@@ -567,6 +567,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // The job is verified, the sandbox gate has passed and the workspace directory exists; the mirror checkout comes next.
             mark("workspace_ready");
             const prepared = await git.prepare(job, claimed, workspace);
+            if (stopRun.aborted) throw new GitPathError("git_stopped");
             started.base = prepared.base;
             if (prepared.updatedTo !== undefined) started.updatedTo = prepared.updatedTo;
             // The start commit is recorded here, in the daemon's own memory, before the agent can run: the run-end hook reads this and never the checkout.
@@ -581,6 +582,9 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             if (grant !== undefined) await prepareNix(job, git, grant, started.base, promptNotes);
             await prepareDeps(job, workspace, promptNotes, stopRun, mark);
             stubsBefore = stubBaseline(workspace);
+            // A cancel or a daemon stop seen while the workspace was being set up ends the job here: the install and the clone report it as a
+            // soft outcome (the install says `aborted`), and without this the agent would start on a run the cloud already closed.
+            if (stopRun.aborted) throw new GitPathError("git_stopped");
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);

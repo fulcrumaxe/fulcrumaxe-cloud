@@ -38,7 +38,7 @@ afterEach(async () => {
 
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 
-function rig(lockfile: ((workspace: string) => void) | undefined, kept?: string, depsInstall?: DepsInstaller) {
+function rig(lockfile: ((workspace: string) => void) | undefined, kept?: string, depsInstall?: DepsInstaller, heartbeatMs = 1e9) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -62,7 +62,7 @@ function rig(lockfile: ((workspace: string) => void) | undefined, kept?: string,
   const git = fakeGitPath({ resume: async () => ({ base: "c".repeat(40) }), prepare: async (_job, _claimed, workspace) => { lockfile?.(workspace); return { base: "c".repeat(40) }; } });
   const deps: JobHandlerDeps = {
     client, keyring: KEYRING, clock, run, sandbox: port, ledger: createFileLedger(path.join(root, "jobs.json"), ledgerOptions()), git, events: createEventRelay(),
-    recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs: 1e9, flushMs: 1e9, runJobFn: runJob,
+    recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs, flushMs: 1e9, runJobFn: runJob,
     onDepsDetail: (detail) => details.push(detail),
     ...(depsInstall === undefined ? {} : { depsInstall, packageStoreRoot: path.join(root, "stores") }),
   };
@@ -230,5 +230,20 @@ describe("D#6 C44-4: the host-side dependency install", () => {
     expect((await r.go({ ...allowances(NPM), continues })).status).toBe("completed");
     expect(calls.map((c) => c.workspace)).toEqual([kept]);
     expect(r.stages()).toEqual(["workspace_ready", "cloned", "deps_installed"]);
+  });
+
+  it("a cancel that reaches the install ends the job: no agent turn starts (CANCEL-DURING-INSTALL)", async () => {
+    // The real installer answers an abort with a soft `failed: aborted`; the run was cancelled in the cloud while it ran.
+    const stub: DepsInstaller = {
+      async run({ signal }) {
+        for (const id of cloud.runs.keys()) cloud.stopRun(id, "run_terminal");
+        await new Promise<void>((resolve) => { if (signal?.aborted) return resolve(); signal?.addEventListener("abort", () => resolve(), { once: true }); });
+        return { kind: "failed", why: "aborted" } as DepsOutcome;
+      },
+    };
+    const r = rig(pnpmLock, undefined, stub, 20);
+    const result = await r.go({ ...allowances(NPM) });
+    expect(result).toEqual({ status: "stopped", reason: "run_terminal" });
+    expect(r.starts).toHaveLength(0);
   });
 });

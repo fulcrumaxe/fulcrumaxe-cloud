@@ -29,7 +29,7 @@ import { createUsageGate } from "../daemon/usageGate.js";
 import { createFootprintStore } from "../daemon/footprints.js";
 import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
-import { isPaused, loadSettings } from "../runnerSettings.js";
+import { isDraining, isPaused, loadSettings, setDraining } from "../runnerSettings.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readVerifyAnswer } from "../daemon/answerFile.js";
@@ -227,15 +227,16 @@ const HELD_WORDS: Readonly<Record<LimitedBy, string>> = {
 };
 
 /** The one journal line for a change in what the machine holds back: which classes, and why. Nothing held back says so too. */
-export function describeHeld(light: LimitedBy | null, heavy: LimitedBy | null): string {
+export function describeHeld(light: LimitedBy | null, heavy: LimitedBy | null, near = false): string {
+  const words = (by: LimitedBy): string => (by === "usage_limit" && near ? "near the plan's usage limit, so one job at a time (the limit itself is not reached)" : HELD_WORDS[by]);
   if (light === null && heavy === null) return "taking all kinds of jobs again";
-  if (light !== null && heavy !== null && light === heavy) return `holding back all new jobs: ${HELD_WORDS[light]}`;
-  if (light !== null && heavy !== null) return `holding back all new jobs: ${HELD_WORDS[light]} (heavy jobs: ${HELD_WORDS[heavy]})`;
-  return light === null ? `holding back heavy jobs (reviews and builds): ${HELD_WORDS[heavy!]}; light jobs are still taken` : `holding back light jobs: ${HELD_WORDS[light]}`;
+  if (light !== null && heavy !== null && light === heavy) return `holding back all new jobs: ${words(light)}`;
+  if (light !== null && heavy !== null) return `holding back all new jobs: ${words(light)} (heavy jobs: ${words(heavy)})`;
+  return light === null ? `holding back heavy jobs (reviews and builds): ${words(heavy!)}; light jobs are still taken` : `holding back light jobs: ${words(light)}`;
 }
 
 function describePoll(event: PollEvent): string | undefined {
-  if (event.event === "held") return describeHeld(event.light, event.heavy);
+  if (event.event === "held") return describeHeld(event.light, event.heavy, event.near === true);
   if (event.event === "idle" || event.event === "rate_limited") return undefined;
   if (event.event === "sandbox_unavailable") return undefined;
   if (event.event === "error") return `cloud error ${event.status}${event.code === undefined ? "" : ` ${event.code}`}`;
@@ -305,6 +306,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   let ledger: FileLedger;
   try {
     ledger = createFileLedger(ledgerFile, { pid: host.pid, isAlive: (pid) => pidIsAlive(host.kill, pid), now: ctx.now });
+    // This daemon holds the ledger lock, so a drain marker left over from a drain that nobody was running for is not for it.
+    setDraining(stateDir, false);
   } catch (error) {
     if (error instanceof LedgerLockedError) throw new CliError("another fx-runner run is using this state directory");
     throw error;
@@ -554,10 +557,11 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           ...(limits?.peak === undefined ? {} : { scopePeak: (runId: string) => limits.peak?.(runId), releaseScope: (runId: string) => limits.release?.(runId) }),
           settings: () => capUnenforced(loadSettings(stateDir), enforced),
           heavyBudgetBytes: () => budgets().heavy.memoryBytes,
-          paused: () => isPaused(stateDir) || claimBlockReason(stateDir) !== undefined,
+          paused: () => isPaused(stateDir) || isDraining(stateDir) || claimBlockReason(stateDir) !== undefined,
           usage: () => usage.state(),
           now: () => clock.now().getTime(),
         }),
+        draining: () => isDraining(stateDir),
         onClaimed: (claimed) => jobs.track(() => handle(claimed)),
         onMergeOrder: async () => ((await jobs.track(() => planeMerge())) === "none" ? "none" : "handled"),
         ...(deployOrder === undefined ? {} : { onDeployOrder: async () => ((await jobs.track(() => deployOrder())) === "none" ? "none" : "handled") }),
@@ -595,6 +599,12 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           if (line !== undefined) ctx.out(`fx-runner: ${line}`);
         },
       });
+      if (end === "drained") {
+        // The marker is removed here, so the next start (by hand or by the service manager) claims again.
+        setDraining(stateDir, false);
+        ctx.out("fx-runner: drained: no job is in hand and none was claimed since the drain was asked for; exiting");
+        return 0;
+      }
       if (end === "restart") return EXIT_RESTART_FOR_UPDATE;
       if (end === "unauthorized") throw new CliError("the cloud no longer accepts this runner's key; run: fx-runner revoke --local, then register again");
       // Vercel's Deployment Protection answered, not the cloud: the key is fine, so this says what to set and never to revoke. The process ends, as for a refused key.

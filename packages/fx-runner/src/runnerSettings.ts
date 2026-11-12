@@ -15,6 +15,8 @@ const MAX_TOTAL_CAPACITY = MAX_LIGHT_CAPACITY;
 
 export const SETTINGS_FILE = "runner-settings.json";
 export const PAUSE_FILE = "claiming.paused";
+/** The drain marker (`fx-runner drain`): the daemon claims nothing while it exists, and exits 0 once the jobs in hand have ended. */
+export const DRAIN_FILE = "claiming.drain";
 const MAX_SETTINGS_BYTES = 64 * 1024;
 
 export interface RunnerSettings {
@@ -281,4 +283,31 @@ export function isPaused(stateDir: string): boolean {
 export function setPaused(stateDir: string, paused: boolean): void {
   if (paused) writePrivateFile(stateDir, PAUSE_FILE, "paused\n");
   else rmSync(path.join(stateDir, PAUSE_FILE), { force: true });
+}
+
+/** The pid in the daemon's ledger lock (`<ledgerFile>.lock`), or undefined when there is no lock or it holds none: no daemon holds this state directory. */
+export function daemonPid(stateDir: string, ledgerFile: string): number | undefined {
+  try {
+    const pid = Number.parseInt(readFileSync(path.join(stateDir, `${ledgerFile}.lock`), "utf8").trim(), 10);
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    // fx-swallow-ok: no readable lock means no daemon holds this state directory
+    return undefined;
+  }
+}
+
+/** Whether `fx-runner drain` asked the daemon to finish what it holds and exit. Only whether the marker exists is looked at. */
+export function isDraining(stateDir: string): boolean {
+  try {
+    lstatSync(path.join(stateDir, DRAIN_FILE));
+    return true;
+  } catch {
+    // fx-swallow-ok: no marker file is "not draining"
+    return false;
+  }
+}
+
+export function setDraining(stateDir: string, draining: boolean): void {
+  if (draining) writePrivateFile(stateDir, DRAIN_FILE, "drain\n");
+  else rmSync(path.join(stateDir, DRAIN_FILE), { force: true });
 }
