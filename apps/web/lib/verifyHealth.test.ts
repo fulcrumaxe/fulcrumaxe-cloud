@@ -142,18 +142,20 @@ describe("the verify stage's health reader", () => {
 
   describe("Deployment Protection bypass (fake secret only)", () => {
     const FAKE = "fake-bypass-secret-0000";
-    const env = (over: Record<string, string> = {}) => ({ VERCEL_AUTOMATION_BYPASS_SECRET: FAKE, VERCEL_PROJECT_PRODUCTION_URL: HOST, ...over });
+    const OURS = { accountId: "11111111-1111-4111-8111-111111111111" };
+    const THEIRS = { accountId: "22222222-2222-4222-8222-222222222222" };
+    const env = (over: Record<string, string> = {}) => ({ VERCEL_AUTOMATION_BYPASS_SECRET: FAKE, VERCEL_PROJECT_PRODUCTION_URL: HOST, FX_OPERATOR_ACCOUNT_IDS: OURS.accountId, ...over });
 
     it("own host: the header is sent on the one GET", async () => {
       const s = await start(() => json({ commit: COMMIT }));
-      expect(await reader(s, { env: env() })(`https://${HOST}`)).toEqual({ kind: "ok", commit: COMMIT });
+      expect(await reader(s, { env: env() })(`https://${HOST}`, OURS)).toEqual({ kind: "ok", commit: COMMIT });
       expect(s.seen[0]!.headers["x-vercel-protection-bypass"]).toBe(FAKE);
     });
 
     it("own host named by VERCEL_URL, VERCEL_BRANCH_URL or FX_VERIFY_OWN_HOSTS (case-folded) also gets it", async () => {
       for (const over of [{ VERCEL_URL: HOST }, { VERCEL_BRANCH_URL: HOST }, { FX_VERIFY_OWN_HOSTS: `x.example.test, ${HOST.toUpperCase()}` }]) {
         const s = await start(() => json({ commit: COMMIT }));
-        await reader(s, { env: { VERCEL_AUTOMATION_BYPASS_SECRET: FAKE, ...over } })(`https://${HOST}`);
+        await reader(s, { env: { VERCEL_AUTOMATION_BYPASS_SECRET: FAKE, FX_OPERATOR_ACCOUNT_IDS: OURS.accountId, ...over } })(`https://${HOST}`, OURS);
         expect(s.seen[0]!.headers["x-vercel-protection-bypass"], JSON.stringify(over)).toBe(FAKE);
         await s.close();
         server = undefined;
@@ -164,7 +166,7 @@ describe("the verify stage's health reader", () => {
       const cases: Array<[string, string]> = [["other.example.test", HOST], [`evil-${HOST}`, HOST], [HOST, `sub.${HOST}`], [HOST, `${HOST}.evil.test`], [HOST, `${HOST}-evil.test`]];
       for (const [ownHost, target] of cases) {
         const s = await startFor(target);
-        await reader(s, { env: env({ VERCEL_PROJECT_PRODUCTION_URL: ownHost }) })(`https://${target}`);
+        await reader(s, { env: env({ VERCEL_PROJECT_PRODUCTION_URL: ownHost }) })(`https://${target}`, OURS);
         expect(s.seen, target).toHaveLength(1);
         expect(s.seen[0]!.headers["x-vercel-protection-bypass"], target).toBeUndefined();
         await s.close();
@@ -175,8 +177,42 @@ describe("the verify stage's health reader", () => {
     it("no secret, or an unusable one: no header, exactly as before", async () => {
       for (const e of [{ VERCEL_PROJECT_PRODUCTION_URL: HOST }, env({ VERCEL_AUTOMATION_BYPASS_SECRET: "has space" }), env({ VERCEL_AUTOMATION_BYPASS_SECRET: "" })]) {
         const s = await start(() => json({ commit: COMMIT }));
-        expect(await reader(s, { env: e })(`https://${HOST}`)).toEqual({ kind: "ok", commit: COMMIT });
+        expect(await reader(s, { env: e })(`https://${HOST}`, OURS)).toEqual({ kind: "ok", commit: COMMIT });
         expect(s.seen[0]!.headers["x-vercel-protection-bypass"]).toBeUndefined();
+        await s.close();
+        server = undefined;
+      }
+    });
+
+    it("confused deputy: our own host named in ANOTHER account's settings gets no header (and still reads the answer the open app gives)", async () => {
+      const s = await start(() => json({ commit: COMMIT }));
+      expect(await reader(s, { env: env() })(`https://${HOST}`, THEIRS)).toEqual({ kind: "ok", commit: COMMIT });
+      expect(s.seen).toHaveLength(1);
+      expect(s.seen[0]!.headers["x-vercel-protection-bypass"]).toBeUndefined();
+    });
+
+    it("a list with several accounts admits each of them, case-folded; the other account still gets nothing", async () => {
+      const list = `${THEIRS.accountId.toUpperCase()}, ${OURS.accountId}`;
+      for (const [who, sent] of [[THEIRS, true], [OURS, true], [{ accountId: "33333333-3333-4333-8333-333333333333" }, false]] as const) {
+        const s = await start(() => json({ commit: COMMIT }));
+        await reader(s, { env: env({ FX_OPERATOR_ACCOUNT_IDS: list }) })(`https://${HOST}`, who);
+        expect(s.seen[0]!.headers["x-vercel-protection-bypass"], who.accountId).toBe(sent ? FAKE : undefined);
+        await s.close();
+        server = undefined;
+      }
+    });
+
+    it("no account named, an unset or blank list, or a list with one malformed entry: no header for anyone", async () => {
+      const cases: Array<[Record<string, string | undefined>, { accountId: string } | undefined]> = [
+        [env(), undefined],
+        [{ ...env(), FX_OPERATOR_ACCOUNT_IDS: undefined }, OURS],
+        [env({ FX_OPERATOR_ACCOUNT_IDS: "  " }), OURS],
+        [env({ FX_OPERATOR_ACCOUNT_IDS: `${OURS.accountId},not-a-uuid` }), OURS],
+      ];
+      for (const [e, who] of cases) {
+        const s = await start(() => json({ commit: COMMIT }));
+        await reader(s, { env: e })(`https://${HOST}`, who);
+        expect(s.seen[0]!.headers["x-vercel-protection-bypass"], JSON.stringify([e.FX_OPERATOR_ACCOUNT_IDS, who])).toBeUndefined();
         await s.close();
         server = undefined;
       }
@@ -184,7 +220,7 @@ describe("the verify stage's health reader", () => {
 
     it("a 302 from the own host still reads unreachable and is not followed", async () => {
       const s = await start(() => ({ status: 302, headers: { location: "https://vercel.com/sso-api" } }));
-      expect(await reader(s, { env: env() })(`https://${HOST}`)).toEqual({ kind: "unreachable" });
+      expect(await reader(s, { env: env() })(`https://${HOST}`, OURS)).toEqual({ kind: "unreachable" });
       expect(s.seen).toHaveLength(1);
     });
 
@@ -194,7 +230,7 @@ describe("the verify stage's health reader", () => {
       vi.doMock("@fx/telemetry", async (importOriginal) => ({ ...(await importOriginal<object>()), reportError }));
       const mod = await import("./verifyHealth");
       const read = mod.createVerifyHealthReader({ env: env(), resolveUpstream: async () => ["127.0.0.1"], forwardPinned: async () => { throw new Error(`boom ${FAKE} ${FAKE}`); } });
-      expect(await read(`https://${HOST}`)).toEqual({ kind: "unreachable" });
+      expect(await read(`https://${HOST}`, OURS)).toEqual({ kind: "unreachable" });
       expect(reportError).toHaveBeenCalledTimes(1);
       const err = reportError.mock.calls[0]![0] as Error;
       expect(`${err.message}\n${err.stack ?? ""}`).not.toContain(FAKE);

@@ -5,7 +5,7 @@ import { DEPLOY_VERIFIER_ROLE, isBrowserMethod, type BrowserMethod } from "@fulc
 import { overRepoDailyUsd, verifyStageRunKey } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { fileBugItem } from "@fx/core/src/verify/bugItem.js";
 import type { Journey } from "@fx/core/src/verify/journeys.js";
-import { finishVerifyRow, readVerifyRow, startRunning, type FinishInput, type VerifyMethod, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
+import { finishVerifyRow, readVerifyRow, setVerifyHold, startRunning, type FinishInput, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
 import { readVerifySettings } from "@fx/core/src/verify/settings.js";
 import { cancelOpenOrders } from "@fx/core/src/verify/orders.js";
 import { VERIFIER_WORKDIR, isRunnerMode, readExecutionMode, type StartAgentRunInput } from "@fx/runner";
@@ -32,6 +32,8 @@ import type { ReadyOutcome, VerifyStageDeps } from "./verifyStage.js";
 const ENDED = new Set(["succeeded", "refused_spend", "failed", "timed_out", "killed_spend", "cancelled"]);
 
 const PLAN_DATA_CODES: ReadonlySet<string> = new Set(["deploy_verify_unconfigured", "deploy_verify_run_over_daily"]);
+/** The hold reason each plan-data refusal is stored as on the row (migration 1013): the code without its `deploy_verify_` prefix. */
+const HOLD_OF_PLAN_CODE: Readonly<Record<string, VerifyHoldReason>> = { deploy_verify_unconfigured: "unconfigured", deploy_verify_run_over_daily: "run_over_daily" };
 
 export interface VerifyRunLimits {
   /** What one tester job may spend: its cap and its reservation. */
@@ -93,6 +95,18 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
     });
   }
 
+  /**
+   * Writes why this row is waiting (or, with null, that it no longer waits on one of the three limits) so the card can say so. A write that fails is reported and never changes what the pass does:
+   * the hold itself (nothing starts) is decided before and independent of this note.
+   */
+  async function noteHold(accountId: string, rowId: string, reason: VerifyHoldReason | null): Promise<void> {
+    try {
+      await tenant(accountId, (client) => setVerifyHold(client, accountId, rowId, reason));
+    } catch (err) {
+      reportError(err, { stage: "verify_run.hold_note" });
+    }
+  }
+
   const ready: Required<Pick<VerifyStageDeps, "ready">>["ready"] = async ({ accountId, repoId, row, deployedCommit }): Promise<ReadyOutcome> => {
     const mode = await readExecutionMode(deps.pool, accountId, repoId);
     if (!isRunnerMode(mode)) {
@@ -107,6 +121,8 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       // Fail closed: figures that cannot be read start nothing; the next tick asks again.
         // Only the plan data's named refusals travel as their own code, so the report says which figure is wrong; any other failure keeps the error's own code.
       reportError(err, { stage: "verify_run.limits", code: err instanceof Error && PLAN_DATA_CODES.has(err.message) ? err.message : undefined });
+      const why = err instanceof Error ? HOLD_OF_PLAN_CODE[err.message] : undefined;
+      await noteHold(accountId, row.id, why ?? null);
       return "held";
     }
     const state = await tenant(accountId, async (client) => {
@@ -131,8 +147,12 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
         reportedDailyHold.add(day);
         reportError(new Error("deploy_verify_daily_cap"), { stage: "verify_run.daily_cap", code: "deploy_verify_daily_cap" });
       }
+      // The log line above is once a day; the note on the row is what the card reads, and it is kept current on every tick (a repeat of the same reason writes nothing).
+      await noteHold(accountId, row.id, "daily_cap");
       return "held";
     }
+    // None of the three limits holds this row now: whatever reason an earlier tick wrote is gone (a later wait, for the seat or the address, has no reason of its own).
+    if (state.current.hold_reason !== null) await noteHold(accountId, row.id, null);
     const [codeOwner, codeName] = state.codeRepo === null ? [] : state.codeRepo.split("/");
     // The merge commit lives on the public repository when the repository is paired with one.
     const clone = codeOwner && codeName ? { owner: codeOwner, name: codeName } : state.repo?.gh_owner && state.repo.gh_name ? { owner: state.repo.gh_owner, name: state.repo.gh_name } : null;

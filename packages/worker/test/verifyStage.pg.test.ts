@@ -64,6 +64,7 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
   let b: SeedRefs;
   let host: FakeHost;
   let healthUrls: string[];
+  let healthAccounts: string[];
   let healthAnswer: HealthRead;
   let readyCalls: Array<{ rowId: string; deployedCommit: string }>;
 
@@ -71,8 +72,9 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
     createVerifyStageSweep({
       pool: writerPool,
       host,
-      health: async (url) => {
+      health: async (url, who) => {
         healthUrls.push(url);
+        healthAccounts.push(who.accountId);
         return healthAnswer;
       },
       ready: async (i) => void readyCalls.push({ rowId: i.row.id, deployedCommit: i.deployedCommit }),
@@ -151,6 +153,7 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
     await admin.query("UPDATE verify_settings SET enabled = false");
     host = new FakeHost();
     healthUrls = [];
+    healthAccounts = [];
     healthAnswer = { kind: "ok", commit: null };
     readyCalls = [];
   });
@@ -337,6 +340,8 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
       expect(counts).toMatchObject({ ready: 1, unverified: 0 });
       expect(readyCalls).toEqual([{ rowId: w.row.id, deployedCommit: w.mergeSha }]);
       expect(healthUrls).toEqual([BASE_URL]);
+      // The reader is told whose row this is (it decides on that whether our protection bypass may be sent).
+      expect(healthAccounts).toEqual([a.accountId]);
       expect(host.calls.filter((c) => c.startsWith("commit"))).toEqual([]);
     });
 

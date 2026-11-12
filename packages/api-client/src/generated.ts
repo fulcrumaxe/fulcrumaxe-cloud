@@ -610,6 +610,10 @@ export interface Operations {
           browser: Array<number>;
           checks: Array<number>;
         };
+        hold?: {
+          reason: "unconfigured" | "run_over_daily" | "daily_cap";
+          since: string;
+        };
         bug_item_id: (string) | (null);
         pr_number: number;
         at: string;

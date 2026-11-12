@@ -67,7 +67,7 @@ export interface VerifyStageDeps {
   pool: Pool;
   host: VerifyHostPort;
   /** One read of the app's /api/health at the base URL the settings name (the production reader pins the host and caps the body). */
-  health: (baseUrl: string) => Promise<HealthRead>;
+  health: (baseUrl: string, who: { accountId: string }) => Promise<HealthRead>;
   /**
    * The next stage's entry: called once a deployed commit qualifies for a row (verifyRun.ts). Absent: the row stays `deploying`. It answers what it did:
    * `started` (the tester job is running and the row is `running`), `held` (the repository's daily cap, or no seat yet: read again next tick), `ended` (it ended the row `unverified`).
@@ -165,7 +165,7 @@ export function createVerifyStageSweep(deps: VerifyStageDeps): () => Promise<Ver
 
   async function readiness(accountId: string, repoId: string, target: VerifyTarget, baseUrl: string, row: VerifyRow, order: DeployOrder, counts: VerifyStageCounts): Promise<boolean> {
     const capped = order.finished_at !== null && order.db_now.getTime() - order.finished_at.getTime() > READINESS_CAP_MINUTES * 60_000;
-    const health = await deps.health(baseUrl);
+    const health = await deps.health(baseUrl, { accountId });
     const deployed = health.kind === "ok" ? health.commit : null;
     if (deployed !== null) {
       let ok = false;

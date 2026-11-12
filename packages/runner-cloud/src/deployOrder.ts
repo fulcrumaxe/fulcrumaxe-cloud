@@ -10,6 +10,7 @@ import {
   DeployOrderReportMessage,
   DeployOrderReportReply,
 } from "@fulcrumaxe/runner-protocol";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
@@ -137,6 +138,9 @@ export async function deployOrderReportRun(deps: RunnerCloudDeps, req: RunnerHtt
       return "recorded" as const;
     }),
   );
+  // Push, not poll: the post-merge check rides the proposal-verify sweep, and a row waiting on this order is read there. Marking it here wakes the sweep now instead of at the
+  // next 30-minute slot. Only a report that was recorded wakes it: a fenced or refused one changed nothing. The marker is a hint; the row stays the truth.
+  if (outcome === "recorded") void markWorkPending("proposal-verify-sweep");
   if (outcome === "recorded") return { status: 200, body: DeployOrderReportReply.parse({ recorded: true }), headers: NO_STORE };
   if (outcome === "refused") throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
   throw fenced(outcome);
