@@ -16,6 +16,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { markWorkPending } from '../pendingWork.js';
+import { openVerifyAgainRow } from '../verify/rows.js';
 import { recordStage } from './recordStage.js';
 import { IllegalStageTransitionError } from './stages.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, operatorVerdict, readOperatorFacts, type OperatorAction, type OperatorVerdict } from './operatorActions.js';
@@ -162,6 +164,28 @@ export async function requestPublicChangeAction(ctx: OperatorMoveCtx, workItemId
     const facts = await allowed(client, ctx, workItemId, action);
     await audit(client, 'work_item.sent_back', { work_item_id: workItemId, action, from_stage: facts.stage, public_change_state: facts.push?.state ?? null });
   });
+}
+
+/**
+ * D#749: Verify again. The table's verdict (with the item's row locked), then the NEW verify row for the same merge commit (the finished one stays as history), and the
+ * audit row naming who asked, all in one transaction. After the commit the verify sweep's hint is marked, so the next pass picks the row up at once (the sweep reads the
+ * rows; a lost hint costs only the wait for its next tick). The row is a person step for the streak. Nothing is written when the table or the row's own check refuses.
+ *
+ * TODO: like Reopen, the audit row is written as `work_item.sent_back` with an `action` in its payload, because the 0713 definer's allowlist has no event of its own for
+ * this and the change adds none. When it becomes permanent, add `verify.again` in a migration numbered at merge time.
+ */
+export async function verifyAgainWorkItem(ctx: OperatorMoveCtx, workItemId: string): Promise<{ rowId: string; attempt: number }> {
+  if (!UUID_RE.test(workItemId)) throw new NotFoundError('not found');
+  const { accountId, userId } = ctx.principal;
+  const opened = await withTenant(ctx.pool, accountId, userId, async (client) => {
+    await allowed(client, ctx, workItemId, 'verify_again');
+    const row = await openVerifyAgainRow(client, accountId, workItemId);
+    if (!row.opened) throw new OperatorMovedOnError();
+    await audit(client, 'work_item.sent_back', { work_item_id: workItemId, action: 'verify_again', verify_row_id: row.rowId, attempt: row.attempt });
+    return row;
+  });
+  void markWorkPending('proposal-verify-sweep');
+  return { rowId: opened.rowId, attempt: opened.attempt };
 }
 
 /**
