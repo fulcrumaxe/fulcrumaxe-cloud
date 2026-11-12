@@ -8,6 +8,14 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// A clone the daemon has just made has no local change in the way, so "the merge is clean but the tree would not take it" cannot be produced with real git there;
+// the one test that needs it flips this switch, every other case runs the real merge.
+const forced = vi.hoisted(() => ({ blocked: false }));
+vi.mock("../../src/daemon/hostRead.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../src/daemon/hostRead.js")>();
+  return { ...real, mergeDefaultInto: (...args: Parameters<typeof real.mergeDefaultInto>) => (forced.blocked ? Promise.resolve({ kind: "blocked" as const }) : real.mergeDefaultInto(...args)) };
+});
+
 /** Most tests here make real repositories and run real `git` (clone, fetch, push to a local bare remote) through the production capture; a CI run loads the host and vitest's 5 s default has failed them while they pass alone, so each async test sets its own bound. A stuck git fails on it with its output; the global `testTimeout` is left alone. */
 const REAL_GIT_TEST_TIMEOUT = 60_000;
 import { createGit, GitPathError, GUARD_CONFIG, guardConfigEnv, type GitCapture } from "../../src/daemon/git.js";
@@ -772,6 +780,26 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     await gitPath.prepare(fixJob, FIX_LEASE, second);
     expect(readFileSync(path.join(second, "agent.txt"), "utf8")).toBe("work\n");
     expect(refsOf(path.join(cacheDir, "mirrors", `${job.repo.id}.git`))).toContain(`refs/heads/${first.branch}`);
+  });
+});
+
+describe("a fresh clone whose base update is blocked", () => {
+  afterEach(() => {
+    forced.blocked = false;
+  });
+
+  it("prepare ends with workspace_failed (no fallback clone is left to start from), while resume of a kept workspace falls back to null", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {
+    const { gitPath } = makeGitPath();
+    const job = jobFor();
+    const first = newWorkspace("first");
+    const { base } = await gitPath.prepare(job, lease, first);
+    agentCommits(first);
+    await gitPath.publish(job, lease, first, base);
+    const check = { argv: ["bash", "scripts/check.sh"], dev_shell: false, timeout_s: 60 };
+    const fix = jobFor({ repo: job.repo, check, continues: { parent_run_id: randomUUID(), session_id: null, branch: pushPlan(lease).branch } as never });
+    forced.blocked = true;
+    await expect(gitPath.prepare(fix, lease, newWorkspace("blocked"))).rejects.toMatchObject({ code: "workspace_failed" });
+    expect(await gitPath.resume(fix, lease, first)).toBeNull();
   });
 });
 

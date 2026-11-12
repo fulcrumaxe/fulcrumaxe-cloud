@@ -125,3 +125,32 @@ describe("through the route", () => {
     expect(transport.push).not.toHaveBeenCalled();
   });
 });
+
+describe("a git failure or a cut-short search inside the check", () => {
+  const none: PrivateSourceChange[] = [];
+
+  it("refuses when git reports rename detection was cut short (explicit limit, a larger change set)", async () => {
+    put("docs/ops/plan2.md", `${PLAN}and a second private file\n`);
+    base = commitAll("second overlay file");
+    for (let n = 0; n < 6; n++) put(`src/gen${n}.txt`, `generated ${n}\nwith a few lines\nof its own\n`);
+    const head = commitAll("many files");
+    const r = await privateSourceRefusals(dir, none, base, head, match, 1);
+    expect(r).toHaveLength(1);
+    expect(r[0]?.kind).toBe("overlay_path");
+    expect(r[0]?.message).toContain("cut short");
+    // the default limit handles the same change set normally
+    expect(await privateSourceRefusals(dir, none, base, head, match)).toEqual([]);
+  });
+
+  it("rejects, never passes, when the rename diff fails (unknown objects)", async () => {
+    const missing = "1".repeat(40);
+    await expect(privateSourceRefusals(dir, none, base, missing, match)).rejects.toThrow(/git diff failed/);
+  });
+
+  it("rejects, never passes, when the tree listing fails after the diff succeeded", async () => {
+    // The same blob id on both sides diffs cleanly, but it names no tree, so only the ls-tree listing can fail.
+    const blob = sh("rev-parse", "HEAD:src/a.ts");
+    const live: PrivateSourceChange[] = [{ key: "src/x.ts", deleted: false, mode: "100644", sha: blob }];
+    await expect(privateSourceRefusals(dir, live, blob, blob, match)).rejects.toThrow(/git ls-tree failed/);
+  });
+});

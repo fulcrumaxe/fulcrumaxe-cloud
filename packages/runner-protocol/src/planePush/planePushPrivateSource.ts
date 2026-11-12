@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { git } from "./planePushGit.js";
+import { git, gitWithStderr } from "./planePushGit.js";
 import type { Refusal } from "./planePush.js";
 
 /**
@@ -23,7 +23,10 @@ export interface PrivateSourceChange {
   sha: string;
 }
 
-const EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+/** Rename and copy detection limit passed to git explicitly (git's own default is 1000 and differs by version and config). */
+export const RENAME_LIMIT = 4000;
+
+const EMPTY_BLOB ="e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 const utf8 = (key: string): string => Buffer.from(key, "latin1").toString("utf8");
 
 const refusal = (publicPath: string, overlayPath: string, how: string): Refusal => ({
@@ -44,11 +47,17 @@ async function overlayBlobs(repoDir: string, rev: string, match: (p: string) => 
   return out;
 }
 
-export async function privateSourceRefusals(repoDir: string, changes: readonly PrivateSourceChange[], base: string, head: string, match: (p: string) => boolean): Promise<Refusal[]> {
+export async function privateSourceRefusals(repoDir: string, changes: readonly PrivateSourceChange[], base: string, head: string, match: (p: string) => boolean, renameLimit: number = RENAME_LIMIT): Promise<Refusal[]> {
   const out: Refusal[] = [];
 
   // (a) either side of a rename or copy.
-  const raw = (await git(repoDir, ["diff", "--raw", "-z", "--no-abbrev", "-M", "-C", "--find-copies-harder", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", base, head, "--"])).toString("latin1").split("\0");
+  // When the change set is too large git narrows its search, says so on stderr and still exits 0 (LC_ALL=C pins the wording), so a
+  // cut-short detection is refused rather than read as "no copies found".
+  const diff = await gitWithStderr(repoDir, ["diff", "--raw", "-z", "--no-abbrev", "-M", "-C", "--find-copies-harder", `-l${renameLimit}`, "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", base, head, "--"], undefined, { LC_ALL: "C", LANGUAGE: "C" });
+  if (/too many files/i.test(diff.stderr)) {
+    return [{ kind: "overlay_path", path: "(change set)", message: "rename and copy detection was cut short because the change set is too large, so content copied from an overlay (private) path cannot be ruled out" }];
+  }
+  const raw = diff.out.toString("latin1").split("\0");
   for (let n = 0; n < raw.length; ) {
     const m = /^:\d+ \d+ [0-9a-f]{40} ([0-9a-f]{40}) ([RC])\d*$/.exec(raw[n] ?? "");
     if (m) {
