@@ -29,6 +29,17 @@ export const VERIFY_REASON_CODES = [
 ] as const;
 export type VerifyReasonCode = (typeof VERIFY_REASON_CODES)[number];
 /**
+ * D#749: what an `unverified` row's reason does not say on its own, as one closed code stored on the row's `verify_unverified` fact (its `reasons`), never on the row: no migration and
+ * no model text. For `envelope_rejected`, why the answer was refused (the pipeline's envelope rejection, or `unknown_journey`). For `run_failed`, the runner's named end of a browser job
+ * that could not check anything (the runner protocol's `runner_setup` details of the deploy verifier). Any other value is not stored.
+ */
+export const VERIFY_DETAIL_CODES = [
+  'too_large', 'not_json', 'bad_shape', 'extra_key', 'duplicate_journey', 'bad_value', 'unknown_journey',
+  'browser_not_connected', 'verify_signin_missing', 'verify_browser_unavailable', 'verify_answer_missing',
+] as const;
+export type VerifyDetailCode = (typeof VERIFY_DETAIL_CODES)[number];
+export const isVerifyDetailCode = (value: unknown): value is VerifyDetailCode => typeof value === 'string' && (VERIFY_DETAIL_CODES as readonly string[]).includes(value);
+/**
  * The account check stored on a finished row (migration 1009): `matched` when the repository named a test account and the trusted verify server recorded exactly
  * that account, `mismatch` for `unverified: wrong_account`, `unverifiable` for `unverified: account_unverifiable`. Null: the account was not judged.
  */
@@ -285,7 +296,7 @@ async function readCarriedFailures(client: PoolClient, accountId: string, workIt
   return prior.journeys.filter((j) => failed.has(j.id)).map((j) => ({ id: j.id, text: j.text }));
 }
 
-async function writeFact(client: PoolClient, accountId: string, row: VerifyRow, to: VerifyRowStatus): Promise<void> {
+async function writeFact(client: PoolClient, accountId: string, row: VerifyRow, to: VerifyRowStatus, detail: VerifyDetailCode | null = null): Promise<void> {
   const kind = FACT_KIND[to];
   if (kind === undefined) return;
   const failedIds = row.result === null ? [] : row.result.filter((r) => r.result === 'fail').map((r) => r.id).slice(0, 20);
@@ -294,7 +305,7 @@ async function writeFact(client: PoolClient, accountId: string, row: VerifyRow, 
     kind,
     dedupeKey: `verify:${row.id}:${to}`,
     code: row.reason_code,
-    reasons: to === 'failed' ? failedIds : [],
+    reasons: to === 'failed' ? failedIds : to === 'unverified' && detail !== null ? [detail] : [],
     headSha: row.merge_sha,
     prNumber: row.pr_number,
     runId: row.run_id,
@@ -352,7 +363,7 @@ export async function startRunning(client: PoolClient, accountId: string, rowId:
 
 export type FinishInput =
   | { status: 'verified' | 'failed'; result: JourneyResult[]; accountCheck?: AccountCheck | null }
-  | { status: 'unverified'; reason: VerifyReasonCode; result?: JourneyResult[] | null; accountCheck?: AccountCheck | null };
+  | { status: 'unverified'; reason: VerifyReasonCode; result?: JourneyResult[] | null; accountCheck?: AccountCheck | null; /** D#749: see VERIFY_DETAIL_CODES. */ detail?: VerifyDetailCode | null };
 
 /**
  * running -> verified | failed | unverified, and pending / deploying -> unverified. Writes the matching fact in the same transaction. The result must name
@@ -365,6 +376,7 @@ export async function finishVerifyRow(client: PoolClient, accountId: string, row
   if (!canMove(row.status, input.status)) return { moved: false, status: row.status };
   if (input.status === 'unverified') {
     if (!VERIFY_REASON_CODES.includes(input.reason)) throw bad('unknown reason');
+    if (input.detail != null && !isVerifyDetailCode(input.detail)) throw bad('unknown detail');
   } else {
     assertResultMatches(row.journeys, input.result);
     if (input.status === 'verified' && row.journeys.length === 0) throw bad('a row with no journeys cannot be verified');
@@ -382,7 +394,7 @@ export async function finishVerifyRow(client: PoolClient, accountId: string, row
     [rowId, accountId, input.status, result, reason, row.status, accountCheck],
   );
   if (r.rows[0] === undefined) return { moved: false, status: (await readRow(client, accountId, rowId))?.status ?? null };
-  await writeFact(client, accountId, r.rows[0], input.status);
+  await writeFact(client, accountId, r.rows[0], input.status, input.status === 'unverified' ? input.detail ?? null : null);
   return { moved: true, row: r.rows[0] };
 }
 

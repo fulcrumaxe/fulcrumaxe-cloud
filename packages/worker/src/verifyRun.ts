@@ -5,7 +5,8 @@ import { DEPLOY_VERIFIER_ROLE, isBrowserMethod, type BrowserMethod } from "@fulc
 import { overRepoDailyUsd, verifyStageRunKey } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { fileBugItem } from "@fx/core/src/verify/bugItem.js";
 import type { Journey } from "@fx/core/src/verify/journeys.js";
-import { finishVerifyRow, readVerifyRow, setVerifyHold, startRunning, type FinishInput, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
+import { finishVerifyRow, isVerifyDetailCode, readVerifyRow, setVerifyHold, startRunning, type FinishInput, type VerifyDetailCode, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
+import { RUNNER_EVENT_KIND } from "@fx/core/src/onboarding/previewProgress.js";
 import { readVerifySettings } from "@fx/core/src/verify/settings.js";
 import { cancelOpenOrders } from "@fx/core/src/verify/orders.js";
 import { VERIFIER_WORKDIR, isRunnerMode, readExecutionMode, type StartAgentRunInput } from "@fx/runner";
@@ -45,6 +46,8 @@ export interface VerifyRunLimits {
 export interface VerifyOutcome {
   input: FinishInput;
   failedJourneyIds: string[];
+  /** Set when the answer was refused as a whole: the closed reason (D#749: stored on the row's fact, so a person and the card can see why). */
+  rejection?: string;
 }
 
 export interface VerifyRunDeps {
@@ -225,12 +228,14 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       let input: FinishInput;
       let failed: string[] = [];
       if (run === undefined || (ENDED.has(run.status) && run.status !== "succeeded")) {
-        input = { status: "unverified", reason: "run_failed" };
+        // D#749: the runner's named end of the job, when it gave one this stage knows (no browser, no saved sign-in, no answer), goes on the fact beside `run_failed`.
+        const detail = run === undefined ? null : await runEndDetail(client, accountId, fresh.run_id!);
+        input = { status: "unverified", reason: "run_failed", ...(detail === null ? {} : { detail }) };
       } else if (run.status !== "succeeded") {
         return "waiting";
       } else {
         const outcome = deps.outcome(fresh.journeys, run.envelope, { testAccountLabel: (await readVerifySettings(client, fresh.repo_id)).testAccountLabel, method: fresh.method });
-        input = outcome.input;
+        input = outcome.input.status === "unverified" && outcome.input.reason === "envelope_rejected" && isVerifyDetailCode(outcome.rejection) ? { ...outcome.input, detail: outcome.rejection } : outcome.input;
         failed = outcome.failedJourneyIds;
       }
       const done = await finishVerifyRow(client, accountId, row.id, input);
@@ -241,4 +246,17 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
   };
 
   return { ready, settle };
+}
+
+/**
+ * The closed detail of the runner's `run_ended` event for a run, when it is one of the verify stage's detail codes; null otherwise (a cloud run, an event of another kind, a detail this
+ * stage does not name). The runner protocol's schema already checked the event; only the stored closed word is read, and only a word on the list is kept.
+ */
+async function runEndDetail(client: PoolClient, accountId: string, runId: string): Promise<VerifyDetailCode | null> {
+  const { rows } = await client.query<{ detail: string | null }>(
+    `SELECT payload->>'detail' AS detail FROM run_events WHERE run_id = $1::uuid AND kind = $2::text AND payload->>'type' = 'run_ended' AND payload->>'reason' = 'runner_setup' AND account_id = $3::uuid ORDER BY seq DESC LIMIT 1`,
+    [runId, RUNNER_EVENT_KIND, accountId],
+  );
+  const detail = rows[0]?.detail;
+  return isVerifyDetailCode(detail) ? detail : null;
 }

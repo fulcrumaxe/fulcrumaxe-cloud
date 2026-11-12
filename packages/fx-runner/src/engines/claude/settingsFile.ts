@@ -108,6 +108,19 @@ export function mcpConfigFor(job: { role: string; browserMethod?: BrowserMethod 
   };
 }
 
+/**
+ * Whether the CLI's init line says the `fxverify` server is up for this job. The CLI starts every MCP server before its first turn and names each one's state in the init line
+ * (`mcp_servers: [{ name, status }]`); a server that exited at start (a refused flag, a missing program) is listed `failed` and its tools are simply absent, so the model would answer
+ * without a browser. `connected` and `pending` (still starting: its tools may arrive, and a run that ends without the server's answer file is refused later) count as up; anything
+ * else, and no entry at all, is down. Reads two closed fields only.
+ */
+export function verifyServerUp(init: Record<string, unknown>): boolean {
+  const servers = init["mcp_servers"];
+  if (!Array.isArray(servers)) return false;
+  const entry = servers.find((s): s is Record<string, unknown> => s !== null && typeof s === "object" && (s as Record<string, unknown>)["name"] === VERIFY_SERVER_NAME);
+  return entry !== undefined && (entry["status"] === "connected" || entry["status"] === "pending");
+}
+
 /** A re-claimed run id starts with none of the last attempt's answer or browser folders (the server refuses to reuse a folder that exists). */
 export function clearVerifyLeftovers(jobDir: string): void {
   for (const name of ["answer.json", "home", "tmp"]) rmSync(path.join(jobDir, name), { recursive: true, force: true });

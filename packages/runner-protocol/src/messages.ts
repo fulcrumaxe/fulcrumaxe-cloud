@@ -120,6 +120,13 @@ export const RUNNER_SETUP_DETAILS = [
   "browser_not_connected",
   // The branch a fix round continues is behind the default branch and the merge conflicts: the run ended before the agent started and no check was spent on a stale base. Additive under C8 section 6; the cloud deploys first.
   "base_conflict",
+  // D#749 (additive under C8 section 6; the cloud deploys first): the three named ends of a playwright deploy verifier job that could not check anything. `verify_signin_missing`: the
+  // saved sign-in of `fx-runner verify-login` is missing, unsafe, expired or of another site, so the job ended before the agent began. `verify_browser_unavailable`: the CLI reported
+  // the runner's `fxverify` browser server down at its init line, so the job ended before the model's first turn. `verify_answer_missing`: the model's turn ended without the server
+  // accepting an answer (no `answer.json`), so there is nothing to judge; the model's own text is never taken in its place.
+  "verify_signin_missing",
+  "verify_browser_unavailable",
+  "verify_answer_missing",
 ] as const;
 /**
  * D#599 HO-1 (additive under C8 section 6; the cloud deploys first): how a handed-off run ended its side of the move. `pushed`: the

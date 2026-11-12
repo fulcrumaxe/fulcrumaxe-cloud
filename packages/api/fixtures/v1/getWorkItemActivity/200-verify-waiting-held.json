@@ -20,6 +20,7 @@
   "verify": {
     "status": "deploying",
     "reason": null,
+    "detail": null,
     "method": null,
     "journeys": null,
     "account": null,

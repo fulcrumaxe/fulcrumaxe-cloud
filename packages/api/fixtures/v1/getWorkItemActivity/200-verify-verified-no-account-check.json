@@ -20,6 +20,7 @@
   "verify": {
     "status": "verified",
     "reason": null,
+    "detail": null,
     "method": "chrome_runner",
     "journeys": {
       "total": 3,

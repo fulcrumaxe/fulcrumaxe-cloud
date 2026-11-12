@@ -561,6 +561,39 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
       expect(await itemsOf(repo)).toEqual([]);
     });
 
+    it("D#749: the closed detail beside the reason is on the fact and the card: the envelope rejection, and the runner's named end of a failed job; nothing else is kept", async () => {
+      const repo = await newRepo(a);
+      const runEnded = async (runId: string, payload: Record<string, unknown>) =>
+        admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'runner.event', $3::jsonb)`, [a.accountId, runId, JSON.stringify({ seq: 0, ts: new Date().toISOString(), type: "run_ended", ...payload })]);
+      const cases: Array<[string, string, unknown, Record<string, unknown> | null, string, string | null]> = [
+        ["no envelope (a tool-less turn)", "succeeded", undefined, null, "envelope_rejected", "bad_shape"],
+        ["an unknown journey", "succeeded", { journeys: [pass("c1"), pass("c2"), pass("c9")] }, null, "envelope_rejected", "unknown_journey"],
+        ["an extra key", "succeeded", { journeys: [pass("c1"), pass("c2")], note: "x" }, null, "envelope_rejected", "extra_key"],
+        ["the browser server was down", "failed", undefined, { reason: "runner_setup", detail: "verify_browser_unavailable" }, "run_failed", "verify_browser_unavailable"],
+        ["no answer handed in", "failed", undefined, { reason: "runner_setup", detail: "verify_answer_missing" }, "run_failed", "verify_answer_missing"],
+        ["no saved sign-in", "failed", undefined, { reason: "runner_setup", detail: "verify_signin_missing" }, "run_failed", "verify_signin_missing"],
+        ["a setup detail this stage does not name", "failed", undefined, { reason: "runner_setup", detail: "push_failed" }, "run_failed", null],
+        ["another reason's end", "failed", undefined, { reason: "agent_failed" }, "run_failed", null],
+        ["a failed job with no event", "failed", undefined, null, "run_failed", null],
+      ];
+      let pr = 200;
+      for (const [label, status, envelope, ended, reason, detail] of cases) {
+        const made = await runningRow(a, repo, ++pr, shaN(pr));
+        if (ended !== null) await runEnded(made.row.run_id!, ended);
+        await endRun(made.row.run_id!, status, envelope);
+        expect(await run().settle({ accountId: a.accountId, repoId: repo, row: made.row }), label).toBe("settled");
+        expect(await reread(a, made.row.id), label).toMatchObject({ status: "unverified", reason_code: reason });
+        const fact = (await admin.query(`SELECT code, reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'verify_unverified'`, [made.itemId])).rows[0];
+        expect(fact, label).toEqual({ code: reason, reasons: detail === null ? [] : [detail] });
+        expect(await tenant(a, (c) => readItemVerify(c, made.itemId)), label).toMatchObject({ status: "unverified", reason, detail });
+      }
+      // A finished row that passed carries no detail.
+      const good = await runningRow(a, repo, ++pr, shaN(pr));
+      await endRun(good.row.run_id!, "succeeded", { journeys: [pass("c1"), pass("c2")] });
+      await run().settle({ accountId: a.accountId, repoId: repo, row: good.row });
+      expect(await tenant(a, (c) => readItemVerify(c, good.itemId))).toMatchObject({ status: "verified", detail: null });
+    });
+
     it("the streak: pass, pass, a fail resets, an unverified resets, then a pass counts from one", async () => {
       const repo = await newRepo(a);
       const answers: Array<[Record<string, unknown>, number]> = [

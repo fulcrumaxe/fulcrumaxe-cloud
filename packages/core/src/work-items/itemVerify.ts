@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { ACCOUNT_CHECKS, VERIFY_HOLD_REASONS, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, type AccountCheck, type JourneyResult, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRowStatus } from '../verify/rows.js';
+import { ACCOUNT_CHECKS, VERIFY_HOLD_REASONS, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, isVerifyDetailCode, type AccountCheck, type JourneyResult, type VerifyDetailCode, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRowStatus } from '../verify/rows.js';
 
 /**
  * D#749 V4b: the verify section of an item's activity read. The newest verify row of the item (one row per merge), read only, from `verify_rows` and
@@ -17,6 +17,11 @@ export interface ItemVerify {
   status: VerifyRowStatus;
   /** The closed reason of an `unverified` row; null for every other status (a row that has not started has none). */
   reason: VerifyReasonCode | null;
+  /**
+   * D#749: what the reason does not say on its own, read from the row's `verify_unverified` fact (core's VERIFY_DETAIL_CODES): why the answer was refused for `envelope_rejected`, or the
+   * runner's named end of the job for `run_failed` (no browser, no saved sign-in, no answer). Null for every other row and for a fact that names none.
+   */
+  detail: VerifyDetailCode | null;
   method: VerifyMethod | null;
   /** The journeys' outcomes for a finished `verified` or `failed` row; null otherwise (an unverified row's results are not trusted: the check could not be made). */
   journeys: { total: number; passed: number; failed: number; other: number } | null;
@@ -47,6 +52,7 @@ export interface ItemVerify {
 
 interface Row {
   status: VerifyRowStatus;
+  detail: string | null;
   method: VerifyMethod | null;
   reason_code: VerifyReasonCode | null;
   result: JourneyResult[] | null;
@@ -81,7 +87,9 @@ function countJourneys(result: JourneyResult[] | null): ItemVerify['journeys'] {
 /** The item's newest verify row, or null when verification is off for its repository or the item has no row (the answer then carries no `verify`). */
 export async function readItemVerify(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<ItemVerify | null> {
   const { rows } = await client.query<Row>(
-    `SELECT r.status, r.method, r.reason_code, r.result, r.bug_item_id, r.pr_number, r.finished_at, r.created_at, r.account_check, r.journeys, r.checks_only, r.hold_reason, r.hold_since
+    `SELECT r.status, r.method, r.reason_code, r.result, r.bug_item_id, r.pr_number, r.finished_at, r.created_at, r.account_check, r.journeys, r.checks_only, r.hold_reason, r.hold_since,
+            (SELECT e.reasons[1] FROM work_item_driver_events e
+              WHERE e.account_id = r.account_id AND e.work_item_id = r.work_item_id AND e.kind = 'verify_unverified' AND e.dedupe_key = 'verify:' || r.id::text || ':unverified') AS detail
        FROM verify_rows r
        JOIN verify_settings s ON s.repo_id = r.repo_id AND s.account_id = r.account_id AND s.enabled
       WHERE r.work_item_id = $1::uuid
@@ -96,6 +104,7 @@ export async function readItemVerify(client: Pick<PoolClient, 'query'>, workItem
   return {
     status: r.status,
     reason,
+    detail: reason !== null && isVerifyDetailCode(r.detail) ? r.detail : null,
     method: r.method !== null && VERIFY_METHODS.includes(r.method) ? r.method : null,
     journeys: finishedWithResult ? countJourneys(r.result) : null,
     account: r.account_check !== null && ACCOUNT_CHECKS.includes(r.account_check) ? r.account_check : null,
