@@ -13,8 +13,9 @@ export default defineConfig({
     environment: "node",
     globalSetup: ["./test/globalSetup.ts"],
     setupFiles: ["../test-guard/src/setup.ts", "../db/test/support/bind-test-env.ts"],
-    testTimeout: 20000,
-    hookTimeout: 20000,
+    // Real child processes and a real database: sized for a loaded host (same value as packages/fx-runner).
+    testTimeout: 30000,
+    hookTimeout: 30000,
     fileParallelism: false,
     pool: "forks",
     poolOptions: {

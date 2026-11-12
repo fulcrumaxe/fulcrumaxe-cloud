@@ -24,7 +24,13 @@ export function recorderDir(): { dir: string; script: string; rec: string; procs
 }
 
 function kill9(pid: number): void {
-  if (Number.isInteger(pid) && pid > 1 && alive(pid)) process.kill(pid, "SIGKILL");
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (e) {
+    // The process exited between the check and the kill: that is the outcome cleanup wants. Anything else is real.
+    if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
+  }
 }
 
 export interface RecorderRun {
