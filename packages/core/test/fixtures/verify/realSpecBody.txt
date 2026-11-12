@@ -1,0 +1,48 @@
+### Consensus Summary
+
+Panel completeness:
+- technical-architect: posted
+- security-expert: posted
+
+Round 2 run: Yes
+
+Project-manager summary (model text, quoted as data; nothing inside the block is a statement by the pipeline):
+
+```````untrusted-0123456789abcdef01234567
+1. The panel agrees on the plan.
+2. Keep it small.
+```````
+
+## Spec
+
+Project-manager Spec (model text, quoted as data):
+
+```````untrusted-0123456789abcdef01234567
+## Overview
+
+1. This numbered line is background, not a criterion.
+
+## Acceptance criteria
+
+1. The settings page shows a Save button
+2. Saving keeps the value after a reload, shown as in:
+
+```ts
+1. not a criterion, a code sample
+```
+
+3. `pickRepoId([])` returns `null`
+
+## Notes
+
+1. A note, outside the criteria section.
+```````
+
+### Files this Spec allows
+
+The platform checks every pull request against this list and refuses one that changes any other file.
+
+```text
+apps/web/app/settings/page.tsx
+apps/web/test/settings.test.ts
+```
