@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
@@ -21,7 +21,7 @@ describe.skipIf(!ready)("the fx-agent guest, booted under Firecracker", () => {
   let vm: Vm;
   let work: string;
   beforeAll(async () => {
-    work = mkdtempSync(path.join(tmpdir(), "fx-vm-boot-"));
+    work = mkdtempSync(path.join(socketTmpRoot(), "fx-vm-boot-"));
     vm = await bootVm({ firecracker: env.firecracker!, kernel: env.kernel!, rootfs: env.rootfs! }, path.join(work, "vm"));
     console.warn(`vmBoot.real: first agent answer ${vm.bootMs} ms after spawn`);
   }, 90_000);
