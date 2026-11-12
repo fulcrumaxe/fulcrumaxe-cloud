@@ -2,7 +2,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS, FXVERIFY_TOOL_PREFIX } from '@fulcrumaxe/runner-protocol';
 import { MAX_STEP_TEXT, MAX_STEPS, parseEnvelope } from '../src/verify/envelope.js';
+import { SUBMIT_LINE, buildVerifyPrompt } from '../src/verify/prompt.js';
 
 /**
  * D#749 V5: the deploy verifier card tells the tester to answer in the envelope `parseEnvelope` reads. The card is read as text (this
@@ -57,5 +59,32 @@ describe('the deploy verifier card and the envelope parser', () => {
       const prompt = readFileSync(promptPath, 'utf8');
       for (const [name, re] of SHARED) expect(prompt, name).toMatch(re);
     }
+  });
+});
+
+/**
+ * D#749: on the runner's own browser the only answer read is the one handed to the `submit_answer` tool (it writes the answer file). A live run whose browser could not start wrote a
+ * correct all-blocked object as text and so handed in nothing. The card and the prompt both say to call the tool, with its real name and argument, even when nothing can be checked.
+ */
+describe('the answer goes in through submit_answer', () => {
+  it('names the runner tool and its argument as the runner protocol and the verify server define them', () => {
+    expect(DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS).toContain(`${FXVERIFY_TOOL_PREFIX}submit_answer`);
+    const server = readFileSync(path.join(here, '..', '..', 'fx-runner', 'src', 'verifyBrowser', 'server.ts'), 'utf8');
+    expect(server).toMatch(/submit_answer: \{[^\n]*props: \{ envelope: /);
+  });
+
+  it('the card says to call it once with the block as its envelope, that only that call is read, and to call it when every journey is blocked', () => {
+    const flat = card.replace(/\s+/g, ' ');
+    expect(flat).toContain('When your tools include `submit_answer`, hand the block in by calling it once, with the block as its `envelope`.');
+    expect(flat).toContain('Only that call is read; text you write is not.');
+    expect(flat).toContain('Call it even when the browser does not start and every journey is `blocked`.');
+  });
+
+  it('the prompt carries the same instruction, last, whatever the journeys', () => {
+    const prompt = buildVerifyPrompt({ baseUrl: 'https://app.example.test', mergeSha: 'a'.repeat(40), deployedCommit: 'a'.repeat(40), journeys: [{ id: 'c1', source: 'criterion', text: 'Open the page' }] });
+    expect(prompt.split('\n').at(-1)).toBe(SUBMIT_LINE);
+    expect(SUBMIT_LINE).toContain('submit_answer once, with the object as its "envelope" argument');
+    expect(SUBMIT_LINE).toContain('text you write is ignored');
+    expect(SUBMIT_LINE).toContain('every journey is "blocked"');
   });
 });

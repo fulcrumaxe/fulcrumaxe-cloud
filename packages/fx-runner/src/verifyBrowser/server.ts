@@ -96,6 +96,8 @@ interface Reply {
 }
 const ok = (text: string): Reply => ({ text, error: false });
 const fail = (code: string, body = ""): Reply => ({ text: fenced(`error: ${code}`, body), error: true });
+/** The closed codes that mean the browser itself is not there (driver.ts), as opposed to one action failing on a page. */
+const BROWSER_DOWN_CODES: ReadonlySet<string> = new Set(["browser_start_failed", "browser_tmp_unavailable", "playwright_missing", "no_browser"]);
 
 export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<void>; stop: () => Promise<void> } {
   const now = opts.now ?? (() => Date.now());
@@ -264,7 +266,9 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
       return await run(name, checked);
     } catch (error) {
       // fx-swallow-ok: a failed action is answered with a closed error code; the browser's message can carry page text and is not forwarded
-      return fail(error instanceof ToolError ? error.code : "action_failed");
+      const code = error instanceof ToolError ? error.code : "action_failed";
+      // D#749: when the browser cannot start, no journey can be checked; the answer still has to go in through submit_answer, or the run ends with no answer at all.
+      return fail(code, BROWSER_DOWN_CODES.has(code) ? "the browser cannot start: answer every journey blocked with submit_answer now" : "");
     }
   };
 

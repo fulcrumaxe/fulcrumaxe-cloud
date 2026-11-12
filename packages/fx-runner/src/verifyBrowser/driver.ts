@@ -1,4 +1,4 @@
-import { existsSync, promises as fs, readdirSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, promises as fs, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import type { LoginSession } from "../commands/verifyLogin.js";
@@ -9,15 +9,45 @@ import { headersWithBypass } from "./bypass.js";
 import { hostRulesArg, isAllowedUrl, type BasePin } from "./pin.js";
 import { startOriginProxy, type OriginProxy } from "./proxy.js";
 import { SNAPSHOT_SCRIPT, type RawElement } from "./snapshot.js";
+// The record names this job's TMPDIR so a re-claim can remove the folder of a server killed before its own `close` (settingsFile.ts `clearVerifyLeftovers`).
+import { BROWSER_TMP_PREFIX, BROWSER_TMP_RECORD } from "./tmpRecord.js";
 
 /**
  * D#749 V2c-2a: the one place a browser is started. Chromium comes from the runner's settings (the browsers directory first, then the system's Chrome or
  * Chromium), never from a running Chrome of the person's. Every job gets a fresh browser and a context built from the storage-state file it is given: `readScopedState` (stateScope.ts)
  * reads it once, refuses it when it holds another origin, and hands the checked object to the context; it is never logged and nothing is written back to it. The browser's environment is a short allowlist plus a throwaway HOME
- * and TMPDIR inside the job directory, so no token of the runner's reaches it. Playwright puts the browser's profile in a fresh temp directory of its own and removes
- * it when the browser closes; the job's HOME and TMPDIR are removed by `close` below.
+ * inside the job directory and a throwaway TMPDIR in a short private directory (`browserTmpParent`), so no token of the runner's reaches it. Playwright puts the browser's profile in a fresh
+ * temp directory of its own and removes it when the browser closes; the job's HOME and TMPDIR are removed by `close` below.
  */
 export const ACTION_MS = 10_000;
+
+/** The longest path a Unix socket can be bound at on Linux (`sun_path` is 108 bytes with its terminating zero). */
+export const UNIX_SOCKET_PATH_MAX = 107;
+/** What Chromium adds under its TMPDIR for its singleton socket: `/org.chromium.Chromium.XXXXXX/SingletonSocket`. */
+const CHROMIUM_SOCKET_NAME_ROOM_TEXT = "/org.chromium.Chromium.XXXXXX/SingletonSocket";
+export const CHROMIUM_SOCKET_NAME_ROOM = Buffer.byteLength(CHROMIUM_SOCKET_NAME_ROOM_TEXT, "utf8");
+
+
+/**
+ * D#749: where the browser's TMPDIR is made. Chromium binds its singleton socket under TMPDIR; a TMPDIR inside the job directory (`~/.fx-runner/jobs/<uuid>/tmp`) is longer than a socket
+ * path may be, and Chromium then stops at start ("Socket path too long"). So the TMPDIR is a fresh private directory (`mkdtemp`, mode 0700) under the first candidate that is a writable
+ * directory short enough for that socket: the TMPDIR the runner handed in (`hostEnv`), then `/tmp`. None: undefined, and the launch refuses with `browser_tmp_unavailable`.
+ */
+export function browserTmpParent(candidates: ReadonlyArray<string | undefined> = ["/tmp"]): string | undefined {
+  for (const dir of candidates) {
+    // Bytes, not UTF-16 units: the socket limit is on the encoded path.
+    if (dir === undefined || !path.isAbsolute(dir) || Buffer.byteLength(path.join(dir, `${BROWSER_TMP_PREFIX}XXXXXX`), "utf8") + Buffer.byteLength(CHROMIUM_SOCKET_NAME_ROOM_TEXT, "utf8") > UNIX_SOCKET_PATH_MAX) continue;
+    try {
+      if (!statSync(dir).isDirectory()) continue;
+      accessSync(dir, fsConstants.W_OK | fsConstants.X_OK);
+      return dir;
+    } catch {
+      // fx-swallow-ok: a candidate that is missing or not writable is skipped; no candidate is the closed code at the launch
+      continue;
+    }
+  }
+  return undefined;
+}
 export const NAVIGATION_MS = 30_000;
 const ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "TZ", "FONTCONFIG_FILE", "FONTCONFIG_PATH"];
 const KEYS = new Set(["Enter", "Escape", "Tab"]);
@@ -104,6 +134,13 @@ function classify(error: unknown): ToolError {
   return new ToolError("action_failed");
 }
 
+/** Removes the job's browser HOME, its TMPDIR and the record that names it; the record last, so a crash in between still leaves it to name the folder. */
+async function removeBrowserFolders(home: string, tmp: string | undefined, record: string): Promise<void> {
+  await fs.rm(home, { recursive: true, force: true });
+  if (tmp !== undefined) await fs.rm(tmp, { recursive: true, force: true });
+  await fs.rm(record, { force: true });
+}
+
 export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
   const info = await fs.lstat(cfg.jobDir);
   if (!path.isAbsolute(cfg.jobDir) || !info.isDirectory() || info.isSymbolicLink()) throw new ToolError("bad_job_dir");
@@ -116,21 +153,33 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
     scoped = read.state as typeof scoped;
   }
   const home = path.join(cfg.jobDir, "home");
-  const tmp = path.join(cfg.jobDir, "tmp");
-  // A plain mkdir (not recursive): a path that already exists, a planted link included, is refused rather than reused or removed.
-  await fs.mkdir(home, { mode: 0o700 });
-  await fs.mkdir(tmp, { mode: 0o700 });
-  const env: Record<string, string> = { HOME: home, TMPDIR: tmp };
-  for (const name of ENV_ALLOWLIST) {
-    const value = cfg.hostEnv[name];
-    if (value !== undefined) env[name] = value;
-  }
+  const record = path.join(cfg.jobDir, BROWSER_TMP_RECORD);
+  const tmpParent = browserTmpParent([cfg.hostEnv["TMPDIR"], "/tmp"]);
+  if (tmpParent === undefined) throw new ToolError("browser_tmp_unavailable");
+  // Every check that can refuse comes before any folder is made (D#749, CWE-459): the server tries the launch again on each tool call, so a refusal must leave nothing behind.
   let pw: typeof import("playwright-core");
   try {
     pw = (await loadPlaywright()) as typeof import("playwright-core");
   } catch {
     // fx-swallow-ok: reported as a closed code; the loader's message names paths
     throw new ToolError("playwright_missing");
+  }
+  // A plain mkdir (not recursive): a path that already exists, a planted link included, is refused rather than reused or removed.
+  await fs.mkdir(home, { mode: 0o700 });
+  let tmp: string;
+  try {
+    // A fresh name of our own, mode 0700 (mkdtemp): short enough for Chromium's socket, and no other user can enter it. Its path is recorded in the job directory first thing.
+    tmp = await fs.mkdtemp(path.join(tmpParent, BROWSER_TMP_PREFIX));
+    await fs.writeFile(record, tmp, { mode: 0o600 });
+  } catch {
+    // fx-swallow-ok: reported as a closed code; the error names paths
+    await removeBrowserFolders(home, undefined, record);
+    throw new ToolError("browser_tmp_unavailable");
+  }
+  const env: Record<string, string> = { HOME: home, TMPDIR: tmp };
+  for (const name of ENV_ALLOWLIST) {
+    const value = cfg.hostEnv[name];
+    if (value !== undefined) env[name] = value;
   }
   let browser: Browser | undefined;
   let proxy: OriginProxy | undefined;
@@ -258,16 +307,16 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
       close: async () => {
         await browser?.close().catch(() => undefined);
         await proxy?.close();
-        await fs.rm(home, { recursive: true, force: true });
-        await fs.rm(tmp, { recursive: true, force: true });
+        await removeBrowserFolders(home, tmp, record);
       },
     };
   } catch (error) {
     await browser?.close().catch(() => undefined);
     await proxy?.close();
-    await fs.rm(home, { recursive: true, force: true });
-    await fs.rm(tmp, { recursive: true, force: true });
-    throw classify(error);
+    await removeBrowserFolders(home, tmp, record);
+    // D#749: a browser that never came up is named as such (not the generic `action_failed` of a page action), so the model and the log can tell it apart.
+    const closed = classify(error);
+    throw closed.code === "action_failed" ? new ToolError("browser_start_failed") : closed;
   }
 }
 

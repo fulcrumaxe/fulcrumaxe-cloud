@@ -28,6 +28,14 @@ function assertOurJourneys(journeys: readonly Journey[]): void {
   }
 }
 
+/**
+ * D#749: the runner's own browser (`playwright_runner`) reads the answer ONLY from its `submit_answer` tool (it writes the answer file the runner reports); text the model writes is
+ * discarded. A live run whose browser could not start wrote a correct all-blocked object as text and so handed in nothing. The line is conditional on the tool, not on the method this
+ * stage asked for, because the job is run under the method it was SIGNED with (verifyRun.ts), and a Chrome job has no such tool. Pinned by a test.
+ */
+export const SUBMIT_LINE =
+  'If your tools include submit_answer, hand in that JSON object by calling submit_answer once, with the object as its "envelope" argument: that call is then the only answer that is read, and text you write is ignored. Call it even when the browser does not work and every journey is "blocked".';
+
 export function buildVerifyPrompt(input: VerifyPromptInput): string {
   assertOurJourneys(input.journeys);
   const journeys = input.journeys.flatMap((j) => [`JOURNEY ${j.id} (${j.source}):`, sanitize(j.text)]);
@@ -41,5 +49,6 @@ export function buildVerifyPrompt(input: VerifyPromptInput): string {
     '',
     'Answer with one JSON object and nothing else: {"journeys":[{"id","result":"pass"|"fail"|"blocked","steps":[{"did","dom_fact","number"?}],"console_errors":<integer>,"undo_checked":<boolean>,"reloaded":<boolean>}]}.',
     `Answer every journey once, with its id. Give at most ${MAX_STEPS} steps per journey and at most ${MAX_STEP_TEXT} characters per "did" and "dom_fact". A "pass" needs a step stating what you did and the page fact or number that showed it, an undo check and a reload; otherwise answer "blocked" or "fail".`,
+    SUBMIT_LINE,
   ].join('\n');
 }

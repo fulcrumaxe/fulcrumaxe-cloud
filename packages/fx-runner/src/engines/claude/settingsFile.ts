@@ -1,10 +1,11 @@
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS, DEPLOY_VERIFIER_ROLE, excludeDenyRules, isBrowserJobRole, verifierReadGuardHook, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
 import type { ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { anchored, checkCommandDenyRules, confineFileTools, denyRules, readRulesFor, workspaceProtectedEditRules } from "./filePermissions.js";
 import type { VerifyServerSpec } from "../../verifyBrowser/spec.js";
+import { BROWSER_TMP_NAME, BROWSER_TMP_RECORD } from "../../verifyBrowser/tmpRecord.js";
 import { EngineRefusal } from "./refusal.js";
 
 export type { VerifyServerSpec };
@@ -121,9 +122,33 @@ export function verifyServerUp(init: Record<string, unknown>): boolean {
   return entry !== undefined && (entry["status"] === "connected" || entry["status"] === "pending");
 }
 
-/** A re-claimed run id starts with none of the last attempt's answer or browser folders (the server refuses to reuse a folder that exists). */
+/**
+ * A re-claimed run id starts with none of the last attempt's answer or browser folders (the server refuses to reuse a folder that exists). D#749: that includes the browser TMPDIR the
+ * last attempt's server made outside the job directory, which its record file names. The folder is removed only when the record is a plain file of ours that names an absolute path
+ * whose last part is a driver-made `fxv-XXXXXX` folder, and that folder is a real directory (never a link) that only its owner can enter. Anything else is left alone.
+ */
 export function clearVerifyLeftovers(jobDir: string): void {
-  for (const name of ["answer.json", "home", "tmp"]) rmSync(path.join(jobDir, name), { recursive: true, force: true });
+  const named = recordedBrowserTmp(path.join(jobDir, BROWSER_TMP_RECORD));
+  if (named !== undefined) rmSync(named, { recursive: true, force: true });
+  for (const name of ["answer.json", "home", "tmp", BROWSER_TMP_RECORD]) rmSync(path.join(jobDir, name), { recursive: true, force: true });
+}
+
+function recordedBrowserTmp(record: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(record, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > 4096 || (info.mode & 0o077) !== 0) return undefined;
+    const named = readFileSync(fd, "utf8");
+    if (!path.isAbsolute(named) || path.resolve(named) !== named || !BROWSER_TMP_NAME.test(path.basename(named))) return undefined;
+    const dir = lstatSync(named);
+    return dir.isDirectory() && !dir.isSymbolicLink() && (dir.mode & 0o077) === 0 && dir.uid === info.uid ? named : undefined;
+  } catch {
+    // fx-swallow-ok: no record, or one that cannot be read, names nothing to remove
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /**

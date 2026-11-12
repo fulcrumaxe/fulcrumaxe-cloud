@@ -73,3 +73,5 @@ when you cannot check anything. The block is one JSON object and no other text:
 - At most 20 steps per journey and at most 300 characters in each `did` and `dom_fact`. Put a number you read in `number`.
 - `console_errors` is a whole number. `undo_checked` and `reloaded` say whether you really did them.
 - If you cannot check anything, answer every journey `blocked` with no steps.
+- When your tools include `submit_answer`, hand the block in by calling it once, with the block as its `envelope`. Only that
+  call is read; text you write is not. Call it even when the browser does not start and every journey is `blocked`.
