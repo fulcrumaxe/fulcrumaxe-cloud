@@ -90,5 +90,10 @@ describe("the journal words for what is held back", () => {
     expect(describeHeld("ceiling", "memory")).toBe("holding back all new jobs: at the job limit (heavy jobs: memory is short)");
     expect(describeHeld("disk", null)).toBe("holding back light jobs: disk space is low");
     expect(describeHeld(null, null)).toBe("taking all kinds of jobs again");
+    // The warning (near the limit, one job at a time) must not read as the real block (reached).
+    expect(describeHeld("usage_limit", "usage_limit")).toBe("holding back all new jobs: the plan's usage limit is reached");
+    const near = describeHeld("usage_limit", "usage_limit", true);
+    expect(near).toBe("holding back all new jobs: near the plan's usage limit, so one job at a time (the limit itself is not reached)");
+    expect(near).not.toContain("is reached");
   });
 });

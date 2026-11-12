@@ -41,6 +41,8 @@ export interface Snapshot {
   /** More jobs of each class that fit right now. */
   free: Record<JobClass, number>;
   limitedBy: LimitedBy | null;
+  /** The usage hold is the one-job-at-a-time warning (the plan's limit is near), not a block (the limit is reached). */
+  usageNear: boolean;
 }
 
 export interface Admission {
@@ -184,6 +186,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
       },
       free: { light: light.count, heavy: heavy.count },
       limitedBy,
+      usageNear: usageHeld && !usage.blocked,
     };
   }
 

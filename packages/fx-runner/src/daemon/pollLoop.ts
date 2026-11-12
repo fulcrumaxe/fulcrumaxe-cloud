@@ -38,10 +38,10 @@ export type PollEvent =
   /** D#6 RUNNER-WAKE: the wake route failed 3 times in a row; plain 60-second claims until a claim brings a grant again. */
   | { event: "wake_fallback" }
   /** The classes this machine is holding back, and why; said once per change (both null: nothing is held back any more). */
-  | { event: "held"; light: LimitedBy | null; heavy: LimitedBy | null };
+  | { event: "held"; light: LimitedBy | null; heavy: LimitedBy | null; near?: true };
 
 /** `protected`: Vercel's Deployment Protection answered 401 before the cloud saw the request, so the key was not judged. */
-export type PollEnd = "stopped" | "unauthorized" | "protected" | "restart";
+export type PollEnd = "stopped" | "unauthorized" | "protected" | "restart" | "drained";
 
 export interface PollDeps {
   /** `wake` is needed only with a `wake` tracker. */
@@ -73,6 +73,11 @@ export interface PollDeps {
   admission?: Admission;
   /** Called before each claim, while no job is in hand (with several jobs, only once the last one has ended). Resolving `"restart"` ends the loop (self-update switched the program and a service manager should start it again). */
   betweenJobs?: () => Promise<"restart" | undefined>;
+  /**
+   * `fx-runner drain`: true once the person asked the runner to finish what it holds and stop. Nothing new is claimed (the admission also reads the marker),
+   * no order is worked, and the loop ends with `"drained"` as soon as no run is in hand. Read at the top of every pass.
+   */
+  draining?: () => boolean;
   log?: (event: PollEvent) => void;
   /** In [0, 1). Default `Math.random`. */
   random?: () => number;
@@ -175,10 +180,11 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
   let heldKey = "none|none";
   /** One `held` event per change of what is held back. */
   function noteHeld(snapshot: Snapshot): void {
-    const key = `${snapshot.limits.light ?? "none"}|${snapshot.limits.heavy ?? "none"}`;
+    const near = snapshot.usageNear && (snapshot.limits.light === "usage_limit" || snapshot.limits.heavy === "usage_limit");
+    const key = `${snapshot.limits.light ?? "none"}|${snapshot.limits.heavy ?? "none"}${near ? "|near" : ""}`;
     if (key === heldKey) return;
     heldKey = key;
-    log({ event: "held", light: snapshot.limits.light, heavy: snapshot.limits.heavy });
+    log({ event: "held", light: snapshot.limits.light, heavy: snapshot.limits.heavy, ...(near ? { near: true as const } : {}) });
   }
   /** Waits `seconds`, or less when a job ends meanwhile and the loop could claim again. */
   async function waitForWork(seconds: number): Promise<void> {
@@ -231,6 +237,8 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
 
   try {
     while (!deps.signal.aborted) {
+      // Asked to drain: the first pass with nothing in hand ends the loop, before any claim. While jobs are in hand the passes below only wait for them.
+      if (deps.draining?.() === true && running.size === 0) return "drained";
       // With no job in hand this is the one place self-update may act (a count, not a flag: one job's end never clears the others).
       if (deps.betweenJobs !== undefined && running.size === 0) {
         try {
@@ -293,10 +301,10 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
         // Only an idle answer may be cut short by a job ending; the cloud's throttle (`rate_limited`) is waited out in full. A closed sandbox's
         // status poll keeps the cloud's own cadence: no wake check can make it take a job.
         // A merge order waits for this runner: work it, and claim again at once when it was taken (an order is bounded work, never a spin: `none` falls through to the wait).
-        if (reply.kind === "idle" && reply.mergeOrder === true && gate.open && deps.onMergeOrder !== undefined && !deps.signal.aborted) {
+        if (reply.kind === "idle" && reply.mergeOrder === true && gate.open && deps.onMergeOrder !== undefined && !deps.signal.aborted && deps.draining?.() !== true) {
           if ((await mergeOrders.run()) === "handled") continue;
         }
-        if (reply.kind === "idle" && reply.deployOrder === true && gate.open && deps.onDeployOrder !== undefined && !deps.signal.aborted) {
+        if (reply.kind === "idle" && reply.deployOrder === true && gate.open && deps.onDeployOrder !== undefined && !deps.signal.aborted && deps.draining?.() !== true) {
           if ((await deployOrders.run()) === "handled") continue;
         }
         if (reply.kind === "idle") await (gate.open ? waitIdle(reply.retryAfter) : waitForWork(reply.retryAfter));

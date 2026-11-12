@@ -8,6 +8,7 @@ import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
 import { assistantCommand } from "./commands/assistant.js";
 import { attachCommand } from "./commands/attach.js";
+import { drainCommand } from "./commands/drain.js";
 import { claimingCommand, runnerResetFootprintsCommand, runnerSettingCommand, runnerUnsetCommand } from "./commands/claiming.js";
 import { SETTING_KEYS } from "./runnerSettings.js";
 import { registerCommand } from "./commands/register.js";
@@ -116,6 +117,8 @@ Commands:
                      Forget the memory each kind of job was learned to need; the estimates start from the defaults again.
   assistant unlink   Revoke the assistant token on the cloud and remove it from this machine.
   assistant link     Connect this machine's assistant to a workspace: prints a code a signed-in person approves, then stores the short-lived token (mode 0600) here.
+  drain [--no-wait]  The upgrade path. The running runner finishes the jobs it holds, claims nothing more and exits 0; this returns once it has, so replacing the program
+                     loses no run (a plain restart can kill a job claimed a second earlier). With a service manager it stays down until you start it again. --no-wait only asks.
   pause | resume     Stop claiming new jobs (running ones finish), or start again. The runner stays registered and keeps its place.
 `;
 
@@ -137,6 +140,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   update: { flags: ["pin"], switches: ["check", "unpin", "rollback"] },
   config: { flags: [], switches: [], positionals: 3 },
   pause: { flags: [], switches: [] },
+  drain: { flags: [], switches: ["no-wait"] },
   resume: { flags: [], switches: [] },
   credentials: { flags: [], switches: [] },
   assistant: { flags: [], switches: [], positionals: 1 },
@@ -243,6 +247,10 @@ export async function runCli(io: CliIo): Promise<number> {
     }
     if (command === "assistant") return await assistantCommand(positionals, ctx);
     if (command === "pause" || command === "resume") return claimingCommand(command, ctx);
+    if (command === "drain") {
+      if (io.host === undefined) throw new CliError("drain is only available from the fx-runner program");
+      return await drainCommand(ctx, io.host.kill, { wait: !flags.has("no-wait") });
+    }
     if (command === "config" && positionals[0] === "reset" && positionals[1] === "footprints") return runnerResetFootprintsCommand(ctx);
     if (command === "config" && positionals[0] === "unset" && positionals[1] !== undefined && SETTING_KEYS.includes(positionals[1])) return runnerUnsetCommand(positionals[1], ctx);
     if (command === "config" && positionals[0] === "set" && positionals[1] !== undefined && SETTING_KEYS.includes(positionals[1])) return runnerSettingCommand(positionals[1], positionals[2], ctx);
