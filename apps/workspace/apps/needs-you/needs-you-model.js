@@ -81,6 +81,10 @@ export const WORDS = {
   overdue: "Overdue",
   answered: "Answered",
   alreadyAnswered: "That was already answered.",
+  raiseOverBudget: "That limit is more than your account can still spend this month, so it was not raised. Nothing changed; the question is still here.",
+  raiseConflict: "The limit was changed at the same moment, so it was not raised. Look at the new limit and answer again.",
+  raiseStale: "The limit on this item changed after this question was asked, so this answer no longer applies. Nothing changed. Check the item's limit, or stop the item.",
+  raiseUnavailable: "This item no longer has a spend limit to raise. Nothing changed.",
   runMovedOn: "That run has already moved on, so there is nothing to answer.",
   runnerGone: "You have no live runner on your plan that lists this repository (it may have been removed, or never set up), so this run can't start on your plan. Add the repository to a runner on your plan, or set one up, then say yes again. Nothing was started.",
   mergeStep: "Merge this pull request on GitHub",
@@ -283,6 +287,10 @@ export function failureSentence(e) {
   if (e && e.status === 403) return WORDS.onlyAdmins;
   if (e && e.status === 409 && e.code === "already_answered") return WORDS.alreadyAnswered;
   if (e && e.status === 409 && e.code === "runner_gone") return WORDS.runnerGone;
+  if (e && e.status === 409 && e.code === "raise_over_budget") return WORDS.raiseOverBudget;
+  if (e && e.status === 409 && e.code === "raise_conflict") return WORDS.raiseConflict;
+  if (e && e.status === 409 && e.code === "raise_stale") return WORDS.raiseStale;
+  if (e && e.status === 409 && e.code === "raise_unavailable") return WORDS.raiseUnavailable;
   if (e && e.status === 409 && e.code === "run_moved_on") return WORDS.runMovedOn;
   return WORDS.failed;
 }

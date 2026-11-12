@@ -43,6 +43,8 @@ export const activityResponseSchema = z.object({
       lines: z.array(z.object({ at: z.string(), text: z.string() })),
       // D#6 C42-3: where the run ran, and for a run on the person's machine its cost as a state (never a silent 0), a sentence for the states with no figure, and when the runner last checked in.
       runtime: z.string().optional(),
+      // A refused run only: the fixed code that says why it was refused (the status stays refused_spend).
+      failure_reason: z.string().optional(),
       runner_usage: runnerUsageSchema.nullable().optional(),
       runner_usage_state: z.enum(["recorded", "not_priced", "not_recorded"]).nullable().optional(),
       runner_usage_note: z.string().nullable().optional(),

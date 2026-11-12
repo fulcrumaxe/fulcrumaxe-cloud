@@ -43,6 +43,11 @@ export interface EnvelopeWrite {
    * before anything else is checked or written. Omit it only for an amount of 0, which voids an envelope (the undo of an approval).
    */
   minAmountUsd?: number;
+  /**
+   * Write the version after THIS one, not after whatever is newest now. A caller that decided on a version it read earlier (a raise bound to the version its
+   * question was asked at) passes it, so an edit that committed in between collides on the version key and is refused `version_conflict` instead of being overwritten.
+   */
+  fromVersion?: number;
   now?: Date;
 }
 
@@ -60,7 +65,7 @@ export async function writeEnvelopeVersion(client: PoolClient, w: EnvelopeWrite)
   if (w.envelopeId !== undefined) {
     const current = await currentEnvelope(client, w.accountId, w.envelopeId);
     if (current === null) throw new EnvelopeWriteError('envelope_not_found');
-    version = current.version + 1;
+    version = (w.fromVersion ?? current.version) + 1;
   }
   try {
     await client.query('SAVEPOINT envelope_write');

@@ -7,6 +7,7 @@
 //
 // One file for both halves because the Runs app has a per-app boot-file ceiling (build/budget.mjs).
 import { clockText, h, timeNode } from "../_lib/dom.js";
+import { REFUSAL } from "../_lib/api.js";
 import { crossesBoundary, displayText, nextCarry } from "./runs-display-filter.js";
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -651,6 +652,8 @@ export function headLinks(insight, { openPipeline }) {
 
 /** Why a run failed, in plain words, for each fixed code the runner records. */
 const FAILURE_TEXT = {
+  // The run's status stays `refused_spend` whatever the cause; these are the fixed admit-refusal codes, each in its own sentence.
+  ...Object.fromEntries(Object.entries(REFUSAL).map(([code, r]) => [code, r.text])),
   sandbox_busy: "Another build is still using this item's sandbox. Wait for it to finish, then build again.",
   sandbox_error: "The sandbox could not be created or started.",
   agent_start_timeout: "The agent did not start in time.",

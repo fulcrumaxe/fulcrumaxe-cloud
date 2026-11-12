@@ -686,6 +686,9 @@
                               }
                             ]
                           },
+                          "failure_reason": {
+                            "type": "string"
+                          },
                           "created_at": {
                             "type": "string"
                           },
@@ -990,6 +993,9 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "failure_reason": {
+                      "type": "string"
                     },
                     "created_at": {
                       "type": "string"
@@ -3779,6 +3785,9 @@
                             }
                           },
                           "runtime": {
+                            "type": "string"
+                          },
+                          "failure_reason": {
                             "type": "string"
                           },
                           "runner_usage": {
@@ -21432,7 +21441,7 @@
             }
           },
           "409": {
-            "description": "The ask is already answered (`already_answered`), has no run to resume (`ask_no_run`), its run has moved on (`run_moved_on`: for a member-plan ask, the run was approved elsewhere, claimed, cancelled or finished; the sweep withdraws the ask), or, for a yes to a member-plan ask, the plan holder has no live subscription runner that lists the run's repository (`runner_gone`: the runner was removed or revoked, or never set up). Nothing is written and the ask stays open; the holder can add the repository to a runner on their plan, or set one up, and say yes again.",
+            "description": "The ask is already answered (`already_answered`), has no run to resume (`ask_no_run`), its run has moved on (`run_moved_on`: for a member-plan ask, the run was approved elsewhere, claimed, cancelled or finished; the sweep withdraws the ask), or, for a yes to a member-plan ask, the plan holder has no live subscription runner that lists the run's repository (`runner_gone`: the runner was removed or revoked, or never set up). Raising a spend limit is refused when the figure is above what the account can still spend this month (`raise_over_budget`) or the item no longer has a limit (`raise_unavailable`), the limit changed after the question was asked (`raise_stale`), or the limit was edited at the same moment (`raise_conflict`); nothing is written then either. Nothing is written and the ask stays open; the holder can add the repository to a runner on their plan, or set one up, and say yes again.",
             "content": {
               "application/json": {
                 "schema": {

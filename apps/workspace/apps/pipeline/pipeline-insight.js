@@ -11,7 +11,7 @@
 // The file has two halves: the pure model (no DOM, no network) and, below the divider, the panel that draws it. They
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
 import { clockText, h, timeNode } from "../_lib/dom.js";
-import { api, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
+import { api, createRetryGate, refusalLabel, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { APPROVE_SENTENCES, approveSentenceFor, refusalSentence, sayLive, stageWords } from "./pipeline-actions.js";
 
 
@@ -64,7 +64,7 @@ const STATUS_WORDS = {
   killed_spend: "stopped at the spend limit",
   refused_spend: "not started: spend limit",
 };
-export const statusWord = (status) => STATUS_WORDS[status] || "ended";
+export const statusWord = (status, reason) => (status === "refused_spend" ? "not started: " + refusalLabel(reason) : STATUS_WORDS[status] || "ended");
 
 /** The first non-empty line of a text, cut to `max` characters (one line, for a collapsed row). */
 export function firstLine(text, max = 110) {
@@ -138,7 +138,7 @@ export function runView(run, maxLines = 40) {
     phase: phaseOf(run.role),
     role: roleWord(run.role),
     status: run.status,
-    statusWord: statusWord(run.status),
+    statusWord: statusWord(run.status, run.failure_reason),
     live,
     openByDefault: live,
     cost: rc ? rc.head : usdText(run.usd),
@@ -385,6 +385,13 @@ export function noticeFailedFiles(n) {
   return { files, filesMore: Number.isInteger(n.failed_files_more) && n.failed_files_more > 0 ? n.failed_files_more : 0 };
 }
 
+/** The opening of the Needs-a-person card: when the item already has a pull request the build is not "without" one, so the card names it. */
+function needsPersonLead(data) {
+  const pr = data && data.pr_number;
+  if (Number.isInteger(pr) && pr >= 1 && pr !== data.issue_number) return "The build stopped after opening pull request #" + pr + ". The executor's own account: ";
+  return "The build stopped without a pull request. The executor's own account: ";
+}
+
 /**
  * The notice banner: why the pipeline stopped and wants a person. `reason` is model text, returned as plain text and drawn
  * as a text node or a <pre> only, never markup. Any other kind, or a malformed notice, draws nothing.
@@ -394,7 +401,7 @@ export function noticeBanner(data) {
   if (!n || typeof n.reason !== "string") return null;
   if (n.kind === "not_feasible") return { kind: "not_feasible", title: "Stopped before building. ", lead: "The project manager says this can't be built as written: ", tail: " Edit the issue on GitHub and approve again, or close it.", reason: n.reason };
   if (n.kind === "check_failed") return { kind: "check_failed", title: "Couldn't check the build. ", lead: "", tail: "", reason: n.reason };
-  if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason, ...noticeFailedFiles(n) };
+  if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: needsPersonLead(data), tail: "", reason: n.reason, ...noticeFailedFiles(n) };
   // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words of its own around it.
   if (n.kind === "no_file_list" || n.kind === "respec_failed" || n.kind === "build_slot_wait" || n.kind === "public_update_stopped") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
   if (n.kind === "review_limit_wait") return { kind: n.kind, title: "", lead: "", tail: limitResetTail(n.resets_at), reason: n.reason };

@@ -29,6 +29,8 @@ export const runResponseSchema = z.object({
   tokens_out: z.number().nullable(),
   // D#6 R2b-5a: a runner run only. What it would have cost at API prices, as information; never part of any spend figure.
   runner_usage: runnerUsageSchema.nullable().optional(),
+  // A refused run only: the fixed code that says why it was refused (its status stays refused_spend).
+  failure_reason: z.string().optional(),
   created_at: z.string(),
   updated_at: z.string(),
   approved_by: z.object({ id: z.string().uuid(), name: z.string() }).nullable(),

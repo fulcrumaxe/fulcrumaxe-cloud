@@ -68,6 +68,10 @@ const MESSAGES: Record<string, string> = {
   ask_no_run: "this ask has no run to resume",
   ask_receipt_mismatch: "this ask cannot be answered",
   runner_gone: "the plan holder has no live subscription runner that lists this repository",
+  raise_over_budget: "that limit is more than your account can still spend this month, so it was not raised",
+  raise_conflict: "the limit was changed at the same moment, so it was not raised; look at the new limit and answer again",
+  raise_stale: "the limit on this item changed after this question was asked, so this answer no longer applies",
+  raise_unavailable: "this item has no spend limit to raise any more",
   run_moved_on: "the run this ask was about has moved on, so there is nothing to answer",
 };
 
@@ -129,7 +133,7 @@ export const decisionAskRoutes: RouteEntry[] = [
     rateClass: "write",
     extraResponses: {
       "404": "No such ask in this account.",
-      "409": "The ask is already answered (`already_answered`), has no run to resume (`ask_no_run`), its run has moved on (`run_moved_on`: for a member-plan ask, the run was approved elsewhere, claimed, cancelled or finished; the sweep withdraws the ask), or, for a yes to a member-plan ask, the plan holder has no live subscription runner that lists the run's repository (`runner_gone`: the runner was removed or revoked, or never set up). Nothing is written and the ask stays open; the holder can add the repository to a runner on their plan, or set one up, and say yes again.",
+      "409": "The ask is already answered (`already_answered`), has no run to resume (`ask_no_run`), its run has moved on (`run_moved_on`: for a member-plan ask, the run was approved elsewhere, claimed, cancelled or finished; the sweep withdraws the ask), or, for a yes to a member-plan ask, the plan holder has no live subscription runner that lists the run's repository (`runner_gone`: the runner was removed or revoked, or never set up). Raising a spend limit is refused when the figure is above what the account can still spend this month (`raise_over_budget`) or the item no longer has a limit (`raise_unavailable`), the limit changed after the question was asked (`raise_stale`), or the limit was edited at the same moment (`raise_conflict`); nothing is written then either. Nothing is written and the ask stays open; the holder can add the repository to a runner on their plan, or set one up, and say yes again.",
       "503": "Answers are not available yet (`decision_answers_unavailable`).",
     },
     paramsSchema: idParamsSchema,

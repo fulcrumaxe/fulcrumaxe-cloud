@@ -1,3 +1,4 @@
+import { REFUSAL_REASON_SQL, refusalField } from './refusal.js';
 import type { Pool, PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
@@ -35,6 +36,8 @@ export interface RunDTO {
   tokens_out: number | null;
   /** D#6 R2b-5a: a runner run only (absent on any other): what it would have cost at API prices, never spend. Null until the runner reports usage. */
   runner_usage?: RunnerUsage | null;
+  /** A refused run only (status `refused_spend`): the fixed code that says why admit refused it. Absent on any other run. */
+  failure_reason?: string;
   created_at: string;
   updated_at: string;
   /**
@@ -61,6 +64,7 @@ interface RunRow {
   tokens_in: string | null;
   tokens_out: string | null;
   runner_usage_json: unknown;
+  refusal_reason: string | null;
   created_at: Date;
   updated_at: Date;
   created_at_cursor: string; // fix round 1: full-precision text cursor, cursor-only, never in the DTO
@@ -71,7 +75,7 @@ interface RunRow {
 /** Shown where a member has no name on record. Never an email, an id or the word null (the same text the runner read model uses). */
 const UNNAMED_MEMBER = 'A team member';
 
-const RUN_COLUMNS = `id, work_item_id, parent_run_id, role, status, runtime, usd, tokens_in, tokens_out, ${RUNNER_USAGE_COLUMN}, created_at, updated_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor, approved_by,
+const RUN_COLUMNS = `id, work_item_id, parent_run_id, role, status, runtime, usd, tokens_in, tokens_out, ${RUNNER_USAGE_COLUMN}, ${REFUSAL_REASON_SQL}, created_at, updated_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor, approved_by,
   (SELECT COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), '${UNNAMED_MEMBER}') FROM users u WHERE u.id = agent_runs.approved_by) AS approved_by_name`;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -107,6 +111,7 @@ function toRunDTO(row: RunRow, auto: Set<string>): RunDTO {
     tokens_in: row.tokens_in === null ? null : Number(row.tokens_in),
     tokens_out: row.tokens_out === null ? null : Number(row.tokens_out),
     ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage }),
+    ...refusalField(row.refusal_reason),
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
     approved_by: row.approved_by === null ? null : { id: row.approved_by, name: row.approved_by_name ?? UNNAMED_MEMBER },

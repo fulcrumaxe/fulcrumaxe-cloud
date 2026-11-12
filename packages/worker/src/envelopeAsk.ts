@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { clampRuleOutcome, evaluateRules, platformAskRequest, tightenAskDisposition, usdCeilCents } from "@fx/decisions";
 import { resolveActionRules } from "@fx/db/src/actionRules.js";
+import { raiseLimitLabel } from "@fx/core/src/decisions/envelopeRaise.js";
 import { raiseAskMarked } from "@fx/core/src/decisions/raiseAskMarked.js";
 import { getCurrentDialSetting } from "@fx/db/src/decisions.js";
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeReceipt } from "@fx/db/src/receiptWriter.js";
@@ -93,7 +94,7 @@ export function createEnvelopeAsk(receiptPool: Pool) {
         workItemId,
         runId: run.id,
         options: [
-          { id: "raise_limit", label: `Raise the limit to ${cents(spent + Math.max(0, input.runUsd))}` },
+          { id: "raise_limit", label: raiseLimitLabel(spent + Math.max(0, input.runUsd)) },
           { id: "stop_item", label: "Stop this item" },
         ],
         proposed: "raise_limit",

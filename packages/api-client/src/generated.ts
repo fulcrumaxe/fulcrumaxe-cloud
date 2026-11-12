@@ -91,6 +91,7 @@ export interface Operations {
           api_equivalent_usd: number | null;
           price_table_version: string | null;
         }) | (null);
+        failure_reason?: string;
         created_at: string;
         updated_at: string;
         approved_by: ({
@@ -128,6 +129,7 @@ export interface Operations {
         api_equivalent_usd: number | null;
         price_table_version: string | null;
       }) | (null);
+      failure_reason?: string;
       created_at: string;
       updated_at: string;
       approved_by: ({
@@ -474,6 +476,7 @@ export interface Operations {
           text: string;
         }>;
         runtime?: string;
+        failure_reason?: string;
         runner_usage?: ({
           credential_mode: "subscription" | "api_key";
           model: string | null;

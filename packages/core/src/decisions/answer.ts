@@ -15,13 +15,14 @@ import { startGateForAsk } from '@fx/db/src/startGate.js';
 import { runAfterReceipt, type AfterReceiptHook } from './receiptHook.js';
 import { fileAllowedReversal, type AllowedReversalPlanner } from './reversalRequest.js';
 import { REVERSAL_ASK_ALLOW } from './reversalOverCap.js';
+import { ENVELOPE_ASK_RAISE, raiseLimitFromLabel, type EnvelopeRaiser } from './envelopeRaise.js';
 
 /**
  * D#7 DP11b (DP-C9): the answer service. One transaction on the RECEIPT pool, under `withTenant` with the
  * person's user id set, so the receipt's actor is that person. It writes no run-action request (DP11c's).
  */
 export type AskAnswerErrorCode =
-  | 'session_required' | 'forbidden' | 'not_found' | 'already_answered' | 'invalid_choice' | 'ask_no_run' | 'ask_receipt_mismatch' | 'runner_gone' | 'run_moved_on';
+  | 'session_required' | 'forbidden' | 'not_found' | 'already_answered' | 'invalid_choice' | 'ask_no_run' | 'ask_receipt_mismatch' | 'runner_gone' | 'run_moved_on' | 'raise_over_budget' | 'raise_unavailable' | 'raise_conflict' | 'raise_stale';
 
 /** `status` is the HTTP status a route answers with. Branch on `code`, never on the message. */
 export class AskAnswerError extends Error {
@@ -43,6 +44,8 @@ export interface AskAnswerCtx {
   afterReceipt?: AfterReceiptHook;
   /** D#7 DP7-2e (R4): decides the compensation row an "Allow another reversal" answer inserts. The worker's composition root supplies it. */
   reversal?: AllowedReversalPlanner;
+  /** Writes the new envelope version when a "spend past the limit" ask is answered "raise". The worker's composition root supplies it; without it that answer is refused. */
+  envelopeRaise?: EnvelopeRaiser;
 }
 export interface AskAnswerInput {
   askId: string;
@@ -75,7 +78,7 @@ interface AskRow {
   work_item_id: string;
   run_id: string | null;
   decision_type: string;
-  options: { id: string }[];
+  options: { id: string; label?: string }[];
   proposed: string;
   sub_item_key: string | null;
   state: string;
@@ -151,6 +154,17 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
         ruleSetVersion: ask.rule_set_version,
       });
       if (receipt.store !== 'decision_receipts') throw new AskAnswerError(409, 'ask_receipt_mismatch');
+      // 7b. Raising an item's spend limit is applied here, before the answer is recorded: the figure is the one the person was shown, the write respects the account's
+      // own budget (over it, the whole answer rolls back and the ask stays open), and the new envelope version is stamped with this person as its author.
+      if (ask.decision_type === 'spend_past_envelope' && choice === ENVELOPE_ASK_RAISE) {
+        const limitUsd = raiseLimitFromLabel(ask.options.find((o) => o.id === choice)?.label ?? '');
+        if (limitUsd === null || ctx.envelopeRaise === undefined) throw new AskAnswerError(409, 'raise_unavailable');
+        const raised = await ctx.envelopeRaise(client, { accountId, workItemId: ask.work_item_id, askId: ask.id, limitUsd });
+        if (raised === 'over_account_budget') throw new AskAnswerError(409, 'raise_over_budget');
+        if (raised === 'conflict') throw new AskAnswerError(409, 'raise_conflict');
+        if (raised === 'stale') throw new AskAnswerError(409, 'raise_stale');
+        if (raised === 'no_envelope') throw new AskAnswerError(409, 'raise_unavailable');
+      }
       // 8. The compare-and-set, linking the receipt in the same UPDATE.
       await answerAskIn(client, { askId: ask.id, choice, receiptId: receipt.id });
       // 8b. A reversal_over_cap answer is never a resume (R4). "Allow another reversal" inserts one compensation row keyed on the ask; keep_as_is and deny insert nothing.
