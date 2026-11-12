@@ -100,6 +100,9 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
   async function mergedItem(who: SeedRefs, repoId: string, pr: number, o: { byProduct?: boolean; mergeSha?: string } = {}): Promise<string> {
     const id = randomUUID();
     await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage) VALUES ($1, $2, $3, 'feature', 'internal', 'merged')`, [id, who.accountId, repoId]);
+    // One criterion a person can see, so the row has a journey to deploy for (a Spec with none ends the row at open as `no_visible_journeys`).
+    const spec = "1. The page shows the new button";
+    await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, $3, encode(sha256(convert_to($3, 'UTF8')), 'hex'), 'agent')`, [who.accountId, id, spec]);
     await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'review_passed', 'merged', now(), 'webhook', $3)`, [who.accountId, id, `d-${id}`]);
     if (o.byProduct !== false) {
       await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merged_by_gate', 'merged', $3, $4, 'k')`, [who.accountId, id, sha("1"), pr]);

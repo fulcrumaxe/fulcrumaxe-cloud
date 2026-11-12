@@ -28,6 +28,7 @@
       "other": 0
     },
     "account": "matched",
+    "criteria": { "browser": [1, 2], "checks": [] },
     "bug_item_id": "6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e11",
     "pr_number": 57,
     "at": "2026-11-10T12:00:00.000Z"

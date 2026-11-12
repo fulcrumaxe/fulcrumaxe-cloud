@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import { recordDriverEvent, type DriverEventKind } from '../work-items/driverEvents.js';
 import { specOfItemSql } from '../work-items/stages.js';
 import { cancelOpenOrders } from './orders.js';
-import { deriveJourneys, VerifyInputError, type Journey } from './journeys.js';
+import { planJourneys, VerifyInputError, type Journey } from './journeys.js';
 import { isEligible, readVerifySettings, writeVerifySettings, type VerifySettings, type VerifySettingsPatch } from './settings.js';
 
 /**
@@ -24,7 +24,7 @@ export const GATE_METHODS: readonly VerifyMethod[] = ['chrome_runner', 'playwrig
 export const VERIFY_REASON_CODES = [
   'no_browser', 'chrome_not_connected', 'wrong_account', 'sign_in_refused', 'deploy_failed', 'deployment_unreachable',
   'commit_not_deployed', 'envelope_rejected', 'hollow_pass', 'journey_blocked', 'journeys_missing', 'run_failed', 'verify_disabled',
-  'account_unverifiable',
+  'account_unverifiable', 'no_visible_journeys',
 ] as const;
 export type VerifyReasonCode = (typeof VERIFY_REASON_CODES)[number];
 /**
@@ -72,6 +72,8 @@ export interface VerifyRow {
   method: VerifyMethod | null;
   deployed_commit: string | null;
   journeys: Journey[];
+  /** The 1-based Spec numbers of the criteria left to the checks rather than the browser (migration 1010). */
+  checks_only: number[];
   result: JourneyResult[] | null;
   reason_code: VerifyReasonCode | null;
   bug_item_id: string | null;
@@ -83,7 +85,7 @@ export interface VerifyRow {
   finished_at: Date | null;
   created_at: Date;
 }
-const ROW_COLUMNS = `id, repo_id, batch_id, work_item_id, pr_number, merge_sha, status, method, deployed_commit, journeys, result, reason_code, bug_item_id, account_check, run_id,
+const ROW_COLUMNS = `id, repo_id, batch_id, work_item_id, pr_number, merge_sha, status, method, deployed_commit, journeys, checks_only, result, reason_code, bug_item_id, account_check, run_id,
   deploy_by_order, person_step, started_at, finished_at, created_at`;
 
 function bad(message: string): VerifyInputError {
@@ -102,6 +104,10 @@ export interface StreakInput {
   deployByOrder: boolean;
   /** A person acted during deploy or verify (drove the profile, hand-retried the tester, overrode a verdict). */
   personStep: boolean;
+  /** A Spec-criterion journey (`c<n>`: from a criterion or a recheck, not a standing journey) passed in this row. Only read for a `verified` row. */
+  criterionPassed: boolean;
+  /** The closed reason of an `unverified` row (absent or null for any other). */
+  reason?: VerifyReasonCode | null;
 }
 
 /**
@@ -111,15 +117,20 @@ export interface StreakInput {
  *   - A `verified` row counts +1 only when the stage's own order deployed it and a gate method drove it (the runner's own browser, by either driver: see GATE_METHODS).
  *     Two readings the plan leaves to its reader, chosen here and named in the tests: a verified row deployed by someone else resets (that deploy was a person step);
  *     a verified row driven by another method (the sandbox browser) or with no method neither counts nor resets.
+ *   - A `verified` row that passed on standing journeys alone (no Spec-criterion journey `c<n>` passed) is neutral too: it proves nothing about the merged change.
  *   - A row that has not finished changes nothing.
+ *   - `unverified: no_visible_journeys` (the Spec had no criterion a browser can check and the repository keeps no standing journey) is NEUTRAL: it is not a pass, so it
+ *     never counts, but nothing failed and nothing stopped for a person, so it never resets. A person step on it still resets, like on any row.
  */
 export function nextStreak(streak: number, row: StreakInput): number {
   if (!FINISHED_STATUSES.includes(row.status)) return streak;
   if (!row.mergedByProduct) return streak;
   if (row.personStep) return 0;
+  if (row.status === 'unverified' && row.reason === 'no_visible_journeys') return streak;
   if (row.status === 'failed' || row.status === 'unverified') return 0;
   if (!row.deployByOrder) return 0;
   if (row.method === null || !GATE_METHODS.includes(row.method)) return streak;
+  if (!row.criterionPassed) return streak;
   return streak + 1;
 }
 
@@ -168,15 +179,17 @@ export async function openVerifyRow(client: PoolClient, accountId: string, input
       ORDER BY s.version DESC LIMIT 1`,
     [input.workItemId, accountId],
   );
-  const journeys = deriveJourneys({ specBody: spec.rows[0]?.body ?? null, standing: settings.standingJourneys, carried: await readCarriedFailures(client, accountId, input.workItemId) });
+  const { journeys, checksOnly } = planJourneys({ specBody: spec.rows[0]?.body ?? null, standing: settings.standingJourneys, carried: await readCarriedFailures(client, accountId, input.workItemId) });
 
   const batch = await client.query<{ id: string }>(`INSERT INTO verify_batches (account_id, repo_id) VALUES ($1, $2) RETURNING id`, [accountId, repoId]);
   const batchId = batch.rows[0]!.id;
   const row = await client.query<{ id: string }>(
-    `INSERT INTO verify_rows (account_id, repo_id, batch_id, work_item_id, pr_number, merge_sha, journeys) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) RETURNING id`,
-    [accountId, repoId, batchId, input.workItemId, input.prNumber, input.mergeSha, JSON.stringify(journeys)],
+    `INSERT INTO verify_rows (account_id, repo_id, batch_id, work_item_id, pr_number, merge_sha, journeys, checks_only) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb) RETURNING id`,
+    [accountId, repoId, batchId, input.workItemId, input.prNumber, input.mergeSha, JSON.stringify(journeys), JSON.stringify(checksOnly)],
   );
   await client.query(`UPDATE verify_batches SET status = 'closed', closed_by = 'size', closed_at = now() WHERE id = $1 AND account_id = $2`, [batchId, accountId]);
+  // Nothing a browser can check (no visible criterion, no standing journey): the row ends at once with its own closed reason, before any deploy or tester run is paid for.
+  if (journeys.length === 0) await finishVerifyRow(client, accountId, row.rows[0]!.id, { status: 'unverified', reason: 'no_visible_journeys' });
   return { opened: true, rowId: row.rows[0]!.id, batchId, journeys };
 }
 
@@ -322,8 +335,8 @@ export async function endUnstartedRows(client: PoolClient, accountId: string, re
 
 /** The streak of a repository, derived from its finished rows (oldest first) and the facts that say the product merged each one. Never stored. */
 export async function readStreak(client: PoolClient, accountId: string, repoId: string): Promise<number> {
-  const { rows } = await client.query<{ status: VerifyRowStatus; method: VerifyMethod | null; deploy_by_order: boolean; person_step: boolean; merged_by_product: boolean }>(
-    `SELECT r.status, r.method, r.deploy_by_order, r.person_step,
+  const { rows } = await client.query<{ status: VerifyRowStatus; reason_code: VerifyReasonCode | null; criterion_passed: boolean; method: VerifyMethod | null; deploy_by_order: boolean; person_step: boolean; merged_by_product: boolean }>(
+    `SELECT r.status, r.reason_code, r.method, EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(r.result, '[]'::jsonb)) j WHERE j->>'result' = 'pass' AND j->>'id' ~ '^c[0-9]+$') AS criterion_passed, r.deploy_by_order, r.person_step,
             EXISTS (SELECT 1 FROM work_item_driver_events e WHERE e.account_id = r.account_id AND e.work_item_id = r.work_item_id AND e.kind IN ('merged_by_gate', 'merged_via_queue')
                        AND (e.pr_number = r.pr_number OR e.head_sha = r.merge_sha)) AS merged_by_product
        FROM verify_rows r
@@ -331,7 +344,7 @@ export async function readStreak(client: PoolClient, accountId: string, repoId: 
       ORDER BY r.finished_at, r.id`,
     [accountId, repoId],
   );
-  return streakOf(rows.map((r) => ({ status: r.status, method: r.method, mergedByProduct: r.merged_by_product, deployByOrder: r.deploy_by_order, personStep: r.person_step })));
+  return streakOf(rows.map((r) => ({ status: r.status, reason: r.reason_code, criterionPassed: r.criterion_passed, method: r.method, mergedByProduct: r.merged_by_product, deployByOrder: r.deploy_by_order, personStep: r.person_step })));
 }
 
 /**

@@ -74,6 +74,9 @@ describe('D#749 V4a: verify settings routes', () => {
   async function mergedItem(accountId: string, repoId: string): Promise<string> {
     const id = randomUUID();
     await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage) VALUES ($1, $2, $3, 'feature', 'internal', 'merged')`, [id, accountId, repoId]);
+    // One criterion a person can see, so the row has a journey and waits for the stage rather than ending at open as `no_visible_journeys`.
+    const spec = '1. The picker lists both options on the page';
+    await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, $3, encode(sha256(convert_to($3, 'UTF8')), 'hex'), 'agent')`, [accountId, id, spec]);
     return id;
   }
   async function tokenFor(who: Identity): Promise<string> {

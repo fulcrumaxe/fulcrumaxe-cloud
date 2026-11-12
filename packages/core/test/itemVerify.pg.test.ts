@@ -160,6 +160,15 @@ describe('item verify section [pg]', { timeout: 120_000 }, () => {
     }
   });
 
+  it('the card says which criteria the browser covered and which were left to the checks (numbers only)', async () => {
+    const item = await newItem(await newRepo(true));
+    const row = await open(item);
+    expect((await read(item))?.criteria).toEqual({ browser: [1, 2], checks: [] });
+    await toRunning(row);
+    await admin.query(`UPDATE verify_rows SET checks_only = '[3,5]'::jsonb WHERE id = $1`, [row]);
+    expect((await read(item))?.criteria).toEqual({ browser: [1, 2], checks: [3, 5] });
+  });
+
   it('the newest row of the item wins', async () => {
     const item = await newItem(await newRepo(true));
     const first = await open(item, sha('a'), 57);
@@ -187,7 +196,7 @@ describe('item verify section [pg]', { timeout: 120_000 }, () => {
     await worker((c) => finishVerifyRow(c, a.accountId, row, { status: 'verified', result: ['c1', 'c2'].map((id) => ev(id)) }));
     const text = JSON.stringify(await read(item));
     expect(text).not.toMatch(/app\.example|verify-bot|First thing|opened the page|heading reads/);
-    expect(Object.keys((await read(item))!).sort()).toEqual(['account', 'at', 'bug_item_id', 'journeys', 'method', 'pr_number', 'reason', 'status']);
+    expect(Object.keys((await read(item))!).sort()).toEqual(['account', 'at', 'bug_item_id', 'criteria', 'journeys', 'method', 'pr_number', 'reason', 'status']);
   });
 
   it('another account cannot read the row', async () => {
