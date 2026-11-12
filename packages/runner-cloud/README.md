@@ -190,8 +190,17 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   `runner_mode_switch_definer`, in the shape of the other two roles above) moves the runs through the compare-and-set writer and
   answers their ids; the events are written here, in the same transaction, by the code every status change uses. A queue sweep
   tick cancels, with the same reason and whatever its age, a pending runner run whose repo is no longer `runner_local` (a dispatch
-  that read the old mode and inserted just after the switch), and the notice sweep skips such a run. The screen that offers the
-  switch must show the number of queued runs that will be cancelled before the user confirms; that screen is a later change.
+  that read the old mode and inserted just after the switch), and the notice sweep skips such a run.
+- `GET /api/runners/repos/:id/execution-mode` (D#767) answers three more facts so the confirm step can say what a mode change
+  does before Apply, none of which change what the `POST` does: `pending_runner_runs` (the repo's queued runner runs, `status =
+  'pending'` and `runtime = 'runner'`, that a move off a runner mode would cancel), `allowances_in_force` and
+  `allowances_set_aside` (derived from the repo's newest `repo_runner_sandbox_allowances` row by the same rule
+  `sandboxAllowances.ts`'s `view` uses: in force when not set aside and the row has an entry or a check, set aside from its own
+  column, both false with no row). The picker shows them with four more `COPY` strings (`modeLeaveQueued`, `modeLeaveSetsAside`,
+  `modeLeaveAutoMergeOff`, `modeNeedsReapproval`): leaving a runner mode for the sandbox lists the cancel sentence, the queued
+  count, the set-aside sentence while an allowance is in force and the auto-merge-off sentence while it is on; coming from the
+  sandbox onto a runner mode shows the re-approval sentence while the repo's allowances are set aside; moving between the two
+  runner modes shows none of them.
 - The sweeper also sends two notices per waiting run, once each, as `run_events` rows: `runner.waiting` at the first tick at
   or after 15 minutes from dispatch when no runner is online for the run's repo (a runner counts when it is not revoked, was
   live by the shared rule (120 s, or the wake window for a wake runner while the wake key is configured), and has the repo in its own `allowed_repo_ids`; an empty list takes no repo, as in the claim), and
