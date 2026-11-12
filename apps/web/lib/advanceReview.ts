@@ -1,12 +1,14 @@
-import type { AdvanceReviewDeps } from "@fx/worker";
+import type { Pool } from "pg";
+import { reverifyRefusedPush, type AdvanceReviewDeps } from "@fx/worker";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { settleAuthorizedOrder } from "@fx/runner-cloud";
-import { createCiGate, parseGate1AttestRepos, readPublicPullRequest, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
+import { createCiGate, parseGate1AttestRepos, readPublicPullRequest, type PublicPullRequestLookup, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
+import { createLivePlanePushPort } from "./github/planePushHosted";
 import { createPlaneMergeOps } from "./planeMerge";
 
 /**
@@ -24,6 +26,27 @@ import { createPlaneMergeOps } from "./planeMerge";
  */
 /** The run-pull-request port that closes a private copy after a verified merge; built on first use. */
 let privateCloser: ReturnType<typeof createAppRunPullRequestPort> | undefined;
+
+/**
+ * D#6 PLANE-PUSH-REVERIFY-BOUND: the merge gate's and the CI wait's public-pull-request lookup. A paired item with no open public pull request whose push record is still a
+ * `report_mismatch` refusal gets the bound re-check once per lookup (same cap, backoff and bindings as the report route; see @fx/worker `reverifyRefusedPush`); when GitHub confirms what the
+ * refused attempt stored, the lookup is read again and may now find the pull request. Any failure leaves the answer as it was.
+ */
+let reverifyPort: ReturnType<typeof createLivePlanePushPort> | undefined;
+export const readPublicPullRequestWithReverify = (pool: Pool): PublicPullRequestLookup => {
+  const read = readPublicPullRequest(pool);
+  return async (accountId, workItemId) => {
+    const first = await read(accountId, workItemId);
+    if (first === null || first.pr !== null) return first;
+    try {
+      reverifyPort ??= createLivePlanePushPort();
+      return (await reverifyRefusedPush(pool, reverifyPort, { accountId, workItemId })) ? await read(accountId, workItemId) : first;
+    } catch {
+      // fx-swallow-ok: the re-check is best effort; the lookup answers as before (no open public pull request)
+      return first;
+    }
+  };
+};
 
 export function createReviewDeps(open: typeof openInstallationHttp = openInstallationHttp): AdvanceReviewDeps {
   // The merge gate's token purpose for one repository (the item's own, or the paired code repository its installation serves), fenced for a runner_local repo.
@@ -55,7 +78,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
         },
         // D#598 P7b: the head's CI is read with the merge gate's token purpose (check runs, statuses, branch protection) and, for a runner_local repo, its fence.
         // Two planes: a paired item's CI is read on the public pull request that merges (`openPublicHttp` gets the code repository's coordinates).
-        createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool), gate1 }),
+        createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequestWithReverify(pool), gate1 }),
       ),
     // D#598 P7c: a head that is only a merge of the base branch is re-checked from facts (GitHub's commit and compare reads, our own records), with no reviewer run.
     // The reads use the merge gate's token purpose, like the CI wait; the head's CI is waited for before anything is recorded.
@@ -66,7 +89,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       const out = await recordMergeOnlyRecheck(
         pool,
         { accountId: input.accountId, workItemId: input.workItemId, headSha: input.headSha, prNumber: input.prNumber, baseRef: input.baseRef, requiredRoles: input.requiredRoles as VerdictRole[] },
-        { http: await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool), gate1 }) },
+        { http: await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequestWithReverify(pool), gate1 }) },
       );
       if (out.decision === "full_review") return { decision: out.decision, reason: out.reason };
       // A pending wait carries the words and check names the timeout stop will say; the other answers carry nothing more.
@@ -99,7 +122,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
             localReviewOptIn: createPgLocalReviewOptIn(pool),
             // D#598 P1d-1: who the platform merges for (its own App bots, the intake allowlist); the merge queue's tick reaches the gate through here.
             authorTrust: mergeGateAuthorTrust,
-            publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
+            publicPlane: { open: openPublicHttp, read: readPublicPullRequestWithReverify(pool) },
             // PR 1c: an fx-gate1 our App did not post never counts for a cloud item (A17, which this code-repository client already holds).
             // An item whose review round ended before the setting went on is attested here, with the same client the CI wait uses (it holds A14 to A17).
             gate1Status: { ...gate1, attest: true },

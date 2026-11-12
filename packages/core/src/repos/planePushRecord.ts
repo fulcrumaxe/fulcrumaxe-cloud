@@ -298,7 +298,7 @@ export function cleanRefusals(list: readonly PlaneRefusalEntry[] | undefined): P
  * the PR first). The record is a stamp: this does not read GitHub. Returns the row, or null when nothing was recorded because the row is
  * settled (its state says a pull request exists or a person has the branch, or `managed_by_person_at` is set): a late report from a retried attempt cannot move it back.
  */
-export async function recordVerifiedOutcome(client: Queryable, input: { accountId: string; id: string; outcome: VerifiedOutcome }): Promise<PlanePushRow | null> {
+export async function recordVerifiedOutcome(client: Queryable, input: { accountId: string; id: string; outcome: VerifiedOutcome; reverify?: { runId: string; leaseGeneration: number } }): Promise<PlanePushRow | null> {
   const o = input.outcome;
   const bad = (why: string): never => {
     throw new PlanePushRecordError('bad_outcome', `plane push outcome ${o.state}: ${why}`);
@@ -330,6 +330,7 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
             pr_url = COALESCE($9, pr_url),
             source_head = CASE WHEN $6::text IS NULL THEN source_head ELSE $11::text END
       WHERE id = $1 AND account_id = $2 AND managed_by_person_at IS NULL AND NOT (state = ANY ($10::text[]))
+        AND ($12::uuid IS NULL OR ${REVERIFY_BOUND})
       RETURNING ${COLUMNS}`,
     [
       input.id,
@@ -343,10 +344,27 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
       o.prUrl ?? null,
       SETTLED,
       o.sourceHead ?? null,
+      input.reverify?.runId ?? null,
+      input.reverify?.leaseGeneration ?? null,
+      o.prNumber ?? null,
     ],
   );
   return rows[0] ? toRow(rows[0]) : null;
 }
+
+/**
+ * D#6 PLANE-PUSH-REVERIFY-BOUND: the extra condition of a re-checked report (a refused row that GitHub now confirms). The row must still be the `report_mismatch` refusal, the named
+ * attempt (that run and lease generation, and no other) must be the row's newest and have ended as `report_mismatch` with a stored check, and the head and tip being recorded ($6, $7)
+ * must equal the ones that attempt reported. Nothing else may move a refused row to "pushed": another run's head, or a head the runner names now, matches nothing here.
+ */
+const REVERIFY_BOUND = `state = 'refused' AND code = 'report_mismatch' AND EXISTS (
+          SELECT 1 FROM plane_push_attempts a
+           WHERE a.account_id = plane_pushes.account_id AND a.plane_push_id = plane_pushes.id AND a.runtime = 'runner'
+             AND a.run_id = $12::uuid AND a.lease_generation = $13::integer
+             AND a.finished_at IS NOT NULL AND a.outcome = 'report_mismatch' AND a.refused_check IS NOT NULL
+             AND a.refused_head_sha = $6::text AND a.refused_tip_sha = $7::text
+             AND (a.refused_pr_number IS NULL OR a.refused_pr_number = $14::integer)
+             AND NOT EXISTS (SELECT 1 FROM plane_push_attempts b WHERE b.account_id = a.account_id AND b.plane_push_id = a.plane_push_id AND b.id <> a.id AND b.created_at >= a.created_at))`;
 
 /** The fixed code, and the run event that carries it, for an update that landed on a branch a person had already chosen to keep (their Keep lost to a round under way). */
 export const UPDATED_AFTER_KEEP = 'updated_after_keep';

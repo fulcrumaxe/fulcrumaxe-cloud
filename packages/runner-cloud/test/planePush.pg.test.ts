@@ -534,6 +534,136 @@ describe("plane-push routes [pg]", () => {
       });
     });
 
+    describe("D#6 PLANE-PUSH-REVERIFY-BOUND: a refused report is stored, and read again only against what it stored", () => {
+      const HEAD2 = "c".repeat(40);
+      type Stored = { check: "head_unconfirmed" | "pr_unconfirmed"; headSha: string; tipSha: string; prNumber?: number };
+      /** A finished attempt that ended as report_mismatch; `reverify` is what the worker hands over when it has counted an evaluation. */
+      const refusedContext = (reverify?: Stored): typeof context => ({ ...withToken(), attempt: { id: randomUUID(), tokenIssued: true, finished: true, outcome: "report_mismatch", ...(reverify ? { reverify } : {}) } }) as typeof context;
+      const reads = () => names().filter((n) => n === "verifyPushed" || n === "verifyPullRequest");
+
+      it.each([
+        ["head_unconfirmed", () => { pushedOk = false; }, { phase: "pr_opened", pr_number: 9 }],
+        ["head_unconfirmed", () => { pushedOk = false; }, { phase: "pushed" }],
+        ["pr_unconfirmed", () => { prAnswer = null; }, { phase: "pr_opened", pr_number: 9 }],
+      ])("a %s refusal hands the worker the check and the report's head and tip to keep on the attempt", async (check, arrange, extra) => {
+        arrange();
+        await askReport({ head_sha: HEAD, tip_sha: TIP, ...extra });
+        expect(record()).toMatchObject({ label: "report_mismatch", refused: { check, headSha: HEAD, tipSha: TIP } });
+      });
+
+      it.each([
+        ["pairing_digest", () => undefined, { pairing_digest: "d".repeat(64), phase: "pushed" }],
+        ["no_grant", () => { context = { ...withToken(), attempt: null } as typeof context; }, { phase: "pushed" }],
+        ["branch_differs", () => undefined, { phase: "pushed", branch: "fx/p-someone-else" }],
+        ["pr_address", () => { prAnswer = { url: "https://github.com/evil/widgets-public/pull/9" }; }, { phase: "pr_opened", pr_number: 9 }],
+        ["update_state", () => { context = { ...withToken(), attempt: { id: randomUUID(), tokenIssued: true, finished: false, outcome: null } } as typeof context; }, { phase: "updated" }],
+      ])("a %s refusal is the runner's own: nothing is stored for it, so it can never be read again", async (_check, arrange, extra) => {
+        arrange();
+        await askReport({ head_sha: HEAD, tip_sha: TIP, ...extra });
+        expect(record()).toMatchObject({ label: "report_mismatch" });
+        expect(record()).not.toHaveProperty("refused");
+      });
+
+      it("an update's unconfirmed head stores nothing either (its refusal leaves the open pull request as it is)", async () => {
+        context = { kind: "context", plane: { id: PLANE, codeRepo: "acme/widgets-public", branch: BRANCH, pairingDigest: STAMP, state: "pr_opened" }, attempt: { id: randomUUID(), tokenIssued: true, finished: false, outcome: null } };
+        pushedOk = false;
+        await askReport({ phase: "updated", head_sha: HEAD, tip_sha: TIP });
+        expect(record()).toMatchObject({ label: "report_mismatch" });
+        expect(record()).not.toHaveProperty("refused");
+      });
+
+      it("a pr_unconfirmed refusal keeps the pull request number the report named; a head_unconfirmed one keeps none", async () => {
+        prAnswer = null;
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(record()).toMatchObject({ refused: { check: "pr_unconfirmed", prNumber: 9 } });
+        calls.length = 0;
+        pushedOk = false;
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect((record() as unknown as { refused: Record<string, unknown> }).refused).not.toHaveProperty("prNumber");
+      });
+
+      it("a pr_opened re-check naming another pull request number than the stored one reads nothing", async () => {
+        context = refusedContext({ check: "pr_unconfirmed", headSha: HEAD, tipSha: TIP, prNumber: 9 });
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 10 });
+        expect(reads()).toEqual([]);
+        expect(names()).not.toContain("record");
+      });
+
+      it("a finished attempt the worker did NOT hand over for a re-check costs nothing: no GitHub read, nothing recorded", async () => {
+        context = refusedContext();
+        const res = await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(res.status).toBe(200);
+        expect(names()).toEqual(["context"]);
+      });
+
+      it("a pushed re-check reads the STORED head and tip once, with no retry and no wait, and records them as a re-check", async () => {
+        context = refusedContext({ check: "head_unconfirmed", headSha: HEAD, tipSha: TIP });
+        const res = await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(res.status).toBe(200);
+        expect(names()).toEqual(["context", "verifyPushed", "record"]);
+        expect(calls[1]!.input).toEqual({ accountId: A.accountId, codeRepo: "acme/widgets-public", branch: BRANCH, headSha: HEAD, tipSha: TIP });
+        expect(waits).toEqual([]);
+        expect(record()).toMatchObject({ outcome: { state: "pushed", headSha: HEAD, tipSha: TIP }, label: "pushed", reverify: true });
+      });
+
+      it("a re-check that GitHub still does not confirm is read once and changes nothing", async () => {
+        context = refusedContext({ check: "head_unconfirmed", headSha: HEAD, tipSha: TIP });
+        pushedOk = false;
+        const res = await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(res.status).toBe(200);
+        expect(names()).toEqual(["context", "verifyPushed"]);
+        expect(waits).toEqual([]);
+      });
+
+      it("a pr_opened re-check makes at most one branch read and one pull request read, and records the address GitHub gave", async () => {
+        context = refusedContext({ check: "pr_unconfirmed", headSha: HEAD, tipSha: TIP, prNumber: 9 });
+        prAnswer = { url: "https://github.com/acme/widgets-public/pull/9" };
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(reads()).toEqual(["verifyPushed", "verifyPullRequest"]);
+        expect(record()).toMatchObject({ outcome: { state: "pr_opened", prNumber: 9, prUrl: "https://github.com/acme/widgets-public/pull/9" }, reverify: true });
+      });
+
+      it("a pull request that GitHub still does not show, or shows at another address, is read once and changes nothing", async () => {
+        context = refusedContext({ check: "pr_unconfirmed", headSha: HEAD, tipSha: TIP, prNumber: 9 });
+        prAnswer = null;
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(reads()).toEqual(["verifyPushed", "verifyPullRequest"]);
+        expect(names()).not.toContain("record");
+        calls.length = 0;
+        prAnswer = { url: "https://github.com/evil/widgets-public/pull/9" };
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(reads()).toEqual(["verifyPushed", "verifyPullRequest"]);
+        expect(names()).not.toContain("record");
+      });
+
+      it.each([
+        ["a head the runner names now", { head_sha: HEAD2, tip_sha: TIP }],
+        ["a tip the runner names now", { head_sha: HEAD, tip_sha: HEAD2 }],
+      ])("%s is not the stored push: nothing is read and nothing is recorded", async (_name, shas) => {
+        context = refusedContext({ check: "head_unconfirmed", headSha: HEAD, tipSha: TIP });
+        const res = await askReport({ phase: "pushed", ...shas });
+        expect(res.status).toBe(200);
+        expect(names()).toEqual(["context"]);
+      });
+
+      it("a branch that is not the record's, or a digest that is not the stamp, is not a re-check of this push", async () => {
+        context = refusedContext({ check: "head_unconfirmed", headSha: HEAD, tipSha: TIP });
+        await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP, branch: "fx/p-someone-else" });
+        await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP, pairing_digest: "d".repeat(64) });
+        expect(reads()).toEqual([]);
+        expect(names()).not.toContain("record");
+      });
+
+      it("a stored pr_unconfirmed check is only re-read for a pr_opened report, and an update report never re-reads", async () => {
+        context = refusedContext({ check: "pr_unconfirmed", headSha: HEAD, tipSha: TIP, prNumber: 9 });
+        await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        await askReport({ phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });
+        await askReport({ phase: "updated", head_sha: HEAD, tip_sha: TIP });
+        expect(reads()).toEqual([]);
+        expect(names()).not.toContain("record");
+      });
+    });
+
     it("when GitHub cannot be asked nothing is recorded and the answer is 503, so the hook sends the report again", async () => {
       githubError = Object.assign(new Error("down"), { code: "public_unavailable" });
       const res = await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP });

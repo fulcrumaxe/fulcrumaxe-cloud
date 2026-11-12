@@ -77,10 +77,31 @@ export type PlanePushGrantResult =
   /** `itemTitle` is the work item's title as stored: untrusted text that only `buildPlanePushText` may turn into public text. */
   | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null; /** True for a planned PR child: `issueNumber` is then its parent's. */ child: boolean; /** The head the platform last pushed, for a fix round that updates the open public pull request; null for a first push. */ updateOf: string | null; /** The run is the merge-conflict round of its item (its `merge_conflict_rounds` row names it). */ conflictRound: boolean } & PlanePushFacts);
 
+/**
+ * D#6 PLANE-PUSH-REVERIFY-BOUND: what a refused report named, kept on its own attempt (migration 1012). Only the two checks a later read of GitHub can change are ever stored.
+ * `check` is a closed name; the shas are the 40-hex head and tip that report carried.
+ */
+export const REVERIFY_CHECKS = ["head_unconfirmed", "pr_unconfirmed"] as const;
+export interface RefusedReport {
+  check: (typeof REVERIFY_CHECKS)[number];
+  headSha: string;
+  tipSha: string;
+  /** The pull request number the refused report named; present exactly for `pr_unconfirmed`. */
+  prNumber?: number;
+}
+/** The run event one re-check evaluation leaves (before GitHub is asked), so the count of them on a lease is the cap. */
+export const REVERIFY_EVENT = "plane.reverify";
+/**
+ * The most re-check evaluations one attempt gets, and how long to wait before each: none for the first (the hook's own follow-up report, seconds after a refused one, is the first evaluation), then after the previous one. Each evaluation reads GitHub at most
+ * twice (the branch, then the pull request), each read with a token minted and revoked, so an attempt costs at most 2 x this many reads however often the runner reports.
+ */
+export const REVERIFY_BACKOFF_MS: readonly number[] = Object.freeze([0, 30_000, 120_000]);
+const SHA40 = /^[0-9a-f]{40}$/;
+
 export type PlanePushReportContextResult =
   | { kind: "fenced"; reason: StopReason }
   | { kind: "not_paired" }
-  | { kind: "context"; plane: PlanePushFacts & { state: string; /** The digest stamped at build start; a report's echo is compared with it. */ pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null; /** Present for a merge-conflict round: the public main tip recorded at its grant, or null when none was. */ conflictRound?: { tip: string | null } };
+  | { kind: "context"; plane: PlanePushFacts & { state: string; /** The digest stamped at build start; a report's echo is compared with it. */ pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null; /** Present only when this evaluation may re-check the attempt's refused report (see `claimReverify`); the evaluation is already counted. */ reverify?: RefusedReport } | null; /** Present for a merge-conflict round: the public main tip recorded at its grant, or null when none was. */ conflictRound?: { tip: string | null } };
 
 export interface PlanePushRecordInput extends PlanePushLeaseInput {
   /** From `planePushReportContext`; the row is re-read and compared. */
@@ -100,6 +121,10 @@ export interface PlanePushRecordInput extends PlanePushLeaseInput {
   /** A fixed snake_case label for the attempt's `outcome` (a refusal code or a phase name). */
   label: string;
   tokenRevoked?: boolean;
+  /** Stored on the attempt when this report ends it as `report_mismatch` (only for the two re-checkable checks). */
+  refused?: RefusedReport;
+  /** The outcome is a re-check of this attempt's own refused report: it is recorded only while the attempt, the row and the shas still match (see `recordVerifiedOutcome`). */
+  reverify?: boolean;
 }
 
 export type PlanePushRecordResult = { kind: "fenced"; reason: StopReason } | { kind: "not_paired" } | { kind: "recorded"; recorded: boolean };
@@ -221,6 +246,64 @@ const isPlannedChild = async (client: PoolClient, accountId: string, workItemId:
   (await client.query("SELECT 1 FROM work_items WHERE account_id = $1 AND id = $2 AND planned_pr_key IS NOT NULL", [accountId, workItemId])).rows.length > 0;
 
 const facts = (row: PlanePushRow): PlanePushFacts => ({ id: row.id, codeRepo: row.codeRepo, branch: row.branch });
+
+/**
+ * D#6 PLANE-PUSH-REVERIFY-BOUND: decides whether this report evaluation may check an attempt's refused report against GitHub again, and counts it. Under the attempt's row lock: the attempt must be the
+ * newest of its push row (no later attempt, so no other run's push is in play), its stored shas and check must be well formed, fewer than `REVERIFY_BACKOFF_MS.length` evaluations may have happened on its
+ * lease, and the backoff since the attempt ended (or the previous evaluation) must have passed. The evaluation is written down BEFORE GitHub is asked, so a failing or slow read still counts. Returns the
+ * stored report, or undefined.
+ */
+export async function claimReverify(client: PoolClient, input: { accountId: string; runId: string; leaseGeneration: number }, planePushId: string, a: { id: string; refused_check: string | null; refused_head_sha: string | null; refused_tip_sha: string | null; refused_pr_number: number | null }): Promise<RefusedReport | undefined> {
+  const check = (REVERIFY_CHECKS as readonly string[]).includes(a.refused_check ?? "") ? (a.refused_check as RefusedReport["check"]) : null;
+  if (check === null || !a.refused_head_sha || !SHA40.test(a.refused_head_sha) || !a.refused_tip_sha || !SHA40.test(a.refused_tip_sha)) return undefined;
+  const { rows: locked } = await client.query<{ created_at: Date }>("SELECT created_at FROM plane_push_attempts WHERE id = $1 AND account_id = $2 AND run_id = $3 AND lease_generation = $4 AND runtime = 'runner' FOR UPDATE", [a.id, input.accountId, input.runId, input.leaseGeneration]);
+  if (!locked[0]) return undefined;
+  const later = await client.query("SELECT 1 FROM plane_push_attempts WHERE account_id = $1 AND plane_push_id = $2 AND id <> $3 AND created_at >= $4", [input.accountId, planePushId, a.id, locked[0].created_at]);
+  if (later.rows.length > 0) return undefined;
+  const { rows: seen } = await client.query<{ n: string }>("SELECT count(*)::text AS n FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 AND payload->>'lease_generation' = $4", [input.accountId, input.runId, REVERIFY_EVENT, String(input.leaseGeneration)]);
+  const n = Number(seen[0]?.n ?? 0);
+  const wait = REVERIFY_BACKOFF_MS[n];
+  if (wait === undefined) return undefined;
+  const { rows: due } = await client.query<{ due: boolean }>(
+    `SELECT now() >= GREATEST(
+              (SELECT finished_at FROM plane_push_attempts WHERE id = $1 AND account_id = $2),
+              COALESCE((SELECT max(created_at) FROM run_events WHERE account_id = $2 AND run_id = $3 AND kind = $4 AND payload->>'lease_generation' = $5), '-infinity')
+            ) + ($6::int * interval '1 millisecond') AS due`,
+    [a.id, input.accountId, input.runId, REVERIFY_EVENT, String(input.leaseGeneration), wait],
+  );
+  if (due[0]?.due !== true) return undefined;
+  await insertRunEvent(client, input.accountId, input.runId, REVERIFY_EVENT, { lease_generation: input.leaseGeneration, check });
+  return { check, headSha: a.refused_head_sha, tipSha: a.refused_tip_sha, ...(check === "pr_unconfirmed" && a.refused_pr_number !== null ? { prNumber: a.refused_pr_number } : {}) };
+}
+
+/**
+ * D#6 PLANE-PUSH-REVERIFY-BOUND: records a re-checked push (GitHub confirmed the STORED head, tip and, for a pull request, number) on the refused record. The one writer for both callers (the report
+ * route, with a live lease, and the merge gate, with none). Everything it writes is bound by `recordVerifiedOutcome`'s `reverify` condition to the named run's own attempt; the attempt is then relabelled
+ * under the same equality. Returns whether the record moved.
+ */
+export async function recordReverified(
+  client: PoolClient,
+  input: { accountId: string; runId: string; leaseGeneration: number; row: PlanePushRow; outcome: { state: PlanePushOutcomeState; headSha: string; tipSha: string; prNumber?: number; prUrl?: string }; label: string },
+): Promise<boolean> {
+  const o = input.outcome;
+  if (!["pushed", "pr_opened", "pushed_pr_not_opened"].includes(o.state)) return false;
+  const row = await recordVerifiedOutcome(client, {
+    accountId: input.accountId,
+    id: input.row.id,
+    outcome: { state: o.state, headSha: o.headSha, tipSha: o.tipSha, ...(o.prNumber !== undefined ? { prNumber: o.prNumber } : {}), ...(o.prUrl !== undefined ? { prUrl: o.prUrl } : {}) },
+    reverify: { runId: input.runId, leaseGeneration: input.leaseGeneration },
+  });
+  if (row === null) return false;
+  if (o.state === "pr_opened" && o.prNumber !== undefined && (await isPlannedChild(client, input.accountId, input.row.workItemId))) {
+    await recordChildCodePullRequest(client, input.accountId, input.runId, { branch: input.row.branch, prNumber: o.prNumber, codeRepo: input.row.codeRepo });
+  }
+  await client.query(
+    `UPDATE plane_push_attempts SET outcome = $4
+      WHERE account_id = $1 AND run_id = $2 AND lease_generation = $3 AND runtime = 'runner' AND outcome = 'report_mismatch' AND refused_head_sha = $5 AND refused_tip_sha = $6`,
+    [input.accountId, input.runId, input.leaseGeneration, input.label, o.headSha, o.tipSha],
+  );
+  return true;
+}
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
 export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlanePushDeps = {}): RunnerPlanePushFacade {
@@ -437,11 +520,18 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
           const found = await runFacts(client, input);
           if (!found) return { kind: "not_paired" };
-          const { rows } = await client.query<{ id: string; token_issued_at: Date | null; finished_at: Date | null; outcome: string | null }>(
-            "SELECT id, token_issued_at, finished_at, outcome FROM plane_push_attempts WHERE account_id = $1 AND run_id = $2 AND lease_generation = $3 AND runtime = 'runner'",
+          const { rows } = await client.query<{ id: string; token_issued_at: Date | null; finished_at: Date | null; outcome: string | null; refused_check: string | null; refused_head_sha: string | null; refused_tip_sha: string | null; refused_pr_number: number | null }>(
+            "SELECT id, token_issued_at, finished_at, outcome, refused_check, refused_head_sha, refused_tip_sha, refused_pr_number FROM plane_push_attempts WHERE account_id = $1 AND run_id = $2 AND lease_generation = $3 AND runtime = 'runner'",
             [input.accountId, input.runId, input.leaseGeneration],
           );
-          const attempt = rows[0] ? { id: rows[0].id, tokenIssued: rows[0].token_issued_at !== null, finished: rows[0].finished_at !== null, outcome: rows[0].outcome } : null;
+          const row0 = rows[0];
+          // A re-check is for the first publish of a run only (a fix round's refusal leaves the pull request open and is never re-read), of an attempt that ended as `report_mismatch` with a stored check,
+          // while the item's row still holds that refusal and the attempt is its newest.
+          const reverify =
+            row0 && row0.finished_at !== null && row0.outcome === "report_mismatch" && row0.refused_check !== null && !found.continues && found.row.state === "refused" && found.row.code === "report_mismatch"
+              ? await claimReverify(client, input, found.row.id, row0)
+              : undefined;
+          const attempt = row0 ? { id: row0.id, tokenIssued: row0.token_issued_at !== null, finished: row0.finished_at !== null, outcome: row0.outcome, ...(reverify ? { reverify } : {}) } : null;
           // A conflict round's end is judged against the tip recorded at its grant (the newest one; none when the grant could not read it).
           const round = found.continues && (await isConflictRound(client, input.accountId, input.runId));
           const tip = !round ? null : ((await client.query<{ tip: string | null }>("SELECT payload->>'tip' AS tip FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 ORDER BY seq DESC LIMIT 1", [input.accountId, input.runId, ROUND_TIP_EVENT])).rows[0]?.tip ?? null);
@@ -453,6 +543,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
       guarded(async () => {
         requireLease(input);
         if (!LABEL.test(input.label)) throw new Error("planePushRecordReport: bad label");
+        if (input.refused !== undefined && (!(REVERIFY_CHECKS as readonly string[]).includes(input.refused.check) || !SHA40.test(input.refused.headSha) || !SHA40.test(input.refused.tipSha) || (input.refused.check === "pr_unconfirmed") !== (input.refused.prNumber !== undefined))) throw new Error("planePushRecordReport: bad refused report");
         // D#598 P1g-2: set when the round's update failed its lease; the branch is read and the request raised once the report is recorded (no GitHub read inside the transaction).
         let leaseFailedFor: string | null = null;
         const result = await withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushRecordResult> => {
@@ -461,6 +552,14 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const found = await runFacts(client, input);
           if (!found || found.row.id !== input.planePushId) return { kind: "not_paired" };
           let recorded = false;
+          // D#6 PLANE-PUSH-REVERIFY-BOUND: a re-checked report of a refused first publish. Everything it may write is bound to the attempt's own stored report: the recording below only matches while the row
+          // is still that refusal, this run's attempt is its newest and the shas equal the ones it stored; the attempt is then relabelled under the same equality. A round that continues a branch never takes this path.
+          if (input.reverify === true) {
+            const o = input.outcome;
+            if (found.continues || !o || o.headSha === undefined || o.tipSha === undefined) return { kind: "recorded", recorded: false };
+            const moved = await recordReverified(client, { accountId: input.accountId, runId: input.runId, leaseGeneration: input.leaseGeneration, row: found.row, outcome: { ...o, state: o.state as PlanePushOutcomeState, headSha: o.headSha, tipSha: o.tipSha }, label: input.label });
+            return { kind: "recorded", recorded: moved };
+          }
           // D#598 P1g-1: a round the token request already stopped (closed, merged, pairing off) keeps that stop. A runner's follow-up report (an old runner says `public_unavailable`, a new one the stop's own code) is not
           // recorded over it: the item would read "Press Build again" instead of what happened.
           if (found.continues && input.outcome !== undefined && (await stoppedAtToken(client, input.accountId, found.row.workItemId, input.runId))) return { kind: "recorded", recorded: false };
@@ -506,9 +605,13 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
             `UPDATE plane_push_attempts
                 SET token_revoked = CASE WHEN token_issued_at IS NOT NULL AND ($5::boolean IS NOT NULL OR $4::boolean) THEN COALESCE($5::boolean, false) ELSE token_revoked END,
                     finished_at = CASE WHEN $4::boolean THEN COALESCE(finished_at, now()) ELSE finished_at END,
-                    outcome = CASE WHEN $4::boolean OR $6 = 'pushed' THEN $6 ELSE outcome END
+                    outcome = CASE WHEN $4::boolean OR $6 = 'pushed' THEN $6 ELSE outcome END,
+                    refused_check = CASE WHEN $4::boolean AND finished_at IS NULL AND refused_check IS NULL AND $6 = 'report_mismatch' THEN $7::text ELSE refused_check END,
+                    refused_head_sha = CASE WHEN $4::boolean AND finished_at IS NULL AND refused_check IS NULL AND $6 = 'report_mismatch' THEN $8::text ELSE refused_head_sha END,
+                    refused_tip_sha = CASE WHEN $4::boolean AND finished_at IS NULL AND refused_check IS NULL AND $6 = 'report_mismatch' THEN $9::text ELSE refused_tip_sha END,
+                    refused_pr_number = CASE WHEN $4::boolean AND finished_at IS NULL AND refused_check IS NULL AND $6 = 'report_mismatch' THEN $10::integer ELSE refused_pr_number END
               WHERE account_id = $1 AND run_id = $2 AND lease_generation = $3 AND runtime = 'runner'`,
-            [input.accountId, input.runId, input.leaseGeneration, input.terminal, input.tokenRevoked ?? null, input.label],
+            [input.accountId, input.runId, input.leaseGeneration, input.terminal, input.tokenRevoked ?? null, input.label, input.refused?.check ?? null, input.refused?.headSha ?? null, input.refused?.tipSha ?? null, input.refused?.prNumber ?? null],
           );
           return { kind: "recorded", recorded };
         });

@@ -53,3 +53,4 @@ export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriage
 export type { PrStateOpen, PrStateHttp, PrSlotSweepCounts } from "./prSlotReconcile.js";
 export type { PrCloseOpen, PrCloseHttp } from "./privatePrClose.js";
 export type { ReversalGitOpeners } from "./reversalCompensate.js";
+export { reverifyRefusedPush, type ReverifyHosted } from "./planePushReverify.js";

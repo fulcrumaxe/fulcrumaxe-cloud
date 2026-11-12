@@ -38,6 +38,11 @@ export interface HostedPlanePush {
    * address is `https://github.com/<code_repo>/pull/<number>`; null otherwise.
    */
   verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+  /**
+   * D#6 PLANE-PUSH-REVERIFY-BOUND: the ONE open pull request of `branch`, when it is exactly the push that was recorded: the only open pull request with that head, in the paired repository itself (not a
+   * fork), head ref `branch`, head sha `headSha`, base `main`, and an address in the paired repository. Anything else (none, two, a fork, another base or head) is null. One read of the list.
+   */
+  findOpenPullRequest(input: { accountId: string; codeRepo: string; branch: string; headSha: string }): Promise<{ number: number; url: string } | null>;
   /** D#6 REPUBLISH-CLOSED-PR: the pull request's live state (`unknown` for no such pull request); an unreadable answer throws. Sibling of `verifyPullRequest`, which keeps returning null for everything but an open match. */
   pullRequestState(input: { accountId: string; codeRepo: string; number: number }): Promise<"open" | "closed" | "merged" | "unknown">;
   /** D#6 STACK-THREE-DEEP: a public pull request's state, merge bit, base branch and the repository's default branch; null for no such pull request. An unreadable answer throws. */
@@ -103,6 +108,15 @@ export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => num
     pullRequestBase: ({ accountId, codeRepo, number }) => withFreshToken(accountId, codeRepo, (token) => api.pullRequestBase({ codeRepo, number, token })),
 
     closeRefusedPullRequest: ({ accountId, codeRepo, number, branch, comment }) => withFreshToken(accountId, codeRepo, (token) => api.closeRefusedPullRequest({ codeRepo, number, branch, token, comment })),
+
+    findOpenPullRequest: ({ accountId, codeRepo, branch, headSha }) =>
+      withFreshToken(accountId, codeRepo, async (token) => {
+        const found = await api.openPullRequestsForBranch({ codeRepo, branch, token });
+        if (found.length !== 1) return null;
+        const pr = found[0]!;
+        if (pr.headRef !== branch || pr.headRepo.toLowerCase() !== codeRepo.toLowerCase() || pr.baseRef !== "main" || pr.headSha !== headSha) return null;
+        return pr.url.toLowerCase() === `https://github.com/${codeRepo}/pull/${pr.number}`.toLowerCase() ? { number: pr.number, url: pr.url } : null;
+      }),
 
     verifyPullRequest: ({ accountId, codeRepo, branch, number }) =>
       withFreshToken(accountId, codeRepo, async (token) => {

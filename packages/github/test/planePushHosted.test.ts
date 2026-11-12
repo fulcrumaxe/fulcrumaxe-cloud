@@ -38,7 +38,9 @@ interface World {
   compare?: string;
   pr?: unknown;
   /** Make the named read answer 500. */
-  fail?: "ref" | "commit" | "compare" | "pulls";
+  fail?: "ref" | "commit" | "compare" | "pulls" | "list";
+  /** What `GET /pulls?state=open&head=...` answers (a list of pull requests as GitHub shapes them). */
+  list?: unknown;
   /** With fail "pulls": answer with the failure only for the first N reads of the pull request, then answer normally (a blip). */
   failFirst?: number;
   /** With fail "pulls": the status to fail with (default 500). */
@@ -70,6 +72,10 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
       if (world.create === "refused") return ghError(422, "Validation Failed");
       if (world.create === "down") return ghError(503, "unavailable");
       return json(201, { number: 9, html_url: "https://github.com/acme/widgets/pull/9" });
+    }
+    if (r.method === "GET" && r.path === "/repos/acme/widgets/pulls") {
+      if (world.fail === "list") return ghError(500, "boom");
+      return json(200, world.list ?? []);
     }
     if (r.path === "/repos/acme/widgets/pulls/9") return world.fail === "pulls" && (world.failFirst === undefined || ++pullReads <= world.failFirst) ? ghError(world.failStatus ?? 500, "boom") : world.pr === undefined ? ghError(404, "Not Found") : json(200, world.pr);
     return undefined;
@@ -159,6 +165,48 @@ describe("verifyPushed", () => {
     await ask(t);
     await ask(t);
     expect(t.mintedTokens).toEqual(["ghs_hosted1", "ghs_hosted2"]);
+  });
+});
+
+describe("findOpenPullRequest (D#6 PLANE-PUSH-REVERIFY-BOUND)", () => {
+  const listed = (over: Record<string, unknown> = {}) => ({
+    number: 9,
+    state: "open",
+    html_url: "https://github.com/acme/widgets/pull/9",
+    head: { ref: BRANCH, sha: HEAD, repo: { full_name: "acme/widgets" } },
+    base: { ref: "main" },
+    ...over,
+  });
+  const ask = (t: Awaited<ReturnType<typeof setup>>, headSha = HEAD) => t.hosted.findOpenPullRequest({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH, headSha });
+
+  it("finds the one open pull request that is exactly the recorded push, with one list read under one token that is then revoked", async () => {
+    const t = await setup({ list: [listed()] });
+    await expect(ask(t)).resolves.toEqual({ number: 9, url: "https://github.com/acme/widgets/pull/9" });
+    const reads = t.server.seen.filter((x) => x.method === "GET" && x.path === "/repos/acme/widgets/pulls");
+    expect(reads).toHaveLength(1);
+    expect(reads[0]!.query).toContain("state=open");
+    expect(reads[0]!.query).toContain(`head=acme%3A${encodeURIComponent(BRANCH)}`);
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+  });
+
+  it.each([
+    ["no pull request is open", []],
+    ["two pull requests are open on the branch", [listed(), listed({ number: 10, html_url: "https://github.com/acme/widgets/pull/10" })]],
+    ["the pull request is from a fork", [listed({ head: { ref: BRANCH, sha: HEAD, repo: { full_name: "evil/widgets" } } })]],
+    ["the pull request's repository is gone", [listed({ head: { ref: BRANCH, sha: HEAD, repo: null } })]],
+    ["the base is not main", [listed({ base: { ref: "release" } })]],
+    ["the head ref is another branch", [listed({ head: { ref: "fx/p-other", sha: HEAD, repo: { full_name: "acme/widgets" } } })]],
+    ["the head is another commit than the recorded one", [listed({ head: { ref: BRANCH, sha: "c".repeat(40), repo: { full_name: "acme/widgets" } } })]],
+    ["the address is in another repository", [listed({ html_url: "https://github.com/evil/widgets/pull/9" })]],
+    ["the address is another pull request's", [listed({ html_url: "https://github.com/acme/widgets/pull/10" })]],
+  ] as Array<[string, unknown[]]>)("is null when %s", async (_l, list) => {
+    await expect(ask(await setup({ list }))).resolves.toBeNull();
+  });
+
+  it("a failed read is a throw (unavailable), never a null, and the token is still revoked", async () => {
+    const t = await setup({ fail: "list" });
+    await expect(ask(t)).rejects.toMatchObject({ code: "public_unavailable" });
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
   });
 });
 
