@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
@@ -143,6 +144,20 @@ describe('Verify again [pg]', () => {
       const { item } = await itemWithRow(repo, sha('3'), 'failed');
       await expect(verifyAgainWorkItem(stranger, item)).rejects.toThrow('not found');
       expect(await rowsOf(item)).toHaveLength(1);
+    });
+  });
+
+  describe('the press on a Spec in the shape the pipeline stores', () => {
+    it('the new row has the Spec criteria as journeys, not an empty list', async () => {
+      const repo = await newRepo();
+      await turnOn(repo);
+      const { item } = await itemWithRow(repo, sha('7'), 'unverified', 47);
+      const real = readFileSync(new URL('./fixtures/verify/realSpecBody.txt', import.meta.url), 'utf8');
+      await admin.query(`UPDATE spec_versions SET body = $2, body_sha256 = encode(sha256(convert_to($2, 'UTF8')), 'hex') WHERE work_item_id = $1`, [item, real]);
+      const out = await verifyAgainWorkItem(ctx(), item);
+      const row = (await rowsOf(item)).find((r) => r.id === out.rowId)!;
+      expect(row.journeys.map((j) => j.id)).toEqual(['c1', 'c2']);
+      expect(row.checks_only).toEqual([3]);
     });
   });
 

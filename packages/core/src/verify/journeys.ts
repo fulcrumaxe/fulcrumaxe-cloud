@@ -36,24 +36,121 @@ export function cleanVerifyText(raw: unknown, max: number = MAX_JOURNEY_TEXT): s
   return noLinks.replace(INVISIBLE, ' ').replace(/\s+/g, ' ').trim().slice(0, max).trim();
 }
 
-/** The numbered list items of a Spec body, in order, outside code fences: `1. text` or `1) text`, at most three spaces of indent. At most MAX_CRITERIA. */
-export function parseSpecCriteria(body: string | null | undefined): string[] {
-  if (typeof body !== 'string') return [];
-  const out: string[] = [];
-  let fenced = false;
-  for (const line of body.slice(0, 400_000).split('\n')) {
-    if (/^\s{0,3}(```|~~~)/.test(line)) {
-      fenced = !fenced;
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})\s*$/;
+const PM_SPEC_LABEL = /^Project-manager Spec \(model text, quoted as data\):\s*$/;
+const CRITERION_LINE = /^ {0,3}\d{1,3}[.)]\s+(\S.*)$/;
+const HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+const ACCEPTANCE_HEADING = /^acceptance criteria\b/i;
+
+interface OpenFence {
+  ch: string;
+  len: number;
+}
+
+/** The fence a line opens, or null. A backtick fence's info string cannot hold a backtick (that is inline code). */
+function opensFence(line: string): OpenFence | null {
+  const f = FENCE_OPEN.exec(line);
+  if (f === null || (f[1]![0] === '`' && f[2]!.includes('`'))) return null;
+  return { ch: f[1]![0]!, len: f[1]!.length };
+}
+
+/** CommonMark: a fence closes only on the same character, at least as many of it as opened the fence, and nothing else on the line. */
+function closesFence(line: string, open: OpenFence): boolean {
+  const m = FENCE_CLOSE.exec(line);
+  return m !== null && m[1]![0] === open.ch && m[1]!.length >= open.len;
+}
+
+/** Whether an "Acceptance criteria" heading stands on `lines` outside code fences (the same fence tracking as the reading loop). */
+function hasAcceptanceHeading(lines: readonly string[]): boolean {
+  let open: OpenFence | null = null;
+  for (const line of lines) {
+    if (open !== null) {
+      if (closesFence(line, open)) open = null;
       continue;
     }
-    if (fenced) continue;
-    const m = /^ {0,3}\d{1,3}[.)]\s+(\S.*)$/.exec(line);
+    open = opensFence(line);
+    if (open !== null) continue;
+    const h = HEADING.exec(line);
+    if (h !== null && ACCEPTANCE_HEADING.test(h[2]!)) return true;
+  }
+  return false;
+}
+
+/** The criteria on `lines` outside code fences; with `byHeading`, only those under an "Acceptance criteria" heading when the text has one. */
+function criteriaOutsideFences(lines: readonly string[], byHeading: boolean): string[] {
+  const out: string[] = [];
+  const scoped = byHeading && hasAcceptanceHeading(lines);
+  let level = 0; // level of the Acceptance criteria heading being read; 0 = outside it
+  let open: OpenFence | null = null;
+  for (const line of lines) {
+    if (open !== null) {
+      if (closesFence(line, open)) open = null;
+      continue;
+    }
+    open = opensFence(line);
+    if (open !== null) continue;
+    const h = HEADING.exec(line);
+    if (h !== null && scoped) {
+      const l = h[1]!.length;
+      if (ACCEPTANCE_HEADING.test(h[2]!)) level = l;
+      else if (level !== 0 && l <= level) level = 0;
+      continue;
+    }
+    if (scoped && level === 0) continue;
+    const m = CRITERION_LINE.exec(line);
     if (m === null) continue;
     const text = cleanVerifyText(m[1]);
     if (text !== '') out.push(text);
     if (out.length >= MAX_CRITERIA) break;
   }
   return out;
+}
+
+/** The lines of the quoted block that follows the "Project-manager Spec" label, or null when the body has no such block. */
+function quotedSpecLines(lines: readonly string[]): string[] | null {
+  // The label counts only at the top level, outside every fence (a forged one inside the summary's quoted block does not).
+  let label = -1;
+  let fence: OpenFence | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (fence !== null) {
+      if (closesFence(line, fence)) fence = null;
+      continue;
+    }
+    fence = opensFence(line);
+    if (fence === null && PM_SPEC_LABEL.test(line)) {
+      label = i;
+      break;
+    }
+  }
+  if (label < 0) return null;
+  let at = label + 1;
+  while (at < lines.length && lines[at]!.trim() === '') at++;
+  const first = at < lines.length ? lines[at]! : '';
+  const open = opensFence(first);
+  // The pipeline's own container: seven or more backticks and the label `untrusted-<hex nonce>`.
+  if (open === null || open.ch !== '`' || open.len < 7 || !/^ {0,3}`+untrusted-[0-9a-f]+\s*$/.test(first)) return null;
+  const inner: string[] = [];
+  for (const line of lines.slice(at + 1)) {
+    if (closesFence(line, open)) break;
+    inner.push(line);
+  }
+  return inner;
+}
+
+/**
+ * The numbered list items of a Spec body, in order: `1. text` or `1) text`, at most three spaces of indent. At most MAX_CRITERIA.
+ *
+ * The stored Spec quotes the project-manager's text inside an untrusted fence after a "Project-manager Spec" line (pipeline plan/spec.ts). When that block is
+ * there, only it is read (under its "Acceptance criteria" heading when it has one): the Consensus Summary block, the allowed-files block and any code sample
+ * inside the Spec are ignored. A body without that block (an older or hand-written Spec) is read outside code fences.
+ */
+export function parseSpecCriteria(body: string | null | undefined): string[] {
+  if (typeof body !== 'string') return [];
+  const lines = body.slice(0, 400_000).replace(/\r/g, '').split('\n');
+  const quoted = quotedSpecLines(lines);
+  return quoted !== null ? criteriaOutsideFences(quoted, true) : criteriaOutsideFences(lines, false);
 }
 
 /** A refusal of a verify input, carrying one of the closed codes in `OWN_ERROR_CODES`. */

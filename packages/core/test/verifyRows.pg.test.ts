@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
@@ -222,6 +223,20 @@ describe('verify stage store', () => {
       expect(row.checks_only).toEqual([1, 3]);
       // The stored list cannot be changed by the app role afterwards.
       await expect(asWorker((c) => c.query(`UPDATE verify_rows SET checks_only = '[]'::jsonb WHERE id = $1`, [o.rowId]))).rejects.toThrow();
+    });
+
+    it('a Spec in the shape the pipeline stores (criteria inside the quoted block) gives journeys and checks_only', async () => {
+      const repo = await newRepo();
+      await turnOn(repo);
+      const real = readFileSync(new URL('./fixtures/verify/realSpecBody.txt', import.meta.url), 'utf8');
+      const item = await newItem(repo, 'merged', real);
+      const o = (await open(item)) as { rowId: string; journeys: { id: string; source: string; text: string }[] };
+      expect(o.journeys).toEqual([
+        { id: 'c1', source: 'criterion', text: 'The settings page shows a Save button' },
+        { id: 'c2', source: 'criterion', text: 'Saving keeps the value after a reload, shown as in:' },
+      ]);
+      const row = (await admin.query(`SELECT checks_only FROM verify_rows WHERE id = $1`, [o.rowId])).rows[0];
+      expect(row.checks_only).toEqual([3]);
     });
 
     it('readStreak reads a no_visible_journeys row without counting it (the neutral rule itself is in verifyCriteria.test.ts)', async () => {
