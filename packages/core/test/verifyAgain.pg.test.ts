@@ -29,6 +29,7 @@ describe('Verify again [pg]', () => {
   let a: SeedRefs;
   let memberId: string;
   let markers: Map<string, number>;
+  let kicked: string[];
 
   beforeAll(async () => {
     adminPool = createPool(process.env.DATABASE_URL!);
@@ -46,7 +47,8 @@ describe('Verify again [pg]', () => {
   });
   beforeEach(() => {
     markers = new Map();
-    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    kicked = [];
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) }, kick: (name) => void kicked.push(name) });
   });
   afterEach(() => setPendingHooks(null));
 
@@ -109,6 +111,7 @@ describe('Verify again [pg]', () => {
         await expect(verifyAgainWorkItem(ctx(), item)).rejects.toBeInstanceOf(OperatorRefusedError);
         expect(await rowsOf(item)).toHaveLength(1);
         expect(markers.has(HINT)).toBe(false);
+        expect(kicked).toEqual([]);
         expect(await audits(item)).toEqual([]);
       }
     });
@@ -183,6 +186,8 @@ describe('Verify again [pg]', () => {
 
       // Push, not poll: the verify sweep's hint was set, for the sweep that already runs; the sweep reads the rows.
       expect(markers.has(HINT)).toBe(true);
+      // ... and the sweep was kicked, so the new row is read within seconds rather than at the next tick.
+      expect(kicked).toEqual(['proposal-verify-sweep']);
 
       // The audit row names who asked and which rows.
       expect(await audits(item)).toEqual([expect.objectContaining({ actor: a.userId, payload: expect.objectContaining({ work_item_id: item, action: 'verify_again', verify_row_id: out.rowId, attempt: 2 }) })]);

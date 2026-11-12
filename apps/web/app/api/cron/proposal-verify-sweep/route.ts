@@ -1,6 +1,7 @@
+import { after } from "next/server";
 import type { NextRequest, NextResponse } from "next/server";
 import { getWorker } from "../../../../lib/worker";
-import { proposalVerifySweepHandler } from "./handler";
+import { proposalVerifySweepHandler, proposalVerifySweepKickHandler } from "./handler";
 import { cronLog } from "../../../../lib/cronLog";
 
 /**
@@ -16,5 +17,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     cronSecret: process.env.CRON_SECRET ?? "",
     getWorker,
     log: cronLog,
+  });
+}
+
+/** The signed kick sent right after a verify wake point wrote its row (packages/webhooks verifyKick.ts); see handler.ts. */
+export async function POST(req: NextRequest): Promise<Response> {
+  return proposalVerifySweepKickHandler(req, {
+    cronSecret: process.env.CRON_SECRET ?? "",
+    getWorker,
+    log: cronLog,
+    schedule: (work) => after(() => work),
   });
 }

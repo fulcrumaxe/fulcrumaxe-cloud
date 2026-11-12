@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { VERIFY_TESTER_ROLE, isTerminalRunStatus, wakeVerifyStage } from "@fx/core/src/verify/wake.js";
 import { setDeferredRoleEventWriter } from "@fx/core/src/memory/deferredRole.js";
 import { redactEventPayload } from "@fx/core/src/events/redact.js";
 // A relative import: @fx/features is not a dependency of this package and this
@@ -910,6 +911,12 @@ export async function recordRunStatusMove(client: PoolClient, params: Pick<Write
   await emitRunStatusDomainEvent(client, params);
 }
 
+/** Wakes the verify stage when the run that just ended is a post-merge tester's. Any other role does nothing. */
+async function wakeVerifyStageForRun(client: PoolClient, accountId: string, runId: string): Promise<void> {
+  const { rows } = await client.query<{ role: string }>(`SELECT role FROM agent_runs WHERE account_id = $1 AND id = $2`, [accountId, runId]);
+  if (rows[0]?.role === VERIFY_TESTER_ROLE) wakeVerifyStage();
+}
+
 /**
  * The same write on a client the caller already holds, inside the caller's tenant transaction (D#6 R2b-3): a runner's claim,
  * its events and the sweeper move a run's status in the SAME transaction as the lease columns they check, so the two commit or
@@ -958,6 +965,9 @@ export async function writeRunStatusOn(client: PoolClient, params: WriteRunStatu
     await emitRunStatusDomainEvent(client, params);
     // D#597 CC-8: a run that just ended wakes the invariant sweep for the next few minutes (its gate is this marker; nothing else keeps it awake).
     if (params.to === "succeeded" || params.to === "failed" || params.to === "timed_out") void markWorkPending("invariant-sweep");
+    // D#749: a finished post-merge tester run is what the verify stage waits on; wake the verify sweep now (marker and kick) instead of at its next tick. Only that role:
+    // any other run's end changes nothing the stage reads.
+    if (isTerminalRunStatus(params.to)) await wakeVerifyStageForRun(client, params.accountId, params.runId);
     return { updated: true };
   }
   const { rows } = await client.query<{ status: RunStatus }>(

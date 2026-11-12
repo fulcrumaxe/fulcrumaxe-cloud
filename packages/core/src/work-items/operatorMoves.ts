@@ -16,7 +16,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
-import { markWorkPending } from '../pendingWork.js';
+import { wakeVerifyStage } from '../verify/wake.js';
 import { openVerifyAgainRow } from '../verify/rows.js';
 import { recordStage } from './recordStage.js';
 import { IllegalStageTransitionError } from './stages.js';
@@ -184,7 +184,7 @@ export async function verifyAgainWorkItem(ctx: OperatorMoveCtx, workItemId: stri
     await audit(client, 'work_item.sent_back', { work_item_id: workItemId, action: 'verify_again', verify_row_id: row.rowId, attempt: row.attempt });
     return row;
   });
-  void markWorkPending('proposal-verify-sweep');
+  wakeVerifyStage();
   return { rowId: opened.rowId, attempt: opened.attempt };
 }
 

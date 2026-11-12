@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { MARKER_TTL_SECONDS, getPendingHooks, markWorkPending, runGatedTick, setPendingHooks } from "@fx/core/src/pendingWork";
+import { MARKER_TTL_SECONDS, getPendingHooks, markWorkPending, runGatedTick, setPendingHooks, type SweepName } from "@fx/core/src/pendingWork";
 import { configureErrorReporter } from "@fx/telemetry";
 import { installPendingWork, runtimeCacheStore } from "../lib/pendingWorkStore";
 
@@ -162,6 +162,46 @@ describe("runtimeCacheStore through the real client", () => {
     await markWorkPending("run-action-sweep", { now: t0 + 120_000 });
     await tick(t0 + 300_000);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("installPendingWork: the kick wiring", () => {
+  const KICK_URL = "https://x.test/api/internal/run-actions/kick";
+  const SECRET = "cron-secret-for-the-wiring-test";
+  afterEach(() => vi.unstubAllEnvs());
+
+  /** Installs the hooks with the given settings, runs `fire` against them, and returns the URLs the kick sent (the sender waits KICK_DELAY_MS before it posts). */
+  async function sentBy(env: Record<string, string>, fire: (kick: (name: SweepName) => void) => void): Promise<string[]> {
+    for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v);
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((async (u: string) => {
+      urls.push(String(u));
+      return new Response(null, { status: 202 });
+    }) as never);
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    installPendingWork();
+    fire((name) => getPendingHooks()!.kick!(name));
+    await vi.advanceTimersByTimeAsync(5000);
+    return urls;
+  }
+
+  it("kick('proposal-verify-sweep') posts to the verify sweep route on the kick URL's origin when the URL and secret are set", async () => {
+    expect(await sentBy({ RUN_ACTION_KICK_URL: KICK_URL, CRON_SECRET: SECRET }, (kick) => kick("proposal-verify-sweep"))).toEqual(["https://x.test/api/cron/proposal-verify-sweep"]);
+  });
+
+  it("kick('api-sweep') still posts only to the api sweep route, and no other sweep name posts anything", async () => {
+    const env = { RUN_ACTION_KICK_URL: KICK_URL, CRON_SECRET: SECRET };
+    expect(await sentBy(env, (kick) => kick("api-sweep"))).toEqual(["https://x.test/api/cron/api-sweep"]);
+    vi.restoreAllMocks();
+    setPendingHooks(null);
+    expect(await sentBy(env, (kick) => { kick("reconcile"); kick("stage-resume-sweep"); kick("merge-queue-sweep"); })).toEqual([]);
+  });
+
+  it("sends nothing when the kick URL or the cron secret is missing", async () => {
+    expect(await sentBy({ RUN_ACTION_KICK_URL: "", CRON_SECRET: SECRET }, (kick) => kick("proposal-verify-sweep"))).toEqual([]);
+    vi.restoreAllMocks();
+    setPendingHooks(null);
+    expect(await sentBy({ RUN_ACTION_KICK_URL: KICK_URL, CRON_SECRET: "" }, (kick) => kick("proposal-verify-sweep"))).toEqual([]);
   });
 });
 
