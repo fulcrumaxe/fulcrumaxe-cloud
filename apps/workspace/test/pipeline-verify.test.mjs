@@ -22,9 +22,9 @@ function coreList(name) {
 const row = (over) => ({ verify: { status: "unverified", reason: "run_failed", method: "playwright_runner", journeys: null, account: null, bug_item_id: null, pr_number: 57, at: "2026-11-10T12:00:00.000Z", ...over } });
 
 describe("D#749 V4b: verify section words", () => {
-  it("has a plain sentence for each of the 14 closed reasons, and no others", () => {
+  it("has a plain sentence for each of the 15 closed reasons, and no others", () => {
     const codes = coreList("VERIFY_REASON_CODES");
-    expect(codes).toHaveLength(14);
+    expect(codes).toHaveLength(15);
     expect(Object.keys(VERIFY_REASON_SENTENCES).sort()).toEqual([...codes].sort());
     for (const code of codes) {
       const s = verifySection(row({ reason: code }));
@@ -32,7 +32,7 @@ describe("D#749 V4b: verify section words", () => {
       expect(s.reason, code).not.toMatch(/_|null|undefined/);
       expect(s.reason.endsWith("."), code).toBe(true);
     }
-    expect(new Set(Object.values(VERIFY_REASON_SENTENCES)).size).toBe(14);
+    expect(new Set(Object.values(VERIFY_REASON_SENTENCES)).size).toBe(15);
   });
 
   it("names every method with words, and the same methods the store allows", () => {
@@ -62,6 +62,17 @@ describe("D#749 V4b: verify section states", () => {
     expect(verifySection(row({ status: "verified", reason: null, account: "matched" })).account).toBe("Signed in as the account set for checking.");
   });
 
+  it("says which criteria the browser covered and which were left to the code checks, as numbers only", () => {
+    const s = verifySection(fx("200-verify-verified.json"));
+    expect(s.criteria).toEqual({ browser: "Checked in the browser: criteria 1, 2, 4.", checks: "Left to the code checks and reviews: criterion 3." });
+    expect(verifySection(row({ status: "verified", reason: null, criteria: { browser: [], checks: [2, 3] } })).criteria).toEqual({ browser: null, checks: "Left to the code checks and reviews: criteria 2, 3." });
+    for (const criteria of [undefined, null, "x", {}, { browser: [], checks: [] }, { browser: ["1; DROP", -1, 99, 1.5], checks: "no" }]) expect(verifySection(row({ status: "verified", reason: null, criteria })).criteria, JSON.stringify(criteria)).toBeNull();
+  });
+  it("a no_visible_journeys row reads as not checked in a browser, with no counts", () => {
+    const s = verifySection(row({ status: "unverified", reason: "no_visible_journeys", criteria: { browser: [], checks: [1, 2] } }));
+    expect(s.reason).toBe(VERIFY_REASON_SENTENCES.no_visible_journeys);
+    expect(s.counts).toBeNull();
+  });
   it("a failed row says so, counts the failures and offers the bug item", () => {
     const s = verifySection(fx("200-verify-failed.json"));
     expect(s).toMatchObject({ status: "failed", counts: "1 of 3 steps passed, 2 failed.", bugItemId: BUG, method: { id: "chrome_runner" } });

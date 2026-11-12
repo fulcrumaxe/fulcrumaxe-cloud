@@ -23,6 +23,7 @@
     "method": null,
     "journeys": null,
     "account": null,
+    "criteria": { "browser": [1, 2], "checks": [] },
     "bug_item_id": null,
     "pr_number": 57,
     "at": "2026-11-10T12:00:00.000Z"

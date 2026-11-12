@@ -199,15 +199,37 @@ describe('verify stage store', () => {
       await expect(asWorker((c) => openVerifyRow(c, a.accountId, { workItemId: item, prNumber: 0, mergeSha: sha('a') }))).rejects.toMatchObject({ code: 'verify_row_invalid' });
     });
 
-    it('an empty Spec gives only the standing journeys; with no standing journeys either, the row holds none and can never be verified', async () => {
+    it('an empty Spec gives only the standing journeys; with none either, the row ends at once as unverified: no_visible_journeys, with no deploy or run', async () => {
       const repo = await newRepo();
       await turnOn(repo);
       const item = await newItem(repo, 'merged', 'A Spec with prose and no numbered list.');
       const o = (await open(item)) as { rowId: string; journeys: unknown[] };
       expect(o.journeys).toEqual([]);
-      await toRunning(o.rowId);
-      await expect(asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'verified', result: [] }))).rejects.toMatchObject({ code: 'verify_row_invalid' });
-      expect((await asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'unverified', reason: 'journeys_missing' }))).moved).toBe(true);
+      const row = (await admin.query(`SELECT status, reason_code, method, finished_at IS NOT NULL AS done FROM verify_rows WHERE id = $1`, [o.rowId])).rows[0];
+      expect(row).toEqual({ status: 'unverified', reason_code: 'no_visible_journeys', method: null, done: true });
+      // Nothing to start: the row is finished, so it cannot be moved to deploying.
+      expect((await asWorker((c) => startDeploying(c, a.accountId, o.rowId, true))).moved).toBe(false);
+      expect((await factKinds(item)).at(-1)).toBe('verify_unverified:no_visible_journeys');
+    });
+
+    it('only the visible criteria become journeys (ids keep the Spec numbers); the code-level ones are stored as left to the checks', async () => {
+      const repo = await newRepo();
+      await turnOn(repo);
+      const item = await newItem(repo, 'merged', ['1. `repoLabel({full_name: "a/b"})` is `"a/b"`', '2. The picker option texts are exactly [A, B]', '3. `pickRepoId([])` returns `null`', '4. [ui] The empty state says so'].join('\n'));
+      const o = (await open(item)) as { rowId: string; journeys: { id: string }[] };
+      expect(o.journeys.map((j) => j.id)).toEqual(['c2', 'c4']);
+      const row = (await admin.query(`SELECT checks_only FROM verify_rows WHERE id = $1`, [o.rowId])).rows[0];
+      expect(row.checks_only).toEqual([1, 3]);
+      // The stored list cannot be changed by the app role afterwards.
+      await expect(asWorker((c) => c.query(`UPDATE verify_rows SET checks_only = '[]'::jsonb WHERE id = $1`, [o.rowId]))).rejects.toThrow();
+    });
+
+    it('readStreak reads a no_visible_journeys row without counting it (the neutral rule itself is in verifyCriteria.test.ts)', async () => {
+      const repo = await newRepo();
+      await turnOn(repo);
+      const item = await newItem(repo, 'merged', '1. `f` returns 1');
+      expect(((await open(item)) as { opened: boolean }).opened).toBe(true);
+      expect(await asWorker((c) => readStreak(c, a.accountId, repo))).toBe(0);
     });
 
     it('a replay finds the row it made; two creators at once make one row and one batch', async () => {
@@ -715,6 +737,18 @@ describe('verify stage store', () => {
       await toRunning(o.rowId, sha('6'));
       expect((await asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'verified', result: [evidenced('c1')] }))).moved).toBe(true);
       expect(await asWorker((c) => readStreak(c, a.accountId, repo))).toBe(1);
+    });
+
+    it('a verified row that passed on a standing journey alone is neutral for the streak', async () => {
+      const repo = await newRepo();
+      await turnOn(repo, { standingJourneys: [{ id: 'home', text: 'The home page loads' }] });
+      const item = await newItem(repo, 'merged', '1. `f` returns 1');
+      const o = (await open(item, sha('5'), 55)) as { rowId: string; journeys: { id: string }[] };
+      expect(o.journeys.map((j) => j.id)).toEqual(['s_home']);
+      await asWorker((c) => recordDriverEvent(c, a.accountId, { workItemId: item, kind: 'merged_by_gate', dedupeKey: 'sj', code: 'merged', headSha: sha('5'), prNumber: 55 }));
+      await toRunning(o.rowId, sha('5'));
+      expect((await asWorker((c) => finishVerifyRow(c, a.accountId, o.rowId, { status: 'verified', result: [evidenced('s_home')] }))).moved).toBe(true);
+      expect(await asWorker((c) => readStreak(c, a.accountId, repo))).toBe(0);
     });
   });
 });

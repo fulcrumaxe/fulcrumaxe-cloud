@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { CRITERION_TAG_RULES } from "@fx/core/src/verify/criteria.js";
 import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { parsePlannedPrs, publishSpec, type DiscussionsContext } from "@fx/discussions";
 import { systemPrincipal } from "@fx/discussions/server";
@@ -58,6 +59,8 @@ export function buildLightSpecPrompt(input: { category: LightSpecCategory; title
     "Do not write the file list into the Spec text: the pipeline adds it.",
     "",
     ACCEPTANCE_FILES_RULES,
+    "",
+    CRITERION_TAG_RULES,
     "",
     PLANNED_PRS_RULES,
     "Also give `split_proposed`, a required boolean: true when you propose delivering the work as separate planned pull requests, false otherwise. It must be true exactly when `planned_prs` lists two or more rows; any other combination is refused. Every planned pull request is built within the same file list, so `acceptance_files` covers all of them.",

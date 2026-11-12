@@ -508,6 +508,7 @@ export const VERIFY_REASON_SENTENCES = {
   run_failed: "The checking run itself failed before it gave an answer.",
   verify_disabled: "Checking was switched off before this one started.",
   account_unverifiable: "The signed-in account could not be confirmed with this browser method, so the result was not trusted.",
+  no_visible_journeys: "Nothing in this request's checklist is something a browser can check, so only the code checks and reviews covered it.",
 };
 export const VERIFY_REASON_UNKNOWN = "The check could not be made.";
 export const VERIFY_METHOD_WORDS = {
@@ -516,6 +517,19 @@ export const VERIFY_METHOD_WORDS = {
   playwright_sandbox: "Playwright in the sandbox",
 };
 export const VERIFY_BUG_LABEL = "Open the bug item";
+const criterionNumbers = (list) => (Array.isArray(list) ? list.filter((n) => Number.isInteger(n) && n >= 1 && n <= 30) : []);
+const criterionList = (list) => (list.length === 1 ? "criterion " + list[0] : "criteria " + list.join(", "));
+/** Which Spec criteria the browser covered and which were left to the code checks (numbers only; the server sends no Spec text). Null when neither list has an entry. */
+export function verifyCriteriaLines(criteria) {
+  if (!isObj(criteria)) return null;
+  const browser = criterionNumbers(criteria.browser);
+  const checks = criterionNumbers(criteria.checks);
+  if (browser.length === 0 && checks.length === 0) return null;
+  return {
+    browser: browser.length > 0 ? "Checked in the browser: " + criterionList(browser) + "." : null,
+    checks: checks.length > 0 ? "Left to the code checks and reviews: " + criterionList(checks) + "." : null,
+  };
+}
 const countOf = (n) => (Number.isInteger(n) && n >= 0 ? n : null);
 export function verifySection(data) {
   const v = data && data.verify;
@@ -535,6 +549,7 @@ export function verifySection(data) {
     reason,
     counts,
     method: !held && typeof v.method === "string" && Object.hasOwn(VERIFY_METHOD_WORDS, v.method) ? { id: v.method, label: VERIFY_METHOD_WORDS[v.method] } : null,
+    criteria: verifyCriteriaLines(v.criteria),
     account: v.account === "matched" ? "Signed in as the account set for checking." : null,
     bugItemId: v.status === "failed" && typeof v.bug_item_id === "string" && ITEM_ID.test(v.bug_item_id) ? v.bug_item_id.toLowerCase() : null,
   };
@@ -1108,6 +1123,8 @@ export function createInsightPanel(deps) {
       h("p", { role: "status", "data-testid": "pl-verify-status" }, v.text, v.method ? [" ", h("span", { class: "pl-verify-badge", "data-testid": "pl-verify-method", "data-method": v.method.id }, v.method.label)] : null),
       v.reason ? h("p", { "data-testid": "pl-verify-reason" }, v.reason) : null,
       v.counts ? h("p", { class: "pl-muted", "data-testid": "pl-verify-counts" }, v.counts) : null,
+      v.criteria && v.criteria.browser ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-browser" }, v.criteria.browser) : null,
+      v.criteria && v.criteria.checks ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-checks" }, v.criteria.checks) : null,
       v.account ? h("p", { class: "pl-muted", "data-testid": "pl-verify-account" }, v.account) : null,
       v.bugItemId && deps.onOpenItem ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-verify-bug", onClick: () => deps.onOpenItem(v.bugItemId) }, VERIFY_BUG_LABEL) : null
     );

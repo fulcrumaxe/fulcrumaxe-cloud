@@ -26,6 +26,12 @@ export interface ItemVerify {
    * finished before the word was stored. The repository's current settings play no part: a label set afterwards changes nothing.
    */
   account: AccountCheck | null;
+  /**
+   * Which Spec criteria the check put in front of the browser and which it left to the other checks (the check, the reviewers, the acceptance tester), as the criteria's
+   * 1-based numbers in the Spec: closed values, no Spec text. `browser` are the criteria that became journeys; `checks` are the ones classed as code-level (core's
+   * verify/criteria.ts) when the row opened. A row opened before migration 1010 left none to the checks.
+   */
+  criteria: { browser: number[]; checks: number[] };
   /** The bug item a failed row filed, or null. */
   bug_item_id: string | null;
   pr_number: number;
@@ -43,6 +49,18 @@ interface Row {
   finished_at: Date | null;
   created_at: Date;
   account_check: AccountCheck | null;
+  journeys: { id: string; source: string }[];
+  checks_only: number[];
+}
+
+const asNumbers = (v: unknown): number[] => (Array.isArray(v) ? v.filter((n): n is number => Number.isInteger(n) && n >= 1 && n <= 30).slice(0, 30) : []);
+function criteriaOf(r: Row): ItemVerify['criteria'] {
+  const browser: number[] = [];
+  for (const j of Array.isArray(r.journeys) ? r.journeys : []) {
+    const m = j !== null && typeof j === 'object' && (j.source === 'criterion' || j.source === 'recheck') && typeof j.id === 'string' ? /^c(\d{1,2})$/.exec(j.id) : null;
+    if (m !== null) browser.push(Number(m[1]));
+  }
+  return { browser: [...new Set(browser)].sort((a, b) => a - b), checks: asNumbers(r.checks_only) };
 }
 
 function countJourneys(result: JourneyResult[] | null): ItemVerify['journeys'] {
@@ -55,7 +73,7 @@ function countJourneys(result: JourneyResult[] | null): ItemVerify['journeys'] {
 /** The item's newest verify row, or null when verification is off for its repository or the item has no row (the answer then carries no `verify`). */
 export async function readItemVerify(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<ItemVerify | null> {
   const { rows } = await client.query<Row>(
-    `SELECT r.status, r.method, r.reason_code, r.result, r.bug_item_id, r.pr_number, r.finished_at, r.created_at, r.account_check
+    `SELECT r.status, r.method, r.reason_code, r.result, r.bug_item_id, r.pr_number, r.finished_at, r.created_at, r.account_check, r.journeys, r.checks_only
        FROM verify_rows r
        JOIN verify_settings s ON s.repo_id = r.repo_id AND s.account_id = r.account_id AND s.enabled
       WHERE r.work_item_id = $1::uuid
@@ -73,6 +91,7 @@ export async function readItemVerify(client: Pick<PoolClient, 'query'>, workItem
     method: r.method !== null && VERIFY_METHODS.includes(r.method) ? r.method : null,
     journeys: finishedWithResult ? countJourneys(r.result) : null,
     account: r.account_check !== null && ACCOUNT_CHECKS.includes(r.account_check) ? r.account_check : null,
+    criteria: criteriaOf(r),
     bug_item_id: r.bug_item_id,
     pr_number: r.pr_number,
     at: (r.finished_at ?? r.created_at).toISOString(),

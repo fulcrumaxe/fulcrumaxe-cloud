@@ -1,3 +1,5 @@
+import { classifyCriteria } from './criteria.js';
+
 /**
  * D#6 V1: the journeys a verification row will check, derived before the run and without a model.
  *
@@ -91,10 +93,29 @@ export interface DeriveJourneysInput {
   carried?: readonly { id: string; text: string }[];
 }
 
-/** The journeys of a new row, in order: criteria `c1..`, then standing `s_<id>`, then the carried ones. Deterministic; an empty Spec gives only the standing and carried ones. */
+/** The journeys of a new row and the criteria it leaves to the checks. */
+export interface JourneyPlan {
+  journeys: Journey[];
+  /** The 1-based numbers of the Spec criteria classified `code` (criteria.ts): not journeys; the check, the reviewers and the acceptance tester cover them. */
+  checksOnly: number[];
+}
+
+/** The journeys alone (see `planJourneys`). */
 export function deriveJourneys(input: DeriveJourneysInput): Journey[] {
+  return planJourneys(input).journeys;
+}
+
+/**
+ * The journeys of a new row, in order: the visible criteria `c<n>` (n is the criterion's number in the Spec, so a left-out criterion leaves a gap in the ids and the
+ * numbers stay stable), then standing `s_<id>`, then the carried ones. Deterministic. A Spec with no visible criterion gives only the standing and carried ones.
+ */
+export function planJourneys(input: DeriveJourneysInput): JourneyPlan {
   const out: Journey[] = [];
-  parseSpecCriteria(input.specBody).forEach((text, i) => out.push({ id: `c${i + 1}`, source: 'criterion', text }));
+  const checksOnly: number[] = [];
+  for (const c of classifyCriteria(parseSpecCriteria(input.specBody))) {
+    if (c.kind === 'code') checksOnly.push(c.n);
+    else if (c.text !== '') out.push({ id: `c${c.n}`, source: 'criterion', text: c.text });
+  }
   for (const s of input.standing.slice(0, MAX_STANDING)) {
     if (STANDING_ID_RE.test(s.id)) out.push({ id: `s_${s.id}`, source: 'standing', text: cleanVerifyText(s.text) });
   }
@@ -105,5 +126,5 @@ export function deriveJourneys(input: DeriveJourneysInput): Journey[] {
     if (at >= 0) out[at] = { id: c.id, source: 'recheck', text: text === '' ? out[at]!.text : text };
     else if (text !== '') out.push({ id: c.id, source: 'recheck', text });
   }
-  return out.filter((j) => j.text !== '').slice(0, MAX_JOURNEYS);
+  return { journeys: out.filter((j) => j.text !== '').slice(0, MAX_JOURNEYS), checksOnly };
 }

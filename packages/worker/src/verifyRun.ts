@@ -24,7 +24,7 @@ import type { ReadyOutcome, VerifyStageDeps } from "./verifyStage.js";
  *  - `settle` (the row is running): the job's end is read. A job that ended without succeeding ends the row `unverified: run_failed`. A succeeded job's envelope goes through
  *    the pipeline's strict rules (injected: this package does not import it), which turn it into the row's outcome; a hollow pass is `unverified`. The outcome, the
  *    `verify_*` fact and, for a failed row, the one bug item are written in ONE transaction. A cannot-verify outcome files no bug item (it is not a product defect). The
- *    streak is derived from the finished rows (`readStreak`), so every outcome moves it by rule: a pass counts, a fail or an unverified row resets it.
+ *    streak is derived from the finished rows (`readStreak`), so every outcome moves it by rule: a pass counts, a fail or an unverified row resets it. The neutral exceptions: `unverified: no_visible_journeys`, and a `verified` row that passed on standing journeys alone (no Spec-criterion journey passed), neither count nor reset.
  *
  * The pipeline decides everything here (R-597-1): nothing a page or a model wrote reaches a prompt, a label or a decision. This file writes verify rows, their facts, a
  * cancelled deploy order and the bug item, and imports no merge call site.

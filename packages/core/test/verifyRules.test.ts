@@ -5,8 +5,8 @@ import { applySettingsPatch, DEFAULT_VERIFY_SETTINGS, isEligible, parseBaseUrl, 
 import { canMove, FINISHED_STATUSES, GATE_METHODS, nextStreak, ROW_MOVES, streakOf, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, type StreakInput, type VerifyRowStatus } from '../src/verify/rows.js';
 
 const MIGRATION = readFileSync(path.join(__dirname, '..', '..', 'db', 'migrations', '1003_verify_stage.sql'), 'utf8');
-// The reason check was replaced by 1007 (one more word); the status and method checks are 1003's.
-const LATER_MIGRATION = readFileSync(path.join(__dirname, '..', '..', 'db', 'migrations', '1007_verify_browser_driver.sql'), 'utf8');
+// The reason check was last replaced by 1010 (one more word); the status and method checks are 1003's.
+const LATER_MIGRATION = readFileSync(path.join(__dirname, '..', '..', 'db', 'migrations', '1010_verify_visible_criteria.sql'), 'utf8');
 const listIn = (constraint: string): string[] => {
   const source = constraint === 'verify_rows_reason_check' ? LATER_MIGRATION : MIGRATION;
   const m = new RegExp(`${constraint} CHECK \\((?:status|method|reason_code) IN \\(([^)]*)\\)\\)`).exec(source);
@@ -42,7 +42,7 @@ describe('the row state machine', () => {
 });
 
 describe('the streak rule', () => {
-  const clean: StreakInput = { status: 'verified', method: 'chrome_runner', mergedByProduct: true, deployByOrder: true, personStep: false };
+  const clean: StreakInput = { status: 'verified', method: 'chrome_runner', mergedByProduct: true, deployByOrder: true, personStep: false, criterionPassed: true };
   it('counts a clean, self-verified merge', () => {
     expect(nextStreak(0, clean)).toBe(1);
     expect(nextStreak(2, clean)).toBe(3);
