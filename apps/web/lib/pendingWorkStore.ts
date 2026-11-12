@@ -1,6 +1,6 @@
 import { getCache, waitUntil } from "@vercel/functions";
 import { setPendingHooks, type PendingHooks, type PendingStore } from "@fx/core/src/pendingWork";
-import { apiSweepKickerFromEnv } from "@fx/webhooks";
+import { apiSweepKickerFromEnv, verifySweepKickerFromEnv } from "@fx/webhooks";
 import { createErrorReporter } from "@fx/telemetry";
 
 /**
@@ -41,6 +41,7 @@ function reportError(err: unknown, stage: string): void {
 /** Installs the store, the post-response keep-alive and, when the run-action kick URL and secret are set, the api-sweep kick. */
 export function installPendingWork(): void {
   const kicker = apiSweepKickerFromEnv(process.env, reportError);
+  const verifyKicker = verifySweepKickerFromEnv(process.env, reportError);
   const keepAlive = (work: Promise<unknown>): void => {
     try {
       waitUntil(work);
@@ -56,6 +57,7 @@ export function installPendingWork(): void {
     recordConnected: async (name, at) => (await import("./cronLiveness")).recordConnectedTick(name, at),
     kick: (name) => {
       if (name === "api-sweep" && kicker) keepAlive(kicker.kick());
+      if (name === "proposal-verify-sweep" && verifyKicker) keepAlive(verifyKicker.kick());
     },
   };
   setPendingHooks(hooks);

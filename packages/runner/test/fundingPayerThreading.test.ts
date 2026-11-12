@@ -293,6 +293,8 @@ describe("C16.2: an injected resolvePayer threads through reserve/release/settle
         match: /agent_run_set_status/i,
         respond: () => ({ rows: [{ updated: true }], rowCount: 1 }),
       },
+      // The end of a run reads its role to decide whether the verify stage is woken (an executor's wakes nothing).
+      { match: /SELECT role FROM agent_runs/i, respond: () => ({ rows: [{ role: "executor" }], rowCount: 1 }) },
       // An unsliced run has no reader row: the saved-meter read and the fenced acquire of an end find none.
       { match: /run_log_readers/i, respond: () => ({ rows: [], rowCount: 0 }) },
       { match: /SELECT COALESCE\(MAX\(seq\)/i, respond: () => ({ rows: [{ next: "1" }] }) },

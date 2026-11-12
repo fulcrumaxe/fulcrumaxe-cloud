@@ -71,3 +71,14 @@ export {
   apiSweepKickerFromEnv,
   type ApiSweepKickerOptions,
 } from './kick.js';
+export {
+  VERIFY_SWEEP_KICK_HEADER,
+  VERIFY_SWEEP_KICK_BODY,
+  VERIFY_SWEEP_KICK_PATH,
+  verifySweepKickKey,
+  verifySweepKickHeader,
+  verifyVerifySweepKick,
+  createVerifySweepKicker,
+  verifySweepKickerFromEnv,
+  type VerifySweepKickerOptions,
+} from './verifyKick.js';

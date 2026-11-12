@@ -266,9 +266,11 @@ describe("deploy order routes [pg]", () => {
 
     describe("wakes the proposal-verify sweep (push, not poll)", () => {
       const writes = new Map<string, number>();
+      const kicked: string[] = [];
       beforeEach(() => {
         writes.clear();
-        setPendingHooks({ store: { get: async (k) => writes.get(k) ?? null, set: async (k, v) => void writes.set(k, v), delete: async (k) => void writes.delete(k) } });
+        kicked.length = 0;
+        setPendingHooks({ store: { get: async (k) => writes.get(k) ?? null, set: async (k, v) => void writes.set(k, v), delete: async (k) => void writes.delete(k) }, kick: (name) => void kicked.push(name) });
       });
       afterEach(() => setPendingHooks(null));
       const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -278,7 +280,9 @@ describe("deploy order routes [pg]", () => {
         expect((await report(OK(id, 1))).status).toBe(200);
         await flush();
         expect(writes.has("pending:proposal-verify-sweep")).toBe(true);
+        expect(kicked).toEqual(["proposal-verify-sweep"]); // and the sweep is kicked, so the row is read within seconds
         writes.clear();
+        kicked.length = 0;
         const failed = await held();
         expect((await report({ order_id: failed, lease_generation: 1, result: "failed", failure_code: "timeout" })).status).toBe(200);
         await flush();
@@ -292,6 +296,7 @@ describe("deploy order routes [pg]", () => {
         expect((await toResponse(() => deployOrderReportRun(deps(), { method: "POST", headers: {}, body: Buffer.from("{}") }))).status).toBe(401);
         await flush();
         expect(writes.has("pending:proposal-verify-sweep")).toBe(false);
+        expect(kicked).toEqual([]);
         expect((await report(OK(id, 1))).status).toBe(200);
         expect((await report(OK(id, 1))).status).toBe(409);
       });
