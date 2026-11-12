@@ -401,7 +401,7 @@ export function pickerModel(st) {
 }
 
 /** The mode of one repo: read it, pick, confirm, POST. Nothing is sent until the confirm button is pressed with the exact name typed. */
-export function createModeController({ call = api, signal, repoId, onChange = () => {}, onApplied = () => {} } = {}) {
+export function createModeController({ call = api, signal, repoId, onChange = () => {}, onApplied = () => {}, onMode = () => {} } = {}) {
   let st = { status: "loading", view: null, choice: null, typed: "", phase: "idle", error: "" };
   let gen = 0;
   const set = (patch) => {
@@ -415,6 +415,7 @@ export function createModeController({ call = api, signal, repoId, onChange = ()
       if (mine !== gen) return;
       if (!view) return quiet && st.view ? undefined : set({ status: "error", view: null });
       set({ status: "ready", view });
+      onMode(view.mode); // a re-read after a refused change shows the mode now in force
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;
       if (!quiet || st.status !== "ready") set({ status: "error" });
@@ -443,7 +444,7 @@ export function createModeController({ call = api, signal, repoId, onChange = ()
       const done = await call("POST", modeUrl(repoId), body, signal);
       const next = done && MODES.includes(done.execution_mode) ? done.execution_mode : mode;
       set({ view: { ...st.view, mode: next }, choice: null, typed: "", phase: "saved", error: "" });
-      onApplied(); // the auto-merge control under the picker re-reads: leaving local-only turns it off
+      onApplied(next); // the auto-merge control under the picker re-reads: leaving local-only turns it off
     } catch (e) {
       if (cancelled(e)) return;
       const copy = st.view.copy;
@@ -456,9 +457,9 @@ export function createModeController({ call = api, signal, repoId, onChange = ()
 }
 
 /** The view. `el` goes into the repo's settings; it repaints itself and keeps focus on the control the user was on. */
-export function createModeControl({ call = api, signal, repoId, doc = document, onApplied } = {}) {
+export function createModeControl({ call = api, signal, repoId, doc = document, onApplied, onMode } = {}) {
   const el = h("fieldset", { class: "repos-mode", "data-testid": "repos-mode" });
-  const ctl = createModeController({ call, signal, repoId, onChange: () => paint(), onApplied });
+  const ctl = createModeController({ call, signal, repoId, onChange: () => paint(), onApplied, onMode });
   const id = (s) => "repos-mode-" + s;
   let focusError = false;
   function paint() {
