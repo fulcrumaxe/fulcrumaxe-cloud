@@ -120,7 +120,8 @@ function mountRepos(host, installNote) {
     if (dial) dial.load();
     autoMerge = st.openId ? createAutoMergeControl({ signal: abort.signal, repoId: st.openId }) : null;
     if (autoMerge) autoMerge.load();
-    mode = st.openId ? createModeControl({ signal: abort.signal, repoId: st.openId, onApplied: () => autoMerge && autoMerge.reload() }) : null;
+    const rid = st.openId; // the repo this control belongs to: a save still out when another repo opens must not touch that repo's panel
+    mode = rid ? createModeControl({ signal: abort.signal, repoId: rid, onApplied: (next) => { allowances.setMode(rid, next); if (autoMerge) autoMerge.reload(); }, onMode: (next) => allowances.setMode(rid, next) }) : null;
     if (mode) mode.load();
     planWriteback = st.openId ? createPlanWritebackControl({ signal: abort.signal, repoId: st.openId, canChange: () => st.isAdmin }) : null;
     if (planWriteback) planWriteback.load();

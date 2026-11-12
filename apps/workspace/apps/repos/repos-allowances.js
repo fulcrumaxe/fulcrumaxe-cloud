@@ -260,8 +260,15 @@ export function createAllowancePanel({ call, isCancelled, runnerOutdated = () =>
     render();
   }
 
+  /** The repo's mode changed in this same panel: the approvals judge the mode now in force, not the one loaded when the panel opened. */
+  function setMode(repoId, mode) {
+    if (repoId !== s.repoId || !s.view || typeof mode !== "string") return;
+    s.view = { ...s.view, execution_mode: mode };
+    render();
+  }
+
   render();
-  return { el, show, repaint: render, clear() { gen++; s = { ...s, load: "idle", view: null }; check.clear(); el.replaceChildren(); } };
+  return { el, show, setMode, repaint: render, clear() { gen++; s = { ...s, load: "idle", view: null }; check.clear(); el.replaceChildren(); } };
 }
 
 // ── D#6 R-CHK-3c: the Repos app's check command form. The check is the one command a runner runs after the agent; an owner or admin approves, edits or
