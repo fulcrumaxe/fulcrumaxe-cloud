@@ -56,7 +56,12 @@ const PINNED_CONFIG = [
  * Runs git in `repoDir` with the pinned environment and config above. `extraEnv` is added after the `GIT_*` scrub, so the
  * only `GIT_*` variables a child sees are the ones its caller names (a temporary index, an author identity).
  */
-export function git(repoDir: string, args: string[], input?: string | Buffer, extraEnv?: Readonly<Record<string, string>>): Promise<Buffer> {
+export async function git(repoDir: string, args: string[], input?: string | Buffer, extraEnv?: Readonly<Record<string, string>>): Promise<Buffer> {
+  return (await gitWithStderr(repoDir, args, input, extraEnv)).out;
+}
+
+/** Same as `git`, and also hands back what git wrote to stderr on success (for a caller that must see a warning, e.g. cut-short rename detection). */
+export function gitWithStderr(repoDir: string, args: string[], input?: string | Buffer, extraEnv?: Readonly<Record<string, string>>): Promise<{ out: Buffer; stderr: string }> {
   return new Promise((resolve, reject) => {
     const pinned = PINNED_CONFIG.flatMap((c) => ["-c", c]);
     const child = spawn("git", ["--no-replace-objects", "-C", repoDir, ...pinned, ...args], { env: { ...childEnv(), ...extraEnv } as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"] });
@@ -71,7 +76,7 @@ export function git(repoDir: string, args: string[], input?: string | Buffer, ex
     child.stderr.on("data", (b: Buffer) => err.push(b));
     child.on("error", reject);
     child.on("close", (code) => {
-      if (code === 0 && size <= MAX_OUTPUT) resolve(Buffer.concat(out));
+      if (code === 0 && size <= MAX_OUTPUT) resolve({ out: Buffer.concat(out), stderr: Buffer.concat(err).toString("utf8") });
       else {
         const stderr = Buffer.concat(err).toString("utf8");
         // `stderr`, `exitCode` and `stdout` are for a caller that classifies the failure locally (`merge-tree` answers a conflict with exit 1 and its facts on stdout); they are never sent anywhere.
