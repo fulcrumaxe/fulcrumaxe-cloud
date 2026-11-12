@@ -538,4 +538,35 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
       expect(await row(id)).toBe("runner_local");
     });
   });
+
+  // D#767: the mode switch writes repos, the auto-merge opt-in, allowances and pending runs only; it never touches work_items
+  // or work_item_approvals (the 0759 definers hold no grant on either table).
+  describe("the mode switch never touches work_items or their approvals (criterion 10)", () => {
+    async function item(f: F2Fixture, repoId: string, state: string | null): Promise<string> {
+      const id = randomUUID();
+      await h.admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, state) VALUES ($1, $2, $3, 'feature', 'internal', $4)", [id, f.accountId, repoId, state]);
+      return id;
+    }
+    const snapshot = async (f: F2Fixture) => ({
+      items: (await h.admin.query("SELECT id, repo_id, state, updated_at FROM work_items WHERE account_id = $1 ORDER BY id", [f.accountId])).rows,
+      approvals: (await h.admin.query("SELECT id, work_item_id, approved_by FROM work_item_approvals WHERE account_id = $1 ORDER BY id", [f.accountId])).rows,
+    });
+
+    it("a sandbox -> runner_local -> sandbox switch leaves the account's work_items (same ids, same state, none closed) and their approvals exactly as they were", async () => {
+      const f = await fresh();
+      const id = await repo(f, "sandbox");
+      const open = await item(f, id, "open");
+      const closed = await item(f, id, "closed");
+      const unplaced = await item(f, id, null);
+      await h.admin.query("INSERT INTO work_item_approvals (account_id, work_item_id, approved_by, source) VALUES ($1, $2, $3, 'work_item_approve')", [f.accountId, open, f.o1]);
+      const before = await snapshot(f);
+      expect(before.items.map((r) => r.id).sort()).toEqual([closed, open, unplaced].sort());
+
+      expect(await call(f, f.o1, id, { mode: "runner_local", confirm_repo: NAME })).toMatchObject({ status: 200 });
+      expect(await call(f, f.o1, id, { mode: "sandbox", confirm_repo: NAME })).toMatchObject({ status: 200 });
+
+      const after = await snapshot(f);
+      expect(after).toEqual(before);
+    });
+  });
 });

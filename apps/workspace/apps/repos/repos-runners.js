@@ -340,10 +340,14 @@ export function createDialControl({ call = api, signal, repoId, data, doc = docu
 // while no usable model key is connected (`key_required`), with the reason wired to the radio by aria-describedby. A repo on a runner that is
 // public now, or whose visibility can't be read (`runner_blocked`, read live by the server), shows the matching sentence: its runner jobs are refused.
 export const MODES = ["sandbox", "runner_local", "runner_verified"];
+const RUNNER_MODES = ["runner_local", "runner_verified"];
 const BLOCKS = ["public_repo", "repo_visibility_unknown"];
 const LABEL_KEY = { sandbox: "sandbox", runner_local: "localOnly", runner_verified: "cloudVerified" };
 const HELP_KEY = { sandbox: "sandboxHelp", runner_local: "localOnlyHelp", runner_verified: "cloudVerifiedHelp" };
 const NEEDED = ["title", "sandbox", "sandboxHelp", "localOnly", "localOnlyHelp", "cloudVerified", "cloudVerifiedHelp", "keyRequired", "keyRequiredWhy", "typeName", "apply", "cancel", "saving", "saved", "leaveCancels", "adminOnly", "saveFailed", "nameMismatch", "copyChanged", "keyGone", "publicRepo", "visibilityUnknown"];
+// D#767: the confirm step's effect sentences. Checked only where they are actually used (pickerEffects below), the way AM_KEYS is
+// checked only by readAutoMerge: a body from before they existed is still a usable view, just with nothing to show for them.
+const EFFECT_KEYS = ["leaveQueued", "leaveSetsAside", "leaveAutoMergeOff", "needsReapproval"];
 export const LOADING_TEXT = "Loading...";
 export const UNAVAILABLE_TEXT = "This setting isn't available right now.";
 export const modeUrl = (repoId) => "/api/runners/repos/" + encodeURIComponent(repoId) + "/execution-mode";
@@ -353,7 +357,21 @@ export function readView(b) {
   const c = b && b.copy;
   if (!b || !MODES.includes(b.execution_mode) || typeof b.key_required !== "boolean" || typeof b.copy_sha256 !== "string" || !b.copy_sha256) return null;
   if (!c || typeof c !== "object" || !NEEDED.every((k) => typeof c[k] === "string" && c[k] !== "")) return null;
-  return { mode: b.execution_mode, fullName: typeof b.full_name === "string" ? b.full_name : null, keyRequired: b.key_required, hash: b.copy_sha256, canChange: b.can_change === true, blocked: BLOCKS.includes(b.runner_blocked) ? b.runner_blocked : null, copy: c };
+  // D#767's three facts: as lenient as full_name, can_change and auto_merge above, so a body that predates them (an older
+  // fixture, or a server reply with nothing to report) still reads as a usable view, just with nothing to show for them.
+  return {
+    mode: b.execution_mode,
+    fullName: typeof b.full_name === "string" ? b.full_name : null,
+    keyRequired: b.key_required,
+    hash: b.copy_sha256,
+    canChange: b.can_change === true,
+    blocked: BLOCKS.includes(b.runner_blocked) ? b.runner_blocked : null,
+    copy: c,
+    pendingRunnerRuns: Number.isInteger(b.pending_runner_runs) && b.pending_runner_runs >= 0 ? b.pending_runner_runs : 0,
+    allowancesInForce: b.allowances_in_force === true,
+    allowancesSetAside: b.allowances_set_aside === true,
+    autoMerge: b.auto_merge === true,
+  };
 }
 
 /** The sentence for a refused change, by status and code. `copy` is the picker's copy. */
@@ -366,6 +384,41 @@ export function refusalWords(e, copy) {
   if (s === 409 && e.code === "public_repo") return copy.publicRepo;
   if (s === 409 && e.code === "repo_visibility_unknown") return copy.visibilityUnknown;
   return copy.saveFailed;
+}
+
+/**
+ * D#767: the confirm step's effect sentences for the chosen target, in order, taken from the server's copy map. Leaving a
+ * runner mode for the sandbox: the cancel sentence, then how many queued runs that cancels, then that the approved allowances
+ * are set aside (only while one is in force), then that auto-merge turns off (only while it is on). Coming from the sandbox
+ * onto a runner mode: the re-approval sentence, only while the repo's allowances are set aside. Local-only to cloud-verified: only the
+ * auto-merge sentence, while it is on. Cloud-verified to local-only: none.
+ */
+function pickerEffects(v, target) {
+  // A body from before these four strings existed (an older server, or another control's fixture that shares this route)
+  // has nothing to show for them, rather than a sentence with a hole in it.
+  if (!EFFECT_KEYS.every((k) => typeof v.copy[k] === "string" && v.copy[k] !== "")) return [];
+  if (RUNNER_MODES.includes(v.mode) && target === "sandbox") {
+    const effects = [v.copy.leaveCancels, v.copy.leaveQueued.replace("{n}", String(v.pendingRunnerRuns))];
+    if (v.allowancesInForce) effects.push(v.copy.leaveSetsAside);
+    if (v.autoMerge) effects.push(v.copy.leaveAutoMergeOff);
+    return effects;
+  }
+  if (v.mode === "sandbox" && RUNNER_MODES.includes(target)) return v.allowancesSetAside ? [v.copy.needsReapproval] : [];
+  // Local-only to cloud-verified cancels nothing and keeps the set, but the server turns auto-merge off on any move that leaves local-only.
+  if (v.mode === "runner_local" && target === "runner_verified" && v.autoMerge) return [v.copy.leaveAutoMergeOff];
+  return [];
+}
+
+/**
+ * D#767: the picker's facts right after a saved move, so the next pick on the same open panel warns from what is true now. Leaving a runner
+ * mode for the sandbox is what the server just did to them: the queued runs are cancelled, an allowance in force is set aside, auto-merge is
+ * off. Auto-merge is off after ANY move that leaves local-only (the server turns it off in the same transaction), so a move from local-only to
+ * cloud-verified clears that fact too, and changes none of the others.
+ */
+function afterMove(v, next) {
+  const autoMerge = v.mode === "runner_local" && next !== "runner_local" ? false : v.autoMerge;
+  if (!RUNNER_MODES.includes(v.mode) || next !== "sandbox") return { mode: next, autoMerge };
+  return { mode: next, pendingRunnerRuns: 0, allowancesInForce: false, allowancesSetAside: v.allowancesSetAside || v.allowancesInForce, autoMerge };
 }
 
 /**
@@ -393,7 +446,7 @@ export function pickerModel(st) {
     keyReason: v.keyRequired && v.mode !== "runner_verified" ? [v.copy.keyRequired, v.copy.keyRequiredWhy] : null,
     // A sandbox repo is never blocked: moving it there is the way out.
     blocked: v.mode === "sandbox" || !v.blocked ? "" : v.blocked === "public_repo" ? v.copy.publicRepo : v.copy.visibilityUnknown,
-    confirm: target ? { target, showWording: target === "runner_verified", leaveNote: target === "sandbox" && v.mode !== "sandbox" ? v.copy.leaveCancels : "", applyDisabled: !typedOk || busy } : null,
+    confirm: target ? { target, showWording: target === "runner_verified", effects: pickerEffects(v, target), applyDisabled: !typedOk || busy } : null,
     saving: busy,
     saved: st.phase === "saved",
     error: st.phase === "error" ? st.error : "",
@@ -443,7 +496,7 @@ export function createModeController({ call = api, signal, repoId, onChange = ()
     try {
       const done = await call("POST", modeUrl(repoId), body, signal);
       const next = done && MODES.includes(done.execution_mode) ? done.execution_mode : mode;
-      set({ view: { ...st.view, mode: next }, choice: null, typed: "", phase: "saved", error: "" });
+      set({ view: { ...st.view, ...afterMove(st.view, next) }, choice: null, typed: "", phase: "saved", error: "" });
       onApplied(next); // the auto-merge control under the picker re-reads: leaving local-only turns it off
     } catch (e) {
       if (cancelled(e)) return;
@@ -494,7 +547,7 @@ export function createModeControl({ call = api, signal, repoId, doc = document, 
       });
       parts.push(h("div", { class: "repos-confirm", role: "group", "aria-label": v.copy.apply, "data-testid": "repos-mode-confirm" },
         ...(m.confirm.showWording ? [h("p", { "data-testid": "repos-mode-wording" }, v.copy.cloudVerifiedHelp)] : []),
-        ...(m.confirm.leaveNote ? [h("p", { "data-testid": "repos-mode-leave" }, m.confirm.leaveNote)] : []),
+        ...(m.confirm.effects.length ? [h("ul", { class: "repos-rows", "data-testid": "repos-mode-effects" }, m.confirm.effects.map((e) => h("li", { "data-testid": "repos-mode-effect" }, e)))] : []),
         h("label", { for: id("name"), id: id("name-help") }, v.copy.typeName, " ", h("bdi", null, v.fullName || "")),
         input,
         h("div", { class: "repos-actions" },

@@ -44,6 +44,10 @@ const COPY = {
   saving: "Saving...",
   saved: "Saved. The mode changed.",
   leaveCancels: "Moving this repo to the sandbox cancels its queued runner runs.",
+  leaveQueued: "Queued runner runs that this change cancels and that need starting again: {n}.",
+  leaveSetsAside: "The allowances and check command you approved for this repo are set aside when it leaves your runner, so approve them again before any job carries them.",
+  leaveAutoMergeOff: "Auto-merge for this repo is turned off by this change.",
+  needsReapproval: "This repo's approved allowances and check command are set aside. Approve them again in this repo's runner sandbox settings before any job carries them.",
   adminOnly: "Only owners and admins can change this.",
   saveFailed: "That change couldn't be saved. Try again.",
   nameMismatch: "That isn't the repository's name. Type it exactly, including capital letters.",
@@ -64,6 +68,7 @@ const COPY = {
 };
 const view = (over: Record<string, unknown> = {}) => ({
   repo_id: WEB, execution_mode: "runner_local", full_name: NAME, key_required: false, copy_sha256: HASH, auto_merge: false, auto_merge_copy_sha256: AM_HASH,
+  pending_runner_runs: 0, allowances_in_force: false, allowances_set_aside: false,
   can_change: true, runner_blocked: null, copy: COPY, ...over,
 });
 
@@ -148,6 +153,13 @@ test.describe("D#6 R2b: local-review auto-merge control (mocked API)", () => {
     await expect(tid(page, "repos-automerge")).toBeHidden();
     await expect(page.locator(APP)).not.toContainText(COPY.autoMergeTitle);
     expect(appErrors).toEqual([]);
+  });
+
+  // D#767: the mode picker's confirm step, shared with repos-mode.spec.ts's fixture, says a repo's set-aside allowances need re-approval.
+  test("a sandbox repo with set-aside allowances shows the re-approval sentence when local-only is picked", async ({ page }) => {
+    await setup(page, { view: view({ execution_mode: "sandbox", allowances_set_aside: true }) });
+    await tid(page, "repos-mode-runner_local").check();
+    await expect(tid(page, "repos-mode-effect")).toHaveText([COPY.needsReapproval]);
   });
 
   test("a cloud-verified repo has no control", async ({ page }) => {
