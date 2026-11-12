@@ -472,6 +472,9 @@ jobs:
       - name: E2E scope (${{ matrix.project }})
         env:
           CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
+          # Private pull requests only: an overlay-only change answers `overlay` (e2e false), so the specs below skip and the job
+          # still ends success under its real name, as `check` and `e2e-runner` do. Empty elsewhere, so nothing else changes.
+          CI_OVERLAY_LIST: ${{ github.event_name == 'pull_request' && github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}
           CI_PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github --e2e-step
