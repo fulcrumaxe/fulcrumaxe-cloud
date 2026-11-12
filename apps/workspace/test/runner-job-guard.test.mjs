@@ -40,6 +40,34 @@ describe("runner-job e2e guard", () => {
     expect(log).not.toHaveBeenCalled();
   });
 
+  it("does not end a vitest worker even under a marker: a test that only imports the config keeps its process", () => {
+    for (const env of [{ FX_RUNNER_JOB: "1", VITEST: "true" }, { FX_RUNNER_CHECK: "1", VITEST: "true" }]) {
+      const exit = vi.fn();
+      const log = vi.fn();
+      expect(skipInsideRunnerSandbox(env, exit, log)).toBe(false);
+      expect(exit).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    }
+    // Only the exact value vitest sets lets it through.
+    const exit = vi.fn();
+    expect(skipInsideRunnerSandbox({ FX_RUNNER_CHECK: "1", VITEST: "1" }, exit, vi.fn())).toBe(true);
+    expect(exit.mock.calls).toEqual([[0]]);
+  });
+
+  it.each(["FX_RUNNER_JOB", "FX_RUNNER_CHECK"])("importing the real config under %s=1 in this worker loads it and does not exit the process", async (marker) => {
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined);
+    vi.stubEnv(marker, "1");
+    vi.resetModules();
+    try {
+      const config = (await import("../playwright.config.ts")).default;
+      expect(config.projects?.map((p) => p.name)).toEqual(["desktop", "phone", "tablet"]);
+      expect(exit).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      exit.mockRestore();
+    }
+  });
+
   // The real config, loaded by the real Playwright CLI: `--list` loads the config and lists tests without a browser or a server.
   const list = (marker) => {
     // An explicit allowlist of named keys: the child never gets the parent's whole environment.
