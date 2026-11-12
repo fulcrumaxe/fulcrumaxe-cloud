@@ -990,4 +990,122 @@ describe('work item actions: back to discussion, treat as a feature, close', () 
       await noRequests(p.accountId);
     });
   });
+
+  // D#749: a person's "Verify again" on a finished post-merge check. No run action: the write is a new verify row, and the answer's action_id is that row's id.
+  describe('Verify again', () => {
+    const path = (id: string) => `/work-items/${id}/verify-again`;
+    const MERGE = 'c'.repeat(40);
+
+    /** A merged item in a repository with the post-merge check on, and one verify row in `status`. */
+    async function seedChecked(accountId: string, status: 'pending' | 'deploying' | 'running' | 'verified' | 'failed' | 'unverified', over: Seed & { on?: boolean } = {}) {
+      const { item } = await seed(accountId, { stage: 'merged', ...over });
+      // A Spec with a criterion a browser can check: without one the new row would end at once (`no_visible_journeys`) instead of waiting.
+      const body = '## Spec (Acceptance)\n\n1. [ui] The page shows Hello';
+      await admin.query(`UPDATE spec_versions SET body = $2, body_sha256 = encode(sha256(convert_to($2, 'UTF8')), 'hex') WHERE work_item_id = $1`, [item, body]);
+      const repo = (await one<{ repo_id: string }>('SELECT repo_id FROM work_items WHERE id = $1', [item]))!.repo_id;
+      if (over.on !== false) await admin.query(`INSERT INTO verify_settings (account_id, repo_id, enabled, base_url, eligibility) VALUES ($1, $2, true, 'https://app.example', 'all')`, [accountId, repo]);
+      const batch = (await one<{ id: string }>('INSERT INTO verify_batches (account_id, repo_id) VALUES ($1, $2) RETURNING id', [accountId, repo]))!.id;
+      const row = (await one<{ id: string }>(`INSERT INTO verify_rows (account_id, repo_id, batch_id, work_item_id, pr_number, merge_sha, journeys) VALUES ($1, $2, $3, $4, 9, $5, '[{"id":"c1","text":"Open the page","source":"spec"}]'::jsonb) RETURNING id`, [accountId, repo, batch, item, MERGE]))!.id;
+      if (status !== 'pending') await admin.query(`UPDATE verify_rows SET status = 'deploying', deploy_by_order = true WHERE id = $1`, [row]);
+      if (status === 'unverified') await admin.query(`UPDATE verify_rows SET status = 'unverified', reason_code = 'deployment_unreachable', finished_at = now() WHERE id = $1`, [row]);
+      if (status === 'running' || status === 'verified' || status === 'failed') {
+        await admin.query(`UPDATE verify_rows SET status = 'running', method = 'chrome_runner', deployed_commit = $2, started_at = now() WHERE id = $1`, [row, MERGE]);
+      }
+      if (status === 'verified' || status === 'failed') {
+        const result = JSON.stringify([{ id: 'c1', result: status === 'failed' ? 'fail' : 'pass', steps: [{ did: 'opened the page', dom_fact: 'heading', number: 1 }], console_errors: 0, undo_checked: true, reloaded: true }]);
+        await admin.query(`UPDATE verify_rows SET status = $2, result = $3::jsonb, finished_at = now() WHERE id = $1`, [row, status, result]);
+      }
+      return { item, row, repo };
+    }
+    const rowsOf = async (item: string) => (await admin.query<{ id: string; attempt: number; status: string; merge_sha: string; pr_number: number }>('SELECT id, attempt, status, merge_sha, pr_number FROM verify_rows WHERE work_item_id = $1 ORDER BY attempt', [item])).rows;
+    const auditsOf = async (accountId: string) => (await admin.query<{ actor: string; payload: Record<string, unknown> }>(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'work_item.sent_back' AND payload ->> 'action' = 'verify_again'`, [accountId])).rows;
+    const activity = async (who: Identity, item: string) =>
+      (await (await handleApiRequest(new Request(`http://localhost/api/v1/work-items/${item}/activity`, { headers: { cookie: `${SESSION_COOKIE_NAME}=${await signSession(who)}` } }), appUserPool, platformOpsPool, ROUTES)).json()) as { actions: string[]; verify?: { status: string } };
+
+    it.each([['owner', 'unverified'], ['admin', 'failed']] as const)('an %s on a finished %s check: 202 accepted, a NEW row for the same merge, the old row kept, one audit row naming the person, no run action', async (role, status) => {
+      const p = await person(role);
+      const { item, row } = await seedChecked(p.accountId, status);
+      const res = await post(p, path(item));
+      expect(res.status).toBe(202);
+      const body = (await res.json()) as Accepted;
+      expect(body.state).toBe('accepted');
+      const rows = await rowsOf(item);
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ id: row, attempt: 1, status, merge_sha: MERGE });
+      expect(rows[1]).toMatchObject({ id: body.action_id, attempt: 2, status: 'pending', merge_sha: MERGE, pr_number: 9 });
+      expect(await auditsOf(p.accountId)).toEqual([{ actor: p.userId, payload: expect.objectContaining({ work_item_id: item, verify_row_id: body.action_id, attempt: 2 }) }]);
+      expect(await requests(p.accountId)).toBe(0);
+      expect(signal.sent).toEqual([]);
+      // The activity read offers it no more (the new row is waiting) and shows the new row.
+      const act = await activity(p, item);
+      expect(act.actions).not.toContain('verify_again');
+      expect(act.verify?.status).toBe('pending');
+    });
+
+    it('the activity read lists verify_again for an owner on a finished unverified check, and not for a passed one', async () => {
+      const p = await person('owner');
+      const a = await seedChecked(p.accountId, 'unverified');
+      const b = await seedChecked(p.accountId, 'verified');
+      expect((await activity(p, a.item)).actions).toEqual(['verify_again']);
+      expect((await activity(p, b.item)).actions).toEqual([]);
+    });
+
+    it.each(['pending', 'deploying', 'running', 'verified'] as const)('a check that is %s is 409 action_not_available and nothing is written', async (status) => {
+      const p = await person('owner');
+      const { item } = await seedChecked(p.accountId, status);
+      const res = await post(p, path(item));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('action_not_available');
+      expect(await rowsOf(item)).toHaveLength(1);
+      expect(await auditsOf(p.accountId)).toEqual([]);
+    });
+
+    it('is 409 when the post-merge check is off for the repository, when the item is not merged, and when it has no check at all', async () => {
+      const p = await person('owner');
+      const off = await seedChecked(p.accountId, 'unverified', { on: false });
+      expect(await code(await post(p, path(off.item)))).toBe('action_not_available');
+      const moved = await seedChecked(p.accountId, 'unverified');
+      await admin.query(`UPDATE work_items SET stage = 'closed' WHERE id = $1`, [moved.item]);
+      expect(await code(await post(p, path(moved.item)))).toBe('action_not_available');
+      const bare = await seed(p.accountId, { stage: 'merged' });
+      expect(await code(await post(p, path(bare.item)))).toBe('action_not_available');
+      expect(await rowsOf(off.item)).toHaveLength(1);
+      expect(await rowsOf(moved.item)).toHaveLength(1);
+    });
+
+    it('a plain member is 403 insufficient_role, a token is 403, an external item is refused, and an unknown id is 404: nothing is written', async () => {
+      const p = await person('member');
+      const { item } = await seedChecked(p.accountId, 'unverified');
+      const res = await post(p, path(item));
+      expect(res.status).toBe(403);
+      expect(await code(res)).toBe('insufficient_role');
+      const o = await person('owner');
+      const mine = await seedChecked(o.accountId, 'unverified');
+      expect((await post(await tokenFor(o, ['read']), path(mine.item))).status).toBe(403);
+      const ext = await seedChecked(o.accountId, 'unverified', { provenance: 'external' });
+      expect(await code(await post(o, path(ext.item)))).toBe('external_requires_human');
+      expect((await post(o, path(randomUUID()))).status).toBe(404);
+      expect((await post(o, path('not-a-uuid'))).status).toBe(404);
+      for (const x of [item, mine.item, ext.item]) expect(await rowsOf(x)).toHaveLength(1);
+    });
+
+    it('another account\'s item is 404, and a second press (or a keyed replay) opens no second row', async () => {
+      const mine = await person('owner');
+      const theirs = await person('owner');
+      const t = await seedChecked(theirs.accountId, 'unverified');
+      expect((await post(mine, path(t.item))).status).toBe(404);
+      expect(await rowsOf(t.item)).toHaveLength(1);
+
+      const { item } = await seedChecked(mine.accountId, 'failed');
+      const first = await post(mine, path(item), { headers: { 'idempotency-key': 'va-1' } });
+      expect(first.status).toBe(202);
+      const firstBody = (await first.json()) as Accepted;
+      const replay = await post(mine, path(item), { headers: { 'idempotency-key': 'va-1' } });
+      expect(replay.status).toBe(202);
+      expect(((await replay.json()) as Accepted).action_id).toBe(firstBody.action_id);
+      expect(await code(await post(mine, path(item)))).toBe('action_not_available');
+      expect(await rowsOf(item)).toHaveLength(2);
+      expect(await auditsOf(mine.accountId)).toHaveLength(1);
+    });
+  });
 });

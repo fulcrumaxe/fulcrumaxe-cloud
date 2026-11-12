@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { requestRunAction } from "@fx/core/src/runActions/index.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { OperatorMovedOnError, OperatorRefusedError, RequestChangesNoteError, checkRespec, closeWorkItem, reopenWorkItem, requestChanges, requestPublicChangeAction, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
+import { OperatorMovedOnError, OperatorRefusedError, RequestChangesNoteError, checkRespec, closeWorkItem, reopenWorkItem, requestChanges, requestPublicChangeAction, sendBackToDiscussion, treatAsFeature, verifyAgainWorkItem } from "@fx/core/src/work-items/operatorMoves.js";
 import { REQUEST_CHANGES_NOTE_MAX } from "@fx/core/src/work-items/operatorActions.js";
 import type { OperatorVerdict } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
@@ -201,6 +201,17 @@ async function requestChangesRoute(ctx: RouteContext, id: string, note: string) 
   return { action_id: result.actionId, state: result.state as (typeof STATES)[number] };
 }
 
+/**
+ * D#749: Verify again. No agent and no run action: the write is a new verify row for the merge (the verify sweep takes it from there, woken at once by its hint), so
+ * the answer's `action_id` is the NEW verify row's id and the state is `accepted`. `GET /run-actions/{id}` does not know it; the item's activity read shows the row's progress
+ * as its `verify` section.
+ */
+async function verifyAgain(ctx: RouteContext, id: string) {
+  if (!UUID_RE.test(id)) throw notFound();
+  const done = await guarded(() => verifyAgainWorkItem({ pool: ctx.pool, principal: ctx.principal, idempotencyKey: ctx.idempotencyKey || null }, id));
+  return { action_id: done.rowId, state: "accepted" as (typeof STATES)[number] };
+}
+
 const reopenedSchema = z.object({ work_item_id: z.string().uuid(), stage: z.literal("triaged") });
 
 const common = {
@@ -383,5 +394,23 @@ export const workItemActionRoutes: RouteEntry[] = [
       "503": UNAVAILABLE_TEXT,
     },
     handler: (ctx, input) => driven(ctx, input.params.id!, (move, id) => queueAgain({ pool: move.pool, principal: move.principal }, id)),
+  },
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/verify-again",
+    operationId: "verifyAgainWorkItem",
+    summary: "Run the post-merge check on a merged work item again",
+    description:
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. For a merged work item whose post-merge check on the deployed app ended `unverified` or `failed`: opens a NEW check for the same merge commit, wakes the verify stage at once, and records an audit row with who asked. The finished check is kept as history and never changes. " +
+      "Answers 202 `{ action_id, state }` with `state` `accepted`; `action_id` is the id of the new check (it is not a run action: follow the check through the `verify` section of `GET /api/v1/work-items/{id}/activity`). " +
+      "Allowed only while `actions` lists `verify_again`: the item is merged, the post-merge check is switched on for its repository, and its newest check is finished `unverified` or `failed` (one that is waiting, deploying or running, or that passed, is refused). " +
+      "A merge whose check needed this is not counted as a hands-free pass in the switchover streak; the new check's outcome is recorded and shown as any other.",
+    responseSchema: acceptedSchema,
+    successStatus: 202,
+    extraResponses: {
+      "403": SHARED_ERRORS,
+      "409": "Error `action_not_available` (the item is not merged, the post-merge check is off, or its newest check has not finished with `unverified` or `failed`).",
+    },
+    handler: (ctx, input) => verifyAgain(ctx, input.params.id!),
   },
 ];

@@ -4735,6 +4735,7 @@
                           "treat_as_feature",
                           "close",
                           "reopen",
+                          "verify_again",
                           "retry_push",
                           "open_pr",
                           "remove_from_queue",
@@ -6342,6 +6343,143 @@
           },
           "503": {
             "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/verify-again": {
+      "post": {
+        "operationId": "verifyAgainWorkItem",
+        "summary": "Run the post-merge check on a merged work item again",
+        "description": "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. For a merged work item whose post-merge check on the deployed app ended `unverified` or `failed`: opens a NEW check for the same merge commit, wakes the verify stage at once, and records an audit row with who asked. The finished check is kept as history and never changes. Answers 202 `{ action_id, state }` with `state` `accepted`; `action_id` is the id of the new check (it is not a run action: follow the check through the `verify` section of `GET /api/v1/work-items/{id}/activity`). Allowed only while `actions` lists `verify_again`: the item is merged, the post-merge check is switched on for its repository, and its newest check is finished `unverified` or `failed` (one that is waiting, deploying or running, or that passed, is refused). A merge whose check needed this is not counted as a hands-free pass in the switchover streak; the new check's outcome is recorded and shown as any other.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Run the post-merge check on a merged work item again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "action_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "claimed",
+                        "done",
+                        "refused",
+                        "failed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "action_id",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `action_not_available` (the item is not merged, the post-merge check is off, or its newest check has not finished with `unverified` or `failed`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
             "content": {
               "application/json": {
                 "schema": {

@@ -38,13 +38,23 @@ export async function fileBugItem(client: PoolClient, accountId: string, rowId: 
   const ids = failedJourneyIds.filter((id) => JOURNEY_ID_RE.test(id)).slice(0, MAX_JOURNEYS);
   if (ids.length === 0 || ids.length !== failedJourneyIds.length) throw new VerifyInputError('verify_row_invalid', 'a bug item names the failed journeys by their ids');
   await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [bugItemLockKey(rowId, ids[0]!)]);
-  const found = await client.query<{ status: string; bug_item_id: string | null; pr_number: number; repo_id: string; work_item_id: string }>(
-    `SELECT status, bug_item_id, pr_number, repo_id, work_item_id FROM verify_rows WHERE id = $1 AND account_id = $2`,
+  const found = await client.query<{ status: string; bug_item_id: string | null; pr_number: number; repo_id: string; work_item_id: string; merge_sha: string }>(
+    `SELECT status, bug_item_id, pr_number, repo_id, work_item_id, merge_sha FROM verify_rows WHERE id = $1 AND account_id = $2`,
     [rowId, accountId],
   );
   const row = found.rows[0];
   if (row === undefined || row.status !== 'failed') return { filed: false, itemId: null };
   if (row.bug_item_id !== null) return { filed: false, itemId: row.bug_item_id };
+  // A person's "Verify again" opens another row for the same merge. If an earlier attempt of this merge already filed a bug item, this failure is the same defect:
+  // the row takes that item instead of a second one being filed (the table's set-once rule still applies to this row).
+  const earlier = await client.query<{ bug_item_id: string }>(
+    `SELECT bug_item_id FROM verify_rows WHERE account_id = $1 AND work_item_id = $2 AND merge_sha = $3 AND id <> $4 AND bug_item_id IS NOT NULL ORDER BY created_at, id LIMIT 1`,
+    [accountId, row.work_item_id, row.merge_sha, rowId],
+  );
+  if (earlier.rows[0] !== undefined) {
+    if (!(await attachBugItem(client, accountId, rowId, earlier.rows[0].bug_item_id))) throw new BugItemNotAttachedError();
+    return { filed: false, itemId: earlier.rows[0].bug_item_id };
+  }
   return { filed: true, itemId: await insertAndAttach(client, accountId, rowId, row, ids) };
 }
 

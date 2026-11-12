@@ -351,3 +351,29 @@ describe('a planned PR child (no issue number of its own; it builds on its paren
     expect(operatorVerdict('request_changes', at({ stage: 'pr_opened', pr_open: true, fix_rounds_started: 0, gh_number: null, parent_gh_number: '41' }))).toMatchObject({ ok: false, reason: 'no_issue' });
   });
 });
+
+describe('Verify again (D#749)', () => {
+  const v = (over: Partial<OperatorFacts> = {}) => at({ stage: 'merged', verify_again: true, ...over });
+
+  it('is offered on a merged item whose newest post-merge check is finished unverified or failed (the fact), and is the only action there', () => {
+    expect(operatorVerdict('verify_again', v())).toEqual({ ok: true });
+    expect(operatorActionsFor(v())).toEqual(['verify_again']);
+  });
+
+  it('is not offered when the fact is false, unknown or absent (fail closed)', () => {
+    expect(operatorVerdict('verify_again', v({ verify_again: false }))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorVerdict('verify_again', v({ verify_again: undefined }))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorActionsFor(at({ stage: 'merged' }))).not.toContain('verify_again');
+  });
+
+  it('is refused for a member, a viewer, an external item and while an agent runs, whatever the fact says', () => {
+    expect(operatorVerdict('verify_again', v({ role: 'member' }))).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('verify_again', v({ role: 'viewer' }))).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('verify_again', v({ provenance: 'external' }))).toMatchObject({ ok: false, reason: 'external' });
+    expect(operatorVerdict('verify_again', v({ live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
+  });
+
+  it('needs neither a repository nor an issue number of its own in the table (the fact already needs the check to be on for the repository)', () => {
+    expect(operatorVerdict('verify_again', v({ gh_number: null }))).toEqual({ ok: true });
+  });
+});

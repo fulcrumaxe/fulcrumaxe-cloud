@@ -13,6 +13,7 @@
  * Pure: facts in, a verdict out.
  */
 import type { PoolClient } from 'pg';
+import { readVerifyAgain } from '../verify/rows.js';
 import { loadPlanData } from '@fx/plan-data';
 import { mayOpenPublicPullRequest, mayRetryPublish, readRetryFacts, type RetryFacts } from '../repos/planePushRecord.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
@@ -29,7 +30,7 @@ import { isLegalStageTransition, specOfItemSql } from './stages.js';
  */
 export const BACK_TO_DISCUSSION_REF_PREFIX = 'back_to_discussion:';
 
-export const OPERATOR_ACTIONS = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen', 'retry_push', 'open_pr', 'remove_from_queue', 'queue_again'] as const;
+export const OPERATOR_ACTIONS = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen', 'verify_again', 'retry_push', 'open_pr', 'remove_from_queue', 'queue_again'] as const;
 export type OperatorAction = (typeof OPERATOR_ACTIONS)[number];
 
 /**
@@ -94,6 +95,11 @@ export interface OperatorFacts extends AdvanceFacts {
   queue_hold?: boolean;
   /** Fix rounds already started for the item (its `fix_round_started` driver events). Absent: unknown, and Request changes is refused. */
   fix_rounds_started?: number;
+  /**
+   * D#749: the post-merge check can be run again by a person: the item is merged, verification is on for its repository and its newest verify row is finished
+   * `unverified` or `failed` (`readVerifyAgain`, derived). Absent: unknown, and Verify again is not offered (fail closed).
+   */
+  verify_again?: boolean;
 }
 
 export type OperatorRefusal = 'role' | 'external' | 'no_repo' | 'no_issue' | 'live' | 'stage' | 'state' | 'rounds';
@@ -170,6 +176,9 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
     // Queue again also from Needs a person, when the queue put it there (a used-up retry, or the host's silence): the normal advance re-enters the review there (`no_verdict_hold`, see reviewHold.ts).
     case 'queue_again':
       return (f.stage === 'review_passed' || (f.stage === 'needs_human' && f.queue_hold === true)) && (f.merge_queue === 'removed' || f.merge_queue === 'no_answer') ? { ok: true } : no('state', 'the queue has not taken the pull request out');
+    // D#749: only on a merged item whose newest post-merge check ended `unverified` or `failed`, with verification on and no check in flight. The row is opened by openVerifyAgainRow.
+    case 'verify_again':
+      return f.verify_again === true ? { ok: true } : no('state', 'there is no finished post-merge check to run again');
     case 'reopen':
       if (!REOPENABLE_STAGES.includes(f.stage) || !isLegalStageTransition(f.stage, 'triaged')) return no('stage', `work item is ${f.stage}`);
       return { ok: true };
@@ -211,5 +220,6 @@ export async function readOperatorFacts(client: PoolClient, workItemId: string, 
   const prOpen = CLOSE_ON_GITHUB_STAGES.includes(r.stage) || (r.stage === 'needs_human' && needsHumanFrom !== null && CLOSE_ON_GITHUB_STAGES.includes(needsHumanFrom));
   return { ...rest, role, spec_file_list_known: parseAcceptanceScope(acceptanceFiles).kind === 'known', push: await readRetryFacts(client, workItemId), merge_queue: (await readMergeQueueState(client, accountId, workItemId))?.state ?? null,
     queue_hold: QUEUE_ESCALATION_CODES.includes((await readEscalationCode(client, workItemId)) ?? ''),
-    pr_open: prOpen, fix_rounds_started: Number(fixRounds) };
+    pr_open: prOpen, fix_rounds_started: Number(fixRounds),
+    verify_again: (await readVerifyAgain(client, workItemId)) !== null };
 }

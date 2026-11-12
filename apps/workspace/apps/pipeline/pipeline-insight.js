@@ -12,7 +12,7 @@
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
 import { clockText, h, timeNode } from "../_lib/dom.js";
 import { api, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
-import { APPROVE_SENTENCES, refusalSentence, sayLive, stageWords } from "./pipeline-actions.js";
+import { APPROVE_SENTENCES, approveSentenceFor, refusalSentence, sayLive, stageWords } from "./pipeline-actions.js";
 
 
 /** Agent roles by the phase they belong to. A role not listed is labelled "Run". */
@@ -535,6 +535,10 @@ export const VERIFY_METHOD_WORDS = {
   playwright_sandbox: "Playwright in the sandbox",
 };
 export const VERIFY_BUG_LABEL = "Open the bug item";
+/** Verify again: drawn in this section only while the server lists `verify_again` among the item's actions (a finished check that ended failed or not verified). */
+export const VERIFY_AGAIN_LABEL = "Verify again";
+export const VERIFY_AGAIN_NOTE = "Verify again checks the deployed app once more for the same merge. This result stays in the history, and a merge that needed it does not count as a hands-free pass.";
+export const VERIFY_AGAIN_STARTED = "Started. The deployed app is being checked again, and this section shows the new result when it is done.";
 const criterionNumbers = (list) => (Array.isArray(list) ? list.filter((n) => Number.isInteger(n) && n >= 1 && n <= 30) : []);
 const criterionList = (list) => (list.length === 1 ? "criterion " + list[0] : "criteria " + list.join(", "));
 /** Which Spec criteria the browser covered and which were left to the code checks (numbers only; the server sends no Spec text). Null when neither list has an entry. */
@@ -570,6 +574,8 @@ export function verifySection(data) {
     criteria: verifyCriteriaLines(v.criteria),
     account: v.account === "matched" ? "Signed in as the account set for checking." : null,
     bugItemId: v.status === "failed" && typeof v.bug_item_id === "string" && ITEM_ID.test(v.bug_item_id) ? v.bug_item_id.toLowerCase() : null,
+    // The server decides (its list of actions); this only checks the status is one the button belongs to.
+    again: (v.status === "failed" || v.status === "unverified") && Array.isArray(data.actions) && data.actions.includes("verify_again"),
   };
 }
 
@@ -1096,6 +1102,7 @@ export function createInsightPanel(deps) {
   const notes = new Map(); // receipt id -> { text, needsYou } after a reverse or confirm answered
   const fresh = new Map(); // receipt id -> the live estimate a 409 estimate_changed named; shown and sent in place of an older figure
   const busy = new Set();
+  let vAgain = { phase: "idle", text: "" }; // the Verify again press: idle | sending | started | error
   let skeleton = null; // { body, live, rest } of the full section; null whenever a loading or error sentence replaced it
   /** Sections the person opened (true) or closed (false); a section not in here follows its default. */
   const toggled = new Map();
@@ -1133,6 +1140,25 @@ export function createInsightPanel(deps) {
     );
   }
 
+  async function verifyAgainCall() {
+    const id = itemId;
+    if (id === null || vAgain.phase === "sending") return;
+    vAgain = { phase: "sending", text: "" };
+    render();
+    try {
+      await deps.call("POST", "/api/v1/work-items/" + encodeURIComponent(id) + "/verify-again", undefined);
+      if (itemId !== id) return;
+      vAgain = { phase: "started", text: VERIFY_AGAIN_STARTED };
+    } catch (e) {
+      if (itemId !== id) return;
+      vAgain = { phase: "error", text: approveSentenceFor(e && e.status === 429 ? "rate_limited" : e && e.code) };
+    }
+    render();
+    const say = el.querySelector('[data-testid="pl-verify-again-say"]');
+    if (say) say.focus({ preventScroll: true });
+    load();
+  }
+
   function verifyBlock(v) {
     return h(
       "section",
@@ -1144,7 +1170,14 @@ export function createInsightPanel(deps) {
       v.criteria && v.criteria.browser ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-browser" }, v.criteria.browser) : null,
       v.criteria && v.criteria.checks ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-checks" }, v.criteria.checks) : null,
       v.account ? h("p", { class: "pl-muted", "data-testid": "pl-verify-account" }, v.account) : null,
-      v.bugItemId && deps.onOpenItem ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-verify-bug", onClick: () => deps.onOpenItem(v.bugItemId) }, VERIFY_BUG_LABEL) : null
+      v.bugItemId && deps.onOpenItem ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-verify-bug", onClick: () => deps.onOpenItem(v.bugItemId) }, VERIFY_BUG_LABEL) : null,
+      v.again
+        ? [
+            h("button", { type: "button", class: "pl-act", "data-testid": "pl-verify-again", "aria-disabled": vAgain.phase === "sending" ? "true" : "false", onClick: () => vAgain.phase !== "sending" && verifyAgainCall() }, VERIFY_AGAIN_LABEL),
+            h("p", { class: "pl-muted", "data-testid": "pl-verify-again-note" }, VERIFY_AGAIN_NOTE),
+          ]
+        : null,
+      vAgain.text !== "" ? h("p", { role: "status", tabindex: "-1", "data-testid": "pl-verify-again-say", "data-phase": vAgain.phase }, vAgain.text) : null
     );
   }
 
@@ -1464,6 +1497,7 @@ export function createInsightPanel(deps) {
       confirming.clear();
       notes.clear();
       busy.clear();
+      vAgain = { phase: "idle", text: "" };
       signature = "";
       state = { status: "loading", data: null, stale: false };
       render();

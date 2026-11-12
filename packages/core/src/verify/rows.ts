@@ -8,7 +8,8 @@ import { isEligible, readVerifySettings, writeVerifySettings, type VerifySetting
 /**
  * D#6 V1: the verify stage's rows (migration 1003), the row state machine and the streak rule. Nothing outside tests calls the store functions yet.
  *
- * One row per merge of an item. Its journeys are written when it opens and never change. It then moves one way (see ROW_MOVES) and ends in one of three
+ * One row per attempt at a merge of an item (the first is made by the sweep; a person's "Verify again" on a finished `unverified` or `failed` row opens the next, see
+ * `openVerifyAgainRow`; at most one is unfinished at a time). Its journeys are written when it opens and never change. It then moves one way (see ROW_MOVES) and ends in one of three
  * states: `verified` (every journey passed with evidence), `failed` (a journey found a defect) or `unverified` (the check could not be made; a closed reason
  * says why). The database refuses any other move (verify_rows_guard) and any finished row that is not whole (CHECK constraints), so these functions are the
  * only place the rules are written down twice, deliberately: a bug here is caught by the table.
@@ -81,12 +82,14 @@ export interface VerifyRow {
   run_id: string | null;
   deploy_by_order: boolean;
   person_step: boolean;
+  /** Which try of this merge the row is: 1 for the first, 2 and up for a person's "Verify again" (migration 1011). */
+  attempt: number;
   started_at: Date | null;
   finished_at: Date | null;
   created_at: Date;
 }
 const ROW_COLUMNS = `id, repo_id, batch_id, work_item_id, pr_number, merge_sha, status, method, deployed_commit, journeys, checks_only, result, reason_code, bug_item_id, account_check, run_id,
-  deploy_by_order, person_step, started_at, finished_at, created_at`;
+  deploy_by_order, person_step, attempt, started_at, finished_at, created_at`;
 
 function bad(message: string): VerifyInputError {
   return new VerifyInputError('verify_row_invalid', message);
@@ -102,7 +105,10 @@ export interface StreakInput {
   mergedByProduct: boolean;
   /** The deploy was done by the stage's own deploy order. */
   deployByOrder: boolean;
-  /** A person acted during deploy or verify (drove the profile, hand-retried the tester, overrode a verdict). */
+  /**
+   * A person acted during deploy or verify (drove the profile, hand-retried the tester, overrode a verdict) or asked for the check again ("Verify again": a row
+   * whose `attempt` is above 1). `readStreak` derives the second from the attempt number; nothing is stamped for it.
+   */
   personStep: boolean;
   /** A Spec-criterion journey (`c<n>`: from a criterion or a recheck, not a standing journey) passed in this row. Only read for a `verified` row. */
   criterionPassed: boolean;
@@ -119,6 +125,9 @@ export interface StreakInput {
  *     a verified row driven by another method (the sandbox browser) or with no method neither counts nor resets.
  *   - A `verified` row that passed on standing journeys alone (no Spec-criterion journey `c<n>` passed) is neutral too: it proves nothing about the merged change.
  *   - A row that has not finished changes nothing.
+ *   - A merge a person had to run the check on again is not a hands-free pass: the first row ended `failed` or `unverified` (a reset to 0), and the row a person's
+ *     "Verify again" opens is a person step whatever it finds, so its `verified` does not count and the streak stays 0. Its outcome is still stored and shown. The next
+ *     merge starts counting from 0 as usual.
  *   - `unverified: no_visible_journeys` (the Spec had no criterion a browser can check and the repository keeps no standing journey) is NEUTRAL: it is not a pass, so it
  *     never counts, but nothing failed and nothing stopped for a person, so it never resets. A person step on it still resets, like on any row.
  */
@@ -173,24 +182,84 @@ export async function openVerifyRow(client: PoolClient, accountId: string, input
   if (!settings.enabled) return { opened: false, reason: 'verify_off' };
   if (!isEligible(settings, input.changedPaths ?? null)) return { opened: false, reason: 'not_eligible' };
 
+  return insertRow(client, accountId, { workItemId: input.workItemId, repoId, prNumber: input.prNumber, mergeSha: input.mergeSha, settings, attempt: 1 });
+}
+
+/**
+ * Plans the row's journeys from the item's Spec, the repository's standing journeys and the failures to carry, then writes the batch (size one) and the row, with the
+ * criteria left to the checks (`checks_only`). A row with nothing a browser can check ends at once (`no_visible_journeys`), before any deploy or tester run is paid for.
+ */
+async function insertRow(
+  client: PoolClient,
+  accountId: string,
+  row: { workItemId: string; repoId: string; prNumber: number; mergeSha: string; settings: VerifySettings; attempt: number },
+): Promise<{ opened: true; rowId: string; batchId: string; journeys: Journey[] }> {
   const spec = await client.query<{ body: string }>(
     `SELECT s.body FROM work_items w, spec_versions s
       WHERE w.id = $1 AND w.account_id = $2 AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${specOfItemSql('s', 'w')}
       ORDER BY s.version DESC LIMIT 1`,
-    [input.workItemId, accountId],
+    [row.workItemId, accountId],
   );
-  const { journeys, checksOnly } = planJourneys({ specBody: spec.rows[0]?.body ?? null, standing: settings.standingJourneys, carried: await readCarriedFailures(client, accountId, input.workItemId) });
+  const { journeys, checksOnly } = planJourneys({ specBody: spec.rows[0]?.body ?? null, standing: row.settings.standingJourneys, carried: await readCarriedFailures(client, accountId, row.workItemId) });
 
-  const batch = await client.query<{ id: string }>(`INSERT INTO verify_batches (account_id, repo_id) VALUES ($1, $2) RETURNING id`, [accountId, repoId]);
+  const batch = await client.query<{ id: string }>(`INSERT INTO verify_batches (account_id, repo_id) VALUES ($1, $2) RETURNING id`, [accountId, row.repoId]);
   const batchId = batch.rows[0]!.id;
-  const row = await client.query<{ id: string }>(
-    `INSERT INTO verify_rows (account_id, repo_id, batch_id, work_item_id, pr_number, merge_sha, journeys, checks_only) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb) RETURNING id`,
-    [accountId, repoId, batchId, input.workItemId, input.prNumber, input.mergeSha, JSON.stringify(journeys), JSON.stringify(checksOnly)],
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO verify_rows (account_id, repo_id, batch_id, work_item_id, pr_number, merge_sha, journeys, checks_only, attempt) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9) RETURNING id`,
+    [accountId, row.repoId, batchId, row.workItemId, row.prNumber, row.mergeSha, JSON.stringify(journeys), JSON.stringify(checksOnly), row.attempt],
   );
   await client.query(`UPDATE verify_batches SET status = 'closed', closed_by = 'size', closed_at = now() WHERE id = $1 AND account_id = $2`, [batchId, accountId]);
   // Nothing a browser can check (no visible criterion, no standing journey): the row ends at once with its own closed reason, before any deploy or tester run is paid for.
-  if (journeys.length === 0) await finishVerifyRow(client, accountId, row.rows[0]!.id, { status: 'unverified', reason: 'no_visible_journeys' });
-  return { opened: true, rowId: row.rows[0]!.id, batchId, journeys };
+  if (journeys.length === 0) await finishVerifyRow(client, accountId, inserted.rows[0]!.id, { status: 'unverified', reason: 'no_visible_journeys' });
+  return { opened: true, rowId: inserted.rows[0]!.id, batchId, journeys };
+}
+
+/**
+ * What a person's "Verify again" needs to be allowed, read from the rows: the item is `merged`, verification is ON for its repository, and its NEWEST verify row is
+ * finished `unverified` or `failed` (a `verified` row has nothing to redo; one still pending, deploying or running is in flight, and the newest row is always the
+ * unfinished one if there is one). Derived on every read, nothing stamped. Without a tenant context the table's row security shows nothing, and the answer is `null`.
+ */
+export interface VerifyAgainTarget {
+  repoId: string;
+  prNumber: number;
+  mergeSha: string;
+  /** The attempt number the new row would take. */
+  nextAttempt: number;
+}
+export async function readVerifyAgain(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<VerifyAgainTarget | null> {
+  const { rows } = await client.query<{ repo_id: string; pr_number: number; merge_sha: string; status: VerifyRowStatus; next_attempt: number }>(
+    `SELECT r.repo_id, r.pr_number, r.merge_sha, r.status,
+            (SELECT max(o.attempt) + 1 FROM verify_rows o WHERE o.account_id = r.account_id AND o.work_item_id = r.work_item_id AND o.merge_sha = r.merge_sha)::int AS next_attempt
+       FROM work_items w
+       JOIN verify_rows r ON r.account_id = w.account_id AND r.work_item_id = w.id
+       JOIN verify_settings s ON s.account_id = r.account_id AND s.repo_id = r.repo_id AND s.enabled
+      WHERE w.id = $1::uuid AND w.stage = 'merged'
+      ORDER BY r.created_at DESC, r.id DESC
+      LIMIT 1`,
+    [workItemId],
+  );
+  const r = rows[0];
+  if (r === undefined || (r.status !== 'unverified' && r.status !== 'failed')) return null;
+  return { repoId: r.repo_id, prNumber: r.pr_number, mergeSha: r.merge_sha, nextAttempt: r.next_attempt };
+}
+
+export type VerifyAgainResult = { opened: true; rowId: string; batchId: string; attempt: number } | { opened: false; reason: 'not_available' };
+
+/**
+ * A person's "Verify again": opens a NEW row for the same merge commit and leaves the finished one as history (a finished row never changes: the table refuses it).
+ * Allowed only when `readVerifyAgain` says so, read again here under the lock `openVerifyRow` takes for the merge, so two presses at once open one row (the second finds the first in flight; the
+ * table's partial unique index is the backstop). The journeys are planned afresh, carrying the failures of the newest failed row, and the row keeps the criteria left to the checks. The new row is `pending` and the sweep
+ * takes it from there exactly as a first row; it is a person step for the streak (see `readStreak`). The caller writes the audit row and marks the sweep's hint.
+ */
+export async function openVerifyAgainRow(client: PoolClient, accountId: string, workItemId: string): Promise<VerifyAgainResult> {
+  const first = await readVerifyAgain(client, workItemId);
+  if (first === null) return { opened: false, reason: 'not_available' };
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`verify_row:${workItemId}:${first.mergeSha}`]);
+  const target = await readVerifyAgain(client, workItemId);
+  if (target === null || target.mergeSha !== first.mergeSha) return { opened: false, reason: 'not_available' };
+  const settings = await readVerifySettings(client, target.repoId);
+  const out = await insertRow(client, accountId, { workItemId, repoId: target.repoId, prNumber: target.prNumber, mergeSha: target.mergeSha, settings, attempt: target.nextAttempt });
+  return { opened: true, rowId: out.rowId, batchId: out.batchId, attempt: target.nextAttempt };
 }
 
 /** The journeys the newest failed row of this item, or of the item whose failure filed this one as its bug item, found failing: checked again by the new row. */
@@ -333,10 +402,13 @@ export async function endUnstartedRows(client: PoolClient, accountId: string, re
   return ended;
 }
 
-/** The streak of a repository, derived from its finished rows (oldest first) and the facts that say the product merged each one. Never stored. */
+/**
+ * The streak of a repository, derived from its finished rows (oldest first) and the facts that say the product merged each one. Never stored. A row a person's
+ * "Verify again" opened (`attempt` above 1) is a person step, so a merge that needed one never counts as a hands-free verified pass (see `nextStreak`).
+ */
 export async function readStreak(client: PoolClient, accountId: string, repoId: string): Promise<number> {
-  const { rows } = await client.query<{ status: VerifyRowStatus; reason_code: VerifyReasonCode | null; criterion_passed: boolean; method: VerifyMethod | null; deploy_by_order: boolean; person_step: boolean; merged_by_product: boolean }>(
-    `SELECT r.status, r.reason_code, r.method, EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(r.result, '[]'::jsonb)) j WHERE j->>'result' = 'pass' AND j->>'id' ~ '^c[0-9]+$') AS criterion_passed, r.deploy_by_order, r.person_step,
+  const { rows } = await client.query<{ status: VerifyRowStatus; reason_code: VerifyReasonCode | null; criterion_passed: boolean; method: VerifyMethod | null; deploy_by_order: boolean; person_step: boolean; attempt: number; merged_by_product: boolean }>(
+    `SELECT r.status, r.reason_code, r.method, EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(r.result, '[]'::jsonb)) j WHERE j->>'result' = 'pass' AND j->>'id' ~ '^c[0-9]+$') AS criterion_passed, r.deploy_by_order, r.person_step, r.attempt,
             EXISTS (SELECT 1 FROM work_item_driver_events e WHERE e.account_id = r.account_id AND e.work_item_id = r.work_item_id AND e.kind IN ('merged_by_gate', 'merged_via_queue')
                        AND (e.pr_number = r.pr_number OR e.head_sha = r.merge_sha)) AS merged_by_product
        FROM verify_rows r
@@ -344,7 +416,7 @@ export async function readStreak(client: PoolClient, accountId: string, repoId: 
       ORDER BY r.finished_at, r.id`,
     [accountId, repoId],
   );
-  return streakOf(rows.map((r) => ({ status: r.status, reason: r.reason_code, criterionPassed: r.criterion_passed, method: r.method, mergedByProduct: r.merged_by_product, deployByOrder: r.deploy_by_order, personStep: r.person_step })));
+  return streakOf(rows.map((r) => ({ status: r.status, reason: r.reason_code, criterionPassed: r.criterion_passed, method: r.method, mergedByProduct: r.merged_by_product, deployByOrder: r.deploy_by_order, personStep: r.person_step || r.attempt > 1 })));
 }
 
 /**

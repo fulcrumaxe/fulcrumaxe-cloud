@@ -37,10 +37,12 @@ interface Mock {
   /** The activity answer with its `verify`; the mock leaves `verify` out while the setting is off, as the read does. */
   activity: Record<string, unknown>;
   puts: { body: unknown; status: number }[];
+  /** The POSTs the card sent to the item's verify-again route (D#749); each one makes the check read waiting, as the server's new row does. */
+  again: number;
 }
 
 async function mockApi(page: Page, activity: Record<string, unknown>): Promise<Mock> {
-  const mock: Mock = { requests: [], settings: { enabled: true, base_url: "https://app.example.test" }, activity, puts: [] };
+  const mock: Mock = { requests: [], settings: { enabled: true, base_url: "https://app.example.test" }, activity, puts: [], again: 0 };
   const send = (route: Route, status: number, json: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(json) });
   await page.route((u) => u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events", async (route) => {
     const req = route.request();
@@ -77,6 +79,13 @@ async function mockApi(page: Page, activity: Record<string, unknown>): Promise<M
       }
     }
     if (p === "/api/v1/work-items") return send(route, 200, { data: [{ ...LIST.data[0], stage: "merged" }, { ...LIST.data[0], id: BUG, title: "Verify failed after PR #57: c2", stage: "triaged", issue_number: 43 }], next_cursor: null });
+    if (p === `/api/v1/work-items/${ITEM}/verify-again` && req.method() === "POST") {
+      // Strict like the route: no body, and a second press while the new check waits is refused.
+      if (mock.again > 0 || req.postData()) return send(route, 409, { error: { code: "action_not_available", message: "x", request_id: "req_1" } });
+      mock.again += 1;
+      mock.activity = activityOf("waiting");
+      return send(route, 202, { action_id: "11111111-1111-4111-8111-111111111111", state: "accepted" });
+    }
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
     if (p === `/api/v1/work-items/${ITEM}/activity`) {
       const { verify, ...rest } = mock.activity;
@@ -185,6 +194,35 @@ test.describe("D#749 V4b: the verify section on the item card (mocked API)", () 
     await expect(tid(page, "pl-verify-counts")).toHaveCount(0);
     await expect(tid(page, "pl-verify-bug")).toHaveCount(0);
     await expect(tid(page, "pl-verify")).not.toContainText(/wrong_account|_/);
+    expect(errors).toEqual([]);
+  });
+
+  test("Verify again: a finished check that could not be made offers the button inside the section; one press starts a new check, and the section reads waiting, also after a reload", async ({ page }) => {
+    const { mock, errors } = await setup(page, activityOf("unverified-verify-again"));
+    await expect(tid(page, "pl-verify")).toHaveAttribute("data-status", "unverified");
+    const again = tid(page, "pl-verify-again");
+    await expect(again).toHaveText("Verify again");
+    await expect(tid(page, "pl-verify").locator('[data-testid="pl-verify-again"]')).toHaveCount(1);
+    await expect(tid(page, "pl-verify-again-note")).toContainText("stays in the history");
+    await press(page, again);
+    await expect(tid(page, "pl-verify-again-say")).toHaveText("Started. The deployed app is being checked again, and this section shows the new result when it is done.");
+    await expect(tid(page, "pl-verify")).toHaveAttribute("data-status", "waiting");
+    await expect(tid(page, "pl-verify-status")).toHaveText("Waiting to start.");
+    await expect(tid(page, "pl-verify-again")).toHaveCount(0);
+    expect(mock.again).toBe(1);
+    await reload(page);
+    await expect(tid(page, "pl-verify")).toHaveAttribute("data-status", "waiting");
+    await expect(tid(page, "pl-verify-again")).toHaveCount(0);
+    expect(mock.again).toBe(1);
+    expect(errors).toEqual([]);
+  });
+
+  test("a check that passed, or one the server does not offer Verify again for, has no button", async ({ page }) => {
+    const { errors } = await setup(page, activityOf("verified"));
+    await expect(tid(page, "pl-verify")).toHaveAttribute("data-status", "verified");
+    await expect(tid(page, "pl-verify-again")).toHaveCount(0);
+    await reload(page);
+    await expect(tid(page, "pl-verify-again")).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 

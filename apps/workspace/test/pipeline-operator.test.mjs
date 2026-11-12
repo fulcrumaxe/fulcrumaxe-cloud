@@ -68,7 +68,8 @@ describe("one rule source: the app draws what the server lists, in a fixed order
   it("the action ids and their order are the server's (read from @fx/core's table, so a drift fails here)", () => {
     const core = readFileSync(join(HERE, "..", "..", "..", "packages", "core", "src", "work-items", "operatorActions.ts"), "utf8");
     const m = /OPERATOR_ACTIONS = \[([^\]]*)\] as const/.exec(core);
-    expect([...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1])).toEqual(OPERATOR_ORDER);
+    // `verify_again` is drawn by the post-merge check section of the card (pipeline-insight.js, test/pipeline-verify-again.test.mjs), not by this panel.
+    expect([...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).filter((a) => a !== "verify_again")).toEqual(OPERATOR_ORDER);
     expect(Object.keys(OPERATOR_LABELS)).toEqual(OPERATOR_ORDER);
     expect(Object.keys(OPERATOR_NOTES)).toEqual(OPERATOR_ORDER);
     expect(Object.keys(OPERATOR_PATHS)).toEqual(OPERATOR_ORDER);
