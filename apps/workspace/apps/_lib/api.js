@@ -230,3 +230,38 @@ export function createRetryGate({ onChange, now = () => Date.now(), setTimer = s
     },
   };
 }
+
+
+// Why a run was refused before it started, in words. The run's status stays `refused_spend` (the stored contract); the real reason is the fixed code
+// the runner wrote beside it (`failure_reason`, a closed set, never free text). A code this file does not know still reads as a refusal, not as a spend limit.
+const SPEND = "spend limit";
+export const REFUSAL = {
+  per_spawn_cap_exceeded: { label: SPEND, text: "This step would cost more than the limit for a single step, so it did not start." },
+  work_item_cap_exceeded: { label: SPEND, text: "This item has reached its spending limit, so this step did not start." },
+  envelope_exceeded: { label: SPEND, text: "This step would take the item past its spend limit, so it did not start. Raise the limit or stop the item." },
+  model_budget_exceeded: { label: SPEND, text: "The month's model budget has no room for this step, so it did not start." },
+  compute_cap_exceeded: { label: SPEND, text: "The month's compute allowance has no room for this step, so it did not start." },
+  model_credits_exhausted: { label: "model credits used up", text: "The model credits on this account are used up, so this step did not start." },
+  role_not_runner_eligible: { label: "this role can't run on your runner", text: "This kind of step can't run on your own runner, so it did not start. Nothing was spent." },
+  runner_daily_limit: { label: "daily runner limit", text: "Your plan's limit on runner runs for today is used up, so this step did not start. It can start tomorrow." },
+  public_repo: { label: "public repository", text: "A runner doesn't run on a public repository, so this step did not start." },
+  repo_visibility_unknown: { label: "repository not checked", text: "We couldn't tell whether this repository is private, so this step did not start." },
+  account_not_active: { label: "account not active", text: "The account isn't active, so this step did not start." },
+  model_connection_not_ok: { label: "model connection", text: "The model connection isn't working, so this step did not start." },
+  unknown_model: { label: "model not available", text: "The model for this step isn't available, so it did not start." },
+  backend_not_selectable: { label: "backend not available", text: "The chosen backend can't run this step, so it did not start." },
+  verified_review_not_wired: { label: "review not available", text: "Verified review isn't set up for this repository, so this step did not start." },
+  admit_refused: { label: "refused before it began", text: "This step was refused before it began." },
+};
+const has = (code) => typeof code === "string" && Object.hasOwn(REFUSAL, code);
+
+/** The label after "Not started: ". No stored reason keeps the long-standing "spend limit"; a reason this file does not know says only that it was refused. */
+export function refusalLabel(code) {
+  if (typeof code !== "string" || code === "") return SPEND;
+  return has(code) ? REFUSAL[code].label : REFUSAL.admit_refused.label;
+}
+/** One sentence for a refused run, or null when no reason was stored. */
+export function refusalText(code) {
+  if (typeof code !== "string" || code === "") return null;
+  return has(code) ? REFUSAL[code].text : REFUSAL.admit_refused.text;
+}

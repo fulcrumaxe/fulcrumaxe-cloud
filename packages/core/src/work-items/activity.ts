@@ -1,3 +1,4 @@
+import { REFUSAL_REASON_SQL, refusalField } from '../runs/refusal.js';
 import type { Pool, PoolClient } from 'pg';
 import { isItemWaitingOnAnswer } from '@fx/db/src/decisionAsks.js';
 import { NotFoundError } from '../tenancy/errors.js';
@@ -68,6 +69,11 @@ export interface ActivityLine {
   ended?: RunEndedWhy;
 }
 
+/** The default reason a build ended: "without a pull request" is only true when the item has none. */
+export function endedSentence(status: string, prNumber: number | null): string {
+  const what = status.replace(/_/g, ' ');
+  return prNumber !== null && prNumber > 0 ? `The executor run ${what} before the item could move on.` : `The executor run ${what} without a pull request.`;
+}
 /**
  * D#6 C42-3: how long a runner's lease lasts, in seconds. This is `RUNNER_LEASE_SECONDS` of the runner protocol, which @fx/core does not depend
  * on; a test in @fx/api pins the two equal. A live runner run's lease is renewed by every request the runner makes, so `lease_expires_at` minus
@@ -85,6 +91,8 @@ export interface ActivityRun {
   lines: ActivityLine[];
   /** D#6 C42-3: where the run ran (`runner` for a run on a person's machine). */
   runtime: string;
+  /** A refused run only (status `refused_spend`): the fixed code that says why admit refused it, else absent. */
+  failure_reason?: string;
   /** A runner run only: what it would have cost at API prices (information, never spend), or null when it reported none. Absent for any other run. */
   runner_usage?: RunnerUsage | null;
   /** A runner run only: `recorded`, `not_priced` or `not_recorded` once it has ended (never a silent 0), null while it is still going. */
@@ -797,8 +805,10 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         runtime: string;
         lease_expires_at: Date | null;
         runner_usage_json: unknown;
+        refusal_reason: string | null;
       }>(
         `SELECT id, role, status, usd, created_at, left(envelope->>'summary', $2::int) AS summary, runtime, lease_expires_at, ${RUNNER_USAGE_COLUMN},
+                ${REFUSAL_REASON_SQL},
                 COALESCE(CASE WHEN role <> 'executor' THEN dispatch_pr_number::text END,
                          ${RUNNER_VERDICT_PR_SQL},
                          CASE WHEN envelope->>'pr_number' ~ '^[0-9]{1,9}$' THEN envelope->>'pr_number' END) AS pr_number
@@ -958,10 +968,10 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           : scopeRefusal
           ? { kind: 'needs_human', reason: scopeRefusalSentence(scopeRefusal, { recordEnded }) }
           : memoryEnd
-          ? { kind: 'needs_human', reason: `The executor run ${ex!.status.replace(/_/g, ' ')} without a pull request.`, ended: memoryEnd }
+          ? { kind: 'needs_human', reason: endedSentence(ex!.status, prNumber), ended: memoryEnd }
           : {
             kind: 'needs_human',
-            reason: summary ?? (ex ? `The executor run ${ex.status.replace(/_/g, ' ')} without a pull request.` : 'The pipeline stopped and needs a person.'),
+            reason: summary ?? (ex ? endedSentence(ex.status, prNumber) : 'The pipeline stopped and needs a person.'),
           };
       // D#6 CHECK-FAILURE-NAMES-ON-CARD: the outside-only stop says which test files failed (and each one's `Run:` hint), read from the newest executor run's recorded check summary,
       // so a person can tell a runner-environment flake from a base-branch break. Names and hint words only, capped; the sentence above is unchanged.
@@ -1053,6 +1063,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           summary: r.summary ? safeModelText(r.summary, ACTIVITY_LIMITS.maxSummaryChars) : null,
           lines: linesByRun.get(r.id) ?? [],
           runtime: r.runtime,
+          ...refusalField(r.refusal_reason),
           ...runnerFields(r),
         })),
       runs_truncated: runsTruncated,

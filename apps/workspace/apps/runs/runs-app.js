@@ -10,6 +10,7 @@ import { renderMarkdown } from "../_lib/markdown.js";
 import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-display-filter.js";
 import { openRunStream } from "../_lib/stream.js";
 // D#597 CC-6a-2: the assistant panel. The boot budget is full (130 of 130 files), so it lives with the Pipeline detail panels it sits beside.
+import { refusalLabel } from "../_lib/api.js";
 import { createAssistantPanel } from "../pipeline/pipeline-actions.js";
 import { contextBanner, exportLink, foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerHeadTotal, runnerNotes, titleOf } from "./runs-detail.js";
 import {
@@ -30,14 +31,15 @@ const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const short = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
 
 /** A status as words: our label, or the (filtered, shortened) status itself. */
-function statusLabel(status) {
+function statusLabel(status, reason) {
   if (typeof status !== "string" || status === "") return "Unknown";
+  if (status === "refused_spend") return "Not started: " + refusalLabel(reason);
   return Object.hasOwn(STATUS_LABELS, status) ? STATUS_LABELS[status] : short(displayText(status), 40);
 }
 
-function statusChip(status) {
+function statusChip(status, reason) {
   const s = typeof status === "string" ? status.replace(/[^a-z_]/g, "") : "";
-  return h("span", { class: "runs-chip runs-chip-" + (s || "unknown"), "data-testid": "runs-chip", "data-status": s }, statusLabel(status));
+  return h("span", { class: "runs-chip runs-chip-" + (s || "unknown"), "data-testid": "runs-chip", "data-status": s }, statusLabel(status, reason));
 }
 
 /** "fulcrumaxe <role>": the name a person sees for a run's role. */
@@ -174,7 +176,7 @@ function mountApp(contentEl, launchArg) {
         "button",
         { type: "button", class: "runs-row", "data-testid": "runs-row", "data-id": run.id, onClick: () => open(run.id) },
         h("span", { class: "runs-row-name" }, roleName(run.role)),
-        statusChip(run.status),
+        statusChip(run.status, run.failure_reason),
         h("span", { class: "runs-row-usd", "data-testid": "runs-usd" }, runUsd(run)),
         validTime(run.created_at) ? h("span", { class: "runs-row-time" }, timeNode(run.created_at, true)) : null
       )
@@ -264,7 +266,7 @@ function mountApp(contentEl, launchArg) {
           "div",
           { class: "runs-head", "data-testid": "runs-head" },
           h("h3", { class: "runs-head-name" }, ins ? titleOf(ins.run.role) : roleName(run.role)),
-          statusChip(run.status),
+          statusChip(run.status, run.failure_reason),
           h("span", { class: "runs-head-usd", "data-testid": "runs-head-usd" }, (ins && runnerHeadTotal(ins)) || runUsd(run))
         ),
         approvalBlock(run, detail.approval, () => approve(detail)),

@@ -58,6 +58,25 @@ describe('runs/read (D#31 API-3a)', () => {
     return id;
   }
 
+  /** The status stays `refused_spend`; the fixed refusal code rides beside it so the app can say the real reason. */
+  describe('refusal reason', () => {
+    it('a refused run carries its reason code, no other run does, and a code that is not a plain word is dropped', async () => {
+      const at = new Date('2026-01-01T00:00:00Z');
+      const refused = await insertRun(refsA, { status: 'refused_spend', createdAt: at });
+      const odd = await insertRun(refsA, { status: 'refused_spend', createdAt: at });
+      const failed = await insertRun(refsA, { status: 'failed', createdAt: at });
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`, [refsA.accountId, refused, JSON.stringify({ failureReason: 'role_not_runner_eligible' })]);
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`, [refsA.accountId, odd, JSON.stringify({ failureReason: 'Some Free Text!' })]);
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`, [refsA.accountId, failed, JSON.stringify({ failureReason: 'sandbox_error' })]);
+      const ctx = { pool: appUserPool, principal: refsA };
+      expect((await getRun(ctx, refused)).failure_reason).toBe('role_not_runner_eligible');
+      expect('failure_reason' in (await getRun(ctx, odd))).toBe(false);
+      expect('failure_reason' in (await getRun(ctx, failed))).toBe(false);
+      const listed = await listRuns(ctx, { limit: 50, status: 'refused_spend' });
+      expect(listed.data.find((r) => r.id === refused)?.failure_reason).toBe('role_not_runner_eligible');
+    });
+  });
+
   /** D#6 R2b-4a follow-up: who approved a run to use their plan, and whether the claim or a click did it, from stored facts. */
   describe('approval marker', () => {
     /** The receipt the claim's auto-approve definer writes with approved_by (the only writer of this decision type). */

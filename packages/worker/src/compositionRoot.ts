@@ -90,6 +90,7 @@ import { reconcileHolder, sweepPrSlotHolders as runPrSlotSweep, type PrSlotSweep
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
 import { answerAsk, type AskAnswerResult } from "@fx/core/src/decisions/answer.js";
 import { createReversalPlanner } from "@fx/receipts";
+import { raiseItemEnvelope } from "./envelopeRaise.js";
 import { confirmReversal as confirmReversalFor, requestReversal as requestReversalFor, retryReversal as retryReversalFor, type ReversalOutcome, type ReversalPrincipal } from "@fx/core/src/decisions/reversalRequest.js";
 import { approveSubItem, type SubItemApprovalResult } from "@fx/core/src/decisions/approveSubItem.js";
 import type { RunActionSignal } from "@fx/core/src/runActions/index.js";
@@ -607,7 +608,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       requestReversal: (input) => requestReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { receiptId: input.receiptId, ...(input.confirmEstimateUsd === undefined ? {} : { confirmEstimateUsd: input.confirmEstimateUsd }) }),
       retryReversal: (input) => retryReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { reversalId: input.reversalId }),
       confirmReversal: (input) => confirmReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { reversalId: input.reversalId, confirmEstimateUsd: input.confirmEstimateUsd }),
-      answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, reversal: createReversalPlanner(pools.receiptPool), ...(afterReceipt ? { afterReceipt } : {}), ...(input.signal ? { signal: input.signal } : {}), ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { askId: input.askId, choice: input.choice }),
+      answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, reversal: createReversalPlanner(pools.receiptPool), envelopeRaise: raiseItemEnvelope, ...(afterReceipt ? { afterReceipt } : {}), ...(input.signal ? { signal: input.signal } : {}), ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { askId: input.askId, choice: input.choice }),
       sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github, ...(input.closePr ? { closePr: input.closePr } : {}) }),
       sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }),
       reconcilePrHolder: (input) => reconcileHolder(pools.runnerPool, input.github, input.accountId, input.workItemId),

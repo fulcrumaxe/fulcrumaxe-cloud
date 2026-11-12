@@ -13,7 +13,7 @@
 //  - No new live subscription: the app hands run.status_changed and refresh
 //    to live() from the subscriptions the board already holds.
 import { h, timeNode } from "../_lib/dom.js";
-import { OFFLINE_MESSAGE, SERVER_ERROR_MESSAGE, TIMEOUT_MESSAGE, api, createRetryGate, isRateLimited, parseRetryAfter, retryWords, waitSeconds } from "../_lib/api.js";
+import { OFFLINE_MESSAGE, refusalLabel, SERVER_ERROR_MESSAGE, TIMEOUT_MESSAGE, api, createRetryGate, isRateLimited, parseRetryAfter, retryWords, waitSeconds } from "../_lib/api.js";
 import { STAGE_LABELS } from "./pipeline-storage.js";
 import { apiFetch, createSseParser } from "../../core/cloud-live.js";
 
@@ -345,7 +345,7 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
     return h(
       "li",
       { class: "pl-run", tabindex: "-1", "data-testid": "pl-run", "data-run-id": run.id, "data-status": run.status, "data-action-id": p ? p.actionId : null },
-      h("span", { class: "pl-run-main" }, h("bdi", null, run.role), " · ", STATUS_WORDS[run.status] || "Another status", run.runtime !== "runner" && Number.isFinite(run.usd) ? " · " + money(run.usd) : ""),
+      h("span", { class: "pl-run-main" }, h("bdi", null, run.role), " · ", run.status === "refused_spend" ? "Not started: " + refusalLabel(run.failure_reason) : STATUS_WORDS[run.status] || "Another status", run.runtime !== "runner" && Number.isFinite(run.usd) ? " · " + money(run.usd) : ""),
       runnerUsageText(run) ? h("span", { class: "pl-run-usage pl-muted", "data-testid": "pl-run-usage" }, runnerUsageText(run)) : null,
       p ? h("span", { class: "pl-run-pending", "data-testid": "pl-run-pending" }, p.kind === "cancel" ? "Cancelling…" : "Retrying…") : null,
       ...approvalParts(run, approvals),

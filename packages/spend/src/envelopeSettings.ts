@@ -260,3 +260,6 @@ export async function autostartRoom(client: PoolClient, input: { accountId: stri
   const fits = (pendingItems + 1) * tt(input.firstRunUsd) <= tt(state.remainingThisWeekUsd);
   return { fits, reason: fits ? 'ok' : 'exhausted', ...out };
 }
+
+/** The `envelope.changed` audit row, for a writer of an envelope version outside `changeEnvelope` (a raise answered on the ask). */
+export const auditEnvelopeChanged = (client: PoolClient, payload: Record<string, unknown>): Promise<void> => audit(client, 'envelope.changed', payload);
