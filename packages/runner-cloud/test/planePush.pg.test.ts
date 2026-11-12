@@ -114,7 +114,10 @@ describe("plane-push routes [pg]", () => {
       return true;
     },
   };
-  const deps = (over: Partial<RunnerCloudDeps> = {}): RunnerCloudDeps => h.deps({ leases, planePush: port, planePushIdentity: () => identity, ...over });
+  /** The waits between repeated reads, recorded instead of slept; and the one-line diagnostics the route wrote. */
+  const waits: number[] = [];
+  const logged: string[] = [];
+  const deps = (over: Partial<RunnerCloudDeps> = {}): RunnerCloudDeps => h.deps({ leases, planePush: port, planePushIdentity: () => identity, sleep: async (ms) => void waits.push(ms), log: (line) => void logged.push(line), ...over });
   const run = (fn: () => Promise<{ status: number; body: unknown; headers?: Record<string, string> }>) => toResponse(fn);
   const tokenReq = (body: unknown = { run_id: RUN, lease_generation: 2 }, k: TestKey = key, o: Parameters<typeof signed>[3] = {}): RunnerHttpRequest => signed(k, PLANE_PUSH_TOKEN_PATH, body, o);
   const reportReq = (body: Record<string, unknown>, k: TestKey = key, o: Parameters<typeof signed>[3] = {}): RunnerHttpRequest => signed(k, PLANE_PUSH_REPORT_PATH, { run_id: RUN, lease_generation: 2, pairing_digest: STAMP, ...body }, o);
@@ -134,6 +137,8 @@ describe("plane-push routes [pg]", () => {
   afterAll(() => h.close());
   beforeEach(async () => {
     calls.length = 0;
+    waits.length = 0;
+    logged.length = 0;
     refuse = null;
     mintError = null;
     githubError = null;
@@ -458,6 +463,75 @@ describe("plane-push routes [pg]", () => {
       expect(res.status).toBe(200);
       expect(record()).toEqual(expect.objectContaining({ outcome: { state: "refused", code: "report_mismatch" }, terminal: true, label: "report_mismatch" }));
       expect(JSON.stringify(record()!.outcome)).not.toContain(HEAD);
+    });
+
+    describe("a read of GitHub that has not caught up with the push", () => {
+      it("a pushed head that shows on the third read is recorded as pushed (the reads wait 500 and 1500 ms between them)", async () => {
+        const answers = [false, false, true];
+        port.verifyPushed = async (input) => {
+          calls.push({ method: "verifyPushed", input: { ...input } });
+          return answers.shift() ?? true;
+        };
+        const res = await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP, branch: BRANCH });
+        expect(res.status).toBe(200);
+        expect(names()).toEqual(["context", "verifyPushed", "verifyPushed", "verifyPushed", "record"]);
+        expect(waits).toEqual([500, 1500]);
+        expect(record()).toMatchObject({ outcome: { state: "pushed", headSha: HEAD, tipSha: TIP }, label: "pushed" });
+        expect(logged).toEqual([]);
+        port.verifyPushed = async (input) => {
+          calls.push({ method: "verifyPushed", input: { ...input } });
+          if (githubError) throw githubError;
+          return pushedOk;
+        };
+      });
+
+      it("a pull request that shows on the second read is recorded as pr_opened with the address GitHub gave", async () => {
+        const answers: Array<{ url: string } | null> = [null, { url: "https://github.com/acme/widgets-public/pull/9" }];
+        port.verifyPullRequest = async (input) => {
+          calls.push({ method: "verifyPullRequest", input: { ...input } });
+          return answers.shift() ?? null;
+        };
+        const res = await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(res.status).toBe(200);
+        expect(names()).toEqual(["context", "verifyPushed", "verifyPullRequest", "verifyPullRequest", "record"]);
+        expect(waits).toEqual([500]);
+        expect(record()).toMatchObject({ outcome: { state: "pr_opened", prNumber: 9, prUrl: "https://github.com/acme/widgets-public/pull/9" }, terminal: true, label: "pr_opened" });
+        port.verifyPullRequest = async (input) => {
+          calls.push({ method: "verifyPullRequest", input: { ...input } });
+          if (githubError) throw githubError;
+          return prAnswer;
+        };
+      });
+
+      it("a read that never matches is asked 4 times in all, then refused as report_mismatch, and the failing check is named in the log (no sha, branch or number in it)", async () => {
+        pushedOk = false;
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(names().filter((n) => n === "verifyPushed")).toHaveLength(4);
+        expect(waits).toEqual([500, 1500, 3000]);
+        expect(record()).toEqual(expect.objectContaining({ outcome: { state: "refused", code: "report_mismatch" }, terminal: true, label: "report_mismatch" }));
+        expect(logged.map((l) => JSON.parse(l))).toEqual([{ event: "runner.plane_push_report_mismatch", check: "head_unconfirmed", phase: "pr_opened", run_id: RUN }]);
+      });
+
+      it("an address that is wrong is not read again: it is named pr_address and refused at once", async () => {
+        prAnswer = { url: "https://github.com/evil/widgets-public/pull/9" };
+        await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(names().filter((n) => n === "verifyPullRequest")).toHaveLength(1);
+        expect(waits).toEqual([]);
+        expect(JSON.parse(logged[0]!)).toMatchObject({ check: "pr_address" });
+      });
+
+      it.each([
+        ["pairing_digest", () => undefined, { pairing_digest: "d".repeat(64), phase: "pushed" }],
+        ["no_grant", () => { context = { ...withToken(), attempt: null } as typeof context; }, { phase: "pushed" }],
+        ["branch_differs", () => undefined, { phase: "pushed", branch: "fx/p-someone-else" }],
+        ["pr_unconfirmed", () => { prAnswer = null; }, { phase: "pr_opened", pr_number: 9 }],
+      ])("a refusal by the %s check names it, and never reads GitHub again for a check that is not a GitHub read", async (check, arrange, extra) => {
+        arrange();
+        await askReport({ head_sha: HEAD, tip_sha: TIP, ...extra });
+        expect(logged.map((l) => (JSON.parse(l) as { check: string }).check)).toEqual([check]);
+        if (check !== "pr_unconfirmed") expect(waits).toEqual([]);
+        else expect(waits).toEqual([500, 1500, 3000]);
+      });
     });
 
     it("when GitHub cannot be asked nothing is recorded and the answer is 503, so the hook sends the report again", async () => {

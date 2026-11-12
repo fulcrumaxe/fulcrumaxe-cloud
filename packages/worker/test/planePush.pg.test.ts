@@ -76,7 +76,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   let livePr: ((i: { accountId: string; codeRepo: string; number: number }) => Promise<"open" | "closed" | "merged" | "unknown">) | null | undefined;
   const facade = () => createRunnerPlanePushFacade(writerPool, { now: () => clock, publicHead: (i) => port.branchHead!(i), ...(livePr === null ? {} : { pullRequestState: livePr ?? (async () => "open" as const) }) });
   const ops = (): RunnerLeaseOps => ({ ...claims, ...facade() }) as unknown as RunnerLeaseOps;
-  const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: ops(), planePush: port, planePushIdentity: () => identity, now: () => new Date(clock) });
+  const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: ops(), planePush: port, planePushIdentity: () => identity, now: () => new Date(clock), sleep: async () => undefined, log: () => undefined });
   const created = () => Math.floor(clock / 1000);
   const token = (body: unknown, nonce?: string) => toResponse(() => planePushTokenRun(deps(), signed(key, PLANE_PUSH_TOKEN_PATH, body, { created: created(), ...(nonce ? { nonce } : {}) })));
   /** A report as the hook sends it: it echoes the digest of the pairing it read (here, the stamp on the record) unless a test says otherwise. */
@@ -442,7 +442,8 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       github.pushed = false;
       await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
       await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
-      expect(github.asked).toEqual(["pushed"]);
+      // The first report reads four times (one try and three retries, none of which sleeps here); the repeat reads nothing.
+      expect(github.asked).toEqual(["pushed", "pushed", "pushed", "pushed"]);
     });
 
     it("settling an attempt that is already finished or gone matches no row (false), so the route can revoke instead of handing the token out", async () => {
@@ -1634,7 +1635,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       await askToken(r);
       github.pushed = false;
       expect((await updated(r, MAIN)).status).toBe(200);
-      expect(github.asked).toEqual(["pushed"]);
+      expect(github.asked).toEqual(["pushed", "pushed", "pushed", "pushed"]);
       expect(await planeRow()).toMatchObject({ head_sha: HEAD });
       expect(await outcomeOf(r.id)).toBe("history_rewritten");
     });

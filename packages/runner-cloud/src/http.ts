@@ -114,6 +114,8 @@ export interface RunnerCloudDeps {
   log?: (line: string) => void;
   /** The clock. Tests inject a fixed one. */
   now?: () => Date;
+  /** The wait between the repeated reads of a public-push report's check (default: a timer). Tests inject an instant one. */
+  sleep?: (ms: number) => Promise<void>;
   /** The protocol version `hello` is judged against. Defaults to the constant. */
   currentProtocolVersion?: number;
   /** The oldest protocol version `hello` accepts. Defaults to the constant. */
