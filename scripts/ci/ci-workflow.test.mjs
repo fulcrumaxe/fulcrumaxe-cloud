@@ -1910,6 +1910,26 @@ test("overlay-only: the e2e-runner scope step is private-only, pull-request-only
   assert.ok(order.indexOf("Overlay scope") < order.indexOf("Run the end-to-end runner test"));
 });
 
+test("overlay-only: workspace-e2e (all three legs) gets the overlay list on private pull requests only, so an overlay change skips every spec step and the job stays green", () => {
+  assert.deepEqual(ciDoc.jobs["workspace-e2e"].strategy.matrix.project, ["desktop", "phone", "tablet"]);
+  const s = stepNamed(e2eSteps, "E2E scope (${{ matrix.project }})");
+  const expr = "${{ github.event_name == 'pull_request' && github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}";
+  assert.ok(s.text.includes(`CI_OVERLAY_LIST: ${expr}`));
+  assert.match(s.text, /--e2e-step/);
+  const listFor = (event, isPrivate) => (event === "pull_request" && isPrivate ? "scripts/ci/publish-denylist.local" : "");
+  assert.equal(listFor("pull_request", true), "scripts/ci/publish-denylist.local");
+  assert.equal(listFor("pull_request", false), "", "public: the classifier cannot answer overlay");
+  assert.equal(listFor("merge_group", true), "");
+  // An overlay answer sets CI_SCOPE_E2E=false (affected.mjs), and every later spec step reads only that flag.
+  for (const n of ["Pick free e2e ports (${{ matrix.project }})", "Run workspace e2e (${{ matrix.project }})"]) {
+    const g = stepNamed(e2eSteps, n);
+    assert.equal(runs(g, { ...ctxFor("pull_request", true, "true"), "env.CI_SCOPE_E2E": "false" }), false, n);
+    assert.equal(runs(g, { ...ctxFor("pull_request", true), "env.CI_SCOPE_E2E": "true" }), true, n);
+  }
+  // no job-level skip: the three required names keep reporting success
+  assert.doesNotMatch(String(ciDoc.jobs["workspace-e2e"].if), /overlay|CI_SCOPE/i);
+});
+
 test("overlay-only: the merge gate needs `check` green, and a job-level skip would be refused, so no job is skipped for this", () => {
   // scripts/lib/ci-status-check.sh counts `skipped` as did-not-run. Every job keeps its if: free of the overlay answer.
   for (const job of Object.values(ciDoc.jobs)) assert.doesNotMatch(String(job.if ?? ""), /overlay|CI_SCOPE/i);
