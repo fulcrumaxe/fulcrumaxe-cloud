@@ -109,9 +109,12 @@ export function failedOutsideChange(summary: string | null | undefined, chainRoo
   // an ambiguous name keeps the fix round.
   const touched = new Set<string>();
   for (const path of changed.files) touched.add(packageOf(path) ?? '.');
+  // A file the later check itself lists as changed is inside the change too: a fix round that regenerated a file in an untouched package (a generated client, say) put it there,
+  // so that file failing again is the round's own doing, not the environment's. Read only when that later list is complete; otherwise only the first list decides.
+  const laterChanged = now.changed !== null && now.changed.complete ? now.changed.files : null;
   for (const file of failed.files) {
     const pkg = packageOf(file);
-    if (pkg === null || touched.has(pkg)) return false;
+    if (pkg === null || touched.has(pkg) || laterChanged?.has(file) === true) return false;
   }
   return true;
 }
