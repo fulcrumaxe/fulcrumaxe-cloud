@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { sanitize as hostedSanitize } from "@fx/trust";
 import { parseEnvelope } from "../../../pipeline/src/verify/envelope.js";
 import { sanitize } from "../../src/assistant/fence.js";
-import { launchDriver } from "../../src/verifyBrowser/driver.js";
+import { ToolError, launchDriver } from "../../src/verifyBrowser/driver.js";
 import { groundAnswer } from "../../src/verifyBrowser/ground.js";
 import { hostRulesArg, isAllowedUrl, parseBase, resolveOpenPath } from "../../src/verifyBrowser/pin.js";
 import { TOOLS, toolList } from "../../src/verifyBrowser/server.js";
@@ -390,6 +390,28 @@ describe("what may be quoted (fix round)", () => {
     expect((await r.call("begin_journey", { id: "c1" })).isError).toBe(false);
     expect((await r.call("open", { path: "/" })).isError).toBe(false);
     await r.server.stop();
+  });
+});
+
+describe("a browser that cannot start (D#749)", () => {
+  it("every browser tool answers the named code with the way out, and an all-blocked answer is still accepted and written to the answer file", async () => {
+    const r = rig(PAGES, { openDriver: async () => { throw new ToolError("browser_start_failed"); } });
+    for (const [name, args] of [["open", { path: "/" }], ["snapshot", {}], ["wait_text", { text: "x", seconds: 1 }]] as const) {
+      const reply = await r.call(name, args);
+      expect(reply.isError, name).toBe(true);
+      expect(reply.text, name).toContain("error: browser_start_failed");
+      expect(reply.text, name).toContain("answer every journey blocked with submit_answer now");
+    }
+    const blocked = { journeys: [{ id: "c1", result: "blocked", steps: [], console_errors: 0, undo_checked: false, reloaded: false }] };
+    expect(await r.call("submit_answer", { envelope: blocked })).toEqual({ text: "answer accepted", isError: false });
+    expect(JSON.parse(readFileSync(path.join(r.jobDir, "answer.json"), "utf8"))).toEqual(blocked);
+  });
+
+  it("a failure of one action on a page that loaded keeps the plain code and no hint", async () => {
+    const r = rig(PAGES);
+    const reply = await r.call("click", { ref: "e999" });
+    expect(reply.isError).toBe(true);
+    expect(reply.text).not.toContain("submit_answer now");
   });
 });
 
