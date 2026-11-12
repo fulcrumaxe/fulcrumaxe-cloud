@@ -380,7 +380,8 @@ describe("a job with a check whose Spec lists a route (#751)", () => {
 
   it("a hand-edited file: the check is not run and the run ends out_of_scope with a count, as before", async () => {
     const ran: string[] = [];
-    const r = rig({ changed: changed(), derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "other client\n" }, ran } });
+    const steps: string[] = [];
+    const r = rig({ changed: changed(), steps, derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "other client\n" }, ran } });
     await r.handle(await r.claim(scoped()));
     expect(r.order).not.toContain("check");
     expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope", summary: "the check was not run: 1 changed file is outside the Spec's file list" });
@@ -389,8 +390,10 @@ describe("a job with a check whose Spec lists a route (#751)", () => {
 
   it("no table on the default branch: nothing is generated and both files count as outside", async () => {
     const ran: string[] = [];
-    const r = rig({ changed: changed() });
+    const steps: string[] = [];
+    const r = rig({ changed: changed(), steps });
     await r.handle(await r.claim(scoped()));
+    expect(steps.some((l) => l.endsWith("generated files not lifted (rules 0, candidates 0, reason no_rules)"))).toBe(true);
     expect(ran).toEqual([]);
     expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope", summary: "the check was not run: 2 changed files are outside the Spec's file list" });
   });
@@ -405,8 +408,10 @@ describe("a job with a check whose Spec lists a route (#751)", () => {
 
   it("a working tree that differs from HEAD vouches for nothing: the runner pushes HEAD, not loose bytes", async () => {
     const ran: string[] = [];
-    const r = rig({ changed: changed(), derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "client\n" }, ran, dirty: ["client/generated.ts"] } });
+    const steps: string[] = [];
+    const r = rig({ changed: changed(), steps, derived: { table: TABLE, files: FILES, generated: { "gen-openapi": "doc\n", "gen-client": "client\n" }, ran, dirty: ["client/generated.ts"] } });
     await r.handle(await r.claim(scoped()));
+    expect(steps.some((l) => l.endsWith("generated files not lifted (rules 1, candidates 2, reason tree_dirty)"))).toBe(true);
     expect(ran).toEqual([]);
     expect(bodies("/done")[0]!.check).toMatchObject({ reason: "out_of_scope" });
   });
