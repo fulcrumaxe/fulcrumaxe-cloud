@@ -333,7 +333,7 @@ export interface RunnerLeaseOps {
   planePushReportContext?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
     | { kind: "fenced"; reason: StopReason }
     | { kind: "not_paired" }
-    | { kind: "context"; plane: { id: string; codeRepo: string; branch: string; state: string; pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null; /** Set for a conflict round: the public main tip the cloud recorded at its grant (null when none was recorded). */ conflictRound?: { tip: string | null } }
+    | { kind: "context"; plane: { id: string; codeRepo: string; branch: string; state: string; pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null; /** Set only when this evaluation may check the attempt's refused report against GitHub again; the worker has already counted it. */ reverify?: { check: "head_unconfirmed" | "pr_unconfirmed"; headSha: string; tipSha: string; prNumber?: number } } | null; /** Set for a conflict round: the public main tip the cloud recorded at its grant (null when none was recorded). */ conflictRound?: { tip: string | null } }
   >;
   planePushRecordReport?(input: {
     accountId: string;
@@ -353,6 +353,10 @@ export interface RunnerLeaseOps {
     terminal: boolean;
     label: string;
     tokenRevoked?: boolean;
+    /** Stored on the attempt when this report ends it as `report_mismatch` (head_unconfirmed / pr_unconfirmed only). */
+    refused?: { check: "head_unconfirmed" | "pr_unconfirmed"; headSha: string; tipSha: string; prNumber?: number };
+    /** The outcome re-checks this attempt's own refused report: recorded only while the attempt, the row and the shas still match. */
+    reverify?: boolean;
   }): Promise<{ kind: "fenced"; reason: StopReason } | { kind: "not_paired" } | { kind: "recorded"; recorded: boolean }>;
   /**
    * D#601 MEM-6: the proposals a person said yes to at a terminal, after a run of this runner ended (packages/worker `ingestRunnerMemoryProposals`, which this package cannot import).

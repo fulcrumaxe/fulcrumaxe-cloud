@@ -279,6 +279,23 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       return { result: "closed", commented };
     },
 
+    /**
+     * D#6 PLANE-PUSH-REVERIFY-BOUND: the open pull requests whose head is `branch` of this repository (`GET /pulls?state=open&head=<owner>:<branch>`), at most two of them (a second means
+     * the answer is ambiguous). Each: number, address, head ref and repository, head sha and base ref. A body that is not a list of pull requests throws.
+     */
+    async openPullRequestsForBranch(input: { codeRepo: string; branch: string; token: string }): Promise<Array<{ number: number; url: string; headRef: string; headRepo: string; headSha: string; baseRef: string }>> {
+      const { owner, name } = split(input.codeRepo);
+      if (!BRANCH.test(input.branch) || input.branch.includes("..")) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/pulls?state=open&per_page=2&head=${encodeURIComponent(`${owner}:${input.branch}`)}`, input.token);
+      if (res.status >= 500 || res.status === 429) throw new PlanePushApiError("public_unavailable", true);
+      if (res.status !== 200 || !Array.isArray(res.body)) throw new PlanePushApiError("public_unavailable");
+      return res.body.slice(0, 2).map((p: unknown) => {
+        const b = p !== null && typeof p === "object" ? (p as { number?: unknown; html_url?: unknown; state?: unknown; head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } | null }; base?: { ref?: unknown } }) : {};
+        if (typeof b.number !== "number" || !Number.isSafeInteger(b.number) || typeof b.html_url !== "string" || typeof b.head?.ref !== "string" || typeof b.head?.sha !== "string" || typeof b.base?.ref !== "string") throw new PlanePushApiError("public_unavailable");
+        return { number: b.number, url: b.html_url, headRef: b.head.ref, headRepo: typeof b.head.repo?.full_name === "string" ? b.head.repo.full_name : "", headSha: b.head.sha, baseRef: b.base.ref };
+      });
+    },
+
     async openPullRequest(input: { codeRepo: string; branch: string; base: string; title: string; body: string; token: string }): Promise<{ number: number; url: string }> {
       const { owner, name } = split(input.codeRepo);
       const res = await call("POST", `/repos/${owner}/${name}/pulls`, input.token, { title: input.title, head: input.branch, base: input.base, body: input.body, maintainer_can_modify: false });

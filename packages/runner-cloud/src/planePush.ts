@@ -213,6 +213,10 @@ interface Decision {
   label: string;
   /** For a refused report: which check failed (a closed name). */
   check?: ReportMismatchCheck;
+  /** A refusal a later read of GitHub can change: what the report named, stored on the attempt (head_unconfirmed / pr_unconfirmed only, and never for an update). */
+  refused?: RefusedReport;
+  /** The outcome is a re-check of the attempt's own refused report; the worker records it only while the attempt, the row and the shas still match. */
+  reverify?: boolean;
   /** True for a report that changes nothing and asked GitHub nothing (the attempt is already finished, or this phase was already verified). */
   skip?: boolean;
 }
@@ -227,6 +231,44 @@ export const REPORT_MISMATCH_CHECKS = ["pairing_digest", "no_grant", "branch_dif
 export type ReportMismatchCheck = (typeof REPORT_MISMATCH_CHECKS)[number];
 
 const mismatch = (check: ReportMismatchCheck): Decision => ({ outcome: { state: "refused", code: "report_mismatch" }, terminal: true, label: "report_mismatch", check });
+
+/** D#6 PLANE-PUSH-REVERIFY-BOUND: the two checks a later read of GitHub can change. The runner-side ones (pairing_digest, no_grant, branch_differs, update_state, pr_address) are never stored and never re-read. */
+interface RefusedReport {
+  check: "head_unconfirmed" | "pr_unconfirmed";
+  headSha: string;
+  tipSha: string;
+  /** The pull request number the report named; present exactly for `pr_unconfirmed`. */
+  prNumber?: number;
+}
+const SHA40 = /^[0-9a-f]{40}$/;
+
+/** A refusal for a head or pull request GitHub did not confirm. A first publish's report names its head and tip, which the attempt keeps (so a later read is judged against exactly these); an update's does not. */
+function unconfirmed(check: RefusedReport["check"], m: PlanePushReportMessage): Decision {
+  const stored = m.phase !== "updated" && m.head_sha !== undefined && m.tip_sha !== undefined && SHA40.test(m.head_sha) && SHA40.test(m.tip_sha);
+  if (stored && check === "pr_unconfirmed" && m.pr_number === undefined) return mismatch(check);
+  return { ...mismatch(check), ...(stored ? { refused: { check, headSha: m.head_sha!, tipSha: m.tip_sha!, ...(check === "pr_unconfirmed" ? { prNumber: m.pr_number! } : {}) } } : {}) };
+}
+
+/**
+ * D#6 PLANE-PUSH-REVERIFY-BOUND: a report of a push the cloud refused as unconfirmed, read again. The worker only hands over `stored` for the run's own newest attempt that ended as `report_mismatch`
+ * with a stored check, and has already counted this evaluation (a cap and a backoff per attempt). Here: the report must be the same push (digest, branch, head, tip, and the phase the stored check can
+ * cover), and GitHub is asked about the STORED head and tip, never the report's: one read of the branch, and for a pull request at most one read of it. No retry loop. Anything short of full
+ * confirmation changes nothing (the refusal stands); the recording step repeats the binding in its own condition.
+ */
+async function reverifyReport(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string }, stored: RefusedReport, port: PlanePushHostedPort, accountId: string): Promise<Decision> {
+  if (m.phase !== "pushed" && m.phase !== "pr_failed" && m.phase !== "pr_opened") return NOOP;
+  if (m.pairing_digest !== plane.pairingDigest || (m.branch !== undefined && m.branch !== plane.branch)) return NOOP;
+  if (m.head_sha !== stored.headSha || m.tip_sha !== stored.tipSha) return NOOP;
+  if (stored.check === "pr_unconfirmed" && (m.phase !== "pr_opened" || m.pr_number !== stored.prNumber)) return NOOP;
+  if (m.phase === "pr_opened" && m.pr_number === undefined) return NOOP;
+  if (!(await port.verifyPushed({ accountId, codeRepo: plane.codeRepo, branch: plane.branch, headSha: stored.headSha, tipSha: stored.tipSha }))) return NOOP;
+  const done = (outcome: NonNullable<Decision["outcome"]>, label: string): Decision => ({ outcome, terminal: true, label, reverify: true });
+  if (m.phase === "pushed") return done({ state: "pushed", headSha: stored.headSha, tipSha: stored.tipSha }, "pushed");
+  if (m.phase === "pr_failed") return done({ state: "pushed_pr_not_opened", headSha: stored.headSha, tipSha: stored.tipSha }, "pr_failed");
+  const pr = await port.verifyPullRequest({ accountId, codeRepo: plane.codeRepo, branch: plane.branch, number: m.pr_number! });
+  if (!pr || !publicPullRequestUrlMatches(plane.codeRepo, m.pr_number!, pr.url)) return NOOP;
+  return done({ state: "pr_opened", headSha: stored.headSha, tipSha: stored.tipSha, prNumber: m.pr_number!, prUrl: pr.url }, "pr_opened");
+}
 
 /**
  * GitHub can answer a read that follows a write a few seconds before it shows the write (a branch, a pull request just made). A read that says "not there" is therefore asked again,
@@ -257,7 +299,7 @@ const bad = (): never => {
  * The report is a hint. For a phase that says something exists on GitHub, GitHub is asked (with the hosted side's own token) and the answer
  * decides; the runner's `branch` is compared with the record's and never used.
  */
-async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string; state: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort, accountId: string, conflictRound: { tip: string | null } | undefined, retry: ReadRetry): Promise<Decision> {
+async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string; state: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null; reverify?: RefusedReport } | null, port: PlanePushHostedPort, accountId: string, conflictRound: { tip: string | null } | undefined, retry: ReadRetry): Promise<Decision> {
   switch (m.phase) {
     case "building":
       // The build start already stamped `building`; a report must never move a later state back to it.
@@ -279,6 +321,8 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       if (m.phase === "pr_opened" && m.pr_number === undefined) return bad();
       // Bounded work per attempt: once it has finished, or this phase was already verified, a report costs nothing (no mint, no GitHub read). A push is
       // therefore verified at most twice per attempt: once as `pushed`, once as the report that ends it.
+      // A finished attempt the worker marked re-checkable (its own refused report, within the cap) is read again, bound to what it stored; every other finished attempt costs nothing.
+      if (attempt?.finished && attempt.reverify) return reverifyReport(m, plane, attempt.reverify, port, accountId);
       if (attempt?.finished || (m.phase === "pushed" && attempt?.outcome === "pushed")) return NOOP;
       // The hook echoes the digest of the pairing it scanned against. It must equal the one stamped at build start; the value is never used, only compared.
       if (m.pairing_digest !== plane.pairingDigest) return mismatch("pairing_digest");
@@ -297,12 +341,12 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
         const rewritten: Decision = { outcome: { state: "refused", code: "push_failed" }, terminal: true, label: HISTORY_REWRITTEN };
         if (m.tip_sha !== conflictRound.tip && m.tip_sha !== ((await port.branchHead?.({ accountId, codeRepo: plane.codeRepo, branch: "main" })) ?? null)) return rewritten;
         if (!(await confirmed(() => port.verifyPushed(input), retry))) return rewritten;
-      } else if (!(await confirmed(() => port.verifyPushed(input), retry))) return mismatch("head_unconfirmed");
+      } else if (!(await confirmed(() => port.verifyPushed(input), retry))) return unconfirmed("head_unconfirmed", m);
       if (m.phase === "updated") return { outcome: { state: "updated", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "updated" };
       if (m.phase === "pushed") return { outcome: { state: "pushed", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: false, label: "pushed" };
       if (m.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "pr_failed" };
       const pr = await confirmed(() => port.verifyPullRequest({ accountId, codeRepo: plane.codeRepo, branch: plane.branch, number: m.pr_number! }), retry);
-      if (!pr) return mismatch("pr_unconfirmed");
+      if (!pr) return unconfirmed("pr_unconfirmed", m);
       // The address stored is the paired repository's pull request of the reported number, whatever the read returned.
       if (!publicPullRequestUrlMatches(plane.codeRepo, m.pr_number!, pr.url)) return mismatch("pr_address");
       return { outcome: { state: "pr_opened", headSha: m.head_sha, tipSha: m.tip_sha, prNumber: m.pr_number!, prUrl: pr.url }, terminal: true, label: "pr_opened" };
@@ -336,7 +380,7 @@ export async function planePushReportRun(deps: RunnerCloudDeps, req: RunnerHttpR
 
   if (decision.skip) return { status: 200, body: PlanePushReportReply.parse({ recorded: true }), headers: NO_STORE };
   const done = await asRunner(() =>
-    ops.planePushRecordReport({ ...lease, planePushId: context.plane.id, outcome: decision.outcome, terminal: decision.terminal, label: decision.label, ...(message.token_revoked !== undefined ? { tokenRevoked: message.token_revoked } : {}) }),
+    ops.planePushRecordReport({ ...lease, planePushId: context.plane.id, outcome: decision.outcome, terminal: decision.terminal, label: decision.label, ...(decision.refused ? { refused: decision.refused } : {}), ...(decision.reverify ? { reverify: true } : {}), ...(message.token_revoked !== undefined ? { tokenRevoked: message.token_revoked } : {}) }),
   );
   if (done.kind === "fenced") return stopReply(done.reason);
   if (done.kind === "not_paired") throw new RunnerHttpError(403, "not_paired", "this run has no public repository to push to");

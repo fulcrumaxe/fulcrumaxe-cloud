@@ -6,7 +6,7 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
-import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { mayOpenPublicPullRequest, stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { raiseBranchPushedByPerson } from "@fx/core/src/setup-requests/branchPushed.js";
 import { keepBranch, replaceBranch } from "@fx/core/src/setup-requests/branchPushedAnswer.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
@@ -17,7 +17,8 @@ import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse,
 import { mergeQueue } from "@fx/pipeline";
 import { RUNNER_REPLACE_ROUND_KIND, insertRunEvent } from "@fx/runner";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
-import { LIVE_READ_FAILED_EVENT, MAX_FAILED_LIVE_READS_PER_LEASE, createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
+import { LIVE_READ_FAILED_EVENT, MAX_FAILED_LIVE_READS_PER_LEASE, REVERIFY_BACKOFF_MS, REVERIFY_EVENT, claimReverify, createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
+import { reverifyRefusedPush } from "../src/planePushReverify.js";
 import { ORIGIN, newKey, signed, type TestKey } from "../../runner-cloud/test/helpers.js";
 
 /**
@@ -437,13 +438,14 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, pr_number: 9 });
     });
 
-    it("a mismatch finishes the attempt, so a runner repeating the same false report costs GitHub nothing the second time", async () => {
+    it("a mismatch finishes the attempt, so a runner repeating the same false report costs GitHub one bound re-check and then nothing until the backoff", async () => {
       const run = await granted();
       github.pushed = false;
       await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
       await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
-      // The first report reads four times (one try and three retries, none of which sleeps here); the repeat reads nothing.
-      expect(github.asked).toEqual(["pushed", "pushed", "pushed", "pushed"]);
+      await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+      // The first report reads four times (one try and three retries, none of which sleeps here); the first repeat is the one re-check (one read); the next waits for the backoff.
+      expect(github.asked).toEqual(["pushed", "pushed", "pushed", "pushed", "pushed"]);
     });
 
     it("settling an attempt that is already finished or gone matches no row (false), so the route can revoke instead of handing the token out", async () => {
@@ -476,6 +478,595 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
       expect(github.asked).toEqual([]);
       expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+    });
+
+    describe("D#6 PLANE-PUSH-REVERIFY-BOUND: a refused report is read again only against what its own attempt stored", () => {
+      const HEAD2 = "c".repeat(40);
+      const PR_URL = "https://github.com/acme/widgets-public/pull/9";
+      /** Moves the attempt's end, and the re-check evaluations already counted, far enough back that the backoff has passed. */
+      const age = async () => {
+        await admin.query("UPDATE plane_push_attempts SET finished_at = finished_at - interval '10 minutes' WHERE account_id = $1", [A.accountId]);
+        await admin.query("UPDATE run_events SET created_at = created_at - interval '10 minutes' WHERE account_id = $1 AND kind = $2", [A.accountId, REVERIFY_EVENT]);
+      };
+      const evaluations = async () => Number((await admin.query("SELECT count(*) AS n FROM run_events WHERE account_id = $1 AND kind = $2", [A.accountId, REVERIFY_EVENT])).rows[0].n);
+      /** A first report GitHub does not confirm: the attempt ends as report_mismatch. */
+      async function refusedPush(extra: Record<string, unknown> = { phase: "pushed" }) {
+        const run = await granted();
+        github.pushed = false;
+        await report(run, { head_sha: HEAD, tip_sha: TIP, ...extra });
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+        github.pushed = true;
+        github.asked.length = 0;
+        return run;
+      }
+      type Run = { id: string; generation: number };
+      const direct = async (run: Run, over: Record<string, unknown> = {}) =>
+        facade().planePushRecordReport({ accountId: A.accountId, runnerId: runner, runId: run.id, leaseGeneration: run.generation, planePushId: (await planeRow()).id, outcome: { state: "pushed", headSha: HEAD, tipSha: TIP }, terminal: true, label: "pushed", reverify: true, ...over } as Parameters<ReturnType<typeof facade>["planePushRecordReport"]>[0]);
+      const laterAttempt = () => admin.query(`INSERT INTO plane_push_attempts (account_id, plane_push_id, runtime, kind, attempt_no) SELECT account_id, id, 'hosted', 'pr_open', 1 FROM plane_pushes WHERE work_item_id = $1`, [A.workItemId]);
+
+      it("stores the check, head and tip of a head GitHub did not confirm, on the attempt that ended as report_mismatch", async () => {
+        await refusedPush();
+        expect((await attempts())[0]).toMatchObject({ outcome: "report_mismatch", refused_check: "head_unconfirmed", refused_head_sha: HEAD, refused_tip_sha: TIP });
+      });
+
+      it("stores pr_unconfirmed when the push is there and the pull request is not", async () => {
+        const run = await granted();
+        github.pr = null;
+        await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect((await attempts())[0]).toMatchObject({ outcome: "report_mismatch", refused_check: "pr_unconfirmed", refused_head_sha: HEAD, refused_tip_sha: TIP, refused_pr_number: 9 });
+      });
+
+      it.each([
+        ["pairing_digest", async (run: Run) => report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP, pairing_digest: "d".repeat(64) })],
+        ["branch_differs", async (run: Run) => report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP, branch: "fx/p-someone-else" })],
+        ["pr_address", async (run: Run) => { github.pr = { url: "https://github.com/evil/widgets-public/pull/9" }; return report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 }); }],
+      ])("a %s refusal stores nothing and is never read again, however long it has been", async (_check, send) => {
+        const run = await granted();
+        await send(run);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+        expect((await attempts())[0]).toMatchObject({ outcome: "report_mismatch", refused_check: null, refused_head_sha: null, refused_tip_sha: null });
+        await age();
+        github.pr = { url: PR_URL };
+        github.asked.length = 0;
+        await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(github.asked).toEqual([]);
+        expect(await evaluations()).toBe(0);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+      });
+
+      it("a push GitHub now shows is recorded as pushed after ONE branch read, and the attempt is relabelled", async () => {
+        const run = await refusedPush();
+        await age();
+        const res = await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(res.status).toBe(200);
+        expect(github.asked).toEqual(["pushed"]);
+        expect(await planeRow()).toMatchObject({ state: "pushed", head_sha: HEAD, tip_sha: TIP, code: null });
+        expect((await attempts())[0]).toMatchObject({ outcome: "pushed", refused_check: "head_unconfirmed", refused_head_sha: HEAD });
+        expect(await evaluations()).toBe(1);
+        // The row is no longer the refusal, so a repeat is free.
+        github.asked.length = 0;
+        await age();
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual([]);
+      });
+
+      it("a pull request GitHub now shows is recorded with the address GitHub gave, after one branch read and one pull request read", async () => {
+        const run = await granted();
+        github.pr = null;
+        await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        github.asked.length = 0;
+        github.pr = { url: PR_URL };
+        await age();
+        await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(github.asked).toEqual(["pushed", "pr"]);
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9, pr_url: PR_URL });
+        expect((await attempts())[0]).toMatchObject({ outcome: "pr_opened" });
+      });
+
+      it("a pr_failed re-check records the push with no pull request", async () => {
+        const run = await refusedPush({ phase: "pr_failed" });
+        await age();
+        await report(run, { phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual(["pushed"]);
+        expect(await planeRow()).toMatchObject({ state: "pushed_pr_not_opened", head_sha: HEAD, pr_number: null });
+      });
+
+      it("the hook's own follow-up (pr_opened a moment after a refused pushed) is the first evaluation: it is recorded, after one branch read and one pull request read", async () => {
+        const run = await refusedPush();
+        github.pr = { url: PR_URL };
+        const res = await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(res.status).toBe(200);
+        expect(github.asked).toEqual(["pushed", "pr"]);
+        expect(await evaluations()).toBe(1);
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9, pr_url: PR_URL });
+        expect((await attempts())[0]).toMatchObject({ outcome: "pr_opened" });
+      });
+
+      it("a follow-up whose pull request GitHub still does not show reads once more and stands refused; its next try waits for the backoff", async () => {
+        const run = await refusedPush();
+        github.pr = null;
+        await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(github.asked).toEqual(["pushed", "pr"]);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+        github.asked.length = 0;
+        github.pr = { url: PR_URL };
+        await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        expect(github.asked).toEqual([]);
+        expect(await evaluations()).toBe(1);
+      });
+
+      it("a continuing round's refused first publish is never re-read, and the direct record refuses it", async () => {
+        await pair();
+        await stamp();
+        const run = await claimedRun({ continues: {} });
+        expect((await askToken(run)).status).toBe(200);
+        github.pushed = false;
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+        expect((await attempts())[0]).toMatchObject({ outcome: "report_mismatch", refused_check: "head_unconfirmed", refused_head_sha: HEAD });
+        github.pushed = true;
+        github.asked.length = 0;
+        await age();
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual([]);
+        expect(await evaluations()).toBe(0);
+        expect(await direct(run)).toEqual({ kind: "recorded", recorded: false });
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+      });
+
+      describe("the cloud's own trigger (the merge gate's lookup)", () => {
+        const gate = (h: { pushed?: boolean; pr?: { url: string } | null; found?: { number: number; url: string } | null } = {}) => {
+          const seen: string[] = [];
+          const hosted = {
+            // The stand-in shows only the push this attempt stored (HEAD on TIP) and pull request 9.
+            verifyPushed: async (i: { headSha: string; tipSha: string }) => (seen.push("pushed"), i.headSha === HEAD && i.tipSha === TIP && (h.pushed ?? true)),
+            verifyPullRequest: async (i: { number: number }) => (seen.push("pr"), i.number === 9 ? (h.pr === undefined ? { url: PR_URL } : h.pr) : null),
+            // The one open pull request of the branch, asked about the stored head only.
+            findOpenPullRequest: async (i: { headSha: string }) => (seen.push("find"), i.headSha === HEAD ? (h.found ?? null) : null),
+          };
+          return { seen, run: () => reverifyRefusedPush(writerPool, hosted, { accountId: A.accountId, workItemId: A.workItemId }) };
+        };
+        async function prRefused() {
+          const run = await granted();
+          github.pr = null;
+          await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+          github.asked.length = 0;
+          return run;
+        }
+
+        it("records a pr_unconfirmed row once GitHub shows the stored head and the stored pull request, with no report from the runner", async () => {
+          await prRefused();
+          expect((await attempts())[0]).toMatchObject({ refused_check: "pr_unconfirmed", refused_pr_number: 9 });
+          const g = gate();
+          expect(await g.run()).toBe(true);
+          expect(g.seen).toEqual(["pushed", "pr"]);
+          expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9, pr_url: PR_URL });
+          expect((await attempts())[0]).toMatchObject({ outcome: "pr_opened" });
+          expect(await evaluations()).toBe(1);
+        });
+
+        it("a head_unconfirmed row whose head now shows and whose branch has its one open pull request is recorded as opened, with that number", async () => {
+          await refusedPush();
+          const g = gate({ found: { number: 12, url: "https://github.com/acme/widgets-public/pull/12" } });
+          expect(await g.run()).toBe(true);
+          expect(g.seen).toEqual(["pushed", "find"]);
+          expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 12, pr_url: "https://github.com/acme/widgets-public/pull/12" });
+          expect((await attempts())[0]).toMatchObject({ outcome: "pr_opened" });
+        });
+
+        it("a head_unconfirmed row whose head shows and whose branch has no matching open pull request is recorded as pushed, pull request not opened, and the open-it-again action applies", async () => {
+          await refusedPush();
+          const g = gate({ found: null });
+          expect(await g.run()).toBe(true);
+          expect(g.seen).toEqual(["pushed", "find"]);
+          const row = await planeRow();
+          expect(row).toMatchObject({ state: "pushed_pr_not_opened", head_sha: HEAD, tip_sha: TIP, pr_number: null });
+          expect(mayOpenPublicPullRequest({ state: row.state, lastPushRuntime: "runner", pushAttempts: 1, managedByPerson: false, code: row.code })).toBe(true);
+          expect((await attempts())[0]).toMatchObject({ outcome: "pr_failed" });
+        });
+
+        it("a found pull request whose address is not the paired repository's own pull request of that number is not recorded as opened", async () => {
+          await refusedPush();
+          const g = gate({ found: { number: 12, url: "https://github.com/evil/widgets-public/pull/12" } });
+          expect(await g.run()).toBe(true);
+          expect(await planeRow()).toMatchObject({ state: "pushed_pr_not_opened", pr_number: null, pr_url: null });
+        });
+
+        it("a pr_unconfirmed row never asks for the branch's pull request: it reads the stored number", async () => {
+          await prRefused();
+          const g = gate({ found: { number: 12, url: "https://github.com/acme/widgets-public/pull/12" } });
+          expect(await g.run()).toBe(true);
+          expect(g.seen).toEqual(["pushed", "pr"]);
+          expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 9 });
+        });
+
+        it("the pull request read of a head check is inside the evaluation: a throw there records nothing and the count stays", async () => {
+          await refusedPush();
+          const hosted = { verifyPushed: async () => true, verifyPullRequest: async () => null, findOpenPullRequest: async (): Promise<{ number: number; url: string } | null> => { throw new Error("down"); } };
+          expect(await reverifyRefusedPush(writerPool, hosted, { accountId: A.accountId, workItemId: A.workItemId })).toBe(false);
+          expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+          expect(await evaluations()).toBe(1);
+        });
+
+        describe("only an executor run on a runner is re-checked", () => {
+          /** A refused, stored attempt of a run with the given role and runtime, built by hand (a run's role and runtime cannot be changed once it exists). */
+          async function refusedBy(role: string, runtime: string) {
+            await pair();
+            await stamp();
+            const runId = randomUUID();
+            await admin.query(
+              `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, initiated_by)
+               VALUES ($1, $2, $3, $4, $5, 'succeeded', $6, $7, $8)`,
+              [runId, A.accountId, A.workItemId, role, runtime, runtime === "runner" ? "runner_local" : "sandbox", A.repoId, A.userId],
+            );
+            const row = await planeRow();
+            await admin.query("UPDATE plane_pushes SET state = 'refused', code = 'report_mismatch' WHERE id = $1", [row.id]);
+            await admin.query("INSERT INTO plane_push_attempts (account_id, plane_push_id, run_id, lease_generation, runtime, kind, attempt_no) VALUES ($1, $2, $3, 1, 'runner', 'push', 1)", [A.accountId, row.id, runId]);
+            await admin.query(
+              "UPDATE plane_push_attempts SET finished_at = now() - interval '10 minutes', outcome = 'report_mismatch', refused_check = 'head_unconfirmed', refused_head_sha = $2, refused_tip_sha = $3 WHERE run_id = $1",
+              [runId, HEAD, TIP],
+            );
+          }
+
+          it("an executor run on a runner is (the control)", async () => {
+            await refusedBy("executor", "runner");
+            const g = gate();
+            expect(await g.run()).toBe(true);
+            expect(g.seen).toEqual(["pushed", "find"]);
+          });
+
+          it.each([
+            ["a run that is not an executor's", "reviewer", "runner"],
+            ["a run that is not on a runner", "executor", "local"],
+          ])("reads nothing for %s", async (_name, role, runtime) => {
+            await refusedBy(role, runtime);
+            const g = gate();
+            expect(await g.run()).toBe(false);
+            expect(g.seen).toEqual([]);
+            expect(await evaluations()).toBe(0);
+          });
+        });
+
+        it("GitHub not confirming, or throwing, changes nothing but the count, and the count caps it", async () => {
+          await prRefused();
+          expect(await gate({ pr: null }).run()).toBe(false);
+          expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+          await age();
+          const throwing = { verifyPushed: async (): Promise<boolean> => { throw new Error("down"); }, verifyPullRequest: async () => null, findOpenPullRequest: async () => null };
+          expect(await reverifyRefusedPush(writerPool, throwing, { accountId: A.accountId, workItemId: A.workItemId })).toBe(false);
+          await age();
+          expect(await gate({ pushed: false }).run()).toBe(false);
+          expect(await evaluations()).toBe(REVERIFY_BACKOFF_MS.length);
+          await age();
+          const g = gate();
+          expect(await g.run()).toBe(false);
+          expect(g.seen).toEqual([]);
+          expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+        });
+
+        it("shares the report route's count: the evaluation the route made is not made again at once", async () => {
+          const run = await prRefused();
+          github.pr = { url: PR_URL };
+          github.pushed = false;
+          await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+          const g = gate();
+          expect(await g.run()).toBe(false);
+          expect(g.seen).toEqual([]);
+          expect(await evaluations()).toBe(1);
+        });
+
+        it.each([
+          ["a later attempt on the record", async () => laterAttempt()],
+          ["a record that moved to another refusal", async () => admin.query("UPDATE plane_pushes SET code = 'push_failed' WHERE work_item_id = $1", [A.workItemId])],
+          ["an attempt whose run is gone", async () => admin.query("UPDATE plane_push_attempts SET run_id = NULL WHERE account_id = $1", [A.accountId])],
+          ["a person who took the branch over", async () => admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId])],
+        ])("reads nothing for %s", async (_name, arrange) => {
+          await prRefused();
+          await arrange();
+          const g = gate();
+          expect(await g.run()).toBe(false);
+          expect(g.seen).toEqual([]);
+        });
+
+        it("reads nothing for a runner-side refusal (nothing stored)", async () => {
+          const run = await granted();
+          await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP, branch: "fx/p-someone-else" });
+          const g = gate();
+          expect(await g.run()).toBe(false);
+          expect(g.seen).toEqual([]);
+        });
+
+        it("a continuing round's refusal is not re-read", async () => {
+          await pair();
+          await stamp();
+          const run = await claimedRun({ continues: {} });
+          expect((await askToken(run)).status).toBe(200);
+          github.pushed = false;
+          await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+          const g = gate();
+          expect(await g.run()).toBe(false);
+          expect(g.seen).toEqual([]);
+          expect(await evaluations()).toBe(0);
+        });
+
+        it("two lookups at once spend one evaluation and make one read (the attempt's row lock serialises them)", async () => {
+          await prRefused();
+          const g = gate();
+          const both = await Promise.all([g.run(), g.run()]);
+          expect(both.filter(Boolean)).toHaveLength(1);
+          expect(await evaluations()).toBe(1);
+        });
+      });
+
+      it("the attempt's row lock is held from the count to the commit: a second evaluation waits for the first (proved with an explicit barrier on the database's lock wait)", async () => {
+        const run = await refusedPush();
+        const a = (await attempts())[0];
+        const lease = { accountId: A.accountId, runId: run.id, leaseGeneration: run.generation };
+        const pushId = (await planeRow()).id as string;
+        const claim = (c: PoolClient) => claimReverify(c, lease, pushId, a);
+        let release!: () => void;
+        const gateOpen = new Promise<void>((r) => (release = r));
+        let firstHeld!: () => void;
+        const held = new Promise<void>((r) => (firstHeld = r));
+        const first = withTenant(writerPool, A.accountId, async (c) => {
+          const got = await claim(c);
+          firstHeld();
+          await gateOpen;
+          return got;
+        });
+        await held;
+        let secondDone = false;
+        const second = withTenant(writerPool, A.accountId, async (c) => claim(c)).then((v) => ((secondDone = true), v));
+        // The barrier: the second transaction shows up as waiting on a lock. Without the lock it would finish at once and never be seen waiting.
+        let waiting = false;
+        for (let i = 0; i < 100 && !waiting && !secondDone; i++) {
+          waiting = (await admin.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()")).rows.length > 0;
+          if (!waiting) await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(waiting).toBe(true);
+        expect(secondDone).toBe(false);
+        release();
+        const [one, two] = await Promise.all([first, second]);
+        expect(one).toMatchObject({ check: "head_unconfirmed" });
+        // The second ran after the first committed: it saw the first's count, and its backoff has not passed.
+        expect(two).toBeUndefined();
+        expect(await evaluations()).toBe(1);
+      });
+
+      it.each([
+        ["a head the runner names now", { head_sha: HEAD2, tip_sha: TIP }],
+        ["a tip the runner names now", { head_sha: HEAD, tip_sha: HEAD2 }],
+      ])("%s is not the stored push: nothing is read and the refusal stands", async (_name, shas) => {
+        const run = await refusedPush();
+        await age();
+        await report(run, { phase: "pushed", ...shas });
+        expect(github.asked).toEqual([]);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+      });
+
+      it("a stored pr_unconfirmed check is not satisfied by a pushed report", async () => {
+        const run = await granted();
+        github.pr = null;
+        await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+        github.asked.length = 0;
+        await age();
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual([]);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch" });
+      });
+
+      it("a branch GitHub does not show at the stored head is read once and the refusal stands", async () => {
+        const run = await refusedPush();
+        await age();
+        github.pushed = false;
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual(["pushed"]);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+      });
+
+      it(`an attempt is evaluated at most ${REVERIFY_BACKOFF_MS.length} times, each with one read, even when GitHub keeps answering no and the runner keeps asking`, async () => {
+        const run = await refusedPush();
+        github.pushed = false;
+        for (let i = 0; i < REVERIFY_BACKOFF_MS.length; i++) {
+          await age();
+          await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        }
+        expect(github.asked).toEqual(REVERIFY_BACKOFF_MS.map(() => "pushed"));
+        expect(await evaluations()).toBe(REVERIFY_BACKOFF_MS.length);
+        // Past the cap: GitHub has the push now, and still nothing is read or recorded.
+        github.pushed = true;
+        github.asked.length = 0;
+        await age();
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual([]);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+      });
+
+      it("each evaluation waits for the backoff after the previous one, not only after the attempt ended", async () => {
+        const run = await refusedPush();
+        github.pushed = false;
+        await age();
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        github.asked.length = 0;
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual([]);
+        expect(await evaluations()).toBe(1);
+      });
+
+      it("a later attempt on the same record (another run's push) means the earlier attempt's head is never attributed to it: nothing is read", async () => {
+        const run = await refusedPush();
+        await laterAttempt();
+        await age();
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual([]);
+        expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+      });
+
+      it("a record that has moved on (another refusal code) is not a refusal to re-check: nothing is read", async () => {
+        const run = await refusedPush();
+        await admin.query("UPDATE plane_pushes SET code = 'push_failed' WHERE work_item_id = $1", [A.workItemId]);
+        await age();
+        await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP });
+        expect(github.asked).toEqual([]);
+      });
+
+      describe("the recording repeats the binding in its own condition (the route and its read are bypassed)", () => {
+        it("records the stored push", async () => {
+          const run = await refusedPush();
+          expect(await direct(run)).toEqual({ kind: "recorded", recorded: true });
+          expect(await planeRow()).toMatchObject({ state: "pushed", head_sha: HEAD });
+        });
+
+        it.each([
+          ["a head other than the stored one", { outcome: { state: "pushed", headSha: HEAD2, tipSha: TIP } }],
+          ["a tip other than the stored one", { outcome: { state: "pushed", headSha: HEAD, tipSha: HEAD2 } }],
+        ])("%s records nothing", async (_name, over) => {
+          const run = await refusedPush();
+          expect(await direct(run, over)).toEqual({ kind: "recorded", recorded: false });
+          expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null });
+          expect((await attempts())[0]).toMatchObject({ outcome: "report_mismatch" });
+        });
+
+        it("records nothing for an attempt that is not this run's (its run is gone)", async () => {
+          const run = await refusedPush();
+          await admin.query("UPDATE plane_push_attempts SET run_id = NULL WHERE account_id = $1", [A.accountId]);
+          expect(await direct(run)).toEqual({ kind: "recorded", recorded: false });
+          expect(await planeRow()).toMatchObject({ state: "refused", head_sha: null });
+        });
+
+        it("records nothing for an attempt of another lease generation", async () => {
+          const run = await refusedPush();
+          await admin.query("ALTER TABLE plane_push_attempts DISABLE TRIGGER plane_push_attempts_guard");
+          try {
+            await admin.query("UPDATE plane_push_attempts SET lease_generation = lease_generation + 7 WHERE account_id = $1", [A.accountId]);
+          } finally {
+            await admin.query("ALTER TABLE plane_push_attempts ENABLE TRIGGER plane_push_attempts_guard");
+          }
+          expect(await direct(run)).toEqual({ kind: "recorded", recorded: false });
+          expect(await planeRow()).toMatchObject({ state: "refused", head_sha: null });
+        });
+
+        it("records nothing when a later attempt exists", async () => {
+          const run = await refusedPush();
+          await laterAttempt();
+          expect(await direct(run)).toEqual({ kind: "recorded", recorded: false });
+          expect(await planeRow()).toMatchObject({ state: "refused", head_sha: null });
+        });
+
+        it("records nothing when the record is no longer the report_mismatch refusal", async () => {
+          const run = await refusedPush();
+          await admin.query("UPDATE plane_pushes SET code = 'push_failed' WHERE work_item_id = $1", [A.workItemId]);
+          expect(await direct(run)).toEqual({ kind: "recorded", recorded: false });
+          expect((await planeRow()).head_sha).toBeNull();
+        });
+
+        it("records nothing for an attempt whose refusal was the runner's own (nothing stored)", async () => {
+          const run = await granted();
+          await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP, branch: "fx/p-someone-else" });
+          expect(await direct(run)).toEqual({ kind: "recorded", recorded: false });
+          expect((await planeRow()).head_sha).toBeNull();
+        });
+
+        it("records nothing for a pull request number other than the one the refused report named; the named one records", async () => {
+          const run = await granted();
+          github.pr = null;
+          await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+          const opened = (n: number) => ({ outcome: { state: "pr_opened", headSha: HEAD, tipSha: TIP, prNumber: n, prUrl: `https://github.com/acme/widgets-public/pull/${n}` }, label: "pr_opened" });
+          expect(await direct(run, opened(10))).toEqual({ kind: "recorded", recorded: false });
+          expect(await planeRow()).toMatchObject({ state: "refused", pr_number: null });
+          expect(await direct(run, opened(9))).toEqual({ kind: "recorded", recorded: true });
+          expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 9 });
+        });
+
+        it("records nothing for an outcome that is not a push of a first publish", async () => {
+          const run = await refusedPush();
+          expect(await direct(run, { outcome: { state: "updated", headSha: HEAD, tipSha: TIP } })).toEqual({ kind: "recorded", recorded: false });
+          expect(await direct(run, { outcome: { state: "refused", code: "push_failed" } })).toEqual({ kind: "recorded", recorded: false });
+          expect((await planeRow()).code).toBe("report_mismatch");
+        });
+      });
+
+      describe("what a report may store on its attempt", () => {
+        const refusedBody = (headSha: string) => ({ outcome: { state: "refused", code: "report_mismatch" }, label: "report_mismatch", reverify: undefined, refused: { check: "pr_unconfirmed", headSha, tipSha: TIP, prNumber: 9 } });
+
+        it("is set only by the report that ends the attempt as report_mismatch: a later report cannot replace it", async () => {
+          const run = await refusedPush();
+          await expect(direct(run, refusedBody(HEAD2))).resolves.toMatchObject({ kind: "recorded" });
+          expect((await attempts())[0]).toMatchObject({ refused_check: "head_unconfirmed", refused_head_sha: HEAD, refused_tip_sha: TIP });
+        });
+
+        it("is not set by a report that ends the attempt any other way", async () => {
+          const run = await granted();
+          await direct(run, { outcome: { state: "pushed_pr_not_opened", headSha: HEAD, tipSha: TIP }, label: "pr_failed", reverify: undefined, refused: { check: "head_unconfirmed", headSha: HEAD, tipSha: TIP } });
+          expect((await attempts())[0]).toMatchObject({ outcome: "pr_failed", refused_check: null, refused_head_sha: null, refused_tip_sha: null });
+        });
+
+        it("a malformed report is refused before anything is written", async () => {
+          const run = await granted();
+          await expect(direct(run, { refused: { check: "pr_address", headSha: HEAD, tipSha: TIP } })).rejects.toThrow(/bad refused report/);
+          await expect(direct(run, { refused: { check: "head_unconfirmed", headSha: "A".repeat(40), tipSha: TIP } })).rejects.toThrow(/bad refused report/);
+        });
+      });
+
+      describe("the database keeps the stored report honest", () => {
+        const setAttempt = (sql: string, params: unknown[] = []) => admin.query(`UPDATE plane_push_attempts SET ${sql} WHERE account_id = $1`, [A.accountId, ...params]);
+
+        it("an attempt cannot be created with any part of a refused report", async () => {
+          const run = await granted();
+          const pushId = (await planeRow()).id;
+          const insert = (cols: string, vals: string) =>
+            admin.query(`INSERT INTO plane_push_attempts (account_id, plane_push_id, runtime, kind, attempt_no, ${cols}) VALUES ($1, $2, 'hosted', 'pr_open', 1, ${vals})`, [A.accountId, pushId]);
+          expect(run.id).toBeTruthy();
+          await expect(insert("refused_check, refused_head_sha, refused_tip_sha", `'head_unconfirmed', '${HEAD}', '${TIP}'`)).rejects.toThrow(/cannot be set when the attempt is created/);
+          await expect(insert("refused_check, refused_head_sha, refused_tip_sha, refused_pr_number", `'pr_unconfirmed', '${HEAD}', '${TIP}', 9`)).rejects.toThrow(/cannot be set when the attempt is created/);
+          await expect(insert("refused_pr_number", "9")).rejects.toThrow();
+          await expect(insert("finished_at, outcome, refused_check, refused_head_sha, refused_tip_sha", `now(), 'report_mismatch', 'head_unconfirmed', '${HEAD}', '${TIP}'`)).rejects.toThrow(/cannot be set when the attempt is created/);
+        });
+
+        it("a pull request number belongs to a pr_unconfirmed check and to no other", async () => {
+          await granted();
+          const body = (check: string, pr: string) => `finished_at = now(), outcome = 'report_mismatch', refused_check = '${check}', refused_head_sha = '${HEAD}', refused_tip_sha = '${TIP}', refused_pr_number = ${pr}`;
+          await expect(setAttempt(body("pr_unconfirmed", "NULL"))).rejects.toThrow();
+          await expect(setAttempt(body("head_unconfirmed", "9"))).rejects.toThrow();
+          await expect(setAttempt(body("pr_unconfirmed", "0"))).rejects.toThrow();
+        });
+
+        it("a stored report cannot be changed or cleared", async () => {
+          await refusedPush();
+          await expect(setAttempt("refused_head_sha = $2", [HEAD2])).rejects.toThrow(/set once/);
+          await expect(setAttempt("refused_tip_sha = $2", [HEAD2])).rejects.toThrow(/set once/);
+          await expect(setAttempt("refused_check = 'pr_unconfirmed'")).rejects.toThrow(/set once/);
+          await expect(setAttempt("refused_check = NULL, refused_head_sha = NULL, refused_tip_sha = NULL")).rejects.toThrow(/set once/);
+        });
+
+        it("a stored pull request number cannot be changed or cleared", async () => {
+          const run = await granted();
+          github.pr = null;
+          await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+          expect((await attempts())[0]).toMatchObject({ refused_check: "pr_unconfirmed", refused_pr_number: 9 });
+          await expect(setAttempt("refused_pr_number = 10")).rejects.toThrow(/set once/);
+          await expect(setAttempt("refused_check = NULL, refused_head_sha = NULL, refused_tip_sha = NULL, refused_pr_number = NULL")).rejects.toThrow(/set once/);
+        });
+
+        it("it is set only when the attempt ends as report_mismatch: not on an open attempt, not on another outcome, not after the end", async () => {
+          await granted();
+          await expect(setAttempt("refused_check = 'head_unconfirmed', refused_head_sha = $2, refused_tip_sha = $3", [HEAD, TIP])).rejects.toThrow(/ends as report_mismatch/);
+          await expect(setAttempt("finished_at = now(), outcome = 'push_failed', refused_check = 'head_unconfirmed', refused_head_sha = $2, refused_tip_sha = $3", [HEAD, TIP])).rejects.toThrow(/ends as report_mismatch/);
+          await setAttempt("finished_at = now(), outcome = 'push_failed'");
+          await expect(setAttempt("outcome = 'report_mismatch', refused_check = 'head_unconfirmed', refused_head_sha = $2, refused_tip_sha = $3", [HEAD, TIP])).rejects.toThrow(/ends as report_mismatch/);
+        });
+
+        it.each([
+          ["only the check", "refused_check = 'head_unconfirmed'"],
+          ["only the head", `refused_head_sha = '${"a".repeat(40)}'`],
+          ["a check outside the closed list", `finished_at = now(), outcome = 'report_mismatch', refused_check = 'pr_address', refused_head_sha = '${"a".repeat(40)}', refused_tip_sha = '${"b".repeat(40)}'`],
+          ["an uppercase sha", `finished_at = now(), outcome = 'report_mismatch', refused_check = 'head_unconfirmed', refused_head_sha = '${"A".repeat(40)}', refused_tip_sha = '${"b".repeat(40)}'`],
+          ["a short sha", `finished_at = now(), outcome = 'report_mismatch', refused_check = 'head_unconfirmed', refused_head_sha = 'abc', refused_tip_sha = '${"b".repeat(40)}'`],
+        ])("refuses %s", async (_name, sql) => {
+          await granted();
+          await expect(setAttempt(sql)).rejects.toThrow();
+        });
+      });
     });
 
     it("a refusal is recorded with its code and its place-plus-rule-key entries only, and the attempt notes a token that was not confirmed revoked", async () => {

@@ -65,6 +65,8 @@ export interface PlanePublishDeps {
   hosted: {
     verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
     verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+    /** D#6 PLANE-PUSH-REVERIFY-BOUND: the one open pull request that is exactly the pushed head, if there is one. Read before "open the pull request again" opens one, so a pull request that already exists is adopted, not duplicated. Absent: opens as before. */
+    findOpenPullRequest?(input: { accountId: string; codeRepo: string; branch: string; headSha: string }): Promise<{ number: number; url: string } | null>;
     /** D#6 REPUBLISH-CLOSED-PR: the public pull request's live state, read before a republish pushes. Absent, unreadable or `unknown`: the republish stops with the failed code (fail closed). A throw means GitHub could not be asked. */
     pullRequestState?(input: { accountId: string; codeRepo: string; number: number }): Promise<"open" | "closed" | "merged" | "unknown">;
     /** D#598 P1f-5c: opens the pull request on the paired repo's already-pushed branch (base `main`), with a fresh token it revokes before it returns. No git. Throws an error with `code` `pr_failed` or `public_unavailable`. */
@@ -848,7 +850,8 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
     // The footer is validated when the pairing is written. This path pushes nothing and has no rule files to scan with; the push paths scan the body they send.
     const text = buildPlanePushText({ itemTitle: textTitle(p.title, build), runId: p.run_id, prFooter: p.pr_footer, issueNumber: build.issueNumber, child: build.isChild });
     await noteFooterSkipped(deps.pool, accountId, p.run_id, p.pr_footer, build);
-    const opened = await deps.hosted.openPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body });
+    const existing = (await deps.hosted.findOpenPullRequest?.({ accountId, codeRepo: p.code_repo, branch: p.branch, headSha: p.head_sha })) ?? null;
+    const opened = existing ?? (await deps.hosted.openPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body }));
     const pr = await deps.hosted.verifyPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, number: opened.number });
     if (pr === null || !publicPullRequestUrlMatches(p.code_repo, opened.number, pr.url)) return await stop(PUBLISH_CODES.reportMismatch);
     await end("pr_opened", { state: "pr_opened", headSha: p.head_sha, tipSha: p.tip_sha, ...(p.source_head !== null ? { sourceHead: p.source_head } : {}), prNumber: opened.number, prUrl: pr.url }, build.isChild ? (c) => bindChildCodePullRequest(c, accountId, { runId: p.run_id!, branch: p.branch, codeRepo: p.code_repo }, opened.number) : undefined);

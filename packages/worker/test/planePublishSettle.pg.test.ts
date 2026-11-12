@@ -79,7 +79,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
   };
 
   /** The public side. */
-  const gh = { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, opened: [] as Array<{ codeRepo: string; branch: string; title: string; body: string }>, openError: undefined as string | undefined, calls: [] as string[] };
+  const gh = { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, opened: [] as Array<{ codeRepo: string; branch: string; title: string; body: string }>, openError: undefined as string | undefined, calls: [] as string[], existing: null as { number: number; url: string } | null };
 
   function deps(over: Partial<PlanePublishDeps> = {}): PlanePublishDeps {
     const port = fake.port;
@@ -101,6 +101,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
       hosted: {
         verifyPushed: async () => (gh.calls.push("pushed"), gh.pushed),
         verifyPullRequest: async () => (gh.calls.push("pr"), gh.pr),
+        findOpenPullRequest: async () => (gh.calls.push("find"), gh.existing),
         openPullRequest: async (i) => {
           gh.calls.push("open");
           gh.opened.push(i);
@@ -157,7 +158,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
     output = () => say(prOpened());
     identityMissing = false;
     Object.assign(priv, { calls: [], opened: [], ready: [], existing: false, openError: false, readyError: false, defaultBranch: "main" });
-    Object.assign(gh, { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" }, opened: [], openError: undefined, calls: [] });
+    Object.assign(gh, { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" }, opened: [], openError: undefined, calls: [], existing: null });
     parent = { state: "open", merged: false, headSha: "e".repeat(40), headRef: "fx/issue-40", headInBaseRepo: true, branchTipSha: "e".repeat(40), baseRef: "main", defaultBranch: "main" };
     A = await seedAccount(admin, randomUUID());
     await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [A.repoId]);
@@ -475,6 +476,16 @@ describe("settling a paired sandbox build, and opening the public pull request a
       } finally {
         await restore();
       }
+    });
+
+    it("a pull request that already exists for the pushed head is adopted, not opened a second time (the refused row GitHub later confirmed had one)", async () => {
+      await executorRun("succeeded", "runner");
+      await stuck();
+      gh.existing = { number: 12, url: "https://github.com/acme/widgets-public/pull/12" };
+      gh.pr = { url: "https://github.com/acme/widgets-public/pull/12" };
+      expect(await reopen()).toMatchObject({ kind: "opened", prNumber: 12 });
+      expect(gh.opened).toEqual([]);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 12, pr_url: "https://github.com/acme/widgets-public/pull/12" });
     });
 
     it("sandbox-run row: opens the pull request with the fixed text, records pr_opened, and writes a pr_open attempt with no sandbox and no run row", async () => {
