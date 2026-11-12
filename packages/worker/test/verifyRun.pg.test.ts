@@ -8,8 +8,9 @@ import { configureErrorReporter, type ErrorClass } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { placeDeployOrder } from "@fx/core/src/verify/orders.js";
-import { openVerifyRow, readStreak, readVerifyRow, startDeploying, type VerifyRow } from "@fx/core/src/verify/rows.js";
+import { finishVerifyRow, openVerifyRow, readStreak, readVerifyRow, setVerifyHold, startDeploying, startRunning, type VerifyRow } from "@fx/core/src/verify/rows.js";
 import { overRepoDailyUsd } from "@fx/core/src/plan/proposalVerifyLimits.js";
+import { readItemVerify } from "@fx/core/src/work-items/itemVerify.js";
 import { buildVerifyPrompt } from "../../pipeline/src/verify/prompt.js";
 import { outcomeFromAnswer } from "../../pipeline/src/verify/rules.js";
 import type { RunStarter } from "../src/preview.js";
@@ -728,6 +729,138 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
         expect(await run().settle({ accountId: a.accountId, repoId: repo, row: chrome })).toBe("settled");
         expect(await reread(a, chrome.id)).toMatchObject({ status: "verified", account_check: null });
       });
+    });
+  });
+
+  describe("why a waiting row is waiting (migration 1013)", () => {
+    const holdOf = async (rowId: string) => (await admin.query<{ hold_reason: string | null; hold_since: Date | null; status: string }>("SELECT hold_reason, hold_since, status FROM verify_rows WHERE id = $1", [rowId])).rows[0]!;
+    const throwing = (code: string) => (): VerifyRunLimits => {
+      throw new Error(code);
+    };
+    const longAgo = new Date("2026-11-01T00:00:00.000Z");
+
+    it("each of the three limits writes its own reason and the time the wait began, and the card's read carries both for the waiting row", async () => {
+      const repo = await newRepo(a);
+      await testerSpend(a, repo, 8.9);
+      for (const [make, reason] of [
+        [throwing("deploy_verify_unconfigured"), "unconfigured"],
+        [throwing("deploy_verify_run_over_daily"), "run_over_daily"],
+        [() => ({ runUsd: RUN_USD, perRepoDailyUsd: 10 }), "daily_cap"],
+      ] as const) {
+        const { row, itemId } = await deployingRow(a, repo, 200 + ++spentN, shaN(2000 + spentN));
+        limits = make;
+        expect(await run().ready(readyInput(a, repo, row))).toBe("held");
+        const held = await holdOf(row.id);
+        expect(held, reason).toMatchObject({ hold_reason: reason, status: "deploying" });
+        expect(held.hold_since).toBeInstanceOf(Date);
+        const seen = await tenant(a, (c) => readItemVerify(c, itemId));
+        expect(seen, reason).toMatchObject({ status: "deploying", hold: { reason, since: held.hold_since!.toISOString() } });
+      }
+    });
+
+    it("the time is the start of the wait: a tick with the same reason keeps it and writes nothing; a different reason moves it", async () => {
+      const repo = await newRepo(a);
+      const { row } = await deployingRow(a, repo);
+      limits = throwing("deploy_verify_unconfigured");
+      await run().ready(readyInput(a, repo, row));
+      await admin.query("UPDATE verify_rows SET hold_since = $2 WHERE id = $1", [row.id, longAgo]);
+      await run().ready(readyInput(a, repo, row));
+      await run().ready(readyInput(a, repo, row));
+      expect((await holdOf(row.id)).hold_since?.toISOString()).toBe(longAgo.toISOString());
+      limits = throwing("deploy_verify_run_over_daily");
+      await run().ready(readyInput(a, repo, row));
+      const moved = await holdOf(row.id);
+      expect(moved.hold_reason).toBe("run_over_daily");
+      expect(moved.hold_since!.getTime()).toBeGreaterThan(longAgo.getTime());
+    });
+
+    it("the reason is gone as soon as the limit lets go: a start clears it, and so does a wait for something else (an unnamed failure, a refused seat)", async () => {
+      const repo = await newRepo(a);
+      const { row, itemId } = await deployingRow(a, repo);
+      limits = throwing("deploy_verify_unconfigured");
+      await run().ready(readyInput(a, repo, row));
+      expect((await holdOf(row.id)).hold_reason).toBe("unconfigured");
+      // An unnamed failure to read the figures has no reason of its own: the card says only "waiting", never the old reason.
+      limits = throwing("plan data unreadable");
+      expect(await run().ready(readyInput(a, repo, row))).toBe("held");
+      expect(await holdOf(row.id)).toMatchObject({ hold_reason: null, hold_since: null });
+      expect((await tenant(a, (c) => readItemVerify(c, itemId)))?.hold).toBeUndefined();
+      // Held by the cap, then the cap lets go but the seat is refused: still waiting, no reason.
+      await testerSpend(a, repo, 8.9);
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 10 });
+      await run().ready(readyInput(a, repo, row));
+      expect((await holdOf(row.id)).hold_reason).toBe("daily_cap");
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 777 });
+      seatAnswer = "refuse";
+      expect(await run().ready(readyInput(a, repo, row))).toBe("held");
+      expect(await holdOf(row.id)).toMatchObject({ hold_reason: null, hold_since: null, status: "deploying" });
+      // Then it starts.
+      seatAnswer = null;
+      expect(await run().ready(readyInput(a, repo, row))).toBe("started");
+      expect(await holdOf(row.id)).toMatchObject({ status: "running", hold_reason: null, hold_since: null });
+    });
+
+    it("a start clears it, and the card read never shows a hold on a started row", async () => {
+      const repo = await newRepo(a);
+      const { row, itemId } = await deployingRow(a, repo);
+      limits = throwing("deploy_verify_run_over_daily");
+      await run().ready(readyInput(a, repo, row));
+      expect((await holdOf(row.id)).hold_reason).toBe("run_over_daily");
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 777 });
+      expect(await run().ready(readyInput(a, repo, row))).toBe("started");
+      expect(await holdOf(row.id)).toMatchObject({ status: "running", hold_reason: null, hold_since: null });
+      expect((await tenant(a, (c) => readItemVerify(c, itemId)))?.hold).toBeUndefined();
+    });
+
+    it("the moves themselves clear it, whoever makes them: deploying -> running and deploying -> unverified write both columns away in the same statement", async () => {
+      const repo = await newRepo(a);
+      const one = await deployingRow(a, repo, 301, shaN(3001));
+      const two = await deployingRow(a, repo, 302, shaN(3002));
+      for (const r of [one, two]) expect(await tenant(a, (c) => setVerifyHold(c, a.accountId, r.row.id, "daily_cap"))).toBe(true);
+      expect(await tenant(a, (c) => startRunning(c, a.accountId, one.row.id, { method: "playwright_runner", deployedCommit: sha("c") }))).toMatchObject({ moved: true });
+      expect(await tenant(a, (c) => finishVerifyRow(c, a.accountId, two.row.id, { status: "unverified", reason: "deploy_failed" }))).toMatchObject({ moved: true });
+      expect(await holdOf(one.row.id)).toMatchObject({ status: "running", hold_reason: null, hold_since: null });
+      expect(await holdOf(two.row.id)).toMatchObject({ status: "unverified", hold_reason: null, hold_since: null });
+      // And a started or finished row takes no new reason.
+      expect(await tenant(a, (c) => setVerifyHold(c, a.accountId, one.row.id, "daily_cap"))).toBe(false);
+      expect(await tenant(a, (c) => setVerifyHold(c, a.accountId, two.row.id, "daily_cap"))).toBe(false);
+    });
+
+    it("a finished row never keeps one: ending a held row writes the reason away", async () => {
+      const repo = await newRepo(a);
+      const { row } = await deployingRow(a, repo);
+      limits = throwing("deploy_verify_unconfigured");
+      await run().ready(readyInput(a, repo, row));
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [repo]);
+      limits = () => ({ runUsd: RUN_USD, perRepoDailyUsd: 777 });
+      expect(await run().ready(readyInput(a, repo, row))).toBe("ended");
+      expect(await holdOf(row.id)).toMatchObject({ status: "unverified", hold_reason: null, hold_since: null });
+    });
+
+    it("the table holds the rules whoever writes: a closed word, both columns or neither, and only on a row that has not started", async () => {
+      const repo = await newRepo(a);
+      const { row } = await deployingRow(a, repo);
+      const write = (reason: string | null, since: string | null) => admin.query("UPDATE verify_rows SET hold_reason = $2, hold_since = $3::timestamptz WHERE id = $1", [row.id, reason, since]);
+      await expect(write("because", "2026-11-10T00:00:00Z")).rejects.toThrow(/verify_rows_hold_reason_check/);
+      await expect(write("daily_cap", null)).rejects.toThrow(/verify_rows_hold_pair/);
+      await expect(write(null, "2026-11-10T00:00:00Z")).rejects.toThrow(/verify_rows_hold_pair/);
+      await write("daily_cap", "2026-11-10T00:00:00Z");
+      // The move to running that forgets to clear it is refused by the table, not just by the stage's own statement.
+      await expect(admin.query("UPDATE verify_rows SET status = 'running', method = 'playwright_runner', deployed_commit = $2, started_at = now() WHERE id = $1", [row.id, sha("c")])).rejects.toThrow(/verify_rows_hold_unstarted/);
+      expect((await holdOf(row.id)).status).toBe("deploying");
+    });
+
+    it("another account's session cannot write or clear a row's reason", async () => {
+      const repo = await newRepo(a);
+      const { row } = await deployingRow(a, repo);
+      limits = throwing("deploy_verify_unconfigured");
+      await run().ready(readyInput(a, repo, row));
+      const moved = await tenant(b, (c) => setVerifyHold(c, b.accountId, row.id, null));
+      expect(moved).toBe(false);
+      expect((await holdOf(row.id)).hold_reason).toBe("unconfigured");
+      const sneaky = await tenant(b, (c) => setVerifyHold(c, a.accountId, row.id, null));
+      expect(sneaky).toBe(false);
+      expect((await holdOf(row.id)).hold_reason).toBe("unconfigured");
     });
   });
 

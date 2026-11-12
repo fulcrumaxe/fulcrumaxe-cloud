@@ -534,6 +534,15 @@ export const VERIFY_METHOD_WORDS = {
   playwright_runner: "Playwright on your runner",
   playwright_sandbox: "Playwright in the sandbox",
 };
+/**
+ * Why a check that has not started is waiting (the server's `verify.hold.reason`, a closed word). Fixed text; the word itself is never shown. A reason this build does not know draws no line,
+ * so the card then says only "Waiting to start". The line is drawn only while the row waits: a started or finished check carries no hold.
+ */
+export const VERIFY_HOLD_SENTENCES = {
+  unconfigured: "The check has not started: the spending limits for checking the deployed app are not set up yet.",
+  run_over_daily: "The check has not started: the limit for one check is set higher than the daily limit, so none can start until that is changed.",
+  daily_cap: "The check has not started: this repository's daily checking budget is used. It starts when the day's budget renews.",
+};
 export const VERIFY_BUG_LABEL = "Open the bug item";
 /** Verify again: drawn in this section only while the server lists `verify_again` among the item's actions (a finished check that ended failed or not verified). */
 export const VERIFY_AGAIN_LABEL = "Verify again";
@@ -564,11 +573,14 @@ export function verifySection(data) {
   const counts = finished && total !== null && passed !== null && failed !== null ? passed + " of " + total + " steps passed" + (failed > 0 ? ", " + failed + " failed" : "") + "." : null;
   const reason = v.status === "unverified" ? (typeof v.reason === "string" && Object.hasOwn(VERIFY_REASON_SENTENCES, v.reason) ? VERIFY_REASON_SENTENCES[v.reason] : VERIFY_REASON_UNKNOWN) : null;
   const when = !held && typeof v.at === "string" ? formatWhen(v.at) : "";
+  const holdWhy = held && isObj(v.hold) && typeof v.hold.reason === "string" && Object.hasOwn(VERIFY_HOLD_SENTENCES, v.hold.reason) ? VERIFY_HOLD_SENTENCES[v.hold.reason] : null;
+  const holdWhen = holdWhy !== null && typeof v.hold.since === "string" ? formatWhen(v.hold.since) : "";
   return {
     heading: VERIFY_HEADING,
     status: held ? "waiting" : v.status,
     text: VERIFY_STATUS_WORDS[v.status] + (when !== "" ? " " + when + "." : ""),
     reason,
+    hold: holdWhy === null ? null : holdWhy + (holdWhen !== "" ? " Waiting since " + holdWhen + "." : ""),
     counts,
     method: !held && typeof v.method === "string" && Object.hasOwn(VERIFY_METHOD_WORDS, v.method) ? { id: v.method, label: VERIFY_METHOD_WORDS[v.method] } : null,
     criteria: verifyCriteriaLines(v.criteria),
@@ -1166,6 +1178,7 @@ export function createInsightPanel(deps) {
       h("h3", { class: "pl-detail-sub", "data-testid": "pl-verify-heading" }, v.heading),
       h("p", { role: "status", "data-testid": "pl-verify-status" }, v.text, v.method ? [" ", h("span", { class: "pl-verify-badge", "data-testid": "pl-verify-method", "data-method": v.method.id }, v.method.label)] : null),
       v.reason ? h("p", { "data-testid": "pl-verify-reason" }, v.reason) : null,
+      v.hold ? h("p", { "data-testid": "pl-verify-hold" }, v.hold) : null,
       v.counts ? h("p", { class: "pl-muted", "data-testid": "pl-verify-counts" }, v.counts) : null,
       v.criteria && v.criteria.browser ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-browser" }, v.criteria.browser) : null,
       v.criteria && v.criteria.checks ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-checks" }, v.criteria.checks) : null,

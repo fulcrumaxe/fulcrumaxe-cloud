@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildInsight, verifySection, VERIFY_BUG_LABEL, VERIFY_HEADING, VERIFY_METHOD_WORDS, VERIFY_REASON_SENTENCES, VERIFY_REASON_UNKNOWN, VERIFY_STATUS_WORDS } from "../apps/pipeline/pipeline-insight.js";
+import { buildInsight, verifySection, VERIFY_BUG_LABEL, VERIFY_HEADING, VERIFY_HOLD_SENTENCES, VERIFY_METHOD_WORDS, VERIFY_REASON_SENTENCES, VERIFY_REASON_UNKNOWN, VERIFY_STATUS_WORDS } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fx = (name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", "getWorkItemActivity", name), "utf8"));
@@ -97,6 +97,38 @@ describe("D#749 V4b: verify section states", () => {
       expect(JSON.stringify(s)).not.toMatch(/deploy_failed|chrome_runner|pending|deploying/);
     }
     expect(verifySection(fx("200-verify-waiting.json")).text).toBe("Waiting to start.");
+  });
+
+  it("a waiting row held by one of the three limits says why, in a fixed sentence and with when the wait began; never the code", () => {
+    const codes = coreList("VERIFY_HOLD_REASONS");
+    expect(codes).toEqual(["unconfigured", "run_over_daily", "daily_cap"]);
+    expect(Object.keys(VERIFY_HOLD_SENTENCES).sort()).toEqual([...codes].sort());
+    expect(new Set(Object.values(VERIFY_HOLD_SENTENCES)).size).toBe(codes.length);
+    for (const status of ["pending", "deploying"]) {
+      for (const code of codes) {
+        const s = verifySection(row({ status, reason: null, hold: { reason: code, since: "2026-11-10T11:30:00.000Z" } }));
+        expect(s.status, code).toBe("waiting");
+        expect(s.text).toBe("Waiting to start.");
+        expect(s.hold.startsWith(VERIFY_HOLD_SENTENCES[code]), code).toBe(true);
+        expect(s.hold).toMatch(/Waiting since .+\.$/);
+        expect(s.hold).not.toMatch(/_|null|undefined|Invalid/);
+        expect(VERIFY_HOLD_SENTENCES[code]).not.toMatch(/_/);
+      }
+    }
+    const fixture = verifySection(fx("200-verify-waiting-held.json"));
+    expect(fixture.hold.startsWith(VERIFY_HOLD_SENTENCES.daily_cap)).toBe(true);
+  });
+
+  it("no hold line without a known reason, and none on a row that has started or finished (a stale hold is not shown)", () => {
+    expect(verifySection(fx("200-verify-waiting.json")).hold).toBeNull();
+    expect(verifySection(row({ status: "pending", reason: null, hold: { reason: "from_the_future", since: "2026-11-10T11:30:00.000Z" } })).hold).toBeNull();
+    expect(verifySection(row({ status: "pending", reason: null, hold: "daily_cap" })).hold).toBeNull();
+    for (const status of ["running", "verified", "failed", "unverified"]) {
+      expect(verifySection(row({ status, hold: { reason: "daily_cap", since: "2026-11-10T11:30:00.000Z" } })).hold, status).toBeNull();
+    }
+    // A reason with no readable time still gives the sentence, never a blank "since".
+    const noTime = verifySection(row({ status: "deploying", reason: null, hold: { reason: "unconfigured", since: "not a date" } }));
+    expect(noTime.hold).toBe(VERIFY_HOLD_SENTENCES.unconfigured);
   });
 
   it("a running row says it is being checked and shows its method", () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { ClaimReply, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_LEASE_SECONDS, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimReply, DeployOrderReportReply } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { seedVerifyRow } from "@fx/db/test/helpers/verifyRows.js";
@@ -261,6 +262,39 @@ describe("deploy order routes [pg]", () => {
       const res = await report(OK(id, 1));
       expect([res.status, (res.body as { reason: string }).reason]).toEqual([409, "not_claimed"]);
       expect((await row(id)).state).toBe("cancelled");
+    });
+
+    describe("wakes the proposal-verify sweep (push, not poll)", () => {
+      const writes = new Map<string, number>();
+      beforeEach(() => {
+        writes.clear();
+        setPendingHooks({ store: { get: async (k) => writes.get(k) ?? null, set: async (k, v) => void writes.set(k, v), delete: async (k) => void writes.delete(k) } });
+      });
+      afterEach(() => setPendingHooks(null));
+      const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+      it("a recorded success, and a recorded failure, set the sweep's marker", async () => {
+        const id = await held();
+        expect((await report(OK(id, 1))).status).toBe(200);
+        await flush();
+        expect(writes.has("pending:proposal-verify-sweep")).toBe(true);
+        writes.clear();
+        const failed = await held();
+        expect((await report({ order_id: failed, lease_generation: 1, result: "failed", failure_code: "timeout" })).status).toBe(200);
+        await flush();
+        expect(writes.has("pending:proposal-verify-sweep")).toBe(true);
+      });
+
+      it("a fenced, a refused or an unsigned report sets nothing", async () => {
+        const id = await held();
+        expect((await report(OK(id, 2))).status).toBe(409);
+        expect((await report(OK(id, 1, { exit_code: 1 }))).status).toBe(400);
+        expect((await toResponse(() => deployOrderReportRun(deps(), { method: "POST", headers: {}, body: Buffer.from("{}") }))).status).toBe(401);
+        await flush();
+        expect(writes.has("pending:proposal-verify-sweep")).toBe(false);
+        expect((await report(OK(id, 1))).status).toBe(200);
+        expect((await report(OK(id, 1))).status).toBe(409);
+      });
     });
 
     it("refuses what the strict message refuses, before the database, and an unsigned request", async () => {

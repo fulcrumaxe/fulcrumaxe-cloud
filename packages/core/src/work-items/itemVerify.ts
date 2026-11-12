@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { ACCOUNT_CHECKS, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, type AccountCheck, type JourneyResult, type VerifyMethod, type VerifyReasonCode, type VerifyRowStatus } from '../verify/rows.js';
+import { ACCOUNT_CHECKS, VERIFY_HOLD_REASONS, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES, type AccountCheck, type JourneyResult, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRowStatus } from '../verify/rows.js';
 
 /**
  * D#749 V4b: the verify section of an item's activity read. The newest verify row of the item (one row per merge), read only, from `verify_rows` and
@@ -32,6 +32,12 @@ export interface ItemVerify {
    * verify/criteria.ts) when the row opened. A row opened before migration 1010 left none to the checks.
    */
   criteria: { browser: number[]; checks: number[] };
+  /**
+   * Why a row that has not started is waiting, and since when (migration 1013): one of the stage's three limits (`unconfigured`: the cost figures are not set; `run_over_daily`: the
+   * per-run figure is above the daily one; `daily_cap`: the repository's daily budget is used). Present only on a `pending` or `deploying` row that is held for one of them; absent
+   * otherwise, so the card then says only that the row is waiting. `since` is when this wait began.
+   */
+  hold?: { reason: VerifyHoldReason; since: string };
   /** The bug item a failed row filed, or null. */
   bug_item_id: string | null;
   pr_number: number;
@@ -51,6 +57,8 @@ interface Row {
   account_check: AccountCheck | null;
   journeys: { id: string; source: string }[];
   checks_only: number[];
+  hold_reason: VerifyHoldReason | null;
+  hold_since: Date | null;
 }
 
 const asNumbers = (v: unknown): number[] => (Array.isArray(v) ? v.filter((n): n is number => Number.isInteger(n) && n >= 1 && n <= 30).slice(0, 30) : []);
@@ -73,7 +81,7 @@ function countJourneys(result: JourneyResult[] | null): ItemVerify['journeys'] {
 /** The item's newest verify row, or null when verification is off for its repository or the item has no row (the answer then carries no `verify`). */
 export async function readItemVerify(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<ItemVerify | null> {
   const { rows } = await client.query<Row>(
-    `SELECT r.status, r.method, r.reason_code, r.result, r.bug_item_id, r.pr_number, r.finished_at, r.created_at, r.account_check, r.journeys, r.checks_only
+    `SELECT r.status, r.method, r.reason_code, r.result, r.bug_item_id, r.pr_number, r.finished_at, r.created_at, r.account_check, r.journeys, r.checks_only, r.hold_reason, r.hold_since
        FROM verify_rows r
        JOIN verify_settings s ON s.repo_id = r.repo_id AND s.account_id = r.account_id AND s.enabled
       WHERE r.work_item_id = $1::uuid
@@ -92,6 +100,7 @@ export async function readItemVerify(client: Pick<PoolClient, 'query'>, workItem
     journeys: finishedWithResult ? countJourneys(r.result) : null,
     account: r.account_check !== null && ACCOUNT_CHECKS.includes(r.account_check) ? r.account_check : null,
     criteria: criteriaOf(r),
+    ...((r.status === 'pending' || r.status === 'deploying') && r.hold_reason !== null && r.hold_since !== null && VERIFY_HOLD_REASONS.includes(r.hold_reason) ? { hold: { reason: r.hold_reason, since: r.hold_since.toISOString() } } : {}),
     bug_item_id: r.bug_item_id,
     pr_number: r.pr_number,
     at: (r.finished_at ?? r.created_at).toISOString(),

@@ -5,7 +5,7 @@ import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { withTenant } from '../src/tenancy/withTenant.js';
 import { fileBugItem } from '../src/verify/bugItem.js';
-import { finishVerifyRow, openVerifyRow, saveVerifySettings, startDeploying, startRunning, VERIFY_REASON_CODES, type JourneyResult } from '../src/verify/rows.js';
+import { finishVerifyRow, openVerifyRow, saveVerifySettings, setVerifyHold, startDeploying, startRunning, VERIFY_REASON_CODES, type JourneyResult } from '../src/verify/rows.js';
 import { readItemVerify } from '../src/work-items/itemVerify.js';
 
 /** [pg] D#749 V4b: the verify section of the item activity read, as app_user through withTenant (row-level security is part of what is tested). */
@@ -94,6 +94,28 @@ describe('item verify section [pg]', { timeout: 120_000 }, () => {
     expect(await read(item)).toMatchObject({ status: 'deploying', reason: null, method: null });
     await worker((c) => startRunning(c, a.accountId, row, { method: 'chrome_runner', deployedCommit: sha('a') }));
     expect(await read(item)).toMatchObject({ status: 'running', method: 'chrome_runner', journeys: null });
+  });
+
+  it('a held row carries its reason and the start of the wait, for a member too; a pending row has none; a start takes it away', async () => {
+    const item = await newItem(await newRepo(true));
+    const row = await open(item);
+    expect((await read(item))?.hold).toBeUndefined();
+    await worker((c) => startDeploying(c, a.accountId, row, true));
+    await worker((c) => setVerifyHold(c, a.accountId, row, 'daily_cap'));
+    const since = (await admin.query<{ hold_since: Date }>('SELECT hold_since FROM verify_rows WHERE id = $1', [row])).rows[0]!.hold_since;
+    expect(await read(item)).toMatchObject({ status: 'deploying', hold: { reason: 'daily_cap', since: since.toISOString() } });
+    await worker((c) => startRunning(c, a.accountId, row, { method: 'playwright_runner', deployedCommit: sha('a') }));
+    expect((await read(item))?.hold).toBeUndefined();
+  });
+
+  it('defence in depth: a hold on a row that is not waiting is never sent, whatever the row says', async () => {
+    const stale = { status: 'running', method: null, reason_code: null, result: null, bug_item_id: null, pr_number: 1, finished_at: null, created_at: new Date(), account_check: null, journeys: [], checks_only: [], hold_reason: 'daily_cap', hold_since: new Date() };
+    for (const status of ['running', 'verified', 'failed', 'unverified']) {
+      expect((await readItemVerify({ query: (async () => ({ rows: [{ ...stale, status }] })) as never }, randomUUID()))?.hold, status).toBeUndefined();
+    }
+    const unknown = { ...stale, status: 'deploying', hold_reason: 'from_the_future' };
+    expect((await readItemVerify({ query: (async () => ({ rows: [unknown] })) as never }, randomUUID()))?.hold).toBeUndefined();
+    expect((await readItemVerify({ query: (async () => ({ rows: [{ ...stale, status: 'deploying' }] })) as never }, randomUUID()))?.hold).toMatchObject({ reason: 'daily_cap' });
   });
 
   it('a verified row counts its journeys and reports the account as matched when the stage stored that proof', async () => {

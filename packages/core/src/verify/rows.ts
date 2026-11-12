@@ -34,6 +34,12 @@ export type VerifyReasonCode = (typeof VERIFY_REASON_CODES)[number];
  */
 export const ACCOUNT_CHECKS = ['matched', 'mismatch', 'unverifiable'] as const;
 export type AccountCheck = (typeof ACCOUNT_CHECKS)[number];
+/**
+ * The closed reasons a `deploying` row is held back from starting its tester job (migration 1013): the cost figures are not set (`unconfigured`), the per-run figure is above the daily one
+ * (`run_over_daily`) or the repository's own daily budget is used (`daily_cap`). The first two are the plan data's refusal codes with the prefix `deploy_verify_` removed.
+ */
+export const VERIFY_HOLD_REASONS = ['unconfigured', 'run_over_daily', 'daily_cap'] as const;
+export type VerifyHoldReason = (typeof VERIFY_HOLD_REASONS)[number];
 export const JOURNEY_RESULTS = ['pass', 'fail', 'blocked', 'unverified'] as const;
 export type JourneyResultWord = (typeof JOURNEY_RESULTS)[number];
 
@@ -84,12 +90,15 @@ export interface VerifyRow {
   person_step: boolean;
   /** Which try of this merge the row is: 1 for the first, 2 and up for a person's "Verify again" (migration 1011). */
   attempt: number;
+  /** Why a `deploying` row cannot start its tester job right now, and since when (migration 1013). Null on every row that is not held for one of the closed reasons. */
+  hold_reason: VerifyHoldReason | null;
+  hold_since: Date | null;
   started_at: Date | null;
   finished_at: Date | null;
   created_at: Date;
 }
 const ROW_COLUMNS = `id, repo_id, batch_id, work_item_id, pr_number, merge_sha, status, method, deployed_commit, journeys, checks_only, result, reason_code, bug_item_id, account_check, run_id,
-  deploy_by_order, person_step, attempt, started_at, finished_at, created_at`;
+  deploy_by_order, person_step, attempt, hold_reason, hold_since, started_at, finished_at, created_at`;
 
 function bad(message: string): VerifyInputError {
   return new VerifyInputError('verify_row_invalid', message);
@@ -313,12 +322,27 @@ export async function startDeploying(client: PoolClient, accountId: string, rowI
   return { moved: true, row: r.rows[0] };
 }
 
+/**
+ * Writes (or, with null, clears) why a `deploying` row cannot start its tester job (migration 1013). `hold_since` moves only when the reason changes, so a row held tick after tick keeps the
+ * time its wait began and the repeated call writes nothing. A row that is not `deploying` is left as it is (the moves to running and to a finished state clear the reason themselves).
+ * Returns true when it wrote.
+ */
+export async function setVerifyHold(client: Pick<PoolClient, 'query'>, accountId: string, rowId: string, reason: VerifyHoldReason | null): Promise<boolean> {
+  if (reason !== null && !VERIFY_HOLD_REASONS.includes(reason)) throw bad('unknown hold reason');
+  const r = await client.query(
+    `UPDATE verify_rows SET hold_reason = $3::text, hold_since = CASE WHEN $3::text IS NULL THEN NULL WHEN hold_reason = $3::text THEN hold_since ELSE now() END
+      WHERE id = $1 AND account_id = $2 AND status = 'deploying' AND hold_reason IS DISTINCT FROM $3::text`,
+    [rowId, accountId, reason],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
 /** deploying -> running with the method that drives the browser (never defaulted: the row says what was used) and the commit the app reported. Writes the `verify_started` fact. */
 export async function startRunning(client: PoolClient, accountId: string, rowId: string, input: { method: VerifyMethod; deployedCommit: string; runId?: string | null }): Promise<MoveResult> {
   if (!VERIFY_METHODS.includes(input.method)) throw bad('unknown method');
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.deployedCommit)) throw bad('deployed commit is not a commit id');
   const r = await client.query<VerifyRow>(
-    `UPDATE verify_rows SET status = 'running', method = $3, deployed_commit = $4, run_id = $5, started_at = now() WHERE id = $1 AND account_id = $2 AND status = 'deploying' RETURNING ${ROW_COLUMNS}`,
+    `UPDATE verify_rows SET status = 'running', method = $3, deployed_commit = $4, run_id = $5, started_at = now(), hold_reason = NULL, hold_since = NULL WHERE id = $1 AND account_id = $2 AND status = 'deploying' RETURNING ${ROW_COLUMNS}`,
     [rowId, accountId, input.method, input.deployedCommit, input.runId ?? null],
   );
   if (r.rows[0] === undefined) return { moved: false, status: (await readRow(client, accountId, rowId))?.status ?? null };
@@ -354,7 +378,7 @@ export async function finishVerifyRow(client: PoolClient, accountId: string, row
   if (accountCheck !== null && !ACCOUNT_CHECKS.includes(accountCheck)) throw bad('unknown account check');
   if ((accountCheck === 'mismatch') !== (reason === 'wrong_account') || (accountCheck === 'unverifiable') !== (reason === 'account_unverifiable')) throw bad('the account check must agree with the reason');
   const r = await client.query<VerifyRow>(
-    `UPDATE verify_rows SET status = $3, result = $4::jsonb, reason_code = $5, account_check = $7, finished_at = now() WHERE id = $1 AND account_id = $2 AND status = $6 RETURNING ${ROW_COLUMNS}`,
+    `UPDATE verify_rows SET status = $3, result = $4::jsonb, reason_code = $5, account_check = $7, finished_at = now(), hold_reason = NULL, hold_since = NULL WHERE id = $1 AND account_id = $2 AND status = $6 RETURNING ${ROW_COLUMNS}`,
     [rowId, accountId, input.status, result, reason, row.status, accountCheck],
   );
   if (r.rows[0] === undefined) return { moved: false, status: (await readRow(client, accountId, rowId))?.status ?? null };
