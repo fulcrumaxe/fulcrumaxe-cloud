@@ -1,0 +1,50 @@
+{
+  "stage": "needs_human",
+  "halted": false,
+  "waiting_on_answer": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 42,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [
+    {
+      "id": "66666666-6666-4666-8666-000000000012",
+      "role": "executor",
+      "status": "succeeded",
+      "usd": 0.9,
+      "created_at": "2026-10-03T09:30:00.000Z",
+      "summary": "The Spec asks for a file that cannot exist, so I opened no pull request.",
+      "lines": []
+    }
+  ],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": {
+    "kind": "needs_human",
+    "reason": "The check failed in parts of the repo this change didn't touch, so a fix round would not help: the failure comes from the environment or from code that is already on the base branch. Nothing was started. Look at the check's output in the run, then press Build again if it was a one-off, or fix the base branch.",
+    "failed_files": [
+      {
+        "name": "apps/ops/test/scan.test.ts"
+      },
+      {
+        "name": "packages/api-client/test/drift.test.ts",
+        "hint": "pnpm --filter @fx/api-client gen"
+      }
+    ],
+    "failed_files_more": 3
+  },
+  "actions": [
+    "build_again",
+    "back_to_discussion",
+    "close"
+  ],
+  "close_on_github": false,
+  "request_changes_blocked": null,
+  "change_requests": []
+}

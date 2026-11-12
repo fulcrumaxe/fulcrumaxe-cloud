@@ -726,7 +726,8 @@ export const CHECK_FAILED_FILES_LABEL = "Failing test files";
 export const CHECK_FAILED_FILES_MORE = (n) => "+" + n + " more";
 function failedFilesView(r) {
   if (!r || !Array.isArray(r.failed_files) || r.failed_files.length === 0 || !r.failed_files.every((f) => typeof f === "string")) return null;
-  return { files: r.failed_files.slice(0, 20), more: Number.isInteger(r.failed_files_more) && r.failed_files_more > 0 ? r.failed_files_more : 0 };
+  const hints = new Map(Array.isArray(r.failed_file_hints) ? r.failed_file_hints.filter((x) => x && typeof x.file === "string" && typeof x.hint === "string").map((x) => [x.file, x.hint]) : []);
+  return { files: r.failed_files.slice(0, 20), hints, more: Number.isInteger(r.failed_files_more) && r.failed_files_more > 0 ? r.failed_files_more : 0 };
 }
 // D#6 R-CHK-3d: a check the runner could not run safely carries a closed reason code (the runner protocol's CHECK_NOT_RUN_REASONS); each code has one plain sentence here, kept equal to
 // the protocol's CHECK_NOT_RUN_LINES by test. A code this page does not know reads as `other`; the code itself is never drawn.
@@ -805,7 +806,7 @@ function checkSection(insight) {
     h("p", { class: "runs-verdict", "data-testid": "runs-check-state", "data-state": v.state }, h("span", { class: "runs-vchip runs-vchip-" + (CHECK_TONE[v.state] || "plain") }, v.label), " ", v.copy),
     v.argv.length ? h("ol", { class: "runs-check-argv", "aria-label": "Approved command, one argument per line", "data-testid": "runs-check-argv" }, v.argv.map((a) => h("li", null, h("code", { "data-testid": "runs-check-arg" }, showArg(a))))) : null,
     v.facts.length ? h("p", { class: "runs-muted", "data-testid": "runs-check-facts" }, v.facts.join(" · ")) : null,
-    v.failed ? h("div", { class: "runs-check-failed", "data-testid": "runs-check-failed" }, h("p", { class: "runs-muted" }, CHECK_FAILED_FILES_LABEL + ":"), h("ul", { class: "runs-facts-list" }, v.failed.files.map((f) => h("li", null, h("code", { "data-testid": "runs-check-failed-file" }, f))), v.failed.more ? h("li", { "data-testid": "runs-check-failed-more" }, CHECK_FAILED_FILES_MORE(v.failed.more)) : null)) : null,
+    v.failed ? h("div", { class: "runs-check-failed", "data-testid": "runs-check-failed" }, h("p", { class: "runs-muted" }, CHECK_FAILED_FILES_LABEL + ":"), h("ul", { class: "runs-facts-list" }, v.failed.files.map((f) => h("li", null, h("code", { "data-testid": "runs-check-failed-file" }, f), v.failed.hints.has(f) ? [" Run: ", h("code", { "data-testid": "runs-check-failed-hint" }, v.failed.hints.get(f))] : null)), v.failed.more ? h("li", { "data-testid": "runs-check-failed-more" }, CHECK_FAILED_FILES_MORE(v.failed.more)) : null)) : null,
     v.changed ? h("p", { class: "runs-check-changed", role: "note", "data-testid": "runs-check-changed" }, v.changed) : null,
     v.tail.trim() !== "" ? h("pre", { class: "runs-check-out", tabindex: "0", role: "region", "aria-label": "Check output, last lines", "data-testid": "runs-check-output" }, v.tail) : null
   );

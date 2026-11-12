@@ -1278,6 +1278,30 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeNow()).toEqual({ kind: 'needs_human', reason: sentence });
     });
 
+    // D#6 CHECK-FAILURE-NAMES-ON-CARD: the outside-only stop names the failing test files (and each one's Run: hint) from the executor run's recorded check.
+    it('CHECK-FAILURE-NAMES-ON-CARD: the outside-only stop lists the failing files with their hints, capped, as plain data', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(accountId, { stage: 'in_progress' });
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, execution_mode, status, envelope, created_at, ended_at) VALUES ($1, $2, $3, 'executor', 'runner', 'runner_local', 'failed', '{}'::jsonb, now(), now())`, [runId, accountId, itemId]);
+      const many = Array.from({ length: 25 }, (_, n) => `apps/ops/test/f${String(n)}.test.ts`);
+      const summary = `failed test files (25): ${many.join(', ')}\nhint for apps/ops/test/f1.test.ts: pnpm --filter @fx/ops gen <img src=x onerror=alert(1)>\nchanged files (1): packages/a/src/a.ts\nFAIL x\nhint for apps/ops/test/f0.test.ts: from the tail`;
+      await admin.query(`INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary, reason) VALUES ($1, $2, 1, 5, false, NULL, $3, NULL)`, [accountId, runId, summary]);
+      expect(await markBuildNeedsHuman(appUserPool, accountId, itemId, null, 'check_failed_outside_change', 'attempt-names')).toEqual({ status: 'recorded', stage: 'needs_human' });
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', 'check_failed_outside_change', 'build:names')`, [accountId, itemId]);
+      const body = (await (await get(itemId, { accountId, userId })).json()) as Activity;
+      expect(activityResponseSchema.parse(body)).toEqual(body);
+      const notice = body.notice as unknown as { kind: string; failed_files: Array<{ name: string; hint?: string }>; failed_files_more?: number };
+      expect(notice.kind).toBe('needs_human');
+      expect(notice.failed_files).toHaveLength(20);
+      expect(notice.failed_files[0]).toEqual({ name: 'apps/ops/test/f0.test.ts' });
+      expect(notice.failed_files[1]).toEqual({ name: 'apps/ops/test/f1.test.ts', hint: 'pnpm --filter @fx/ops gen <img src=x onerror=alert(1)>' });
+      expect(notice.failed_files_more).toBe(5);
+      // A check that passed, or timed out, names nothing.
+      await admin.query(`UPDATE run_checks SET exit_code = NULL, timed_out = true WHERE run_id = $1`, [runId]);
+      expect(((await (await get(itemId, { accountId, userId })).json()) as Activity).notice).toEqual({ kind: 'needs_human', reason: expect.stringContaining("this change didn't touch") });
+    });
+
     // D#6 CARD-OOM-CAUSE-WORDS: a build the runner ended at its memory limit says so on the card, and names the cap when the runner sent a valid one.
     describe('an executor run the runner ended at its memory limit', () => {
       const GIB = 1024 ** 3;

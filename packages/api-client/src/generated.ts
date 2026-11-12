@@ -507,6 +507,11 @@ export interface Operations {
         kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait" | "resume_refused" | "spec_refused" | "superseded" | "review_limit_wait" | "public_update_stopped";
         reason: string;
         resets_at?: string;
+        failed_files?: Array<{
+          name: string;
+          hint?: string;
+        }>;
+        failed_files_more?: number;
       }) | (null);
       review_recheck?: ({
         kind: "merge_only";
@@ -850,6 +855,10 @@ export interface Operations {
           reason: ("sandbox_unavailable" | "sandbox_refused" | "pin_failed" | "protected_unreadable" | "protected_changed" | "not_restored" | "start_failed" | "not_set_up" | "base_missing" | "agent_not_stopped" | "out_of_scope" | "other") | (null);
           failed_files?: Array<string>;
           failed_files_more?: number;
+          failed_file_hints?: Array<{
+            file: string;
+            hint: string;
+          }>;
         }) | (null);
       };
     };

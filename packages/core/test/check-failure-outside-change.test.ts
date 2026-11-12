@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { failedOutsideChange } from '../src/work-items/checkFailure.js';
+import { checkFailureFiles, failedOutsideChange } from '../src/work-items/checkFailure.js';
 
 const tail = '\nsome output tail\n';
 
@@ -75,5 +75,36 @@ describe('failedOutsideChange: a check that failed only in test files the change
 
   it.each([null, undefined, '', '\n', 'failed test files'])('%j is not decided', (summary) => {
     expect(failedOutsideChange(summary)).toBe(false);
+  });
+});
+
+describe('checkFailureFiles (CHECK-FAILURE-NAMES-ON-CARD)', () => {
+  const header = 'failed test files (4): apps/a/test/x.test.ts, apps/a/test/y.test.ts (and 2 more)\nhint for apps/a/test/y.test.ts: pnpm --filter a gen\nchanged files (1): packages/b/src/b.ts\n';
+  it("names the files, each one's hint, and the count the runner cut", () => {
+    expect(checkFailureFiles(`${header}FAIL x`)).toEqual({ files: [{ name: 'apps/a/test/x.test.ts' }, { name: 'apps/a/test/y.test.ts', hint: 'pnpm --filter a gen' }], more: 2 });
+  });
+  it('caps at 20 names and counts the rest; reads only the header, never the tail', () => {
+    const names = Array.from({ length: 30 }, (_, n) => `apps/a/t${String(n)}.test.ts`);
+    const out = checkFailureFiles(`failed test files (30): ${names.join(', ')}\nFAIL\nhint for apps/a/t0.test.ts: from the tail`);
+    expect(out!.files).toHaveLength(20);
+    expect(out!.more).toBe(10);
+    expect(out!.files[0]).toEqual({ name: 'apps/a/t0.test.ts' });
+  });
+  it('strips control and format characters from a hint, cuts it, and drops a name that is not a plain relative path', () => {
+    const out = checkFailureFiles(`failed test files (2): ../etc/passwd, apps/a/t.test.ts\nhint for apps/a/t.test.ts: a\u001b[31mb\u2028c${'z'.repeat(400)}\n`);
+    expect(out!.files).toHaveLength(1);
+    expect(out!.files[0]!.hint!.length).toBeLessThanOrEqual(200);
+    expect(out!.files[0]!.hint).not.toMatch(/[\u0000-\u001f\u2028]/);
+  });
+  it('replaces format characters (bidi override, zero-width space) in a hint with plain spaces', () => {
+    const rlo = String.fromCharCode(0x202e);
+    const zwsp = String.fromCharCode(0x200b);
+    const out = checkFailureFiles(`failed test files (1): apps/a/t.test.ts\nhint for apps/a/t.test.ts: pnpm${rlo}gen${zwsp}now\n`);
+    expect(out!.files[0]!.hint).toBe('pnpm gen now');
+  });
+  it('is null with no failed-files line, and a hint line no longer hides the changed-files line from the outside-only decision', () => {
+    expect(checkFailureFiles('FAIL x')).toBeNull();
+    expect(checkFailureFiles(null)).toBeNull();
+    expect(failedOutsideChange('failed test files (1): apps/ops/test/a.test.ts\nhint for apps/ops/test/a.test.ts: pnpm gen\nchanged files (1): packages/a/src/a.ts\nFAIL')).toBe(true);
   });
 });
