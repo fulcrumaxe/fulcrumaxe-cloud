@@ -10,6 +10,7 @@ import { maxFixRounds } from "@fx/spend";
 import type { BranchSyncOutcome } from "@fx/github";
 import { createStackBasePort } from "@fx/pipeline";
 import { BASE_SYNCED_PROMPT_LINE, checkFixBeforeStart } from "../src/fixRoundBase.js";
+import { createAdvanceModule } from "../src/advance.js";
 const withSync = (beforeStart: ReturnType<typeof checkFixBeforeStart>) => ({ beforeStart, baseSync: () => beforeStart.state });
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_NOT_RUN_OUT_OF_SCOPE, CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, FAILED_FILES_PROMPT_LEAD, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
 
@@ -328,6 +329,21 @@ describe("check fix round [pg]", () => {
       expect(await startCheckFixRound(deps(), who(), later)).toEqual({ ok: false, reason: CHECK_NOT_RUN_OUT_OF_SCOPE });
       expect(resumed).toHaveLength(1);
       expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2", [A.accountId, later])).rows[0].n).toBe(0);
+    });
+
+    it("the driver reads the same stored reason on the run's outcome (checkNotRun), so it can stop before it asks the dial for a round: only for a failed check_failed run whose check reason is out_of_scope", async () => {
+      const m = createAdvanceModule(writerPool, { starter: deps().starter as never, resolveRunSeat: async () => ({ ok: false, reason: "no_model" }) as never, startAdvance: async () => undefined, triage: null, registry: never });
+      const outside = await ended({ reason: "check_failed", summary: notRun, exit: null, checkReason: "out_of_scope" });
+      expect(await m.advanceRunOutcome(A.accountId, outside)).toMatchObject({ status: "failed", done: true, failureReason: "check_failed", checkNotRun: "out_of_scope" });
+      const other = await ended({ reason: "check_failed", summary: notRun, exit: null, checkReason: "not_set_up" });
+      expect(await m.advanceRunOutcome(A.accountId, other)).not.toHaveProperty("checkNotRun");
+      const plain = await ended({ reason: "check_failed", summary: mixed });
+      expect(await m.advanceRunOutcome(A.accountId, plain)).not.toHaveProperty("checkNotRun");
+      // A check whose record has not arrived yet (it is sent after the run's end) is not decided here; the worker's own start refuses it later.
+      const early = await ended({ reason: "check_failed", check: false });
+      expect(await m.advanceRunOutcome(A.accountId, early)).not.toHaveProperty("checkNotRun");
+      const text = await ended({ reason: "check_failed", summary: `${notRun}\nout_of_scope`, exit: 1 });
+      expect(await m.advanceRunOutcome(A.accountId, text)).not.toHaveProperty("checkNotRun");
     });
 
     it("a check that was not run for another reason keeps today's round", async () => {

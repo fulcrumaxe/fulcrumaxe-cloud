@@ -556,6 +556,8 @@ export interface AdvanceRunOutcome {
    * the last of those runs'. It is the id the caller must cancel, and the one a failure is recorded against. Absent when the run is gone.
    */
   tailRunId?: string;
+  /** The tail ended `check_failed` and its check was not run because the changed files lie outside the Spec's list (the stored reason `out_of_scope`). Absent otherwise. */
+  checkNotRun?: "out_of_scope";
   /** The tail's failure reason when it is a failed runner run (`runner_lost`, `usage_limit` or another fixed word), else null. Absent when the run is gone. */
   failureReason?: string | null;
 }
@@ -1313,8 +1315,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             }
           }
         }
+        // A run that ended `check_failed` because its check was never run (the changed files lie outside the Spec's list) says so, from the stored reason (never from text), so the
+        // driver can stop before it asks for a fix round that would only change more files outside the list. Absent while the check's record has not arrived yet.
+        const notRun =
+          row.status === "failed" && reason === "check_failed"
+            ? (await client.query<{ reason: string | null }>("SELECT reason FROM run_checks WHERE account_id = $1 AND run_id = $2", [accountId, currentId])).rows[0]?.reason === "out_of_scope"
+            : false;
         const envelope = row.envelope !== null && typeof row.envelope === "object" && !Array.isArray(row.envelope) ? (row.envelope as Record<string, unknown>) : null;
-        return { status: row.status, done: TERMINAL.has(row.status), envelope, runtime: row.runtime, ...(row.runtime === "runner" ? { runningMs: row.running_ms === null ? null : Math.max(Number(row.running_ms), 0) } : {}), tailRunId: currentId, failureReason: reason };
+        return { status: row.status, done: TERMINAL.has(row.status), envelope, ...(notRun ? { checkNotRun: "out_of_scope" as const } : {}), runtime: row.runtime, ...(row.runtime === "runner" ? { runningMs: row.running_ms === null ? null : Math.max(Number(row.running_ms), 0) } : {}), tailRunId: currentId, failureReason: reason };
       }
     });
     // D#601 MEM-2: a finished run's memory proposals become pending entries, once (the intake is idempotent per run, and never reads a runner run).

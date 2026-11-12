@@ -689,7 +689,10 @@ export async function markBuildNeedsHuman(pool: Pool, accountId: string, workIte
     // when the opened delivery came first, and nothing else would move it. Only a `run_failed` of a run that recorded such a close counts; any other run is left alone.
     const cloudClosed =
       stage === "pr_opened" && code === "run_failed" && runId !== null && (await client.query("SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [accountId, runId, CLOUD_CLOSE_EVENT])).rows.length > 0;
-    const refusedPr = (stage === "pr_opened" && (code === "scope_violation" || code === "scope_unknown")) || cloudClosed;
+    // A review-requested fix round whose check was never run (its changed files lie outside the Spec's list) ends the item's chain at the pull request stage it started from:
+    // another round would only change more files outside the list, so it goes to a person (and so releases the repository's build slot). Only that one code may do this.
+    const outsideReviewFix = (stage === "pr_opened" || stage === "changes_requested") && code === "check_not_run_out_of_scope";
+    const refusedPr = (stage === "pr_opened" && (code === "scope_violation" || code === "scope_unknown")) || cloudClosed || outsideReviewFix;
     if (stage !== "in_progress" && !refusedPr) return { status: "unchanged", stage };
     try {
       const r = await recordStage(client, { workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `build_failed:${code}:${runId ?? attempt ?? "none"}`, ...(runId === null ? {} : { runId }) });

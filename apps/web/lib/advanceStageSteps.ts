@@ -93,6 +93,8 @@ export interface BuildRunOutcome {
   tailRunId: string;
   /** The fixed reason a failed RUNNER run carries (`no_commit`: it ended with the agent done and nothing pushed). Absent for any other run. */
   failureReason?: string | null;
+  /** The run ended `check_failed` with its check not run, the changed files being outside the Spec's list: a fix round could only change more of them. */
+  checkNotRun?: "out_of_scope";
 }
 
 /** D#6 R-CHK-3: what the driver keeps of a check fix round: fixed words and a run id. `escalated` is the plan's fix-round limit (the item goes to Needs human). */
@@ -128,7 +130,7 @@ export async function buildOutcomeBody(worker: (AdvanceWorker & BuildSettler) | 
     }
   }
   const summary = out.envelope?.summary;
-  return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason ? { failureReason: out.failureReason } : {}) };
+  return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason ? { failureReason: out.failureReason } : {}), ...(out.checkNotRun === "out_of_scope" ? { checkNotRun: out.checkNotRun } : {}) };
 }
 
 /**
