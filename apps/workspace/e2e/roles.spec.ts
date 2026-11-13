@@ -21,7 +21,15 @@ const REPOS = readFixture("listRepos", "200-page.json");
 const ROLES = readFixture("listRoles", "200-ok.json");
 const SEC = readFixture("patchRole", "200-ok.json");
 const INSTALLED_ID = REPOS.data[0].id;
-const SECOND = { ...REPOS.data[0], id: "55555555-5555-4555-8555-555555555555", product: "api" };
+const SECOND = { ...REPOS.data[0], id: "55555555-5555-4555-8555-555555555555", product: "api", full_name: "acme/api" };
+// Two installed repos sharing the same `product`, so only `full_name` tells them apart.
+const SHARED_PRODUCT = {
+  data: [
+    { ...REPOS.data[0], id: "66666666-6666-4666-8666-666666666666", product: "team", full_name: "acme/widgets" },
+    { ...REPOS.data[0], id: "77777777-7777-4777-8777-777777777777", product: "team", full_name: "acme/docs" },
+  ],
+  next_cursor: null,
+};
 
 const CSP =
   "script-src 'self'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'";
@@ -122,7 +130,7 @@ const subscribers = (page: Page) =>
 test("lists installed repos only, and each role with its mode, model and spend", async ({ page }) => {
   const seen = await boot(page);
   await expect(tid(page, "roles-row")).toHaveCount(2);
-  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["web"]);
+  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["acme/widgets"]);
   const build = page.locator(`${WIN} [data-role="build"]`);
   await expect(build).toContainText("fulcrumaxe build");
   await expect(build.locator("option")).toHaveText(["off", "suggest", "auto"]);
@@ -156,7 +164,7 @@ test("follows next_cursor and remembers the chosen repo", async ({ page }) => {
         ? { data: [REPOS.data[0], SECOND], next_cursor: null }
         : { data: [REPOS.data[1]], next_cursor: "c2" },
   });
-  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["web", "api"]);
+  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["acme/widgets", "acme/api"]);
   expect(seen.requests.some((r) => r.includes("cursor=c2"))).toBe(true);
   await tid(page, "roles-repo").selectOption(SECOND.id);
   await expect.poll(() => seen.requests.filter((r) => r.endsWith(`${SECOND.id}/roles`)).length).toBe(1);
@@ -165,6 +173,16 @@ test("follows next_cursor and remembers the chosen repo", async ({ page }) => {
   await closeRoles(page);
   await openRoles(page);
   await expect(tid(page, "roles-repo")).toHaveValue(SECOND.id);
+});
+
+test("every option names its repository, never the product label", async ({ page }) => {
+  await boot(page, { repos: SHARED_PRODUCT });
+  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["acme/widgets", "acme/docs"]);
+  for (const text of await tid(page, "roles-repo").locator("option").allInnerTexts()) {
+    expect(text).not.toBe("team");
+    expect(text).not.toBe(SHARED_PRODUCT.data[0].id);
+    expect(text).not.toBe(SHARED_PRODUCT.data[1].id);
+  }
 });
 
 test("a member sees a note and read-only controls: no model select, disabled mode", async ({ page }) => {
