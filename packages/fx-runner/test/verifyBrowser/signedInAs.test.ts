@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readVerifyAnswer, withAnswerFile } from "../../src/daemon/answerFile.js";
 import { groundAnswer } from "../../src/verifyBrowser/ground.js";
-import { IDENTITY_PATH, MAX_IDENTITY_BYTES, signedInAs, type IdentityResponse } from "../../src/verifyBrowser/identity.js";
+import { IDENTITY_PATH, MAX_IDENTITY_BYTES, identityGetter, signedInAs, type IdentityResponse } from "../../src/verifyBrowser/identity.js";
 import { parseBase } from "../../src/verifyBrowser/pin.js";
 import { DEPLOY_VERIFIER_ROLE } from "@fulcrumaxe/runner-protocol";
 import { tmpRoot } from "../helpers/tmpRoot.js";
@@ -194,5 +194,39 @@ describe("the daemon reports the field", () => {
       write("run-bad-login", ENVELOPE({ signed_in_as: bad }));
       expect(readVerifyAnswer(root, "run-bad-login", UID), JSON.stringify(bad)).toBeUndefined();
     }
+  });
+});
+
+describe("the identity lookup and the protection bypass header", () => {
+  const SECRET = "fake-bypass-value-0123456789";
+  const base = parseBase("https://app.example.test")!;
+  const reply = (target: string): IdentityResponse => ({
+    status: () => 200,
+    url: () => target,
+    headers: () => ({}),
+    body: async () => Buffer.from(JSON.stringify({ username: "octo-cat" })),
+  });
+  const run = async (secret: string | undefined, url = `${base.origin}${IDENTITY_PATH}`) => {
+    const sent: Array<{ url: string; headers: Record<string, string> }> = [];
+    const get = identityGetter(async (u, o) => (sent.push({ url: u, headers: o.headers }), reply(u)), base, secret, 1000);
+    await get(url);
+    return { sent, who: await signedInAs(get, base) };
+  };
+
+  it("sends the exact-origin bypass header on a base-origin identity GET when a secret is held", async () => {
+    const { sent, who } = await run(SECRET);
+    expect(who).toBe("octo-cat");
+    expect(sent[0]!.url).toBe(`${base.origin}${IDENTITY_PATH}`);
+    expect(sent[0]!.headers).toEqual({ accept: "application/json", "x-vercel-protection-bypass": SECRET, "x-vercel-set-bypass-cookie": "true" });
+  });
+
+  it("sends no bypass header when no secret is held", async () => {
+    const { sent } = await run(undefined);
+    expect(sent[0]!.headers).toEqual({ accept: "application/json" });
+  });
+
+  it("sends no bypass header to another origin", async () => {
+    const { sent } = await run(SECRET, "https://other.example.test/x");
+    expect(sent[0]!.headers).toEqual({ accept: "application/json" });
   });
 });

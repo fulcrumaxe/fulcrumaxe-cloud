@@ -2,7 +2,16 @@
  * D#749 V2c-2a: what the page actually showed the model, kept as the server returned it (cleaned and cut, before the fence), one log per journey. The answer is
  * checked against the journey's own log, so a fact the model quotes has to be page text the server really handed over while that journey was being checked.
  */
-export const MAX_CALLS = 90;
+/**
+ * The browser-call budget grows with the journeys the job holds: 30 calls for each, never under 90 and never over 600. The 30-minute `MAX_JOB_MS` stays the hard bound. The server
+ * learns each journey when its `begin_journey` call arrives, so the budget is worked out from the distinct journeys begun so far.
+ */
+export const CALLS_PER_JOURNEY = 30;
+export const MIN_CALLS = 90;
+export const MAX_CALLS = 600;
+export function callBudget(journeys: number): number {
+  return Math.min(MAX_CALLS, Math.max(MIN_CALLS, journeys * CALLS_PER_JOURNEY));
+}
 export const MAX_JOB_MS = 30 * 60 * 1000;
 export const MAX_CONSOLE_KEPT = 5;
 
@@ -60,10 +69,10 @@ export class Trace {
   sawNumber(journey: string, n: number): boolean {
     return this.scopes.get(journey)?.nums.has(n) ?? false;
   }
-  /** Counts a browser call; false once the budget of calls is used. */
+  /** Counts a browser call; false once the budget of calls (which grows with the journeys begun) is used. */
   takeCall(): boolean {
     this.calls += 1;
-    return this.calls <= MAX_CALLS;
+    return this.calls <= callBudget(this.scopes.size);
   }
   expired(now: number): boolean {
     return now - this.startedAt > MAX_JOB_MS;
