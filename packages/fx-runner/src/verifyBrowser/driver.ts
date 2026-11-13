@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, existsSync, promises as fs, readd
 import path from "node:path";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import type { LoginSession } from "../commands/verifyLogin.js";
-import { signedInAs } from "./identity.js";
+import { identityGetter, signedInAs } from "./identity.js";
 import { loadPlaywright } from "./loadPlaywright.js";
 import { readScopedState } from "./stateScope.js";
 import { headersWithBypass } from "./bypass.js";
@@ -303,7 +303,7 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
       textOf: (ref) => guard(async () => (await target(ref)).innerText()),
       blocked: () => ({ requests: blockedRequests + (proxy?.refused() ?? 0), navigations: blockedNavigations }),
       // One GET with no redirect followed and a short time limit; the context's request API carries the saved session's cookies.
-      identity: () => signedInAs((url) => context.request.get(url, { maxRedirects: 0, timeout: ACTION_MS, failOnStatusCode: false, headers: { accept: "application/json" } }), cfg.base),
+      identity: () => signedInAs(identityGetter((url, options) => context.request.get(url, options), cfg.base, cfg.bypassSecret, ACTION_MS), cfg.base),
       close: async () => {
         await browser?.close().catch(() => undefined);
         await proxy?.close();

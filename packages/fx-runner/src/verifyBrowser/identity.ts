@@ -1,5 +1,6 @@
 import { isAllowedUrl, type BasePin } from "./pin.js";
 import { SIGNED_IN_AS } from "./ground.js";
+import { headersWithBypass } from "./bypass.js";
 
 /**
  * D#749 V2c-2b: who the saved session is signed in as, asked of the app itself and never of the model. The route is the app's own session route (`GET /api/cloud/auth/me`, the shell's
@@ -35,4 +36,15 @@ export async function signedInAs(get: (url: string) => Promise<IdentityResponse>
     // fx-swallow-ok: a failed lookup means the field is left out; nothing of the response is kept
     return undefined;
   }
+}
+
+/** The little of Playwright's request API the identity lookup uses. */
+export type IdentityRequest = (url: string, options: { maxRedirects: 0; timeout: number; failOnStatusCode: false; headers: Record<string, string> }) => Promise<IdentityResponse>;
+
+/**
+ * The identity GET for a browser context. Playwright's request API does not go through the page route that adds the protection bypass header, so the same exact-origin header is
+ * added here; without it a protected deployment answers this lookup with the protection layer's 401 and no identity is recorded.
+ */
+export function identityGetter(request: IdentityRequest, base: BasePin, secret: string | undefined, timeout: number): (url: string) => Promise<IdentityResponse> {
+  return (url) => request(url, { maxRedirects: 0, timeout, failOnStatusCode: false, headers: headersWithBypass({ accept: "application/json" }, url, base, secret) });
 }

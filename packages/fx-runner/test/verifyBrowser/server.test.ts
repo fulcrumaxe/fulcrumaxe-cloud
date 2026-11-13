@@ -9,7 +9,7 @@ import { ToolError, launchDriver } from "../../src/verifyBrowser/driver.js";
 import { groundAnswer } from "../../src/verifyBrowser/ground.js";
 import { hostRulesArg, isAllowedUrl, parseBase, resolveOpenPath } from "../../src/verifyBrowser/pin.js";
 import { TOOLS, toolList } from "../../src/verifyBrowser/server.js";
-import { Trace } from "../../src/verifyBrowser/trace.js";
+import { Trace, callBudget } from "../../src/verifyBrowser/trace.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 import { BASE, FakeDriver, rig, type FakePage } from "./harness.js";
 
@@ -262,7 +262,7 @@ describe("grounding", () => {
 });
 
 describe("limits", () => {
-  it("answers 'call budget used' after 90 browser calls and still takes the answer", async () => {
+  it("answers 'call budget used' after 90 browser calls (a job with one journey) and still takes the answer", async () => {
     const r = rig(PAGES);
     await r.call("open", { path: "/" });
     await r.call("snapshot");
@@ -271,6 +271,21 @@ describe("limits", () => {
     expect(over.text).toContain("call_budget_used");
     expect((await r.call("submit_answer", { envelope: ENVELOPE("count: 3") })).isError).toBe(false);
     await r.server.stop();
+  });
+
+  it("gives a job with more journeys a larger call budget (30 per journey)", async () => {
+    const r = rig(PAGES);
+    await r.call("open", { path: "/" });
+    for (const id of ["c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]) await r.call("begin_journey", { id });
+    // nine journeys: 270 calls. Calls 91 to 270 still run (the old fixed budget would have refused call 91).
+    for (let i = 0; i < 269; i++) expect((await r.call("reload")).text).not.toContain("call_budget_used");
+    const over = await r.call("reload");
+    expect(over.text).toContain("call_budget_used");
+    await r.server.stop();
+  });
+
+  it("works the budget out as 30 per journey, from 90 up to 600", () => {
+    expect([0, 1, 3, 4, 9, 20, 21, 60].map(callBudget)).toEqual([90, 90, 90, 120, 270, 600, 600, 600]);
   });
 
   it("refuses calls after 30 minutes", async () => {
