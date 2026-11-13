@@ -168,7 +168,7 @@ export async function runDiscovery(deps: DiscoveryRunDeps, runId: string): Promi
       ]);
     });
     // The transaction has committed: new proposals start `pending` for the claim verifier. Void and best-effort (a hint; the backstop is the floor).
-    if (payload.length > 0) void markWorkPending('proposal-verify-sweep');
+    if (payload.length > 0) void markWorkPending('proposal-verify-sweep', { kick: true });
     return { state: 'succeeded', imported: payload.length, withPreview, owner };
   } catch (err) {
     // fx-swallow-ok: the failure is recorded on the run row as a closed code (never the error's text, which can carry a host or a token)

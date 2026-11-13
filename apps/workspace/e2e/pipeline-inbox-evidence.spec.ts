@@ -296,7 +296,7 @@ test.describe("D#483 S4-h: opening a proposal", () => {
     await press(page, filter(page, "being_checked"));
     const toggle = tid(page, "pl-inbox-toggle");
     await press(page, toggle.first());
-    await expect(tid(page, "pl-check-status")).toHaveText("This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.");
+    await expect(tid(page, "pl-check-status")).toHaveText("This repository runs work on your own runner. The check for this proposal runs there, so it waits here until that finishes.");
     const box = await tid(page, "pl-check-status").boundingBox();
     const win = await page.locator(WIN).boundingBox();
     expect(box!.width).toBeGreaterThan(100);

@@ -289,21 +289,22 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
     expect(listed).not.toContain(id);
   });
 
-  it("S4b-5: with the daily external limit at 2, the third external proposal of the day stays pending and nothing is reserved for it", async () => {
+  it("S4b-5: with the daily external limit at 2, the oldest of three external proposals of the day stays pending and nothing is reserved for it", async () => {
     limit = 2;
     try {
       const { a, repoId } = await target();
       envelope = GOOD;
       const ids = [await proposal(a, repoId), await proposal(a, repoId), await proposal(a, repoId)];
+      // Newest first (1015): the two newest outside proposals take the limit, the oldest waits.
       const inside = await proposal(a, repoId, "internal");
       await sweep();
-      expect((await runsOf(ids[0]!)).length + (await runsOf(ids[1]!)).length).toBe(2);
-      expect(await runsOf(ids[2]!)).toEqual([]);
+      expect((await runsOf(ids[1]!)).length + (await runsOf(ids[2]!)).length).toBe(2);
+      expect(await runsOf(ids[0]!)).toEqual([]);
       // The limit counts outsiders only.
       expect(await runsOf(inside)).toHaveLength(1);
-      const reservedFor3 = await admin.query("SELECT count(*)::int AS n FROM spend_reservations s JOIN agent_run_idempotency_keys k ON k.run_id = s.run_id WHERE k.idempotency_key LIKE $1", [`proposal-verify:${ids[2]}:%`]);
-      expect(reservedFor3.rows[0].n).toBe(0);
-      expect(await row(ids[2]!)).toMatchObject({ verification: "pending", verify_attempts: 0 });
+      const reservedForOldest = await admin.query("SELECT count(*)::int AS n FROM spend_reservations s JOIN agent_run_idempotency_keys k ON k.run_id = s.run_id WHERE k.idempotency_key LIKE $1", [`proposal-verify:${ids[0]}:%`]);
+      expect(reservedForOldest.rows[0].n).toBe(0);
+      expect(await row(ids[0]!)).toMatchObject({ verification: "pending", verify_attempts: 0 });
       const counted = await writerPool.connect();
       try {
         await counted.query("BEGIN");
@@ -314,7 +315,7 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
         counted.release();
       }
       await sweep();
-      expect(await runsOf(ids[2]!)).toEqual([]);
+      expect(await runsOf(ids[0]!)).toEqual([]);
     } finally {
       limit = 7;
     }

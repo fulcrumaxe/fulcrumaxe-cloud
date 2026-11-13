@@ -126,7 +126,8 @@ describe("install and payment discovery (D#483 S4-c)", () => {
 
   it("S4-b2b: a discovery that wrote proposals marks the claim verifier's sweep pending, after the commit; one that wrote nothing does not", async () => {
     const markers = new Map<string, number>();
-    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    const kicked: string[] = [];
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) }, kick: (name) => void kicked.push(name) });
     try {
       const r = await tenant();
       const factory = await github([issue(1), issue(2)]);
@@ -136,14 +137,18 @@ describe("install and payment discovery (D#483 S4-c)", () => {
       // The rows are committed by the time the marker is there.
       expect((await proposals(r)).length).toBe(2);
       expect([...markers.keys()]).toContain("pending:proposal-verify-sweep");
+      // ... and the sweep is kicked, so the new proposals are checked within seconds rather than at the next tick.
+      expect(kicked).toEqual(["proposal-verify-sweep"]);
 
       // A skipped run (no subscription: the free preview) writes nothing and marks nothing.
       markers.clear();
+      kicked.length = 0;
       const free = await tenant({ active: false });
       await queue(free, "activation", "sub_free");
       const [skipped] = await runQueuedDiscoveries(depsFor(free, factory));
       expect(skipped).toMatchObject({ state: "skipped" });
       expect([...markers.keys()]).not.toContain("pending:proposal-verify-sweep");
+      expect(kicked).toEqual([]);
     } finally {
       setPendingHooks(null);
     }

@@ -1193,11 +1193,13 @@ describe("JobIssuer [pg]", () => {
       expect(await stored(run.id)).toBeNull();
     });
 
-    it("a Local-only target refuses the role before anything is counted or written; the verified target takes it", async () => {
+    it("a Local-only target takes the claim verifier and refuses the discovery analyst before anything is counted or written; the verified target takes both", async () => {
       const w = await world();
       const i = issuer();
       const precheck = { accountId: w.accountId, repoId: w.repoId, role: VERIFIER };
-      expect(await new RunnerTarget(deps(i), "runner_local").precheck(precheck)).toEqual({ ok: false, reason: "role_not_runner_eligible" });
+      expect(await new RunnerTarget(deps(i), "runner_local").precheck(precheck)).toEqual(
+        VERIFIER === "proposal-verifier" ? { ok: true } : { ok: false, reason: "role_not_runner_eligible" },
+      );
       expect(await new RunnerTarget(deps(i), "runner_verified").precheck(precheck)).toEqual({ ok: true });
     });
   });
