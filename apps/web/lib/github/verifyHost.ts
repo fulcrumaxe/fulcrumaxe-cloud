@@ -1,4 +1,5 @@
-import { createPlanReadClient, PlanReadError, type PlanReadDeps } from "@fx/github";
+import { createPlanReadClient, PlanReadError, type PlanReadDeps, type PlanReadErrorCode } from "@fx/github";
+import { reportError } from "@fx/telemetry";
 import type { CommitFacts, CommitRelation } from "@fx/core/src/verify/qualify.js";
 import type { VerifyHostPort, VerifyTarget } from "@fx/worker";
 
@@ -11,9 +12,12 @@ import type { VerifyHostPort, VerifyTarget } from "@fx/worker";
  *  - `mergeCommit`: `GET pulls/<n>`; the answer counts only for a pull request that is `merged` and names a full commit id.
  *  - `commit`: `GET commits?sha=<id>&per_page=1`, the list form, not `commits/<id>`: the single-commit form carries every changed file's patch (megabytes for a large
  *    merge) and the list form carries the parents and message alone. The first entry must be the commit asked for.
- *  - `relation`: `GET compare/<base>...<head>?per_page=1`; GitHub's `status` is `ahead` (head descends from base), `behind`, `identical` or `diverged`.
+ *  - `relation`: `GET compare/<base>...<head>?per_page=1&page=2`; GitHub's `status` is `ahead` (head descends from base), `behind`, `identical` or `diverged`. Page 2, not
+ *    page 1: GitHub puts EVERY changed file of the whole comparison, with its patch, on the first page whatever `per_page` says, so a merge a day of work behind the
+ *    deployed commit (26 commits, 213 files: 1.1 MB) went over the body cap and read as `unknown`. Every page carries the status and counts; only the first carries files.
  * Nothing thrown reaches the tick: a missing commit is `null`, a relation that cannot be read is `unknown`, a merge commit that cannot be read is `null` (the intake
  * tries the merge again next tick). After GitHub's rate limit answers (the primary or the secondary one) the adapter makes no call at all for `RATE_COOLDOWN_MS`.
+ * A read that got no answer is reported (`verify_host.<read>.<why>`, a closed label: the client's code, `deadline`, or the HTTP status), never with the request text.
  */
 export const MAX_BODY_BYTES = 1_048_576;
 export const CALL_TIMEOUT_MS = 10_000;
@@ -22,6 +26,21 @@ export const DEADLINE_MS = 15_000;
 export const RATE_COOLDOWN_MS = 60_000;
 const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const RELATIONS: ReadonlySet<string> = new Set(["ahead", "behind", "identical", "diverged"]);
+
+type HostRead = "merge_commit" | "commit" | "relation";
+/** The client's failure codes, shortened so `verify_host.<read>.<why>` fits the 40-character stage label. */
+const WHY: Record<PlanReadErrorCode, string> = {
+  repo_not_connected: "not_connected",
+  app_permission_missing: "permission",
+  discussions_disabled: "discussions",
+  token_not_read_only: "not_read_only",
+  github_unavailable: "unavailable",
+  rate_limited_by_github: "rate_limited",
+  plan_file_too_large: "too_large",
+  request_refused: "refused",
+  request_budget_exceeded: "budget",
+};
+const noAnswer = (op: HostRead, why: string, err: unknown = null): void => reportError(err, { stage: `verify_host.${op}.${why}` });
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -42,23 +61,32 @@ export function createVerifyHost(deps: PlanReadDeps | (() => PlanReadDeps), opts
   let coolUntil = 0;
 
   /** One GET. `null` when the call was not made, failed, or GitHub answered with a status that is not in `accept`; otherwise the parsed JSON body of that status. */
-  async function read(target: PlaneTarget, plane: "code" | "private", path: string, query: Record<string, string>, accept: readonly number[]): Promise<{ status: number; body: unknown } | null> {
-    if (now() < coolUntil) return null;
+  async function read(op: HostRead, target: PlaneTarget, plane: "code" | "private", path: string, query: Record<string, string>, accept: readonly number[]): Promise<{ status: number; body: unknown } | null> {
+    if (now() < coolUntil) {
+      noAnswer(op, "cooling");
+      return null;
+    }
     // The token is minted on the installation that owns `target`, so the paired code repository must belong to the same owner: a pairing that names another owner is no answer, before any mint or request.
-    if (plane === "code" && target.codeRepo && target.codeRepo.owner.toLowerCase() !== target.owner.toLowerCase()) return null;
+    if (plane === "code" && target.codeRepo && target.codeRepo.owner.toLowerCase() !== target.owner.toLowerCase()) {
+      noAnswer(op, "foreign_owner");
+      return null;
+    }
     const repo = plane === "code" && target.codeRepo ? target.codeRepo : { owner: target.owner, name: target.name };
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const late = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), deadlineMs);
+    const late = new Promise<"late">((resolve) => {
+      timer = setTimeout(() => resolve("late"), deadlineMs);
     });
     try {
-      return await Promise.race([attempt(target.repoId, repo, path, query, accept), late]);
+      const got = await Promise.race([attempt(op, target.repoId, repo, path, query, accept), late]);
+      if (got !== "late") return got;
+      noAnswer(op, "deadline");
+      return null;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  async function attempt(repoId: string, repo: { owner: string; name: string }, path: string, query: Record<string, string>, accept: readonly number[]): Promise<{ status: number; body: unknown } | null> {
+  async function attempt(op: HostRead, repoId: string, repo: { owner: string; name: string }, path: string, query: Record<string, string>, accept: readonly number[]): Promise<{ status: number; body: unknown } | null> {
     try {
       const res = await open({ repoId, owner: repo.owner, name: repo.name }).request({
         method: "GET",
@@ -66,7 +94,10 @@ export function createVerifyHost(deps: PlanReadDeps | (() => PlanReadDeps), opts
         ...(Object.keys(query).length > 0 ? { query } : {}),
         maxBytes: MAX_BODY_BYTES,
       });
-      if (!accept.includes(res.status)) return null;
+      if (!accept.includes(res.status)) {
+        noAnswer(op, `http_${res.status}`);
+        return null;
+      }
       let body: unknown = null;
       try {
         body = JSON.parse(res.text);
@@ -77,6 +108,7 @@ export function createVerifyHost(deps: PlanReadDeps | (() => PlanReadDeps), opts
       return { status: res.status, body };
     } catch (err) {
       if (err instanceof PlanReadError && err.code === "rate_limited_by_github") coolUntil = now() + RATE_COOLDOWN_MS;
+      noAnswer(op, err instanceof PlanReadError ? (WHY[err.code] ?? "other") : "other", err);
       // fx-swallow-ok: the stage reads a missing answer as "try again next tick" (intake) or "does not qualify yet" (readiness); the error text can carry request details
       return null;
     }
@@ -85,7 +117,7 @@ export function createVerifyHost(deps: PlanReadDeps | (() => PlanReadDeps), opts
   return {
     async mergeCommit(target, prNumber) {
       if (!Number.isSafeInteger(prNumber) || prNumber < 1) return null;
-      const res = await read(target, "code", `pulls/${prNumber}`, {}, [200]);
+      const res = await read("merge_commit", target, "code", `pulls/${prNumber}`, {}, [200]);
       if (res === null || !isRecord(res.body) || res.body["merged"] !== true) return null;
       const sha = res.body["merge_commit_sha"];
       return typeof sha === "string" && COMMIT_ID.test(sha) ? sha : null;
@@ -93,7 +125,7 @@ export function createVerifyHost(deps: PlanReadDeps | (() => PlanReadDeps), opts
 
     async commit(target, sha): Promise<CommitFacts | null> {
       if (!COMMIT_ID.test(sha)) return null;
-      const res = await read(target, "private", "commits", { sha, per_page: "1" }, [200]);
+      const res = await read("commit", target, "private", "commits", { sha, per_page: "1" }, [200]);
       const first = res !== null && Array.isArray(res.body) ? (res.body[0] as unknown) : undefined;
       if (!isRecord(first) || first["sha"] !== sha || !Array.isArray(first["parents"]) || !isRecord(first["commit"]) || typeof first["commit"]["message"] !== "string") return null;
       const parents: string[] = [];
@@ -106,7 +138,7 @@ export function createVerifyHost(deps: PlanReadDeps | (() => PlanReadDeps), opts
 
     async relation(target, base, head): Promise<CommitRelation> {
       if (!COMMIT_ID.test(base) || !COMMIT_ID.test(head)) return "unknown";
-      const res = await read(target, "code", `compare/${base}...${head}`, { per_page: "1" }, [200]);
+      const res = await read("relation", target, "code", `compare/${base}...${head}`, { per_page: "1", page: "2" }, [200]);
       const status = res !== null && isRecord(res.body) ? res.body["status"] : undefined;
       return typeof status === "string" && RELATIONS.has(status) ? (status as CommitRelation) : "unknown";
     },

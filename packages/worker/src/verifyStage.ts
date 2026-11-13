@@ -97,13 +97,33 @@ export interface VerifyStageCounts {
   settled: number;
   /** Rows ended `unverified` by this pass. */
   unverified: number;
+  /** Readiness reads whose commit did not qualify (yet), by the step that said no (`QualifyStep`). */
+  not_qualified?: Partial<Record<QualifyStep, number>>;
   /** Merges the host could not name a commit for (tried again next tick). */
   no_merge_commit: number;
   failed: number;
   /** Rows still unfinished after the pass: the tick keeps coming while this is above zero. */
   active: number;
 }
-const emptyCounts = (): VerifyStageCounts => ({ listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, started: 0, held: 0, settled: 0, unverified: 0, no_merge_commit: 0, failed: 0, active: 0 });
+/**
+ * Which step of the readiness check decided, a closed set. Qualified: `same_commit`, `sync_identical`, `sync_descends`. Not (yet): the app did not answer (`unreachable`) or
+ * named no commit (`no_commit_reported`); the host had no such commit or could not read it (`no_commit`); the commit is not a genuine sync commit (`not_sync_commit`); the
+ * host's relation of the merge commit to the commit the sync names was not `ahead` (`relation_<status>`, `relation_unknown` when it could not be read); the host threw
+ * (`host_error`); an id that is not a full commit id (`not_a_commit_id`).
+ */
+export type QualifyStep =
+  | "same_commit"
+  | "sync_identical"
+  | "sync_descends"
+  | "unreachable"
+  | "no_commit_reported"
+  | "no_commit"
+  | "not_sync_commit"
+  | `relation_${CommitRelation}`
+  | "host_error"
+  | "not_a_commit_id";
+const QUALIFIED: ReadonlySet<QualifyStep> = new Set<QualifyStep>(["same_commit", "sync_identical", "sync_descends"]);
+const emptyCounts = (): VerifyStageCounts => ({ listed: 0, opened: 0, ordered: 0, waiting: 0, ready: 0, started: 0, held: 0, settled: 0, unverified: 0, not_qualified: {}, no_merge_commit: 0, failed: 0, active: 0 });
 
 interface RepoInfo {
   owner: string;
@@ -150,32 +170,38 @@ export function createVerifyStageSweep(deps: VerifyStageDeps): () => Promise<Ver
     }
   }
 
-  /** Does the commit the app reports qualify for the row's merge commit? The host's answers only: a message alone is never trusted. */
-  async function qualifies(target: VerifyTarget, row: VerifyRow, deployed: string): Promise<boolean> {
-    if (deployed === row.merge_sha) return qualifyDeployedCommit({ deployed, mergeSha: row.merge_sha, twoPlane: false }).qualifies;
+  /**
+   * Does the commit the app reports qualify for the row's merge commit? The host's answers only: a message alone is never trusted. The answer is the step that decided
+   * (`QualifyStep`), so a row that ends `commit_not_deployed` says which one said no.
+   */
+  async function qualifies(target: VerifyTarget, row: VerifyRow, deployed: string): Promise<QualifyStep> {
+    if (deployed === row.merge_sha) return qualifyDeployedCommit({ deployed, mergeSha: row.merge_sha, twoPlane: false }).qualifies ? "same_commit" : "not_a_commit_id";
     const facts = await deps.host.commit(target, deployed);
+    if (facts === null) return "no_commit";
     const sync = genuineSyncCommit(facts);
-    if (facts === null || sync === null) return false;
+    if (sync === null) return "not_sync_commit";
     // The host's second parent equal to the merge commit IN FULL is the answer, and costs no second call. Only when the ids differ (a descendant, or a colliding 12-hex prefix)
     // is the host asked how they relate: never accepted on the prefix the message names.
     const input = { deployed, mergeSha: row.merge_sha, twoPlane: true, deployedMessage: facts.message, namedCommit: sync.named };
-    if (sync.named === row.merge_sha) return qualifyDeployedCommit(input).qualifies;
-    return qualifyDeployedCommit({ ...input, namedRelation: await deps.host.relation(target, row.merge_sha, sync.named) }).qualifies;
+    if (sync.named === row.merge_sha) return qualifyDeployedCommit(input).qualifies ? "sync_identical" : "not_a_commit_id";
+    const relation = await deps.host.relation(target, row.merge_sha, sync.named);
+    return qualifyDeployedCommit({ ...input, namedRelation: relation }).qualifies ? "sync_descends" : `relation_${relation}`;
   }
 
   async function readiness(accountId: string, repoId: string, target: VerifyTarget, baseUrl: string, row: VerifyRow, order: DeployOrder, counts: VerifyStageCounts): Promise<boolean> {
     const capped = order.finished_at !== null && order.db_now.getTime() - order.finished_at.getTime() > READINESS_CAP_MINUTES * 60_000;
     const health = await deps.health(baseUrl, { accountId });
     const deployed = health.kind === "ok" ? health.commit : null;
+    let step: QualifyStep = health.kind === "unreachable" ? "unreachable" : "no_commit_reported";
     if (deployed !== null) {
-      let ok = false;
       try {
-        ok = await qualifies(target, row, deployed.toLowerCase());
+        step = await qualifies(target, row, deployed.toLowerCase());
       } catch (err) {
         // The host could not answer: the app may well be right, so this tick learns nothing and the poll goes on until the cap.
         reportError(err, { stage: "verify_stage.qualify" });
+        step = "host_error";
       }
-      if (ok) {
+      if (QUALIFIED.has(step)) {
         counts.ready += 1;
         const outcome = await deps.ready?.({ accountId, repoId, row, deployedCommit: deployed.toLowerCase() });
         if (outcome === "started") counts.started += 1;
@@ -187,11 +213,16 @@ export function createVerifyStageSweep(deps: VerifyStageDeps): () => Promise<Ver
         return false;
       }
     }
+    const tally = (counts.not_qualified ??= {});
+    tally[step] = (tally[step] ?? 0) + 1;
     if (!capped) {
       counts.waiting += 1;
       return false;
     }
-    return endRow(accountId, row.id, health.kind === "unreachable" ? "deployment_unreachable" : "commit_not_deployed", counts);
+    const ended = await endRow(accountId, row.id, health.kind === "unreachable" ? "deployment_unreachable" : "commit_not_deployed", counts);
+    // The step that said no on the last read, as a closed label (no commit id, no host text): without it a row that ended `commit_not_deployed` looks the same whichever read failed.
+    if (ended) reportError(null, { stage: `verify_stage.nq.${step}` });
+    return ended;
   }
 
   async function advance(accountId: string, repoId: string, target: VerifyTarget, baseUrl: string, counts: VerifyStageCounts): Promise<boolean> {
