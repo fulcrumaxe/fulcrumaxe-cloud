@@ -20,7 +20,7 @@ import { api } from "../_lib/api.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import { getItem, setItem } from "../../core/storage-ns.js";
 import { addRunLimitsView } from "./roles-limits.js";
-import { mountAutonomy, MERGE_COPY } from "./roles-autonomy.js";
+import { mountAutonomy, MERGE_COPY, repoLabel } from "./roles-autonomy.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -179,7 +179,7 @@ function mountApp(contentEl) {
   function render() {
     status.textContent = error;
     status.classList.toggle("roles-error", !!error && !!repoId);
-    picker.replaceChildren(...repos.map((r) => h("option", { value: r.id, selected: r.id === repoId }, r.product)));
+    picker.replaceChildren(...repos.map((r) => h("option", { value: r.id, selected: r.id === repoId }, repoLabel(r))));
     picker.hidden = repos.length === 0;
     note.textContent = roles && !isAdmin ? NOT_ALLOWED : "";
     renderList();

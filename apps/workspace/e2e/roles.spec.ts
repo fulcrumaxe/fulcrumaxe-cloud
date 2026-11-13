@@ -21,7 +21,7 @@ const REPOS = readFixture("listRepos", "200-page.json");
 const ROLES = readFixture("listRoles", "200-ok.json");
 const SEC = readFixture("patchRole", "200-ok.json");
 const INSTALLED_ID = REPOS.data[0].id;
-const SECOND = { ...REPOS.data[0], id: "55555555-5555-4555-8555-555555555555", product: "api" };
+const SECOND = { ...REPOS.data[0], id: "55555555-5555-4555-8555-555555555555", product: "api", full_name: "acme/api" };
 
 const CSP =
   "script-src 'self'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'";
@@ -122,7 +122,7 @@ const subscribers = (page: Page) =>
 test("lists installed repos only, and each role with its mode, model and spend", async ({ page }) => {
   const seen = await boot(page);
   await expect(tid(page, "roles-row")).toHaveCount(2);
-  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["web"]);
+  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["acme/widgets"]);
   const build = page.locator(`${WIN} [data-role="build"]`);
   await expect(build).toContainText("fulcrumaxe build");
   await expect(build.locator("option")).toHaveText(["off", "suggest", "auto"]);
@@ -156,7 +156,7 @@ test("follows next_cursor and remembers the chosen repo", async ({ page }) => {
         ? { data: [REPOS.data[0], SECOND], next_cursor: null }
         : { data: [REPOS.data[1]], next_cursor: "c2" },
   });
-  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["web", "api"]);
+  await expect(tid(page, "roles-repo").locator("option")).toHaveText(["acme/widgets", "acme/api"]);
   expect(seen.requests.some((r) => r.includes("cursor=c2"))).toBe(true);
   await tid(page, "roles-repo").selectOption(SECOND.id);
   await expect.poll(() => seen.requests.filter((r) => r.endsWith(`${SECOND.id}/roles`)).length).toBe(1);
@@ -165,6 +165,11 @@ test("follows next_cursor and remembers the chosen repo", async ({ page }) => {
   await closeRoles(page);
   await openRoles(page);
   await expect(tid(page, "roles-repo")).toHaveValue(SECOND.id);
+  await expect(tid(page, "roles-repo").locator("option:checked")).toHaveText("acme/api");
+  // Switching back to the first repo shows its own roles again.
+  await tid(page, "roles-repo").selectOption(INSTALLED_ID);
+  await expect.poll(() => seen.requests.filter((r) => r.endsWith(`${INSTALLED_ID}/roles`)).length).toBe(2);
+  await expect(tid(page, "roles-repo")).toHaveValue(INSTALLED_ID);
 });
 
 test("a member sees a note and read-only controls: no model select, disabled mode", async ({ page }) => {
