@@ -1,3 +1,4 @@
+import { BYPASS_HEADER, bypassSecretFor, reportRefusedKick } from './ownHostBypass.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
@@ -52,6 +53,8 @@ export interface ApiSweepKickerOptions {
   url: string;
   /** The derived key (`apiSweepKickKey`), not the cron secret. */
   secret: string;
+  /** Vercel's automation bypass secret, for this project's own host only (ownHostBypass.ts). Sent as a header. */
+  bypassSecret?: string;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -73,12 +76,13 @@ export function createApiSweepKicker(options: ApiSweepKickerOptions): { kick(): 
         await sleep(KICK_DELAY_MS);
         const response = await fetchImpl(options.url, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', [API_SWEEP_KICK_HEADER]: apiSweepKickHeader(options.secret, Math.floor(now() / 1000)) },
+          headers: { 'content-type': 'application/json', [API_SWEEP_KICK_HEADER]: apiSweepKickHeader(options.secret, Math.floor(now() / 1000)), ...(options.bypassSecret ? { [BYPASS_HEADER]: options.bypassSecret } : {}) },
           body: API_SWEEP_KICK_BODY,
           redirect: 'error',
           signal: AbortSignal.timeout(KICK_TIMEOUT_MS),
         });
         await response.body?.cancel();
+        reportRefusedKick(response, 'api_sweep_kick.refused', options.reportError);
       } catch (err) {
         // Dropped, refused or slow: the next tick sends the delivery. Worth seeing, though.
         options.reportError?.(err, "api_sweep_kick.send");
@@ -98,7 +102,8 @@ export function apiSweepKickerFromEnv(
   try {
     const url = new URL(API_SWEEP_KICK_PATH, base);
     if (url.protocol !== 'https:') return null;
-    return createApiSweepKicker({ url: url.toString(), secret: apiSweepKickKey(cronSecret), ...(reportError ? { reportError } : {}) });
+    const bypassSecret = bypassSecretFor(url, env);
+    return createApiSweepKicker({ url: url.toString(), secret: apiSweepKickKey(cronSecret), ...(bypassSecret ? { bypassSecret } : {}), ...(reportError ? { reportError } : {}) });
   } catch (err) {
     // A malformed URL is a setting mistake: no kick, and the tick covers it.
     reportError?.(err, "api_sweep_kick.config");

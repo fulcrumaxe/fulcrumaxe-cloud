@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { BYPASS_HEADER, bypassSecretFor, reportRefusedKick } from './ownHostBypass.js';
 import { KICK_COOLDOWN_MS, KICK_DELAY_MS, KICK_MAX_SKEW_SECONDS } from './kick.js';
 
 /**
@@ -45,6 +46,12 @@ export interface VerifySweepKickerOptions {
   url: string;
   /** The derived key (`verifySweepKickKey`), not the cron secret. */
   secret: string;
+  /**
+   * Vercel's automation bypass secret (the platform's own VERCEL_AUTOMATION_BYPASS_SECRET). A protected deployment answers an unsigned-in request with its own 401 at the
+   * edge, before the function runs, so without this header the kick never reaches the sweep route. Sent as a header only (never in the URL, never a bypass cookie), and the
+   * caller passes it only for this project's own host (ownHostBypass.ts).
+   */
+  bypassSecret?: string;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -67,12 +74,17 @@ export function createVerifySweepKicker(options: VerifySweepKickerOptions): { ki
         await sleep(KICK_DELAY_MS);
         const response = await fetchImpl(options.url, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', [VERIFY_SWEEP_KICK_HEADER]: verifySweepKickHeader(options.secret, Math.floor(now() / 1000)) },
+          headers: {
+            'content-type': 'application/json',
+            [VERIFY_SWEEP_KICK_HEADER]: verifySweepKickHeader(options.secret, Math.floor(now() / 1000)),
+            ...(options.bypassSecret ? { [BYPASS_HEADER]: options.bypassSecret } : {}),
+          },
           body: VERIFY_SWEEP_KICK_BODY,
           redirect: 'error',
           signal: AbortSignal.timeout(KICK_TIMEOUT_MS),
         });
         await response.body?.cancel();
+        reportRefusedKick(response, 'verify_sweep_kick.refused', options.reportError);
       } catch (err) {
         // Dropped, refused or slow: the next tick picks the row up.
         options.reportError?.(err, 'verify_sweep_kick.send');
@@ -92,7 +104,13 @@ export function verifySweepKickerFromEnv(
   try {
     const url = new URL(VERIFY_SWEEP_KICK_PATH, base);
     if (url.protocol !== 'https:') return null;
-    return createVerifySweepKicker({ url: url.toString(), secret: verifySweepKickKey(cronSecret), ...(reportError ? { reportError } : {}) });
+    const bypassSecret = bypassSecretFor(url, env);
+    return createVerifySweepKicker({
+      url: url.toString(),
+      secret: verifySweepKickKey(cronSecret),
+      ...(bypassSecret ? { bypassSecret } : {}),
+      ...(reportError ? { reportError } : {}),
+    });
   } catch (err) {
     reportError?.(err, 'verify_sweep_kick.config');
     return null;

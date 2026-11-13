@@ -1,5 +1,6 @@
 import { resolveChecked } from "@fx/net-guard";
 import { reportError } from "@fx/telemetry";
+import { BYPASS_HEADER, ownHosts, readBypassSecret } from "@fx/webhooks";
 import type { HealthRead } from "@fx/worker";
 import { nodeHttpsPinnedRequester, type PinnedRequester } from "../app/api/gh-proxy/[...path]/handler";
 
@@ -28,25 +29,7 @@ export const MAX_BODY_BYTES = 16_384;
 export const TIMEOUT_MS = 10_000;
 const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const unreachable: HealthRead = { kind: "unreachable" };
-export const BYPASS_HEADER = "x-vercel-protection-bypass";
-const HOSTNAME = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
-
-/** The secret, only when it is one value of printable characters (as the runner's own reader requires); anything else reads as unset. */
-function readBypassSecret(env: Record<string, string | undefined>): string | undefined {
-  const v = env.VERCEL_AUTOMATION_BYPASS_SECRET;
-  return v !== undefined && v.length > 0 && v.length <= 256 && /^[\x21-\x7e]+$/.test(v) ? v : undefined;
-}
-
-/** This project's own hostnames, from the platform's variables (bare hosts, no scheme) and the optional list. A value that is not a bare hostname is dropped. */
-function ownHosts(env: Record<string, string | undefined>): Set<string> {
-  const out = new Set<string>();
-  const raw = [env.VERCEL_URL, env.VERCEL_BRANCH_URL, env.VERCEL_PROJECT_PRODUCTION_URL, ...(env.FX_VERIFY_OWN_HOSTS ?? "").split(",")];
-  for (const r of raw) {
-    const h = (r ?? "").trim().toLowerCase();
-    if (HOSTNAME.test(h) && h.includes(".") && !/^[0-9.]+$/.test(h)) out.add(h);
-  }
-  return out;
-}
+export { BYPASS_HEADER };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
