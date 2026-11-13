@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { configureErrorReporter } from "@fx/telemetry";
 import { PLAN_READ_PERMISSIONS, PLAN_READ_USER_AGENT, type AccessTokenRequester, type PlanReadDeps } from "@fx/github";
 import { createVerifyHost, MAX_BODY_BYTES, RATE_COOLDOWN_MS, type PlaneTarget } from "./verifyHost";
 
@@ -76,9 +77,24 @@ const okRoutes = (url: URL): Reply | undefined => {
   if (url.pathname === PULL(1347)) return { status: 200, body: fixture("pull-merged") };
   if (url.pathname === PULL(1348)) return { status: 200, body: fixture("pull-open") };
   if (url.pathname === "/repos/acme/widgets/commits" && url.searchParams.get("sha") === SYNC && url.searchParams.get("per_page") === "1" && [...url.searchParams.keys()].length === 2) return { status: 200, body: fixture("commits-list") };
-  if (url.pathname === `/repos/acme/widgets/compare/${MERGE}...${NAMED}` && url.searchParams.get("per_page") === "1" && [...url.searchParams.keys()].length === 1) return { status: 200, body: fixture("compare-ahead") };
+  if (url.pathname === `/repos/acme/widgets/compare/${MERGE}...${NAMED}`) return comparePage(url, fixture("compare-ahead") as Record<string, unknown>);
   return undefined;
 };
+
+/**
+ * GitHub's compare pagination, as it really answers: `per_page` and `page` page the COMMITS only; every page carries the status and the counts; the FIRST page (no `page`, or
+ * `page=1`) also carries every changed file of the whole comparison with its patch, whatever `per_page` says, and no later page carries `files` at all. Checked against
+ * api.github.com on 2026-11-12 (compare of 26 commits and 213 files: page 1 1,128,870 bytes, page 2 15,586 bytes with no `files` key). Any other query key is a 404 here.
+ */
+function comparePage(url: URL, full: Record<string, unknown>): Reply | undefined {
+  if ([...url.searchParams.keys()].some((k) => k !== "per_page" && k !== "page")) return undefined;
+  const perPage = Number(url.searchParams.get("per_page") ?? "250");
+  const page = Number(url.searchParams.get("page") ?? "1");
+  if (!Number.isSafeInteger(perPage) || perPage < 1 || !Number.isSafeInteger(page) || page < 1) return undefined;
+  const commits = (full["commits"] as unknown[]).slice((page - 1) * perPage, page * perPage);
+  const { files, ...rest } = full;
+  return { status: 200, body: page === 1 ? { ...rest, commits, files } : { ...rest, commits } };
+}
 
 describe("mergeCommit", () => {
   it("reads the merge commit of a merged pull request: one GET with a User-Agent and the read-only token of the repository's own installation", async () => {
@@ -183,11 +199,33 @@ describe("commit", () => {
 describe("relation", () => {
   const compareOf = (status: string): Reply => ({ status: 200, body: { ...(fixture("compare-ahead") as object), status } });
 
-  it("reads GitHub's status for base...head: GET compare/<base>...<head>?per_page=1", async () => {
+  it("reads GitHub's status for base...head: GET compare/<base>...<head>?per_page=1&page=2 (the page with no files)", async () => {
     const t = setup(okRoutes);
     expect(await t.host.relation(A, MERGE, NAMED)).toBe("ahead");
     expect(t.calls()).toHaveLength(1);
     expect(t.calls()[0]!.url.pathname).toBe(`/repos/acme/widgets/compare/${MERGE}...${NAMED}`);
+    expect(Object.fromEntries(t.calls()[0]!.url.searchParams)).toEqual({ per_page: "1", page: "2" });
+  });
+
+  it("a merge far behind the deployed commit (the comparison's files and patches over the body cap on page 1) still reads as its status", async () => {
+    // The 11-13 staging case in shape: 26 commits ahead, 213 changed files whose patches come to more than MAX_BODY_BYTES on the first page.
+    const files = Array.from({ length: 213 }, (_, i) => ({ sha: "1".repeat(40), filename: `packages/p${i}/src/file.ts`, status: "modified", additions: 40, deletions: 3, changes: 43, patch: "@@ -1,3 +1,40 @@\n+".padEnd(Math.ceil(MAX_BODY_BYTES / 200), "x") }));
+    const commits = Array.from({ length: 26 }, (_, i) => ({ sha: (i % 10).toString().repeat(40), parents: [{ sha: MERGE }], commit: { message: `change ${i}` } }));
+    const full = { ...(fixture("compare-ahead") as Record<string, unknown>), status: "ahead", ahead_by: 26, total_commits: 26, commits, files };
+    expect(JSON.stringify(full).length).toBeGreaterThan(MAX_BODY_BYTES);
+    const t = setup((url) => (url.pathname === `/repos/acme/widgets/compare/${MERGE}...${NAMED}` ? comparePage(url, full) : undefined));
+    expect(await t.host.relation(A, MERGE, NAMED)).toBe("ahead");
+    for (const status of ["behind", "diverged", "identical"]) {
+      const other = setup((url) => comparePage(url, { ...full, status }));
+      expect(await other.host.relation(A, MERGE, NAMED), status).toBe(status);
+    }
+  });
+
+  it("a comparison with a single commit (page 2 of one commit is empty) still carries the status", async () => {
+    const one = { ...(fixture("compare-ahead") as Record<string, unknown>), ahead_by: 1, total_commits: 1 };
+    expect(await setup((url) => comparePage(url, one)).host.relation(A, MERGE, NAMED)).toBe("ahead");
+    const same = { ...(fixture("compare-ahead") as Record<string, unknown>), status: "identical", ahead_by: 0, total_commits: 0, commits: [], files: [] };
+    expect(await setup((url) => comparePage(url, same)).host.relation(A, MERGE, NAMED)).toBe("identical");
   });
 
   it.each(["ahead", "behind", "identical", "diverged"])("status %s maps to itself", async (status) => {
@@ -341,5 +379,31 @@ describe("lazy settings", () => {
     expect(await host.mergeCommit(A, 1347)).toBeNull();
     ready = true;
     expect(await host.mergeCommit(A, 1347)).toBe(MERGE);
+  });
+});
+
+describe("a read with no answer is reported by a closed label", () => {
+  const classes: Array<{ stage: string; code: string }> = [];
+  beforeEach(() => {
+    classes.length = 0;
+    configureErrorReporter({ service: "test", write: () => undefined, sink: { record: (e) => void classes.push({ stage: e.stage, code: e.code }) } });
+  });
+  afterEach(() => configureErrorReporter({ service: "app" }));
+
+  it("names the read and why: a body over the cap, a status that is not an answer, the deadline, and a foreign owner", async () => {
+    const big = JSON.stringify({ status: "ahead", pad: "x".repeat(MAX_BODY_BYTES + 10) });
+    expect(await setup(() => ({ status: 200, text: big })).host.relation(A, MERGE, NAMED)).toBe("unknown");
+    expect(await setup(() => ({ status: 404, body: { message: "Not Found" } })).host.commit(A, SYNC)).toBeNull();
+    expect(await setup(okRoutes, { hangMint: true, deadlineMs: 20 }).host.mergeCommit(A, 1347)).toBeNull();
+    expect(await setup(okRoutes).host.relation({ ...A, codeRepo: { owner: "elsewhere", name: "x" } }, MERGE, NAMED)).toBe("unknown");
+    expect(classes.map((c) => c.stage)).toEqual(["verify_host.relation.too_large", "verify_host.commit.http_404", "verify_host.merge_commit.deadline", "verify_host.relation.foreign_owner"]);
+  });
+
+  it("an answer reports nothing", async () => {
+    const t = setup(okRoutes);
+    await t.host.mergeCommit(A, 1347);
+    await t.host.commit(A, SYNC);
+    await t.host.relation(A, MERGE, NAMED);
+    expect(classes).toEqual([]);
   });
 });

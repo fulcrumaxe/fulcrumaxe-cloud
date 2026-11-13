@@ -6,6 +6,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { saveVerifySettings } from "@fx/core/src/verify/rows.js";
+import { configureErrorReporter } from "@fx/telemetry";
 import type { CommitFacts, CommitRelation } from "@fx/core/src/verify/qualify.js";
 import { createVerifyStageSweep, INTAKE_HOST_TRIES, INTAKE_PER_PASS, READINESS_CAP_MINUTES, type HealthRead, type VerifyHostPort, type VerifyStageCounts, type VerifyTarget } from "../src/verifyStage.js";
 
@@ -378,7 +379,7 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
       for (const relation of ["unknown", "identical", "diverged", "behind"] as const) {
         host.relations.set(`${w.mergeSha}:${colliding}`, relation);
         host.calls = [];
-        expect(await sweep(), relation).toMatchObject({ ready: 0, waiting: 1 });
+        expect(await sweep(), relation).toMatchObject({ ready: 0, waiting: 1, not_qualified: { [`relation_${relation}`]: 1 } });
         expect(host.calls, relation).toEqual([`commit:${deployedSha.slice(0, 4)}`, `relation:${w.mergeSha.slice(0, 4)}:${colliding.slice(0, 4)}`]);
       }
       expect(readyCalls).toEqual([]);
@@ -400,7 +401,7 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
       for (const facts of forged) {
         host.commits.set(d, facts);
         const counts = await sweep();
-        expect(counts, JSON.stringify(facts.parents)).toMatchObject({ ready: 0, waiting: 1 });
+        expect(counts, JSON.stringify(facts.parents)).toMatchObject({ ready: 0, waiting: 1, not_qualified: { not_sync_commit: 1 } });
       }
       host.commits.set(d, { parents: [sha("9"), sha("6")], message: SYNC("6".repeat(12)) });
       host.relations.set(`${w.mergeSha}:${sha("6")}`, "diverged");
@@ -411,12 +412,40 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
     it("a commit the host does not have, and a host that cannot answer, keep waiting; the cap then ends the row commit_not_deployed", async () => {
       const w = await deployed(a);
       healthAnswer = { kind: "ok", commit: sha("5") };
-      expect(await sweep()).toMatchObject({ waiting: 1, ready: 0 });
+      expect(await sweep()).toMatchObject({ waiting: 1, ready: 0, not_qualified: { no_commit: 1 } });
       host.throwOnCommit = true;
-      expect(await sweep()).toMatchObject({ waiting: 1, ready: 0, failed: 0 });
+      expect(await sweep()).toMatchObject({ waiting: 1, ready: 0, failed: 0, not_qualified: { host_error: 1 } });
+      host.throwOnCommit = false;
       await forceOrder(w.orderId, `finished_at = now() - interval '${READINESS_CAP_MINUTES + 1} minutes'`);
-      expect(await sweep()).toMatchObject({ unverified: 1 });
+      const stages: string[] = [];
+      configureErrorReporter({ service: "test", write: () => undefined, sink: { record: (e) => void stages.push(e.stage) } });
+      try {
+        expect(await sweep()).toMatchObject({ unverified: 1 });
+      } finally {
+        configureErrorReporter({ service: "worker" });
+      }
       expect((await rowsOf(w.repo))[0]).toMatchObject({ status: "unverified", reason_code: "commit_not_deployed" });
+      // The end names the step that said no last, as a closed label.
+      expect(stages).toEqual(["verify_stage.nq.no_commit"]);
+    });
+
+    it("the 11-13 shape: a genuine sync commit naming a descendant, with a relation the host could not read, waits on relation_unknown and ends naming it; read again, ahead qualifies", async () => {
+      const w = await deployed(a);
+      const d = sha("5");
+      const newer = sha("6");
+      host.commits.set(d, { parents: [sha("9"), newer], message: SYNC(newer.slice(0, 12)) });
+      healthAnswer = { kind: "ok", commit: d };
+      expect(await sweep()).toMatchObject({ ready: 0, waiting: 1, not_qualified: { relation_unknown: 1 } });
+      await forceOrder(w.orderId, `finished_at = now() - interval '${READINESS_CAP_MINUTES + 1} minutes'`);
+      const stages: string[] = [];
+      configureErrorReporter({ service: "test", write: () => undefined, sink: { record: (e) => void stages.push(e.stage) } });
+      try {
+        expect(await sweep()).toMatchObject({ unverified: 1 });
+      } finally {
+        configureErrorReporter({ service: "worker" });
+      }
+      expect(stages).toEqual(["verify_stage.nq.relation_unknown"]);
+      expect((await rowsOf(w.repo))[0]).toMatchObject({ reason_code: "commit_not_deployed" });
     });
 
     it("an app that answers with no commit keeps waiting, then ends commit_not_deployed; one that never answers ends deployment_unreachable; inside the cap neither ends", async () => {
@@ -604,7 +633,9 @@ describe("the verify stage sweep [pg]", { timeout: 120_000 }, () => {
     const repo = await newRepo(a);
     await mergedItem(a, repo, 1, { mergeSha: sha("1") });
     const counts: VerifyStageCounts = await sweep();
-    expect(Object.keys(counts).sort()).toEqual(["active", "failed", "held", "listed", "no_merge_commit", "opened", "ordered", "ready", "settled", "started", "unverified", "waiting"]);
+    expect(Object.keys(counts).sort()).toEqual(["active", "failed", "held", "listed", "no_merge_commit", "not_qualified", "opened", "ordered", "ready", "settled", "started", "unverified", "waiting"]);
+    // `not_qualified` is keyed by the closed step codes alone, never by a commit or a host's text.
+    expect(counts.not_qualified).toEqual({});
     expect(JSON.stringify(counts)).not.toContain(A_SHA);
   });
 });
