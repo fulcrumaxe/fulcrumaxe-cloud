@@ -102,6 +102,17 @@ describe("the merge gate re-ask [pg]", { timeout: 60_000 }, () => {
     expect((await ask(started, w, a.accountId)).started).toBe(false);
   });
 
+  it("the acceptance tester's `unverifiable` is a transient answer (CI turning all green covers it): a check finishing asks again, alone or beside ci_not_green; beside any other stop it does not", async () => {
+    for (const reasons of [["verdict_not_pass_acceptance_tester"], ["ci_not_green", "verdict_not_pass_acceptance_tester"]]) {
+      const { a, w } = await atGate({ reasons });
+      expect((await ask([], w, a.accountId)).started, reasons.join()).toBe(true);
+    }
+    for (const reasons of [["verdict_not_pass_acceptance_tester", "merge_conflict"], ["verdict_not_pass_acceptance_tester", "verdict_not_pass_code_reviewer"]]) {
+      const { a, w } = await atGate({ reasons });
+      expect(await ask([], w, a.accountId), reasons.join()).toMatchObject({ started: false, reason: "not_transient" });
+    }
+  });
+
   it("a stop that is not transient is never re-asked: only a person's merge setting is left, or something that still blocks", async () => {
     for (const reasons of [["auto_merge_not_allowed"], ["human_merge_only"], ["head_sha_malformed"], ["ci_not_green", "merge_conflict"], ["ci_not_green", "no_branch_protection"], ["a_code_nobody_has_heard_of"]]) {
       const { a, w } = await atGate({ reasons });

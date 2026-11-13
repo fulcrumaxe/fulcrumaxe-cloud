@@ -1904,7 +1904,9 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
   }
   if (busy()) return { status: "waiting", detail: "merge_repo_busy" };
   // A head a conflict round produced has had no CI yet: wait for it (same cadence and limit as a review's), and ask the gate again when it is the only thing missing.
-  for (let waited = 0; afterConflict && gate.outcome === "ready_human_merges" && gate.reasons.length === 1 && gate.reasons[0] === "ci_not_green" && waited < CI_WAIT_MS; ) {
+  // Any head, not only a conflict round's: the gate can read CI a moment before GitHub settles it, and the check-finished webhook that
+  // would ask again can arrive before this answer is recorded (it then skips as moved_on), leaving a green item waiting for a person. Ask again while CI alone blocks.
+  for (let waited = 0; gate.outcome === "ready_human_merges" && gate.reasons.length === 1 && gate.reasons[0] === "ci_not_green" && waited < CI_WAIT_MS; ) {
     const pause = tieredPause(waited, CI_POLL_TIERS);
     await sleep(pause);
     waited += pause;
@@ -2144,6 +2146,13 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // A fix round: the executor RESUMES the build's sandbox and session with the findings, then the head is read again.
     const failing = verdicts.filter((v) => v.verdict !== "pass" && !v.unverifiable).map((v) => ({ role: v.role, runId: v.runId }));
+    // A round caused by red CI carries the failed checks as its finding (the reviewers all passed, so none of theirs is failing).
+    if (round.ciFailed && round.ciFailed.length > 0) {
+      // The code reviewer's verdict was recorded as needs-fix for it (roundDecision.ts): its run is the round's recorded failing run, then the CI finding.
+      const code = verdicts.find((v) => v.role === "code-reviewer");
+      if (code && !failing.some((f) => f.runId === code.runId)) failing.unshift({ role: code.role, runId: code.runId });
+      failing.push({ role: "ci", runId: `ci-failed:${round.ciFailed.join("|")}` });
+    }
     const fixGate = await fixGatePhase(args);
     if (fixGate !== null) return fixGate;
     const fixAsk = await askFixUntilAllowed(args, ctx, pr, round.nextRound ?? round.round + 1, failing, rereview);
@@ -2201,7 +2210,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       }
       lookedAgain.add(pr.headSha);
       await advanceLogStep("advance.fix_no_change", { work_item_id: workItemId, run_id: fix.runId, run_status: fixed.status, head: pr.headSha.slice(0, 12), roles: failing.map((f) => f.role).join(",") });
-      again = { head: pr.headSha, roles: failing.map((f) => f.role), passes: verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId })).concat(carried), n: rereview + 1 };
+      // The CI finding is not a reviewer; re-reviewing it would be refused as invalid_input.
+      again = { head: pr.headSha, roles: failing.filter((f) => f.role !== "ci").map((f) => f.role), passes: verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId })).concat(carried), n: rereview + 1 };
       continue;
     }
     // D#599 PL-2b-2 (security model 5): a cross-side sandbox round pushes without --force; GitHub must say its new head descends from the head it started on.

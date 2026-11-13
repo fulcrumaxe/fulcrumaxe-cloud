@@ -258,6 +258,86 @@ describe("recordRound [pg]", () => {
     expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated").map((e) => e.code)).toEqual(["reviewer_fail"]);
   });
 
+  describe("the acceptance tester's `unverifiable` and CI that finished", () => {
+    const ciOf = (reading: Awaited<ReturnType<CiGate["read"]>>): CiGate => ({ read: async () => reading });
+    const roundWith = async (gate: CiGate) => {
+      const { accountId, workItemId, registry } = await seed();
+      const pass = await reviewerRun(accountId, workItemId, "code-reviewer", "pass");
+      const unverifiable = await unverifiableRun(accountId, workItemId);
+      const verdicts: GatheredVerdict[] = [{ role: "code-reviewer", runId: pass, verdict: "pass" }, { role: "acceptance-tester", runId: unverifiable, verdict: "fail", unverifiable: true }];
+      const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, gate);
+      return { out, accountId, workItemId };
+    };
+
+    it("CI entirely green on the head: the unverifiable counts as a pass, the item is at review_passed and no person is asked", async () => {
+      const { out, accountId, workItemId } = await roundWith(ciOf({ state: "settled", reasons: [], allGreen: true }));
+      expect(out.decision).toBe("all_passed");
+      expect(await stageOf(accountId, workItemId)).toBe("review_passed");
+      expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated")).toEqual([]);
+    });
+
+    it("a code reviewer's `unverifiable` is never covered, even with CI entirely green: today's stop for a person stays", async () => {
+      const { accountId, workItemId, registry } = await seed();
+      const unverifiable = await reviewerRun(accountId, workItemId, "code-reviewer", "fail");
+      const pass = await reviewerRun(accountId, workItemId, "acceptance-tester", "pass");
+      const verdicts: GatheredVerdict[] = [{ role: "code-reviewer", runId: unverifiable, verdict: "fail", unverifiable: true }, { role: "acceptance-tester", runId: pass, verdict: "pass" }];
+      const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, ciOf({ state: "settled", reasons: [], allGreen: true }));
+      expect(out.decision).toBe("unverifiable");
+      expect(await stageOf(accountId, workItemId)).toBe("needs_human");
+    });
+
+    it("a red check: no cover (the red head goes to a fix round for its failed checks, never to a pass)", async () => {
+      const { out, accountId, workItemId } = await roundWith(ciOf({ state: "settled", reasons: [], failed: ["build"] }));
+      expect(out).toMatchObject({ decision: "fix", ciFailed: ["build"] });
+      expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
+    });
+
+    it("a cancelled or otherwise not-green check (settled, not all green): today's stop for a person stays", async () => {
+      const { out, accountId, workItemId } = await roundWith(ciOf({ state: "settled", reasons: [] }));
+      expect(out.decision).toBe("unverifiable");
+      expect(await stageOf(accountId, workItemId)).toBe("needs_human");
+    });
+
+    it("a check still pending: nothing is recorded, ci_pending", async () => {
+      const { out, accountId, workItemId } = await roundWith(ciOf({ state: "pending", reasons: ["check_running"] }));
+      expect(out.decision).toBe("ci_pending");
+      expect(await stageOf(accountId, workItemId)).toBe("pr_opened");
+    });
+  });
+
+  it("CI that finished red while the code reviewer passed: recorded as the code reviewer's needs-fix, a fix round, and the failed checks come back", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const verdicts = await gather(accountId, workItemId, [["code-reviewer", "pass"], ["acceptance-tester", "pass"]]);
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, { read: async () => ({ state: "settled", reasons: [], failed: ["workspace-e2e (phone)"] }) });
+    expect(out).toMatchObject({ decision: "fix", nextRound: 1, ciFailed: ["workspace-e2e (phone)"] });
+    expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
+    expect((await transitions(workItemId)).map((t) => t.to_stage)).toContain("changes_requested");
+  });
+
+  it("red CI at the fix-round cap escalates with ci_red as the reason; a reviewer's own needs-fix at the cap does not carry it", async () => {
+    for (const red of [true, false]) {
+      const { accountId, workItemId, registry } = await seed();
+      await withTenant(db.runWriterPool, accountId, async (c) => {
+        for (let i = 1; i <= maxFixRounds(); i++) await recordDriverEvent(c, accountId, { workItemId, kind: "fix_round_started", dedupeKey: `r${i}`, round: i });
+      });
+      const verdicts = await gather(accountId, workItemId, [["code-reviewer", red ? "pass" : "needs-fix"], ["acceptance-tester", "pass"]]);
+      const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, { read: async () => ({ state: "settled", reasons: [], ...(red ? { failed: ["build"] } : {}) }) });
+      expect(out.decision).toBe("escalated");
+      const esc = (await events(accountId, workItemId)).filter((e) => e.kind === "escalated");
+      expect(esc).toHaveLength(1);
+      expect(esc[0]).toMatchObject({ code: "max_fix_rounds" });
+      expect(esc[0]!.reasons ?? []).toEqual(red ? ["ci_red"] : []);
+    }
+  });
+
+  it("red CI without a code reviewer pass does not add a ciFailed (a reviewer's own needs-fix is the round's reason)", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "pass"]]);
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, { read: async () => ({ state: "settled", reasons: [], failed: ["build"] }) });
+    expect(out.decision).toBe("fix");
+    expect(out.ciFailed).toBeUndefined();
+  });
+
   it("a person's Approve at Needs a person reviews again; a reviewer that gives up again records a new escalation without moving the stage (Needs a person has no edge to itself)", async () => {
     const { accountId, workItemId, registry } = await seed();
     const first = await endedRun(accountId, workItemId, "code-reviewer", "failed");

@@ -6,8 +6,9 @@
  * acceptance tester; the verify stage keeps the browser for the visible ones.
  *
  * The rule is deterministic and uses no model (R-597-1). In order, the first that applies decides:
- *   1. A tag at the start of the criterion: `[ui]` (also `[visible]`, `[browser]`) is visible and overrides everything below. `[code]` is code only where rules 2 to 4 would not find the
- *      criterion visible (a person acting, a screen element or a display verb keep it visible); the Spec writer emits the tags.
+ *   1. A tag at the start of the criterion: `[ui]` (also `[visible]`, `[browser]`) is visible and overrides everything below. `[code]` is code when it holds a backticked identifier and the prose
+ *      around the backticks names no person acting (rule 2); otherwise only where rules 2 to 4 would not find the criterion visible (a person acting, a screen
+ *      element or a display verb keep it visible). The Spec writer emits the tags.
  *   2. A person acting: "a person / the user / someone ... sees | clicks | opens | selects | types ..." is visible, whatever else it names.
  *   3. A code lead: the sentence opens on a backticked identifier (optionally "the `x` function") followed by returns / is / throws / equals ... is code, UNLESS it names a
  *      visible surface (page, screen, button, picker, option, label ...). "`pickRepoId` returns the id of the picker's selected option" therefore stays code only when it
@@ -55,6 +56,9 @@ export function classifyCriterion(raw: string): { kind: CriterionKind; text: str
   const text = raw.slice(tag[0].length).trim();
   if (tag[1]!.toLowerCase() !== 'code') return { kind: 'visible', text, by: 'tag' };
   // `[code]` is a claim that no page is involved, so it never hides a criterion the rule finds visible (a person acting, a screen element or a display verb).
+  // A `[code]` criterion that names a backticked identifier is about the code, whatever screen word its prose also uses ("the Roles tab labels come from
+  // `repoLabel`"); a browser can only answer `blocked` for it, so it stays code. A person acting in the prose still makes it visible.
+  if (/`[^`]+`/.test(text) && !PERSON_RE.test(text.replace(/`[^`]*`/g, ' '))) return { kind: 'code', text, by: 'tag' };
   const rule = untagged(text);
   return rule.kind === 'visible' && rule.by !== 'default' ? rule : { kind: 'code', text, by: 'tag' };
 }

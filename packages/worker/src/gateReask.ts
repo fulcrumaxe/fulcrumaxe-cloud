@@ -71,7 +71,8 @@ export async function reaskMergeGate(runnerPool: Pool, deps: GateReaskDeps, inpu
       if (!gate || gate.code !== "ready_human_merges") return { skip: "not_at_gate" };
       // Only a stop that time clears. A gate answer with any other reason still blocks (fail closed: a code this list has never heard of is not transient).
       const blocking = blockingReasons(gate.reasons ?? []);
-      if (blocking.length === 0 || !blocking.every((r) => TRANSIENT_GATE_REASONS.includes(r))) return { skip: "not_transient" };
+      // The acceptance tester's `unverifiable` clears once CI is all green (the gate covers it), so a check finishing asks again.
+      if (blocking.length === 0 || !blocking.every((r) => TRANSIENT_GATE_REASONS.includes(r) || r === "verdict_not_pass_acceptance_tester")) return { skip: "not_transient" };
     }
     const moved = await client.query("SELECT 1 FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = ANY($3::text[]) AND seq > $4 LIMIT 1", [accountId, workItemId, [...MOVED_ON_KINDS, ...(input.dequeued === true ? ["merge_enqueued"] : [])], gate.seq]);
     if (moved.rows.length > 0) return { skip: "moved_on" };

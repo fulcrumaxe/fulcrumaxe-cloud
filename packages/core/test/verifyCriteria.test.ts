@@ -44,6 +44,12 @@ describe('classifyCriterion: tags override the rule', () => {
     for (const t of ['[code] A person opens Settings and sees the repository name instead of its id', '[code] The Settings page lists every repository by name']) expect(kind(t), t).toBe('visible');
     expect(kind('[code] `f` returns 1')).toBe('code');
     expect(kind('[code] Everything keeps working')).toBe('code');
+    // A backticked identifier makes it about the code, whatever screen word the prose also uses.
+    for (const t of ['[code] The Roles tab labels come from `repoLabel` in the picker', '[code] The Settings page lists every repository by name through `repoLabel`']) expect(kind(t), t).toBe('code');
+    // A person acting in the prose keeps it visible, backticks or not.
+    expect(kind('[code] A person sees the name that `repoLabel` returns')).toBe('visible');
+    // No backticks: the rule still finds it visible; a path alone is not an identifier.
+    expect(kind('[code] The Roles tab labels come from repoLabel in roles-autonomy.js')).toBe('visible');
     expect(kind('[ui] migration 1010 adds a column')).toBe('visible');
   });
   it('display verbs are visible signals, tested before the code subjects', () => {

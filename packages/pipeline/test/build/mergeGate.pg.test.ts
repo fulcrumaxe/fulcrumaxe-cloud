@@ -19,6 +19,7 @@ import { FakeGitHub, greenCi, snap, type FakePullRequest } from "./helpers/fakeG
 import { createFakeExecutionTarget } from "./helpers/fakeExecutionTarget.js";
 import { seedAccount, seedRepo } from "./helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
+import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 
 /**
  * D#2 H14b, H14 criterion 3 as replaced by C11: the merge-gate TABLE test.
@@ -62,6 +63,7 @@ interface Case {
     | "green"
     | "green_on_old_pending_on_head"
     | "none"
+    | "own_status_only"
     | "one_failing"
     | "pending_status"
     | "wrong_sha_data"
@@ -552,6 +554,38 @@ const CASES: Case[] = [
     reasons: ["verdict_not_pass_acceptance_tester"],
   },
   {
+    name: "acceptance-tester `unverifiable` with CI entirely green on the head is covered by CI",
+    runs: [pass("code-reviewer"), { role: "acceptance-tester", verdict: "unverifiable" }],
+    expect: "merge",
+  },
+  {
+    name: "acceptance-tester `unverifiable` with a red check is not covered: both reasons stay",
+    runs: [pass("code-reviewer"), { role: "acceptance-tester", verdict: "unverifiable" }],
+    ci: "one_failing",
+    expect: "human",
+    reasons: ["ci_not_green", "verdict_not_pass_acceptance_tester"],
+  },
+  {
+    name: "acceptance-tester `unverifiable` with only our own review status green is not covered (no check of the repository's own passed)",
+    runs: [pass("code-reviewer"), { role: "acceptance-tester", verdict: "unverifiable" }],
+    ci: "own_status_only",
+    expect: "human",
+    reasons: ["verdict_not_pass_acceptance_tester"],
+  },
+  {
+    name: "acceptance-tester `unverifiable` with a pending commit status is not covered",
+    runs: [pass("code-reviewer"), { role: "acceptance-tester", verdict: "unverifiable" }],
+    ci: "pending_status",
+    expect: "human",
+    reasons: ["ci_not_green", "verdict_not_pass_acceptance_tester"],
+  },
+  {
+    name: "a code reviewer's `unverifiable` is never covered by CI (only the acceptance tester's is)",
+    runs: [{ role: "code-reviewer", verdict: "unverifiable" }, pass("acceptance-tester")],
+    expect: "human",
+    reasons: ["verdict_not_pass_code_reviewer"],
+  },
+  {
     name: "acceptance-tester with no row blocks (strict reading of 'not a fail')",
     runs: [pass("code-reviewer")],
     expect: "human",
@@ -741,6 +775,9 @@ describe("H14b merge gate: table [pg]", () => {
         return { ciBySha: { [OLD]: greenCi(OLD), [HEAD]: snap(HEAD, [{ name: "check", status: "in_progress", conclusion: null }], []) } };
       case "none":
         return { ciBySha: { [HEAD]: snap(HEAD, [], []) } };
+      // Green by our own review status alone: the repository has no check of its own that passed.
+      case "own_status_only":
+        return { ciBySha: { [HEAD]: snap(HEAD, [], [{ context: REVIEW_STATUS_CONTEXT, state: "success" }]) } };
       case "one_failing":
         return { ciBySha: { [HEAD]: snap(HEAD, [ok, { name: "e2e", status: "completed", conclusion: "failure" }], []) } };
       case "pending_status":

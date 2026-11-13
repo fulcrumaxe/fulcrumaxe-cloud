@@ -357,6 +357,8 @@ export interface RoundOut {
   recorded: string[];
   /** `ci_pending` only: the `reasons` a `ci_wait_timeout` stop would carry (the wait's reason words, then `missing_<check>` names). */
   ciStop?: string[];
+  /** `fix` caused by finished red CI: the failed check names (public names). */
+  ciFailed?: string[];
 }
 
 export interface GatheredInput {
@@ -378,7 +380,7 @@ export async function recordRoundBody(worker: ReviewWorker | null, who: StepWho,
   // A halt is its own answer, so the workflow can record one stop and end instead of treating it as a failed round.
   if (out.decision === "refused") return { decision: "reason" in out && (out.reason === "item_halted" || out.reason === "halted_since_approval") ? "halted" : "refused", round: 0, nextRound: null, recorded: [] };
   const done = out as Exclude<typeof out, { decision: "refused"; reason: string }>;
-  return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`), ...(done.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(done.ciReasons, done.ciMissing, done.ciRunning) } : {}) };
+  return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`), ...(done.ciFailed ? { ciFailed: done.ciFailed } : {}), ...(done.decision === "ci_pending" ? { ciStop: ciWaitStopReasons(done.ciReasons, done.ciMissing, done.ciRunning) } : {}) };
 }
 
 /** D#598 P7c: `all_passed` (a merge-only head, carried forward and recorded), `full_review` (run the reviewers), `ci_pending`, `halted` or `refused`. */
@@ -432,6 +434,12 @@ export async function startFixBody(
   if (spec === null) return { ok: false, runId: null, reason: "spec_changed" };
   const findings: FixFinding[] = [];
   for (const f of failing.slice(0, 4)) {
+    // The pull request's CI finished red. Its failed checks (public names only, no log text) are the finding.
+    if (f.role === "ci" && f.runId.startsWith("ci-failed:")) {
+      const names = f.runId.slice("ci-failed:".length).split("|").filter(Boolean).slice(0, 5);
+      findings.push({ role: "ci", verdict: "needs-fix", findings: [`The pull request's CI finished red on this head. Failed checks: ${names.join(", ")}. Run the failing suites yourself (for workspace-e2e (desktop|phone|tablet): pnpm --filter @fulcrumaxe/workspace exec playwright test --project=<desktop|phone|tablet> on the spec files this change touches), find why each failing test fails, and fix the code or the test so every listed check passes. Do not skip or delete a test to make it pass.`], summary: "CI failed" });
+      continue;
+    }
     const o = await worker.advanceRunOutcome(who.accountId, f.runId);
     const v = readVerdict(o.status, o.envelope);
     findings.push({ role: f.role, verdict: v.verdict, findings: v.findings, fullFindings: v.fullFindings, summary: v.summary });

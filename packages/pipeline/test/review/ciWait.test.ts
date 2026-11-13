@@ -55,7 +55,34 @@ describe("readCiWait", () => {
     expect({ state: named.state, reasons: named.reasons }).toEqual(readCiWait(s, HEAD));
     // Reported ones are not named; with nothing missing there is no `missing` at all (an unfinished check is named under `running`).
     expect(readCiWaitNamed(snap({ requiredContexts: ["build", "guard"], checkRuns: [run("build", "completed", "success"), run("guard", "queued")] }), HEAD)).toEqual({ state: "pending", reasons: ["check_running"], running: ["guard"] });
-    expect(readCiWaitNamed(snap(), HEAD)).toEqual({ state: "settled", reasons: [] });
+    expect(readCiWaitNamed(snap(), HEAD)).toEqual({ state: "settled", reasons: [], allGreen: true });
+  });
+
+  it("readCiWaitNamed names the finished checks that failed: failure and timed_out check runs, failure and error statuses (never cancelled or action_required, never our own status)", () => {
+    const named = readCiWaitNamed(snap({
+      checkRuns: [run("zeta", "completed", "failure"), run("alpha", "completed", "timed_out"), run("moved", "completed", "cancelled"), run("gate", "completed", "action_required"), run("ok", "completed", "success")],
+      statuses: [{ context: "ci/old", state: "error" }, { context: "ci/x", state: "failure" }, { context: REVIEW_STATUS_CONTEXT, state: "failure" }],
+    }), HEAD);
+    expect(named.state).toBe("settled");
+    expect(named.failed).toEqual(["alpha", "ci/old", "ci/x", "zeta"]);
+    expect(named.allGreen).toBeUndefined();
+  });
+
+  it("a cancelled-only head is settled, not red (nothing for a fix round to fix) and not all green", () => {
+    const named = readCiWaitNamed(snap({ checkRuns: [run("build", "completed", "success"), run("e2e", "completed", "cancelled")] }), HEAD);
+    expect(named.state).toBe("settled");
+    expect(named.failed).toBeUndefined();
+    expect(named.allGreen).toBeUndefined();
+  });
+
+  it("allGreen: every check run success, skipped or neutral and every status success; a head with no check run is not all green; a pending head reports neither", () => {
+    expect(readCiWaitNamed(snap({ checkRuns: [run("a", "completed", "success"), run("b", "completed", "skipped"), run("c", "completed", "neutral")], statuses: [{ context: "ci/x", state: "success" }] }), HEAD).allGreen).toBe(true);
+    expect(readCiWaitNamed(snap({ checkRuns: [] }), HEAD).allGreen).toBeUndefined();
+    expect(readCiWaitNamed(snap({ statuses: [{ context: "ci/x", state: "failure" }] }), HEAD).allGreen).toBeUndefined();
+    expect(readCiWaitNamed(snap({ statuses: [{ context: REVIEW_STATUS_CONTEXT, state: "pending" }] }), HEAD).allGreen).toBe(true);
+    const pending = readCiWaitNamed(snap({ checkRuns: [run("a", "completed", "success"), run("b", "queued")] }), HEAD);
+    expect(pending.allGreen).toBeUndefined();
+    expect(pending.failed).toBeUndefined();
   });
 
   it("a requirement for our own review status does not hold the verdict back (it can only be met after the verdict)", () => {

@@ -961,7 +961,18 @@ async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput, le
   if (mode === "runner_local_off") reasons.push("local_review_not_enabled");
 
   const ci = await deps.github.getCiSnapshot(input.pr, headSha);
-  if (!isCiGreen(ci, headSha) || missingExpectedSignals(ci, input.expectedSignals ?? []).length > 0) reasons.push("ci_not_green");
+  const ciGreen = isCiGreen(ci, headSha) && missingExpectedSignals(ci, input.expectedSignals ?? []).length === 0;
+  if (!ciGreen) reasons.push("ci_not_green");
+  // The round decision counts the acceptance tester's `unverifiable` as covered when CI is entirely green on
+  // this head; the gate reads the tester's own run verdict, so it applies the same rule here: green CI, a succeeded latest tester run whose verdict is `unverifiable`.
+  // A check run or status the repository owns must be among the green signals: our own review status can never be the only one.
+  if (ciGreen && hasRepoOwnCi(ci) && reasons.includes("verdict_not_pass_acceptance_tester")) {
+    const tester = rows.filter((r) => r.role === "acceptance-tester" && r.is_latest);
+    if (tester.length > 0 && tester.every((r) => r.status === "succeeded" && r.verdict === "unverifiable")) {
+      reasons.splice(reasons.indexOf("verdict_not_pass_acceptance_tester"), 1);
+      console.log(JSON.stringify({ event: "merge_gate.unverifiable_covered_by_ci", head: headSha.slice(0, 12) }));
+    }
+  }
   if (mode === "runner_local_on") {
     // (c): GitHub, not a runner, decides CI and protection. Our own status must not be the only CI signal.
     if (!hasRepoOwnCi(ci) && !repoOwnCiRunning(ci)) reasons.push("repo_ci_missing");
