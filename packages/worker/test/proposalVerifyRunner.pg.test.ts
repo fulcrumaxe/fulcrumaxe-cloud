@@ -41,6 +41,7 @@ describe("the proposal verifier sweep on a runner [pg]", { timeout: 120_000 }, (
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   /** GitHub's answer for the repository's visibility, per repo id (default private). */
   const seen = new Map<string, RepoVisibility>();
+  const visibilityReads: string[] = [];
   const visibility = { visibility: async ({ repoId }: { repoId: string }) => seen.get(repoId) ?? "private" };
   const headReads: string[] = [];
   const settings = (): VerifySettings => ({ on: true, perRepoDailyUsd: 50, verifyPerProposalUsd: 0.4, externalVerifiesPerRepoPerDay: 7 });
@@ -64,7 +65,7 @@ describe("the proposal verifier sweep on a runner [pg]", { timeout: 120_000 }, (
         resolveSeat: createSeatResolver({ pool: writerPool }),
         starter: createRunStarter({ pool: writerPool, registry, follow: async () => undefined, queued: "refuse" }),
         ...(runner ? { runnerStarter: createRunStarter({ pool: writerPool, registry, follow: async () => undefined, queued: "accept" }) } : {}),
-        visibility,
+        visibility: { visibility: async (a: { accountId: string; repoId: string }) => (visibilityReads.push(a.repoId), visibility.visibility(a)) },
         github: (repo) => ({
           headSha: async () => {
             headReads.push(repo.repoId);
@@ -203,15 +204,43 @@ describe("the proposal verifier sweep on a runner [pg]", { timeout: 120_000 }, (
     }
   });
 
-  it("a Local-only repository is not verified: not listed, no run, and our cloud reads nothing of it", async () => {
+  it("a Local-only repository: the run is a pending runner job pinned to the commit, started once GitHub reads it as private, and a second pass waits", async () => {
     const { a, repoId } = await target("runner_local");
     const id = await proposal(a, repoId);
     const listed = (await writerPool.query("SELECT proposal_id FROM proposal_verify_list_due(200)")).rows.map((r) => r.proposal_id);
-    expect(listed).not.toContain(id);
+    expect(listed).toContain(id);
+    visibilityReads.length = 0;
+    const counts = await sweep();
+    expect(counts.started).toBeGreaterThanOrEqual(1);
+    const [run] = await runsOf(id);
+    expect(run).toMatchObject({ role: PROPOSAL_VERIFIER_ROLE, status: "pending", runtime: "runner", execution_mode: "runner_local", head_sha: SHA });
+    expect(visibilityReads).toContain(repoId);
+    await sweep();
+    expect(await runsOf(id)).toHaveLength(1);
+    expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0 });
+  });
+
+  it.each(["public", "unknown"] as const)("a Local-only repository GitHub reads as %s starts nothing: no head read, no run, no reservation, the proposal stays pending", async (answer) => {
+    const { a, repoId } = await target("runner_local");
+    const before = (await admin.query("SELECT count(*)::int AS n FROM spend_reservations WHERE account_id = $1", [a.accountId])).rows[0].n as number;
+    seen.set(repoId, answer);
+    const id = await proposal(a, repoId);
     headReads.length = 0;
     await sweep();
-    expect(await runsOf(id)).toEqual([]);
     expect(headReads).not.toContain(repoId);
+    expect(await runsOf(id)).toEqual([]);
+    expect((await admin.query("SELECT count(*)::int AS n FROM spend_reservations WHERE account_id = $1", [a.accountId])).rows[0].n).toBe(before);
+    expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0 });
+    seen.set(repoId, "private");
+    await sweep();
+    expect(await runsOf(id)).toHaveLength(1);
+  });
+
+  it("without a runner starter wired, a Local-only proposal starts nothing and stays pending", async () => {
+    const { a, repoId } = await target("runner_local");
+    const id = await proposal(a, repoId);
+    await sweep({ runner: false });
+    expect(await runsOf(id)).toEqual([]);
     expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0 });
   });
 

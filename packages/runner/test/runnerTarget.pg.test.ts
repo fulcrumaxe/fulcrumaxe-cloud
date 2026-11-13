@@ -80,7 +80,13 @@ describe("RunnerTarget [pg]", () => {
       expect(t.port.calls).toHaveLength(0);
     });
 
-    it.each(["proposal-verifier", "discovery-analyst"])("%s, a confined read role that our cloud re-reads, is still refused in a Local-only repository", async (role) => {
+    it("the claim verifier (D#483) is admitted in a Local-only repository", async () => {
+      const w = await world();
+      const run = await insertRun(w, { role: "proposal-verifier" });
+      expect(await target(db.runWriterPool).target.admit(run, db.admin)).toEqual({ admitted: true });
+    });
+
+    it.each(["discovery-analyst"])("%s, a confined read role that our cloud re-reads, is still refused in a Local-only repository", async (role) => {
       const w = await world();
       const run = await insertRun(w, { role });
       expect(await target(db.runWriterPool).target.admit(run, db.admin)).toEqual({ admitted: false, reason: "role_not_runner_eligible" });

@@ -187,7 +187,7 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
     expect(await waitOf(who, mine)).toBe('queued');
   });
 
-  it('runner_check_not_built: a pending proposal on a runner_local repository says so; the cloud and runner_verified repositories read queued', async () => {
+  it('a pending proposal reads queued on runner_local as on the cloud and runner_verified (runner_check_not_built is no longer produced but stays in the enum)', async () => {
     usePlan(limitOf(10));
     const who = await seedAccountWithMember(admin, { role: 'member' });
     const wait = async (mode: string): Promise<string | null> => {
@@ -195,7 +195,7 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
       await admin.query('UPDATE repos SET execution_mode = $1 WHERE id = $2', [mode, repo]);
       return waitOf(who, await proposalFor(who, repo));
     };
-    expect(await wait('runner_local')).toBe('runner_check_not_built');
+    expect(await wait('runner_local')).toBe('queued');
     expect(await wait('sandbox')).toBe('queued');
     expect(await wait('runner_verified')).toBe('queued');
     // The field is in the documented enum.

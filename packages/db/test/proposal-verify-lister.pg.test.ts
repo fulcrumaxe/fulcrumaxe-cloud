@@ -93,7 +93,7 @@ describe(`migration 0889: ${ROLE} and proposal_verify_list_due [pg]`, () => {
   const listed = async (wanted: string[]): Promise<string[]> =>
     (await writerPool.query<{ account_id: string; proposal_id: string }>('SELECT * FROM proposal_verify_list_due(200)')).rows.map((r) => r.proposal_id).filter((id) => wanted.includes(id));
 
-  it('lists pending and retryable proposals of every account as (account, proposal), oldest first, and nothing that is not waiting', async () => {
+  it('lists pending and retryable proposals of every account as (account, proposal), newest first (1015), and nothing that is not waiting', async () => {
     const a = await proposal(A);
     const b = await proposal(B);
     const retry = await proposal(A, { verification: 'check_failed', attempts: MAX_VERIFY_ATTEMPTS - 1 });
@@ -102,13 +102,13 @@ describe(`migration 0889: ${ROLE} and proposal_verify_list_due [pg]`, () => {
     const unchecked = await proposal(A, { verification: 'not_checked' });
     const withdrawn = await proposal(B, { state: 'withdrawn' });
     const internal = await proposal(B, { owner: 'internal_loop' });
-    expect(await listed([a, b, retry, spent, done, unchecked, withdrawn, internal])).toEqual([a, b, retry]);
+    expect(await listed([a, b, retry, spent, done, unchecked, withdrawn, internal])).toEqual([retry, b, a]);
     const row = (await writerPool.query('SELECT * FROM proposal_verify_list_due(200)')).rows.find((r) => r.proposal_id === b);
     expect(row).toEqual({ account_id: B.accountId, proposal_id: b });
   });
 
-  // D#483 S4-b2c (0893): a Cloud-verified repository's verifier is a runner job, so its proposals are listed; a Local-only one's still are not.
-  it('lists a Cloud-verified repository, and still leaves out a Local-only one', async () => {
+  // D#483 S4-b2c (0893): a Cloud-verified and a Local-only repository's verifier is a runner job, so both are listed (1014).
+  it('lists a Cloud-verified repository and a Local-only one, newest first', async () => {
     const repo = async (mode: string): Promise<string> => {
       const id = randomUUID();
       await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, $4, 'team', 'o', $5, $6)`, [id, A.accountId, A.installationId, Math.floor(Math.random() * 1e9), `r${id.slice(0, 8)}`, mode]);
@@ -116,23 +116,36 @@ describe(`migration 0889: ${ROLE} and proposal_verify_list_due [pg]`, () => {
     };
     const verified = await proposal(A, { repoId: await repo('runner_verified') });
     const local = await proposal(A, { repoId: await repo('runner_local') });
-    expect(await listed([verified, local])).toEqual([verified]);
+    expect(await listed([verified, local])).toEqual([local, verified]);
     const policy = await admin.query<{ qual: string }>(`SELECT qual FROM pg_policies WHERE tablename = 'repos' AND policyname = 'proposal_verify_lister_select'`);
-    expect(policy.rows[0]!.qual).toMatch(/sandbox.*runner_verified/);
-    expect(policy.rows[0]!.qual).not.toMatch(/runner_local/);
+    expect(policy.rows[0]!.qual).toMatch(/sandbox.*runner_verified.*runner_local/);
   });
 
-  it('leaves out a repository on the person own machine and a deleted account, and gives one account at most 10 places', async () => {
+  it("1016: fair across accounts: every account's newest proposal comes before anyone's second", async () => {
+    const X = await seedAccount(admin, randomUUID());
+    const Y = await seedAccount(admin, randomUUID());
+    const Z = await seedAccount(admin, randomUUID());
+    // X has a backlog of three; Y and Z have one each, created last.
+    const x1 = await proposal(X);
+    const x2 = await proposal(X);
+    const x3 = await proposal(X);
+    const y1 = await proposal(Y);
+    const z1 = await proposal(Z);
+    // First places by rank, newest first among them; then X's second and third.
+    expect(await listed([x1, x2, x3, y1, z1])).toEqual([z1, y1, x3, x2, x1]);
+  });
+
+  it('lists a repository on the person own machine,leaves out a deleted account, and gives one account at most 10 places', async () => {
     const runnerRepo = randomUUID();
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, $4, 'team', 'o', 'r', 'runner_local')`, [runnerRepo, A.accountId, A.installationId, Math.floor(Math.random() * 1e9)]);
     const local = await proposal(A, { repoId: runnerRepo });
     const gone = await seedAccount(admin, randomUUID());
     const orphan = await proposal(gone);
     await admin.query(`UPDATE accounts SET deleted_at = now() WHERE id = $1`, [gone.accountId]);
-    expect(await listed([local, orphan])).toEqual([]);
+    expect(await listed([local, orphan])).toEqual([local]);
     const big = await seedAccount(admin, randomUUID());
     const ids: string[] = [];
     for (let i = 0; i < 12; i++) ids.push(await proposal(big));
-    expect(await listed(ids)).toEqual(ids.slice(0, 10));
+    expect(await listed(ids)).toEqual(ids.slice(2).reverse());
   });
 });

@@ -309,15 +309,19 @@ describe('envelope edits, the weekly auto-start envelope and the default margin 
 
     it('S5-b1a-2: confirming or raising the limit wakes the auto-start pass; turning it off, or the same amount again, does not', async () => {
       const sets: string[] = [];
-      setPendingHooks({ store: { get: async () => null, set: async (key) => { sets.push(key); }, delete: async () => {} } });
+      const kicked: string[] = [];
+      setPendingHooks({ store: { get: async () => null, set: async (key) => { sets.push(key); }, delete: async () => {} }, kick: (name) => void kicked.push(name) });
       try {
         const t = await team();
         await call(t.owner, 'PUT', '/account/autostart-envelope', { amount_usd: 20, confirm: true });
         expect(sets).toContain('pending:proposal-verify-sweep');
+        expect(kicked).toEqual(['proposal-verify-sweep']);
+        kicked.length = 0;
         sets.length = 0;
         await call(t.owner, 'PUT', '/account/autostart-envelope', { amount_usd: 20, confirm: true });
         await call(t.owner, 'PUT', '/account/autostart-envelope', { amount_usd: 0 });
         expect(sets).toEqual([]);
+        expect(kicked).toEqual([]);
       } finally {
         setPendingHooks(null);
       }

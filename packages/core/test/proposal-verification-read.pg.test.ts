@@ -347,22 +347,22 @@ describe('proposal verification read (S4-i)', () => {
     }
   });
 
-  it('verify_wait: a pending proposal on a runner_local repository reads runner_check_not_built; the cloud and runner_verified read queued', async () => {
+  it('verify_wait: a pending proposal reads queued in every execution mode, runner_local included (the old runner_check_not_built is no longer produced)', async () => {
     const reading = async (mode: string | null): Promise<string | null> => {
       const repo = await newRepo(a, 'acme', 'modes');
       if (mode !== null) await admin.query('UPDATE repos SET execution_mode = $1 WHERE id = $2', [mode, repo]);
       const id = await newProposal(a, repo, { provenance: 'external' });
       return (await getProposal(ctxOf(a), id)).verify_wait;
     };
-    expect(await reading('runner_local')).toBe('runner_check_not_built');
+    expect(await reading('runner_local')).toBe('queued');
     expect(await reading('sandbox')).toBe('queued');
     expect(await reading('runner_verified')).toBe('queued');
-    // The wait holds with verification settings off too, since no setting ever starts a check on this repository.
+    // With verification settings off a Local-only proposal reads queued too.
     const repo = await newRepo(a, 'acme', 'modes2');
     await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [repo]);
     const id = await newProposal(a, repo);
     const off = await getProposal(ctxOf(a), id, () => ({ on: false, code: 'discovery_unconfigured' }));
-    expect(off.verify_wait).toBe('runner_check_not_built');
+    expect(off.verify_wait).toBe('queued');
   });
 
   it('readProposal inside a transaction carries the same counts the decision routes return', async () => {

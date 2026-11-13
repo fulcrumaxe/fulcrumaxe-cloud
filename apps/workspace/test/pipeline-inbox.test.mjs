@@ -86,7 +86,7 @@ describe("S4-h: the check on a proposal", () => {
     expect(unfinishedCheckLine({ verification: "check_failed" }, "daily_limit")).toBe(DETAIL_FAILED_SENTENCE);
     expect(unfinishedCheckLine({ verification: "not_checked" }, "daily_spend")).toBe(NOT_CHECKED_SENTENCE);
     expect(unfinishedCheckLine({ verification: "verified" }, "daily_spend")).toBe("");
-    expect(unfinishedCheckLine(pending, "runner_check_not_built")).toBe("This repository runs work on your own runner. Checking proposals on your runner is not built yet, so this one waits here.");
+    expect(unfinishedCheckLine(pending, "runner_check_not_built")).toBe("This repository runs work on your own runner. The check for this proposal runs there, so it waits here until that finishes.");
     expect(unfinishedCheckLine({ verification: "not_checked" }, "runner_check_not_built")).toBe(NOT_CHECKED_SENTENCE);
     for (const s of Object.values(VERIFY_WAIT_SENTENCES)) expect(s).not.toMatch(BAD);
   });

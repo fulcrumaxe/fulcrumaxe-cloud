@@ -195,7 +195,7 @@ export const envelopeSettingRoutes: RouteEntry[] = [
       try {
         const out = await withTenant(ctx.pool, accountId, userId, (client) => changeAutostart(client, { accountId, amountUsd }));
         // D#483 S5-b1a-2: a newly confirmed limit lets waiting proposals start; the auto-start pass wakes now instead of at the backstop.
-        if (out.written && amountUsd > 0) void markWorkPending("proposal-verify-sweep");
+        if (out.written && amountUsd > 0) void markWorkPending("proposal-verify-sweep", { kick: true });
         return { ...autostartView(out.state), changed: out.written };
       } catch (error) {
         throw mapError(error);

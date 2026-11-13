@@ -146,11 +146,10 @@ export async function verifyHold(
 }
 
 /**
- * The detail route's `verify_wait`: null unless the proposal is `pending`; then `runner_check_not_built` when its repository runs work on the
- * customer's own runner (`runner_local`: the hosted check never reads such a repository, and no runner-side check exists yet, so it waits
- * with no run coming), else what `verifyHold` says (`daily_limit` or `daily_spend`), else `queued`. The repository's mode is read as the
- * check sweep reads it (`repos.execution_mode`, a repository without one is on the cloud). With verification off (`discovery_unconfigured`)
- * nothing is held by a limit, so a pending proposal on the cloud reads `queued`.
+ * The detail route's `verify_wait`: null unless the proposal is `pending`; then what `verifyHold` says (`daily_limit` or `daily_spend`), else
+ * `queued`, in every execution mode (a Local-only repository's check now runs on its own runner, so it reads as any other). The value
+ * `runner_check_not_built` is no longer produced; it stays in `VERIFY_WAITS` so a stored or wire value from before still parses.
+ * With verification off (`discovery_unconfigured`) nothing is held by a limit, so a pending proposal reads `queued`.
  */
 export async function verifyWait(
   client: Query,
@@ -159,8 +158,6 @@ export async function verifyWait(
   settings: DiscoverySettings,
 ): Promise<VerifyWait | null> {
   if (p.verification !== 'pending') return null;
-  const mode = await client.query<{ execution_mode: string | null }>('SELECT execution_mode FROM repos WHERE account_id = $1 AND id = $2', [accountId, p.repo_id]);
-  if (mode.rows[0]?.execution_mode === 'runner_local') return 'runner_check_not_built';
   if (!settings.on) return 'queued';
   return (await verifyHold(client, accountId, p, settings)) ?? 'queued';
 }

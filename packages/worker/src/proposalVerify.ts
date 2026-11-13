@@ -35,8 +35,11 @@ import type { SeatRequest, SeatResult } from "./seat.js";
  *    from GitHub now (`visibility`); anything else (public, unknown, a failed read) starts nothing and uses no attempt. The job carries the
  *    pinned commit (the runner checks it out, detached), and its result is recorded exactly as a sandbox run's: our cloud re-reads every cite
  *    at the pinned sha, as it already reads such a repository for its reviews.
- *  - `runner_local` (Local-only), or anything else: nothing. Our cloud never reads a Local-only repository's files, so its proposals wait for a
- *    runner-side check (a later row). The lister (0889/0893) leaves them out; this is the second lock.
+ *  - `runner_local` (Local-only): the same light job on that repository's own runner, with the same visibility rule as `runner_verified` (it must
+ *    read as private now). The result is recorded as for `runner_verified`: our cloud re-reads the cites at the pinned sha through the
+ *    installation. That re-read is interim, until the claim check moves onto the runner.
+ *  - anything else: nothing. The lister (0889/0893/1014) lists sandbox, runner_verified and runner_local repositories, fairly across accounts and
+ *    newest first (1015/1016); this is the second lock.
  * The pipeline decides everything here; the model's output is only parsed (R-597-1). Nothing here changes a proposal's state, approval or
  * work item (the definer refuses it).
  *
@@ -171,10 +174,13 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
   const now = deps.now ?? Date.now;
 
   /** S4-b2c: the starter and mode a new run of this repository uses, or null when none may start (see the header). */
-  async function placementFor(accountId: string, repoId: string): Promise<{ mode: "sandbox" | "runner_verified"; starter: RunStarter } | null> {
+  async function placementFor(accountId: string, repoId: string): Promise<{ mode: "sandbox" | "runner_verified" | "runner_local"; starter: RunStarter } | null> {
     const mode = await readExecutionMode(deps.pool, accountId, repoId);
     if (mode === "sandbox") return { mode, starter: deps.starter };
-    if (mode !== "runner_verified" || deps.runnerStarter === undefined || deps.visibility === undefined) return null;
+    // A Local-only repo's proposal is checked on its own runner, as a Cloud-verified one is, and starts only when GitHub reads it as private (a public
+    // or unreadable repo starts nothing). The result is recorded as for runner_verified (cites re-read at the pinned sha through the installation);
+    // that re-read is interim, until the claim check moves onto the runner.
+    if ((mode !== "runner_verified" && mode !== "runner_local") || deps.runnerStarter === undefined || deps.visibility === undefined) return null;
     const seen: RepoVisibility = await deps.visibility.visibility({ accountId, repoId }).catch((): RepoVisibility => "unknown");
     return seen === "private" ? { mode, starter: deps.runnerStarter } : null;
   }
