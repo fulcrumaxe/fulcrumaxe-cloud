@@ -82,3 +82,4 @@ export {
   verifySweepKickerFromEnv,
   type VerifySweepKickerOptions,
 } from './verifyKick.js';
+export { BYPASS_HEADER, bypassSecretFor, ownHosts, readBypassSecret, reportRefusedKick } from './ownHostBypass.js';
