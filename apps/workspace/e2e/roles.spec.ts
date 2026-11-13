@@ -505,6 +505,128 @@ test("a refresh during a save waits for it, then reloads once", async ({ page })
   expect(seen.patches).toHaveLength(1);
 });
 
+test("the debater role's mode select labels options with human-readable text", async ({ page }) => {
+  const debater = {
+    role: "debater",
+    allowed_modes: ["off", "feature_critical", "always"],
+    mode: "feature_critical",
+    model: null,
+    allowed_models: [],
+    expected_spend: { text: "test spend", caveat: "test caveat" },
+  };
+  await boot(page, {
+    admin: true,
+    roles: () => ({ data: [debater] }),
+  });
+  const modeSelect = page.locator(`${WIN} [data-role="debater"] [data-testid="roles-mode"]`);
+  await expect(modeSelect.locator("option")).toHaveText(["Off", "On for features and critical work", "On for every pull request"]);
+  await expect(modeSelect).not.toContainText("off");
+  await expect(modeSelect).not.toContainText("feature_critical");
+  await expect(modeSelect).not.toContainText("always");
+});
+
+test("the debater role's mode select keeps raw values in option elements", async ({ page }) => {
+  const debater = {
+    role: "debater",
+    allowed_modes: ["off", "feature_critical", "always"],
+    mode: "feature_critical",
+    model: null,
+    allowed_models: [],
+    expected_spend: { text: "test spend", caveat: "test caveat" },
+  };
+  await boot(page, {
+    admin: true,
+    roles: () => ({ data: [debater] }),
+  });
+  const modeSelect = page.locator(`${WIN} [data-role="debater"] [data-testid="roles-mode"]`);
+  const options = await modeSelect.locator("option").all();
+  const values = await Promise.all(options.map((opt) => opt.getAttribute("value")));
+  expect(values).toEqual(["off", "feature_critical", "always"]);
+  await expect(modeSelect).toHaveValue("feature_critical");
+});
+
+test("changing debater mode to 'always' sends PATCH and persists after reload", async ({ page }) => {
+  const debater = {
+    role: "debater",
+    allowed_modes: ["off", "feature_critical", "always"],
+    mode: "feature_critical",
+    model: null,
+    allowed_models: [],
+    expected_spend: { text: "test spend", caveat: "test caveat" },
+  };
+  let reloads = 0;
+  const seen = await boot(page, {
+    admin: true,
+    roles: () => {
+      reloads++;
+      return {
+        data: [
+          {
+            ...debater,
+            mode: reloads > 1 ? "always" : "feature_critical",
+          },
+        ],
+      };
+    },
+  });
+  const modeSelect = page.locator(`${WIN} [data-role="debater"] [data-testid="roles-mode"]`);
+  await modeSelect.selectOption("always");
+  await expect.poll(() => seen.patches.length).toBe(1);
+  expect(seen.patches[0]).toEqual({ role: "debater", body: { mode: "always" } });
+  await expect(modeSelect).toHaveValue("always");
+  await expect(modeSelect.locator("option:has-text('On for every pull request')")).toHaveAttribute("value", "always");
+  // After reload, the select still shows "On for every pull request" selected
+  await page.reload();
+  await openRoles(page);
+  await expect(modeSelect).toHaveValue("always");
+  await expect(modeSelect.locator("option[value='always']")).toHaveText("On for every pull request");
+});
+
+test("changing debater mode to 'off' sends PATCH and persists after reload", async ({ page }) => {
+  const debater = {
+    role: "debater",
+    allowed_modes: ["off", "feature_critical", "always"],
+    mode: "always",
+    model: null,
+    allowed_models: [],
+    expected_spend: { text: "test spend", caveat: "test caveat" },
+  };
+  let reloads = 0;
+  const seen = await boot(page, {
+    admin: true,
+    roles: () => {
+      reloads++;
+      return {
+        data: [
+          {
+            ...debater,
+            mode: reloads > 1 ? "off" : "always",
+          },
+        ],
+      };
+    },
+  });
+  const modeSelect = page.locator(`${WIN} [data-role="debater"] [data-testid="roles-mode"]`);
+  await modeSelect.selectOption("off");
+  await expect.poll(() => seen.patches.length).toBe(1);
+  expect(seen.patches[0]).toEqual({ role: "debater", body: { mode: "off" } });
+  await expect(modeSelect).toHaveValue("off");
+  await expect(modeSelect.locator("option[value='off']")).toHaveText("Off");
+  // After reload, the select still shows "Off" selected
+  await page.reload();
+  await openRoles(page);
+  await expect(modeSelect).toHaveValue("off");
+});
+
+test("non-debater roles show raw mode values in select options", async ({ page }) => {
+  await boot(page, {
+    admin: true,
+    roles: () => ({ data: [ROLES.data[0]] }),
+  });
+  const build = page.locator(`${WIN} [data-role="build"]`);
+  await expect(build.locator("[data-testid='roles-mode'] option")).toHaveText(["off", "suggest", "auto"]);
+});
+
 test("the app source has no sink, no direct fetch, only the PATCH mutation, no 401 branch, no SDK state", () => {
   const src = readFileSync(join(SCRIPT_DIR, "..", "apps", "roles", "roles-app.js"), "utf8");
   expect(src).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);

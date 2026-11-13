@@ -20,7 +20,7 @@ import { api } from "../_lib/api.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import { getItem, setItem } from "../../core/storage-ns.js";
 import { addRunLimitsView } from "./roles-limits.js";
-import { mountAutonomy } from "./roles-autonomy.js";
+import { mountAutonomy, MERGE_COPY } from "./roles-autonomy.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -97,7 +97,10 @@ function roleRow(role, x) {
     "roles-mode",
     "Mode",
     "roles-mode",
-    role.allowed_modes.map((m) => h("option", { value: m, selected: m === role.mode }, m))
+    role.allowed_modes.map((m) => {
+      const label = role.role === "debater" && m in MERGE_COPY.debater ? MERGE_COPY.debater[m] : m;
+      return h("option", { value: m, selected: m === role.mode }, label);
+    })
   );
   mode.setAttribute("data-can-edit", x.canEdit ? "true" : "false");
   const floorHint = role.model_floor ? h("span", { class: "roles-floor", id: floorId }, " (at least " + role.model_floor + ")") : null;
