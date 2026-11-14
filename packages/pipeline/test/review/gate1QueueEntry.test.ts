@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ACTIONS_APP_ID, GATE1_DESCRIPTIONS, GATE1_WORKFLOW_CONTEXTS } from "../../src/review/gate1Attest.js";
-import { attestQueueEntry, decideQueueEntry } from "../../src/review/gate1QueueEntry.js";
+import { attestQueueEntry, decideQueueEntry, listQueueEntryCandidates } from "../../src/review/gate1QueueEntry.js";
 import { freshRepo, type FakeCheckRun } from "./helpers/fakeGitHubRest.js";
 import { fakeGitHubLocal, gate1World, queueBranch, type Gate1World } from "./helpers/fakeGitHubLocal.js";
 
@@ -260,5 +260,57 @@ describe("attestQueueEntry: a cloud item's group head that never met the head at
     const boom = world({ heads });
     await expect(boom.run({ attestHead: async () => Promise.reject(new Error("no installation")) })).rejects.toThrow(/no installation/);
     expect(boom.s.posts).toEqual([]);
+  });
+});
+
+describe("listQueueEntryCandidates: the re-check after a pull request leaves the queue", () => {
+  const REPOS = new Set(["acme/widgets-public"]);
+  const list = (t: ReturnType<typeof world>) => listQueueEntryCandidates(t.fake.http, { repos: REPOS, owner: "acme", name: "widgets-public", base: "main" });
+  /** Asks the attester about the candidate behind the exited pull request, as the webhook does (the world holds the checks of entry 12 only). */
+  const recheck = async (t: ReturnType<typeof world>, exited: number) => {
+    const out: unknown[] = [];
+    for (const c of (await list(t)).filter((x) => x.prNumber !== exited && x.prNumber === 12)) out.push(await t.run({ prNumber: c.prNumber, baseSha: c.baseSha, entrySha: c.entrySha }));
+    return out;
+  };
+
+  it("front of the queue first, with each entry's commit and base; only the attester's read (A18) is used", async () => {
+    const t = world();
+    expect(await list(t)).toEqual([
+      { prNumber: 11, baseSha: MAIN, entrySha: E11 },
+      { prNumber: 12, baseSha: E11, entrySha: E12 },
+      { prNumber: 13, baseSha: E12, entrySha: E13 },
+    ]);
+    expect(new Set(t.fake.calls.map((c) => c.label))).toEqual(new Set(["A18"]));
+    expect(await listQueueEntryCandidates(t.fake.http, { repos: new Set(), owner: "acme", name: "widgets-public", base: "main" })).toEqual([]);
+    expect(await listQueueEntryCandidates(t.fake.http, { repos: REPOS, owner: "acme", name: "widgets-public", base: "a..b" })).toEqual([]);
+  });
+
+  it("an entry behind a team pull request waits; once that pull request is gone the re-check posts fx-gate1 once, and a replay posts nothing more", async () => {
+    // PR 11 (a team pull request) carries no fx-gate1 of ours.
+    const t = world({ heads: { [H11]: null, [H12]: {}, [H13]: null } });
+    expect(await t.run()).toEqual({ kind: "wait", reason: "group_head_unattested" });
+    expect(t.posts()).toEqual([]);
+    // PR 11 merged: PR 12 is at the front now (its entry commit and base are unchanged).
+    t.g1.queues!.main = [{ position: 1, entryOid: E12, baseOid: E11, prNumber: 12, prHead: H12 }, { position: 2, entryOid: E13, baseOid: E12, prNumber: 13, prHead: H13 }];
+    expect(await recheck(t, 11)).toEqual([{ kind: "posted", state: "success" }]);
+    expect(t.posts()).toHaveLength(1);
+    // The same exit delivered again, or two at once after the first: the attester's own already-posted check answers.
+    expect(await recheck(t, 11)).toEqual([{ kind: "already" }]);
+    expect(await Promise.all([recheck(t, 11), recheck(t, 11)])).toEqual([[{ kind: "already" }], [{ kind: "already" }]]);
+    expect(t.posts()).toHaveLength(1);
+  });
+
+  it("a dequeue of the pull request ahead re-checks the same way (the entry rebuilt on main's tip)", async () => {
+    const t = world({ heads: { [H11]: null, [H12]: {}, [H13]: null } });
+    t.g1.queues!.main = [{ position: 1, entryOid: E12, baseOid: MAIN, prNumber: 12, prHead: H12 }];
+    const c = (await list(t)).find((x) => x.prNumber === 12)!;
+    expect(await t.run({ baseSha: c.baseSha })).toEqual({ kind: "posted", state: "success" });
+  });
+
+  it("a group that still holds a head that is not ours keeps waiting after another pull request left", async () => {
+    // PR 11 (team) is still queued ahead of PR 12; the one that left was behind both.
+    const t = world({ heads: { [H11]: null, [H12]: {}, [H13]: {} } });
+    expect(await recheck(t, 13)).toEqual([{ kind: "wait", reason: "group_head_unattested" }]);
+    expect(t.posts()).toEqual([]);
   });
 });

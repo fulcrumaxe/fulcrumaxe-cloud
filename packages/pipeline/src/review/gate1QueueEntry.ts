@@ -225,6 +225,38 @@ async function readRunsHosted(http: GitHubHttp, repo: { owner: string; name: str
 }
 
 /**
+ * The queue's entry commits on one base branch, for a re-check after a pull request left the queue (merged or dequeued). Read only, through the same
+ * fenced or hosted client `attestQueueEntry` uses: the fenced A18 for a runner_local client, the queue's `gh-readonly-queue/<base>/pr-<n>-<sha>` refs for
+ * a hosted one. It decides nothing: each answer is only a candidate that `attestQueueEntry` then proves from its own reads. Front of the queue first where
+ * the positions are known; an incomplete read is an empty list (the next finished suite asks again).
+ */
+export async function listQueueEntryCandidates(http: GitHubHttp, input: { repos: ReadonlySet<string>; owner: string; name: string; base: string }): Promise<Array<{ prNumber: number; baseSha: string; entrySha: string }>> {
+  if (!gate1AttestEnabled(input.repos, input.owner, input.name)) return [];
+  if (!BRANCH.test(input.base) || input.base.includes("..")) return [];
+  if (isLocalGitHubHttp(http)) {
+    const { entries, complete } = await readEntries(http, input);
+    if (!complete) return [];
+    return [...entries]
+      .sort((a, b) => a.position - b.position)
+      .flatMap((e) => (e.entryOid !== null && e.baseOid !== null && SHA_PATTERN.test(e.entryOid) && SHA_PATTERN.test(e.baseOid) ? [{ prNumber: e.prNumber, baseSha: e.baseOid, entrySha: e.entryOid }] : []));
+  }
+  const root = `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}`;
+  const res = await http.request({ method: "GET", path: `${root}/git/matching-refs/heads/gh-readonly-queue/${input.base}` });
+  if (res.status !== 200 || !Array.isArray(res.body)) return fail("queue refs unreadable");
+  const prefix = `refs/heads/gh-readonly-queue/${input.base}/`;
+  const out: Array<{ prNumber: number; baseSha: string; entrySha: string }> = [];
+  for (const r of res.body as unknown[]) {
+    if (!isObj(r) || typeof r.ref !== "string" || !isObj(r.object) || typeof r.object.sha !== "string") return fail("queue ref");
+    if (!r.ref.startsWith(prefix)) continue;
+    const m = QUEUE_REF_TAIL.exec(r.ref.slice(prefix.length));
+    if (m === null || !SHA_PATTERN.test(r.object.sha)) continue;
+    out.push({ prNumber: Number(m[1]), baseSha: m[2]!, entrySha: r.object.sha });
+    if (out.length > MAX_GROUP) return [];
+  }
+  return out;
+}
+
+/**
  * Reads the entry's facts and acts. A throw (a failed read, a refused post) is not an answer: the next check suite's wake asks again. A fenced client
  * (`runner_local`) reads through A17, A18 and A15; any other client is the hosted `merge_gate` one and needs `entryDocument` (PR 1e).
  */

@@ -1,7 +1,8 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { attestGate1Head, attestQueueEntry, loadReviewContext, parseGate1AttestRepos, type GitHubHttp, type QueueEntryOutcome } from "@fx/pipeline";
+import { attestGate1Head, attestQueueEntry, listQueueEntryCandidates, loadReviewContext, parseGate1AttestRepos, type GitHubHttp, type QueueEntryOutcome } from "@fx/pipeline";
 import { MERGE_QUEUE_ENTRY_DOCUMENT, type GithubWebhookEventName, type GithubWebhookPayload } from "@fx/github";
+import { reportError } from "@fx/telemetry";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 
@@ -67,7 +68,79 @@ async function ownItem(pool: Pool, accountId: string, repoFullName: string, prNu
 /** The webhook's trigger. Answers what the attester did, or null when the delivery is not for a listed code repository's queue entry of one of our items. */
 export async function wakeGate1QueueEntry(pool: Pool, event: { accountId: string; eventName: GithubWebhookEventName | string; payload: GithubWebhookPayload | unknown }, deps: Gate1QueueEntryDeps = {}): Promise<QueueEntryOutcome | null> {
   const wake = readQueueEntryWake(event.eventName, event.payload);
-  if (wake === null) return null;
+  if (wake === null) {
+    // A pull request leaving the queue: the entries behind it are asked again (no check suite is left to wake them). Answers nothing itself.
+    const exit = readQueueExit(event.eventName, event.payload);
+    if (exit !== null) await recheckAfterExit(pool, event.accountId, exit, deps);
+    return null;
+  }
+  return attestWake(pool, event.accountId, wake, deps, null);
+}
+
+/** At most this many entries behind a departed pull request are asked again per event. */
+export const MAX_EXIT_RECHECKS = 10;
+
+export interface QueueExit {
+  repoFullName: string;
+  base: string;
+  /** The pull request that left (merged, dequeued or closed). */
+  prNumber: number;
+}
+
+/** What a delivery says about a pull request leaving the merge queue, or null. Pure. `dequeued`, and `closed` (merged or not: a closed pull request is out of the queue too). */
+export function readQueueExit(eventName: string, payload: unknown): QueueExit | null {
+  if (eventName !== "pull_request") return null;
+  const p = (typeof payload === "object" && payload !== null ? payload : {}) as { action?: unknown; repository?: { full_name?: unknown }; pull_request?: { number?: unknown; base?: { ref?: unknown } } };
+  if (p.action !== "closed" && p.action !== "dequeued") return null;
+  const full = p.repository?.full_name;
+  const base = p.pull_request?.base?.ref;
+  const n = p.pull_request?.number;
+  if (typeof full !== "string" || !FULL_NAME.test(full) || typeof base !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(base) || base.includes("..")) return null;
+  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n >= 2_000_000_000) return null;
+  return { repoFullName: full, base, prNumber: n };
+}
+
+/**
+ * Asks the attester again for the entries still queued on the base branch, front first, capped. The queue is read through the same client the attester uses
+ * (opened for any one of our items in that repository); each candidate then goes through the unchanged per-entry path (our record, the attester's own
+ * `already` check, `decideQueueEntry`), so a replayed or concurrent exit posts nothing a first one did not, and a group with a head that is not ours still waits.
+ */
+async function recheckAfterExit(pool: Pool, accountId: string, exit: QueueExit, deps: Gate1QueueEntryDeps): Promise<void> {
+  const repos = deps.repos ?? parseGate1AttestRepos(process.env.FX_GATE1_ATTEST_REPOS);
+  if (!repos.has(exit.repoFullName.toLowerCase())) return;
+  const anyItem = await withTenant(pool, accountId, async (client) => {
+    const { rows } = await client.query<{ work_item_id: string }>(
+      "SELECT work_item_id FROM plane_pushes WHERE account_id = $1 AND lower(code_repo) = lower($2) AND pr_number IS NOT NULL AND managed_by_person_at IS NULL ORDER BY work_item_id LIMIT 1",
+      [accountId, exit.repoFullName],
+    );
+    return rows[0]?.work_item_id ?? null;
+  });
+  if (anyItem === null) return;
+  const loaded = await loadReviewContext(pool, accountId, anyItem);
+  if (!loaded.ok) {
+    console.info(JSON.stringify({ event: "gate1_queue_entry", trigger: "queue_exit", exited_pr: exit.prNumber, work_item_id: anyItem, outcome: "skipped", reason: "context_unloadable" }));
+    return;
+  }
+  const [owner, name] = exit.repoFullName.split("/") as [string, string];
+  const http: GitHubHttp = await openForRepo(deps.open ?? openInstallationHttp, loaded.ctx.executionMode, "merge_gate", { repoId: loaded.ctx.repoId, owner, name }, { withoutMerge: true, gate1Attest: true });
+  const seen = new Set<number>([exit.prNumber]);
+  const candidates = (await listQueueEntryCandidates(http, { repos, owner, name, base: exit.base })).filter((c) => !seen.has(c.prNumber) && (seen.add(c.prNumber), true)).slice(0, MAX_EXIT_RECHECKS);
+  let firstError: unknown = null;
+  for (const c of candidates) {
+    // One entry's failed read must not starve the ones behind it; the first failure is thrown after the rest were asked.
+    try {
+      await attestWake(pool, accountId, { repoFullName: exit.repoFullName, base: exit.base, prNumber: c.prNumber, baseSha: c.baseSha, entrySha: c.entrySha }, deps, exit.prNumber);
+    } catch (e) {
+      // The first failure is rethrown below (and reported by the delivery); any later one would be lost, so it is reported here.
+      if (firstError === null) firstError = e;
+      else reportError(e, { stage: "gate1_queue_entry.exit_recheck" });
+    }
+  }
+  if (firstError !== null) throw firstError;
+}
+
+async function attestWake(pool: Pool, accountId: string, wake: QueueEntryWake, deps: Gate1QueueEntryDeps, exitedPr: number | null): Promise<QueueEntryOutcome | null> {
+  const event = { accountId };
   // The setting first: an unlisted repository gets no read of ours at all, not even of our own records.
   const repos = deps.repos ?? parseGate1AttestRepos(process.env.FX_GATE1_ATTEST_REPOS);
   if (!repos.has(wake.repoFullName.toLowerCase())) return null;
@@ -95,6 +168,6 @@ export async function wakeGate1QueueEntry(pool: Pool, event: { accountId: string
     return (r.kind === "posted" && r.state === "success") || r.kind === "already";
   };
   const out = await attestQueueEntry(http, { attestHead, repos, owner, name, base: wake.base, prNumber: wake.prNumber, baseSha: wake.baseSha, entrySha: wake.entrySha, ourLogin: () => ourLogin(ctx.repoId), ...(ctx.executionMode === "runner_local" ? {} : { entryDocument: MERGE_QUEUE_ENTRY_DOCUMENT }) });
-  console.info(JSON.stringify({ event: "gate1_queue_entry", work_item_id: workItemId, outcome: out.kind, ...("reason" in out ? { reason: out.reason } : {}) }));
+  console.info(JSON.stringify({ event: "gate1_queue_entry", work_item_id: workItemId, outcome: out.kind, ...(exitedPr === null ? {} : { trigger: "queue_exit", exited_pr: exitedPr, pr_number: wake.prNumber }), ...("reason" in out ? { reason: out.reason } : {}) }));
   return out;
 }
