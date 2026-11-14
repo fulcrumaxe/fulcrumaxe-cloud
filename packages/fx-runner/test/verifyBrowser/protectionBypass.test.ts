@@ -226,7 +226,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     foreignSeen.length = 0;
     const s = await session({ bypassSecret: FAKE, cloudOrigin: appBase });
     expect(await s.call("open", { path: "/" })).toContain("opened");
-    expect(await s.call("wait_text", { text: "data ok" })).toBe("text_visible");
+    expect(await s.call("wait_text", { text: "data ok" })).toMatch(/^text_visible/);
     await s.call("snapshot");
     expect(await s.call("open", { path: "/redir" })).toContain("error: left_origin");
     await s.call("console");
@@ -270,7 +270,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     appSeen.length = 0;
     const s = await session({ cloudOrigin: appBase });
     expect(await s.call("open", { path: "/" })).toContain("opened");
-    expect(await s.call("wait_text", { text: "data ok" })).toBe("text_visible");
+    expect(await s.call("wait_text", { text: "data ok" })).toMatch(/^text_visible/);
     await s.stop();
     for (const h of appSeen) {
       expect(h["x-vercel-protection-bypass"]).toBeUndefined();

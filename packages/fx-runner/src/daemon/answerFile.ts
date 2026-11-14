@@ -32,6 +32,15 @@ export function readVerifyAnswer(jobsDir: string, runId: string, uid: number | u
     const info = fstatSync(fd);
     if (!info.isFile() || info.size > MAX_ANSWER_BYTES || (info.mode & 0o077) !== 0 || uid === undefined || info.uid !== uid) return undefined;
     const verdict = groundAnswer(readFileSync(fd, "utf8"), SHAPE_ONLY, { signedInAs: true });
+    // One line per journey to the journal (result, step count, the last step's own words and page fact, cut and cleaned): a blocked verify can be read without a re-run.
+    if (verdict.ok) {
+      const js = (JSON.parse(verdict.json) as { journeys?: { id?: string; result?: string; steps?: { did?: string; dom_fact?: string }[] }[] }).journeys ?? [];
+      const clean = (t: unknown): string => String(t ?? "").slice(0, 140).replace(/[^\x20-\x7e]/g, "?");
+      for (const j of js) {
+        const last = j.steps?.[j.steps.length - 1];
+        console.log(`fx-runner: verify journey ${runId.slice(0, 8)} ${clean(j.id).slice(0, 40)} ${clean(j.result)} steps=${j.steps?.length ?? 0} last=${clean(last?.did)} | ${clean(last?.dom_fact)}`);
+      }
+    }
     return verdict.ok ? (JSON.parse(verdict.json) as Record<string, unknown>) : undefined;
   } catch {
     // fx-swallow-ok: no file, or one that cannot be read, is no answer

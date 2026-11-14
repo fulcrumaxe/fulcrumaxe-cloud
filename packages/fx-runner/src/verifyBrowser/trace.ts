@@ -7,7 +7,7 @@
  * learns each journey when its `begin_journey` call arrives, so the budget is worked out from the distinct journeys begun so far.
  */
 export const CALLS_PER_JOURNEY = 30;
-export const MIN_CALLS = 90;
+export const MIN_CALLS = 150; // a 3-journey check ran out of calls at 90
 export const MAX_CALLS = 600;
 export function callBudget(journeys: number): number {
   return Math.min(MAX_CALLS, Math.max(MIN_CALLS, journeys * CALLS_PER_JOURNEY));

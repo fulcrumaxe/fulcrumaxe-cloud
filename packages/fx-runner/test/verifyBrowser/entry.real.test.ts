@@ -138,7 +138,7 @@ describe.skipIf(EXE === undefined)("the fxverify server started from the MCP ent
     const button = refOf(before.text, "Add one");
     expect(button).not.toBe("");
     await call("click", { ref: button });
-    expect((await call("wait_text", { text: "Total: 4" })).text).toBe("text_visible");
+    expect((await call("wait_text", { text: "Total: 4" })).text).toMatch(/^text_visible/);
     await call("reload");
     const after = await call("snapshot");
     expect(after.text).toContain("Total: 4");

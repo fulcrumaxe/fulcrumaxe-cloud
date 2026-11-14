@@ -200,6 +200,22 @@ describe("grounding", () => {
     await r.server.stop();
   });
 
+  it("tells the model how to fix a rejected dom_fact or a bad value, and quotes the row a wait_text found", async () => {
+    const r = await seen();
+    const invented = await r.call("submit_answer", { envelope: ENVELOPE("The page says the item was deleted") });
+    expect(invented.text).toContain("dom_fact_not_seen");
+    expect(invented.text).toContain("Copy a short piece of the page text exactly");
+    const tooLong = await r.call("submit_answer", { envelope: ENVELOPE("x".repeat(301)) });
+    expect(tooLong.text).toContain("bad_value");
+    expect(tooLong.text).toContain("under 300 characters");
+    r.driver()!.waitText = async () => "Runs in Local-only";
+    const waited = await r.call("wait_text", { text: "Runs in" });
+    expect(waited.text).toContain("text_visible");
+    expect(waited.text).toContain("Runs in Local-only");
+    expect((await r.call("submit_answer", { envelope: ENVELOPE("Runs in Local-only") })).isError).toBe(false);
+    await r.server.stop();
+  });
+
   it("rejects an invented dom_fact, names the step, and writes nothing", async () => {
     const r = await seen();
     const out = await r.call("submit_answer", { envelope: ENVELOPE("Item deleted successfully") });
@@ -262,11 +278,11 @@ describe("grounding", () => {
 });
 
 describe("limits", () => {
-  it("answers 'call budget used' after 90 browser calls (a job with one journey) and still takes the answer", async () => {
+  it("answers 'call budget used' after 150 browser calls (a job with one journey) and still takes the answer", async () => {
     const r = rig(PAGES);
     await r.call("open", { path: "/" });
     await r.call("snapshot");
-    for (let i = 0; i < 88; i++) await r.call("reload");
+    for (let i = 0; i < 148; i++) await r.call("reload");
     const over = await r.call("reload");
     expect(over.text).toContain("call_budget_used");
     expect((await r.call("submit_answer", { envelope: ENVELOPE("count: 3") })).isError).toBe(false);
@@ -277,15 +293,15 @@ describe("limits", () => {
     const r = rig(PAGES);
     await r.call("open", { path: "/" });
     for (const id of ["c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]) await r.call("begin_journey", { id });
-    // nine journeys: 270 calls. Calls 91 to 270 still run (the old fixed budget would have refused call 91).
+    // nine journeys: 270 calls. Calls 151 to 270 still run (the minimum budget would have refused call 151).
     for (let i = 0; i < 269; i++) expect((await r.call("reload")).text).not.toContain("call_budget_used");
     const over = await r.call("reload");
     expect(over.text).toContain("call_budget_used");
     await r.server.stop();
   });
 
-  it("works the budget out as 30 per journey, from 90 up to 600", () => {
-    expect([0, 1, 3, 4, 9, 20, 21, 60].map(callBudget)).toEqual([90, 90, 90, 120, 270, 600, 600, 600]);
+  it("works the budget out as 30 per journey, from 150 up to 600", () => {
+    expect([0, 1, 3, 4, 9, 20, 21, 60].map(callBudget)).toEqual([150, 150, 150, 150, 270, 600, 600, 600]);
   });
 
   it("refuses calls after 30 minutes", async () => {

@@ -91,7 +91,7 @@ describe("the browser's temporary directory", () => {
     const driver = await launchDriver({ base, executablePath: exe, jobDir, hostEnv: { PATH: process.env.PATH, TMPDIR: parent }, onConsole: () => undefined });
     try {
       await driver.go(`${base.origin}/`);
-      expect(await driver.waitText("Total: 3", 10_000)).toBe(true);
+      expect(await driver.waitText("Total: 3", 10_000)).toContain("Total: 3");
     } finally {
       await driver.close();
     }
