@@ -219,9 +219,14 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     // Click, reload, undo: the counter changes, persists across a reload, and goes back.
     expect(await j.call("open", { path: "/" })).toContain("opened");
     expect(await j.call("wait_text", { text: "Items: 0" })).toContain("text_visible");
+    await j.call("wait_text", { text: "Add item" });
     let snap = await j.call("snapshot");
     expect(snap).toContain("first visit");
-    const ref = (label: string) => new RegExp(`(e\\d+) \\S+ "${label}"`).exec(snap)![1]!;
+    const ref = (label: string) => {
+      const m = new RegExp(`(e\\d+) \\S+ "${label}"`).exec(snap);
+      if (m === null) throw new Error(`no element labelled "${label}" in the snapshot:\n${snap}`);
+      return m[1]!;
+    };
     expect(snap).toContain("Items: 0");
     await j.call("click", { ref: ref("Add item") });
     await j.call("click", { ref: ref("Add item") });
@@ -265,6 +270,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     for (const a of lines) expect(a).not.toContain("--no-sandbox");
 
     // The second origin gets no hit: a link, a redirect and a protocol-relative path are all stopped.
+    await j.call("wait_text", { text: "Partner site" });
     snap = await j.call("snapshot");
     expect(await j.call("click", { ref: ref("Partner site") })).toContain("error: left_origin");
     expect(otherHits, "after the link click").toBe(0);
@@ -279,6 +285,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     expect(await j.call("open", { path: "file:///etc/passwd" })).toContain("error: bad_path");
     await j.call("open", { path: "/" });
     await j.call("wait_text", { text: "Items:" });
+    await j.call("wait_text", { text: "Local file" });
     snap = await j.call("snapshot");
     await j.call("click", { ref: ref("Local file") });
     expect(await j.call("snapshot")).toContain("Dashboard");
@@ -326,9 +333,14 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     const j = job(false);
     await j.call("open", { path: "/popups" });
     await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await j.call("wait_text", { text: "Send form" });
     let snap = await j.call("snapshot");
     expect(snap).toContain("Popups");
-    const ref = (label: string) => new RegExp(`(e\\d+) \\S+ "${label}"`).exec(snap)![1]!;
+    const ref = (label: string) => {
+      const m = new RegExp(`(e\\d+) \\S+ "${label}"`).exec(snap);
+      if (m === null) throw new Error(`no element labelled "${label}" in the snapshot:\n${snap}`);
+      return m[1]!;
+    };
     await j.call("click", { ref: ref("New window") });
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     snap = await j.call("snapshot");
