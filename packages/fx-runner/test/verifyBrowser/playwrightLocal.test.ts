@@ -73,16 +73,16 @@ describe("the MCP file and the command line, per method and role", () => {
     expect(argv).toContain("--no-chrome");
     expect(argv).not.toContain("--chrome");
     expect(argv).toContain("--strict-mcp-config");
-    // The CLI's built-in tools are the three reads; the twelve fxverify tools are granted by their allow rules alone.
-    expect(argv[argv.indexOf("--tools") + 1]).toBe("Read,Glob,Grep");
+    // The run carries no built-in tools at all (no Read, Glob or Grep): the twelve fxverify tools are granted by their allow rules alone.
+    expect(argv[argv.indexOf("--tools") + 1]).toBe("");
     const allowed = argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools"));
     expect(allowed).toEqual(expect.arrayContaining([...DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS]));
   });
 
-  it("the playwright job's settings allow the confined reads and the twelve fxverify tools, and still deny the five Chrome extension tools", () => {
+  it("the playwright job's settings allow the twelve fxverify tools, and still deny the five Chrome extension tools", () => {
     const ws = path.join(root, "ws");
     const s = settingsFor(DEPLOY_VERIFIER_ROLE, SANDBOX, ws, protectedList, [], undefined, undefined, "playwright_runner") as { permissions: { allow: string[]; deny: string[] } };
-    expect(s.permissions.allow).toEqual([`Read(/${ws})`, `Read(/${ws}/**)`, ...DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS]);
+    expect(s.permissions.allow).toEqual([...DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS]);
     expect(s.permissions.allow.join(" ")).not.toMatch(/claude-in-chrome|Bash|Edit|Write/);
     expect(s.permissions.deny).toEqual(expect.arrayContaining([...DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS]));
   });

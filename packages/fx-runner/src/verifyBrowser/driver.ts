@@ -77,7 +77,7 @@ export interface PageDriver {
   choose(ref: string, option: string): Promise<void>;
   press(key: string): Promise<void>;
   reload(): Promise<void>;
-  waitText(text: string, ms: number): Promise<boolean>;
+  waitText(text: string, ms: number): Promise<boolean | string>;
   textOf(ref: string): Promise<string>;
   /** Requests the route refused: all of them, and the ones that were page navigations. */
   blocked(): { requests: number; navigations: number };
@@ -293,8 +293,20 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
       reload: () => guard(async () => void (await page.reload({ waitUntil: "domcontentloaded" }))),
       waitText: async (text, ms) => {
         try {
-          await page.getByText(text).first().waitFor({ state: "visible", timeout: Math.min(ms, ACTION_MS) });
-          return true;
+          const hit = page.getByText(text).first();
+          await hit.waitFor({ state: "visible", timeout: Math.min(ms, ACTION_MS) });
+          // The text of the row the match sits in (a label with its value), so a fact such as `Runs in Local-only` can be read and quoted;
+          // a dt brings its dd, a th or td its row, anything else its parent element.
+          const row = await hit.evaluate((el) => {
+            const dt = el.closest("dt");
+            if (dt !== null) {
+              const dd = dt.nextElementSibling;
+              return `${(dt as unknown as { innerText: string }).innerText} ${dd === null ? "" : (dd as unknown as { innerText: string }).innerText}`;
+            }
+            const box = el.closest("tr, li, dd") ?? el.parentElement ?? el;
+            return (box as unknown as { innerText: string }).innerText;
+          }).catch(() => "");
+          return row === "" ? true : row;
         } catch {
           // fx-swallow-ok: text that did not appear in time is the answer false, not a failure
           return false;

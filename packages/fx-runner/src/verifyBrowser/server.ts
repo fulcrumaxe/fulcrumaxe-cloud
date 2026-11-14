@@ -36,10 +36,10 @@ export const TOOLS: Readonly<Record<string, ToolDef>> = {
   select: { description: "Choose an option, by its visible label, in the select with this ref.", props: { ref: REF, option: TEXT }, required: ["ref", "option"] },
   press: { description: "Press Enter, Escape or Tab.", props: { key: { type: "string", enum: ["Enter", "Escape", "Tab"] } }, required: ["key"] },
   reload: { description: "Reload the current page.", props: {}, required: [] },
-  wait_text: { description: "Wait up to 10 seconds for text to be visible on the page.", props: { text: TEXT, seconds: { type: "integer", max: 10 } }, required: ["text"] },
+  wait_text: { description: "Wait up to 10 seconds for text to be visible on the page. When it is, the reply holds the text of the row it sits in (a label with its value), which you may quote as a dom_fact.", props: { text: TEXT, seconds: { type: "integer", max: 10 } }, required: ["text"] },
   read_number: { description: "Read the element with this ref and return its text and the number it holds.", props: { ref: REF }, required: ["ref"] },
   console: { description: "The count of console errors since the start and the first few console messages.", props: {}, required: [] },
-  submit_answer: { description: "Submit the final JSON answer once. Every dom_fact and number must be something the page showed you through these tools.", props: { envelope: { type: "json" } }, required: ["envelope"] },
+  submit_answer: { description: "Submit the final JSON answer once. Every dom_fact must be a short piece of text copied exactly, word for word, from one snapshot taken in that journey (for example `Local-only`), with no description or commentary around it; every number must be one the page showed. Explanations go in did.", props: { envelope: { type: "json" } }, required: ["envelope"] },
 };
 
 export function toolList(): Array<{ name: string; description: string; inputSchema: unknown }> {
@@ -177,7 +177,7 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
     if (name === "submit_answer") {
       if (accepted) return fail("already_submitted");
       const verdict = groundAnswer(a.envelope, trace);
-      if (!verdict.ok) return fail("answer_rejected", verdict.reason);
+      if (!verdict.ok) return fail("answer_rejected", verdict.reason.endsWith("dom_fact_not_seen") ? `${verdict.reason}: that dom_fact is not text from a snapshot of this journey. Copy a short piece of the page text exactly (no quotes around it, no description) and submit again.` : verdict.reason.endsWith("bad_value") ? `${verdict.reason}: keep each did and dom_fact under 300 characters, result one of the allowed words, and submit again.` : verdict.reason);
       // The signed-in account is recorded here, by the server, from the app's own identity route through the saved session. The model cannot set it (a `signed_in_as` of its own was
       // refused above); when the lookup gives nothing the field is left out, and the cloud then fails the row closed.
       const login = driver === undefined ? undefined : await driver.identity().catch(() => undefined);
@@ -236,7 +236,7 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
           break;
         case "wait_text": {
           const found = await d.waitText(str("text"), (a.seconds === undefined ? 5 : (a.seconds as number)) * 1000);
-          reply = ok(found ? "text_visible" : "text_not_visible");
+          reply = typeof found === "string" ? fromPage("text_visible", found, 300) : ok(found ? "text_visible" : "text_not_visible");
           break;
         }
         default: {

@@ -66,7 +66,7 @@ export function snapshotBody(elements: readonly RawElement[], pageText: string):
  */
 export const SNAPSHOT_SCRIPT = `(() => {
   for (const old of document.querySelectorAll('[data-fx-ref]')) old.removeAttribute('data-fx-ref');
-  const sel = 'a[href],button,input,select,textarea,h1,h2,h3,h4,h5,h6,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[role=status],[role=alert],[aria-live],output';
+  const sel = 'a[href],button,summary,input,select,textarea,h1,h2,h3,h4,h5,h6,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[role=status],[role=alert],[aria-live],output';
   const out = [];
   for (const el of document.querySelectorAll(sel)) {
     const box = el.getBoundingClientRect();

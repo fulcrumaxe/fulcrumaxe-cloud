@@ -71,6 +71,14 @@ describe("the deploy verifier's exact tool list", () => {
     ]);
   });
 
+  it("the Playwright verifier runs without the three read tools while its digest still covers the signed list", () => {
+    expect(roleToolsDigest(DEPLOY_VERIFIER_ROLE, "playwright_runner")).toBe(cloudDigest(DEPLOY_VERIFIER_ROLE, "playwright_runner"));
+    const run = roleToolsFor(DEPLOY_VERIFIER_ROLE, "playwright_runner");
+    for (const tool of ["Read", "Glob", "Grep"]) expect(run, tool).not.toContain(tool);
+    expect(run.length).toBeGreaterThan(0);
+    expect(roleToolsFor(DEPLOY_VERIFIER_ROLE, "chrome_runner")).toEqual(expect.arrayContaining(["Read", "Glob", "Grep"]));
+  });
+
   it("holds none of the five extension tools that run script, read request headers, upload a file or fill a form", () => {
     const entry = roleToolsFor(DEPLOY_VERIFIER_ROLE).join(" ");
     for (const never of ["javascript_tool", "file_upload", "upload_image", "form_input", "read_network_requests"]) expect(entry, never).not.toContain(never);

@@ -87,7 +87,7 @@ export class FakeDriver implements PageDriver {
   async reload(): Promise<void> {
     this.refs.clear();
   }
-  async waitText(text: string): Promise<boolean> {
+  async waitText(text: string): Promise<boolean | string> {
     return this.page().text.toLowerCase().includes(text.toLowerCase());
   }
   async textOf(ref: string): Promise<string> {

@@ -77,7 +77,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
       });
     await call("begin_journey", { id: "c1" });
     expect(await call("open", { path: "/" })).toContain("opened");
-    expect(await call("wait_text", { text: "Secure total: 42" })).toBe("text_visible");
+    expect(await call("wait_text", { text: "Secure total: 42" })).toMatch(/^text_visible/);
     expect(await call("snapshot")).toContain("Secure page");
     expect(await call("open", { path: "/redir" })).toContain("error: left_origin");
     await new Promise((resolve) => setTimeout(resolve, 1_000));
