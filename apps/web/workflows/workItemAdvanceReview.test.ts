@@ -74,7 +74,7 @@ interface World {
   /** (role) -> the verdict the reviewer run ends with. A function of the head the run is for. */
   verdict: (role: string, head: string, step: string) => { status?: string; envelope?: Record<string, unknown> | null; done?: boolean; failureReason?: string };
   /** The decision the worker's round returns, per call. */
-  rounds: Array<{ decision: string; round?: number; nextRound?: number | null; ciReasons?: string[]; ciMissing?: string[]; ciRunning?: string[] }>;
+  rounds: Array<{ decision: string; round?: number; nextRound?: number | null; ciReasons?: string[]; ciMissing?: string[]; ciRunning?: string[]; ciFailed?: string[] }>;
   /** The fix start. */
   fix: { ok: boolean; reason?: string };
   /** What the fix run does to the head when it ends. */
@@ -165,7 +165,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     }),
     advanceRecordRound: vi.fn(async (_who: unknown, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">) => {
       const r = w.realDecide ? { decision: decideRound({ requiredRoles: input.requiredRoles as never, verdicts: input.verdicts as never, fixRoundsStarted: 0 }) as string } : rounds.length > 1 ? rounds.shift()! : rounds[0]!;
-      return { decision: r.decision, round: r.round ?? 0, ...(r.ciReasons ? { ciReasons: r.ciReasons } : {}), ...(r.ciMissing ? { ciMissing: r.ciMissing } : {}), ...(r.ciRunning ? { ciRunning: r.ciRunning } : {}), ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
+      return { decision: r.decision, round: r.round ?? 0, ...(r.ciReasons ? { ciReasons: r.ciReasons } : {}), ...(r.ciMissing ? { ciMissing: r.ciMissing } : {}), ...(r.ciRunning ? { ciRunning: r.ciRunning } : {}), ...(r.ciFailed ? { ciFailed: r.ciFailed } : {}), ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
     }),
     advanceRecordMergeOnly: vi.fn(async (_who: unknown, _input: { headSha: string; prNumber: number; baseRef: string; requiredRoles: string[] }) => {
       const list = w.mergeOnly ?? [{ decision: "full_review", reason: "no_prior_review" }];
@@ -1084,6 +1084,35 @@ describe("fix rounds", () => {
       expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_pushed_nothing", code: "rereview", headSha: H1, runId: "fix-1" }));
       expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
       expect(events()).toContain("advance.fix_no_change");
+    });
+
+    describe("a round that red CI caused (every reviewer passed)", () => {
+      const allPass = (_role: string, _head: string) => ({ status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } });
+      const red = { decision: "fix", round: 0, nextRound: 1, ciFailed: ["workspace-e2e (phone)", "lint"] };
+
+      it("the fix round carries the failed check names as its finding, then the new head is reviewed", async () => {
+        const t = setup(fresh({ verdict: allPass, rounds: [red, { decision: "all_passed", round: 1 }] }));
+        expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+        expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+        const req = t.worker.advanceStartFix.mock.calls[0]![1];
+        expect(req.round).toBe(1);
+        expect(req.prompt).toContain("CI finished red on this head");
+        expect(req.prompt).toContain("Failed checks: workspace-e2e (phone), lint");
+        // The CI finding has no run: its marker is never looked up as one.
+        expect(t.worker.advanceRunOutcome.mock.calls.some((c) => String(c[1]).startsWith("ci-failed:"))).toBe(false);
+        expect(t.started.filter((s) => s.headSha === H2).map((s) => s.role).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+      });
+
+      it("a fix that changes nothing looks again with the code reviewer only: the CI finding is not a reviewer and is never started as one", async () => {
+        const t = setup(fresh({ verdict: allPass, rounds: [red, { decision: "all_passed", round: 1 }], fixPushes: null, fixOutcome: noChangeSandbox }));
+        expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+        expect(t.started.every((s) => s.role === "code-reviewer" || s.role === "acceptance-tester")).toBe(true);
+        // A reviewer start for "ci" would be refused as invalid_input and logged as refused; the CI finding must not be asked for at all.
+        expect(logs.filter((l) => l.event === "advance.review_started").map((l) => String((l as Record<string, unknown>).refused ?? "")).filter((r) => r !== "")).toEqual([]);
+        expect(t.started.filter((s) => s.step.includes(":rr")).map((s) => s.role)).toEqual(["code-reviewer"]);
+        expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+        expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_pushed_nothing", code: "rereview", headSha: H1 }));
+      });
     });
 
     it("replay safety: running the same workflow again over the same facts starts exactly the same keyed runs, so a replayed step finds the runs it already started", async () => {
@@ -2019,6 +2048,20 @@ describe("a merge handed to the customer's runner (merge_delegated): the workflo
     expect(t.worker.advanceMergeOrder).toHaveBeenCalledTimes(130);
     expect(world.sleeps).toBe(130);
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ reasons: ["runner_merge_timeout"] }));
+  });
+
+  it("the gate read CI a moment before GitHub settled it (no conflict round involved): CI alone blocking asks the gate again, and a later green answer merges", async () => {
+    const noCi = { outcome: "ready_human_merges", reasons: ["ci_not_green"], status: "posted" };
+    const t = setup(fresh({ gates: [noCi, noCi, { outcome: "merged", reasons: [], status: "posted" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+    expect(world.sleeps).toBeGreaterThanOrEqual(2);
+  });
+
+  it("CI is not the only reason: the gate is not asked again", async () => {
+    const t = setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["ci_not_green", "overlap_unreviewed"], status: "posted" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toMatchObject({ status: "ready_human_merges" });
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
   });
 
   it("no order is looked at unless the gate delegated: every other outcome ends exactly as before", async () => {

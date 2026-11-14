@@ -63,6 +63,8 @@ export interface RoundResult {
   ciMissing?: string[];
   /** The checks that had not finished (names), when `check_running` or `status_pending` is a reason. Set for `ci_pending` only. */
   ciRunning?: string[];
+  /** The finished checks that failed on the reviewed head, when CI is the reason for this round's fix. */
+  ciFailed?: string[];
 }
 
 /** Fix rounds started so far for one item (the driver events). */
@@ -99,6 +101,20 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
   const wait = await ci.read({ accountId: input.accountId, workItemId: input.workItemId, prNumber: input.prNumber, headSha: input.headSha });
   if (wait.state === "head_moved") return { decision: "head_moved", round, recorded: [] };
   if (wait.state === "pending") return { decision: "ci_pending", round, recorded: [], ciReasons: wait.reasons, ...(wait.missing ? { ciMissing: wait.missing } : {}), ...(wait.running ? { ciRunning: wait.running } : {}) };
+  // CI that FINISHED red is a needs-fix of the head, as a reviewer's would be: the code reviewer's pass is recorded as needs-fix
+  // (the same changes_requested move and fix-round bound), and the failed checks go to the fix prompt. Before this, a red head reached the merge gate and stopped for a person.
+  const ciFailed = wait.state === "settled" && (wait.failed?.length ?? 0) > 0 ? wait.failed! : null;
+  const ciRed = ciFailed !== null && input.verdicts.some((v) => v.role === "code-reviewer" && v.verdict === "pass");
+  if (ciRed) input = { ...input, verdicts: input.verdicts.map((v) => (v.role === "code-reviewer" && v.verdict === "pass" ? { ...v, verdict: "needs-fix" as const } : v)) };
+  // The acceptance tester's `unverifiable` (a criterion's test could not run in ITS
+  // environment) counts as covered when the pull request's CI on this exact head is entirely green; the post-merge browser verify still checks every visible criterion.
+  // Anything short of all-green (a red, cancelled, pending or missing check) keeps today's stop for a person. The cover is logged.
+  const ciCovers = wait.state === "settled" && wait.allGreen === true;
+  const coveredRoles = ciCovers ? input.verdicts.filter((v) => v.unverifiable === true && v.role === "acceptance-tester") : [];
+  if (coveredRoles.length > 0) {
+    console.log(JSON.stringify({ event: "review.unverifiable_covered_by_ci", work_item_id: input.workItemId, head: input.headSha.slice(0, 12), roles: coveredRoles.map((v) => v.role) }));
+    input = { ...input, verdicts: input.verdicts.map((v) => (v.unverifiable === true && v.role === "acceptance-tester" ? { ...v, unverifiable: false, verdict: "pass" as const } : v)) };
+  }
   const decision = decideRound({ requiredRoles: input.requiredRoles, verdicts: input.verdicts, fixRoundsStarted: round });
   if (decision === "environment_failure") {
     const failed = input.verdicts.filter((v) => v.environmentFailure === true);
@@ -132,7 +148,7 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
     const runId = (input.verdicts.find((v) => v.verdict !== "pass" && v.unverifiable !== true) ?? input.verdicts.find((v) => v.verdict !== "pass")!).runId;
     await withTenant(pool, input.accountId, async (client) => {
       await escalate(client, input.accountId, input.workItemId, runId, new Date());
-      await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `max_fix_rounds:${input.headSha}`, code: "max_fix_rounds", headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
+      await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `max_fix_rounds:${input.headSha}`, code: "max_fix_rounds", ...(ciRed ? { reasons: ["ci_red"] } : {}), headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
     });
   } else if (decision === "reviewer_no_verdict") {
     const missing = input.verdicts.filter((v) => v.noVerdict === true && input.requiredRoles.includes(v.role));
@@ -163,7 +179,7 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
       recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `reviewer_fail:${input.headSha}`, code: "reviewer_fail", headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId }),
     );
   }
-  return { decision, round, recorded, ...(decision === "fix" ? { nextRound: round + 1 } : {}) };
+  return { decision, round, recorded, ...(decision === "fix" ? { nextRound: round + 1 } : {}), ...(ciRed && decision === "fix" ? { ciFailed: ciFailed! } : {}) };
 }
 
 export { maxFixRounds };

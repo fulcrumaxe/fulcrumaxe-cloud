@@ -157,7 +157,8 @@ describe("plane-merge routes [pg]", () => {
     goCalls.length = 0;
     gate = { next: { kind: "go", mergeMode: "direct" } };
     pull = { open: true, merged: false, headSha: HEAD };
-    queue = { open: true, merged: false, headSha: HEAD, entryId: "MQE_kwDOAAAAAQ" };
+    // By default the pull request is not in the merge queue; the enqueued tests below put an entry there.
+    queue = { open: true, merged: false, headSha: HEAD, entryId: null };
     recordedEnqueued.length = 0;
     recorded.length = 0;
     recordResult = "closed";
@@ -627,6 +628,49 @@ describe("plane-merge routes [pg]", () => {
       }
     });
 
+    describe("an aborted or refused report for a pull request that is already in the merge queue", () => {
+      it("GitHub shows an entry at the order's head: the order ends enqueued (the merge is the webhook's), the entry is recorded once, nothing as merged", async () => {
+        for (const over of [{ result: "aborted", abort_code: "read_failed" }, { result: "refused", http_status: 405 }]) {
+          const { order, reply } = await authorized();
+          queue = { open: true, merged: false, headSha: HEAD, entryId: "MQE_kwDOAAAAAQ" };
+          await reportIt(reportBody(reply, over));
+          expect(await row(order.id), JSON.stringify(over)).toMatchObject({ state: "enqueued", outcome_code: "enqueued" });
+          expect(recordedEnqueued.at(-1)).toEqual([order.id, "MQE_kwDOAAAAAQ"]);
+        }
+        expect(recorded).toEqual([]);
+      });
+
+      it("the queue read shows the pull request already merged: no enqueue is recorded; the pull request's own read decides (merged there: merged; still open: the failure stands)", async () => {
+        const first = await authorized();
+        queue = { open: false, merged: true, headSha: HEAD, entryId: null };
+        pull = { open: false, merged: true, headSha: HEAD };
+        await reportIt(reportBody(first.reply, { result: "aborted", abort_code: "read_failed" }));
+        expect(await row(first.order.id)).toMatchObject({ state: "merged", outcome_code: "merged" });
+        expect(recorded).toEqual([first.order.id]);
+        const second = await authorized();
+        queue = { open: false, merged: true, headSha: HEAD, entryId: null };
+        pull = { open: true, merged: false, headSha: HEAD };
+        await reportIt(reportBody(second.reply, { result: "aborted", abort_code: "read_failed" }));
+        expect(await row(second.order.id)).toMatchObject({ state: "failed", outcome_code: "runner_merge_failed" });
+        expect(recordedEnqueued).toEqual([]);
+      });
+
+      it("no entry, an entry at another head, or a queue GitHub cannot read: the report stays a failure, as before", async () => {
+        const cases: Array<[PublicQueueFacts | Error, string]> = [
+          [{ open: true, merged: false, headSha: HEAD, entryId: null }, "runner_merge_failed"],
+          [{ open: true, merged: false, headSha: "e".repeat(40), entryId: "MQE_kwDOAAAAAQ" }, "runner_merge_failed"],
+          [new Error("GitHub down"), "runner_merge_failed"],
+        ];
+        for (const [q, code] of cases) {
+          const { order, reply } = await authorized();
+          queue = q;
+          await reportIt(reportBody(reply, { result: "aborted", abort_code: "read_failed" }));
+          expect(await row(order.id)).toMatchObject({ state: "failed", outcome_code: code });
+        }
+        expect(recordedEnqueued).toEqual([]);
+      });
+    });
+
     // D#519 MQ4-e2-b, C15-19: the verdict is stored on the order the report ends, from the cloud's own read of GitHub, and nowhere else.
     describe("a conflict verdict on a refused 405", () => {
       const verdictOf = (over: Record<string, unknown> = {}) => ({ verdict: "conflict_platform", paths: ["src/a.ts"], base_sha: "c".repeat(40), base_ref: "main", ...over });
@@ -744,6 +788,10 @@ describe("plane-merge routes [pg]", () => {
 
     // D#694 B7-1: an `enqueued` report is a hint. The order ends enqueued only when the cloud's own read shows the pull request open at the order's head WITH a queue entry.
     describe("an enqueued report", () => {
+      beforeEach(() => {
+        queue = { open: true, merged: false, headSha: HEAD, entryId: "MQE_kwDOAAAAAQ" };
+      });
+
       it("GitHub shows the entry at the expected head: the order ends enqueued (never merged), the fact is recorded once with the entry id, and nothing is recorded as merged", async () => {
         const { order, reply } = await authorized();
         const res = await reportIt(reportBody(reply, { result: "enqueued" }));

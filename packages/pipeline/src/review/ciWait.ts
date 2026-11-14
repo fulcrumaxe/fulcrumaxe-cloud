@@ -50,6 +50,10 @@ export interface CiWaitReading {
   missing?: string[];
   /** Only from `readCiWaitNamed`, and only when `check_running` or `status_pending` is a reason: the names of the checks that have not finished, sorted, at most MAX_MISSING_NAMES. */
   running?: string[];
+  /** When settled, the names of the finished checks and statuses that did not succeed (public names only). */
+  failed?: string[];
+  /** Settled, and every check run and status on the head succeeded (success, skipped or neutral only; nothing cancelled or red). */
+  allGreen?: boolean;
 }
 
 const MAX_MISSING_NAMES = 5;
@@ -81,6 +85,18 @@ export function readCiWaitNamed(snapshot: CiSnapshot, headSha: string, opts: { f
     const checks = (Array.isArray(snapshot.checkRuns) ? snapshot.checkRuns : []).filter((c) => c.status !== "completed").map((c) => c.name);
     const states = (Array.isArray(snapshot.statuses) ? snapshot.statuses : []).filter((s) => s.context !== REVIEW_STATUS_CONTEXT && !FINISHED_STATUS_STATES.has(s.state)).map((s) => s.context);
     out.running = names([...checks, ...states]);
+  }
+  if (reading.state === "settled") {
+    // Only a real failure is a fix round's work. Cancelled, stale, action_required and neutral runs are not something code can fix.
+    const RED = new Set(["failure", "timed_out"]);
+    const badChecks = (Array.isArray(snapshot.checkRuns) ? snapshot.checkRuns : []).filter((c) => c.status === "completed" && c.conclusion !== null && RED.has(c.conclusion)).map((c) => c.name);
+    const badStates = (Array.isArray(snapshot.statuses) ? snapshot.statuses : []).filter((s) => s.context !== REVIEW_STATUS_CONTEXT && (s.state === "failure" || s.state === "error")).map((s) => s.context);
+    const failed = names([...badChecks, ...badStates]);
+    if (failed.length > 0) out.failed = failed;
+    const GREEN = new Set(["success", "skipped", "neutral"]);
+    const runs = Array.isArray(snapshot.checkRuns) ? snapshot.checkRuns : [];
+    const sts = (Array.isArray(snapshot.statuses) ? snapshot.statuses : []).filter((st) => st.context !== REVIEW_STATUS_CONTEXT);
+    if (runs.length > 0 && runs.every((c) => c.status === "completed" && c.conclusion !== null && GREEN.has(c.conclusion)) && sts.every((st) => st.state === "success")) out.allGreen = true;
   }
   return out;
 }

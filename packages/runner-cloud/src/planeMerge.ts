@@ -242,7 +242,10 @@ export type SettleOutcome = { state: "merged" | "enqueued" | "head_moved" | "fai
  */
 export async function settleAuthorizedOrder(port: PlaneMergePort, accountId: string, order: PlaneMergeOrderFacts, hint: SettleHint): Promise<SettleOutcome> {
   // D#694 B7-1: an `enqueued` report is checked against the pull request AND its queue entry; any other hint against the pull request alone.
-  const queue = hint?.result === "enqueued" ? await port.readPublicQueue({ accountId, order }) : null;
+  // A re-asked order whose runner found the pull request ALREADY in the queue aborts (GitHub refuses a second enqueue). The queue is read for an
+  // aborted or refused report too, and an entry at the order's head ends the order `enqueued` (the merge is the webhook's), not `runner_merge_failed` for a person.
+  const looked = hint?.result === "aborted" || hint?.result === "refused" ? await port.readPublicQueue({ accountId, order }).catch(() => null) : null;
+  const queue = hint?.result === "enqueued" ? await port.readPublicQueue({ accountId, order }) : looked !== null && looked.entryId != null && looked.open && !looked.merged && looked.headSha === order.expectedPublicHead ? looked : null;
   const pull = queue ?? (await port.readPublicPull({ accountId, order }));
   const end = async (to: "merged" | "enqueued" | "head_moved" | "failed", code: string, conflict?: PlaneMergeConflictRecord): Promise<SettleOutcome> => {
     const done = await port.store.finish({ accountId, orderId: order.id, to, code, actor: { by: "cloud" }, ...(conflict !== undefined ? { conflict } : {}) });

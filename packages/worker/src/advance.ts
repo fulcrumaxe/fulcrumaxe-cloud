@@ -384,6 +384,8 @@ export interface AdvanceRoundResult {
   ciReasons?: string[];
   ciMissing?: string[];
   ciRunning?: string[];
+  /** `fix` caused by finished red CI: the failed check names (public names). */
+  ciFailed?: string[];
 }
 /**
  * D#6 PUBLIC-MERGE PR2b: where the merge order of a paired `runner_local` item stands. `open`: still waiting for the runner (pending, claimed or authorized).

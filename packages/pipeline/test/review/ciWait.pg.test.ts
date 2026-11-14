@@ -120,9 +120,19 @@ describe("a pass recorded while CI is running", () => {
     expect((await record(w, PASS_BOTH)).decision).toBe("all_passed");
   });
 
-  it("a check that finished red is a finished signal: the verdicts are recorded as given (the merge gate is what refuses a red head)", async () => {
-    const w = await world({ repo: { checks: { [HEAD]: [{ name: "build", status: "completed", conclusion: "failure" }] } } });
-    expect((await record(w, PASS_BOTH)).decision).toBe("all_passed");
+  it("a check that finished red with the code reviewer's pass: recorded as the code reviewer's needs-fix, a fix round, and the failed check names come back", async () => {
+    const w = await world({ repo: { checks: { [HEAD]: [{ name: "build", status: "completed", conclusion: "failure" }, { name: "lint", status: "completed", conclusion: "success" }] } } });
+    const out = await record(w, PASS_BOTH);
+    expect(out).toMatchObject({ decision: "fix", nextRound: 1, ciFailed: ["build"] });
+    expect(await stageOf(w)).toBe("changes_requested");
+    expect(out.recorded.map((r) => `${r.role}:${r.verdict}`)).toContain("code-reviewer:needs-fix");
+  });
+
+  it("a check that was only cancelled is not red: the verdicts are recorded as given", async () => {
+    const w = await world({ repo: { checks: { [HEAD]: [{ name: "build", status: "completed", conclusion: "cancelled" }] } } });
+    const out = await record(w, PASS_BOTH);
+    expect(out.decision).toBe("all_passed");
+    expect(out.ciFailed).toBeUndefined();
   });
 });
 
@@ -337,9 +347,9 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
     expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing"] });
   });
 
-  it("a public check that finished red is a finished signal, as on a single plane (the merge gate refuses a red head)", async () => {
+  it("a public check that finished red is a fix round, as on a single plane: the public check's name comes back", async () => {
     const t = await pairedWorld({ pub: { [PUB_HEAD]: [{ name: "build", status: "completed", conclusion: "failure" }] } });
-    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "fix", ciFailed: ["build"] });
   });
 
   it("a public head that is not the one the platform pushed is a wait (wrong_head), unless a person took the branch over", async () => {
