@@ -61,8 +61,9 @@ export class FakeDriver implements PageDriver {
     if (e === undefined) throw new ToolError("stale_ref");
     return e;
   }
-  async click(ref: string): Promise<void> {
+  async click(ref: string, count: 1 | 2 = 1): Promise<void> {
     const e = this.el(ref);
+    this.calls.push(count === 2 ? `dblclick ${ref}` : `click ${ref}`);
     if (e.download || e.type === "file") throw new ToolError("refused_element");
     if (e.goes !== undefined) {
       const u = new URL(e.goes, BASE);

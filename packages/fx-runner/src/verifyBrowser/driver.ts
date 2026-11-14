@@ -72,7 +72,7 @@ export interface PageDriver {
   go(url: string): Promise<void>;
   url(): string;
   scan(): Promise<{ elements: RawElement[]; text: string }>;
-  click(ref: string): Promise<void>;
+  click(ref: string, count?: 1 | 2): Promise<void>;
   fill(ref: string, text: string): Promise<void>;
   choose(ref: string, option: string): Promise<void>;
   press(key: string): Promise<void>;
@@ -266,12 +266,13 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
       go: (url) => guard(async () => void (await page.goto(url, { waitUntil: "domcontentloaded" }))),
       url: () => page.url(),
       scan: () => guard(() => page.evaluate(SNAPSHOT_SCRIPT) as Promise<{ elements: RawElement[]; text: string }>),
-      click: (ref) =>
+      click: (ref, count) =>
         guard(async () => {
           const loc = await target(ref);
           const kind = await loc.evaluate((el) => ({ type: el.getAttribute("type") ?? "", download: el.hasAttribute("download") }));
           if (kind.download || kind.type.toLowerCase() === "file") throw new ToolError("refused_element");
-          await loc.click();
+          // A desktop-style icon opens on a double-click; a plain click only selects it.
+          await (count === 2 ? loc.dblclick() : loc.click());
         }),
       fill: (ref, text) =>
         guard(async () => {
