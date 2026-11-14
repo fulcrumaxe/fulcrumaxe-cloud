@@ -153,6 +153,43 @@ describe("the merge gate re-ask [pg]", { timeout: 60_000 }, () => {
     expect(await findGateReaskCandidates(writerPool, { accountId: cases[3]![1].a.accountId, repoId: cases[3]![1].a.repoId }, wake)).toEqual([]);
   });
 
+  it("an approved proposal: the approval sits on the retired card this item replaced (the supersede record), and the re-ask starts the advance on it; a card the record does not tie to this item, or only a forged `superseded:<item>` history row, is not counted", async () => {
+    // The approval request sits on a closed card. `replacedBy` is the item the supersede record names (null: no record); `ref` is the history row's free-text mark.
+    const approvalOnClosedCard = async (c: Awaited<ReturnType<typeof atGate>>, ref: string, replacedBy: string | null) => {
+      const card = randomUUID();
+      await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'closed', $4)", [card, c.a.accountId, c.a.repoId, n++]);
+      await admin.query("UPDATE run_action_requests SET target_id = $2 WHERE target_id = $1", [c.w, card]);
+      await admin.query("INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'triaged', 'closed', now(), 'control_plane', $3)", [c.a.accountId, card, ref]);
+      if (replacedBy !== null) await admin.query("INSERT INTO work_item_supersedes (account_id, old_work_item_id, root_work_item_id) VALUES ($1, $2, $3)", [c.a.accountId, card, replacedBy]);
+    };
+    const none = async (c: Awaited<ReturnType<typeof atGate>>) => {
+      const started: AdvanceStartArgs[] = [];
+      expect(await ask(started, c.w, c.a.accountId)).toEqual({ started: false, reason: "no_approval" });
+      expect(started).toEqual([]);
+      expect(await claims(c.w)).toBe(0);
+    };
+
+    const origin = await atGate({ reasons: ["ci_not_green"] });
+    await approvalOnClosedCard(origin, `superseded:${origin.w}`, origin.w);
+    const started: AdvanceStartArgs[] = [];
+    expect(await ask(started, origin.w, origin.a.accountId)).toEqual({ started: true });
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({ accountId: origin.a.accountId, userId: origin.a.userId, workItemId: origin.w, actionId: origin.approval });
+    expect(await claims(origin.w)).toBe(1);
+
+    // The same approval on a closed card that another item replaced is nobody's approval of this item.
+    const unrelated = await atGate({ reasons: ["ci_not_green"] });
+    const another = randomUUID();
+    await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'spec_ready', $4)", [another, unrelated.a.accountId, unrelated.a.repoId, n++]);
+    await approvalOnClosedCard(unrelated, `superseded:${another}`, another);
+    await none(unrelated);
+
+    // A history row alone proves nothing: the app can write that text, and only the retire step writes the record.
+    const forged = await atGate({ reasons: ["ci_not_green"] });
+    await approvalOnClosedCard(forged, `superseded:${forged.w}`, null);
+    await none(forged);
+  });
+
   it("another repository's pull request of the same number, and another account's item, are not candidates", async () => {
     const { a, w } = await atGate();
     const other = await atGate();
