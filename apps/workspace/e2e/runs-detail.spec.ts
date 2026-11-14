@@ -159,7 +159,7 @@ test.describe("D#483 P5: the run detail (mocked API)", () => {
     await expect(tid(page, "runs-facts")).toContainText("sonnet-5");
     await expect(tid(page, "runs-facts")).toContainText("9b708c1");
     await expect(tid(page, "runs-facts")).toContainText("Time 60 min");
-    await expect(tid(page, "runs-linked")).toHaveText("Continues: Review · Code reviewer, failed");
+    await expect(tid(page, "runs-linked")).toHaveText("Continues: Review · Code reviewer, Failed");
     await expectNoOverflow(page);
     expect(mock.requests.filter((r) => r.endsWith("/insight"))).toEqual([`GET /api/v1/runs/${ID}/insight`]);
     expect(await tt()).toEqual([]);
@@ -188,7 +188,7 @@ test.describe("D#483 P5: the run detail (mocked API)", () => {
     await expect(tid(page, "runs-cost-model")).toContainText("On the operator's subscription");
     await expect(tid(page, "runs-cost-compute")).toContainText("$0.04");
     await press(page, tid(page, "runs-facts").locator("summary"));
-    await expect(tid(page, "runs-linked")).toHaveText("Continued by: Review · Code reviewer, running");
+    await expect(tid(page, "runs-linked")).toHaveText("Continued by: Review · Code reviewer, Running");
     await expectNoOverflow(page);
   });
 

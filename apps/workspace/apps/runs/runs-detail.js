@@ -9,6 +9,7 @@
 import { clockText, h, timeNode } from "../_lib/dom.js";
 import { REFUSAL } from "../_lib/api.js";
 import { crossesBoundary, displayText, nextCarry } from "./runs-display-filter.js";
+import { STATUS_LABELS } from "./runs-storage.js";
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const word = (s) => String(s).replace(/[_-]+/g, " ");
@@ -606,11 +607,17 @@ export function foldBox(ui, testid, title, defaultOpen, ...children) {
   return h("details", { class: "runs-fold", "data-testid": testid, open: open || undefined, onToggle: (e) => { ui[testid] = e.currentTarget.open; } }, h("summary", { class: "runs-fold-sum" }, title), ...children);
 }
 
+/** "Continues: Review · Code reviewer, Stopped at the spend limit"; a status without a label falls back to its plain words. */
+export function linkedRunText(label, run) {
+  const statusWords = Object.hasOwn(STATUS_LABELS, run.status) ? STATUS_LABELS[run.status] : word(run.status);
+  return label + ": " + titleOf(run.role) + ", " + statusWords;
+}
+
 function linkedRun(label, run, openRun) {
   return h(
     "button",
     { type: "button", class: "runs-link", "data-testid": "runs-linked", "data-id": run.id, onClick: () => openRun(run.id) },
-    label + ": " + titleOf(run.role) + ", " + word(run.status)
+    linkedRunText(label, run)
   );
 }
 
