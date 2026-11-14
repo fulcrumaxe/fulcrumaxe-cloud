@@ -207,6 +207,11 @@ export function runnerEventLine(p) {
   return displayText(line);
 }
 
+// The Repos app's mode picker names these three modes from runner-protocol's COPY (repos-runners.js, LABEL_KEY); this
+// file is browser code served without a bundler and the insight response carries no copy, so the words are written
+// here too and held equal to COPY by test/runs-detail.test.mjs.
+const EXECUTION_MODE_WORDS = { sandbox: "Sandbox", runner_local: "Local-only", runner_verified: "Cloud-verified" };
+
 const LIMIT_LABELS = {
   max_run_minutes: ["Time", (v) => v + " min"],
   max_model_calls: ["Model calls", (v) => String(v)],
@@ -223,7 +228,7 @@ export function factRows(insight) {
   const r = insight.run;
   const rows = [];
   if (r.model) rows.push(["Model", r.model]);
-  if (r.execution_mode) rows.push(["Runs in", word(r.execution_mode)]);
+  if (r.execution_mode) rows.push(["Runs in", EXECUTION_MODE_WORDS[r.execution_mode] || word(r.execution_mode)]);
   // C42-4: where a runner run is, and (live only) when its runner last checked in.
   if (r.runtime === "runner") rows.push(["Runs on", "Your runner"]);
   const seen = clockText(insight.runner_checked_in_at);

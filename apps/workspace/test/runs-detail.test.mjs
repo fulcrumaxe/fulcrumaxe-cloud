@@ -7,12 +7,14 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { costRows, durationText, factRows, failureText, githubLinks, isReviewer, readInsight, titleOf, verdictView } from "../apps/runs/runs-detail.js";
+import { COPY } from "../../../packages/runner-protocol/src/copy.ts";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fx = (name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", "getRunInsight", name), "utf8"));
 const REVIEW = fx("200-review-needs-fix.json");
 const EXEC = fx("200-executor-done.json");
 const BARE = fx("200-running-bare.json");
+const RUNNER = fx("200-runner.json");
 
 describe("titles and verdicts", () => {
   it("names a role with its phase, and an unknown role plainly", () => {
@@ -85,6 +87,20 @@ describe("facts and links", () => {
   it("lists nothing about model or commit when none was recorded", () => {
     const rows = factRows(BARE);
     expect(rows.map((r) => r[0])).toEqual(["Limits now set for this role"]);
+  });
+  it("names the execution mode with the Repos picker's own words, held equal to COPY", () => {
+    expect(factRows(RUNNER).find((r) => r[0] === "Runs in")).toEqual(["Runs in", "Local-only"]);
+    expect(factRows(EXEC).find((r) => r[0] === "Runs in")).toEqual(["Runs in", "Sandbox"]);
+    expect(factRows({ run: { ...RUNNER.run, execution_mode: "runner_verified" } }).find((r) => r[0] === "Runs in")).toEqual(["Runs in", "Cloud-verified"]);
+    expect(factRows(RUNNER).find((r) => r[0] === "Runs in")[1]).toBe(COPY.modeLocalOnly);
+    expect(factRows(EXEC).find((r) => r[0] === "Runs in")[1]).toBe(COPY.modeSandbox);
+    expect(factRows({ run: { ...RUNNER.run, execution_mode: "runner_verified" } }).find((r) => r[0] === "Runs in")[1]).toBe(COPY.modeCloudVerified);
+  });
+  it("falls back to plain words for a mode it does not know, and shows no row when none was recorded", () => {
+    expect(factRows({ run: { ...RUNNER.run, execution_mode: "some_new_mode" } }).find((r) => r[0] === "Runs in")).toEqual(["Runs in", "some new mode"]);
+    expect(factRows(BARE).find((r) => r[0] === "Runs in")).toBeUndefined();
+    expect(factRows({ run: { ...RUNNER.run, execution_mode: "" } }).find((r) => r[0] === "Runs in")).toBeUndefined();
+    expect(factRows({ run: { ...RUNNER.run, execution_mode: undefined } }).find((r) => r[0] === "Runs in")).toBeUndefined();
   });
   it("links the issue and the PR only when the repo and the numbers are recorded and safe", () => {
     expect(githubLinks(REVIEW)).toEqual([
