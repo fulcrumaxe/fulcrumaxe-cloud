@@ -89,8 +89,10 @@ export async function stageApprovalGate<H extends { sha: string }>(
   // The cards an approval of this stage may sit on: the item itself and, where the entry says so, the card this one replaced (retired with `superseded:<this item>`).
   const targets = [workItemId];
   if (entry.approval.from === 'origin') {
-    const origin = await client.query<{ work_item_id: string }>("SELECT DISTINCT work_item_id FROM work_item_transitions WHERE account_id = $1 AND to_stage = 'closed' AND source_ref = $2", [accountId, `superseded:${workItemId}`]);
-    targets.push(...origin.rows.map((r) => r.work_item_id));
+    // The proof is the record `retire_superseded_work_item` writes (same account, same repo, card retired from Triaged). The ref text on a closing transition is free text
+    // the app can write, so it is never read here.
+    const origin = await client.query<{ old_work_item_id: string }>('SELECT old_work_item_id FROM work_item_supersedes WHERE account_id = $1 AND root_work_item_id = $2', [accountId, workItemId]);
+    targets.push(...origin.rows.map((r) => r.old_work_item_id));
   }
   // Any request of this kind that is still waiting to be performed means a person is acting right now: leave it to them.
   const open = await client.query("SELECT 1 FROM run_action_requests WHERE account_id = $1 AND target_id = ANY($2::uuid[]) AND kind IN ('advance_work_item', 'respec_work_item') AND state IN ('accepted', 'claimed') LIMIT 1", [accountId, targets]);

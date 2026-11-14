@@ -64,6 +64,7 @@ describe("the parked-stage sweep for the panel [pg]", { timeout: 90_000 }, () =>
       approvalTarget = randomUUID();
       await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'closed', $4)", [approvalTarget, a.accountId, a.repoId, n++]);
       await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'triaged', 'closed', now(), 'control_plane', $3)`, [a.accountId, approvalTarget, `superseded:${w}`]);
+      await admin.query(`INSERT INTO work_item_supersedes (account_id, old_work_item_id, root_work_item_id) VALUES ($1, $2, $3)`, [a.accountId, approvalTarget, w]);
     }
     const approval = randomUUID();
     await admin.query(

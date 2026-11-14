@@ -24,11 +24,15 @@ import { createSiblingConflictWake } from "./siblingConflictWake.js";
 
 export const GATE_REASK_CODE = "gate_reask";
 
-/** The review stage's entry, as far as the approval decision reads it: an item at "Review passed", approved by the person who pressed Build or Check the merge. */
+/**
+ * The review stage's entry, as far as the approval decision reads it: an item at "Review passed", approved by the person who pressed Build or Check the merge.
+ * The approval is read from `origin`: an approved proposal first makes one card, that card is retired (`superseded:<new item>`) and the real item replaces it, and the
+ * approval request stays on the retired card. Reading only the item's own requests found none for every approved-proposal item, so a green check never re-asked it.
+ */
 const GATE_ENTRY: StageGateEntry = Object.freeze({
   stage: "review",
   itemStages: Object.freeze(["review_passed"]) as readonly string[],
-  approval: Object.freeze({ kind: "advance_work_item", from: "self" }) as { kind: "advance_work_item"; from: "self" },
+  approval: Object.freeze({ kind: "advance_work_item", from: "origin" }) as { kind: "advance_work_item"; from: "origin" },
   needsSpec: false,
   runKeyLikes: (): string[] => [],
   startedRunsOk: true,

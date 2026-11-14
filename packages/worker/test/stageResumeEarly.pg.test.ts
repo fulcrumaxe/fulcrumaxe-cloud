@@ -73,6 +73,7 @@ describe("the parked-stage sweep for classify, the first Spec and the re-spec [p
       approvalTarget = randomUUID();
       await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'closed', $4)", [approvalTarget, a.accountId, a.repoId, n++]);
       await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'triaged', 'closed', now(), 'control_plane', $3)`, [a.accountId, approvalTarget, `superseded:${w}`]);
+      await admin.query(`INSERT INTO work_item_supersedes (account_id, old_work_item_id, root_work_item_id) VALUES ($1, $2, $3)`, [a.accountId, approvalTarget, w]);
     }
     if (stage === "respec") {
       await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system')", [a.accountId, w]);
@@ -287,7 +288,8 @@ describe("the parked-stage sweep for classify, the first Spec and the re-spec [p
 
   it("the first Spec: an approval on a card that was NOT replaced by this item does not count", async () => {
     const p = await parked("spec");
-    // Point the retired card's mark at some other item.
+    // The card was not replaced by this item: no record of it, and its mark names some other item.
+    await admin.query("DELETE FROM work_item_supersedes WHERE old_work_item_id = $1", [p.approvalTarget]);
     await admin.query("UPDATE work_item_transitions SET source_ref = $2 WHERE work_item_id = $1", [p.approvalTarget, `superseded:${randomUUID()}`]);
     const started: AdvanceStartArgs[] = [];
     await sweeper(limits(600), started, { t: Date.now() }).sweepParkedStages([entryOf("spec")]);
