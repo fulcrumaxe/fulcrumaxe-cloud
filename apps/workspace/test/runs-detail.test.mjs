@@ -6,7 +6,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { costRows, durationText, factRows, failureText, githubLinks, isReviewer, readInsight, titleOf, verdictView } from "../apps/runs/runs-detail.js";
+import { costRows, durationText, factRows, failureText, githubLinks, isReviewer, linkedRunText, readInsight, titleOf, verdictView } from "../apps/runs/runs-detail.js";
+import { STATUS_LABELS } from "../apps/runs/runs-storage.js";
 import { COPY } from "../../../packages/runner-protocol/src/copy.ts";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -116,6 +117,26 @@ describe("facts and links", () => {
     const item = { repo: { owner: "acme", name: "docs" }, issue_number: 64 };
     expect(githubLinks({ work_item: item, pr_number: 64 })).toEqual([{ label: "Issue #64", href: "https://github.com/acme/docs/issues/64" }]);
     expect(githubLinks({ work_item: item, pr_number: 70 }).map((l) => l.label)).toEqual(["Issue #64", "PR #70"]);
+  });
+});
+
+describe("linked runs", () => {
+  const run = { id: "00000000-0000-4000-8000-000000000001", role: "code-reviewer", status: "killed_spend" };
+  it("names the status with the Runs app's own label", () => {
+    expect(linkedRunText("Continues", run)).toBe("Continues: Review · Code reviewer, Stopped at the spend limit");
+  });
+  it("uses STATUS_LABELS for every status it knows", () => {
+    for (const key of Object.keys(STATUS_LABELS)) {
+      expect(linkedRunText("Continues", { ...run, status: key })).toBe("Continues: Review · Code reviewer, " + STATUS_LABELS[key]);
+    }
+    expect(linkedRunText("Continues", { ...run, status: "succeeded" })).toBe("Continues: Review · Code reviewer, Succeeded");
+    expect(linkedRunText("Continues", { ...run, status: "timed_out" })).toBe("Continues: Review · Code reviewer, Timed out");
+    expect(linkedRunText("Continues", { ...run, status: "refused_spend" })).toBe("Continues: Review · Code reviewer, Not started: spend limit");
+    expect(linkedRunText("Continues", { ...run, status: "pending" })).toBe("Continues: Review · Code reviewer, Waiting");
+  });
+  it("falls back to plain words for a status it does not know, inventing nothing", () => {
+    expect(linkedRunText("Continues", { ...run, status: "some_new_state" })).toBe("Continues: Review · Code reviewer, some new state");
+    expect(linkedRunText("Continues", { ...run, status: "" })).toBe("Continues: Review · Code reviewer, ");
   });
 });
 
