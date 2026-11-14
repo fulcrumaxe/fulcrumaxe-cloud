@@ -189,8 +189,12 @@ export function createCiGate(deps: {
         if (!publicPr.managedByPerson && (publicPr.stampedHead === null || publicPr.pushState === "updating" || publicPr.pushState === "waiting_person_pushed")) return { state: "pending", reasons: ["wrong_head"] };
         const snapshot = await port.getCiSnapshot(ref, live);
         let reading = readCiWaitNamed(snapshot, live);
-        // D#6 CLOUD-POSTS-FX-GATE1: only a head the platform pushed, with `fx-gate1` the one thing missing, is attested; after a post GitHub is read again.
-        if (onlyGate1Missing(reading, snapshot) && !publicPr.managedByPerson && publicPr.stampedHead === live) {
+        // D#6 CLOUD-POSTS-FX-GATE1: only a head the platform pushed is attested, and only while `fx-gate1` is still missing from it: either it is the one thing the wait
+        // is for, or the reading is still pending for other reasons too (the first CI running). The second case lets the full-scope run start beside the first one
+        // instead of after it: with no `ci:full` label the attester adds it at once; with the label on it can only wait or fail early. Once `fx-gate1` exists on the
+        // head (ours or someone else's) the attester is not called again: a failure post is terminal and a foreign status is never overwritten. A pending reading keeps
+        // its own reasons plus the Gate 1 one; after a post GitHub is read again.
+        if ((onlyGate1Missing(reading, snapshot) || (reading.state === "pending" && missingRequired(snapshot).includes(GATE1_CONTEXT))) && !publicPr.managedByPerson && publicPr.stampedHead === live) {
           const gate1 = deps.gate1;
           if (gate1 === undefined || gate1.repos.size === 0) {
             reading = { ...reading, state: "pending", reasons: [...reading.reasons, "gate1_attest_off"] };
