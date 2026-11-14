@@ -31,7 +31,7 @@ export const TOOLS: Readonly<Record<string, ToolDef>> = {
   begin_journey: { description: "Start checking a journey, by its id, before any other browser tool; call it again to switch journeys. An answer may quote only what the page showed while that journey was being checked.", props: { id: { type: "string", max: 40 } }, required: ["id"] },
   open: { description: "Open a page of the app by path, for example /items. Takes a path that starts with one slash, never an address.", props: { path: { type: "string", max: 500 } }, required: ["path"] },
   snapshot: { description: "List the visible buttons, links, fields, headings and status elements with refs (e1, e2, ...), and a slice of the page text.", props: {}, required: [] },
-  click: { description: "Click the element with this ref from the latest snapshot.", props: { ref: REF }, required: ["ref"] },
+  click: { description: "Click the element with this ref from the latest snapshot. count 2 double-clicks (a desktop-style icon opens its app with a double-click; one click only selects it). A taskbar or toolbar button opens with one click.", props: { ref: REF, count: { type: "integer", max: 2 } }, required: ["ref"] },
   type: { description: "Type text into the text field or textarea with this ref. Password and file fields are refused.", props: { ref: REF, text: TEXT }, required: ["ref", "text"] },
   select: { description: "Choose an option, by its visible label, in the select with this ref.", props: { ref: REF, option: TEXT }, required: ["ref", "option"] },
   press: { description: "Press Enter, Escape or Tab.", props: { key: { type: "string", enum: ["Enter", "Escape", "Tab"] } }, required: ["key"] },
@@ -215,7 +215,7 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
           break;
         }
         case "click":
-          await d.click(str("ref"));
+          await d.click(str("ref"), a.count === 2 ? 2 : 1);
           reply = shown("clicked", where(d));
           break;
         case "type":

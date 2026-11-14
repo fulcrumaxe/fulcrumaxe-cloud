@@ -102,6 +102,7 @@ function page(req: IncomingMessage, res: ServerResponse): void {
       try { const pc = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.2:'+U}]}); pc.createDataChannel('x'); pc.createOffer().then(o=>pc.setLocalDescription(o)); document.getElementById('s').textContent='rtc-created'; } catch(e) { document.getElementById('s').textContent='rtc-unavailable'; }
     </script>`);
   }
+  if (url.pathname === "/desk") return html(`<button ondblclick="document.getElementById('app').textContent='App opened'">Notes icon</button><p id=app>Desktop</p>`);
   if (url.pathname === "/redir2") return void res.writeHead(302, { location: "/redir" }).end();
   if (url.pathname === "/redir") return void res.writeHead(302, { location: `${otherBase}/landed` }).end();
   if (url.pathname === "/attach") return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=secret.bin" }).end("DOWNLOAD-BYTES");
@@ -313,6 +314,19 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     await k.server.stop();
     expect(existsSync(path.join(k.jobDir, "home"))).toBe(false);
   }, 120_000);
+
+  it("opens a desktop-style icon with a double-click and not with a single click", async () => {
+    const j = job(false);
+    await j.call("open", { path: "/desk" });
+    await j.call("wait_text", { text: "Notes icon" });
+    const snap = await j.call("snapshot");
+    const ref = /(e\d+) \S+ "Notes icon"/.exec(snap)![1]!;
+    expect(await j.call("click", { ref })).toContain("clicked");
+    expect(await j.call("snapshot")).not.toContain("App opened");
+    expect(await j.call("click", { ref, count: 2 })).toContain("clicked");
+    expect(await j.call("wait_text", { text: "App opened" })).toContain("text_visible");
+    await j.server.stop();
+  }, 60_000);
 
   it("stops every sub-resource, socket, worker, beacon and WebRTC attempt to another host or another port of the base host", async () => {
     probeHits.length = 0;

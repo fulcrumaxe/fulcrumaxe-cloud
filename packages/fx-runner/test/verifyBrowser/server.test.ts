@@ -44,7 +44,7 @@ describe("the tool table", () => {
     const banned = /script|eval|network|upload|download|request|header|cookie|storage|screenshot|file/i;
     for (const t of toolList()) expect(t.name, t.name).not.toMatch(banned);
     const props = toolList().flatMap((t) => Object.keys((t.inputSchema as { properties: object }).properties));
-    expect(new Set(props)).toEqual(new Set(["id", "path", "ref", "text", "option", "key", "seconds", "envelope"]));
+    expect(new Set(props)).toEqual(new Set(["id", "path", "ref", "text", "option", "key", "seconds", "count", "envelope"]));
     for (const t of toolList()) expect((t.inputSchema as { additionalProperties: boolean }).additionalProperties).toBe(false);
   });
 
@@ -125,6 +125,26 @@ describe("results are fenced as untrusted", () => {
     expect(snap.length).toBeGreaterThan(1_000);
     const num = (await r.call("read_number", { ref: "e1" })).text;
     expect(num.length).toBeLessThan(1_000);
+    await r.server.stop();
+  });
+});
+
+describe("click count", () => {
+  it("double-clicks only for count 2, clicks once otherwise, and refuses any other count", async () => {
+    const r = rig(PAGES);
+    await r.call("open", { path: "/" });
+    await r.call("snapshot");
+    expect((await r.call("click", { ref: "e1", count: 2 })).text).toContain("clicked");
+    expect((await r.call("click", { ref: "e1" })).text).toContain("clicked");
+    expect((await r.call("click", { ref: "e1", count: 1 })).text).toContain("clicked");
+    const calls = r.driver()!.calls.filter((c) => /click/.test(c));
+    expect(calls).toEqual(["dblclick e1", "click e1", "click e1"]);
+    for (const count of [3, 0, "2", 1.5]) {
+      const out = await r.call("click", { ref: "e1", count });
+      expect(out.isError, String(count)).toBe(true);
+      expect(out.text).toContain("bad_arguments");
+    }
+    expect(r.driver()!.calls.filter((c) => /click/.test(c))).toHaveLength(3);
     await r.server.stop();
   });
 });
