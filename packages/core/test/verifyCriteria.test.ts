@@ -62,6 +62,10 @@ describe('classifyCriterion: tags override the rule', () => {
     expect(CRITERION_TAG_RULES).toContain('[ui]');
     expect(CRITERION_TAG_RULES).toContain('[code]');
   });
+  it('the Spec writer prompt says a [ui] criterion uses real app data, never a fixture, and says how to reach rare or old items', () => {
+    expect(CRITERION_TAG_RULES).toContain('never a test fixture name, seed id or test file');
+    expect(CRITERION_TAG_RULES).toContain('an older run, reached with Show more');
+  });
 });
 
 describe('planJourneys', () => {

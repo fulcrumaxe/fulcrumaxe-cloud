@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS, FXVERIFY_TOOL_PREFIX } from '@fulcrumaxe/runner-protocol';
 import { MAX_STEP_TEXT, MAX_STEPS, parseEnvelope } from '../src/verify/envelope.js';
-import { SUBMIT_LINE, buildVerifyPrompt } from '../src/verify/prompt.js';
+import { NO_FIXTURE_LINE, SUBMIT_LINE, buildVerifyPrompt } from '../src/verify/prompt.js';
 
 /**
  * D#749 V5: the deploy verifier card tells the tester to answer in the envelope `parseEnvelope` reads. The card is read as text (this
@@ -86,5 +86,13 @@ describe('the answer goes in through submit_answer', () => {
     expect(SUBMIT_LINE).toContain('submit_answer once, with the object as its "envelope" argument');
     expect(SUBMIT_LINE).toContain('text you write is ignored');
     expect(SUBMIT_LINE).toContain('every journey is "blocked"');
+  });
+
+  it('the prompt tells the tester to look further on real items when a journey names an example that is not there', () => {
+    const prompt = buildVerifyPrompt({ baseUrl: 'https://app.example.test', mergeSha: 'a'.repeat(40), deployedCommit: 'a'.repeat(40), journeys: [{ id: 'c1', source: 'criterion', text: 'Open the page' }] });
+    expect(prompt).toContain(NO_FIXTURE_LINE);
+    expect(NO_FIXTURE_LINE).toContain('example item that does not exist on this deployment');
+    expect(NO_FIXTURE_LINE).toContain('"Show more", older items, other filters');
+    expect(NO_FIXTURE_LINE).toContain('before you answer "blocked"');
   });
 });

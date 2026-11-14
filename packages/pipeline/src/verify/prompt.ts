@@ -36,6 +36,10 @@ function assertOurJourneys(journeys: readonly Journey[]): void {
 export const SUBMIT_LINE =
   'If your tools include submit_answer, hand in that JSON object by calling submit_answer once, with the object as its "envelope" argument: that call is then the only answer that is read, and text you write is ignored. Call it even when the browser does not work and every journey is "blocked".';
 
+/** D#749: a journey can name an example item (a test fixture) that this deployment does not have; the tester must then look at the real data before it answers "blocked". Pinned by a test. */
+export const NO_FIXTURE_LINE =
+  'A journey may name an example item that does not exist on this deployment: then check the same thing on any real item that has it, and look further (for example "Show more", older items, other filters) before you answer "blocked".';
+
 export function buildVerifyPrompt(input: VerifyPromptInput): string {
   assertOurJourneys(input.journeys);
   const journeys = input.journeys.flatMap((j) => [`JOURNEY ${j.id} (${j.source}):`, sanitize(j.text)]);
@@ -49,6 +53,7 @@ export function buildVerifyPrompt(input: VerifyPromptInput): string {
     '',
     'Answer with one JSON object and nothing else: {"journeys":[{"id","result":"pass"|"fail"|"blocked","steps":[{"did","dom_fact","number"?}],"console_errors":<integer>,"undo_checked":<boolean>,"reloaded":<boolean>}]}.',
     `Answer every journey once, with its id. Give at most ${MAX_STEPS} steps per journey and at most ${MAX_STEP_TEXT} characters per "did" and "dom_fact". A "pass" needs a step stating what you did and the page fact or number that showed it, an undo check and a reload; otherwise answer "blocked" or "fail".`,
+    NO_FIXTURE_LINE,
     SUBMIT_LINE,
   ].join('\n');
 }
