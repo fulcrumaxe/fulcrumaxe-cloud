@@ -484,12 +484,86 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
       await expectNothingRecorded(t.w);
     });
 
-    it("a snapshot missing anything else never calls it", async () => {
+    it("a snapshot also missing another guard still calls it (it only labels or waits); the reading keeps its reasons plus gate1_waiting and nothing is posted", async () => {
       const g = gate1World();
       const t = await pairedWorld({ local: true, required: [...REQUIRED, "other-guard"], pub: { [PUB_HEAD]: runs("2026-11-07T10:05:00Z") }, gate1World: g, gate1Repos: LISTED });
-      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing"] });
-      expect(t.pubLocal!.calls.map((c) => c.label).filter((l) => ["A14", "A15", "A16", "A17", "A7"].includes(l))).toEqual([]);
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing", "gate1_waiting"] });
+      expect(g.labelAdds).toBe(1);
+      expect(t.pub.posts).toEqual([]);
+      await expectNothingRecorded(t.w);
+    });
+
+    it("the first CI still running and no ci:full label: the label is added during the wait, the round stays pending", async () => {
+      const g = gate1World({ now: "2026-11-07T10:00:00Z" });
+      const running = [...runs("2026-11-07T09:00:00Z").slice(1), { name: GATE1_WORKFLOW_CONTEXTS[0]!, status: "in_progress", conclusion: null, app: { id: ACTIONS_APP_ID } }];
+      const t = await pairedWorld({ required: REQUIRED, pub: { [PUB_HEAD]: running }, gate1World: g, gate1Repos: LISTED });
+      const out = await record(t.w, PASS_BOTH, t.gate);
+      expect(out.decision).toBe("ci_pending");
+      expect(out.ciReasons).toContain("check_running");
+      expect(g.labelAdds).toBe(1);
+      expect(t.pub.posts).toEqual([]);
+      await expectNothingRecorded(t.w);
+    });
+
+    // In the real setup fx-gate1 is required, so a finished red first run is still pending on required_missing: it goes through onlyGate1Missing as before this change
+    // (label, full run, ci_red, fix round). Only a setup whose required list has no fx-gate1 settles red straight away, and then the attester is never reached.
+    it("the first CI red with fx-gate1 not required: settles red, no label, no post", async () => {
+      const g = gate1World({ now: "2026-11-07T10:00:00Z" });
+      const red = [{ name: GATE1_WORKFLOW_CONTEXTS[0]!, status: "completed", conclusion: "failure", startedAt: "2026-11-07T09:00:00Z", app: { id: ACTIONS_APP_ID } }];
+      const t = await pairedWorld({ required: [...GATE1_WORKFLOW_CONTEXTS], pub: { [PUB_HEAD]: [...runs("2026-11-07T09:00:00Z").slice(1), ...red] }, gate1World: g, gate1Repos: LISTED });
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "fix", ciFailed: [GATE1_WORKFLOW_CONTEXTS[0]] });
       expect(g.labelAdds).toBe(0);
+      expect(t.pub.posts).toEqual([]);
+    });
+
+    const g1Posts = (t: { pub: { posts: Array<{ body: { context?: string; state?: string; description?: string } }> } }) => t.pub.posts.filter((p) => p.body.context === "fx-gate1");
+    const AFTER_LABEL = "2026-11-07T10:05:00Z";
+    const labelled = () => gate1World({ now: "2026-11-07T10:10:00Z", labels: ["ci:full"], labelEvents: [{ event: "labeled", label: "ci:full", createdAt: "2026-11-07T10:00:00Z" }] });
+    const stillRunning = (name: string) => ({ name, status: "in_progress", conclusion: null, startedAt: AFTER_LABEL, app: { id: ACTIONS_APP_ID } });
+
+    it("the label on, one context red after it and another still running, polled twice: the failure is posted once, not on every poll", async () => {
+      const g = labelled();
+      const [first, second, ...rest] = runs(AFTER_LABEL);
+      const checks = [{ ...first!, conclusion: "failure" }, stillRunning(second!.name), ...rest];
+      const t = await pairedWorld({ required: REQUIRED, pub: { [PUB_HEAD]: checks }, gate1World: g, gate1Repos: LISTED });
+      for (let i = 0; i < 2; i++) expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+      expect(g1Posts(t)).toHaveLength(1);
+      expect(g1Posts(t)[0]!.body.state).toBe("failure");
+    });
+
+    it("a change touching .github/, polled twice while the first CI runs: exactly one ci_paths failure post", async () => {
+      const g = gate1World({ now: "2026-11-07T10:00:00Z" });
+      const first = runs("2026-11-07T09:00:00Z");
+      const checks = [stillRunning(first[0]!.name), ...first.slice(1)];
+      const t = await pairedWorld({ required: REQUIRED, pub: { [PUB_HEAD]: checks }, gate1World: g, gate1Repos: LISTED });
+      t.pub.files = [{ filename: ".github/workflows/ci.yml" }];
+      for (let i = 0; i < 2; i++) expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+      expect(g1Posts(t)).toHaveLength(1);
+      expect(g1Posts(t)[0]!.body.state).toBe("failure");
+      expect(g.labelAdds).toBe(0);
+    });
+
+    it("a failure fx-gate1 from another poster, all five full runs green, the wait pending on a required context that never reported: nothing is posted over it", async () => {
+      const g = labelled();
+      g.creators[PUB_HEAD] = { __typename: "User", login: "someone" };
+      const checks = [...runs(AFTER_LABEL)];
+      const t = await pairedWorld({ local: true, required: [...REQUIRED, "other-check"], pub: { [PUB_HEAD]: checks }, gate1World: g, gate1Repos: LISTED });
+      t.pub.statuses[PUB_HEAD] = { "fx-gate1": "failure" };
+      for (let i = 0; i < 2; i++) expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+      expect(g1Posts(t)).toEqual([]);
+      expect(g.labelAdds).toBe(0);
+    });
+
+    it("the label is on and the full run still running: it waits, nothing is posted or labelled again", async () => {
+      const g = gate1World({ now: "2026-11-07T10:10:00Z", labels: ["ci:full"], labelEvents: [{ event: "labeled", label: "ci:full", createdAt: "2026-11-07T10:00:00Z" }] });
+      const running = [...runs("2026-11-07T10:05:00Z").slice(1), { name: GATE1_WORKFLOW_CONTEXTS[0]!, status: "in_progress", conclusion: null, startedAt: "2026-11-07T10:05:00Z", app: { id: ACTIONS_APP_ID } }];
+      const t = await pairedWorld({ required: REQUIRED, pub: { [PUB_HEAD]: running }, gate1World: g, gate1Repos: LISTED });
+      const out = await record(t.w, PASS_BOTH, t.gate);
+      expect(out.decision).toBe("ci_pending");
+      expect(out.ciReasons).toContain("gate1_waiting");
+      expect(g.labelAdds).toBe(0);
+      expect(t.pub.posts).toEqual([]);
+      await expectNothingRecorded(t.w);
     });
 
     it("with FX_GATE1_ATTEST_REPOS unset it never calls it (gate1_attest_off); with the repository unlisted it never calls it either", async () => {
