@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MERGE_QUEUE_ENTRY_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { ACTIONS_APP_ID, GATE1_DESCRIPTIONS, GATE1_WORKFLOW_CONTEXTS } from "../../src/review/gate1Attest.js";
-import { attestQueueEntry } from "../../src/review/gate1QueueEntry.js";
+import { attestQueueEntry, listQueueEntryCandidates } from "../../src/review/gate1QueueEntry.js";
 import { freshRepo, type FakeCheckRun } from "./helpers/fakeGitHubRest.js";
 import { gate1World } from "./helpers/fakeGitHubLocal.js";
 import { fakeGitHubQueueRest, type HostedQueueWorld } from "./helpers/fakeGitHubQueueRest.js";
@@ -254,5 +254,31 @@ describe("attestQueueEntry, hosted pair", () => {
     const unknown = world({ prs });
     await expect(unknown.run()).rejects.toThrow(/entry pull request/);
     for (const w of [t, tip, other, unknown]) expect(w.s.posts).toEqual([]);
+  });
+});
+
+describe("listQueueEntryCandidates (hosted): the queue's branches", () => {
+  const A = "ab".repeat(20);
+  const B = "cd".repeat(20);
+  const E1 = "e1".repeat(20);
+  const E2 = "e2".repeat(20);
+  const PATH = "/repos/acme/widgets-public/git/matching-refs/heads/gh-readonly-queue/main";
+  const http = (body: unknown, status = 200) => ({ request: async (r: { method: string; path: string }) => (r.method === "GET" && r.path === PATH ? { status, body } : { status: 404, body: {} }) }) as never;
+  const input = { repos: new Set(["acme/widgets-public"]), owner: "acme", name: "widgets-public", base: "main" };
+
+  it("lists each well-formed entry branch with its commit and the commit it was built on; lookalikes are skipped; an unlisted repository reads nothing", async () => {
+    const q = "refs/heads/gh-readonly-queue";
+    const refs = [
+      { ref: `${q}/main/pr-11-${A}`, object: { sha: E1 } },
+      { ref: `${q}/main/pr-12-${E1}`, object: { sha: E2 } },
+      { ref: `${q}/main/pr-013-${A}`, object: { sha: B } },
+      { ref: `${q}/main-x/pr-14-${A}`, object: { sha: B } },
+    ];
+    expect(await listQueueEntryCandidates(http(refs), input)).toEqual([
+      { prNumber: 11, baseSha: A, entrySha: E1 },
+      { prNumber: 12, baseSha: E1, entrySha: E2 },
+    ]);
+    expect(await listQueueEntryCandidates(http(refs), { ...input, repos: new Set() })).toEqual([]);
+    await expect(listQueueEntryCandidates(http({}, 500), input)).rejects.toThrow(/queue refs unreadable/);
   });
 });

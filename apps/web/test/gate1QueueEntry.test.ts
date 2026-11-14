@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ loadReviewContext: vi.fn(), attestQueueEntry: vi.fn(), attestGate1Head: vi.fn() }));
-vi.mock("@fx/pipeline", async (original) => ({ ...(await original<typeof import("@fx/pipeline")>()), loadReviewContext: mocks.loadReviewContext, attestQueueEntry: mocks.attestQueueEntry, attestGate1Head: mocks.attestGate1Head }));
+const mocks = vi.hoisted(() => ({ loadReviewContext: vi.fn(), attestQueueEntry: vi.fn(), attestGate1Head: vi.fn(), listQueueEntryCandidates: vi.fn() }));
+vi.mock("@fx/pipeline", async (original) => ({ ...(await original<typeof import("@fx/pipeline")>()), loadReviewContext: mocks.loadReviewContext, attestQueueEntry: mocks.attestQueueEntry, attestGate1Head: mocks.attestGate1Head, listQueueEntryCandidates: mocks.listQueueEntryCandidates }));
 
 import { GATE1_QUEUE_DOCUMENTS } from "@fx/runner-cloud";
 import { MERGE_QUEUE_ENTRY_DOCUMENT } from "@fx/github";
-import { readQueueEntryWake, wakeGate1QueueEntry } from "../lib/gate1QueueEntry";
+import { MAX_EXIT_RECHECKS, readQueueEntryWake, readQueueExit, wakeGate1QueueEntry } from "../lib/gate1QueueEntry";
 
 /** D#6 CLOUD-POSTS-FX-GATE1 PR 1d: the check_suite wake for a merge-queue entry commit, and how it finds the item and opens the attester's client. */
 /** GitHub's branch for PR 12's entry is `gh-readonly-queue/main/pr-12-<BASE>`: the trailing sha is the commit the entry is built on (main's tip, or the
@@ -234,5 +234,115 @@ describe("wakeGate1QueueEntry: the head attester handed to the queue entry for a
     }
     mocks.attestGate1Head.mockRejectedValue(new Error("gate1 attest: files unreadable"));
     await expect(attestHead({ prNumber: 11, head: H11 })).rejects.toThrow(/files unreadable/);
+  });
+});
+
+describe("a pull request leaving the merge queue re-checks the entries behind it", () => {
+  const exitPayload = (action: string, over: Record<string, unknown> = {}) => ({ action, repository: { full_name: "acme/widgets-public" }, pull_request: { number: 11, merged: action === "closed", base: { ref: "main" } }, ...over });
+  const exitEvent = (action = "closed", over: Record<string, unknown> = {}) => ({ accountId: ACCOUNT, eventName: "pull_request", payload: exitPayload(action, over) });
+  const E12 = ENTRY;
+  const cand = (prNumber: number, entrySha: string) => ({ prNumber, baseSha: BASE, entrySha });
+  /** Pull request 12 is ours; 11 (the one that left) is a team pull request; 13 is not ours either. */
+  const records = (n: number) => (n === 12 ? [{ work_item_id: ITEM, managed: false, head_sha: PR_HEAD }] : []);
+  function pools() {
+    const statements: Array<{ sql: string; params: unknown[] | undefined }> = [];
+    const client = {
+      query: async (sql: string, params?: unknown[]) => {
+        statements.push({ sql, params });
+        if (!/FROM plane_pushes/.test(sql)) return { rows: [], rowCount: 0 };
+        // The one-item lookup (no pr_number parameter) opens the client; the per-entry one is by number.
+        return { rows: params!.length === 2 ? [{ work_item_id: ITEM }] : records(params![2] as number), rowCount: 0 };
+      },
+      release: () => undefined,
+    };
+    return { pool: { connect: async () => client } as never, statements };
+  }
+  const run = async (e = exitEvent(), repos: ReadonlySet<string> = LISTED) => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const open = vi.fn(async () => ({ request: vi.fn(async () => ({ status: 200, body: {} })) }) as never);
+    try {
+      const out = await wakeGate1QueueEntry(pools().pool, e, { open, repos, ourLogin: async (id) => `bot-for-${id}` });
+      return { out, open, info: info.mock.calls.map((c) => JSON.parse(c[0] as string) as Record<string, unknown>) };
+    } finally {
+      info.mockRestore();
+    }
+  };
+  beforeEach(() => {
+    mocks.loadReviewContext.mockReset().mockResolvedValue({ ok: true, ctx: { repoId: "r1", owner: "acme", name: "widgets", executionMode: "runner_local" } });
+    mocks.attestQueueEntry.mockReset().mockResolvedValue({ kind: "posted", state: "success" });
+    mocks.listQueueEntryCandidates.mockReset().mockResolvedValue([cand(11, "a1".repeat(20)), cand(12, E12), cand(13, "a3".repeat(20))]);
+  });
+
+  it("readQueueExit: only a closed or dequeued pull request with a base branch and a number", () => {
+    expect(readQueueExit("pull_request", exitPayload("closed"))).toEqual({ repoFullName: "acme/widgets-public", base: "main", prNumber: 11 });
+    expect(readQueueExit("pull_request", exitPayload("dequeued"))).toEqual({ repoFullName: "acme/widgets-public", base: "main", prNumber: 11 });
+    for (const action of ["opened", "synchronize", "enqueued", "reopened"]) expect(readQueueExit("pull_request", exitPayload(action)), action).toBeNull();
+    expect(readQueueExit("check_suite", exitPayload("closed"))).toBeNull();
+    expect(readQueueExit("pull_request", exitPayload("closed", { repository: { full_name: "not a repo" } }))).toBeNull();
+    expect(readQueueExit("pull_request", exitPayload("closed", { pull_request: { number: 11, base: { ref: "a..b" } } }))).toBeNull();
+    expect(readQueueExit("pull_request", exitPayload("closed", { pull_request: { number: 0, base: { ref: "main" } } }))).toBeNull();
+  });
+
+  it("the team pull request ahead merged: the entry behind it is asked again (our records only), logged once, and the one that left is not asked", async () => {
+    const r = await run();
+    expect(r.out).toBeNull();
+    // 13 is not ours: not attested. 11 left. Only 12 reaches the attester, with its own entry commit and base.
+    expect(mocks.attestQueueEntry).toHaveBeenCalledTimes(1);
+    expect(mocks.attestQueueEntry.mock.calls[0]![1]).toMatchObject({ owner: "acme", name: "widgets-public", base: "main", prNumber: 12, baseSha: BASE, entrySha: E12 });
+    expect(r.info).toEqual([{ event: "gate1_queue_entry", work_item_id: ITEM, outcome: "posted", trigger: "queue_exit", exited_pr: 11, pr_number: 12 }]);
+    expect(mocks.listQueueEntryCandidates.mock.calls[0]![1]).toMatchObject({ repos: LISTED, owner: "acme", name: "widgets-public", base: "main" });
+  });
+
+  it("a dequeue (not a merge) of the pull request ahead re-checks too", async () => {
+    await run(exitEvent("dequeued"));
+    expect(mocks.attestQueueEntry).toHaveBeenCalledTimes(1);
+    expect(mocks.attestQueueEntry.mock.calls[0]![1]).toMatchObject({ prNumber: 12, entrySha: E12 });
+  });
+
+  it("a replayed exit asks the attester again and the attester answers already: nothing more is posted by this layer, and a group still holding a head that is not ours waits", async () => {
+    mocks.attestQueueEntry.mockResolvedValueOnce({ kind: "posted", state: "success" }).mockResolvedValueOnce({ kind: "already" }).mockResolvedValueOnce({ kind: "wait", reason: "group_head_unattested" });
+    const outcomes = [] as string[];
+    for (let i = 0; i < 3; i++) {
+      const r = await run();
+      outcomes.push(String(r.info[0]!.outcome) + ((r.info[0] as { reason?: string }).reason ? `:${(r.info[0] as { reason?: string }).reason}` : ""));
+    }
+    expect(outcomes).toEqual(["posted", "already", "wait:group_head_unattested"]);
+  });
+
+  it("is bounded: at most MAX_EXIT_RECHECKS entries per event, and one entry listed twice is asked once", async () => {
+    const many = Array.from({ length: 40 }, (_, i) => cand(100 + i, "a1".repeat(20)));
+    mocks.listQueueEntryCandidates.mockResolvedValue([...many.slice(0, 3), many[0]!, ...many]);
+    const pools2 = { connect: async () => ({ query: async (sql: string, params?: unknown[]) => ({ rows: /FROM plane_pushes/.test(sql) ? (params!.length === 2 ? [{ work_item_id: ITEM }] : [{ work_item_id: ITEM, managed: false, head_sha: PR_HEAD }]) : [], rowCount: 0 }), release: () => undefined }) } as never;
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await wakeGate1QueueEntry(pools2, exitEvent(), { open: vi.fn(async () => ({ request: vi.fn() }) as never), repos: LISTED, ourLogin: async () => "bot" });
+    } finally {
+      info.mockRestore();
+    }
+    expect(mocks.attestQueueEntry).toHaveBeenCalledTimes(MAX_EXIT_RECHECKS);
+  });
+
+  it("one entry's failed read does not starve the ones behind it, and is thrown afterwards", async () => {
+    mocks.listQueueEntryCandidates.mockResolvedValue([cand(12, E12), cand(12 + 1, "a3".repeat(20))]);
+    mocks.attestQueueEntry.mockRejectedValueOnce(new Error("gate1 queue entry: Gate1CheckRuns unreadable")).mockResolvedValue({ kind: "posted", state: "success" });
+    const pools3 = { connect: async () => ({ query: async (sql: string, params?: unknown[]) => ({ rows: /FROM plane_pushes/.test(sql) ? (params!.length === 2 ? [{ work_item_id: ITEM }] : [{ work_item_id: ITEM, managed: false, head_sha: PR_HEAD }]) : [], rowCount: 0 }), release: () => undefined }) } as never;
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await expect(wakeGate1QueueEntry(pools3, exitEvent(), { open: vi.fn(async () => ({ request: vi.fn() }) as never), repos: LISTED, ourLogin: async () => "bot" })).rejects.toThrow(/unreadable/);
+    } finally {
+      info.mockRestore();
+    }
+    expect(mocks.attestQueueEntry).toHaveBeenCalledTimes(2);
+  });
+
+  it("an unlisted repository, or one with no item of ours, reads nothing from GitHub", async () => {
+    const a = await run(exitEvent(), new Set(["acme/other"]));
+    expect(a.open).not.toHaveBeenCalled();
+    expect(mocks.listQueueEntryCandidates).not.toHaveBeenCalled();
+    expect(mocks.attestQueueEntry).not.toHaveBeenCalled();
+    mocks.loadReviewContext.mockResolvedValue({ ok: false, reason: "not_found" });
+    const b = await run();
+    expect(b.open).not.toHaveBeenCalled();
+    expect(mocks.listQueueEntryCandidates).not.toHaveBeenCalled();
   });
 });
