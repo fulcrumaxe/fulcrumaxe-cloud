@@ -1059,7 +1059,7 @@ test("ci.yml fail-safe: the exemption ends the moment the edit leaves the run li
   assert.equal(other.trigger, ".github/workflows/**");
   assert.equal(run(REAL_CI.replace(NODE_TEST_LINE, "$1; true")).mode, "full");
   assert.equal(run(REAL_CI.replace(NODE_TEST_LINE, "        if: false\n$1")).mode, "full");
-  const both = REAL_CI.replace(NODE_TEST_LINE, "$1 scripts/ci/licence.test.mjs").replace("timeout-minutes: 60", "timeout-minutes: 61");
+  const both = REAL_CI.replace(NODE_TEST_LINE, "$1 scripts/ci/licence.test.mjs").replace("timeout-minutes: 90", "timeout-minutes: 91");
   assert.equal(run(both).mode, "full");
   assert.equal(run(REAL_CI.replace("name: Migration lint and secret scan tests", "name: Lint tests").replace(NODE_TEST_LINE, "$1 scripts/ci/licence.test.mjs")).mode, "full");
   assert.equal(changeFrom({}, { [CI]: REAL_CI }).mode, "full");
@@ -1068,7 +1068,7 @@ test("ci.yml fail-safe: the exemption ends the moment the edit leaves the run li
 
 test("ci.yml: an edit inside the check job is a full run without e2e; an edit that reaches the e2e job or lies outside the check job runs e2e", () => {
   const base = { [CI]: REAL_CI };
-  const inCheck = changeFrom(base, { [CI]: REAL_CI.replace("timeout-minutes: 60", "timeout-minutes: 61") });
+  const inCheck = changeFrom(base, { [CI]: REAL_CI.replace("timeout-minutes: 90", "timeout-minutes: 91") });
   assert.equal(inCheck.mode, "full");
   assert.equal(inCheck.trigger, ".github/workflows/**");
   assert.equal(inCheck.e2e, false);

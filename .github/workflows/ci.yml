@@ -179,8 +179,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # Backstop so a hung step cannot hold the single runner indefinitely.
-    timeout-minutes: 60
+    # Backstop so a hung step cannot hold the single runner indefinitely. 90, not 60: a full-scope run in the merge queue
+    # has passed 60 minutes and been dropped from the queue on a healthy head.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
