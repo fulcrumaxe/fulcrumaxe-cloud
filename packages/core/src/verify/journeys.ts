@@ -1,4 +1,5 @@
 import { classifyCriteria } from './criteria.js';
+import { extractStart, isStartApp } from './startApps.js';
 
 /**
  * D#6 V1: the journeys a verification row will check, derived before the run and without a model.
@@ -13,6 +14,8 @@ export interface Journey {
   id: string;
   source: JourneySource;
   text: string;
+  /** D#749: the app the tester opens first (an id from `VERIFY_START_APPS`); absent when the Spec named none. */
+  start?: string;
 }
 export interface StandingJourney {
   id: string;
@@ -187,7 +190,7 @@ export interface DeriveJourneysInput {
   specBody: string | null;
   standing: readonly StandingJourney[];
   /** Journeys an earlier row failed, to check again. A carried journey replaces the journey with the same id, or is added after the others. */
-  carried?: readonly { id: string; text: string }[];
+  carried?: readonly { id: string; text: string; start?: string }[];
 }
 
 /** The journeys of a new row and the criteria it leaves to the checks. */
@@ -209,9 +212,11 @@ export function deriveJourneys(input: DeriveJourneysInput): Journey[] {
 export function planJourneys(input: DeriveJourneysInput): JourneyPlan {
   const out: Journey[] = [];
   const checksOnly: number[] = [];
-  for (const c of classifyCriteria(parseSpecCriteria(input.specBody))) {
+  const extracted = parseSpecCriteria(input.specBody).map(extractStart);
+  for (const c of classifyCriteria(extracted.map((e) => e.text))) {
+    const start = extracted[c.n - 1]!.start;
     if (c.kind === 'code') checksOnly.push(c.n);
-    else if (c.text !== '') out.push({ id: `c${c.n}`, source: 'criterion', text: c.text });
+    else if (c.text !== '') out.push(start === undefined ? { id: `c${c.n}`, source: 'criterion', text: c.text } : { id: `c${c.n}`, source: 'criterion', text: c.text, start });
   }
   for (const s of input.standing.slice(0, MAX_STANDING)) {
     if (STANDING_ID_RE.test(s.id)) out.push({ id: `s_${s.id}`, source: 'standing', text: cleanVerifyText(s.text) });
@@ -220,8 +225,11 @@ export function planJourneys(input: DeriveJourneysInput): JourneyPlan {
     if (!JOURNEY_ID_RE.test(c.id)) continue;
     const text = cleanVerifyText(c.text);
     const at = out.findIndex((j) => j.id === c.id);
-    if (at >= 0) out[at] = { id: c.id, source: 'recheck', text: text === '' ? out[at]!.text : text };
-    else if (text !== '') out.push({ id: c.id, source: 'recheck', text });
+    // The current Spec wins either way: a journey it has (same id) keeps ITS start or none (a dropped marker drops the carried start); only a journey the Spec no longer has keeps the carried one.
+    const start = at >= 0 ? out[at]!.start : isStartApp(c.start) ? c.start : undefined;
+    const withStart = (j: Journey): Journey => (start === undefined ? j : { ...j, start });
+    if (at >= 0) out[at] = withStart({ id: c.id, source: 'recheck', text: text === '' ? out[at]!.text : text });
+    else if (text !== '') out.push(withStart({ id: c.id, source: 'recheck', text }));
   }
   return { journeys: out.filter((j) => j.text !== '').slice(0, MAX_JOURNEYS), checksOnly };
 }
