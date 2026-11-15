@@ -47,6 +47,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // D#6 C43-2b: the capacity this claim declares is kept for the runner list (limits only; what it holds is counted from the rows). A claim
       // that declares none is stored as "declared nothing", which reads as one job in total. A status poll takes no job, so it records nothing.
       if (waited <= 0 && message.sandbox_unavailable === undefined) await client.query("SELECT runner_capacity_record($1::int, $2::int, $3::text)", [message.capacity?.light.limit ?? null, message.capacity?.heavy.limit ?? null, message.capacity?.limited_by ?? null]);
+      // D#749 VERIFY-SIGNIN-EXPIRY: the state of the runner's saved verify sign-in, when it said one (protocol 18 and later; the function ignores a runner whose hello declared less). Kept for the post-merge verify stage.
+      if (waited <= 0 && message.sandbox_unavailable === undefined && message.verify_sign_in !== undefined) await client.query("SELECT runner_verify_sign_in_record($1::text)", [message.verify_sign_in]);
       // D#6 C43-6: how long this runner is still held back by its plan's usage limit, in whole seconds rounded up (0: not at all). Worked out from the
       // stored end time against the database clock on every claim, so a pause that has ended needs no cleanup and the next claim just goes ahead.
       let pausedFor = 0;

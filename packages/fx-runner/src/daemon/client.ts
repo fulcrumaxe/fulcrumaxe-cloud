@@ -4,6 +4,7 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
+  CURRENT_PROTOCOL_VERSION, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
@@ -139,6 +140,12 @@ export interface RunnerClientConfig {
   fetchFn: typeof fetch;
   /** The Vercel protection bypass secret, if set; passed to every call and sent only to `origin`. */
   bypass?: string | undefined;
+  /**
+   * D#749 VERIFY-SIGN-EXPIRY: the state of this machine's saved verify sign-in, asked on each ordinary claim (never a status poll). Absent, or answering undefined: the claim carries nothing.
+   * It is sent only when `protocolVersion` (what this runner's hello declares; the current one when not given) is `VERIFY_SIGN_IN_MIN_PROTOCOL` or later.
+   */
+  verifySignIn?: () => VerifySignInState | undefined;
+  protocolVersion?: number;
 }
 
 export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
@@ -199,7 +206,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
 
     async claim(sandboxUnavailable, capacity) {
       // A status poll (closed sandbox) takes no job, so it declares no capacity; every other claim says what the runner could take now (D#6 C43-4).
-      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : capacity === undefined ? {} : { capacity }));
+      const signIn = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= VERIFY_SIGN_IN_MIN_PROTOCOL ? config.verifySignIn?.() : undefined;
+      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : { ...(capacity === undefined ? {} : { capacity }), ...(signIn === undefined ? {} : { verify_sign_in: signIn }) }));
       if (reply?.status === 200) {
         const parsed = ClaimReply.safeParse(reply.body);
         if (!parsed.success) return fail(reply, "invalid_reply");

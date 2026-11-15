@@ -12,6 +12,9 @@ import { parseEnvelope, type EnvelopeRejection } from './envelope.js';
  *      records the account); on any other method there is no trusted source and the row ends `unverified: account_unverifiable`. Otherwise `signed_in_as` must equal the label after trimming and
  *      ignoring case, else `unverified: wrong_account` (an absent value included). Both end the row before any fail, blocked or missing-journey rule, so nothing a tester did as the wrong person
  *      files a bug.
+ *   1c. D#749 VERIFY-SIGNIN-EXPIRY: when the account is judged and the answer carries the verify server's `signed_in_as_unavailable` marker (the app gave the saved sign-in no account, so it was ended on the
+ *      app's side) INSTEAD of a `signed_in_as`, and the answer is otherwise valid (well formed, only journeys the row holds, every one answered), the row is parked (`park: 'needs_sign_in'`) instead of
+ *      ending `wrong_account`. A `signed_in_as` that differs is still `wrong_account`, and so is an absent one with no marker (the model can never write either).
  *   2. Every journey of the row must be answered; a missing one ends the row `unverified: journeys_missing`. A row with no journeys can never be verified.
  *   3. The hollow-pass guard: a `pass` without a page fact or a number, or without an undo check, or without a reload, is not a pass. It is rewritten to `unverified`
  *      and the row cannot be `verified` (`unverified: hollow_pass`).
@@ -24,6 +27,11 @@ export interface RowOutcome {
   failedJourneyIds: string[];
   /** Set when the answer was rejected as a whole. */
   rejection?: EnvelopeRejection | 'unknown_journey';
+  /**
+   * D#749 VERIFY-SIGNIN-EXPIRY: the row is not to be finished but parked, waiting for a good sign-in on the runner (`hold_reason = needs_sign_in`). Set only from the verify server's own marker
+   * (`signed_in_as_unavailable`), on an envelope that is otherwise valid. `input` is what the row ends with if it is never parked (unverified: sign_in_expired).
+   */
+  park?: 'needs_sign_in';
 }
 
 export interface OutcomeContext {
@@ -52,6 +60,9 @@ export function outcomeFromAnswer(journeys: readonly Journey[], raw: unknown, co
   let accountCheck: AccountCheck | undefined;
   if (context.testAccountLabel !== null) {
     if (context.method !== ACCOUNT_RECORDING_METHOD) return { input: { status: 'unverified', reason: 'account_unverifiable', result: parsed.journeys, accountCheck: 'unverifiable' }, failedJourneyIds: [] };
+    if (parsed.signedInAs === undefined && parsed.signInUnavailable === true && journeys.length > 0 && journeys.every((j) => answered.has(j.id))) {
+      return { input: { status: 'unverified', reason: 'sign_in_expired' }, failedJourneyIds: [], park: 'needs_sign_in' };
+    }
     if (!sameAccount(parsed.signedInAs, context.testAccountLabel)) return { input: { status: 'unverified', reason: 'wrong_account', result: parsed.journeys, accountCheck: 'mismatch' }, failedJourneyIds: [] };
     accountCheck = 'matched';
   }

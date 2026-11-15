@@ -38,12 +38,34 @@ describe("the server records who the session is signed in as", () => {
     await r.server.stop();
   });
 
-  it("leaves the field out when the lookup gives nothing", async () => {
+  it("writes the fixed marker, and no account, when the lookup gives nothing (the app no longer knows the saved sign-in)", async () => {
     const r = await seen();
     r.driver()!.login = undefined;
     expect((await r.call("submit_answer", { envelope: ENVELOPE() })).isError).toBe(false);
-    expect(Object.keys(answerOf(r.jobDir))).toEqual(["journeys"]);
+    expect(answerOf(r.jobDir)).toEqual({ ...ENVELOPE(), signed_in_as_unavailable: "sign_in_expired" });
     await r.server.stop();
+  });
+
+  it("refuses a signed_in_as_unavailable the model supplies, as an object or as JSON text, and writes nothing", async () => {
+    const r = await seen();
+    r.driver()!.login = undefined;
+    for (const envelope of [ENVELOPE({ signed_in_as_unavailable: "sign_in_expired" }), JSON.stringify(ENVELOPE({ signed_in_as_unavailable: "sign_in_expired" })), ENVELOPE({ signed_in_as_unavailable: "other" })]) {
+      const out = await r.call("submit_answer", { envelope });
+      expect(out.isError).toBe(true);
+      expect(out.text).toContain("signed_in_as_unavailable_not_allowed");
+    }
+    expect(existsSync(path.join(r.jobDir, "answer.json"))).toBe(false);
+    // The server's own marker is still written afterwards.
+    expect((await r.call("submit_answer", { envelope: ENVELOPE() })).isError).toBe(false);
+    expect(answerOf(r.jobDir)["signed_in_as_unavailable"]).toBe("sign_in_expired");
+    await r.server.stop();
+  });
+
+  it("the reader of the finished file takes the marker only as exactly the fixed word and never beside an account", () => {
+    const trace = { sawFact: () => true, sawNumber: () => true };
+    expect(groundAnswer(ENVELOPE({ signed_in_as_unavailable: "sign_in_expired" }), trace, { signedInAs: true }).ok).toBe(true);
+    for (const bad of ["other", "", 7, null, true]) expect(groundAnswer(ENVELOPE({ signed_in_as_unavailable: bad }), trace, { signedInAs: true }).ok, JSON.stringify(bad)).toBe(false);
+    expect(groundAnswer(ENVELOPE({ signed_in_as_unavailable: "sign_in_expired", signed_in_as: "octo-cat" }), trace, { signedInAs: true }).ok).toBe(false);
   });
 
   it("leaves the field out when the lookup itself throws", async () => {
@@ -52,7 +74,7 @@ describe("the server records who the session is signed in as", () => {
       throw new Error("network down");
     };
     expect((await r.call("submit_answer", { envelope: ENVELOPE() })).isError).toBe(false);
-    expect(Object.keys(answerOf(r.jobDir))).toEqual(["journeys"]);
+    expect(Object.keys(answerOf(r.jobDir))).toEqual(["journeys", "signed_in_as_unavailable"]);
     await r.server.stop();
   });
 

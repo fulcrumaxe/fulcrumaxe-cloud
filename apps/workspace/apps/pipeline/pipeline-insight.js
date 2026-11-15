@@ -539,6 +539,7 @@ export const VERIFY_REASON_SENTENCES = {
   run_failed: "The checking run itself failed before it gave an answer.",
   verify_disabled: "Checking was switched off before this one started.",
   account_unverifiable: "The signed-in account could not be confirmed with this browser method, so the result was not trusted.",
+  sign_in_expired: "The checking account's saved sign-in ended and was not renewed in time, so the check was not made.",
   no_visible_journeys: "Nothing in this request's checklist is something a browser can check, so only the code checks and reviews covered it.",
 };
 export const VERIFY_REASON_UNKNOWN = "The check could not be made.";
@@ -572,6 +573,7 @@ export const VERIFY_HOLD_SENTENCES = {
   unconfigured: "The check has not started: the spending limits for checking the deployed app are not set up yet.",
   run_over_daily: "The check has not started: the limit for one check is set higher than the daily limit, so none can start until that is changed.",
   daily_cap: "The check has not started: this repository's daily checking budget is used. It starts when the day's budget renews.",
+  needs_sign_in: "The check is waiting for a new sign-in of the checking account on the runner. It runs again once the runner has a fresh one.",
 };
 export const VERIFY_BUG_LABEL = "Open the bug item";
 /** Verify again: drawn in this section only while the server lists `verify_again` among the item's actions (a finished check that ended failed or not verified). */

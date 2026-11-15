@@ -5,9 +5,10 @@ import { DEPLOY_VERIFIER_ROLE, isBrowserMethod, type BrowserMethod } from "@fulc
 import { overRepoDailyUsd, verifyStageRunKey } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { fileBugItem } from "@fx/core/src/verify/bugItem.js";
 import type { Journey } from "@fx/core/src/verify/journeys.js";
-import { finishVerifyRow, isVerifyDetailCode, readVerifyRow, setVerifyHold, startRunning, type FinishInput, type VerifyDetailCode, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
+import { MAX_SIGN_IN_PARKS, SIGN_IN_WAIT_HOURS, finishVerifyRow, isVerifyDetailCode, parkVerifyRow, readVerifyRow, setVerifyHold, startRunning, type FinishInput, type VerifyDetailCode, type VerifyHoldReason, type VerifyMethod, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
 import { RUNNER_EVENT_KIND } from "@fx/core/src/onboarding/previewProgress.js";
 import { readVerifySettings } from "@fx/core/src/verify/settings.js";
+import { readSignInReports, signInGate } from "@fx/core/src/verify/signIn.js";
 import { cancelOpenOrders } from "@fx/core/src/verify/orders.js";
 import { VERIFIER_WORKDIR, isRunnerMode, readExecutionMode, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
@@ -46,6 +47,8 @@ export interface VerifyRunLimits {
 export interface VerifyOutcome {
   input: FinishInput;
   failedJourneyIds: string[];
+  /** D#749 VERIFY-SIGNIN-EXPIRY: the row waits for a new sign-in instead of finishing (see pipeline's `RowOutcome.park`). When the park limit is used, `input` (`unverified: sign_in_expired`) is written instead. */
+  park?: "needs_sign_in";
   /** Set when the answer was refused as a whole: the closed reason (D#749: stored on the row's fact, so a person and the card can see why). */
   rejection?: string;
 }
@@ -116,7 +119,8 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
       await endUnverified(accountId, row.id, "no_browser");
       return "ended";
     }
-    const key = verifyStageRunKey(row.id);
+    // D#749 VERIFY-SIGNIN-EXPIRY: a row parked and started again takes a key of its own (the first job's key would replay the first job).
+    const key = verifyStageRunKey(row.id, row.sign_in_parks);
     let limits: VerifyRunLimits;
     try {
       limits = deps.limits();
@@ -140,6 +144,17 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
     });
     // The row moved on (ended by a switch-off, or started by another pass): nothing to do.
     if (state.current === null || state.current.status !== "deploying") return "held";
+    // D#749 VERIFY-SIGNIN-EXPIRY: the runners' saved sign-in is gone (every runner that said anything says expired or missing): the job would only come back without an account, so the row waits for a
+    // new one. A wait that stood 24 hours ends the row. Nothing is read from a runner but its closed state word; a runner that never said one (an older build) does not hold the row.
+    const heldForSignIn = state.current.hold_reason === "needs_sign_in" && state.current.hold_since !== null ? { since: state.current.hold_since } : null;
+    if (signInGate(await tenant(accountId, (client) => readSignInReports(client, accountId)), heldForSignIn) === "park") {
+      if (heldForSignIn !== null && Date.now() - heldForSignIn.since.getTime() > SIGN_IN_WAIT_HOURS * 3_600_000) {
+        await endUnverified(accountId, row.id, "sign_in_expired");
+        return "ended";
+      }
+      await noteHold(accountId, row.id, "needs_sign_in");
+      return "held";
+    }
     if (state.over) {
       // Held by the stage's own daily cap: say so once per repository per UTC day (the same report channel as the other holds), so a row waiting on it is never silent.
       // The day is the process clock's UTC day (the cap's own day is the database's UTC day; the two differ only by clock skew around midnight, which costs at most one repeated log line).
@@ -237,6 +252,12 @@ export function createVerifyRun(deps: VerifyRunDeps): Required<Pick<VerifyStageD
         const outcome = deps.outcome(fresh.journeys, run.envelope, { testAccountLabel: (await readVerifySettings(client, fresh.repo_id)).testAccountLabel, method: fresh.method });
         input = outcome.input.status === "unverified" && outcome.input.reason === "envelope_rejected" && isVerifyDetailCode(outcome.rejection) ? { ...outcome.input, detail: outcome.rejection } : outcome.input;
         failed = outcome.failedJourneyIds;
+        // D#749 VERIFY-SIGNIN-EXPIRY: the runner's own marker says the app no longer knew the saved sign-in. The row waits (running -> pending, `needs_sign_in`) and the next ticks start it again once a
+        // runner reports a fresh sign-in; the third park ends it instead, so a sign-in that keeps failing cannot loop. The fact of the first start stays; no verdict is written.
+        if (outcome.park === "needs_sign_in" && fresh.sign_in_parks < MAX_SIGN_IN_PARKS) {
+          const parked = await parkVerifyRow(client, accountId, row.id);
+          return parked.moved ? "waiting" : "settled";
+        }
       }
       const done = await finishVerifyRow(client, accountId, row.id, input);
       if (!done.moved) return "settled";

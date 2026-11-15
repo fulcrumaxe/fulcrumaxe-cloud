@@ -66,6 +66,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/jobLimits.ts": ["path"], // D#6 C43-5: path joins and an absolute-path check; every program (systemd-run, systemctl, env) runs through the injected capture or the engine's own start
   "src/daemon/nestedGitfiles.ts": ["fs"], // D#6 RUNNER-HOSTREAD-FOLLOWUPS-527: readdir of the worktree looking for nested .git names; nothing is opened or written
   "src/daemon/workspacePin.ts": ["crypto", "fs", "path"], // D#6 RUNNER-HOSTREAD-GITDIR-SHAPE: lstat of the workspace git folder and its config, a SHA-256 of the config bytes, a realpath key; nothing is written
+  "src/daemon/signInState.ts": ["fs", "path"], // D#749 VERIFY-SIGNIN-EXPIRY: one lstat of the saved verify sign-in file (a link is never followed) and path joins to its sidecar; the sidecar is read through the private-file reader, and nothing is written
   "src/daemon/deployOrder.ts": ["fs", "path"], // D#749 V2b: lstat of each part of the deploy script's path below the owner's checkout (a link is refused, nothing is opened or written); the command runs through the injected process-group capture
   "src/daemon/resumeClean.ts": ["fs", "path"], // D#6 RUNNER-RESUME-CLEAN: realpath of the workspace root before the purge
   "src/daemon/resumePurge.ts": ["fs", "path"], // D#6 RUNNER-RESUME-CLEAN: lstat, unlink and rmdir of ignored build output in a resumed workspace without following a link; realpath of each entry's parent

@@ -219,3 +219,63 @@ describe('bugItemKey', () => {
     expect(bugItemKey('row-1', 'c2')).not.toBe(bugItemKey('row-2', 'c2'));
   });
 });
+
+/**
+ * D#749 VERIFY-SIGNIN-EXPIRY: the verify server writes `signed_in_as_unavailable: "sign_in_expired"` when the app's identity route gave the saved sign-in no account. Only that marker, on an answer that
+ * is otherwise valid, parks the row; every other missing or different account stays `wrong_account`. The model can never write the marker (the runner refuses it, see the runner's signedInAs suite); here, the
+ * cloud's reading of it is pinned: the word must be exact and never sits beside a `signed_in_as`.
+ */
+describe('the sign-in marker', () => {
+  const env = (extra: Record<string, unknown>, list: unknown[] = journeys.map((j) => answered(j.id))) => ({ journeys: list, ...extra });
+  const judged = (raw: unknown, method: 'playwright_runner' | 'chrome_runner' = 'playwright_runner') => outcomeFromAnswer(journeys, raw, { testAccountLabel: 'fx-tester', method });
+  const MARKER = { signed_in_as_unavailable: 'sign_in_expired' };
+
+  it('parks the row for a new sign-in when the marker is the only account word and the answer is otherwise valid; no verdict and no bug come from it', () => {
+    const out = judged(env(MARKER));
+    expect(out.park).toBe('needs_sign_in');
+    expect(out.failedJourneyIds).toEqual([]);
+    // What the row ends with if it is never parked again (the park limit): not a wrong account.
+    expect(out.input).toEqual({ status: 'unverified', reason: 'sign_in_expired' });
+    // A tester that marked everything failed on the signed-out page still parks: no bug is filed from a session the app dropped.
+    const failing = judged(env(MARKER, journeys.map((j) => answered(j.id, { result: 'fail' }))));
+    expect(failing.park).toBe('needs_sign_in');
+    expect(failing.failedJourneyIds).toEqual([]);
+  });
+
+  it('a present, different signed_in_as stays wrong_account', () => {
+    const out = judged(env({ signed_in_as: 'the-owner' }));
+    expect(out.park).toBeUndefined();
+    expect(out.input).toMatchObject({ status: 'unverified', reason: 'wrong_account', accountCheck: 'mismatch' });
+  });
+
+  it('an absent signed_in_as without the marker stays wrong_account', () => {
+    const out = judged(env({}));
+    expect(out.park).toBeUndefined();
+    expect(out.input).toMatchObject({ status: 'unverified', reason: 'wrong_account', accountCheck: 'mismatch' });
+  });
+
+  it('the marker beside a signed_in_as, with another word, or of another type rejects the whole answer; it never parks', () => {
+    for (const extra of [{ ...MARKER, signed_in_as: 'fx-tester' }, { signed_in_as_unavailable: 'other' }, { signed_in_as_unavailable: '' }, { signed_in_as_unavailable: true }, { signed_in_as_unavailable: null }]) {
+      const out = judged(env(extra));
+      expect(out.park, JSON.stringify(extra)).toBeUndefined();
+      expect(out.input, JSON.stringify(extra)).toEqual({ status: 'unverified', reason: 'envelope_rejected' });
+      expect(out.rejection).toBe('bad_value');
+    }
+  });
+
+  it('is read only when the answer is otherwise valid: an unknown journey, a missing journey and an unreadable answer do not park', () => {
+    expect(judged(env(MARKER, [answered('c1'), answered('c2'), answered('zzz')])).park).toBeUndefined();
+    const missing = judged(env(MARKER, [answered('c1')]));
+    expect(missing.park).toBeUndefined();
+    expect(missing.input).toMatchObject({ reason: 'wrong_account' });
+    expect(judged('not json {').park).toBeUndefined();
+  });
+
+  it('counts only where the account is judged and the method records it: a chrome row stays account_unverifiable, and with no test account set nothing is judged or parked', () => {
+    expect(judged(env(MARKER), 'chrome_runner').park).toBeUndefined();
+    expect(judged(env(MARKER), 'chrome_runner').input).toMatchObject({ reason: 'account_unverifiable' });
+    const open = outcomeFromAnswer(journeys, env(MARKER), { testAccountLabel: null, method: 'playwright_runner' });
+    expect(open.park).toBeUndefined();
+    expect(open.input.status).toBe('verified');
+  });
+});

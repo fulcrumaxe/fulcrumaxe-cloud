@@ -13,6 +13,7 @@ import { CliError } from "../cliError.js";
 import { writePrivateFile } from "../config.js";
 import type { CommandContext, Flags } from "../context.js";
 import { inCredentialFloor } from "../daemon/playwrightProbe.js";
+import { SIGN_IN_SIDECAR_SUFFIX, SERVER_SESSION_LIFETIME_MS, sidecarText } from "../daemon/signInState.js";
 import { VERIFY_BROWSER_BASE_URL_KEY, VERIFY_BROWSER_EXECUTABLE_KEY, loadSettings, setSetting, storageStateFor } from "../runnerSettings.js";
 import { parseBase } from "../verifyBrowser/pin.js";
 import { APP_SESSION_COOKIE, cookieIsOfHost, keepBaseOrigin } from "../verifyBrowser/stateScope.js";
@@ -73,6 +74,8 @@ function forget(ctx: CommandContext, host: VerifyLoginHost): number {
     if ((error as { code?: string }).code !== "ENOENT") throw new CliError("cannot look at the saved session; nothing was deleted");
     present = false;
   }
+  // The dates file beside it goes too (a link is removed, never followed); it holds timestamps only.
+  rmSync(`${target}${SIGN_IN_SIDECAR_SUFFIX}`, { force: true });
   if (!present) {
     ctx.out("No saved session was found; there is nothing to delete.");
     return 0;
@@ -123,11 +126,14 @@ export async function verifyLoginCommand(flags: Flags, ctx: CommandContext, host
   }
   if (live.length === 0) throw new CliError("no session of the app was found in the browser (only its own session cookie is kept); nothing was saved. Sign in, then run this again", 1);
   writePrivateFile(path.dirname(target), path.basename(target), `${JSON.stringify(kept)}\n`);
+  // D#749 VERIFY-SIGNIN-EXPIRY: the two dates the runner judges the sign-in by (never the sign-in's content), beside it at mode 0600.
+  const savedAt = ctx.now().getTime();
+  writePrivateFile(path.dirname(target), `${path.basename(target)}${SIGN_IN_SIDECAR_SUFFIX}`, sidecarText(savedAt, live.every((e) => e > 0) ? Math.min(...live) : undefined));
   // Saved settings: the address (and the browser, when it was found rather than set). Never the state itself.
   setSetting(ctx.stateDir, VERIFY_BROWSER_BASE_URL_KEY, base.href);
   if (settings?.executable === undefined) setSetting(ctx.stateDir, VERIFY_BROWSER_EXECUTABLE_KEY, executable);
   const lasts = live.every((e) => e > 0) ? new Date(Math.min(...live) * 1000).toISOString().slice(0, 10) : undefined;
-  ctx.out(`Session saved (mode 0600, this app's address only). ${lasts === undefined ? "It has no fixed end date; the app decides when it expires." : `The session cookie expires ${lasts}; sign in again after that.`}`);
+  ctx.out(`Session saved (mode 0600, this app's address only). ${lasts === undefined ? "It has no fixed end date; the app decides when it expires." : `The session cookie expires ${lasts}; sign in again after that.`} The app also ends a session on its own side about a day after sign-in (this runner counts ${SERVER_SESSION_LIFETIME_MS / 3_600_000} hours), so sign in again then.`);
   ctx.out("Next: fx-runner config set verify.test_account <the test account's label>, then check that the runner lists browser_playwright_v1. To remove the saved session: fx-runner verify-login --forget");
   return 0;
 }

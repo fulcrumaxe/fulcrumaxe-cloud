@@ -246,9 +246,9 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
  * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
- * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`).  Version 17 is the first whose runner accepts a fix job's `fix_round_kind` (`FIX_ROUND_KIND_JOB_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`).  Version 17 is the first whose runner accepts a fix job's `fix_round_kind` (`FIX_ROUND_KIND_JOB_MIN_PROTOCOL`). Version 18 is the first whose runner says on its claim whether the saved verify sign-in is still good (`VERIFY_SIGN_IN_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 17;
+export const CURRENT_PROTOCOL_VERSION = 18;
 /**
  * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
  * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
@@ -345,6 +345,18 @@ export const BROWSER_METHOD_JOB_MIN_PROTOCOL = 16;
  * such a job waits for an updated runner. A job without the key (every other round, and every job an older cloud signed) is never skipped by a runner on a no-commit tip. The cloud deploys first.
  */
 export const FIX_ROUND_KIND_JOB_MIN_PROTOCOL = 17;
+/**
+ * D#749 VERIFY-SIGNIN-EXPIRY: the first version whose runner may put `verify_sign_in` on a claim. Same gate as the others, on the claim: a runner of an older build sends no such key (its strict parse would refuse
+ * one), the cloud keeps nothing for it and nothing about its post-merge checks changes. The cloud deploys first.
+ */
+export const VERIFY_SIGN_IN_MIN_PROTOCOL = 18;
+/**
+ * The state of the saved verify sign-in as the runner itself reckons it from two dates (never from the sign-in's content): `ok`, `expiring_soon` (under two hours left), `expired` (past the
+ * time the app's server drops it, or past its cookie's own end) and `missing` (the address is set but no saved sign-in is there). A runner with no verify address set sends none.
+ */
+export const VERIFY_SIGN_IN_STATES = ["ok", "expiring_soon", "expired", "missing"] as const;
+export const VerifySignInState = z.enum(VERIFY_SIGN_IN_STATES);
+export type VerifySignInState = z.infer<typeof VerifySignInState>;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;
@@ -439,7 +451,7 @@ export function capacityFreeSlots(capacity: ClaimCapacity, running: { light: num
   return { light: Math.min(freeLight, headroom), heavy: Math.min(freeHeavy, headroom), total: Math.min(freeLight + freeHeavy, headroom) };
 }
 
-export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional() }).strict();
+export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional() }).strict();
 
 export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
 
