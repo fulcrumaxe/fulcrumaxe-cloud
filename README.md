@@ -1,18 +1,50 @@
 # fulcrumaxe cloud
 
-The hosted, paid version of the fulcrumaxe process: intake, triage, a consensus
-panel, spec, executor, reviews, the fix loop, merge gates, post-merge and a
-scheduled loop — run as a web product instead of on your own machine.
+The hosted, paid version of the fulcrumaxe process, run as a web product
+instead of on your own machine. A work item moves through a fixed pipeline
+whose driver is deterministic code, not a model (`packages/pipeline`,
+`apps/web/workflows/`):
+
+1. **Proposal.** Ideas arrive as proposals that a person approves
+   (`packages/api/src/routes/proposals.ts`).
+2. **Spec.** A panel of role agents writes the Spec for an approved item
+   (`packages/pipeline/src/plan/`).
+3. **Build.** The executor role builds it on the repository's branch, in a hosted
+   sandbox (`packages/runner/src/vercelSandboxPort.ts`) or on the customer's own
+   machine through the local runner (`packages/fx-runner`). Each repository has
+   an execution mode (`packages/runner-cloud/src/executionMode.ts`).
+4. **Reviews.** The required reviewers run for the item's tier, and a failing
+   verdict starts a fix round (`packages/pipeline/src/review/`).
+5. **CI and gate.** The review waits for CI on the exact head, then the merge
+   gate decides whether to merge (`packages/pipeline/src/build/mergeGate.ts`). The
+   cloud can post the `fx-gate1` status itself from a green full CI run
+   (`packages/pipeline/src/review/gate1Attest.ts`).
+6. **Merge queue.** Where GitHub's merge queue is on, the cloud keeps its own entries
+   and a one-at-a-time merge slot per repository
+   (`packages/pipeline/src/mergeQueue/`).
+7. **Deploy and browser verify.** For a repository that switched it on, a
+   post-merge stage deploys the merge commit, waits for the app to report it, and
+   has a tester drive the app in a real browser against the item's journeys
+   (`packages/worker/src/verifyStage.ts`, `packages/worker/src/verifyRun.ts`,
+   `packages/fx-runner/src/verifyBrowser/`).
 
 It also hosts the **site kit**, which turns a customer's repo into a
-fact-verified project website, and a **partner layer** for affiliates and
-white-label resellers.
+fact-verified project website (`packages/sitekit-claims`,
+`packages/sitekit-template`, `packages/sitekit-checks`,
+`packages/sitekit-publish-gates`), and a **partner layer** for resellers
+(`packages/partners`).
+
+This is the public code plane: all product code, pull requests, reviews and CI
+live here. The team's planning and its own tooling live in a private repository
+whose product tree is a copy of this one (`docs/architecture.md`).
 
 See `docs/index.md` for the full docs map, `docs/architecture.md` for how a
-request moves through the system, `docs/status.md` for what's implemented
-versus scaffolded, `docs/data-model.md` for the schema, `docs/security.md`
-for the tenancy and auth model, and `docs/operations.md` for running and
-operating this.
+request and a work item move through the system, `docs/status.md` for what each
+project does today, `docs/testing.md` for the check and the guard tests,
+`docs/data-model.md` for the schema, `docs/security.md` for the tenancy and auth
+model, and `docs/operations.md` for running and operating this. A change here is
+easiest to start from `docs/agents/builder-guide.md` (also pointed to by
+`AGENTS.md`).
 
 ## Repo layout
 
@@ -20,60 +52,71 @@ A pnpm workspace monorepo (`pnpm-workspace.yaml`: `apps/*`, `packages/*`).
 
 ```
 apps/
-  web/                Next.js App Router console -- sign-in, sessions,
-                      billing webhook, model-router badge, site-kit preview
+  web/                Next.js App Router console and API host: sign-in, the
+                      shell, /api/v1/*, the Stripe and GitHub webhooks, cron
+                      routes, the pipeline workflows
   workspace/          the fulcrumaxe workspace UI, imported from fulcrumaxe-os
-                      via a secure importer and filtered to a cloud profile
+                      via a secure importer and filtered to a cloud profile;
+                      its first-party apps (pipeline, runs, repos, roles, ...)
+                      are under apps/workspace/apps/
+  gh-proxy/           proxy-only deployable for the GitHub proxy
+  ops/                operator console
+  live-e2e/           live end-to-end packs run against a deployed environment
+  live-sink/          webhook sink the live suite reads deliveries back from
 packages/
-  api/                public API v1 foundation: registry, catch-all dispatch,
-                      errors, pagination, OpenAPI 3.1 generation, idempotency
-  billing/            Stripe test-mode billing: webhook, account status/plan
-                      state machines, pause/resume/portal
-  core/                tenancy + auth: sessions, GitHub sign-in, invitations,
-                      membership, role authorization, role-scheduling settings
-  db/                  Postgres schema, migrations, tenancy helpers
+  api/                public API v1: registry, catch-all dispatch, errors,
+                      pagination, OpenAPI 3.1 generation, idempotency
+  api-client/         typed client generated from the OpenAPI document
+  billing/            Stripe billing: webhook, account status/plan state
+  cli/                the `fulcrumaxe` command line over the public API
+  core/               tenancy + auth, work items and stages, corrections,
+                      the assistant, verify rows and settings
+  db/                 Postgres schema, migrations, tenancy helpers
                       (withTenant), the row-level-security inventory
-  decisions/           decision-type catalogue, Cautious/Balanced/Autonomous
-                      presets, and decide(), the pure resolver
-  design/              shared visual tokens and components used by the
-                      apps/web and sitekit-template
-  features/            feature-exposure catalogue and emergency floor, code
-                      not a table, shaped like the role manifest
-  gh-policy/           pure decision engine for what a role may do against a
-                      GitHub installation's one repo
-  github/               GitHub App webhook intake: HMAC verification, event
-                      mapping to work items/run triggers
-  model-connection/    customer bring-your-own-key model connections:
-                      envelope encryption, validation, status
-  model-router/        Postgres-backed model routing table, escalation,
-                      per-role floors
-  net-guard/            the resolved-address SSRF classifier and checked-DNS
-                      wrapper shared by the runner and webhooks packages
-  partners/            partner layer scaffold -- package.json/tsconfig/vitest
-                      wiring only, no feature code yet
-  roles/               the ported role cards, the manifest that binds them,
-                      and the tool registry
-  runner/              per-role sandbox orchestration: network policy, the
-                      ExecutionTarget seam, startAgentRun/cancelRun
-  runtime/             model/runtime adapter: local runner, production
-                      runner, and a fake runner for tests
-  sitekit-checks/      deterministic mechanical checks over rendered
-                      site-kit output
-  sitekit-claims/      claim schema and the render-refuses-unverified gate
-  sitekit-template/    the fixed site template that renders SiteContent to
-                      static HTML
-  spend/               reservation, metering and caps across three
-                      independent budgets
-  stats/                pure KPI formula registry and computation, no I/O
-  test-guard/          vitest setup that fails any test reaching a model API
-  trust/               untrusted-text provenance gate: author-trust
-                      classification and sanitization
-  webhooks/             the outbox sweep: fans domain events out into
-                      per-endpoint deliveries, retries, auto-disables
+  decisions/          decision-type catalogue, autonomy presets, decide()
+  design/             shared visual tokens and components
+  discussions/        the Discussions and work-item service
+  env-build/ env-network/ env-orchestration/ env-presets/ env-spec/
+                      the EnvSpec environment model: schema, presets,
+                      Dockerfile build plan, network policy, ensure-env step
+  features/           feature-exposure catalogue and emergency floor
+  fx-runner/          the local runner: job verification, role tools, the
+                      Claude engine, the daemon and the verify browser
+  gh-policy/          pure decision engine for the GitHub proxy
+  github/             GitHub App webhook intake, event mapping, installation
+                      tokens, merge-gate GraphQL documents
+  model-call/         server-side model calls over the account's own key
+  model-connection/   bring-your-own-key connections: encryption, validation
+  model-router/       Postgres-backed model routing, escalation, floors
+  net-guard/          resolved-address SSRF classifier and checked DNS
+  notify/             email for decision asks
+  partners/           partner layer: host resolution, context, signup
+  pipeline/           stage machine, reviews, merge gate, merge queue,
+                      discovery, plan write-back, verify rules
+  plan-data/          loads and validates plan and cap data, fails closed
+  receipts/           decision receipts in a pull request body, reversals
+  reconcile/          reconciler framework: leased jobs, circuit breaker
+  roles/              the role cards, the manifest that binds them, tools
+  runner/             hosted-sandbox orchestration: network policy, run
+                      status and resume, funding
+  runner-cloud/       the cloud side of the local runner: registration,
+                      claims, events, the merge order
+  runner-protocol/    wire protocol between the cloud and a runner
+  runtime/            model/runtime adapters: local, production, fake
+  sitekit-checks/ sitekit-claims/ sitekit-publish-gates/ sitekit-template/
+                      the site kit
+  spend/              reservation, metering and caps across the budgets
+  stats/              pure KPI formula registry, no I/O
+  telemetry/          redacting logger and the error-code allowlist
+  test-guard/         vitest setup that fails any test reaching a model API
+  trust/              untrusted-text provenance gate
+  webhooks/           outbound webhook sweep: fan-out, retries, auto-disable
+  worker/             the pipeline worker's composition root: pools, ports,
+                      advance, sweeps, run actions
 ```
 
 The published site-kit output is **plain static HTML, CSS and JS with no client
-framework**. Next.js is for `apps/web`, the console — not for the artifact
+framework**. Next.js is for `apps/web`, the console, not for the artifact
 site-kit publishes on a customer's domain.
 
 ## Getting set up
@@ -95,20 +138,28 @@ pnpm lint                    # eslint .
 pnpm typecheck                # pnpm -r --if-present run typecheck
 pnpm test                      # vitest run, whole workspace
 pnpm test:guard                 # the model-call guard's own violation fixture
+pnpm test:e2e-runner             # the @fx/worker runner end-to-end test
 pnpm --filter web build            # apps/web production build
 pnpm --filter @fx/db test           # database tests only, against a throwaway cluster
 
-bash scripts/check.sh        # the gate — runs everything below, in order,
-                              # non-zero on first failure
+bash scripts/check.sh        # the gate; stops at the first failure
 ```
 
-`scripts/check.sh` runs: `pnpm install --frozen-lockfile`, `pnpm lint`,
-`pnpm typecheck`, `scripts/check-globalsetup-env.sh` (guards against a
-package's `globalSetup.ts` writing shared `process.env` state or picking a
-port with `Math.random()`), `pnpm test` (with `FX_FORBID_MODEL_CALLS=1`),
-`packages/db/scripts/test-neon-shape.sh` (proves the migration chain applies
-under a Neon-shaped non-superuser owner), `pnpm --filter web build`, then
-`pnpm test:guard`.
+`scripts/check.sh` runs `pnpm install --frozen-lockfile`, the declared-imports
+test, lint, typecheck, `scripts/check-globalsetup-env.sh` (guards against a
+package's `globalSetup.ts` writing shared `process.env` state or picking a port
+with `Math.random()`), `scripts/check-agent-run-columns.sh`, `pnpm test` (with
+`FX_FORBID_MODEL_CALLS=1` and the model API keys unset), the site-kit browser
+tier, `packages/db/scripts/test-neon-shape.sh` (proves the migration chain
+applies under a Neon-shaped non-superuser owner),
+`packages/db/scripts/check-migration-order.sh`, the `apps/web` build with its
+trace and baked-path checks, then `pnpm test:guard`.
+
+With `FX_CHECK_AFFECTED` set to a comma-separated list of package directories,
+`scripts/check.sh` lints, typechecks and tests only those packages and runs the
+web build, the browser tier and the migration shape test only when their package
+is listed. CI sets it on pull requests from `scripts/ci/affected.mjs`; a push to
+`main` runs everything. `docs/testing.md` has the details.
 
 ## Testing
 
@@ -136,25 +187,25 @@ Numbering blocks with files at HEAD:
 | Block | Contents |
 |---|---|
 | `0001` | core tenancy schema |
-| `0002`–`0006` | spend functions and security fixes, account-members grants and role gate, model-connection key-nonce grant |
-| `0008` | audit log made append-only |
-| `0010`–`0011` | model routing, audit-write for role-settings actions |
+| `0002`–`0011` | spend functions and security fixes, account-members grants and role gate, model-connection key-nonce grant, audit log made append-only, model routing |
 | `0100` | site kit |
 | `0200` | partner layer |
 | `0400` | decision policy (dial history and receipts) |
-| `0600`–`0605` | API core (idempotency keys), model-connection guard search-path pin, session epoch, execution mode |
-| `0606`–`0627` | derived account status, revoked sessions, work-item stages, exposure audit, audit-write hardening, API tokens, the Discussions/spec/work-item-deps store, the GitHub proxy's run resolution, rate limiting, KPI views, and the webhook outbox (`domain_events`/`webhook_endpoints`/`webhook_deliveries`) |
+| `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
+| `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
+| `0800`–`1016` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, and the post-merge verify stage (`1003_verify_stage.sql` onward) |
 
-**Ordering rule:** when a migration merges, its file gets whichever
-number is free and higher than everything already on `main`, so the order
-files sort in on disk always matches the order they actually landed in.
-`packages/db/migrations/0605_execution_mode.sql`'s header shows this in
-practice: the file was renamed twice (from `0007`, then `0603`). By the time it
-rebased, `0604_session_epoch.sql` had merged, so `0605` was the next free
-number, which keeps its filename sorting after a file that landed first.
+**Ordering rule:** every migration file a pull request adds has to sort after
+every file already on its base, and no two files share a four-digit prefix.
+`packages/db/scripts/check-migration-order.sh` enforces it (it is a step in
+`scripts/check.sh`), and `packages/db/migrations/README.md` explains the rule and
+what to do when two pull requests race for one number: the second to merge
+renumbers. `packages/db/migrations/0605_execution_mode.sql`'s header shows the
+rule at work: the file was renamed twice, from `0007` and then `0603`, because
+`0604_session_epoch.sql` merged first.
 
 Migrations that landed out of strict numeric order relative to when they were
-first written are exercised by `LATE_MIGRATIONS` in
+first written are exercised by `HISTORICAL_LATE_MIGRATIONS` in
 `packages/db/scripts/test-neon-shape.sh`, which applies the rest of the chain
 first and then applies those one at a time, the way a live database would
 receive them.
@@ -191,12 +242,21 @@ Migrations run under a non-superuser, Neon-shaped owner role;
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to `main` and on every pull
-request, as one step: `nix develop --command bash
-scripts/check.sh`. The job checks out with `persist-credentials: false` and
-sets `permissions: contents: read`, since `check.sh` runs `pnpm install`
-(arbitrary lockfile lifecycle scripts) and nothing in the job needs write
-access or a GitHub credential on disk. `.github/dependabot.yml` also exists.
+`.github/workflows/ci.yml` runs on every push to `main`, on every pull request
+(opened, synchronize, reopened) and on merge-queue checks (`merge_group`). Its
+jobs are `pr-gates` (public pull requests only: what the body may cite and that
+the diff adds no overlay path), `check` (runs `scripts/check.sh`, 90-minute
+timeout), `workspace-e2e` (pull requests and merge groups) and `e2e-runner`.
+Each job is skipped when the repository variable `CI_DISABLED` is `true`, and
+`runs-on` is `ubuntu-latest` on a public repository.
+
+A pull request run is scoped by `scripts/ci/affected.mjs`: `full`, `affected` or,
+on the private repository, `overlay`. The `ci:full` label forces a full run
+(`.github/workflows/ci-full-label.yml` re-runs the latest run when the label is
+added), and `scripts/ci/full-run-triggers.json` lists the paths that force one.
+The workflow checks out with `persist-credentials: false` and a read-only
+`contents` token, since `check.sh` runs `pnpm install` (arbitrary lockfile
+lifecycle scripts). `.github/dependabot.yml` also exists.
 
 Sources:
 - `apps/`
@@ -215,6 +275,27 @@ Sources:
 - `packages/db/migrations/0605_execution_mode.sql`
 - `packages/test-guard/src/setup.ts`
 - `vitest.workspace.ts`
+- `scripts/check-agent-run-columns.sh`
+- `scripts/ci/affected.mjs`
+- `scripts/ci/full-run-triggers.json`
+- `.github/workflows/ci-full-label.yml`
+- `packages/db/scripts/check-migration-order.sh`
+- `packages/db/migrations/README.md`
+- `packages/db/migrations/1003_verify_stage.sql`
+- `packages/pipeline/`
+- `packages/api/src/routes/proposals.ts`
+- `packages/runner-cloud/src/executionMode.ts`
+- `packages/runner/src/vercelSandboxPort.ts`
+- `packages/fx-runner/`
+- `packages/pipeline/src/build/mergeGate.ts`
+- `packages/pipeline/src/review/gate1Attest.ts`
+- `packages/pipeline/src/mergeQueue/`
+- `packages/worker/src/verifyStage.ts`
+- `packages/worker/src/verifyRun.ts`
+- `packages/fx-runner/src/verifyBrowser/`
+- `apps/workspace/apps/`
+- `AGENTS.md`
+- `docs/agents/builder-guide.md`
 
 ## Licence and contributing
 

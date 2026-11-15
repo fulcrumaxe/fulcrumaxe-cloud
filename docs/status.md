@@ -53,19 +53,42 @@ Sources:
 - `packages/trust/`
 - `packages/webhooks/`
 - `packages/worker/`
+- `packages/worker/src/planePublish.ts`
+- `packages/worker/src/runnerPlanePush.ts`
+- `packages/worker/src/verifyStage.ts`
+- `packages/worker/src/verifyRun.ts`
+- `packages/pipeline/src/verify/rules.ts`
+- `packages/pipeline/src/build/stageMachine.ts`
+- `packages/pipeline/src/discovery/`
+- `packages/pipeline/src/review/ciWait.ts`
+- `packages/core/src/verify/bugItem.ts`
+- `packages/api/src/routes/proposals.ts`
+- `packages/api/src/routes/verify-settings.ts`
+- `packages/api/src/routes/work-item-actions.ts`
+- `packages/db/migrations/1003_verify_stage.sql`
+- `packages/fx-runner/src/verifyBrowser/server.ts`
+- `packages/github/src/planePushHosted.ts`
+- `packages/runner-cloud/src/executionMode.ts`
+- `apps/web/env-manifest.ts`
+- `apps/workspace/profiles/cloud.json`
 
 ## What the pipeline does today
 
-- A work item moves from a Spec through build, review, CI wait and the merge gate to a merge, with fix rounds, check-fix rounds and resumes for runs that stop at a limit (`packages/pipeline`).
+- A work item moves from a Spec through build, review, CI wait and the merge gate to a merge, with fix rounds, check-fix rounds and resumes for runs that stop at a limit (`packages/pipeline`). A Spec that plans several pull requests becomes child items, each built on its own branch (`packages/pipeline/src/build/stageMachine.ts`).
+- Proposals reach the pipeline through discovery analysts and verifiers and a person's approval (`packages/pipeline/src/discovery/`, `packages/api/src/routes/proposals.ts`).
+- A repository whose code lives on both planes is a pair: the build publishes a public pull request and keeps the private one as a paired copy (`packages/worker/src/planePublish.ts`, `packages/worker/src/runnerPlanePush.ts`).
 - Where GitHub's merge queue is on, the cloud keeps its own queue entries, a database-held merge slot, head refreshes and conflict, renumber and delta-review rounds. A direct merge and the queue's slot exclude each other per repository.
-- The cloud can post `fx-gate1` itself from a green full public CI run, for a pull request head and for a merge-queue entry commit. It is off until the repository is listed in `FX_GATE1_ATTEST_REPOS`.
-- A repository runs its agents in a hosted sandbox, on the customer's machine (`runner_local`), or on the customer's machine with the cloud verifying (`runner_verified`).
+- The cloud can post `fx-gate1` itself from a green full public CI run, for a pull request head and for a merge-queue entry commit. It is off until the repository is listed in `FX_GATE1_ATTEST_REPOS` (`apps/web/env-manifest.ts`). For a listed repository the cloud also puts `ci:full` on a new public pull request once, so the full-scope run starts while the first one is still going (`packages/github/src/planePushHosted.ts`, `packages/pipeline/src/review/ciWait.ts`).
+- A repository runs its agents in a hosted sandbox, on the customer's machine (`runner_local`), or on the customer's machine with the cloud verifying (`runner_verified`) (`packages/runner-cloud/src/executionMode.ts`).
+- After a merge, a repository that turned it on gets a post-merge check: the cloud deploys the merge commit through a deploy order only the repository's own runner can claim, waits for `/api/health` to report that commit, and starts a tester job that drives the app in a real browser against the item's journeys. The outcome is a row that moves `pending`, `deploying`, `running`, then `verified`, `failed` or `unverified`; a failed journey files one bug item, and a pass that shows no page fact, undo check or reload is not counted as a pass (`packages/worker/src/verifyStage.ts`, `packages/worker/src/verifyRun.ts`, `packages/pipeline/src/verify/rules.ts`, `packages/core/src/verify/bugItem.ts`). A person can run a finished check again from the item (`packages/api/src/routes/work-item-actions.ts`).
+- The browser the tester drives belongs to the runner: a closed table of twelve small tools, no script execution and no free-form address, with page text fenced as untrusted (`packages/fx-runner/src/verifyBrowser/server.ts`).
 - The assistant answers questions about a repository's work and proposes corrections. It is session-only, has a closed tool registry, a per-conversation cost cap and stores no messages.
 - Decisions are recorded as receipts in the pull request body and can be reversed; an autonomy dial per repository sets what the platform decides on its own.
 - Memory entries (proposed, approved, retired, versioned) and corrections (proposed, accepted, applied) have their own tables and definer-only writes.
 
 ## Built but off until configured
 
+- The post-merge check: a repository has no verify settings until an owner or admin saves them, and `enabled` defaults to false (`packages/db/migrations/1003_verify_stage.sql`, `packages/api/src/routes/verify-settings.ts`). It also needs the deploying runner and, to qualify the deployed commit, `FX_DEPLOY_COMMIT` on the deployment (`apps/web/env-manifest.ts`).
 - Cloud Gate 1 attestation: `FX_GATE1_ATTEST_REPOS`.
 - The operator's own Claude subscription: `FX_OPERATOR_SUBSCRIPTION` and its allow-list.
 - The onboarding preview: `FX_ONBOARDING_PREVIEW`.
@@ -83,19 +106,19 @@ Sources:
 | `apps/live-e2e` | implemented-and-tested | 50 test files, 6 Playwright specs. Live packs against a deployed environment: manifest, selection, targets and the `plan` command. Not part of the pull request check. |
 | `apps/live-sink` | implemented-and-tested | 2 test files. Webhook sink the live suite reads deliveries back from. |
 | `apps/ops` | implemented-and-tested | 6 test files. Operator console. |
-| `apps/web` | implemented-and-tested | 147 test files, 4 against a real Postgres. The Next.js app: sign-in, the shell, `/api/v1/*` through one dispatcher, the Stripe and GitHub webhooks, cron routes and the pipeline workflows. Its web build and a trace check run in `scripts/check.sh`. |
-| `apps/workspace` | implemented-and-tested | 156 test files, 81 Playwright specs. The imported workspace UI filtered to the cloud build profile. Checked mechanically by `import/checks.mjs`, unit tests and Playwright on desktop, phone and tablet viewports. |
+| `apps/web` | implemented-and-tested | 160 test files, 4 against a real Postgres. The Next.js app: sign-in, the shell, `/api/v1/*` through one dispatcher, the Stripe and GitHub webhooks, cron routes and the pipeline workflows. Its web build and a trace check run in `scripts/check.sh`. |
+| `apps/workspace` | implemented-and-tested | 165 test files, 83 Playwright specs. The imported workspace UI filtered to the cloud build profile, with first-party apps for onboarding, pipeline, needs-you, runs, memory, repos, runners, roles, site review, model key, Vercel, budget and billing, and developer. Checked mechanically by `import/checks.mjs`, unit tests and Playwright on desktop, phone and tablet viewports. |
 
 ## Packages
 
 | Project | Status | Evidence |
 |---|---|---|
 | `packages/api-client` | implemented-and-tested | 3 test files. Typed client generated from `packages/api/openapi.json`; a drift test pins the generated file. |
-| `packages/api` | implemented-and-tested | 124 test files, 6 against a real Postgres. Public API v1: route registry, dispatcher, OpenAPI document, the assistant route and the delegation token and device link. |
+| `packages/api` | implemented-and-tested | 127 test files, 6 against a real Postgres. Public API v1: route registry, dispatcher, OpenAPI document, the assistant route and the delegation token and device link. |
 | `packages/billing` | implemented-and-tested | 19 test files. Stripe billing, account status and plan state. |
 | `packages/cli` | implemented-and-tested | 5 test files. The `fulcrumaxe` command line over the public API. |
-| `packages/core` | implemented-and-tested | 157 test files, 57 against a real Postgres. Tenancy and auth, work-item reads and stages, corrections, the assistant's conversations and tools, API tokens. |
-| `packages/db` | implemented-and-tested | 234 test files, 88 against a real Postgres. Migrations, `withTenant`, the RLS and grant inventories, the migration runner and its Neon-shape and ordering checks. |
+| `packages/core` | implemented-and-tested | 174 test files, 64 against a real Postgres. Tenancy and auth, work-item reads and stages, corrections, the assistant's conversations and tools, API tokens, the post-merge verify rows, settings and orders. |
+| `packages/db` | implemented-and-tested | 239 test files, 90 against a real Postgres. Migrations, `withTenant`, the RLS and grant inventories, the migration runner and its Neon-shape and ordering checks. |
 | `packages/decisions` | implemented-and-tested | 19 test files. The decision catalogue, presets and the pure `decide()` resolver. |
 | `packages/design` | implemented-and-tested | 8 test files. The shared visual layer; string and React renderers are checked for markup parity. |
 | `packages/discussions` | implemented-and-tested | 24 test files, 20 against a real Postgres. The Discussions and work-item service. |
@@ -105,7 +128,7 @@ Sources:
 | `packages/env-presets` | implemented-and-tested | 3 test files. The language preset environments as frozen data. |
 | `packages/env-spec` | implemented-and-tested | 4 test files. The canonical EnvSpec schema and version id. |
 | `packages/features` | implemented-and-tested | 5 test files. The feature exposure catalogue and the emergency floor. |
-| `packages/fx-runner` | implemented-and-tested | 235 test files. The local runner: job verification, role tools, clean environment, the Claude engine and the daemon. |
+| `packages/fx-runner` | implemented-and-tested | 271 test files. The local runner: job verification, role tools, clean environment, the Claude engine, the daemon and the verify browser. |
 | `packages/gh-policy` | implemented-and-tested | 15 test files. The pure decision engine for the GitHub proxy. |
 | `packages/github` | implemented-and-tested | 70 test files, 25 against a real Postgres. GitHub App webhook intake, the event mapper, installation tokens and the merge-gate GraphQL documents. |
 | `packages/model-call` | implemented-and-tested | 11 test files. Server-side model calls over the account's own key, including the streaming tool-use turn the assistant uses. |
@@ -113,15 +136,15 @@ Sources:
 | `packages/model-router` | implemented-and-tested | 11 test files, 2 against a real Postgres. Data-driven model routing, escalation and floors. |
 | `packages/net-guard` | implemented-and-tested | 2 test files. The resolved-address SSRF classifier and checked resolve. |
 | `packages/notify` | implemented-and-tested | 1 test file. Email for decision asks. |
-| `packages/partners` | implemented-and-tested | 6 test files. The partner layer; its feature code is added one task at a time, so the schema (`0200_partners.sql`) is further along than this package. |
-| `packages/pipeline` | implemented-and-tested | 210 test files, 107 against a real Postgres. The stage machine, review and fix rounds, the merge gate, the merge queue, concurrency, discovery and plan write-back. |
-| `packages/plan-data` | implemented-and-tested | 10 test files. Loads and validates the plan, pricing and cap data from `FX_PLAN_DATA`; fails closed. |
+| `packages/partners` | implemented-and-tested | 6 test files. The partner layer: host resolution, brand context and signup. The schema (`0200_partners.sql`) is wider than this package. |
+| `packages/pipeline` | implemented-and-tested | 221 test files, 110 against a real Postgres. The stage machine, review and fix rounds, the merge gate, the merge queue, concurrency, discovery, plan write-back and the verify rules. |
+| `packages/plan-data` | implemented-and-tested | 11 test files. Loads and validates the plan, pricing and cap data from `FX_PLAN_DATA`; fails closed. |
 | `packages/receipts` | implemented-and-tested | 11 test files, 3 against a real Postgres. The decision-receipt block in a pull request body, and reversals. |
 | `packages/reconcile` | implemented-and-tested | 16 test files, 11 against a real Postgres. The reconciler framework: due jobs under an atomic lease, with a time limit and a circuit breaker. |
-| `packages/roles` | implemented-and-tested | 12 test files. The role cards and the manifest that binds them. |
-| `packages/runner-cloud` | implemented-and-tested | 50 test files, 33 against a real Postgres. The cloud side of the local runner: registration, claims, events, done, the local-only GitHub allowlist, the merge order. |
-| `packages/runner-protocol` | implemented-and-tested | 44 test files. Wire protocol between the cloud and a runner: message schemas, the signed job, request signing, the verdict envelope parser. |
-| `packages/runner` | implemented-and-tested | 124 test files, 64 against a real Postgres. Hosted-sandbox orchestration: network policy, sandbox naming, the Vercel sandbox port, run status and resume, funding. |
+| `packages/roles` | implemented-and-tested | 13 test files. The role cards and the manifest that binds them. |
+| `packages/runner-cloud` | implemented-and-tested | 51 test files, 34 against a real Postgres. The cloud side of the local runner: registration, claims, events, done, the local-only GitHub allowlist, the merge order. |
+| `packages/runner-protocol` | implemented-and-tested | 50 test files. Wire protocol between the cloud and a runner: message schemas, the signed job, request signing, the verdict envelope parser. |
+| `packages/runner` | implemented-and-tested | 143 test files, 70 against a real Postgres. Hosted-sandbox orchestration: network policy, sandbox naming, the Vercel sandbox port, run status and resume, funding. |
 | `packages/runtime` | implemented-and-tested | 18 test files. Local, production and fake model runners. |
 | `packages/sitekit-checks` | implemented-and-tested | 20 test files. Mechanical checks over rendered site kit output. |
 | `packages/sitekit-claims` | implemented-and-tested | 4 test files. The claim schema and the render-refuses-unverified gate. |
@@ -129,8 +152,8 @@ Sources:
 | `packages/sitekit-template` | implemented-and-tested | 6 test files. The fixed site template. |
 | `packages/spend` | implemented-and-tested | 27 test files. Reservation, metering and caps across the budgets. |
 | `packages/stats` | implemented-and-tested | 4 test files. Pure KPI formulas. |
-| `packages/telemetry` | implemented-and-tested | 10 test files. The redacting logger and the error-code allowlist. |
+| `packages/telemetry` | implemented-and-tested | 11 test files. The redacting logger and the error-code allowlist. |
 | `packages/test-guard` | implemented-and-tested | 4 test files. Fails any test that reaches a model API; its own fixture proves it still fires. |
 | `packages/trust` | implemented-and-tested | 8 test files. Author trust, control-token sanitising and fencing, provenance vocabulary. |
-| `packages/webhooks` | implemented-and-tested | 10 test files. Outbound webhook sweep: due deliveries, fan-out from domain events. |
-| `packages/worker` | implemented-and-tested | 178 test files, 139 against a real Postgres. The pipeline worker's composition root: pools, ports, advance, sweeps, run actions. |
+| `packages/webhooks` | implemented-and-tested | 11 test files. Outbound webhook sweep: due deliveries, fan-out from domain events. |
+| `packages/worker` | implemented-and-tested | 192 test files, 145 against a real Postgres. The pipeline worker's composition root: pools, ports, advance, sweeps, run actions, plane publish and the post-merge verify stage. |
