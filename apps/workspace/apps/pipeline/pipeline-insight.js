@@ -30,6 +30,9 @@ export const PHASES = {
   debater: "Review",
   "accessibility-reviewer": "Review",
   "browser-tester": "Review",
+  "deploy-verifier": "Verify",
+  "proposal-verifier": "Verify",
+  "discovery-analyst": "Discovery",
 };
 
 const ROLE_WORDS = {
@@ -46,6 +49,9 @@ const ROLE_WORDS = {
   debater: "Debater",
   "accessibility-reviewer": "Accessibility reviewer",
   "browser-tester": "Browser tester",
+  "deploy-verifier": "Deploy verifier",
+  "proposal-verifier": "Proposal verifier",
+  "discovery-analyst": "Discovery analyst",
 };
 
 export const phaseOf = (role) => PHASES[role] || "Run";
