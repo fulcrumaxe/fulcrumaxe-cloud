@@ -64,6 +64,8 @@ interface Mock {
   merges: Req[];
   /** The stalled-items read: items that stopped on their own. */
   stalled: Req[];
+  /** The verify-sign-in read: repositories whose post-merge check needs the checking account signed in again on a runner. */
+  signIns?: Req[];
   /** What the answer POST replies: the contract's body, or a number for an error status. */
   answerReply: Req | number;
   answerCode?: string;
@@ -152,6 +154,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     if (p === "/api/v1/decision-asks" && req.method() === "GET") return json(route, 200, askPage(mock.asks, new URL(req.url()).searchParams.get("cursor")));
     if (p === "/api/v1/merge-ready" && req.method() === "GET") return json(route, 200, { items: mock.merges, not_shown: mock.notShown });
     if (p === "/api/v1/stalled-items" && req.method() === "GET") return json(route, 200, { items: mock.stalled, not_shown: 0 });
+    if (p === "/api/v1/verify-sign-in" && req.method() === "GET") return mock.fail.some((f) => f === "verify-sign-in") ? json(route, 500, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } }) : json(route, 200, { items: mock.signIns ?? [] });
     const answerMatch = p.match(/^\/api\/v1\/decision-asks\/([^/]+)\/answer$/);
     if (answerMatch && req.method() === "POST") {
       mock.answers.push({ path: p, body: req.postDataJSON() });
@@ -567,6 +570,29 @@ test.describe("D#598 P8c: Needs you", () => {
       expect(await axeSeriousOrCritical(page), theme).toEqual([]);
     }
     await clean(page, errors);
+  });
+
+  test("D#749: a repository whose checking sign-in needs renewing shows its name, the cloud's sentence and the one command as text; axe is clean; a failed read leaves the other rows", async ({ page }) => {
+    const row = { repo_id: "6d1f3a52-8c47-4b0e-9a35-2e7b1c4d8f60", repo: "example-org/example-repo", kind: "expired", command: "fx-runner verify-login --base-url https://staging.example.test/", since: null };
+    const { errors, mock } = await setup(page, { requests: [request()], signIns: [row] });
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (2)");
+    const signin = page.locator(`${WIN} [data-kind="signin"]`);
+    await expect(signin.locator('[data-testid="ny-title"]')).toHaveText("example-org/example-repo");
+    await expect(signin.locator('[data-testid="ny-sentence"]')).toContainText("saved sign-in on the runner has ended");
+    await expect(signin.locator('[data-testid="ny-command"]')).toHaveText("fx-runner verify-login --base-url https://staging.example.test/");
+    await expect(signin.locator("button, a")).toHaveCount(0);
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), theme).toEqual([]);
+    }
+    await clean(page, errors);
+    mock.fail = ["verify-sign-in"];
+    await page.evaluate(() => (window as unknown as { FULCWM: { close: (id: string) => void } }).FULCWM.close("needs-you"));
+    await expect(page.locator(WIN)).toHaveCount(0);
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (1)");
+    await expect(page.locator(`${WIN} [data-kind="signin"]`)).toHaveCount(0);
   });
 
   test("axe finds nothing serious or critical on an open and an answered ask, under every theme", async ({ page }) => {

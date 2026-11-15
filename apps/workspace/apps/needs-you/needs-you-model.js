@@ -28,6 +28,8 @@ export const MAX_ASK_PAGES = 5;
 export const ASKS_FIRST_URL = ASKS_URL + "?limit=200";
 export const MERGE_URL = "/api/v1/merge-ready";
 export const STALLED_URL = "/api/v1/stalled-items";
+/** D#749: the repositories whose post-merge check needs the checking account signed in again on a runner. */
+export const SIGN_IN_URL = "/api/v1/verify-sign-in";
 /** Work items that need a person: read page by page like the asks, so an item the stalled list does not carry still has a row. */
 export const NEEDS_HUMAN_URL = "/api/v1/work-items?stage=needs_human&limit=200";
 export const ME_URL = "/api/cloud/auth/me";
@@ -88,6 +90,11 @@ export const WORDS = {
   runMovedOn: "That run has already moved on, so there is nothing to answer.",
   runnerGone: "You have no live runner on your plan that lists this repository (it may have been removed, or never set up), so this run can't start on your plan. Add the repository to a runner on your plan, or set one up, then say yes again. Nothing was started.",
   mergeStep: "Merge this pull request on GitHub",
+  signInWaiting: "A check of a merged change is waiting for the checking account to be signed in again on the runner. It runs by itself once the runner has a fresh sign-in. Run this on the runner's machine:",
+  signInExpired: "The checking account's saved sign-in on the runner has ended, so the next check of this repository would not be made. Run this on the runner's machine:",
+  signInMissing: "The runner has no saved sign-in for the checking account, so the next check of this repository would not be made. Run this on the runner's machine:",
+  signInExpiring: "The checking account's saved sign-in on the runner ends within two hours. Run this on the runner's machine before then:",
+  signInRepo: "A repository",
   openPr: "Open pull request",
   stalledStarted: "Started. The card moves when it is done.",
   stalledGone: "This item has moved on, so there is nothing to start. Open its card to see where it is.",
@@ -235,6 +242,34 @@ export function readMerge(m) {
   return { kind: "merge", id: "merge-" + m.work_item_id, workItemId: m.work_item_id, title, reason: text(m.why), state: "open", sentence: WORDS.mergeStep, link: pullRequestLink(m.pr_url) };
 }
 
+const SIGN_IN_SENTENCES = { waiting: "signInWaiting", expired: "signInExpired", missing: "signInMissing", expiring_soon: "signInExpiring" };
+/** The one command a sign-in row shows: the fixed words and an address of https (or http on a loopback host) with nothing after it that could start another command. */
+const SIGN_IN_COMMAND = /^fx-runner verify-login --base-url https?:\/\/[A-Za-z0-9.\-:]+(?:\/[A-Za-z0-9._~\-/]*)?$/;
+
+/** One item of the verify-sign-in read, or null when it is not usable (an unknown kind, or a command that is not the fixed one). The repository name is untrusted text: shown as text only. */
+export function readSignIn(m) {
+  if (!m || typeof m.repo_id !== "string" || m.repo_id === "" || !Object.hasOwn(SIGN_IN_SENTENCES, m.kind)) return null;
+  if (typeof m.command !== "string" || m.command.length > 300 || !SIGN_IN_COMMAND.test(m.command)) return null;
+  const id = "signin-" + m.repo_id;
+  return { kind: "signin", id, workItemId: id, title: typeof m.repo === "string" && m.repo !== "" ? m.repo : WORDS.signInRepo, reason: "", state: "open", sentence: WORDS[SIGN_IN_SENTENCES[m.kind]], command: m.command, sinceMs: dueMs(m.since) };
+}
+
+/**
+ * The sign-in rows' read. It is the one read of this list that may fail without failing the list: it is a warning beside the other rows, and a cloud that has not got the route yet (it is
+ * deployed before the page that asks) or a read that fails once must not blank the decisions and pull requests a person has to act on. A failed or malformed read is no sign-in rows. A
+ * cancelled read still cancels.
+ */
+async function readSignInItems(call, signal) {
+  try {
+    const res = await call("GET", SIGN_IN_URL, undefined, signal);
+    return res && Array.isArray(res.items) ? res.items : [];
+  } catch (e) {
+    if (cancelled(e)) throw e;
+    // fx-swallow-ok: the warning rows are optional (see above); every other read of the list still fails the list
+    return [];
+  }
+}
+
 /**
  * One item of the stalled read, or null when it is not usable. `why` and `action_label` are the cloud's own sentences. A row the caller may not act on, or
  * whose stage has no automatic step, has no button (`action` is ""), and says to open the card instead.
@@ -270,7 +305,7 @@ const ms = (n) => (Number.isFinite(n) ? n : Infinity);
  * second decision, so asks are all kept). Order: asks (overdue first, then due time, then id), then stalled and needs-a-person rows together
  * oldest first, then merge rows, then setup requests. Sorts are stable, so the server's order breaks every remaining tie.
  */
-export function arrangeRows({ asks, stalled, people, merges, requests }) {
+export function arrangeRows({ asks, stalled, people, merges, requests, signIns = [] }) {
   const taken = new Set(asks.map((a) => a.workItemId));
   const fresh = (rows) => rows.filter((r) => !taken.has(r.workItemId) && taken.add(r.workItemId));
   const s = fresh(stalled);
@@ -278,7 +313,7 @@ export function arrangeRows({ asks, stalled, people, merges, requests }) {
   const m = fresh(merges);
   const sortedAsks = [...asks].sort((a, b) => Number(b.overdue) - Number(a.overdue) || ms(a.dueMs) - ms(b.dueMs) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const person = [...s, ...p].sort((a, b) => ms(a.sinceMs) - ms(b.sinceMs));
-  return [...sortedAsks, ...person, ...m, ...requests];
+  return [...sortedAsks, ...person, ...signIns, ...m, ...requests];
 }
 
 /** The sentence for a failed action, chosen by status; the server's own message is never shown. */
@@ -320,13 +355,14 @@ export async function readPages(call, firstUrl, signal) {
 
 /** The five reads behind the list, and the rows they make (the one place the row rules live; the Pipeline board's count calls it too). Any failed read rejects. */
 export async function readAll(call, signal) {
-  const [data, asks, merges, stalled, items] = await Promise.all([call("GET", LIST_URL, undefined, signal), readPages(call, ASKS_FIRST_URL, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal), readPages(call, NEEDS_HUMAN_URL, signal)]);
+  const [data, asks, merges, stalled, items, signIn] = await Promise.all([call("GET", LIST_URL, undefined, signal), readPages(call, ASKS_FIRST_URL, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal), readPages(call, NEEDS_HUMAN_URL, signal), readSignInItems(call, signal)]);
   if (!data || !Array.isArray(data.requests) || !merges || !Array.isArray(merges.items) || !stalled || !Array.isArray(stalled.items)) throw new Error("shape");
   const rows = arrangeRows({
     asks: asks.data.map(readAsk).filter(Boolean),
     stalled: stalled.items.map(readStalled).filter(Boolean),
     people: items.data.map(readPerson).filter(Boolean),
     merges: merges.items.map(readMerge).filter(Boolean),
+    signIns: signIn.map(readSignIn).filter(Boolean),
     requests: data.requests.map(readRequest).filter((r) => r && (r.state === "open" || r.branchManaged || r.replacePending)),
   });
   const notShown = [merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0);

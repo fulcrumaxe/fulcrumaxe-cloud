@@ -135,6 +135,19 @@ function mountApp(contentEl) {
     );
   }
 
+  // D#749: the checking account's sign-in on a runner needs renewing: the cloud's fixed sentence and the one command to run, as text. No button: the person signs in on the runner's machine,
+  // and the row leaves on the next read once the runner reports a fresh sign-in.
+  function signInView(row) {
+    const headId = "ny-h-" + row.id;
+    return h(
+      "li",
+      { class: "ny-row", "data-testid": "ny-row", "data-kind": "signin", "data-id": row.id, "data-state": row.state },
+      h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
+      h("p", { class: "ny-sentence", "data-testid": "ny-sentence" }, row.sentence),
+      h("p", null, h("code", { class: "ny-command", "data-testid": "ny-command" }, row.command))
+    );
+  }
+
   // An item that stopped on its own: what stopped, in the cloud's words, and the card's own top button (or, where none applies, a line to open the card).
   function stalledView(row) {
     const headId = "ny-h-" + row.id;
@@ -174,6 +187,7 @@ function mountApp(contentEl) {
     if (row.kind === "ask") return askView(row);
     if (row.kind === "person") return personView(row);
     if (row.kind === "merge") return mergeView(row);
+    if (row.kind === "signin") return signInView(row);
     const working = list.busyVerb(row.id);
     const headId = "ny-h-" + row.id;
     // While Mark done is in flight on a request with an automatic check, the approved "Checking now." stands in for the answer.

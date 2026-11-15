@@ -349,6 +349,12 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#749: opening the Needs you app also asks which repositories need the checking account signed in again (GET only). None here: the rows of the other lists are what these tests look at.
+    if (urlPath === "/api/v1/verify-sign-in" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ items: [] }));
+      return;
+    }
+
     // Opening the Needs you app also lists the items that stopped on their own (GET only). None here: the rows of the other lists are what these tests look at.
     if (urlPath === "/api/v1/stalled-items" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ items: [], not_shown: 0 }));

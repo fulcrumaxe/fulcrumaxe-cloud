@@ -27,6 +27,7 @@ import { decisionAskRoutes } from "./decisionAsks.js";
 import { subItemApprovalRoutes } from "./subItemApprovals.js";
 import { receiptRoutes } from "./receipts.js";
 import { mergeReadyRoutes } from "./mergeReady.js";
+import { verifySignInRoutes } from "./verifySignIn.js";
 import { stalledItemRoutes } from "./stalledItems.js";
 import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
@@ -102,6 +103,7 @@ export const ROUTES: RouteEntry[] = [
   ...subItemApprovalRoutes,
   ...receiptRoutes,
   ...mergeReadyRoutes,
+  ...verifySignInRoutes,
   ...stalledItemRoutes,
   ...actionRuleRoutes,
   ...githubRoutes,

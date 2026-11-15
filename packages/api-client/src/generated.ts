@@ -2695,6 +2695,20 @@ export interface Operations {
       not_shown: number;
     };
   };
+  listVerifySignInNeeds: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      items: Array<{
+        repo_id: string;
+        repo: string | null;
+        kind: "waiting" | "expired" | "missing" | "expiring_soon";
+        command: string;
+        since: string | null;
+      }>;
+    };
+  };
   listStalledItems: {
     path: undefined;
     query: undefined;
@@ -6347,6 +6361,17 @@ export const operations = {
   listMergeReady: {
     method: "GET",
     path: "/api/v1/merge-ready",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  listVerifySignInNeeds: {
+    method: "GET",
+    path: "/api/v1/verify-sign-in",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
