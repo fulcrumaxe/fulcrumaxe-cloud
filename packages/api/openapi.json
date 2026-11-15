@@ -4761,6 +4761,320 @@
                         },
                         "at": {
                           "type": "string"
+                        },
+                        "attempt_detail": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "attempt": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "pending",
+                                    "deploying",
+                                    "running",
+                                    "verified",
+                                    "failed",
+                                    "unverified"
+                                  ]
+                                },
+                                "reason": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "no_browser",
+                                        "chrome_not_connected",
+                                        "wrong_account",
+                                        "sign_in_refused",
+                                        "deploy_failed",
+                                        "deployment_unreachable",
+                                        "commit_not_deployed",
+                                        "envelope_rejected",
+                                        "hollow_pass",
+                                        "journey_blocked",
+                                        "journeys_missing",
+                                        "run_failed",
+                                        "verify_disabled",
+                                        "account_unverifiable",
+                                        "no_visible_journeys"
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "method": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "chrome_runner",
+                                        "playwright_runner",
+                                        "playwright_sandbox"
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "started_at": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "finished_at": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "journeys": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "id": {
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "type": "string",
+                                        "enum": [
+                                          "criterion",
+                                          "recheck",
+                                          "standing",
+                                          "other"
+                                        ]
+                                      },
+                                      "criterion": {
+                                        "anyOf": [
+                                          {
+                                            "type": "integer",
+                                            "minimum": -9007199254740991,
+                                            "maximum": 9007199254740991
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "status": {
+                                        "type": "string",
+                                        "enum": [
+                                          "passed",
+                                          "failed",
+                                          "blocked",
+                                          "unproven",
+                                          "skipped",
+                                          "not_judged"
+                                        ]
+                                      },
+                                      "reason": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string",
+                                            "enum": [
+                                              "defect_found",
+                                              "blocked",
+                                              "no_evidence",
+                                              "not_answered",
+                                              "wrong_account",
+                                              "account_unverifiable"
+                                            ]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "steps_done": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "evidence": {
+                                        "type": "object",
+                                        "properties": {
+                                          "page_fact": {
+                                            "type": "boolean"
+                                          },
+                                          "undo_checked": {
+                                            "type": "boolean"
+                                          },
+                                          "reloaded": {
+                                            "type": "boolean"
+                                          }
+                                        },
+                                        "required": [
+                                          "page_fact",
+                                          "undo_checked",
+                                          "reloaded"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      "console_errors": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "steps": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "index": {
+                                              "type": "integer",
+                                              "minimum": -9007199254740991,
+                                              "maximum": 9007199254740991
+                                            },
+                                            "label": {
+                                              "type": "string"
+                                            },
+                                            "result": {
+                                              "type": "string",
+                                              "enum": [
+                                                "passed",
+                                                "failed",
+                                                "not_passed",
+                                                "not_reached"
+                                              ]
+                                            },
+                                            "reason": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "string",
+                                                  "enum": [
+                                                    "defect_found",
+                                                    "blocked",
+                                                    "no_evidence",
+                                                    "not_answered",
+                                                    "wrong_account",
+                                                    "account_unverifiable"
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "null"
+                                                }
+                                              ]
+                                            },
+                                            "note": {
+                                              "type": [
+                                                "string",
+                                                "null"
+                                              ]
+                                            }
+                                          },
+                                          "required": [
+                                            "index",
+                                            "label",
+                                            "result",
+                                            "reason",
+                                            "note"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      }
+                                    },
+                                    "required": [
+                                      "id",
+                                      "source",
+                                      "criterion",
+                                      "status",
+                                      "reason",
+                                      "steps_done",
+                                      "evidence",
+                                      "console_errors",
+                                      "steps"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "attempts": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "attempt": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "status": {
+                                        "type": "string",
+                                        "enum": [
+                                          "pending",
+                                          "deploying",
+                                          "running",
+                                          "verified",
+                                          "failed",
+                                          "unverified"
+                                        ]
+                                      },
+                                      "reason": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string",
+                                            "enum": [
+                                              "no_browser",
+                                              "chrome_not_connected",
+                                              "wrong_account",
+                                              "sign_in_refused",
+                                              "deploy_failed",
+                                              "deployment_unreachable",
+                                              "commit_not_deployed",
+                                              "envelope_rejected",
+                                              "hollow_pass",
+                                              "journey_blocked",
+                                              "journeys_missing",
+                                              "run_failed",
+                                              "verify_disabled",
+                                              "account_unverifiable",
+                                              "no_visible_journeys"
+                                            ]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "at": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "attempt",
+                                      "status",
+                                      "reason",
+                                      "at"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": [
+                                "attempt",
+                                "status",
+                                "reason",
+                                "method",
+                                "started_at",
+                                "finished_at",
+                                "journeys",
+                                "attempts"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -4886,6 +5200,403 @@
                     "close_on_github",
                     "request_changes_blocked",
                     "change_requests"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/verify-attempts/{attempt}": {
+      "get": {
+        "operationId": "getWorkItemVerifyAttempt",
+        "summary": "One attempt of a work item's post-merge check: its journeys, their steps and evidence",
+        "description": "Session only, member. The attempt `attempt` (1 for the first check of the merge, 2 for the first Verify again, and so on) of the item's newest merge: its status, its closed reason, how the browser was driven, when it started and finished, one entry per journey (`status` passed, failed, blocked, unproven or skipped; the Spec criterion's number; the three evidence facts; the steps the tester recorded, each with a label and, on the last step of a journey that did not pass, a short note) and the list of attempts. Times are the attempt's: the tester's answer carries none per journey or step, and no planned step count, so there is no 'of total'. Labels and notes are model text, cut and cleaned: show them as text only. Answers 404 when the item, the attempt or the check is not there, including when the check is off for the repository.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attempt",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One attempt of a work item's post-merge check: its journeys, their steps and evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "attempt": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "deploying",
+                        "running",
+                        "verified",
+                        "failed",
+                        "unverified"
+                      ]
+                    },
+                    "reason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "no_browser",
+                            "chrome_not_connected",
+                            "wrong_account",
+                            "sign_in_refused",
+                            "deploy_failed",
+                            "deployment_unreachable",
+                            "commit_not_deployed",
+                            "envelope_rejected",
+                            "hollow_pass",
+                            "journey_blocked",
+                            "journeys_missing",
+                            "run_failed",
+                            "verify_disabled",
+                            "account_unverifiable",
+                            "no_visible_journeys"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "method": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "chrome_runner",
+                            "playwright_runner",
+                            "playwright_sandbox"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "started_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "finished_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "journeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "criterion",
+                              "recheck",
+                              "standing",
+                              "other"
+                            ]
+                          },
+                          "criterion": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "passed",
+                              "failed",
+                              "blocked",
+                              "unproven",
+                              "skipped",
+                              "not_judged"
+                            ]
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "defect_found",
+                                  "blocked",
+                                  "no_evidence",
+                                  "not_answered",
+                                  "wrong_account",
+                                  "account_unverifiable"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "steps_done": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "evidence": {
+                            "type": "object",
+                            "properties": {
+                              "page_fact": {
+                                "type": "boolean"
+                              },
+                              "undo_checked": {
+                                "type": "boolean"
+                              },
+                              "reloaded": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "page_fact",
+                              "undo_checked",
+                              "reloaded"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "console_errors": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "steps": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "index": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "label": {
+                                  "type": "string"
+                                },
+                                "result": {
+                                  "type": "string",
+                                  "enum": [
+                                    "passed",
+                                    "failed",
+                                    "not_passed",
+                                    "not_reached"
+                                  ]
+                                },
+                                "reason": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "defect_found",
+                                        "blocked",
+                                        "no_evidence",
+                                        "not_answered",
+                                        "wrong_account",
+                                        "account_unverifiable"
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "note": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "index",
+                                "label",
+                                "result",
+                                "reason",
+                                "note"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "source",
+                          "criterion",
+                          "status",
+                          "reason",
+                          "steps_done",
+                          "evidence",
+                          "console_errors",
+                          "steps"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "attempts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "attempt": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "deploying",
+                              "running",
+                              "verified",
+                              "failed",
+                              "unverified"
+                            ]
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "no_browser",
+                                  "chrome_not_connected",
+                                  "wrong_account",
+                                  "sign_in_refused",
+                                  "deploy_failed",
+                                  "deployment_unreachable",
+                                  "commit_not_deployed",
+                                  "envelope_rejected",
+                                  "hollow_pass",
+                                  "journey_blocked",
+                                  "journeys_missing",
+                                  "run_failed",
+                                  "verify_disabled",
+                                  "account_unverifiable",
+                                  "no_visible_journeys"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "attempt",
+                          "status",
+                          "reason",
+                          "at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "attempt",
+                    "status",
+                    "reason",
+                    "method",
+                    "started_at",
+                    "finished_at",
+                    "journeys",
+                    "attempts"
                   ],
                   "additionalProperties": false
                 }

@@ -5,6 +5,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
 import { VERIFY_DETAIL_CODES, VERIFY_HOLD_REASONS, VERIFY_METHODS, VERIFY_REASON_CODES, VERIFY_ROW_STATUSES } from "@fx/core/src/verify/rows.js";
+import { JOURNEY_REASONS, JOURNEY_STATUSES, STEP_RESULTS, readVerifyAttempt } from "@fx/core/src/work-items/verifyDetail.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import { STACKED_WAIT_STATES, readConflictState, readMergeQueueState, readQueueWait, readSiblingConflict, readStackedWait } from "@fx/core/src/work-items/mergeReadiness.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
@@ -12,6 +13,7 @@ import { readChildLaunch } from "@fx/core/src/decisions/childLaunch.js";
 import { RUNNER_DAILY_LIMIT_SENTENCE, SELF_CLEARING_WAIT_SENTENCES, isSelfClearingReviewWait, mergeQueue } from "@fx/pipeline";
 import { setupRequestDeps } from "./setupRequests.js";
 import type { RouteEntry } from "../registry.js";
+import { UUID_RE, notFound } from "./run-actions.js";
 import { runnerUsageSchema } from "./runs.js";
 import { runEndedSentence, withRunnerWords, type RunEndedCheck } from "./runnerLineWords.js";
 import { readRunWait, runWaitSchema } from "./runnerWait.js";
@@ -21,6 +23,30 @@ import { readRunWait, runWaitSchema } from "./runnerWait.js";
  * only (the Pipeline app's detail panel), member. Every list is bounded and every text is capped by the reader in
  * @fx/core; model text (comments, the Spec, run summaries) is plain text for the caller to show as text only.
  */
+// D#749 VERIFY-OBSERVABILITY: one attempt's journeys and steps. Closed words and counts, plus two bounded, cleaned strings per step (the tester's label, at most 120 characters, and, on the last step of a journey that did not pass, the page fact it recorded, at most 200): both are untrusted text, shown as text only.
+export const verifyAttemptSchema = z.object({
+  attempt: z.number().int(),
+  status: z.enum(VERIFY_ROW_STATUSES),
+  reason: z.enum(VERIFY_REASON_CODES).nullable(),
+  method: z.enum(VERIFY_METHODS).nullable(),
+  started_at: z.string().nullable(),
+  finished_at: z.string().nullable(),
+  journeys: z.array(
+    z.object({
+      id: z.string(),
+      source: z.enum(["criterion", "recheck", "standing", "other"]),
+      criterion: z.number().int().nullable(),
+      status: z.enum(JOURNEY_STATUSES),
+      reason: z.enum(JOURNEY_REASONS).nullable(),
+      steps_done: z.number().int(),
+      evidence: z.object({ page_fact: z.boolean(), undo_checked: z.boolean(), reloaded: z.boolean() }),
+      console_errors: z.number().int(),
+      steps: z.array(z.object({ index: z.number().int(), label: z.string(), result: z.enum(STEP_RESULTS), reason: z.enum(JOURNEY_REASONS).nullable(), note: z.string().nullable() })),
+    }),
+  ),
+  attempts: z.array(z.object({ attempt: z.number().int(), status: z.enum(VERIFY_ROW_STATUSES), reason: z.enum(VERIFY_REASON_CODES).nullable(), at: z.string() })),
+});
+
 export const activityResponseSchema = z.object({
   stage: z.string(),
   halted: z.boolean(),
@@ -152,6 +178,8 @@ export const activityResponseSchema = z.object({
       bug_item_id: z.string().uuid().nullable(),
       pr_number: z.number().int(),
       at: z.string(),
+      // The newest attempt's journeys and steps, with the list of attempts (null only if the rows changed between the two reads).
+      attempt_detail: verifyAttemptSchema.nullable().optional(),
     })
     .optional(),
   actions: z.array(z.enum(OPERATOR_ACTIONS)),
@@ -243,6 +271,28 @@ export const workItemActivityRoutes: RouteEntry[] = [
         return { ...activity, notice: { kind: bare.kind, reason: bare.reason, failed_files: failedFiles.files, ...(failedFiles.more > 0 ? { failed_files_more: failedFiles.more } : {}) } };
       }
       return activity;
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/work-items/{id}/verify-attempts/{attempt}",
+    operationId: "getWorkItemVerifyAttempt",
+    summary: "One attempt of a work item's post-merge check: its journeys, their steps and evidence",
+    description:
+      "Session only, member. The attempt `attempt` (1 for the first check of the merge, 2 for the first Verify again, and so on) of the item's newest merge: its status, its closed reason, how the browser was driven, when it started and finished, one entry per journey (`status` passed, failed, blocked, unproven or skipped; the Spec criterion's number; the three evidence facts; the steps the tester recorded, each with a label and, on the last step of a journey that did not pass, a short note) and the list of attempts. Times are the attempt's: the tester's answer carries none per journey or step, and no planned step count, so there is no 'of total'. Labels and notes are model text, cut and cleaned: show them as text only. Answers 404 when the item, the attempt or the check is not there, including when the check is off for the repository.",
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    paramsSchema: z.object({ id: z.string(), attempt: z.string() }),
+    responseSchema: verifyAttemptSchema,
+    async handler(ctx, input) {
+      const id = input.params.id!;
+      const n = Number(input.params.attempt);
+      if (!UUID_RE.test(id) || !Number.isInteger(n) || n < 1 || n > 1000) throw notFound();
+      const found = await withTenant(ctx.pool, ctx.principal.accountId, ctx.principal.userId, (client) => readVerifyAttempt(client, id, n));
+      if (found === null) throw notFound();
+      return found;
     },
   },
 ];
