@@ -54,7 +54,7 @@ is known (`settle.ts`).
 
 - `types.ts`: `Budget`, `ReservationState`, `PlanId`, `WorkItemKind`, `Trigger`, `Purpose`, `ModelId`, `UsageTokens`, `DenyReason`, `ReservationRef`, `ReserveResult`, `MeterDecision`
 - `pricing.ts`: `ModelRate`, `SandboxRates`, `claudePricing()`, `pricingFetchedAt()`, `claudeModelIds()`, `isClaudeModelId(model)`, `computeUsd(rate, usage)`, `computeModelUsd(model, usage)`, `sandboxRates()`, `computeComputeUsd(seconds, vcpu, memGb)`
-- `plans.ts`: `FlatComputeBudget`, `ScalingComputeBudget`, `ComputeBudget`, `ApiRateLimits`, `Plan`, `planIds()`, `isPlanId(value)`, `planFor(plan)`, `listPlans()`, `apiLimitsFor(plan)`, `webhookEndpointLimitFor(plan)`, `backgroundBudgetUsd(plan, repoCount)`, `foregroundBudgetUsd(plan)`
+- `plans.ts`: `FlatComputeBudget`, `ScalingComputeBudget`, `ComputeBudget`, `ApiRateLimits`, `Plan`, `planIds()`, `isPlanId(value)`, `planFor(plan)`, `listPlans()`, `apiLimitsFor(plan)`, `webhookEndpointLimitFor(plan)`, `backgroundBudgetUsd(plan, repoCount)`, `foregroundBudgetUsd(plan)`, `worstCaseComputeUsd(plan)`, `breakEvenMarginUsd(plan)`
 - `caps.ts`: `defaultPerSpawnCapUsd()`, `defaultFeatureCapUsd()`, `defaultSmallCapUsd()`, `maxFixRounds()`, `FixRoundDecision`, `checkFixRound(roundNumber)`
 
 No figure is compiled into this package. Every rate, budget, cap and limit above is read from the plan data (`loadPlanData()` in `@fx/plan-data`, the `FX_PLAN_DATA` setting) at the moment it is used, so with the setting missing each reader throws `PlanDataMissingError` and the callers show the unavailable state instead of a default.
@@ -198,6 +198,8 @@ it works") is specifically a concurrency/overcommit defense, not a
 tenant-isolation one -- every reservation and ledger write still goes
 through `withTenant`, so RLS is what stops one account from touching
 another's rows regardless of locking.
+
+**Break-even.** `worstCaseComputeUsd(plan)` (`packages/spend/src/plans.ts`, #943) is the foreground budget plus the background budget at its ceiling for a scaling plan, whatever the plan's repo limit, or the flat amount for a flat plan. `breakEvenMarginUsd(plan)` is the plan's price minus that figure. `packages/spend/test/breakEven.test.ts` fails when a plan's price is not above its worst-case compute or above its compute cap; payment fees and hosting are not in the plan data and are not counted.
 
 ## Tests
 

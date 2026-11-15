@@ -71,7 +71,9 @@ are hints: each sweep reads the rows again.
   runs proposed, in the same transaction (a failure there never fails the move), and wakes the
   branch cleanup and the reconcile pass.
 - A move to `merged` wakes the post-merge verify sweep when the item is a planned pull request
-  child, or when its repository has post-merge verification switched on.
+  child, or when its repository has post-merge verification switched on. In the second case the
+  wake also sends the signed kick to the sweep's route (`packages/core/src/work-items/recordStage.ts`, #931),
+  so the verify pass opens within seconds and not at the next 15-minute tick.
 - A move out of a stage that holds a build slot, into one that does not, wakes the sweep that
   resumes parked stages.
 
