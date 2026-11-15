@@ -61,6 +61,25 @@ an earlier stamp backwards, and an item that ends in `closed` (rather than
 | `closed_unmerged` | `in_progress`, `closed` |
 | `closed` | `triaged` |
 
+### What a stage move sets off
+
+Besides the history row and a `work_item.stage_changed` domain event, `recordStage()`
+(`packages/core/src/work-items/recordStage.ts`) wakes the sweeps that act on the move. These
+are hints: each sweep reads the rows again.
+
+- A move to `merged`, `closed_unmerged` or `closed` takes in the role lessons that the item's
+  runs proposed, in the same transaction (a failure there never fails the move), and wakes the
+  branch cleanup and the reconcile pass.
+- A move to `merged` wakes the post-merge verify sweep when the item is a planned pull request
+  child, or when its repository has post-merge verification switched on.
+- A move out of a stage that holds a build slot, into one that does not, wakes the sweep that
+  resumes parked stages.
+
+`packages/core/src/work-items/stages.ts` holds the shared stage lists and SQL: the terminal
+stages (`merged`, `closed_unmerged`, `closed`), "has a live planned child" (a follow-up child,
+one with `follow_up_id` set, never blocks its parent), and the one selector for which Spec
+version an item reads (its own, or for a planned child the version of its parent it names).
+
 ## The KPI views
 
 `v_kpi_work_items` (one row per work item) and `v_kpi_runs` (one row per

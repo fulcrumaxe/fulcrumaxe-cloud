@@ -8,11 +8,13 @@ Sources:
 - `scripts/check-agent-run-columns.sh`
 - `scripts/ci/affected.mjs`
 - `scripts/ci/full-run-triggers.json`
+- `scripts/ci/same-tree.mjs`
 - `scripts/ci/declared-imports.mjs`
 - `scripts/ci/declared-imports.test.mjs`
 - `.github/workflows/ci.yml`
 - `package.json`
 - `apps/workspace/playwright.config.ts`
+- `apps/workspace/e2e/runner-job-guard.mjs`
 - `apps/live-e2e/package.json`
 - `packages/db/test/audit-log-guard.test.ts`
 - `packages/pipeline/test/build/mergeCallSites.test.ts`
@@ -37,7 +39,9 @@ Two modes share the script. With nothing set it runs everything. With `FX_CHECK_
 
 ## How CI scopes a pull request
 
-`scripts/ci/affected.mjs` decides, from the commit range of the pull request, whether the run is `full`, `affected` or (private repository only) `overlay`. The packages a change touches plus everything that depends on them run; `scripts/ci/full-run-triggers.json` is the one list of what forces a full run, and the `ci:full` label forces it too. The label is read from the API when the scope step runs, because a re-run replays the original event with its old labels; if that read fails the run is full. A push to `main` is always full, and a merge-queue run (`merge_group`) is full scope too.
+`scripts/ci/affected.mjs` decides, from the commit range of the pull request, whether the run is `full`, `affected` or (private repository only) `overlay`. The packages a change touches plus everything that depends on them run; `scripts/ci/full-run-triggers.json` is the one list of what forces a full run, and the `ci:full` label forces it too. The label is read from the API when the scope step runs, because a re-run replays the original event with its old labels; if that read fails the run is full. A push to `main` is always full, and a merge-queue run (`merge_group`) is full scope too. On the private repository a pull request whose every changed file is an overlay path (`scripts/ci/publish-denylist.local`) answers `overlay`: the product suites skip, including the `workspace-e2e` specs, and each job still ends `success` under its real name.
+
+A merge-queue run can skip the heavy steps too. `scripts/ci/same-tree.mjs` answers "same tree" only when the queue group holds exactly one pull request, the checked-out commit's tree is byte-identical to that pull request's head, and the head already carries an `fx-gate1` success posted by the cloud's own App. Then the `check`, `e2e-runner` and `workspace-e2e` jobs skip `Run checks`, the Node 22 step and the specs, and still end `success`. Any doubt or API error means the full suites run. The `check` job's time limit is 90 minutes (`.github/workflows/ci.yml`).
 
 ## Gate 1
 
@@ -64,7 +68,7 @@ These tests read the source tree, not one package's behaviour. A change that add
 
 ## End-to-end projects
 
-- `apps/workspace` has Playwright projects `desktop`, `phone` (Pixel 7) and `tablet` (1024 by 768, touch), run by the `workspace-e2e` job once per project. A layout change needs the full set, not only the specs it adds.
+- `apps/workspace` has Playwright projects `desktop`, `phone` (Pixel 7) and `tablet` (1024 by 768, touch), run by the `workspace-e2e` job once per project. A layout change needs the full set, not only the specs it adds. Inside a runner job or the runner's own check (`FX_RUNNER_JOB=1` or `FX_RUNNER_CHECK=1`) the Playwright config prints a skip line and exits 0 before any server starts, so the real-browser specs never hang there; a developer host and CI do not set those variables (`apps/workspace/e2e/runner-job-guard.mjs`).
 - `e2e-runner` (`pnpm test:e2e-runner`, defined in `@fx/worker`) runs the runner path end to end in one job.
 - `apps/live-e2e` holds the live packs that run against a deployed environment; they are not part of the pull request check. See [the live-e2e page](apps/live-e2e.md).
 
