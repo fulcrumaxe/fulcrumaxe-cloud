@@ -71,7 +71,10 @@ describe("scan of real git objects", () => {
       "identifier_hit src/leak.ts:2 identifier-rule#1",
       "plan_data_hit src/leak.ts:3 priceUsdPerMonth",
     ]);
-    expect(JSON.stringify(r)).not.toMatch(/acme-internal-host|7391/);
+    // The result carries random 40-hex shas in `scanned`; a digit-only figure can occur in one by chance,
+    // so mask them before checking that no value-bearing field repeats the hit.
+    const masked = JSON.stringify({ ...r, scanned: r.scanned && { commit: "<sha>", base: "<sha>" } });
+    expect(masked).not.toMatch(/acme-internal-host|7391/);
   });
 
   it("refuses an overlay path, a binary file, an oversized file and a submodule, each by name", async () => {
