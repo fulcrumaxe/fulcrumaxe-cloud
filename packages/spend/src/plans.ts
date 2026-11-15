@@ -102,6 +102,20 @@ export function foregroundBudgetUsd(plan: PlanId): number {
 }
 
 /**
+ * The most model compute one account on this plan can be charged in a month when both budgets are spent in full: the foreground budget plus the
+ * background budget at its ceiling for a scaling plan, whatever its repo limit (an account can go over the limit), or the flat amount for a flat
+ * plan. A plan's price has to exceed this figure.
+ */
+export function worstCaseComputeUsd(plan: PlanId): number {
+  return foregroundBudgetUsd(plan) + backgroundBudgetUsd(plan, Number.MAX_SAFE_INTEGER);
+}
+
+/** Price minus `worstCaseComputeUsd`: positive when the plan still earns money with every compute budget fully used. Payment fees and hosting are not in the plan data and are not counted. */
+export function breakEvenMarginUsd(plan: PlanId): number {
+  return loadPlanData().plans[plan].priceUsdPerMonth - worstCaseComputeUsd(plan);
+}
+
+/**
  * D#6 R2b criterion 12: the runner tier's limits. The tier is for customers whose agent runs on their own machine; it
  * holds no model spend of ours (their own plan pays for the model), so these cap runners and work, not money.
  */
