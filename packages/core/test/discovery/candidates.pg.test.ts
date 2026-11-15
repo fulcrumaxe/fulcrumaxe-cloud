@@ -247,13 +247,17 @@ describe('mergeCandidates (D#483 S4-f2)', () => {
 
   it('marks the verifier sweep pending after the commit when it wrote something, and not when it wrote nothing', async () => {
     const markers = new Map<string, number>();
-    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    const kicked: string[] = [];
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) }, kick: (name) => void kicked.push(name) });
     const t = await tenant();
     await merge(t, [cand({ names_issue: 5000 })]);
     await new Promise((res) => setTimeout(res, 50));
     expect([...markers.keys()]).not.toContain('pending:proposal-verify-sweep');
+    expect(kicked).toEqual([]);
     await merge(t, [cand({ title: 'Wakes the sweep' })]);
     await vi.waitFor(() => expect([...markers.keys()]).toContain('pending:proposal-verify-sweep'));
+    // The sweep is also kicked, once, so the new proposal is checked within seconds.
+    expect(kicked).toEqual(['proposal-verify-sweep']);
     expect((await rowsOf(t)).length).toBe(1);
   });
 

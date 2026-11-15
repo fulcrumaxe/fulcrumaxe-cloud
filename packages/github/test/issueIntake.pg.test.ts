@@ -414,7 +414,8 @@ describe("an outside author's new issue becomes a proposal (D#483 S4-d)", () => 
 
   it("S4-b2b: a new outsider proposal and an edit that sends one back to pending each mark the verifier's sweep pending; a replay, a rate-limited issue, a close and a trusted author's issue do not", async () => {
     const markers = new Map<string, number>();
-    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    const kicked: string[] = [];
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) }, kick: (name) => void kicked.push(name) });
     const marked = () => markers.has("pending:proposal-verify-sweep");
     try {
       const r = await tenant();
@@ -423,10 +424,14 @@ describe("an outside author's new issue becomes a proposal (D#483 S4-d)", () => 
       const first = await deliver(deps, payload(r, 120, "stranger"));
       expect(first).toMatchObject({ result: { result: { applied: "proposed", created: true } } });
       expect(marked()).toBe(true);
-      // A replay under a new delivery id creates nothing and marks nothing.
+      // The sweep is also kicked, so the proposal is checked within seconds and not at the next tick.
+      expect(kicked).toEqual(["proposal-verify-sweep"]);
+      // A replay under a new delivery id creates nothing, marks nothing and kicks nothing (and does not fail).
       markers.clear();
+      kicked.length = 0;
       await deliver(deps, payload(r, 120, "stranger"));
       expect(marked()).toBe(false);
+      expect(kicked).toEqual([]);
       // A close, and a trusted author's issue (a work item, no proposal), mark nothing.
       await deliver(deps, payload(r, 120, "stranger", { action: "closed" }));
       await deliver(deps, payload(r, 121, "boss", { association: "OWNER" }));
