@@ -6,6 +6,12 @@ Sources:
 - `packages/runtime/src/`
 - `packages/runtime/test/`
 - `packages/runtime/package.json`
+- `packages/runtime/src/backends/types.ts`
+- `packages/runtime/src/backends/registry.ts`
+- `packages/runtime/src/backends/claudeCode.ts`
+- `packages/runtime/src/operatorSubscription.ts`
+- `packages/runtime/src/streamJson.ts`
+- `packages/runtime/src/toolActivity.ts`
 
 ## What it does
 
@@ -32,6 +38,12 @@ There is no single `src/index.ts` — consumers import from the specific entry p
 **Local runner env.** `createLocalRuntime` builds the spawned CLI process's env by copying the parent env and then forcing `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` to `""`, so the CLI falls back to the owner's already-logged-in subscription rather than any key sitting in the orchestrator's own env. `normalizeMessage` maps a raw `@anthropic-ai/claude-agent-sdk` stream-json message onto `NormalizedEvent`, and extracts the trailing `<!-- AGENT_OUTPUT -->` JSON block (`packages/runtime/src/envelope.ts`) from the final result message's text. The `query()` call itself (both the start and resume paths) pins `settingSources: []`, `mcpServers: {}` and `strictMcpConfig: true` as literal options, not spread from config (D#102): a run's working tree can be a PR branch by any author, and the SDK's own defaults otherwise load every filesystem settings source (project/user/local) and any MCP config reachable from that tree, including plugin and on-disk agent frontmatter MCP — which would let anyone who can open a PR shape the run's hooks, tool approvals and MCP servers.
 
 **Bundle isolation.** `select.ts` never statically imports `local/index.ts` (and therefore never the SDK dependency) or `production/index.ts` — both runtimes are supplied to `selectRuntime` as caller-provided factories, so a bundle that only needs `selectRuntime` never pulls either implementation in. `FX_LOCAL_RUNNER_MARKER` exists purely so a bundler that does keep `createLocalRuntime` cannot tree-shake away the one marker string a test greps for to confirm the local runner's entry point is present.
+
+**Agent backends** (`packages/runtime/src/backends/`). A backend descriptor (`AgentBackend`, `backends/types.ts`) is the one place that knows which agent CLI a sandbox runs, how its command line is built, and which exact version and SHA-256 digest the binary must have. It is pure data and pure functions, with no SDK and no I/O. `DEFAULT_BACKEND` is `claude-code`, built by `createClaudeCodeBackend` (`backends/claudeCode.ts`) with the pin and the two config paths passed in as inputs. `createBackendRegistry` (`backends/registry.ts`) refuses to register a backend that has no hostile-config flag group in its argument list, a bad name, version or digest, or a duplicate name, and `select(name)` throws `BackendNotSelectableError` for any name that is not registered. The pin check (`PIN_CHECK_SCRIPT`) resolves the CLI, compares its digest in the shell, and only then runs `--version`, so a digest mismatch ends the check before the binary has run.
+
+**Stream mapping.** `streamJson.ts` and `toolActivity.ts` only re-export the stream-json mapper and the tool-activity reducers, which live in `@fulcrumaxe/runner-protocol` so that the local runner maps the same lines.
+
+**Operator subscription** (`packages/runtime/src/operatorSubscription.ts`). `operatorMode(env, accountId)` is the one decision on whether an account may run on our own Claude subscription. All three must hold: `FX_OPERATOR_SUBSCRIPTION` is exactly `on`, the account is in the `FX_OPERATOR_ACCOUNT_IDS` list (a list with any non-UUID entry turns the feature off), and `FX_OPERATOR_CLAUDE_OAUTH_TOKEN` has the subscription-token shape. A refusal carries a reason code, never a value. The token itself never enters the sandbox: the sandbox gets the fixed placeholder `brokered-at-firewall`, and the firewall puts the real token on the wire.
 
 ## Data it touches
 

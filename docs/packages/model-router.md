@@ -4,6 +4,8 @@
 
 Sources:
 - `packages/model-router/src/`
+- `packages/model-router/src/backendAllowlist.ts`
+- `packages/model-router/src/allowedModels.ts`
 - `packages/model-router/eval/bootstrap.ts`
 - `packages/model-router/test/`
 - `packages/model-router/package.json`
@@ -18,7 +20,7 @@ Sources:
 
 ## Public surface
 
-Everything `packages/model-router/src/index.ts` re-exports: `types.ts` (`ModelId`, `Size`, `RoutingRow`, `RoutingTable`, `RepoSettings`, `RouteInput`, `RouteResult`, `MODEL_TIER_ORDER`, `tierRank`), `roleUniverse.ts` (`ALL_ROUTABLE_ROLES`, `SITE_KIT_ROLES`), `floors.ts` (`ROLE_FLOORS`, `floorFor`, `meetsFloor`, `assertRowMeetsFloor`, `applyCustomerOverride`, `OverrideResult`), `route.ts` (`route`, `loadLiveRoutingTable`, `routeForRun`), `escalate.ts` (`escalate`, `EscalationCause`, `PreviousRun`, `EscalationResult`), `tableSchema.ts` (`RoutingRowSchema`, `DefaultTableFileSchema`, `validateRoutingRows`, `isKnownModelId`), and `proposal.ts` (`RunOutcomeSample`, `PairAggregate`, `aggregateByPair`, `buildProposal`, `PromotionDecision`, `decidePromotion`, `saveProposedTable`, `applyPromotionDecision`).
+Everything `packages/model-router/src/index.ts` re-exports: `types.ts` (`ModelId`, `Size`, `RoutingRow`, `RoutingTable`, `RepoSettings`, `RouteInput`, `RouteResult`, `MODEL_TIER_ORDER`, `tierRank`), `roleUniverse.ts` (`ALL_ROUTABLE_ROLES`, `SITE_KIT_ROLES`), `backendAllowlist.ts` (`BackendRef`, `ModelTarget`, `FLOORED_PIN`, `FLOORED_ALLOWLIST`, `isAliasLike`, `isAllowlisted`, `backendForRole`), `floors.ts` (`ROLE_FLOORS`, `floorFor`, `meetsFloor`, `assertRowMeetsFloor`, `applyCustomerOverride`, `OverrideResult`), `allowedModels.ts` (`allowedModelsFor`), `route.ts` (`route`, `loadLiveRoutingTable`, `routeForRun`), `escalate.ts` (`escalate`, `EscalationCause`, `PreviousRun`, `EscalationResult`), `tableSchema.ts` (`RoutingRowSchema`, `DefaultTableFileSchema`, `validateRoutingRows`, `isKnownModelId`), and `proposal.ts` (`RunOutcomeSample`, `PairAggregate`, `aggregateByPair`, `buildProposal`, `PromotionDecision`, `decidePromotion`, `saveProposedTable`, `applyPromotionDecision`).
 
 ## How it works
 
@@ -29,6 +31,8 @@ Everything `packages/model-router/src/index.ts` re-exports: `types.ts` (`ModelId
 `saveProposedTable` validates every row's floor before opening a transaction, so a floor-violating proposal is rejected before it ever touches the database. `applyPromotionDecision` requires the target row to still be `status = 'proposed'` (`rowCount === 1`) before either promoting it to `live` (retiring whatever was previously live in the same transaction) or marking it `rejected` with a stored reason, throwing and rolling back otherwise — this closes paths that previously let a caller re-promote an already-rejected version or reject the currently-live one.
 
 `eval/bootstrap.ts` is an owner-machine-only script (`pnpm --filter @fx/model-router eval:bootstrap`, guarded by `@fx/runtime`'s `assertLocalRunnerAllowed`) that replays a fixed task list across the three model tiers using the local runner, scores each replay, and writes `default-table/v1.json` plus a results file. `pnpm test` never runs it — `test/evalBootstrap.test.ts` exercises only its guard and its pure scoring/write logic with an injected fake `AgentRuntime`, at zero model tokens.
+
+**The floored-role allowlist.** A floored role passes only when its model is at or above the floor's tier and the exact `(backend, provider, model)` triple is on `FLOORED_ALLOWLIST` (`packages/model-router/src/backendAllowlist.ts`). The pin is `claude-code` with `anthropic`, and the list holds `sonnet-5` and `opus-5` on that pin; a floored role ignores the account's default backend. A model id that contains `:`, has an `auto` path segment or has surrounding whitespace is never allowlisted, whatever the list says. `meetsFloor` and `applyCustomerOverride` both take an optional backend target (default: the pin), so a refusal names the backend and provider as well as the floor. `allowedModelsFor(role, accountContext, universe)` (`packages/model-router/src/allowedModels.ts`) returns the ids from `universe` that the override check accepts for the role, so a picker lists what the PATCH would accept.
 
 ## Data it touches
 
