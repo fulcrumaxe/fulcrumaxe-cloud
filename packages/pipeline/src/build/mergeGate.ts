@@ -359,8 +359,9 @@ export interface MergeGateDeps {
   queueJump?(pr: PullRequestRef): Promise<"jump" | "throttled" | "none">;
   /**
    * TWO-LANE-QUEUE: called right after GitHub took the entry, while the repository's merge lease is still held (the lease is freed in `runMergeGate`'s `finally`, after this returns).
-   * The composition root writes the `merge_enqueued` fact here, so the jump throttle can see a jump before any other gate can take the lease. A throw propagates like any port error
-   * (the step retries); a fact that is never written (the process dies between the enqueue and the write) leaves a jump the throttle cannot see, and is the one window this does not close.
+   * The composition root writes the `merge_enqueued` fact here, so the jump throttle can see a jump before any other gate can take the lease. A throw is reported and swallowed: the entry is already
+   * enqueued, so the ordered-resource hold must still be taken, and step 5 writes the same fact under the same keys. A fact that is never written (a throw here, or the process
+   * dying between the enqueue and the write) leaves a jump the throttle cannot see until step 5 writes it.
    */
   onEnqueued?(result: Extract<MergeGateResult, { outcome: "merge_enqueued" }>): Promise<void>;
 }
@@ -1093,7 +1094,14 @@ async function enqueueIntoQueue(deps: MergeGateDeps, pr: PullRequestRef, headSha
   if (out.enqueued) {
     const jump = out.via === "queue" && out.jump !== undefined ? out.jump : want === "throttled" ? "throttled" : undefined;
     const enqueued: Extract<MergeGateResult, { outcome: "merge_enqueued" }> = { outcome: "merge_enqueued", headSha, entryId: out.entryId, position: out.position, via: out.via, ...(jump !== undefined ? { jump } : {}) };
-    if (deps.onEnqueued !== undefined) await deps.onEnqueued(enqueued);
+    if (deps.onEnqueued !== undefined) {
+      try {
+        await deps.onEnqueued(enqueued);
+      } catch (err) {
+        // fx-swallow-ok: the entry is already in GitHub's queue, so the ordered-resource hold must still be taken after this returns; step 5 writes the same fact under the same keys
+        reportError(err, { stage: "merge_gate.on_enqueued" });
+      }
+    }
     return enqueued;
   }
   if (out.reason === "unavailable") return markHuman(deps, pr, headSha, ["merge_queue_unavailable"]);
