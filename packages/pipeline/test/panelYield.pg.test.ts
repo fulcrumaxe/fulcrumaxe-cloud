@@ -37,7 +37,25 @@ class World implements AdvanceRunPorts {
     await h.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, $4, 'production', 'running')`, [id, this.accountId, this.workItemId, req.role]);
     this.byStep.set(req.step, id);
     this.runs.set(id, { role: req.role, step: req.step, status: this.initial, envelope: null, runningMs: null });
+    this.startWaiters = this.startWaiters.filter((w) => !w());
     return { ok: true, runId: id };
+  }
+  private startWaiters: Array<() => boolean> = [];
+  /**
+   * Resolves once `count` runs matching `match` exist. An explicit signal from `startRun`, not a sleep: on a slow machine the step can take
+   * longer than any fixed pause to start its runs, and a `finish` or `claim` made before they exist does nothing, which left the step waiting
+   * on a run nobody would ever claim until the test's own timeout.
+   */
+  started(match: (r: { role: string }) => boolean, count: number): Promise<void> {
+    const reached = () => [...this.runs.values()].filter(match).length >= count;
+    if (reached()) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.startWaiters.push(() => {
+        if (!reached()) return false;
+        resolve();
+        return true;
+      });
+    });
   }
   async outcome(runId: string): Promise<AdvanceRunOutcome> {
     const r = this.runs.get(runId);
@@ -78,6 +96,10 @@ const signed = async (discussionId: string) => (await h.admin.query("SELECT role
 const stageOf = async (id: string) => (await h.admin.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1", [id])).rows[0]!.stage;
 // A yield point of a few milliseconds: the step's own clock, not the queue's.
 const YIELDING = { pollMs: 5, yieldAfterMs: 40 };
+/** Waits for a state the test itself has caused; it ends by that state being reached (or the test's own timeout), never by a guess at how long it takes. */
+async function until(done: () => Promise<boolean>): Promise<void> {
+  while (!(await done())) await new Promise((r) => setTimeout(r, 5));
+}
 
 describe("a runner panel hands control back and is called again", () => {
   it("seats still queued at the yield point: the step answers waiting, nothing is cancelled, and a second call starts no new run", async () => {
@@ -107,9 +129,13 @@ describe("a runner panel hands control back and is called again", () => {
     const t = await discussing("runner", "pending");
     // The runner has claimed and finished one seat by the time the step yields on the others.
     const world = t.world;
-    const pendingStart = runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, world, YIELDING);
-    await new Promise((r) => setTimeout(r, 15));
+    // The step's own clock is the test's: it does not reach the yield point until the test says so, however slow the machine is.
+    let clock = 0;
+    const pendingStart = runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, world, { ...YIELDING, now: () => clock });
+    await world.started(() => true, 3);
     world.finish((r) => r.role === "technical-architect");
+    await until(async () => (await signed(t.discussionId)).length === 1);
+    clock = YIELDING.yieldAfterMs;
     expect(await pendingStart).toEqual({ status: "waiting", reason: "queued_on_runner" });
     expect(await signed(t.discussionId)).toEqual(["technical-architect"]);
 
@@ -157,8 +183,11 @@ describe("a runner panel hands control back and is called again", () => {
 describe("a sandbox panel is unchanged", () => {
   it("seats that are still running past the yield point do not make the step yield: it waits and completes", async () => {
     const t = await discussing("production", "running");
-    const run = runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, YIELDING);
-    await new Promise((r) => setTimeout(r, 150)); // well past the 40 ms yield point
+    let clock = 0;
+    const run = runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { ...YIELDING, now: () => clock });
+    await t.world.started(() => true, 3);
+    clock = 10 * YIELDING.yieldAfterMs; // far past the yield point, and the step has polled the seats since (a sandbox run does not yield)
+    await new Promise((r) => setTimeout(r, 50));
     t.world.finish(() => true);
     expect(await run).toEqual({ status: "completed", complete: true, missingRoles: [], round2Ran: false });
     expect(t.world.cancelled).toEqual([]);
@@ -174,7 +203,7 @@ describe("a sandbox panel is unchanged", () => {
   it("the Spec step with a PM that never ends still ends pm_timed_out, not waiting", async () => {
     const t = await discussing("production", "running");
     const panel = runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, YIELDING);
-    await new Promise((r) => setTimeout(r, 30));
+    await t.world.started(() => true, 3);
     t.world.finish(() => true);
     await panel;
     expect(await runSpecForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { ...YIELDING, pmTimeoutMs: 100 })).toEqual({ status: "refused", reason: "pm_timed_out" });
@@ -186,7 +215,7 @@ describe("a PM deadline that fired before the PM's runner run had done the work"
   /** The three seats start, the runner finishes them, and the panel step ends. */
   async function panelDone(t: Awaited<ReturnType<typeof discussing>>) {
     const panel = runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { pollMs: 5 });
-    await new Promise((r) => setTimeout(r, 40));
+    await t.world.started(() => true, 3);
     t.world.finish(() => true);
     await panel;
   }
@@ -195,7 +224,8 @@ describe("a PM deadline that fired before the PM's runner run had done the work"
     const t = await discussing("runner", "pending");
     await panelDone(t);
     const step = runSpecForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, { pollMs: 5, pmTimeoutMs });
-    await new Promise((r) => setTimeout(r, 40));
+    // Claim only once the step has started the PM run: a claim made before it exists claims nothing, and the run would then wait in the queue (its budget paused) for a claim that never comes.
+    await t.world.started((r) => r.role === "project-manager", 1);
     t.world.claim((r) => r.role === "project-manager", runningMs);
     return { t, out: await step };
   }
