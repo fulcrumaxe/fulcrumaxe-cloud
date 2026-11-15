@@ -41,14 +41,16 @@ describe("the Node 22 step in CI", () => {
     expect(step).not.toMatch(/^\s*(continue-on-error|runs-on|strategy):/m);
   });
 
-  it("is skipped only by the pull-request scope decision and by a push to the private repository: it runs on every public push, and on a pull request unless the scope step said the package is unaffected", () => {
+  it("is skipped only by the pull-request scope decision, by a push to the private repository and by the merge queue same-tree proof: it runs on every public push, and on a pull request unless the scope step said the package is unaffected", () => {
     // D#507: an affected-only pull request run leaves the step out when packages/runner-protocol is not in
     // scripts/ci/affected.mjs's answer. The one other exception is a push to the private repository, which runs
-    // only the overlay checks because the public repository already ran the full suite on the same tree. Any
+    // only the overlay checks because the public repository already ran the full suite on the same tree. The
+    // other is the merge queue same-tree proof (scripts/ci/same-tree.mjs): the group commit's tree is identical to a
+    // pull request head whose full-scope run, this step included, already passed. Any
     // other condition would be a quiet way to stop checking Node 22.
     const conditions = step.split("\n").filter((line) => /^\s*if:/.test(line));
     expect(conditions.map((line) => line.trim())).toEqual([
-      "if: (github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(github.event_name == 'push' && github.event.repository.private)",
+      "if: (github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(github.event_name == 'push' && github.event.repository.private) && env.CI_SAME_TREE != 'true'",
     ]);
   });
 

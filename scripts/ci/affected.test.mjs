@@ -978,7 +978,7 @@ test("documentation: LICENSE*, NOTICE*, THIRD-PARTY-NOTICES* and CONTRIBUTING* a
 });
 
 test("scripts: adding or editing a standalone scripts/ci/*.test.mjs is not a trigger and selects no package", () => {
-  for (const file of ["scripts/ci/licence.test.mjs", "scripts/ci/affected.test.mjs", "scripts/ci/ci-workflow.test.mjs"]) {
+  for (const file of ["scripts/ci/licence.test.mjs", "scripts/ci/affected.test.mjs", "scripts/ci/ci-workflow.test.mjs", "scripts/ci/same-tree.test.mjs"]) {
     const r = change({ [file]: "// x\n" });
     assertShape(r);
     assert.equal(r.mode, "affected", file);

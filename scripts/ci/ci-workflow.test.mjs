@@ -42,7 +42,7 @@ const stepNamed = (steps, name) => {
 const GUARD = "${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}";
 const EPHEMERAL = "(runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))";
 const PRIVATE_PUSH = "github.event_name == 'push' && github.event.repository.private";
-const OVERLAY_OFF = `env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(${PRIVATE_PUSH})`;
+const OVERLAY_OFF = `env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(${PRIVATE_PUSH}) && env.CI_SAME_TREE != 'true'`;
 const ifOf = (step) => (/^ {8}if: (.*)$/m.exec(step.text) ?? [, null])[1];
 
 // ---- the file is valid YAML --------------------------------------------------
@@ -428,7 +428,7 @@ test("push to main: the classifier is not consulted and check.sh runs with no af
 
 test("check job: the Node 22 runner-protocol step runs on push and when the package is affected", () => {
   const s = stepNamed(checkSteps, "Runner protocol tests on Node 22");
-  assert.equal(ifOf(s), `(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(${PRIVATE_PUSH})`);
+  assert.equal(ifOf(s), `(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(${PRIVATE_PUSH}) && env.CI_SAME_TREE != 'true'`);
 });
 
 test("check job: nothing is narrowed outside Run checks and the Node 22 step", () => {
@@ -444,6 +444,7 @@ test("check job: nothing is narrowed outside Run checks and the Node 22 step", (
     "Paired copy",
     "Run checks",
     "Runner protocol tests on Node 22",
+    "Same tree",
     "pnpm store cache (hosted)",
   ].sort());
 });
@@ -484,7 +485,7 @@ test("e2e job: the first step after checkout (and the hosted-only Nix install) r
 
 test("e2e job: every step after the scope step is guarded on the scope answer", () => {
   const at = e2eSteps.findIndex((s) => s.name === "E2E scope (${{ matrix.project }})");
-  const later = e2eSteps.slice(at + 1).filter((s) => s.name !== "Paired copy");
+  const later = e2eSteps.slice(at + 1).filter((s) => s.name !== "Paired copy" && !s.name.startsWith("Same tree"));
   assert.ok(later.length >= 4);
   for (const s of later) {
     assert.match(ifOf(s) ?? "", /env\.CI_SCOPE_E2E == 'true'/, `${s.name} is not guarded`);
@@ -1905,7 +1906,7 @@ test("overlay-only: the e2e-runner scope step is private-only, pull-request-only
   assert.match(s.text, /CI_OVERLAY_LIST: scripts\/ci\/publish-denylist\.local/);
   assertReadsLabelsFromApi(s.text);
   assert.equal(ifOf(s).includes("private"), true);
-  assert.match(runnerE2eSteps[0].text, /fetch-depth: \$\{\{ github\.event\.repository\.private && 2 \|\| 1 \}\}/);
+  assert.match(runnerE2eSteps[0].text, /fetch-depth: \$\{\{ \(github\.event\.repository\.private \|\| github\.event_name == 'merge_group'\) && 2 \|\| 1 \}\}/);
   const order = runnerE2eSteps.map((x) => x.name);
   assert.ok(order.indexOf("Overlay scope") < order.indexOf("Run the end-to-end runner test"));
 });
@@ -1943,6 +1944,7 @@ const ctxFor = (event, isPrivate, overlay = "") => ({
   "env.CI_SCOPE_OVERLAY": overlay,
   "env.CI_PAIRED_COPY": "",
   "env.CI_SCOPE_RUNNER_PROTOCOL": "",
+  "env.CI_SAME_TREE": "",
 });
 const runs = (step, ctx) => Boolean(evalExpr(ifOf(step), ctx));
 
@@ -2041,7 +2043,7 @@ test("paired copy: the Node 22 step does not run on a copy, and nothing that nee
   assert.match(paired.text, /echo "CI_SCOPE_RUNNER_PROTOCOL=false" >> "\$GITHUB_ENV"/);
   // The step's own scope condition is untouched (the test guard pins it); the override sets what that condition reads.
   const node22 = stepNamed(checkSteps, "Runner protocol tests on Node 22");
-  assert.equal(ifOf(node22), `(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(${PRIVATE_PUSH})`);
+  assert.equal(ifOf(node22), `(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(${PRIVATE_PUSH}) && env.CI_SAME_TREE != 'true'`);
   // A copy where the classifier said runner-protocol is in scope: the env after the override is what the step sees.
   const afterOverride = { ...ctxFor("pull_request", true), "env.CI_PAIRED_COPY": "true", "env.CI_SCOPE_RUNNER_PROTOCOL": "false" };
   const beforeOverride = { ...afterOverride, "env.CI_SCOPE_RUNNER_PROTOCOL": "true" };
@@ -2481,4 +2483,62 @@ test("live-e2e exception: actionlint, told only about the live-e2e label, accept
 });
 test("live-e2e exception: actionlint accepts the real .github/workflows/live-e2e.yml with only the live-e2e label allowed", { skip: LIVE_SKIP || LIVE_LINT_SKIP }, () => {
   assert.equal(lintLive(readFileSync(liveRealPath, "utf8")), null);
+});
+
+// ---- merge queue same-tree shortcut (scripts/ci/same-tree.mjs) -------------------------------------------------
+test("same tree: each required job has one merge-group-only step with the same read-only inputs and no write access", () => {
+  for (const [job, steps] of [["check", checkSteps], ["workspace-e2e", e2eSteps], ["e2e-runner", runnerE2eSteps]]) {
+    const s = steps.filter((x) => x.name.startsWith("Same tree"));
+    assert.equal(s.length, 1, job);
+    assert.equal(ifOf(s[0]), "github.event_name == 'merge_group'", job);
+    assert.match(s[0].text, /run: nix develop \.#ci --command node scripts\/ci\/same-tree\.mjs\n?$/m, job);
+    for (const v of ["CI_EVENT_NAME", "MG_HEAD_REF", "MG_HEAD_SHA", "MG_BASE_SHA", "FX_APP_BOT_LOGIN", "GH_TOKEN"]) assert.match(s[0].text, new RegExp(`\\n {10}${v}: `), `${job} ${v}`);
+    assert.match(s[0].text, /GH_TOKEN: \$\{\{ github\.token \}\}/, job);
+    assert.doesNotMatch(s[0].text, /secrets\./, job);
+    assert.doesNotMatch(s[0].text, /continue-on-error/, job);
+  }
+  assert.doesNotMatch(noComments(ci), /pull_request_target/);
+  assert.doesNotMatch(noComments(ci), /(contents|pull-requests|statuses|checks|actions): write/);
+});
+
+test("same tree: every job that runs the step checks out two commits on a merge group (the script reads HEAD^1)", () => {
+  assert.match(checkSteps[0].text, /fetch-depth: 2/);
+  assert.match(e2eSteps[0].text, /fetch-depth: 2/);
+  assert.match(runnerE2eSteps[0].text, /fetch-depth: \$\{\{ \(github\.event\.repository\.private \|\| github\.event_name == 'merge_group'\) && 2 \|\| 1 \}\}/);
+});
+
+test("same tree: the step runs after Nix is installed and before every step it gates", () => {
+  const at = (steps, n) => steps.findIndex((x) => x.name === n || x.name.startsWith(n));
+  assert.ok(at(checkSteps, "Same tree") > at(checkSteps, "Install Nix (hosted)"));
+  assert.ok(at(checkSteps, "Same tree") > at(checkSteps, "Secret scan of the change"), "the secret scan still runs first");
+  assert.ok(at(checkSteps, "Same tree") < at(checkSteps, "Run checks"));
+  assert.ok(at(checkSteps, "Same tree") < at(checkSteps, "Runner protocol tests on Node 22"));
+  assert.ok(at(e2eSteps, "Same tree") > at(e2eSteps, "Install Nix (hosted)"));
+  assert.ok(at(e2eSteps, "Same tree") < at(e2eSteps, "Pick free e2e ports"));
+  assert.ok(at(e2eSteps, "Same tree") < at(e2eSteps, "Run workspace e2e"));
+  assert.ok(at(runnerE2eSteps, "Same tree") > at(runnerE2eSteps, "Install Nix (hosted)"));
+  assert.ok(at(runnerE2eSteps, "Same tree") < at(runnerE2eSteps, "Run the end-to-end runner test"));
+});
+
+test("same tree: a proven answer skips the suites, and nothing but the script sets the flag", () => {
+  const withProof = { ...ctxFor("merge_group", true), "env.CI_SAME_TREE": "true" };
+  const noProof = { ...ctxFor("merge_group", true), "env.CI_SAME_TREE": "" };
+  for (const step of [stepNamed(checkSteps, "Run checks"), stepNamed(checkSteps, "Runner protocol tests on Node 22"), stepNamed(runnerE2eSteps, "Run the end-to-end runner test")]) {
+    assert.equal(runs(step, withProof), false, step.name);
+    assert.equal(runs(step, noProof), true, step.name);
+  }
+  // workspace-e2e: the step switches the existing scope flag off, so every gated step skips by its own condition
+  assert.match(stepNamed(e2eSteps, "Same tree (${{ matrix.project }})").text, /SAME_TREE_ALSO_SET: CI_SCOPE_E2E=false/);
+  for (const t of [checkSteps, runnerE2eSteps]) assert.doesNotMatch(stepNamed(t, "Same tree").text, /SAME_TREE_ALSO_SET/);
+  assert.doesNotMatch(noComments(ci).replace(/^ {8}if: .*$/gm, ""), /CI_SAME_TREE/);
+});
+
+test("same tree: required check names, timeouts and permissions are unchanged", () => {
+  const py = spawnSync("python3", ["-c", "import sys, json, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))", path.join(repoRoot, ".github/workflows/ci.yml")], { encoding: "utf8" });
+  assert.equal(py.status, 0, py.stderr);
+  const doc = JSON.parse(py.stdout);
+  assert.equal(doc.jobs["workspace-e2e"].name, "workspace-e2e (${{ matrix.project }})");
+  assert.deepEqual([doc.jobs.check["timeout-minutes"], doc.jobs["workspace-e2e"]["timeout-minutes"], doc.jobs["e2e-runner"]["timeout-minutes"]], [90, 40, 30]);
+  for (const j of ["check", "workspace-e2e", "e2e-runner"]) assert.deepEqual(doc.jobs[j].permissions, { contents: "read", "pull-requests": "read" });
+  assert.deepEqual(doc.permissions, { contents: "read" });
 });

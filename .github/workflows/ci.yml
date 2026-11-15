@@ -328,7 +328,7 @@ jobs:
       # 3. The lint's own tests, and the wiring of the secret scan above. The same step runs the scope
       #    classifier's tests and the tests that read this workflow.
       - name: Migration lint and secret scan tests
-        run: nix develop .#ci --command node --test scripts/ci/check-migration-compat.test.mjs scripts/ci/affected.test.mjs scripts/ci/ci-workflow.test.mjs scripts/ci/licence.test.mjs
+        run: nix develop .#ci --command node --test scripts/ci/check-migration-compat.test.mjs scripts/ci/affected.test.mjs scripts/ci/ci-workflow.test.mjs scripts/ci/licence.test.mjs scripts/ci/same-tree.test.mjs
 
       # 4. How much to run (pull requests only). Exports FX_CHECK_AFFECTED for "Run checks" when the answer
       #    is `affected`, and CI_SCOPE_RUNNER_PROTOCOL for the Node 22 step. CI_FORCE_FULL and the
@@ -381,13 +381,28 @@ jobs:
           echo "CI_SCOPE_RUNNER_PROTOCOL=false" >> "$GITHUB_ENV"
           echo "CI scope: paired copy of a cloud-built item (the public pull request ran the full suite; only the secret scan, the migration lint and the CI script tests run here)" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Merge queue only: when this run's tree is byte-identical to a pull request head that already carries our
+      # App's `fx-gate1` = success (a green full-scope run), "Run checks" and the Node 22 step are skipped and the job
+      # still ends `success` under its real name. Anything unproven, any API error, or a group of several pull
+      # requests answers "not proven" and the job runs in full. Read-only token. See scripts/ci/same-tree.mjs.
+      - name: Same tree
+        if: github.event_name == 'merge_group'
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          FX_APP_BOT_LOGIN: ${{ vars.FX_APP_BOT_LOGIN }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command node scripts/ci/same-tree.mjs
+
       # node, pnpm and postgresql (initdb/pg_ctl/createdb) all come from flake.nix's
       # `ci` devShell (D#507: lean, no Python tooling, so a fresh runner fetches it
       # all from the public cache). It is built from the same shared package list as
       # the `default` shell a developer runs locally, so it cannot drift from it. packages/db's own vitest globalSetup provisions and tears down its own
       # throwaway Postgres cluster; nothing else needs configuring here.
       - name: Run checks
-        if: env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
+        if: env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private) && env.CI_SAME_TREE != 'true'
         env:
           # The browser tier runs on every event, push included, with Chromium's
           # sandbox on. check.sh still refuses FX_BROWSER_TIER=skip on pull_request.
@@ -422,7 +437,7 @@ jobs:
       #   - It uses the dependencies "Run checks" just installed, and starts vitest's entry file with that `node`
       #     directly, not through pnpm, so the root `engines.node >= 24` check is not involved.
       - name: Runner protocol tests on Node 22
-        if: (github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(github.event_name == 'push' && github.event.repository.private)
+        if: (github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(github.event_name == 'push' && github.event.repository.private) && env.CI_SAME_TREE != 'true'
         run: |
           set -euo pipefail
           nix shell --inputs-from . nixpkgs#nodejs_22 --command node --version
@@ -506,6 +521,20 @@ jobs:
           echo "CI_SCOPE_E2E=false" >> "$GITHUB_ENV"
           echo "CI scope: paired copy of a cloud-built item (the public pull request ran the full suite; only the secret scan, the migration lint and the CI script tests run here)" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Merge queue only, same proof as in `check` (scripts/ci/same-tree.mjs). When proven it switches the scope flag
+      # off, so every step below skips and the job still ends `success` under its real name; otherwise it changes nothing.
+      - name: Same tree (${{ matrix.project }})
+        if: github.event_name == 'merge_group'
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          FX_APP_BOT_LOGIN: ${{ vars.FX_APP_BOT_LOGIN }}
+          GH_TOKEN: ${{ github.token }}
+          SAME_TREE_ALSO_SET: CI_SCOPE_E2E=false
+        run: nix develop .#ci --command node scripts/ci/same-tree.mjs
+
       - name: Nix store cache (hosted)
         if: env.CI_SCOPE_E2E == 'true' && runner.environment == 'github-hosted' && !startsWith(vars.CI_RUNS_ON, 'ubicloud')
         continue-on-error: true
@@ -583,7 +612,8 @@ jobs:
         with:
           persist-credentials: false
           # Two commits on the private repository, where the overlay scope step below needs HEAD^1; one elsewhere.
-          fetch-depth: ${{ github.event.repository.private && 2 || 1 }}
+          # Merge queue runs need depth 2 as well: scripts/ci/same-tree.mjs reads the group commit's parent.
+          fetch-depth: ${{ (github.event.repository.private || github.event_name == 'merge_group') && 2 || 1 }}
 
       - name: Install Nix (hosted)
         if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
@@ -640,6 +670,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
 
+      # Merge queue only: same proof and same effect as in `check` (scripts/ci/same-tree.mjs).
+      - name: Same tree
+        if: github.event_name == 'merge_group'
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          FX_APP_BOT_LOGIN: ${{ vars.FX_APP_BOT_LOGIN }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command node scripts/ci/same-tree.mjs
+
       - name: Run the end-to-end runner test
-        if: env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
+        if: env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private) && env.CI_SAME_TREE != 'true'
         run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm test:e2e-runner'
