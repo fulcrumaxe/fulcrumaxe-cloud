@@ -227,8 +227,10 @@ const HELD_WORDS: Readonly<Record<LimitedBy, string>> = {
 };
 
 /** The one journal line for a change in what the machine holds back: which classes, and why. Nothing held back says so too. */
-export function describeHeld(light: LimitedBy | null, heavy: LimitedBy | null, near = false): string {
-  const words = (by: LimitedBy): string => (by === "usage_limit" && near ? "near the plan's usage limit, so one job at a time (the limit itself is not reached)" : HELD_WORDS[by]);
+export function describeHeld(light: LimitedBy | null, heavy: LimitedBy | null, near = false, cpu?: { low: boolean; ioHigh: boolean }): string {
+  // Measured CPU use is low yet the CPU holds: the cores are kept back (the person's reserve, jobs still starting), so "the CPU is busy" would be wrong. Disk busyness is only mentioned, never a reason.
+  const cpuWords = cpu === undefined || !cpu.low ? HELD_WORDS.cpu : `cores are kept free for you or for jobs still starting${cpu.ioHigh ? " (disk is busy, informational)" : ""}`;
+  const words = (by: LimitedBy): string => (by === "usage_limit" && near ? "near the plan's usage limit, so one job at a time (the limit itself is not reached)" : by === "cpu" ? cpuWords : HELD_WORDS[by]);
   if (light === null && heavy === null) return "taking all kinds of jobs again";
   if (light !== null && heavy !== null && light === heavy) return `holding back all new jobs: ${words(light)}`;
   if (light !== null && heavy !== null) return `holding back all new jobs: ${words(light)} (heavy jobs: ${words(heavy)})`;
@@ -236,7 +238,7 @@ export function describeHeld(light: LimitedBy | null, heavy: LimitedBy | null, n
 }
 
 function describePoll(event: PollEvent): string | undefined {
-  if (event.event === "held") return describeHeld(event.light, event.heavy, event.near === true);
+  if (event.event === "held") return describeHeld(event.light, event.heavy, event.near === true, event.cpu);
   if (event.event === "idle" || event.event === "rate_limited") return undefined;
   if (event.event === "sandbox_unavailable") return undefined;
   if (event.event === "error") return `cloud error ${event.status}${event.code === undefined ? "" : ` ${event.code}`}`;
