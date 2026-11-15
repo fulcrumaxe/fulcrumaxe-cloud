@@ -28,10 +28,11 @@
  *    name is kept exactly as printed. A second line, `changed files (N): ...`, names the paths the branch changed against the
  *    default branch's merge-base (read with the same guarded git as the version-control digest, after the check), in the same closed shape: sorted, at most 40, 1000 bytes,
  *    N counting every path so a reader can tell a cut list from a whole one. The cloud compares the two lines: a check that failed only in files the change did not touch
- *    needs a person, not a fix round. Left out when the check passed or was stopped, or when git could not say.
+ *    needs a person, not a fix round. A third line, `failed test files that import changed code (K): ...`, names the failed files that depend on a
+ *    changed file through imports (`importScope.ts`), so a test in an untouched package that depends on changed code still gets a fix round; `import graph not read` says the imports could not be followed. Left out when the check passed or was stopped, or when git could not say.
  */
 import { createHash } from "node:crypto";
-import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import path from "node:path";
 import { CHECK_FAILED_FILE_CHARS, CHECK_FAILED_FILES_MAX, CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReason, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 import type { InstallCapture } from "./engineKit.js";
@@ -39,6 +40,7 @@ import { GitPathError, guardConfigEnv, type GitCapture } from "./git.js";
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
 import { HostReadSession, hostGit, readWorkspaceGit } from "./hostRead.js";
 import { LISTING_CAP } from "./repoMap.js";
+import { dependentFailedFiles, IMPORT_SCOPE_FILE_BYTES, importScopeLine } from "./importScope.js";
 import { protectedRootNames, VCS_DIR } from "../sandbox/checkProtected.js";
 
 /** How much raw output is kept before redaction; the summary is cut to `CHECK_SUMMARY_MAX_BYTES` afterwards. */
@@ -91,6 +93,11 @@ export interface CheckStepDeps {
    * `changedFiles`: a daemon without it sends every name exactly as printed, as before.
    */
   trackedFiles?: (workspace: string) => Promise<string[] | null>;
+  /**
+   * CHECK-SCOPE-BY-IMPORTS: the failed test files (of those named) that import, directly or through other files, one of the changed files; null when the import graph could not be
+   * read. Read only after a failed check, with the complete changed list. Optional: a daemon without it sends no line and the cloud keeps its package rule.
+   */
+  importScope?: (workspace: string, failed: readonly string[], changed: readonly string[]) => Promise<string[] | null>;
 }
 
 export type CheckOutcome = { passed: boolean; body: DoneCheck; /** Set when the check was not run because the dev shell is missing. */ noDevShell?: true };
@@ -295,6 +302,56 @@ export function createTrackedFiles(capture: GitCapture, envOptions: CleanEnvOpti
     const listing = await readWorkspaceGit(capture, envOptions, workspace, hostGit("ls-files", "-z"), 30_000);
     if (listing.code !== 0 || listing.timedOut || listing.stdout.length >= LISTING_CAP_GUARD) return null;
     return listing.stdout.split("\0").filter((name) => name !== "");
+  };
+}
+
+/**
+ * CHECK-SCOPE-BY-IMPORTS: reads a tracked file of the workspace for the import graph: a plain name, a regular file (never a link: the agent made this tree) whose real path lies
+ * inside the real workspace, at most `IMPORT_SCOPE_FILE_BYTES`. Null when the file is gone (a deleted file); a throw for anything else that cannot be read exactly. The text is only
+ * searched for import specifiers, never copied into the summary.
+ */
+export function readWorkspaceSource(workspace: string, relative: string): string | null {
+  if (!NAMED_FILE.test(relative) || relative.split("/").includes("..")) throw new Error("not a plain name");
+  const full = path.join(workspace, relative);
+  // The folders on the path are checked first (a link out of the workspace is refused); the file itself is opened without following a link and without blocking on a pipe, and
+  // everything after that goes through the open handle (type and size by asking the handle, bytes read off the handle), never through the path again, so a swap in between changes nothing.
+  let fd: number;
+  try {
+    const root = realpathSync(workspace);
+    const folder = realpathSync(path.dirname(full));
+    if (folder !== root && !folder.startsWith(`${root}${path.sep}`)) throw new Error("outside the workspace");
+    fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    // fx-swallow-ok: a file that is not there is the answer wanted (a deleted file); every other failure, a link included (ELOOP), is rethrown
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > IMPORT_SCOPE_FILE_BYTES) throw new Error("not a readable regular file");
+    const bytes = Buffer.alloc(stat.size);
+    let got = 0;
+    while (got < bytes.length) {
+      const n = readSync(fd, bytes, got, bytes.length - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return bytes.toString("utf8", 0, got);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * CHECK-SCOPE-BY-IMPORTS: the `importScope` dependency: follows the imports of the failed test files through the workspace's tracked source (listed with the same guarded git as
+ * `createTrackedFiles`, read as plain regular files inside the workspace) and names those that reach a changed file. Null when the tracked list is missing or the graph could not be read.
+ */
+export function createImportScope(trackedFiles: NonNullable<CheckStepDeps["trackedFiles"]>): NonNullable<CheckStepDeps["importScope"]> {
+  return async (workspace, failed, changed) => {
+    const tracked = await trackedFiles(workspace);
+    if (tracked === null) return null;
+    return dependentFailedFiles({ failed, changed, tracked, read: (relative) => readWorkspaceSource(workspace, relative) });
   };
 }
 
@@ -658,12 +715,15 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     // The files the branch changed, for a failed check only (the cloud compares them with the failed test files). After the files are given back, so the workspace is the
     // agent's own state; a read that fails or is not offered leaves the line out, and the cloud then keeps its fix round.
     let changedLine = "";
+    let changedAll: string[] | null = null;
     if (out.code !== 0 && !out.timedOut && !out.aborted && deps.changedFiles !== undefined) {
       try {
-        changedLine = changedFilesLine(await deps.changedFiles(input.workspace, input.base));
+        changedAll = await deps.changedFiles(input.workspace, input.base);
+        changedLine = changedFilesLine(changedAll);
       } catch {
         // fx-swallow-ok: a changed-files read that failed leaves the header line out; the check's result does not depend on it
         changedLine = "";
+        changedAll = null;
       }
     }
     // Widens a package-relative failed-file name to its repo-root-relative path before the summary header and `done.failed_files` are built from it (resolve() is a
@@ -678,10 +738,22 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     // A failed check names its failing test files on `done` (protocol 13); a pass, a timeout or an abort names none, and nothing is sent when none were seen.
     const named = out.code !== 0 && !out.timedOut && !out.aborted ? failedFiles.list() : { files: [], more: 0 };
     const failedList = named.files.length === 0 ? {} : { failed_files: named.files, ...(named.more === 0 ? {} : { failed_files_more: named.more }) };
+    // CHECK-SCOPE-BY-IMPORTS: which failed test files depend, through their imports, on a file the change touched. Only when both lists exist; a graph that cannot be read
+    // is said so on a line of its own, and the cloud then runs a fix round. A daemon without the dependency, or a change list git could not give, sends no line (as before).
+    let scopeLine = "";
+    if (changedAll !== null && changedAll.length > 0 && named.files.length > 0 && deps.importScope !== undefined) {
+      try {
+        scopeLine = importScopeLine(await deps.importScope(input.workspace, named.files, changedAll));
+      } catch {
+        // fx-swallow-ok: a graph read that threw is "not read"; the check's result does not depend on it
+        scopeLine = importScopeLine(null);
+      }
+    }
     const header = [
       out.code !== 0 ? failedFiles.summary() : "",
       out.code !== 0 ? failedFiles.hints() : "",
       changedLine,
+      scopeLine,
       needsNetwork ? "the check needed the network, which it does not have: a package it asked for is not in this repository's package store on the runner (the runner installs dependencies before the check)\n" : "",
       changed.length === 0 ? "" : `check files changed by this branch: ${changed.join(", ")}\n`,
       lost.length === 0 ? "" : `check files not given back to the branch: ${lost.join(", ")}\n`,
