@@ -19,6 +19,8 @@ export interface ExtractInput {
   /** The customer's cap for this pass; absent takes `DEFAULT_PASS_CAP_USD[mode]`. */
   capUsd?: number;
   seed?: readonly SeedFile[];
+  /** A shallow pass reads the README and the top-level documentation only (the preview). */
+  shallow?: boolean;
 }
 
 export interface ExtractResult {
@@ -48,7 +50,7 @@ export function checkPassInput(i: { accountId: string; runId: string; owner: str
 export async function runExtract(deps: ExtractDeps, input: ExtractInput): Promise<ExtractResult> {
   const capUsd = checkPassInput(input);
   if (!ProductKind.safeParse(input.productKind).success) throw new ExtractError("input_invalid");
-  const prompt = buildExtractPrompt({ owner: input.owner, name: input.name, sha: input.sha, productKind: input.productKind, seed: input.seed ?? [] });
+  const prompt = buildExtractPrompt({ owner: input.owner, name: input.name, sha: input.sha, productKind: input.productKind, seed: input.seed ?? [], shallow: input.shallow === true });
   const pass = await runSandboxedPass(deps, {
     role: "site-extractor",
     accountId: input.accountId,
