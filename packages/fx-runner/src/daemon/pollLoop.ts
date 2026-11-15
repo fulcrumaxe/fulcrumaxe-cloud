@@ -38,7 +38,7 @@ export type PollEvent =
   /** D#6 RUNNER-WAKE: the wake route failed 3 times in a row; plain 60-second claims until a claim brings a grant again. */
   | { event: "wake_fallback" }
   /** The classes this machine is holding back, and why; said once per change (both null: nothing is held back any more). */
-  | { event: "held"; light: LimitedBy | null; heavy: LimitedBy | null; near?: true };
+  | { event: "held"; light: LimitedBy | null; heavy: LimitedBy | null; near?: true; cpu?: { low: boolean; ioHigh: boolean } };
 
 /** `protected`: Vercel's Deployment Protection answered 401 before the cloud saw the request, so the key was not judged. */
 export type PollEnd = "stopped" | "unauthorized" | "protected" | "restart" | "drained";
@@ -181,10 +181,12 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
   /** One `held` event per change of what is held back. */
   function noteHeld(snapshot: Snapshot): void {
     const near = snapshot.usageNear && (snapshot.limits.light === "usage_limit" || snapshot.limits.heavy === "usage_limit");
-    const key = `${snapshot.limits.light ?? "none"}|${snapshot.limits.heavy ?? "none"}${near ? "|near" : ""}`;
+    // The CPU context is said only beside a CPU hold, and a change in it is a change worth a line.
+    const cpu = snapshot.cpu !== undefined && (snapshot.limits.light === "cpu" || snapshot.limits.heavy === "cpu") ? snapshot.cpu : undefined;
+    const key = `${snapshot.limits.light ?? "none"}|${snapshot.limits.heavy ?? "none"}${near ? "|near" : ""}${cpu === undefined ? "" : `|cpu${cpu.low ? "-low" : ""}${cpu.ioHigh ? "-io" : ""}`}`;
     if (key === heldKey) return;
     heldKey = key;
-    log({ event: "held", light: snapshot.limits.light, heavy: snapshot.limits.heavy, ...(near ? { near: true as const } : {}) });
+    log({ event: "held", light: snapshot.limits.light, heavy: snapshot.limits.heavy, ...(near ? { near: true as const } : {}), ...(cpu === undefined ? {} : { cpu }) });
   }
   /** Waits `seconds`, or less when a job ends meanwhile and the loop could claim again. */
   async function waitForWork(seconds: number): Promise<void> {

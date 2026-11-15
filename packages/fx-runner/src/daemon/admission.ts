@@ -2,7 +2,7 @@
  * Resource-aware admission (D#6 C43-4): before each claim the runner works out, from what the machine has free right now, how many more jobs of
  * each class it could take, and says so on the claim as `capacity`. A claim is offered a slot only when the class's footprint fits the headroom:
  *  - memory: MemAvailable minus a reserve for the person's own work (25% of RAM, at least 2 GB, or the person's setting);
- *  - CPU: the sustained load (the smaller of the 1-minute and 5-minute averages, so a brief spike does not zero the heavy class) against the cores
+ *  - CPU: the cores actually busy (Linux: the kernel's CPU time counters, so disk wait does not count), else the sustained load (the smaller of the 1-minute and 5-minute averages, so a brief spike does not zero the heavy class) against the cores
  *    minus a reserve for the person (20% of the cores, or the person's `cpu-reserve`), plus the cores of jobs still starting up;
  *  - disk: the workspace and store volumes keep a minimum free;
  *  - safety ceilings (total 8, heavy 4 by default, lowered by the person) and the person's pause.
@@ -34,6 +34,14 @@ export interface AdmissionConfig {
 
 export const DEFAULT_ADMISSION: AdmissionConfig = { reserveFraction: 0.25, minReserveBytes: 2 * GIB, loadPerCore: 0.8, minFreeDiskBytes: 5 * GIB, rampMs: 90_000, sampleMs: 5_000 };
 
+/** What the CPU hold looks like beside the disk: for the journal only, never a reason to hold (the claim's protocol fields carry no IO). */
+export interface CpuContext {
+  /** Cores are measured busy (not the load-average fallback) and fewer than half are in use: a CPU hold then comes from the reserve or from jobs still starting, not from load. */
+  low: boolean;
+  /** Tasks waiting beyond the busy cores (the load average less the busy cores, which is mostly disk wait when the cores are idle) are at least a quarter of the cores. */
+  ioHigh: boolean;
+}
+
 export interface Snapshot {
   capacity: ClaimCapacity;
   /** What stops the next job of each class (null: one fits). Both classes, where `limitedBy` names the machine-wide one only. */
@@ -43,6 +51,8 @@ export interface Snapshot {
   limitedBy: LimitedBy | null;
   /** The usage hold is the one-job-at-a-time warning (the plan's limit is near), not a block (the limit is reached). */
   usageNear: boolean;
+  /** Information about the CPU reading, said beside a CPU hold. */
+  cpu?: CpuContext;
 }
 
 export interface Admission {
@@ -108,6 +118,17 @@ export function cpuReserveOf(reading: ResourceReading, config: AdmissionConfig, 
 /** The load that counts (note: min(load1, load5) can admit for about a minute at the start of an outside CPU burst, until the 1-minute figure catches up): the smaller of the 1-minute and 5-minute averages, so a spike that just began (5 minutes still low) or one that just ended (1 minute already low) does not block. */
 export const sustainedLoad = (reading: ResourceReading): number => Math.min(reading.load1, reading.load5 ?? reading.load1);
 
+/** The CPU in use, in cores: the measured busy cores where the probe has them (disk wait is not CPU), else the sustained load average. */
+export const cpuInUse = (reading: ResourceReading): number => reading.cpuBusyCores ?? sustainedLoad(reading);
+
+/** Tasks waiting beyond the busy cores: the sustained load less the cores measured busy (on Linux the load counts disk wait). Undefined without a busy-time reading. */
+export const waitingLoadOf = (reading: ResourceReading): number | undefined => (reading.cpuBusyCores === undefined ? undefined : Math.max(0, sustainedLoad(reading) - reading.cpuBusyCores));
+
+export function cpuContextOf(reading: ResourceReading): CpuContext {
+  const waiting = waitingLoadOf(reading);
+  return { low: reading.cpuBusyCores !== undefined && reading.cpuBusyCores < reading.cores * 0.5, ioHigh: waiting !== undefined && waiting >= reading.cores * 0.25 };
+}
+
 export function createAdmission(deps: AdmissionDeps): Admission {
   const config: AdmissionConfig = { ...DEFAULT_ADMISSION, ...deps.config };
   const inHand = new Set<InHand>();
@@ -141,7 +162,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
       }
     }
     const headMem = reading.availMemBytes - reserveBytesOf(reading, config, settings) - heldMem;
-    const headCores = reading.cores - cpuReserveOf(reading, config, settings) - sustainedLoad(reading) - heldCores;
+    const headCores = reading.cores - cpuReserveOf(reading, config, settings) - cpuInUse(reading) - heldCores;
     const diskOk = reading.freeDiskBytes === undefined || reading.freeDiskBytes >= config.minFreeDiskBytes;
     const paused = deps.paused();
     const usage = deps.usage?.() ?? { blocked: false, single: false };
@@ -187,6 +208,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
       free: { light: light.count, heavy: heavy.count },
       limitedBy,
       usageNear: usageHeld && !usage.blocked,
+      cpu: cpuContextOf(reading),
     };
   }
 
