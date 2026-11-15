@@ -34,6 +34,17 @@ describe("recordFromOutput", () => {
     expect(none).toEqual({ verification: "not_checked", verified_sha: null, claims: [], evidence: [], category: "feature" });
   });
 
+  it("a claim whose cite was over the line cap is recorded unverifiable with no evidence; the others keep their verdicts", async () => {
+    const oversized = { text: "too wide", verdict: "supported", cites: [{ path: "a.ts", start_line: 1, end_line: 60 }] };
+    const run = (claims: unknown[]) => recordFromOutput({ envelope: { category: "bug", claims }, sha: SHA, reader: reader() });
+    const mixed = await run([claim("supported", 1), oversized, claim("supported", 2)]);
+    expect(mixed.verification).toBe("partly_verified");
+    expect(mixed.claims.map((c) => c.verdict)).toEqual(["supported", "unverifiable", "supported"]);
+    expect(mixed.evidence).toHaveLength(2);
+    expect((await run([oversized])).verification).toBe("refuted");
+    expect((await run([oversized, claim("supported", 1)])).verification).toBe("partly_verified");
+  });
+
   it("an output refused whole is check_failed and writes nothing else, with a fixed reason", async () => {
     const r = await recordFromOutput({ envelope: { category: "bug", claims: [], class: "internal" }, sha: SHA, reader: reader() });
     expect(r).toEqual({ verification: "check_failed", verified_sha: null, claims: [], evidence: [], category: null, failure: "unknown_field" });
