@@ -20,9 +20,18 @@ describe("the site-kit role manifest (D#3 K05, D#2 C12)", () => {
     }
   });
 
-  it("the extractor's card is a platform card, and no dev-team or product-run card is handed out for it", () => {
-    expect(loadPlatformCard("site-extractor")).toMatch(/^---\nname: site-extractor\nproduct: true\n---\n/);
-    expect(loadRoleCard("site-extractor")).toBeUndefined();
-    expect(loadProductCard("site-extractor")).toBeUndefined();
+  it("each site role's card is a platform card, and no dev-team or product-run card is handed out for it", () => {
+    for (const role of SITEKIT_ROLE_NAMES) {
+      expect(loadPlatformCard(role), role).toMatch(new RegExp(`^---\\nname: ${role}\\nproduct: true\\n---\\n`));
+      expect(loadRoleCard(role), role).toBeUndefined();
+      expect(loadProductCard(role), role).toBeUndefined();
+    }
+  });
+
+  it("the verifier's card says it finds its own evidence and can give only three verdicts", () => {
+    const card = loadPlatformCard("site-verifier") ?? "";
+    expect(card).toMatch(/Find the evidence yourself/);
+    expect(card).toMatch(/VERIFIED[\s\S]*FALSE[\s\S]*UNVERIFIABLE/);
+    expect(card).toMatch(/those three verdicts are the only ones/i);
   });
 });
