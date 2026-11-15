@@ -908,6 +908,22 @@ describe("checks.mjs WS-C3: Trusted Types sink guard widened to computed-member 
     expect(checkTrustedTypesSink(Buffer.from("frame.srcdoc = x;"), "core/modals.js")).toBe("trusted-types-sink");
   });
 
+  // D#3 K10 review: an `srcdoc` handed to h() as a prop is assigned as el.srcdoc = html by the helper, the same TrustedHTML sink,
+  // and used to pass this check. The exact line the preview panel shipped with must now be flagged.
+  it("checkTrustedTypesSink: flags srcdoc as an h() prop (the preview panel's old frame), quoted or not", () => {
+    const old = 'kids.push(h("iframe", { class: "sr-frame", title: "Homepage preview", sandbox: "", srcdoc: data.preview.homepage_html }));';
+    expect(checkTrustedTypesSink(Buffer.from(old), "core/modals.js")).toBe("trusted-types-sink");
+    expect(checkTrustedTypesSink(Buffer.from('h("iframe", { "srcdoc": html });'), "core/modals.js")).toBe("trusted-types-sink");
+    expect(checkTrustedTypesSink(Buffer.from("h('iframe', { 'srcdoc': html });"), "core/modals.js")).toBe("trusted-types-sink");
+  });
+
+  it("checkTrustedTypesSink: flags setAttribute('srcdoc', x) and frame['srcdoc'] = x, and passes a frame with only a src", () => {
+    expect(checkTrustedTypesSink(Buffer.from("frame.setAttribute('srcdoc', x);"), "core/modals.js")).toBe("trusted-types-sink");
+    expect(checkTrustedTypesSink(Buffer.from('frame.setAttribute("srcdoc", x);'), "core/modals.js")).toBe("trusted-types-sink");
+    expect(checkTrustedTypesSink(Buffer.from('frame["srcdoc"] = x;'), "core/modals.js")).toBe("trusted-types-sink");
+    expect(checkTrustedTypesSink(Buffer.from('h("iframe", { sandbox: "", src: url });'), "core/modals.js")).toBeNull();
+  });
+
   it("checkTrustedTypesSink: flags script.src assignment (receiver literally named script)", () => {
     expect(checkTrustedTypesSink(Buffer.from("script.src = x;"), "core/modals.js")).toBe("trusted-types-sink");
   });

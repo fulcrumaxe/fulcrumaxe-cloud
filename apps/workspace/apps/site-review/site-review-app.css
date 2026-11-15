@@ -25,3 +25,5 @@
 .sr-byid summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
 .sr-byid summary:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .sr-byid .sr-open { margin-bottom: 0; }
+/* D#3 K10: the preview's homepage render, always in a sandboxed frame */
+.sr-frame { display: block; width: 100%; height: 320px; margin: 6px 0 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: #fff; }

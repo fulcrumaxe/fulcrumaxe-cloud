@@ -625,7 +625,7 @@ export const TRUSTED_TYPES_SINK_GUARDED_FILES = new Set([
 // shipped file, not only the guarded set -- the sweep test must never carry
 // a copied literal of this pattern, or the two could drift apart silently.
 export const TRUSTED_TYPES_SINK_RE =
-  /\.(?:innerHTML|outerHTML)\s*=(?!=)|\[\s*(['"`])(?:innerHTML|outerHTML)\1\s*\]\s*=(?!=)|\.insertAdjacentHTML\s*\(|\[\s*(['"`])insertAdjacentHTML\2\s*\]\s*\(|\.parseFromString\s*\(|\.createContextualFragment\s*\(|document\.write\s*\(|\bwriteln\s*\(|\.setHTMLUnsafe\s*\(|\.parseHTMLUnsafe\s*\(|\beval\s*\(|\bFunction\s*\(|\b(?:setTimeout|setInterval)\s*\(\s*['"`]|\.srcdoc\s*=(?!=)|\bscript\.src\s*=(?!=)|\bscript\.setAttribute\s*\(\s*(['"])src\3\s*,/;
+  /\.(?:innerHTML|outerHTML)\s*=(?!=)|\[\s*(['"`])(?:innerHTML|outerHTML)\1\s*\]\s*=(?!=)|\.insertAdjacentHTML\s*\(|\[\s*(['"`])insertAdjacentHTML\2\s*\]\s*\(|\.parseFromString\s*\(|\.createContextualFragment\s*\(|document\.write\s*\(|\bwriteln\s*\(|\.setHTMLUnsafe\s*\(|\.parseHTMLUnsafe\s*\(|\beval\s*\(|\bFunction\s*\(|\b(?:setTimeout|setInterval)\s*\(\s*['"`]|\.srcdoc\s*=(?!=)|\[\s*(['"`])srcdoc\3\s*\]\s*=(?!=)|(?<![\w$.])(['"]?)srcdoc\4\s*:(?!:)|\.setAttribute\s*\(\s*(['"`])srcdoc\5\s*,|\bscript\.src\s*=(?!=)|\bscript\.setAttribute\s*\(\s*(['"])src\6\s*,/;
 
 // Best-effort JS comment stripper, not a full parser: removes /* */ block
 // comments and // line comments before the sink regex runs, so a comment

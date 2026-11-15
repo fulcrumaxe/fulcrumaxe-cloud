@@ -27,7 +27,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // allowed to be created). See lib/shell/headers.ts's own copy for the
 // full reasoning.
 const WORKSPACE_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'; form-action 'self' https://github.com; upgrade-insecure-requests; report-to csp";
+  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'; form-action 'self' https://github.com; upgrade-insecure-requests; report-to csp";
 
 const SHELL_SECURITY_HEADERS = [
   { key: "Content-Security-Policy", value: WORKSPACE_CSP },
@@ -48,6 +48,15 @@ const SHELL_STATIC_ASSET_HEADERS = [
   ...SHELL_SECURITY_HEADERS,
   { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
 ];
+
+// D#3 K10: the one same-origin page the shell may frame is a site's preview render. It is served with a response policy of its own
+// (sandbox, default-src 'none', no scripts), so the shell's own policy is not added on top of it: its frame-ancestors 'none' would
+// refuse the frame. A CSP source cannot carry a path under 'self', so frame-src above is 'self', and this path rule is what keeps
+// every other /api/* answer on the shell policy. Every non-CSP header stays on the render.
+// Next matches header sources case-insensitively and a source cannot opt out, so this exemption also covers case variants of the
+// render path; middleware.ts (renderPathCaseStep) answers those with a 404 that carries the shell policy.
+const RENDER_PATH = "v1/sites/[^/]+/preview/render";
+const RENDER_FRAME_HEADERS = SHELL_SECURITY_HEADERS.filter((entry) => entry.key !== "Content-Security-Policy");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -74,7 +83,9 @@ const nextConfig = {
     return [
       { source: "/", headers: SHELL_SECURITY_HEADERS },
       { source: "/s/:path*", headers: SHELL_STATIC_ASSET_HEADERS },
-      { source: "/api/:path*", headers: SHELL_SECURITY_HEADERS },
+      { source: "/api", headers: SHELL_SECURITY_HEADERS },
+      { source: `/api/:path((?!${RENDER_PATH}$).*)`, headers: SHELL_SECURITY_HEADERS },
+      { source: "/api/v1/sites/:id/preview/render", headers: RENDER_FRAME_HEADERS },
     ];
   },
   // D#37 WS-C criterion 5's "reached through rewrites" is implemented in

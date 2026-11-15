@@ -25,6 +25,7 @@
     "@fx/plan-data": "workspace:*",
     "@fx/receipts": "workspace:*",
     "@fx/runner-cloud": "workspace:*",
+    "@fx/sitekit-pipeline": "workspace:*",
     "@fx/sitekit-publish-gates": "workspace:*",
     "@fx/spend": "workspace:*",
     "@fx/telemetry": "workspace:*",

@@ -3905,6 +3905,66 @@ export interface Operations {
       cancel_at_period_end: true;
     };
   };
+  getSitePreview: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      preview: ({
+        preview_id: string;
+        state: "requested" | "running" | "finished" | "failed" | "void";
+        reason: string | null;
+        created_at: string;
+        finished_at: string | null;
+        summary: ({
+          claims: number;
+          unverifiable: number;
+          blockers: number;
+          line: string;
+        }) | (null);
+        homepage_url: string | null;
+      }) | (null);
+      model_cap_usd: number;
+      compute_cap_usd: number;
+      locks: {
+        full_site: {
+          locked: boolean;
+          label: string | null;
+        };
+        downloads: {
+          locked: boolean;
+          label: string | null;
+        };
+        publish: {
+          locked: boolean;
+          label: string | null;
+        };
+      };
+    };
+  };
+  requestSitePreview: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      confirm_model_cap_usd: number;
+    };
+    response: {
+      preview_id: string;
+      state: string;
+    };
+  };
+  getSitePreviewRender: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: unknown;
+  };
   startPlanImport: {
     path: {
       id: string;
@@ -6936,6 +6996,39 @@ export const operations = {
   cancelSiteSync: {
     method: "POST",
     path: "/api/v1/sites/{id}/billing/sync-cancel",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  getSitePreview: {
+    method: "GET",
+    path: "/api/v1/sites/{id}/preview",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  requestSitePreview: {
+    method: "POST",
+    path: "/api/v1/sites/{id}/preview",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getSitePreviewRender: {
+    method: "GET",
+    path: "/api/v1/sites/{id}/preview/render",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
