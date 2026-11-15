@@ -176,6 +176,6 @@ export async function mergeCandidates(pool: Pool, accountId: string, input: Merg
     return { state: 'merged', counts: done.counts, touched: done.touched };
   });
   // The transaction has committed: new and changed proposals start `pending` for the claim verifier. Void and best-effort (a hint).
-  if (result.state === 'merged' && (result.touched ?? 0) + result.counts.created > 0) void markWorkPending('proposal-verify-sweep');
+  if (result.state === 'merged' && (result.touched ?? 0) + result.counts.created > 0) void markWorkPending('proposal-verify-sweep', { kick: true });
   return result.state === 'merged' ? { state: 'merged', counts: result.counts } : result;
 }

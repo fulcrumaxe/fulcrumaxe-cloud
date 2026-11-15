@@ -18,6 +18,7 @@ describe('recordStage wakes the verify stage on a merge [pg]', () => {
   let a: SeedRefs;
   let b: SeedRefs;
   let markers: Map<string, number>;
+  let kicked: string[];
   beforeAll(async () => {
     adminPool = createPool(process.env.DATABASE_URL!);
     admin = await adminPool.connect();
@@ -32,7 +33,8 @@ describe('recordStage wakes the verify stage on a merge [pg]', () => {
   });
   beforeEach(() => {
     markers = new Map();
-    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    kicked = [];
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) }, kick: (name) => void (name === 'proposal-verify-sweep' && kicked.push(name)) });
   });
   afterEach(() => setPendingHooks(null));
 
@@ -57,12 +59,23 @@ describe('recordStage wakes the verify stage on a merge [pg]', () => {
   it('a merge in a repository with verification on marks the verifier tick pending', async () => {
     await move(a, await item(a, await repo(a, true), 'pr_opened'), 'merged');
     expect(woken()).toBe(true);
+    // ... and the sweep is kicked, so the verify stage opens within seconds and not at the next tick.
+    expect(kicked).toEqual(['proposal-verify-sweep']);
+  });
+
+  it('a replayed merge delivery marks and kicks nothing more and does not fail', async () => {
+    const id = await item(a, await repo(a, true), 'pr_opened');
+    await move(a, id, 'merged', 't:replay');
+    expect(kicked.length).toBe(1);
+    await expect(move(a, id, 'merged', 't:replay')).resolves.toBeUndefined();
+    expect(woken()).toBe(true);
   });
 
   it('a merge where verification is off (switched off, or never configured) marks nothing for it; neither does a move that is not a merge', async () => {
     await move(a, await item(a, await repo(a, false), 'pr_opened'), 'merged');
     await move(a, await item(a, await repo(a, null), 'pr_opened'), 'merged');
     expect(woken()).toBe(false);
+    expect(kicked).toEqual([]);
     await move(a, await item(a, await repo(a, true), 'in_progress'), 'pr_opened');
     expect(woken()).toBe(false);
   });

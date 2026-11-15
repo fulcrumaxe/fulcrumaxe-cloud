@@ -1368,7 +1368,8 @@ export async function handleGithubWebhookEvent(
     (result.applied === 'proposal_owner_changed' && result.count > 0 && result.to === 'product') ||
     (result.applied === 'proposal_changed' && result.count > 0 && mapped.kind === 'issue_proposal_change' && mapped.change.change === 'edited')
   ) {
-    void markWorkPending('proposal-verify-sweep');
+    // The same marker plus the signed kick (as discovery's does): the proposal is checked within seconds, not at the next 15-minute tick. Both are fire and forget and never fail the delivery.
+    void markWorkPending('proposal-verify-sweep', { kick: true });
   }
 
   // H17b-2: the transaction has committed. A sync failure never fails the delivery.

@@ -172,7 +172,7 @@ export async function recordStage(
     if (child.rows.length > 0) void markWorkPending('proposal-verify-sweep');
     // D#749 V3a: a merge in a repository whose post-merge verification is on wakes the same tick: its verify pass opens the row. Only a hint (off by default; the pass reads the rows).
     const verifies = await client.query('SELECT 1 FROM verify_settings s JOIN work_items w ON w.account_id = s.account_id AND w.repo_id = s.repo_id WHERE w.id = $1 AND s.enabled', [workItemId]);
-    if (verifies.rows.length > 0) void markWorkPending('proposal-verify-sweep');
+    if (verifies.rows.length > 0) void markWorkPending('proposal-verify-sweep', { kick: true });
   }
 
   // A move out of a stage that holds a build slot frees it. An item waiting for that slot whose workflow is gone has nothing left that asks again, so this wakes
