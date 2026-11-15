@@ -2,7 +2,7 @@ import type { CleanEnvOptions, CredentialMode } from "./cleanEnv.js";
 import { cleanEnv } from "./cleanEnv.js";
 import { buildPrompt } from "./prompt.js";
 import { jobHashRefusals, type HashCheckedJob, type HashRefusal } from "./verifyHashes.js";
-import { cliModelNameFor, type ContextLedgerMeasure, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { cliModelNameFor, repairPromptFor, structuredFailures, type ContextLedgerMeasure, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
@@ -160,8 +160,25 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     if (ended === "wall_clock") return { status: "failed", reason: "wall_clock", workspace };
     if (ended === undefined) return { status: "failed", reason: "no_result", workspace };
     if (ended.type !== "result") return { status: "failed", reason: "agent_error", workspace };
+    let final: NormalizedEvent = ended;
+    // D#6 RUNNER-STRUCTURED-OUTPUT: a role with one fixed answer shape whose answer would be refused gets ONE repair turn (no loop: this is a single `if`). The turn
+    // resumes the same session with a message that names the failing parts by code only, shares the run's wall clock, and its events go through the same `onEvent`,
+    // so its tokens and cost are counted in this run's own spend. A repair that does not finish as a result leaves the first answer in place.
+    const codes = structuredFailures(job.role, ended.agentOutput);
+    if (codes.length > 0 && ended.sessionId !== undefined) {
+      const prompt = repairPromptFor(codes);
+      let pending: Promise<NormalizedEvent | undefined> | undefined;
+      try {
+        pending = deps.sandbox.resume(handle, ended.sessionId, prompt, { ...start, prompt }).hookFired.catch(() => undefined);
+      } catch {
+        // fx-swallow-ok: a repair that cannot start leaves the first answer in place; the error text could hold job content
+      }
+      const repaired = pending === undefined ? undefined : await Promise.race([pending, clock]);
+      if (repaired === "wall_clock") return { status: "failed", reason: "wall_clock", workspace };
+      if (repaired?.type === "result") final = repaired;
+    }
     await deps.afterAgent?.(handle, workspace);
-    return { status: "done", workspace, ...(ended.sessionId === undefined ? {} : { sessionId: ended.sessionId }), ...(ended.agentOutput === undefined ? {} : { agentOutput: ended.agentOutput }), ...(ended.contextLedger === undefined ? {} : { contextLedger: ended.contextLedger }) };
+    return { status: "done", workspace, ...(final.sessionId === undefined ? {} : { sessionId: final.sessionId }), ...(final.agentOutput === undefined ? {} : { agentOutput: final.agentOutput }), ...(final.contextLedger === undefined ? {} : { contextLedger: final.contextLedger }) };
   } catch (error) {
     // fx-swallow-ok: the failure is returned as a closed reason code; the error text could hold job content
     return { status: "failed", reason: reasonOf(error), workspace };

@@ -17,12 +17,14 @@ export interface ArgvInput {
   chrome?: boolean;
   /** Present on a resume. */
   resumeSessionId?: string;
+  /** D#6 RUNNER-STRUCTURED-OUTPUT: the JSON Schema of a role with one fixed answer shape. The CLI then returns its answer as `structured_output` on the result line. Absent: no flag. */
+  jsonSchema?: Record<string, unknown>;
 }
 
 /** Every flag `claudeArgv` uses. The binary's `--help` must list each one; a test keeps this and the argument list in step. */
 export const REQUIRED_FLAGS: readonly string[] = Object.freeze([
   "-p", "--output-format", "--verbose", "--setting-sources", "--settings", "--strict-mcp-config", "--mcp-config", "--tools",
-  "--allowedTools", "--disallowedTools", "--permission-prompts", "--disable-slash-commands", "--model", "--resume", "--chrome", "--no-chrome",
+  "--allowedTools", "--disallowedTools", "--permission-prompts", "--disable-slash-commands", "--model", "--resume", "--chrome", "--no-chrome", "--json-schema",
 ]);
 
 /**
@@ -67,6 +69,7 @@ export function claudeArgv(input: ArgvInput): string[] {
     "--permission-prompts", "none",
     "--disable-slash-commands",
     "--model", input.cliModel,
+    ...(input.jsonSchema === undefined ? [] : ["--json-schema", JSON.stringify(input.jsonSchema)]),
     ...(input.resumeSessionId === undefined ? [] : ["--resume", input.resumeSessionId]),
   ];
 }

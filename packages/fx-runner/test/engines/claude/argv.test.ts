@@ -57,13 +57,24 @@ describe("argv", () => {
     for (const argv of [claudeArgv(input), claudeArgv({ ...input, resumeSessionId: "s-1" })]) for (const flag of banned) expect(argv).not.toContain(flag);
   });
 
+  // D#6 RUNNER-STRUCTURED-OUTPUT: the schema is one JSON argument after `--json-schema`; a role with no schema carries neither the flag nor a value.
+  it("--json-schema carries the schema as one JSON argument, on a start and a resume, and only when a schema is given", () => {
+    const schema = { type: "object", properties: { a: { type: "string" } } };
+    for (const argv of [claudeArgv({ ...input, jsonSchema: schema }), claudeArgv({ ...input, jsonSchema: schema, resumeSessionId: "s-1" })]) {
+      const at = argv.indexOf("--json-schema");
+      expect(at).toBeGreaterThan(-1);
+      expect(JSON.parse(argv[at + 1]!)).toEqual(schema);
+    }
+    expect(claudeArgv(input)).not.toContain("--json-schema");
+  });
+
   it("--tools is the distinct base names of the role entry", () => {
     expect(baseToolNames(["Read", "Bash(git:*)", "Bash(ls:*)", "Edit", "Bash(pwd)"])).toEqual(["Read", "Bash", "Edit"]);
   });
 
   it("REQUIRED_FLAGS is exactly the set of flags the argument list uses (with and without the browser), so the --help check cannot drift from it", () => {
     const flags = (argv: string[]): string[] => argv.filter((part) => /^-/.test(part) && part !== "");
-    const used = [...flags(claudeArgv({ ...input, resumeSessionId: "s-1" })), ...flags(claudeArgv({ ...input, chrome: true }))];
+    const used = [...flags(claudeArgv({ ...input, resumeSessionId: "s-1" })), ...flags(claudeArgv({ ...input, chrome: true })), ...flags(claudeArgv({ ...input, jsonSchema: { type: "object" } }))];
     expect([...new Set(used)].sort()).toEqual([...REQUIRED_FLAGS].sort());
   });
 

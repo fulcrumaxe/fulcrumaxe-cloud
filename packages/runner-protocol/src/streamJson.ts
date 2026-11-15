@@ -1,4 +1,4 @@
-import { extractAgentOutputEnvelope } from "./envelope.js";
+import { MAX_ENVELOPE_INPUT_BYTES, extractAgentOutputEnvelope } from "./envelope.js";
 import { extractToolResults, extractToolUses } from "./toolActivity.js";
 import type { NormalizedEvent, NormalizedUsage, StartOptions } from "./agentRuntime.js";
 
@@ -139,7 +139,8 @@ export function normalizeMessage(
       isError,
       costUsd: typeof message.total_cost_usd === "number" ? message.total_cost_usd : undefined,
       usage: usage ? toNormalizedUsage(usage) : undefined,
-      agentOutput: resultText ? extractAgentOutputEnvelope(resultText) : undefined,
+      // The CLI's own structured result (it exists only when the run was started with a JSON schema) wins over the text envelope; absent or unusable, the text path decides as before.
+      agentOutput: structuredOutputOf(message.structured_output) ?? (resultText ? extractAgentOutputEnvelope(resultText) : undefined),
     };
   }
 
@@ -150,4 +151,16 @@ export function normalizeMessage(
   }
 
   return base;
+}
+
+/** The `structured_output` of a result line when it is a plain object within the envelope size cap; anything else is no structured result. */
+function structuredOutputOf(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  try {
+    const json = JSON.stringify(value);
+    return json !== undefined && json.length <= MAX_ENVELOPE_INPUT_BYTES && new TextEncoder().encode(json).length <= MAX_ENVELOPE_INPUT_BYTES ? value : undefined;
+  } catch {
+    // fx-swallow-ok: a value that cannot be serialised is no structured result; the text envelope decides
+    return undefined;
+  }
 }
