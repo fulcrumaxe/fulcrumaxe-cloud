@@ -18,12 +18,14 @@ Sources:
 - `packages/pipeline/src/review/gate1Attest.ts`
 - `packages/pipeline/src/review/gate1Creator.ts`
 - `packages/pipeline/src/review/gate1QueueEntry.ts`
+- `packages/pipeline/src/build/checkRunSettle.ts`
 - `packages/pipeline/src/mergeQueue/policy.ts`
 - `packages/pipeline/src/mergeQueue/mergeLease.ts`
 - `packages/pipeline/src/mergeQueue/tick.ts`
 - `packages/runner-cloud/src/executionMode.ts`
 - `packages/runner-cloud/src/localOnlyGithub.ts`
 - `packages/runner/src/vercelSandboxPort.ts`
+- `packages/runner/src/recordParser.ts`
 - `packages/runner-protocol/src/envelope.ts`
 - `packages/api/src/routes/assistant.ts`
 - `packages/api/src/assistant/turn.ts`
@@ -31,7 +33,13 @@ Sources:
 - `packages/core/src/assistant/conversations.ts`
 - `infra/sandbox-image/Dockerfile`
 - `infra/sandbox-image/versions.lock.json`
+- `packages/worker/src/verifyStage.ts`
+- `packages/worker/src/verifyRun.ts`
+- `packages/core/src/verify/rows.ts`
+- `packages/core/src/verify/settings.ts`
+- `packages/core/src/verify/bugItem.ts`
 - `.github/workflows/ci.yml`
+- `scripts/ci/same-tree.mjs`
 
 ## The two planes
 
@@ -40,7 +48,7 @@ The product lives in two repositories that hold the same product tree:
 - The **code plane** is this public repository. All product code, pull requests, reviews, gate labels and CI live here.
 - The **discussion plane** is a private repository. It holds planning and the team's own tooling, plus a small overlay of paths that never leave it. Its product tree is a copy of this one's `main`, kept in step by a sync after each merge here.
 
-A product change is therefore one pull request on the code plane. A change that touches only overlay paths is a pull request on the private plane. The `pr-gates` job in `.github/workflows/ci.yml` runs only on public pull requests: it checks what the pull request body may cite and that the diff adds no overlay path. On the private repository, a pull request that changes only overlay paths skips the product suite and runs a smaller check instead; its jobs still finish `success` under their real names, because the merge gate refuses a required check that concluded `skipped`.
+A product change is therefore one pull request on the code plane. A change that touches only overlay paths is a pull request on the private plane. The `pr-gates` job in `.github/workflows/ci.yml` runs only on public pull requests: it checks what the pull request body may cite and that the diff adds no overlay path. On the private repository, a pull request that changes only overlay paths skips the product suite and runs a smaller check instead; its jobs still finish `success` under their real names, because the merge gate refuses a required check that concluded `skipped`. A merge-queue run does the same when its tree is byte-identical to a pull request head that already carries the cloud's `fx-gate1` success: the `Same tree` step (`scripts/ci/same-tree.mjs`) proves that, and anything it cannot prove, or a queue group of several pull requests, runs the full suite (#923).
 
 ## Dependency direction
 
@@ -105,15 +113,20 @@ A work item moves through the stages in `packages/core/src/work-items/stages.ts`
 1. **Build.** At `spec_ready` the executor role runs (`packages/pipeline/src/build/stageMachine.ts`). A Spec that plans several pull requests becomes child items, each built on its own branch and stacked on its one open dependency. On a repository whose code lives on both planes, the build publishes a public pull request and keeps the private one as a paired copy.
 2. **Review.** At `pr_opened` the required reviewers run for the item's tier (`requiredReviewers.ts`). Their verdicts come back as envelopes (below) and are recorded as labels and driver events. A failing verdict starts a fix round, bounded by the repository's settings.
 3. **CI wait.** The review round waits for the pull request's CI on the exact head it reviewed (`packages/pipeline/src/review/ciWait.ts`) and says why it is still waiting. On a repository listed in `FX_GATE1_ATTEST_REPOS` the cloud also posts the `fx-gate1` status itself, see the next section.
-4. **Merge gate.** `runMergeGate` (`packages/pipeline/src/build/mergeGate.ts`, `review/mergeGateRun.ts`) is the only place the product merges; a repo-wide test (`packages/pipeline/test/build/mergeCallSites.test.ts`) fails if any other file can call the merge. It returns either a merge or a list of fixed stop reasons. It checks the reviewers' verdicts on the current head, CI, mergeability, whether the pull request's author is one the platform merges for, ordered files (so a numbered file can't merge out of order), and the repository's merge dial. A merge by policy leaves a receipt.
+4. **Merge gate.** `runMergeGate` (`packages/pipeline/src/build/mergeGate.ts`, `review/mergeGateRun.ts`) is the only place the product merges; a repo-wide test (`packages/pipeline/test/build/mergeCallSites.test.ts`) fails if any other file can call the merge. It returns either a merge or a list of fixed stop reasons. It checks the reviewers' verdicts on the current head, CI, mergeability, whether the pull request's author is one the platform merges for, ordered files (so a numbered file can't merge out of order), and the repository's merge dial. A merge by policy leaves a receipt. Two details: green CI on the head covers an acceptance tester whose latest run succeeded with the verdict `unverifiable`, provided the repository has CI of its own and not only the cloud's review status (#909); and a repository whose own CI is still running does not also get `repo_ci_missing`, which only a person could fix (#833). Every reader of check runs treats a run that has both a conclusion and a completion time as finished, whatever its `status` still says (`packages/pipeline/src/build/checkRunSettle.ts`, #821).
 5. **Merge queue.** Where GitHub's merge queue is on, the gate puts the pull request in the queue instead of merging directly. `packages/pipeline/src/mergeQueue/` keeps one row per entry (`merge_queue_entries`), holds at most one merge in flight per repository through a database-enforced slot with a lease (300 s, renewed by every step), refreshes a head that fell behind, waits for CI, and starts a conflict, renumber or delta-review round (an agent run) when needed, releasing the slot while that run works. A per-repository lease (`mergeLease.ts`, `repo_merge_leases`) keeps a direct merge and the queue's slot from running at once on one repository.
+6. **Post-merge verify.** Off by default for a repository (`packages/core/src/verify/settings.ts`: `enabled` is false until an owner or admin turns it on). Where it is on, a third pass of the claim verifier's 15-minute tick (`packages/worker/src/verifyStage.ts`) picks up items that the product merged after verification was switched on, within a 24-hour lookback, and opens a verify row for each (`packages/core/src/verify/rows.ts`). The row moves one way: `pending`, `deploying`, `running`, then `verified`, `failed` or `unverified`. For one repository it works one row at a time:
+   - It places one deploy order for the merge commit, which a runner on the repository's own machine claims, then polls the app's `/api/health` for up to 15 minutes until the reported commit is the merge commit or a genuine sync commit that descends from it. A failed deploy ends the row `unverified: deploy_failed`; an app that never answers ends it `deployment_unreachable`, one that answers with another commit `commit_not_deployed`.
+   - Once the commit qualifies (`packages/worker/src/verifyRun.ts`), it starts one `deploy-verifier` job on a runner, with the checkout pinned to the merge commit. A repository that does not run work on a runner ends `unverified: no_browser`. A repository whose daily verify budget is used up holds the row at `deploying` until the next tick.
+   - The tester answers with a JSON envelope of journeys (the Spec's criteria plus the repository's standing journeys), each `pass`, `fail` or `blocked`. The pipeline parses it strictly and decides; a `pass` without a step, an undo check and a reload is refused as a hollow pass and the row ends `unverified`.
+   - A `failed` row files one bug item, keyed on the row and its first failing journey (`packages/core/src/verify/bugItem.ts`). A row that could not check anything files none. The streak of consecutive `verified` rows is derived from the finished rows: a pass counts, a `failed` or `unverified` row resets it.
 
 ### The cloud's own `fx-gate1`
 
 `fx-gate1` is a commit status on a public pull request's head that the repository's ruleset requires. For a cloud item:
 
 - The cloud posts it itself, from a green full-scope run of the public CI on that exact head (`gate1Attest.ts`). It reads only GitHub's own records: which app ran each of the five CI contexts (GitHub Actions only), their start times against the time of the last `ci:full` label event, and the changed paths. A change that touches CI files is refused.
-- It posts it for the head of the pull request and also for each merge-queue entry commit (`gate1QueueEntry.ts`): the entry gets success only when its five contexts are green on the entry commit and every pull request ahead of it in the group already carries the cloud's own `fx-gate1` success.
+- It posts it for the head of the pull request and also for each merge-queue entry commit (`gate1QueueEntry.ts`): the entry gets success only when its five contexts are green on the entry commit and every pull request ahead of it in the group already carries the cloud's own `fx-gate1` success. When a pull request leaves the queue, merged or dequeued, the entries still queued on that base branch are listed again and re-checked (`listQueueEntryCandidates`, #917).
 - An item that was already in flight when the setting went on is attested at the merge gate and at the queue entry too, not only in the review round.
 - The merge gate counts `fx-gate1` only when the cloud's App posted it (`gate1Creator.ts` reads who posted it). A status from a person, a token or another app is not counted, and the gate stops with `gate1_status_foreign`.
 
@@ -139,7 +152,8 @@ Every reviewer ends its final message with an `AGENT_OUTPUT` block holding a JSO
 
 - The last block wins. A malformed last block gives no verdict; an earlier block is never a fallback.
 - A block's body may not contain another opening marker, and input over 256 KB is refused.
-- On a hosted sandbox, when the final turn of a run has no envelope because the agent spoke again after giving its verdict (a background task finished), the envelope of the last main-thread message that carried a marker is used (`packages/runner/src/vercelSandboxPort.ts`). Subagent lines never feed it, a checkpoint verdict never counts, and a later marker that does not parse clears it.
+- On a hosted sandbox, when the final turn of a run has no envelope because the agent spoke again after giving its verdict (a background task finished), the envelope of the last main-thread message that carried a marker is used (`packages/runner/src/vercelSandboxPort.ts`), but only if that message ends with the block (`endsWithEnvelopeBlock` in `packages/runner-protocol/src/envelope.ts`), so a block quoted mid-message never counts (#834). Subagent lines never feed it, a checkpoint verdict never counts, and a later marker that does not parse clears it.
+- The sandbox port reads the agent's output from a record file written by a recorder script that wraps the CLI, read back in slices and checked against the command's own echo at exit (`packages/runner/src/recordParser.ts`, #840, #844, #852).
 
 ## The assistant
 
