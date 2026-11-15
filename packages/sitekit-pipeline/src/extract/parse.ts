@@ -4,6 +4,8 @@ import { z } from "zod";
 
 /** More claims than this in one pass is a runaway answer, refused whole. */
 export const MAX_CLAIMS = 500;
+/** The shape of a claim id the extractor may use; the verifier's prompt checks the same pattern. */
+export const CLAIM_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_TEXT = 2000;
 const MAX_EXCERPT = 4000;
 
@@ -22,11 +24,11 @@ const RepoPath = z
  * stand in for a decision that belongs to the customer or the verifier.
  */
 const AgentEvidence = z
-  .object({ path: RepoPath, lines: StrictLines.optional(), query: z.string().min(1).max(500).optional(), excerpt: z.string().min(1).max(MAX_EXCERPT) })
+  .object({ path: RepoPath, lines: StrictLines.optional(), query: z.string().min(1).max(500).optional(), excerpt: z.string().max(MAX_EXCERPT).refine((s) => s.trim().length > 0, "an excerpt must hold text") })
   .strict();
 const AgentClaim = z
   .object({
-    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+    id: z.string().regex(CLAIM_ID_RE),
     section: z.string().min(1).max(100),
     locale: z.string().min(1).max(35),
     text: z.string().min(1).max(MAX_TEXT),
@@ -56,4 +58,21 @@ export function parseExtractOutput(raw: string, sha: string): ExtractedClaim[] {
     // The sha is ours: the commit the checkout was verified to be at, never a value the agent wrote.
     return { ...c, evidence: c.evidence.map((e) => ({ ...e, repo_sha: sha })) };
   });
+}
+
+/**
+ * Claims that did not come straight from `parseExtractOutput` (a fix step's output, a stored list) go through the same
+ * strict schema again before they are used: every evidence entry must already carry the pinned sha, which is then
+ * re-stamped, and nothing extra is allowed. Throws like `parseExtractOutput`.
+ */
+export function revalidateClaims(claims: readonly ExtractedClaim[], sha: string): ExtractedClaim[] {
+  const plain = claims.map((c) => ({
+    ...c,
+    evidence: (Array.isArray(c.evidence) ? c.evidence : []).map((e) => {
+      const { repo_sha: pinned, ...rest } = e;
+      if (pinned !== sha) throw new Error("evidence is not at the pinned commit");
+      return rest;
+    }),
+  }));
+  return parseExtractOutput(JSON.stringify({ claims: plain }), sha);
 }
