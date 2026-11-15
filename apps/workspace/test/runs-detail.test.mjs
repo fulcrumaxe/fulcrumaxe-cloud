@@ -21,6 +21,9 @@ describe("titles and verdicts", () => {
   it("names a role with its phase, and an unknown role plainly", () => {
     expect(titleOf("code-reviewer")).toBe("Review · Code reviewer");
     expect(titleOf("executor")).toBe("Build · Executor");
+    expect(titleOf("deploy-verifier")).toBe("Verify · Deploy verifier");
+    expect(titleOf("proposal-verifier")).toBe("Verify · Proposal verifier");
+    expect(titleOf("discovery-analyst")).toBe("Discovery · Discovery analyst");
     expect(titleOf("something-new")).toBe("something new");
     expect(titleOf("")).toBe("Agent run");
     expect(titleOf(undefined)).toBe("Agent run");

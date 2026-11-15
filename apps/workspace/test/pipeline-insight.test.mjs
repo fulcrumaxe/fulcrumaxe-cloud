@@ -28,9 +28,14 @@ describe("phases and words", () => {
     for (const r of ["technical-architect", "product-owner", "performance-expert", "security-expert", "cost-analyst"]) expect(phaseOf(r)).toBe("Panel");
     expect(phaseOf("executor")).toBe("Build");
     for (const r of ["code-reviewer", "acceptance-tester", "security-reviewer", "debater"]) expect(phaseOf(r)).toBe("Review");
+    for (const r of ["deploy-verifier", "proposal-verifier"]) expect(phaseOf(r)).toBe("Verify");
+    expect(phaseOf("discovery-analyst")).toBe("Discovery");
     expect(phaseOf("something-new")).toBe("Run");
     expect(Object.keys(PHASES).length).toBeGreaterThan(8);
     expect(roleWord("code-reviewer")).toBe("Code reviewer");
+    expect(roleWord("deploy-verifier")).toBe("Deploy verifier");
+    expect(roleWord("proposal-verifier")).toBe("Proposal verifier");
+    expect(roleWord("discovery-analyst")).toBe("Discovery analyst");
     expect(roleWord("something-new")).toBe("something-new");
     expect(roleWord(undefined)).toBe("Agent");
   });
@@ -88,6 +93,12 @@ describe("one run as a section", () => {
     expect(runView({ ...OK.runs[0], summary: "   " }).summary).toBeNull();
     expect(runView({ ...OK.runs[0], summary: null }).summary).toBeNull();
     expect(runView({ ...OK.runs[1], lines: [] }).lines).toEqual([]);
+  });
+
+  it("labels a deploy verifier run with its phase and role word", () => {
+    const view = runView({ ...OK.runs[0], role: "deploy-verifier" });
+    expect(view.phase).toBe("Verify");
+    expect(view.role).toBe("Deploy verifier");
   });
 });
 

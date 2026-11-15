@@ -28,6 +28,9 @@ const ROLE_WORDS = {
   debater: ["Review", "Debater"],
   "accessibility-reviewer": ["Review", "Accessibility reviewer"],
   "browser-tester": ["Review", "Browser tester"],
+  "deploy-verifier": ["Verify", "Deploy verifier"],
+  "proposal-verifier": ["Verify", "Proposal verifier"],
+  "discovery-analyst": ["Discovery", "Discovery analyst"],
 };
 const REVIEWERS = new Set(["code-reviewer", "acceptance-tester", "security-reviewer", "debater", "accessibility-reviewer", "browser-tester", "security-expert"]);
 
