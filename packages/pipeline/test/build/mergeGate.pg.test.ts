@@ -924,19 +924,32 @@ describe("H14b merge gate: table [pg]", () => {
         expect(github.enqueueCalls).toEqual([{ expectedHeadOid: HEAD }]);
       });
 
-      it("the enqueue is reported to the composition root BEFORE the repository's lease is freed (so the throttle's fact cannot lag behind the lease), and a throw there still frees it", async () => {
+      it("the enqueue is reported to the composition root BEFORE the repository's lease is freed (so the throttle's fact cannot lag behind the lease)", async () => {
         const log: string[] = [];
         const lease = { release: async () => void log.push("release") };
         const { world, github } = await ready({ queueMode: "queue", enqueue: { enqueued: true, via: "queue", entryId: "MQE_kwDOtest1", position: 1, jump: "applied" } });
         const deps: MergeGateDeps = { ...withRule(github, "jump"), acquireMergeLease: async () => lease, onEnqueued: async (r) => void log.push(`fact:${r.jump}`) };
         await runMergeGate(deps, inputFor(world, {}));
         expect(log).toEqual(["fact:applied", "release"]);
+      });
 
-        const log2: string[] = [];
-        const again = await ready({ queueMode: "queue" });
-        const failing: MergeGateDeps = { ...withRule(again.github, "jump"), acquireMergeLease: async () => ({ release: async () => void log2.push("release") }), onEnqueued: async () => Promise.reject(new Error("fact write failed")) };
-        await expect(runMergeGate(failing, inputFor(again.world, {}))).rejects.toThrow("fact write failed");
-        expect(log2).toEqual(["release"]);
+      it("a throw from the enqueue record is swallowed: the entry stays enqueued and a pull request adding an ordered-resource file keeps the lease until its entry settles", async () => {
+        const log: string[] = [];
+        const { world, github } = await ready({ queueMode: "queue" });
+        const lease = { release: async () => void log.push("release"), holdForHostQueue: async (n: number) => void log.push(`hold:${n}`) };
+        const failing: MergeGateDeps = { ...withRule(github, "jump"), acquireMergeLease: async () => lease, onEnqueued: async () => Promise.reject(new Error("fact write failed")) };
+        const input = inputFor(world, {});
+        expect(await runMergeGate(failing, input)).toMatchObject({ outcome: "merge_enqueued", headSha: HEAD });
+        expect(log).toEqual([`hold:${input.pr.prNumber}`]);
+      });
+
+      it("a throw from the enqueue record for a pull request with no ordered-resource file still frees the lease", async () => {
+        const log: string[] = [];
+        const { world, github } = await ready({ queueMode: "queue" });
+        const lease = { release: async () => void log.push("release"), holdForHostQueue: async () => void log.push("hold") };
+        const failing: MergeGateDeps = { ...withRule(github, "jump"), acquireMergeLease: async () => lease, addsOrderedFile: async () => false, onEnqueued: async () => Promise.reject(new Error("fact write failed")) };
+        await runMergeGate(failing, inputFor(world, {}));
+        expect(log).toEqual(["release"]);
       });
 
       it("a refused jump the port retried at the back is reported as refused", async () => {
