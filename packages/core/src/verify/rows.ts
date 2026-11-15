@@ -283,7 +283,7 @@ export async function openVerifyAgainRow(client: PoolClient, accountId: string, 
 }
 
 /** The journeys the newest failed row of this item, or of the item whose failure filed this one as its bug item, found failing: checked again by the new row. */
-async function readCarriedFailures(client: PoolClient, accountId: string, workItemId: string): Promise<{ id: string; text: string }[]> {
+async function readCarriedFailures(client: PoolClient, accountId: string, workItemId: string): Promise<{ id: string; text: string; start?: string }[]> {
   const { rows } = await client.query<{ journeys: Journey[]; result: JourneyResult[] }>(
     `SELECT journeys, result FROM verify_rows
       WHERE account_id = $1 AND status = 'failed' AND (work_item_id = $2 OR bug_item_id = $2)
@@ -293,7 +293,7 @@ async function readCarriedFailures(client: PoolClient, accountId: string, workIt
   const prior = rows[0];
   if (prior === undefined) return [];
   const failed = new Set(prior.result.filter((r) => r.result === 'fail').map((r) => r.id));
-  return prior.journeys.filter((j) => failed.has(j.id)).map((j) => ({ id: j.id, text: j.text }));
+  return prior.journeys.filter((j) => failed.has(j.id)).map((j) => (j.start === undefined ? { id: j.id, text: j.text } : { id: j.id, text: j.text, start: j.start }));
 }
 
 async function writeFact(client: PoolClient, accountId: string, row: VerifyRow, to: VerifyRowStatus, detail: VerifyDetailCode | null = null): Promise<void> {
