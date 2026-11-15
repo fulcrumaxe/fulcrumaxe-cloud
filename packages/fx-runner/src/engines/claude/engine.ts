@@ -1,7 +1,7 @@
 import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { CONTEXT_WARN_PCT, ContextLedgerCapture, createUsageMeter, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type BrowserMethod, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WARN_PCT, ContextLedgerCapture, createUsageMeter, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type BrowserMethod, type LocalOnlyEvent, structuredSchemaFor, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
@@ -163,7 +163,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     if (browserMethod === "playwright_runner") clearVerifyLeftovers(jobDir);
     // The shell sandbox must be able to start a Bash call under this job's own rules. If bubblewrap refuses, every Bash call would fail and the agent would loop to "incomplete", so the run ends now.
     if (await (config.bashSandboxUnusable ?? bashSandboxUnusableFor)(files.settings, workdir, path.join(jobDir, "probe"), { env, spawn: spawnFn, launch: config.launch })) throw new EngineRefusal("sandbox_unusable");
-    const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: [...confineFileTools(roleTools, path.resolve(workdir)), ...((opts as EngineStartOptions).spillDir === undefined ? [] : readRulesFor((opts as EngineStartOptions).spillDir!))], ...files, chrome: chromeFlagFor(opts.role, (opts as EngineStartOptions).browserMethod), ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
+    const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: [...confineFileTools(roleTools, path.resolve(workdir)), ...((opts as EngineStartOptions).spillDir === undefined ? [] : readRulesFor((opts as EngineStartOptions).spillDir!))], ...files, chrome: chromeFlagFor(opts.role, (opts as EngineStartOptions).browserMethod), ...(structuredSchemaFor(opts.role) === undefined ? {} : { jsonSchema: structuredSchemaFor(opts.role)! }), ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);
 
