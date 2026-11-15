@@ -10,7 +10,7 @@ import { maxFixRounds } from '@fx/spend';
 import { RUNNER_DAILY_LIMIT_PAUSE, RUNNER_DAILY_LIMIT_SENTENCE, SELF_CLEARING_REVIEW_WAITS, SELF_CLEARING_WAIT_SENTENCES, markBuildNeedsHuman } from '@fx/pipeline';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
-import { activityResponseSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
+import { activityResponseSchema, verifyAttemptSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
 
@@ -119,7 +119,12 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
   }
 
   it('registers one session-only member GET with a read rate class', () => {
-    expect(workItemActivityRoutes).toHaveLength(1);
+    expect(workItemActivityRoutes).toHaveLength(2);
+    for (const r of workItemActivityRoutes) {
+      expect(r.method).toBe('GET');
+      expect(r.principals).toEqual(['session']);
+      expect(r.minRole).toBe('member');
+    }
     const [route] = workItemActivityRoutes;
     expect(route!.method).toBe('GET');
     expect(route!.principals).toEqual(['session']);
@@ -1053,6 +1058,31 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(JSON.stringify(v)).not.toMatch(/staging\.example|tester/);
     await admin.query(`UPDATE verify_settings SET enabled = false WHERE repo_id = $1`, [repoId]);
     expect(await activity()).not.toHaveProperty('verify');
+  });
+
+  it('D#749: the verify attempt route answers one attempt with its journeys and steps, and 404 for a missing attempt, a bad number, another account or a check that is off', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const other = await seedAccountWithMember(admin);
+    const { itemId, repoId } = await seedItem(accountId, { stage: 'merged' });
+    const attempt = async (n: string, who = { accountId, userId }): Promise<Response> => {
+      const token = await signSession(who);
+      return handleApiRequest(new Request(`http://localhost/api/v1/work-items/${itemId}/verify-attempts/${n}`, { headers: new Headers({ cookie: `${SESSION_COOKIE_NAME}=${token}` }) }), appUserPool, platformOpsPool, ROUTES);
+    };
+    expect((await attempt('1')).status).toBe(404);
+    await admin.query(`INSERT INTO verify_settings (account_id, repo_id, enabled, base_url) VALUES ($1, $2, true, 'https://staging.example')`, [accountId, repoId]);
+    const batch = await admin.query<{ id: string }>(`INSERT INTO verify_batches (account_id, repo_id) VALUES ($1, $2) RETURNING id`, [accountId, repoId]);
+    const journeys = JSON.stringify([{ id: 'c1', source: 'criterion', text: 'Spec words that must not leave' }]);
+    await admin.query(`INSERT INTO verify_rows (account_id, repo_id, batch_id, work_item_id, pr_number, merge_sha, journeys) VALUES ($1, $2, $3, $4, 57, $5, $6::jsonb)`, [accountId, repoId, batch.rows[0]!.id, itemId, 'a'.repeat(40), journeys]);
+    const res = await attempt('1');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(verifyAttemptSchema.parse(body)).toEqual(body);
+    expect(body).toMatchObject({ attempt: 1, status: 'pending', journeys: [{ id: 'c1', source: 'criterion', criterion: 1, status: 'skipped' }], attempts: [{ attempt: 1 }] });
+    expect(JSON.stringify(body)).not.toContain('Spec words');
+    for (const n of ['2', '0', 'x', '1001', '1.5']) expect((await attempt(n)).status, n).toBe(404);
+    expect((await attempt('1', other)).status).toBe(404);
+    await admin.query(`UPDATE verify_settings SET enabled = false WHERE repo_id = $1`, [repoId]);
+    expect((await attempt('1')).status).toBe(404);
   });
 
   it('answers 404 for an unknown id, a malformed id and another account\'s item', async () => {

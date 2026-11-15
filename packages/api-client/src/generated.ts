@@ -621,6 +621,41 @@ export interface Operations {
         bug_item_id: (string) | (null);
         pr_number: number;
         at: string;
+        attempt_detail?: ({
+          attempt: number;
+          status: "pending" | "deploying" | "running" | "verified" | "failed" | "unverified";
+          reason: ("no_browser" | "chrome_not_connected" | "wrong_account" | "sign_in_refused" | "deploy_failed" | "deployment_unreachable" | "commit_not_deployed" | "envelope_rejected" | "hollow_pass" | "journey_blocked" | "journeys_missing" | "run_failed" | "verify_disabled" | "account_unverifiable" | "no_visible_journeys") | (null);
+          method: ("chrome_runner" | "playwright_runner" | "playwright_sandbox") | (null);
+          started_at: string | null;
+          finished_at: string | null;
+          journeys: Array<{
+            id: string;
+            source: "criterion" | "recheck" | "standing" | "other";
+            criterion: (number) | (null);
+            status: "passed" | "failed" | "blocked" | "unproven" | "skipped" | "not_judged";
+            reason: ("defect_found" | "blocked" | "no_evidence" | "not_answered" | "wrong_account" | "account_unverifiable") | (null);
+            steps_done: number;
+            evidence: {
+              page_fact: boolean;
+              undo_checked: boolean;
+              reloaded: boolean;
+            };
+            console_errors: number;
+            steps: Array<{
+              index: number;
+              label: string;
+              result: "passed" | "failed" | "not_passed" | "not_reached";
+              reason: ("defect_found" | "blocked" | "no_evidence" | "not_answered" | "wrong_account" | "account_unverifiable") | (null);
+              note: string | null;
+            }>;
+          }>;
+          attempts: Array<{
+            attempt: number;
+            status: "pending" | "deploying" | "running" | "verified" | "failed" | "unverified";
+            reason: ("no_browser" | "chrome_not_connected" | "wrong_account" | "sign_in_refused" | "deploy_failed" | "deployment_unreachable" | "commit_not_deployed" | "envelope_rejected" | "hollow_pass" | "journey_blocked" | "journeys_missing" | "run_failed" | "verify_disabled" | "account_unverifiable" | "no_visible_journeys") | (null);
+            at: string;
+          }>;
+        }) | (null);
       };
       actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "verify_again" | "retry_push" | "open_pr" | "remove_from_queue" | "queue_again">;
       close_on_github: boolean;
@@ -632,6 +667,49 @@ export interface Operations {
         at: string;
         state: "waiting" | "sent" | "dropped";
         run_id: (string) | (null);
+      }>;
+    };
+  };
+  getWorkItemVerifyAttempt: {
+    path: {
+      id: string;
+      attempt: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      attempt: number;
+      status: "pending" | "deploying" | "running" | "verified" | "failed" | "unverified";
+      reason: ("no_browser" | "chrome_not_connected" | "wrong_account" | "sign_in_refused" | "deploy_failed" | "deployment_unreachable" | "commit_not_deployed" | "envelope_rejected" | "hollow_pass" | "journey_blocked" | "journeys_missing" | "run_failed" | "verify_disabled" | "account_unverifiable" | "no_visible_journeys") | (null);
+      method: ("chrome_runner" | "playwright_runner" | "playwright_sandbox") | (null);
+      started_at: string | null;
+      finished_at: string | null;
+      journeys: Array<{
+        id: string;
+        source: "criterion" | "recheck" | "standing" | "other";
+        criterion: (number) | (null);
+        status: "passed" | "failed" | "blocked" | "unproven" | "skipped" | "not_judged";
+        reason: ("defect_found" | "blocked" | "no_evidence" | "not_answered" | "wrong_account" | "account_unverifiable") | (null);
+        steps_done: number;
+        evidence: {
+          page_fact: boolean;
+          undo_checked: boolean;
+          reloaded: boolean;
+        };
+        console_errors: number;
+        steps: Array<{
+          index: number;
+          label: string;
+          result: "passed" | "failed" | "not_passed" | "not_reached";
+          reason: ("defect_found" | "blocked" | "no_evidence" | "not_answered" | "wrong_account" | "account_unverifiable") | (null);
+          note: string | null;
+        }>;
+      }>;
+      attempts: Array<{
+        attempt: number;
+        status: "pending" | "deploying" | "running" | "verified" | "failed" | "unverified";
+        reason: ("no_browser" | "chrome_not_connected" | "wrong_account" | "sign_in_refused" | "deploy_failed" | "deployment_unreachable" | "commit_not_deployed" | "envelope_rejected" | "hollow_pass" | "journey_blocked" | "journeys_missing" | "run_failed" | "verify_disabled" | "account_unverifiable" | "no_visible_journeys") | (null);
+        at: string;
       }>;
     };
   };
@@ -5290,6 +5368,17 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  getWorkItemVerifyAttempt: {
+    method: "GET",
+    path: "/api/v1/work-items/{id}/verify-attempts/{attempt}",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id","attempt"],
     queryParams: [],
     hasBody: false,
   },

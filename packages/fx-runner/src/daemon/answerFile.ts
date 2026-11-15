@@ -39,6 +39,13 @@ export function readVerifyAnswer(jobsDir: string, runId: string, uid: number | u
       for (const j of js) {
         const last = j.steps?.[j.steps.length - 1];
         console.log(`fx-runner: verify journey ${runId.slice(0, 8)} ${clean(j.id).slice(0, 40)} ${clean(j.result)} steps=${j.steps?.length ?? 0} last=${clean(last?.did)} | ${clean(last?.dom_fact)}`);
+        // One line per step, to follow a live run: a step the tester recorded is `recorded` (nothing checked it on its own); the last step of a journey that failed is the one that failed, and the last step of a blocked journey is the one it stopped on (closed reason, never page text).
+        const n = j.steps?.length ?? 0;
+        for (let i = 0; i < Math.min(n, 20); i++) {
+          const lastStep = i === n - 1;
+          const word = lastStep && j.result === "fail" ? "failed defect_found" : lastStep && j.result === "blocked" ? "not_passed blocked" : "recorded -";
+          console.log(`fx-runner: verify step ${runId.slice(0, 8)} ${clean(j.id).slice(0, 40)} s${i + 1} ${word}`);
+        }
       }
     }
     return verdict.ok ? (JSON.parse(verdict.json) as Record<string, unknown>) : undefined;
