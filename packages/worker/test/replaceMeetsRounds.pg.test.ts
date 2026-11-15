@@ -30,6 +30,7 @@ import { FIX_BASE_EVENT, recordRepublishRefusal } from "../src/fixRoundBase.js";
  * (The product's own transport is covered by pipeline/test/build/planePushRoute.test.ts; what this adds is the chain around it.)
  */
 describe("Replace and Keep, from the raised request to the lease push on a bare remote [pg]", { timeout: 120_000 }, () => {
+  const kindOf = new Map<string, string | undefined>();
   let adminPool: Pool;
   let admin: PoolClient;
   let writerPool: Pool;
@@ -315,6 +316,7 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
       await writeRunStatus(writerPool, { accountId, runId: build, from: "running", to: "succeeded", result: { sessionId: "cc-session-1", envelope: { summary: "built" } } });
       const resume = vi.fn(async (_pool: Pool, _registry: ExecutionTargetRegistry, input: StartAgentRunInput) => {
         const { id } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: input.accountId, workItemId: input.workItemId, parentRunId: input.parentRunId, specParentRunId: input.parentRunId ?? null, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: input.repoId, dispatchPrNumber: input.pr ?? null, idempotency: input.idempotency, startPrompt: input.prompt, inCreateTransaction: input.inCreateTransaction });
+        kindOf.set(id, input.fixRoundKind);
         await writeRunStatus(writerPool, { accountId: input.accountId, runId: id, from: "pending", to: "running" });
         return { id, status: "running" };
       });
@@ -325,6 +327,7 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
           ? {
               async start(input: StartAgentRunInput) {
                 const { id } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: input.accountId, workItemId: input.workItemId, parentRunId: input.parentRunId, specParentRunId: input.parentRunId ?? null, role: "executor", runtime: "runner", executionMode: "runner_local", dispatchRepoId: input.repoId, dispatchPrNumber: input.pr ?? null, idempotency: input.idempotency, startPrompt: input.prompt, inCreateTransaction: input.inCreateTransaction });
+        kindOf.set(id, input.fixRoundKind);
                 return { runId: id };
               },
             }
@@ -352,6 +355,8 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
       expect(await h.stageNow()).toBe("needs_human");
       return { theirs, req: req! };
     }
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the round kind each started round's input carried (a stand-in starter records it; the real issuer would sign it).
+    const markersOfKind = (runId: string) => kindOf.get(runId);
     const markersOf = async (runId: string) => (await admin.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [runId, RUNNER_REPLACE_ROUND_KIND])).rows.map((r) => r.payload);
     const pending = async (h: RoundScene) => (await h.load()).branchAnswerPending === true;
 
@@ -429,11 +434,14 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
       expect(started, String(started.reason)).toMatchObject({ ok: true });
       expect(await h.startedRounds()).toBe(1);
       expect(await markersOf(started.runId!)).toEqual([{}]);
+      // The confirmed Replace round normally adds no commit and is judged on its check passing: it never names a round kind, so a runner never skips its check.
+      expect(markersOfKind(started.runId!)).toBeUndefined();
       expect(await pending(h)).toBe(false);
       const plain = await roundScene("changes_requested", true);
       const ordinary = await plain.ask();
       expect(ordinary, String(ordinary.reason)).toMatchObject({ ok: true });
       expect(await markersOf(ordinary.runId!)).toEqual([]);
+      expect(markersOfKind(ordinary.runId!)).toBe("review_fix");
     });
 
     it("an ordinary round (no answered stop) is not marked, whoever asked for it", async () => {

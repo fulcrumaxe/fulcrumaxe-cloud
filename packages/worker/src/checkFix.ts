@@ -220,6 +220,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         pr: issueNumber,
         parentRunId: failedRunId,
         prompt,
+        // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: this round answers a failed check, so a runner never skips its check on an unmoved tip: a flaky check may pass on the unchanged head.
+        fixRoundKind: "check_fix" as const,
         ...expectedExecutionMode,
         ...(row.spec_version_id === null ? {} : { specVersionId: row.spec_version_id }),
         continues: { branch: bound.branch, prNumber: bound.prNumber, ...(baseSha === null ? {} : { baseSha }) },
@@ -244,6 +246,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         pr: issueNumber,
         parentRunId: failedRunId,
         prompt,
+        fixRoundKind: "check_fix" as const,
         // The base of a round that republishes the public pull request: signed only for the branch it was synced on (the issuer compares).
         ...(needed === true && baseSha !== null && target !== null ? { base: { sha: baseSha, branch: target.pr.branch } } : {}),
         // A sandbox round has no signed job to carry the base: the cloud records it in the run's create transaction, as for a review fix round.

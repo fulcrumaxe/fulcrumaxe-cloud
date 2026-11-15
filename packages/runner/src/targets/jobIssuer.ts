@@ -15,6 +15,7 @@ import {
   CONFLICT_ATTEST_JOB_MIN_PROTOCOL,
   SCOPE_JOB_MIN_PROTOCOL,
   BROWSER_METHOD_JOB_MIN_PROTOCOL,
+  FIX_ROUND_KIND_JOB_MIN_PROTOCOL,
   JobConflictRoundSchema,
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
@@ -513,6 +514,11 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         conflictRound = marker.data;
       }
 
+      // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the round kind rides only on an executor's continuing job that is not a conflict round; anything else is no job (never signed with a marker the schema would refuse).
+      // A start that sets it where the job cannot carry it (no continued branch) is signed without it: no marker never skips a check, so this fails toward running it.
+      // Only a job that carries a check can have one skipped, so only such a job names its kind: a round with no check is not gated to the newer protocol for nothing.
+      const fixRoundKind = run.fixRoundKind !== undefined && role === "executor" && continues !== null && conflictRound === undefined && check !== undefined ? run.fixRoundKind : undefined;
+
       // D#749 V2c-1: a deploy verifier job is issued with the method the starting code chose (the cloud's own pipeline, never a runner or model text), and no other job has one. Anything else is no job.
       if ((role === DEPLOY_VERIFIER_ROLE) !== (run.browserMethod !== undefined)) throw new JobIssueError("job_invalid");
 
@@ -548,6 +554,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(conflictRound !== undefined ? { conflict_round: conflictRound } : {}),
         // D#749 V2c-1: omitted (never null) on every job but the deploy verifier's, so their signed bytes are unchanged.
         ...(run.browserMethod !== undefined ? { browser_method: run.browserMethod } : {}),
+        ...(fixRoundKind !== undefined ? { fix_round_kind: fixRoundKind } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),
@@ -579,7 +586,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
         // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for pins (CX-5c2): the strict parse again. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason. And for a continuation's `base_sha` (R2-b): the strict parse again, and a runner that ignored it would pick its own diff base.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, continues !== null && isChildItemBranch(continues.branch) ? CHILD_BRANCH_JOB_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, candidate.conflict_round ? CONFLICT_ATTEST_JOB_MIN_PROTOCOL : 0, candidate.scope ? SCOPE_JOB_MIN_PROTOCOL : 0, run.browserMethod !== undefined ? BROWSER_METHOD_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, continues !== null && isChildItemBranch(continues.branch) ? CHILD_BRANCH_JOB_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, candidate.conflict_round ? CONFLICT_ATTEST_JOB_MIN_PROTOCOL : 0, candidate.scope ? SCOPE_JOB_MIN_PROTOCOL : 0, run.browserMethod !== undefined ? BROWSER_METHOD_JOB_MIN_PROTOCOL : 0, fixRoundKind !== undefined ? FIX_ROUND_KIND_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

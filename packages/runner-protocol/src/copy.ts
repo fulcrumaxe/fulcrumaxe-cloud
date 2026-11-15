@@ -266,6 +266,7 @@ export const CHECK_NOT_RUN_LINES = {
   base_missing: "The runner could not find the default branch's copy of the check's files, so it was not run.",
   agent_not_stopped: "The runner could not stop the agent's processes before the check, so the check was not run.",
   out_of_scope: "The runner found changed files outside the Spec's file list, so it did not run the check.",
+  no_change: "The agent made no commit on this round, so the runner did not run the check.",
   other: "The runner reported that the check could not run safely, so it was not run.",
 } as const;
 export function checkNotRunText(reason: unknown): string {

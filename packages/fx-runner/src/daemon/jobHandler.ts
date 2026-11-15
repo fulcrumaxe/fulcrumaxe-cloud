@@ -55,6 +55,9 @@ export const MAX_DONE_ATTEMPTS = 5;
 const MAX_DONE_WAIT_SECONDS = 60;
 /** After SIGINT, the agent gets this long to end its turn before its sandbox is stopped. */
 export const TAKEOVER_STOP_GRACE_MS = 10_000;
+/** A full commit id (40 or 64 hex, lower case): the only form a start head and a tip are compared in. */
+const FULL_COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 /** The part of a handoff's time kept for the push: the checkpoint turn is cut off this long before the deadline. */
 export const HANDOFF_PUSH_MARGIN_MS = 30_000;
 
@@ -626,6 +629,16 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               checkHeld.outcome = closed("the check was not run: the agent could not be stopped", "agent_not_stopped"); step("check not run (agent_not_stopped)");
               return;
             }
+            // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: a fix round (a branch it continues) whose workspace HEAD is still the exact commit it started from added no commit, and the cloud will end it on its own
+            // no-commit path whatever a check says, so the check (up to its time limit) is not spent. Compared by full commit id, the tip read from a snapshot the daemon made (never the agent's `.git`). A
+            // build, a round brought up to date with the default branch (its merge commit is a new tip) and a tip that cannot be read all run the check as before. The reason is a hint, never a pass.
+            if (job.continues !== null && job.fix_round_kind === "review_fix" && started.base !== undefined && started.updatedTo === undefined && git.tip !== undefined) {
+              const tip = await git.tip(job, workspace).catch(() => null);
+              if (tip !== null && FULL_COMMIT_ID.test(tip) && tip === started.base) {
+                checkHeld.outcome = closed("the check was not run: the agent made no commit on this round", "no_change"); step("check not run (no_change)");
+                return;
+              }
+            }
             // A check that needs the dev shell is not run without one, and never passes by default.
             if (check.dev_shell && grant?.nixEnv === undefined) {
               checkHeld.outcome = closed("", undefined, { noDevShell: true }); step("check not run (check_no_dev_shell)");
@@ -745,7 +758,10 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       const conflictMirror = job.conflict_round !== undefined && published.pushed ? git.mirrorDir?.(job) : undefined;
       const conflictAttest = job.conflict_round !== undefined && published.pushed && conflictMirror !== undefined ? await deps.conflictAttest?.({ mirrorDir: conflictMirror, head: published.sha, jobId: job.job_id, round: job.conflict_round }) : undefined;
       const checked = checkHeld.outcome ?? (job.check === undefined ? undefined : closedCheck("the check was not run", "other"));
-      if (checked !== undefined && !checked.passed) {
+      // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: a round that added no commit, whose check was skipped for that, is not a failed check: no `check_failed` end is reported, the hook and `done` go as for any run that
+      // pushed nothing, and `done` carries the closed reason so the cloud takes its no-commit path. If a commit was pushed after all, the skipped check is a check that did not pass, as before.
+      const noChange = checked?.body.reason === "no_change" && !published.pushed;
+      if (checked !== undefined && !checked.passed && !noChange) {
         await lease.flush();
         const stoppedAtCheck = lease.ended();
         if (stoppedAtCheck !== undefined) return stoppedBy(stoppedAtCheck);

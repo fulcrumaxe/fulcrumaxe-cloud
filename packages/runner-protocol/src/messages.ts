@@ -246,9 +246,9 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
  * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
- * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`).  Version 17 is the first whose runner accepts a fix job's `fix_round_kind` (`FIX_ROUND_KIND_JOB_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 16;
+export const CURRENT_PROTOCOL_VERSION = 17;
 /**
  * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
  * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
@@ -340,6 +340,11 @@ export const SCOPE_JOB_MIN_PROTOCOL = 15;
  * that predates it, whatever browser capability it advertises. The cloud deploys first.
  */
 export const BROWSER_METHOD_JOB_MIN_PROTOCOL = 16;
+/**
+ * D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the first version whose runner accepts a fix job's `fix_round_kind` (`check_fix` or `review_fix`). Same claim gate as above: an older runner's strict parse would refuse the key, so
+ * such a job waits for an updated runner. A job without the key (every other round, and every job an older cloud signed) is never skipped by a runner on a no-commit tip. The cloud deploys first.
+ */
+export const FIX_ROUND_KIND_JOB_MIN_PROTOCOL = 17;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;
@@ -716,8 +721,11 @@ export const CHECK_SKIPPED_MAX = 100_000_000;
  * to `other` before it stores or shows anything, and a check that carries a reason never counts as passed. `other` is the generic code.
  * D#6 SCOPE-IN-JOB: `out_of_scope` is the runner saying it found changed files outside the job's `scope` and did not spend a check on them. It is a hint, never a verdict: the cloud still judges the
  * pull request against the list from its own rows, and a run the runner reported this way never ends as a pass. The summary of such a result holds a count only, never a path.
+ * D#6 RUNNER-CHECK-SKIP-NO-COMMIT: `no_change` is the runner saying a fix round's branch tip is still the commit the round started from (the agent committed nothing), so it did not spend a check on it.
+ * Also a hint, never a pass: the cloud still reads the branch itself, takes its existing no-commit path when it finds no new commit, and ends `check_failed` if it does find one. A cloud that does not know the word
+ * reads it as `other`, a check that did not run.
  */
-export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", "pin_failed", "protected_unreadable", "protected_changed", "not_restored", "start_failed", "not_set_up", "base_missing", "agent_not_stopped", "out_of_scope", "other"] as const;
+export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", "pin_failed", "protected_unreadable", "protected_changed", "not_restored", "start_failed", "not_set_up", "base_missing", "agent_not_stopped", "out_of_scope", "no_change", "other"] as const;
 export type CheckNotRunReason = (typeof CHECK_NOT_RUN_REASONS)[number];
 /** The closed code for a word off the wire or out of a row: a known code as it is, anything else `other`. */
 export const checkNotRunReason = (word: unknown): CheckNotRunReason => (typeof word === "string" && (CHECK_NOT_RUN_REASONS as readonly string[]).includes(word) ? (word as CheckNotRunReason) : "other");

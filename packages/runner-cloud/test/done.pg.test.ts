@@ -503,6 +503,45 @@ describe("done route [pg]", () => {
       });
     });
 
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the reason `no_change` (no exit status, no cap kill) says the runner skipped the check because the round's branch tip is still its start commit. The cloud reads the branch itself:
+    // no new commit takes the ordinary no_commit path; a commit it finds anyway never succeeds without its check. It is never a pass.
+    describe("a no-change hint from the runner (no_change)", () => {
+      const BR = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+      const hint = (over: Partial<DoneCheck> = {}): DoneCheck => ({ exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: "the check was not run: the agent made no commit on this round", reason: "no_change", ...over });
+      const callWith = (s: Scene, check: DoneCheck) => s.call({ body: { run_id: s.runId, lease_generation: s.gen, check } });
+
+      it("a fix round whose head did not move takes the existing no_commit path, with no pull request, the hint stored as the check", async () => {
+        const s = await scene({ continues: { branch: BR }, dispatchBase: "c".repeat(40), branchOid: "c".repeat(40), aheadBy: 1, check: APPROVED });
+        expect(parsedDone(await callWith(s, hint()))).toEqual({ continue: false, outcome: "failed", failure_reason: "no_commit", pr_number: null });
+        expect(s.repo.pulls).toHaveLength(0);
+        expect(finished[0]!.check).toEqual(hint());
+      });
+
+      it("a branch with no commit ahead of the base is no_commit as well", async () => {
+        const s = await scene({ check: APPROVED, aheadBy: 0 });
+        expect(parsedDone(await callWith(s, hint())).failure_reason).toBe("no_commit");
+        expect(s.repo.pulls).toHaveLength(0);
+      });
+
+      it("a branch that does show a commit is never succeeded on a check that did not run: check_failed, no pull request, the branch recorded", async () => {
+        const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+        expect(parsedDone(await callWith(s, hint()))).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect(s.repo.pulls).toHaveLength(0);
+        expect(verdictOf()).toEqual({ outcome: "failed", failureReason: "check_failed", prNumber: null, branch: s.branch });
+        expect(finished[0]!.check).toEqual(hint());
+      });
+
+      it("it is not read as a hint when anything else is off: an exit status or a cap kill keeps the early check_failed with GitHub never asked", async () => {
+        for (const bad of [hint({ exit_code: 0 }), hint({ exit_code: 1 }), hint({ timed_out: true, duration_ms: 5_400_000 })]) {
+          const s = await scene({ check: APPROVED, files: [file("src/app.ts")] });
+          const res = await callWith(s, bad);
+          if (res.status === 400) continue;
+          expect(parsedDone(res), JSON.stringify(bad)).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+          expect(labels(s.fake), JSON.stringify(bad)).toEqual([]);
+        }
+      });
+    });
+
     it("a runner that sends no reason is judged as before: a failing exit records no reason, a pass still passes", async () => {
       const failing = await scene({ check: APPROVED });
       await failing.call({ body: { run_id: failing.runId, lease_generation: failing.gen, check: report({ exit_code: 1 }) } });
@@ -657,6 +696,17 @@ describe("done route [pg]", () => {
   describe("the fix round a confirmed Replace started, with no new commit", () => {
     const BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
     const unmoved = { continues: { branch: BRANCH }, dispatchBase: "c".repeat(40), branchOid: "c".repeat(40), aheadBy: 1 } as const;
+
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: a Replace round's job names no round kind, so its runner runs the check and a pass still succeeds; a no_change hint on it (which a runner never sends for it) is never read as a pass.
+    it("with a check in its job: a passing check on the unchanged head still succeeds, and a no_change hint is check_failed, never a success", async () => {
+      const APPROVED: Check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+      const report = (): DoneCheck => ({ exit_code: 0, duration_ms: 41 * 60_000, timed_out: false, skipped_tests: 3, summary: "ok" });
+      const passing = await scene({ ...unmoved, replaceRound: true, attempt: "updated", check: APPROVED });
+      expect(parsedDone(await passing.call({ body: { run_id: passing.runId, lease_generation: passing.gen, check: report() } }))).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+      const hinted = await scene({ ...unmoved, replaceRound: true, attempt: "updated", check: APPROVED });
+      const noChange: DoneCheck = { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: "the check was not run: the agent made no commit on this round", reason: "no_change" };
+      expect(parsedDone(await hinted.call({ body: { run_id: hinted.runId, lease_generation: hinted.gen, check: noChange } }))).toMatchObject({ outcome: "failed", failure_reason: "check_failed", pr_number: null });
+    });
 
     it("ends succeeded with the pull request for the existing head, recording the branch and head", async () => {
       const s = await scene({ ...unmoved, replaceRound: true, attempt: "updated" });
