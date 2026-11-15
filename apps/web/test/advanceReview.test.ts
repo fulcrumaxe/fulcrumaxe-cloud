@@ -20,7 +20,7 @@ vi.mock("@fx/pipeline", async (original) => ({
   readItemRecordedPullRequest: mocks.readItemRecordedPullRequest,
 }));
 
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { GATE1_STATUS_DOCUMENTS } from "@fx/runner-cloud";
 import { createReviewDeps } from "../lib/advanceReview";
 import { readRepoAppLogin } from "../lib/github/installationHttp";
@@ -69,7 +69,7 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
     const { pool } = fakePool(true);
     await createReviewDeps(async () => ({}) as never).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
     const gateDeps = mocks.runMergeGateForItem.mock.calls[0]![0] as { queueDocuments?: { read: string; enqueue: string; autoMerge: string; dequeue: string; entry: string } };
-    expect(gateDeps.queueDocuments).toEqual({ read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT });
+    expect(gateDeps.queueDocuments).toEqual({ read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT, enqueueJump: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT });
     // Not empty strings or look-alikes: each is a real document.
     expect(gateDeps.queueDocuments!.read).toContain("mergeQueue");
     expect(gateDeps.queueDocuments!.enqueue).toContain("enqueuePullRequest");

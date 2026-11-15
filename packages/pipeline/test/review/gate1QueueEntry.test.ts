@@ -314,3 +314,51 @@ describe("listQueueEntryCandidates: the re-check after a pull request leaves the
     expect(t.posts()).toEqual([]);
   });
 });
+
+describe("TWO-LANE-QUEUE: the re-check across a jump (GitHub rebuilds every entry; entry commits and bases change)", () => {
+  const REPOS = new Set(["acme/widgets-public"]);
+  const E12J = "b2".repeat(20);
+  const E11J = "b1".repeat(20);
+
+  it("a cloud entry behind a team pull request waits; after it jumps, its rebuilt entry commit is attested once from its own checks, and the old commit is never posted on", async () => {
+    // PR 11 is a team pull request (no fx-gate1 of ours); PR 12 is the cloud's, queued behind it.
+    const t = world({ heads: { [H11]: null, [H12]: {}, [H13]: null } });
+    expect(await t.run()).toEqual({ kind: "wait", reason: "group_head_unattested" });
+    expect(t.posts()).toEqual([]);
+
+    // PR 12 jumps: it is first now, on main's tip, with a NEW entry commit, and PR 11 is rebuilt on top of it.
+    t.g1.queues!.main = [
+      { position: 1, entryOid: E12J, baseOid: MAIN, prNumber: 12, prHead: H12 },
+      { position: 2, entryOid: E11J, baseOid: E12J, prNumber: 11, prHead: H11 },
+    ];
+    t.s.checks![E12J] = green();
+    const list = await listQueueEntryCandidates(t.fake.http, { repos: REPOS, owner: "acme", name: "widgets-public", base: "main" });
+    expect(list).toEqual([
+      { prNumber: 12, baseSha: MAIN, entrySha: E12J },
+      { prNumber: 11, baseSha: E12J, entrySha: E11J },
+    ]);
+    const c = list.find((x) => x.prNumber === 12)!;
+    // The re-check (what the webhook runs for each candidate) posts on the REBUILT commit, from that commit's own five checks.
+    expect(await t.run({ baseSha: c.baseSha, entrySha: c.entrySha })).toEqual({ kind: "posted", state: "success" });
+    expect(t.s.posts.filter((p) => p.sha === E12J)).toHaveLength(1);
+    // A replay (a second delivery, or a concurrent one) posts nothing more.
+    expect(await t.run({ baseSha: c.baseSha, entrySha: c.entrySha })).toEqual({ kind: "already" });
+    expect(t.s.posts.filter((p) => p.sha === E12J)).toHaveLength(1);
+    // A late wake about the OLD commit of the same pull request is not an entry any more: nothing is posted on it.
+    expect(await t.run()).toEqual({ kind: "wait", reason: "entry_not_queued" });
+    expect(t.posts()).toEqual([]);
+  });
+
+  it("a team entry rebuilt behind the jumped cloud entry is never posted on by the cloud (its fx-gate1 is the team watcher's)", async () => {
+    const t = world({ heads: { [H11]: null, [H12]: {}, [H13]: null } });
+    t.g1.queues!.main = [
+      { position: 1, entryOid: E12J, baseOid: MAIN, prNumber: 12, prHead: H12 },
+      { position: 2, entryOid: E11J, baseOid: E12J, prNumber: 11, prHead: H11 },
+    ];
+    t.s.checks![E12J] = green();
+    t.s.checks![E11J] = green();
+    // PR 11's own head is not ours: the group check for it is unmet, so the attester waits and posts nothing on E11J.
+    expect(await t.run({ prNumber: 11, baseSha: E12J, entrySha: E11J })).toEqual({ kind: "wait", reason: "group_head_unattested" });
+    expect(t.s.posts.filter((p) => p.sha === E11J)).toEqual([]);
+  });
+});

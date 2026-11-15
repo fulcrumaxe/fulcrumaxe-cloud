@@ -2,8 +2,8 @@ import type { Pool } from "pg";
 import { reverifyRefusedPush, type AdvanceReviewDeps } from "@fx/worker";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { settleAuthorizedOrder } from "@fx/runner-cloud";
-import { createCiGate, parseGate1AttestRepos, readPublicPullRequest, type PublicPullRequestLookup, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
+import { createCiGate, parseGate1AttestRepos, parseQueueJumpSettings, readPublicPullRequest, type PublicPullRequestLookup, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
@@ -56,6 +56,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
   const openPublicHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }, { withoutMerge: true, gate1Attest: true }) as Promise<GitHubHttp>;
   // FX_GATE1_ATTEST_REPOS, read once when the worker is built: a malformed value throws here, so the worker does not start (unset: off, no attester call).
   const gate1 = { repos: parseGate1AttestRepos(process.env.FX_GATE1_ATTEST_REPOS), ourLogin: readRepoAppLogin };
+  // TWO-LANE-QUEUE: FX_QUEUE_JUMP (default on; `off` turns it off) and FX_QUEUE_JUMP_MIN_MINUTES, read once here. A jump is only ever asked for in a repository listed above.
+  const queueJump = parseQueueJumpSettings(process.env, gate1.repos);
   return {
     async load(pool, accountId, workItemId) {
       const r = await loadReviewContext(pool, accountId, workItemId);
@@ -118,7 +120,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
             pool,
             http,
             // D#694 B5 and B6-1: the five documents the hosted merge client pins (@fx/github); the pipeline package does not depend on it.
-            queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT },
+            queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT, enqueueJump: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT },
+            queueJump,
             localReviewOptIn: createPgLocalReviewOptIn(pool),
             // D#598 P1d-1: who the platform merges for (its own App bots, the intake allowlist); the merge queue's tick reaches the gate through here.
             authorTrust: mergeGateAuthorTrust,

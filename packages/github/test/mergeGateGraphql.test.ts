@@ -2,10 +2,10 @@ import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ENQUEUE_PULL_REQUEST_DOCUMENT as RUNNER_ENQUEUE_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT as RUNNER_QUEUE_READ_DOCUMENT } from "@fulcrumaxe/runner-protocol/planePush";
+import { ENQUEUE_PULL_REQUEST_DOCUMENT as RUNNER_ENQUEUE_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT as RUNNER_ENQUEUE_JUMP_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT as RUNNER_QUEUE_READ_DOCUMENT } from "@fulcrumaxe/runner-protocol/planePush";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
 import { createInstallationHttp, InstallationHttpError, type InstallationHttpKind } from "../src/installationHttp.js";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_GATE_GRAPHQL_MAX_BYTES, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_GATE_GRAPHQL_MAX_BYTES, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../src/mergeGateGraphql.js";
 
 /** D#694 B5a: the pinned-document GraphQL allowance, through the real client and a local HTTP server (the call log is the server's own). */
 const TARGET = { repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets" };
@@ -49,6 +49,7 @@ async function setup() {
 type Doc = { query: string; variables: Record<string, unknown> };
 const read: Doc = { query: MERGE_QUEUE_READ_DOCUMENT, variables: { owner: "acme", name: "widgets", branch: "main" } };
 const enqueue: Doc = { query: ENQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH", expectedHeadOid: OID } };
+const jump: Doc = { query: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH", expectedHeadOid: OID } };
 const auto: Doc = { query: ENABLE_AUTO_MERGE_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH", expectedHeadOid: OID, mergeMethod: "SQUASH" } };
 const dequeue: Doc = { query: DEQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH" } };
 const entry: Doc = { query: MERGE_QUEUE_ENTRY_DOCUMENT, variables: { owner: "acme", name: "widgets", number: 7 } };
@@ -60,9 +61,9 @@ const without = (d: Doc, key: string): Doc => {
   return { query: d.query, variables };
 };
 
-describe("the six pinned documents (snapshot: changing one is a reviewed edit)", () => {
+describe("the seven pinned documents (snapshot: changing one is a reviewed edit)", () => {
   it("are exactly these strings", () => {
-    expect([MERGE_QUEUE_READ_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT]).toMatchInlineSnapshot(`
+    expect([MERGE_QUEUE_READ_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT]).toMatchInlineSnapshot(`
       [
         "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }",
         "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id position } } }",
@@ -70,6 +71,7 @@ describe("the six pinned documents (snapshot: changing one is a reviewed edit)",
         "mutation($pullRequestId: ID!) { dequeuePullRequest(input: { id: $pullRequestId }) { mergeQueueEntry { id } } }",
         "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }",
         "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { __typename } beforeCommit { oid } } } } } } }",
+        "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, jump: true }) { mergeQueueEntry { id position } } }",
       ]
     `);
   });
@@ -80,6 +82,7 @@ describe("the runner's copies of the queue documents", () => {
   it("are byte-equal to the pinned originals", () => {
     expect(RUNNER_QUEUE_READ_DOCUMENT).toBe(MERGE_QUEUE_READ_DOCUMENT);
     expect(RUNNER_ENQUEUE_DOCUMENT).toBe(ENQUEUE_PULL_REQUEST_DOCUMENT);
+    expect(RUNNER_ENQUEUE_JUMP_DOCUMENT).toBe(ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT);
   });
 });
 
@@ -98,7 +101,7 @@ describe("the size cap", () => {
 });
 
 describe("merge_gate POST /graphql allowance", () => {
-  it.each([["mergeQueue read", read], ["enqueuePullRequest", enqueue], ["enablePullRequestAutoMerge", auto], ["dequeuePullRequest", dequeue], ["mergeQueueEntry read", entry], ["removal event read", removal]])("lets %s through to the server unchanged", async (_n, body) => {
+  it.each([["mergeQueue read", read], ["enqueuePullRequest", enqueue], ["enqueuePullRequest with jump", jump], ["enablePullRequestAutoMerge", auto], ["dequeuePullRequest", dequeue], ["mergeQueueEntry read", entry], ["removal event read", removal]])("lets %s through to the server unchanged", async (_n, body) => {
     const { open, calls } = await setup();
     const http = await open("merge_gate", TARGET);
     const res = await http.request({ method: "POST", path: "/graphql", body });
@@ -122,6 +125,10 @@ describe("merge_gate POST /graphql allowance", () => {
     ["a top-level extensions key", { body: { ...enqueue, extensions: {} } }],
     ["a missing variables key", { body: { query: enqueue.query } }],
     ["an unknown variable (enqueue)", { body: withVars(enqueue, { extra: "x" }) }],
+    ["a jump variable on the plain enqueue", { body: withVars(enqueue, { jump: true }) }],
+    ["a jump variable on the jump document (the flag is in the text, not a variable)", { body: withVars(jump, { jump: false }) }],
+    ["the jump document with a malformed head", { body: withVars(jump, { expectedHeadOid: "abc" }) }],
+    ["the jump flag flipped to false in the text", { body: { ...jump, query: jump.query.replace("jump: true", "jump: false") } }],
     ["an unknown variable (read)", { body: withVars(read, { extra: "x" }) }],
     ["a missing pullRequestId", { body: without(enqueue, "pullRequestId") }],
     ["a missing expectedHeadOid (enqueue)", { body: without(enqueue, "expectedHeadOid") }],

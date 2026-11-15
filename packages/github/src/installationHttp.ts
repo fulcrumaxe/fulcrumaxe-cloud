@@ -281,7 +281,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         const req = { method: method as typeof raw.method, path, query: queryText, body: snapBody };
         const graphql = (kind === "runner_pr" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         // `revert_pr` may name `/graphql` too, but only the one exact mutation checked below.
-        // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of six pinned documents (mergeGateGraphql.ts); never a blanket flag.
+        // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of seven pinned documents (mergeGateGraphql.ts); never a blanket flag.
         // D#694 B7-2: the hosted `read` client may send the one queue read (MERGE_QUEUE_READ_DOCUMENT) and no other document, with the same checks.
         const pinnedBody = (kind === "merge_gate" || kind === "read") && req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined ? (kind === "merge_gate" ? pinnedMergeGateBody : pinnedMergeQueueReadBody)(req.body, { owner: target.owner, name: target.name }) : undefined;
         const pinnedGate = pinnedBody !== undefined;

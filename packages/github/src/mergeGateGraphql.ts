@@ -1,16 +1,23 @@
 import { GH_OWNER_LOGIN_RE } from "./eventMapper.js";
 
 /**
- * D#694 B5a, B6-1 and B6-6: the six GraphQL documents the hosted `merge_gate` client may send, and the shape check for each one's variables.
+ * D#694 B5a, B6-1 and B6-6: the seven GraphQL documents the hosted `merge_gate` client may send, and the shape check for each one's variables.
  *
  * Threat model: a compromised or buggy caller of the hosted merge client tries to send an arbitrary GraphQL document with the
  * installation's write token. So the client (installationHttp.ts) lets `POST /graphql` through only when the `query` is `===` one of
  * these literal strings (no trimming, no parsing) and the variables pass that document's check below, with no extra keys.
- * Changing a document is a visible edit: the snapshot test pins all six.
+ * Changing a document is a visible edit: the snapshot test pins all seven.
  */
 export const MERGE_QUEUE_READ_DOCUMENT = "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }";
 export const ENQUEUE_PULL_REQUEST_DOCUMENT =
   "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id position } } }";
+/**
+ * TWO-LANE-QUEUE: the enqueue with `jump: true`, which puts the pull request at the front of the queue. A document of its own, with the flag fixed in the text
+ * and not a variable, so the pinned client can only ever send `true` and a plain enqueue can never be turned into a jump by a variable. GitHub rebuilds every
+ * in-progress entry behind a jump. The port sends it for the cloud's own pull requests only, when its switch is on and the per-repository throttle allows.
+ */
+export const ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT =
+  "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, jump: true }) { mergeQueueEntry { id position } } }";
 export const ENABLE_AUTO_MERGE_DOCUMENT =
   "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, mergeMethod: $mergeMethod }) { pullRequest { id } } }";
 /** D#694 B6-1: take one pull request out of the merge queue (`DequeuePullRequestInput.id` is the pull request's node id). Nothing calls it yet. */
@@ -45,6 +52,7 @@ const keysAre = (v: Record<string, unknown>, keys: string): boolean => {
 const CHECKS: ReadonlyMap<string, (v: Record<string, unknown>) => boolean> = new Map([
   [MERGE_QUEUE_READ_DOCUMENT, (v) => keysAre(v, "branch,name,owner") && str(v["owner"], GH_OWNER_LOGIN_RE) && str(v["name"], NAME_RE) && typeof v["branch"] === "string" && v["branch"].length >= 1 && v["branch"].length <= 255 && !CONTROL_RE.test(v["branch"])],
   [ENQUEUE_PULL_REQUEST_DOCUMENT, (v) => keysAre(v, "expectedHeadOid,pullRequestId") && str(v["pullRequestId"], NODE_ID_RE) && str(v["expectedHeadOid"], OID_RE)],
+  [ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, (v) => keysAre(v, "expectedHeadOid,pullRequestId") && str(v["pullRequestId"], NODE_ID_RE) && str(v["expectedHeadOid"], OID_RE)],
   [DEQUEUE_PULL_REQUEST_DOCUMENT, (v) => keysAre(v, "pullRequestId") && str(v["pullRequestId"], NODE_ID_RE)],
   [MERGE_QUEUE_ENTRY_DOCUMENT, (v) => keysAre(v, "name,number,owner") && str(v["owner"], GH_OWNER_LOGIN_RE) && str(v["name"], NAME_RE) && typeof v["number"] === "number" && Number.isSafeInteger(v["number"]) && v["number"] >= 1],
   [MERGE_QUEUE_REMOVAL_DOCUMENT, (v) => keysAre(v, "name,number,owner") && str(v["owner"], GH_OWNER_LOGIN_RE) && str(v["name"], NAME_RE) && typeof v["number"] === "number" && Number.isSafeInteger(v["number"]) && v["number"] >= 1],

@@ -6,3 +6,9 @@
 export const MERGE_QUEUE_READ_DOCUMENT = "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }";
 export const ENQUEUE_PULL_REQUEST_DOCUMENT =
   "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id position } } }";
+/**
+ * TWO-LANE-QUEUE: the jumping enqueue, held byte-equal to `@fulcrumaxe/github`'s `ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT` by the same test. The runner never sends it: it is here so
+ * the cloud's fence for a `runner_local` repository (which refuses every write document) can be tested against the exact string, and so nobody adds a second copy.
+ */
+export const ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT =
+  "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, jump: true }) { mergeQueueEntry { id position } } }";

@@ -2,9 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { applyQueueEvent } from "../../src/mergeQueue/index.js";
+import { parseQueueJumpSettings } from "../../src/review/queueJump.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { runMergeGateForItem, type Gate1StatusCheck } from "../../src/review/mergeGateRun.js";
 import { ACTIONS_APP_ID, GATE1_DESCRIPTIONS, GATE1_WORKFLOW_CONTEXTS } from "../../src/review/gate1Attest.js";
@@ -946,5 +947,43 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1e: a hosted cloud item counts fx-gate1 on
     const broken = await posted(AGENT);
     await expect(broken.run({ ...LISTED, ourLogin: async () => Promise.reject(new Error("no installation")) })).rejects.toThrow();
     expect(broken.w.pub.merges).toEqual([]);
+  });
+});
+
+describe("TWO-LANE-QUEUE: a paired item's jump is decided on the repository that merges (the public one), not the private one", () => {
+  const docs = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, enqueueJump: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
+  const enqueueWith = async (listed: string[]) => {
+    clearMergeQueueModeCache();
+    const w = await world();
+    w.pub.mergeQueue = { exists: true, jumpAllowed: true, mutations: [] };
+    w.pub.rulesetRules = [{ type: "merge_queue", enforcement: "active" }];
+    const out = await runMergeGateForItem(
+      {
+        pool: h.runWriterPool,
+        authorTrust: BOT_TRUST,
+        http: fakeGitHubRest(w.priv),
+        queueDocuments: docs,
+        queueJump: parseQueueJumpSettings({}, new Set(listed)),
+        publicPlane: { open: async () => fakeGitHubRest(w.pub), read: readPublicPullRequest(h.runWriterPool) },
+      },
+      { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+    );
+    const facts = (await h.admin.query<{ reasons: string[] }>("SELECT reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued'", [w.workItemId])).rows;
+    return { w, out, facts };
+  };
+
+  it("only the public repository (the merge target) is listed: the item jumps, on the public queue", async () => {
+    const { w, out, facts } = await enqueueWith(["acme/widgets-public"]);
+    expect(out).toMatchObject({ outcome: "merge_enqueued" });
+    expect(w.pub.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue_jump"]);
+    expect(w.priv.mergeQueue?.mutations ?? []).toEqual([]);
+    expect(facts).toEqual([{ reasons: ["queue_jump"] }]);
+  });
+
+  it("only the private repository is listed: the item does not jump (a plain enqueue, no jump fact)", async () => {
+    const { w, out, facts } = await enqueueWith(["acme/widgets"]);
+    expect(out).toMatchObject({ outcome: "merge_enqueued" });
+    expect(w.pub.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue"]);
+    expect(facts).toEqual([{ reasons: [] }]);
   });
 });

@@ -4,10 +4,11 @@ import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents, listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
 import { queueAgainPending } from "@fx/core/src/work-items/queueIntent.js";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { applyQueueEvent } from "../../src/mergeQueue/index.js";
 import { recordMergeReceipt, runMergeGateForItem } from "../../src/review/mergeGateRun.js";
+import { parseQueueJumpSettings } from "../../src/review/queueJump.js";
 import { loadReviewContext, loadSpecText } from "../../src/review/context.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
@@ -517,6 +518,148 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
       [w.workItemId],
     );
     expect(rows).toEqual([{ code: "queue", head_sha: HEAD, pr_number: 41, queue_entry_id: "MQE_kwDOfake1" }]);
+  });
+
+  describe("TWO-LANE-QUEUE: the cloud's own pull request jumps to the front", () => {
+    const jumpOf = (_w: World, env: { FX_QUEUE_JUMP?: string; FX_QUEUE_JUMP_MIN_MINUTES?: string } = {}, listed = true) =>
+      parseQueueJumpSettings(env, new Set(listed ? ["acme/widgets"] : ["someone/else"]));
+    const queuedJump = (w: World, queueJump: ReturnType<typeof parseQueueJumpSettings> | undefined) =>
+      runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), queueDocuments: { ...queueDocuments, enqueueJump: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT }, ...(queueJump !== undefined ? { queueJump } : {}) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    /** A second work item of the same repository (an earlier cloud pull request). */
+    const seedSecondItem = async (w: World): Promise<string> => {
+      const { workItemId } = await discussingItem(h.runWriterPool, w.accountId, { title: "Earlier change", body: "Something earlier.", category: "feature", repoId: w.repoId });
+      await h.admin.query("UPDATE work_items SET gh_number = 8, repo_id = $2 WHERE id = $1", [workItemId, w.repoId]);
+      return workItemId;
+    };
+    const enqueueFacts = async (w: World) => (await h.admin.query<{ code: string; reasons: string[] }>("SELECT code, reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued' ORDER BY seq", [w.workItemId])).rows;
+
+    it("a cloud PR enqueues with the jump from the App the ruleset lets bypass; the fact records queue_jump, the entries in progress are rebuilt, nothing is merged directly", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true, inProgress: 2 }) });
+      await passBoth(w);
+      expect(await queuedJump(w, jumpOf(w))).toMatchObject({ outcome: "merge_enqueued", headSha: HEAD });
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue_jump"]);
+      expect(w.gh.mergeQueue!.rebuilt).toBe(2);
+      expect(w.gh.merges).toEqual([]);
+      expect(await enqueueFacts(w)).toEqual([{ code: "queue", reasons: ["queue_jump"] }]);
+    });
+
+    it("the switch off: a plain enqueue, no jump asked for, and the fact carries no jump reason", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      await queuedJump(w, jumpOf(w, { FX_QUEUE_JUMP: "off" }));
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue"]);
+      expect(await enqueueFacts(w)).toEqual([{ code: "queue", reasons: [] }]);
+    });
+
+    it("a repository that is not listed (a customer's): a plain enqueue", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      await queuedJump(w, jumpOf(w, {}, false));
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue"]);
+    });
+
+    it("no jump rule wired (every other caller of the gate): a plain enqueue", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      await queuedJump(w, undefined);
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue"]);
+    });
+
+    it("GitHub refuses the jump: the pull request is enqueued at the back, the fact records jump_refused and the refusal is reported in the closed set", async () => {
+      vi.mocked(reportError).mockClear();
+      const w = await world({ repo: withQueue({ jumpAllowed: false }) });
+      await passBoth(w);
+      expect(await queuedJump(w, jumpOf(w))).toMatchObject({ outcome: "merge_enqueued" });
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue_jump", "enqueue"]);
+      expect(await enqueueFacts(w)).toEqual([{ code: "queue", reasons: ["jump_refused"] }]);
+      expect(vi.mocked(reportError)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: "merge_queue_jump_refused" }));
+      // A refused jump rebuilt nothing, so it does not start the throttle window: no queue_jump fact exists for the repository.
+      expect((await h.admin.query("SELECT 1 FROM work_item_driver_events WHERE kind = 'merge_enqueued' AND 'queue_jump' = ANY(reasons) AND account_id = $1", [w.accountId])).rows).toEqual([]);
+    });
+
+    it("the throttle: a jump fact of the repository inside the window holds the next one back (a plain enqueue, jump_throttled); outside the window it jumps again", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      // An earlier cloud pull request of the same repository jumped 10 minutes ago.
+      const earlier = await seedSecondItem(w);
+      await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', 'earlier', 'queue', ARRAY['queue_jump'], $3, 99)", [w.accountId, earlier, "e".repeat(40)]);
+      await h.admin.query("UPDATE work_item_driver_events SET created_at = now() - interval '10 minutes' WHERE work_item_id = $1 AND dedupe_key = 'earlier'", [earlier]);
+      await queuedJump(w, jumpOf(w));
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue"]);
+      expect(await enqueueFacts(w)).toEqual([{ code: "queue", reasons: ["jump_throttled"] }]);
+
+      // Outside the window (the same fact, 2 hours old): the next one jumps.
+      const w2 = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w2);
+      const e2 = await seedSecondItem(w2);
+      await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', 'earlier', 'queue', ARRAY['queue_jump'], $3, 99)", [w2.accountId, e2, "e".repeat(40)]);
+      await h.admin.query("UPDATE work_item_driver_events SET created_at = now() - interval '2 hours' WHERE work_item_id = $1 AND dedupe_key = 'earlier'", [e2]);
+      await queuedJump(w2, jumpOf(w2));
+      expect(w2.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue_jump"]);
+    });
+
+    it("the throttle is per repository: a jump of another repository does not hold this one back", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      const w3 = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', 'elsewhere', 'queue', ARRAY['queue_jump'], $3, 98)", [w3.accountId, w3.workItemId, "f".repeat(40)]);
+      await queuedJump(w, jumpOf(w));
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue_jump"]);
+    });
+
+    it("the throttle is per repository INSIDE one account: a recent jump in repository A does not hold repository B back (the repository filter of the throttle query is under test)", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      // Repository A of the same account: another cloud pull request jumped there a minute ago.
+      const repoA = randomUUID();
+      await seedRepo(h.admin, w.accountId, repoA);
+      await h.admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'gadgets' WHERE id = $1", [repoA]);
+      const { workItemId } = await discussingItem(h.runWriterPool, w.accountId, { title: "Gadget change", body: "Something in the other repository.", category: "feature", repoId: repoA });
+      await h.admin.query("UPDATE work_items SET gh_number = 9, repo_id = $2 WHERE id = $1", [workItemId, repoA]);
+      await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', 'gadgets', 'queue', ARRAY['queue_jump'], $3, 97)", [w.accountId, workItemId, "d".repeat(40)]);
+      await queuedJump(w, jumpOf(w));
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue_jump"]);
+      expect(await enqueueFacts(w)).toEqual([{ code: "queue", reasons: ["queue_jump"] }]);
+    });
+
+    it("the jump is on record before the lease is freed: a gate that takes the lease right after the release is throttled, so two gates in a row cannot both jump", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      // A second cloud pull request of the same repository, ready at the same moment (its own fake of the same repository, its own reviews).
+      const second = await seedSecondItem(w);
+      await h.admin.query("UPDATE work_items SET stage = 'pr_opened', provenance = 'internal' WHERE id = $1", [second]);
+      const body = "1. The footer shows the year.";
+      await h.admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, $3, $4, 'system')", [w.accountId, second, body, createHash("sha256").update(body).digest("hex")]);
+      const w2: World = { ...w, workItemId: second, gh: freshRepo({ headSha: HEAD, checks: { [HEAD]: [] }, ...withQueue({ jumpAllowed: true }) }) };
+      await passBoth(w2);
+      // What the database holds the moment the lease row is freed: a probe in the same transaction as the release.
+      await h.admin.query("CREATE TABLE lease_probe (jumps int)");
+      await h.admin.query(
+        `CREATE FUNCTION lease_probe_fn() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN INSERT INTO lease_probe SELECT count(*) FROM work_item_driver_events WHERE account_id = OLD.account_id AND kind = 'merge_enqueued' AND 'queue_jump' = ANY(reasons); RETURN OLD; END $$`,
+      );
+      await h.admin.query("CREATE TRIGGER lease_probe_t AFTER DELETE ON repo_merge_leases FOR EACH ROW EXECUTE FUNCTION lease_probe_fn()");
+      try {
+        await queuedJump(w, jumpOf(w));
+        expect((await h.admin.query<{ jumps: number }>("SELECT jumps FROM lease_probe")).rows).toEqual([{ jumps: 1 }]);
+        // The gate that follows the release finds the first jump on record.
+        await queuedJump(w2, jumpOf(w2));
+      } finally {
+        await h.admin.query("DROP TRIGGER lease_probe_t ON repo_merge_leases");
+        await h.admin.query("DROP FUNCTION lease_probe_fn()");
+        await h.admin.query("DROP TABLE lease_probe");
+      }
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue_jump"]);
+      expect(w2.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue"]);
+      expect(await enqueueFacts(w2)).toEqual([{ code: "queue", reasons: ["jump_throttled"] }]);
+    });
+
+    it("the facts of an enqueue keep their order (the gate's own fact, then the enqueue) now that the enqueue is recorded under the lease", async () => {
+      const w = await world({ repo: withQueue({ jumpAllowed: true }) });
+      await passBoth(w);
+      await queuedJump(w, jumpOf(w));
+      expect((await events(w)).map((e) => e.kind)).toEqual(["review_status", "merge_gate", "merge_enqueued"]);
+    });
+
   });
 
   it("migration 0990: the enqueue fact names the dial version the gate read, which the receipt written later uses", async () => {

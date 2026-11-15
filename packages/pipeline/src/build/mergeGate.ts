@@ -225,12 +225,18 @@ export type MergeQueueMode = {
 };
 
 /**
+ * TWO-LANE-QUEUE: how a jump went. `applied`: the entry was placed at the front. `refused`: a jump was asked for, GitHub refused it, and the retry without jump
+ * put the pull request at the back of the queue (the rule is still enforced; the pull request only lost its place). Absent: no jump was asked for.
+ */
+export type QueueJump = "applied" | "refused";
+
+/**
  * D#694 B5: what the enqueue call answered. `via: "queue"` carries the entry GitHub made; `via: "auto_merge"` is the fallback taken only when the queue call itself was
  * refused for the app's permissions (GitHub names no entry then). `head_moved`: GitHub said the head is not the one sent. `unavailable`: the app may not enqueue and
  * may not switch on auto-merge either. Any other failure throws (the workflow step retries).
  */
 export type EnqueueOutcome =
-  | { enqueued: true; via: "queue"; entryId: string; position: number | null }
+  | { enqueued: true; via: "queue"; entryId: string; position: number | null; jump?: QueueJump }
   | { enqueued: true; via: "auto_merge"; entryId: null; position: null }
   | { enqueued: false; reason: "head_moved" | "unavailable" };
 
@@ -292,7 +298,7 @@ export interface MergeGateGitHubPort {
   /** D#694 B6-3: the merge mode of the pull request's base branch and the batch size of its queue (1 when unreadable), for the product queue's in-flight bound. */
   getMergeQueueInfo?(pr: PullRequestRef): Promise<{ mode: MergeQueueMode["mode"]; maxEntries: number }>;
   /** D#694 B5: puts the pull request in the merge queue, bound to `expectedHeadOid` (GitHub refuses if the head is any other commit). Only called when the mode is `queue`. */
-  enqueuePullRequest?(pr: PullRequestRef, args: { expectedHeadOid: string }): Promise<EnqueueOutcome>;
+  enqueuePullRequest?(pr: PullRequestRef, args: { expectedHeadOid: string; jump?: boolean }): Promise<EnqueueOutcome>;
   /** D#694 B6-1 (inert): takes the pull request out of the merge queue. Not called by the gate. */
   dequeuePullRequest?(pr: PullRequestRef): Promise<DequeueOutcome>;
   /** D#694 B6-1 (inert): the pull request and its queue entry now. Not called by the gate. */
@@ -345,6 +351,18 @@ export interface MergeGateDeps {
    * Absent, a throw, or an unreadable list is `true` (the lease is held).
    */
   addsOrderedFile?(input: { accountId: string; workItemId: string; pr: PullRequestRef }): Promise<boolean>;
+  /**
+   * TWO-LANE-QUEUE: whether this pull request asks for the front of GitHub's merge queue. `jump`: ask for it. `throttled`: the rule would allow a jump but the
+   * repository's last one is too recent (the pull request is enqueued at the back and the fact says why). `none`: no jump (switch off, repository not eligible).
+   * Only the cloud's own gate has this dep: a team pull request never passes through here. Absent, or a throw: `none`.
+   */
+  queueJump?(pr: PullRequestRef): Promise<"jump" | "throttled" | "none">;
+  /**
+   * TWO-LANE-QUEUE: called right after GitHub took the entry, while the repository's merge lease is still held (the lease is freed in `runMergeGate`'s `finally`, after this returns).
+   * The composition root writes the `merge_enqueued` fact here, so the jump throttle can see a jump before any other gate can take the lease. A throw propagates like any port error
+   * (the step retries); a fact that is never written (the process dies between the enqueue and the write) leaves a jump the throttle cannot see, and is the one window this does not close.
+   */
+  onEnqueued?(result: Extract<MergeGateResult, { outcome: "merge_enqueued" }>): Promise<void>;
 }
 
 export interface MergeGateInput {
@@ -495,7 +513,7 @@ export type MergeGateResult =
   /** Two planes, `runner_local`: every condition was met and the merge was handed to the customer's runner (see `MergeCallOutcome`). Nothing merged, nothing marked. */
   | { outcome: "merge_delegated"; headSha: string }
   /** D#694 B5: the base branch is behind GitHub's merge queue and the pull request was put in it (bound to `headSha`). The merge itself is GitHub's, seen later. `entryId` and `position` are null for `via: "auto_merge"`. */
-  | { outcome: "merge_enqueued"; headSha: string; entryId: string | null; position: number | null; via: "queue" | "auto_merge" }
+  | { outcome: "merge_enqueued"; headSha: string; entryId: string | null; position: number | null; via: "queue" | "auto_merge"; jump?: QueueJump | "throttled" }
   | { outcome: "ready_human_merges"; headSha: string; reasons: MergeBlockReason[] }
   /** The PR is closed or already merged: nothing to gate, nothing marked
    * (a merged PR must never be labelled "ready, human merges"). */
@@ -1062,8 +1080,22 @@ async function readQueueMode(github: MergeGateGitHubPort, pr: PullRequestRef, ba
 /** D#694 B5: the one enqueue call, bound to the gated head. A moved head is classified from a re-read, as for the direct merge. */
 async function enqueueIntoQueue(deps: MergeGateDeps, pr: PullRequestRef, headSha: string): Promise<MergeGateResult> {
   if (deps.github.enqueuePullRequest === undefined) return markHuman(deps, pr, headSha, ["merge_queue_unavailable"]);
-  const out = await deps.github.enqueuePullRequest(pr, { expectedHeadOid: headSha });
-  if (out.enqueued) return { outcome: "merge_enqueued", headSha, entryId: out.entryId, position: out.position, via: out.via };
+  // TWO-LANE-QUEUE: ask for the front of the queue only when the composition root's rule says so. A rule that cannot answer is "no jump" (the plain enqueue is always safe).
+  let want: "jump" | "throttled" | "none" = "none";
+  if (deps.queueJump !== undefined) {
+    try {
+      want = await deps.queueJump(pr);
+    } catch {
+      // fx-swallow-ok: a jump rule that cannot be read means no jump; the pull request is enqueued at the back, which is what every other enqueue does
+    }
+  }
+  const out = await deps.github.enqueuePullRequest(pr, want === "jump" ? { expectedHeadOid: headSha, jump: true } : { expectedHeadOid: headSha });
+  if (out.enqueued) {
+    const jump = out.via === "queue" && out.jump !== undefined ? out.jump : want === "throttled" ? "throttled" : undefined;
+    const enqueued: Extract<MergeGateResult, { outcome: "merge_enqueued" }> = { outcome: "merge_enqueued", headSha, entryId: out.entryId, position: out.position, via: out.via, ...(jump !== undefined ? { jump } : {}) };
+    if (deps.onEnqueued !== undefined) await deps.onEnqueued(enqueued);
+    return enqueued;
+  }
   if (out.reason === "unavailable") return markHuman(deps, pr, headSha, ["merge_queue_unavailable"]);
   const after = await deps.github.getMergeability(pr, { gatedHeadSha: headSha });
   if (after.headSha !== headSha) {

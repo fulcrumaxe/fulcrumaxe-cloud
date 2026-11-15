@@ -1,4 +1,4 @@
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
 import type { GitHubHttp, GitHubHttpRequest, GitHubHttpResponse } from "../../../src/build/githubMergePort.js";
 import type { Gate1World } from "./fakeGitHubLocal.js";
 
@@ -124,7 +124,20 @@ export interface FakeRepoState {
     dequeue?: "ok" | "forbidden" | "not_queued";
     /** B6-1: the pull request's queue entry as the entry read reports it (default: none). A successful dequeue clears it. */
     entry?: { id: string; state: string; position: number | null } | null;
-    mutations: Array<{ kind: "enqueue" | "auto_merge" | "dequeue"; variables: Record<string, unknown> }>;
+    mutations: Array<{ kind: "enqueue" | "enqueue_jump" | "auto_merge" | "dequeue"; variables: Record<string, unknown> }>;
+    /**
+     * TWO-LANE-QUEUE: what GitHub does with `jump: true`. It enforces the contract the real host does: only an actor the ruleset lets bypass may jump, and anyone else gets
+     * the same FORBIDDEN answer as any refused write ("Resource not accessible by integration"). `jumpAllowed` (default false: no bypass) says whether the actor is a bypass actor.
+     * `jumpError` makes an allowed jump fail anyway with a non-permission error (a transient host error). A successful jump answers position 1 and counts the entries
+     * that were in progress in `rebuilt` (GitHub rebuilds all of them); a plain enqueue answers the next position and rebuilds nothing.
+     */
+    jumpAllowed?: boolean;
+    jumpError?: boolean;
+    /** The jumping document is answered with this non-200 status (a gateway error): the host never gets to say anything about the jump. */
+    jumpStatus?: number;
+    /** Entries already building when the next enqueue arrives. */
+    inProgress?: number;
+    rebuilt?: number;
     readFails?: boolean;
     /** B6-6: the newest REMOVED_FROM_MERGE_QUEUE_EVENT as GitHub's timeline answers (default: none). `removalFails` answers the removal read with a 502. */
     removal?: { createdAt: string; reason: string | null; actor: { __typename: string } | null; beforeCommit: { oid: string } | null };
@@ -303,7 +316,16 @@ export function fakeGitHubRest(s: FakeRepoState, opts: { gate1?: Gate1World } = 
           return json(200, { data: { dequeuePullRequest: { mergeQueueEntry: { id: removed.id } } } });
         }
         const auto = query.includes("enablePullRequestAutoMerge");
-        q.mutations.push({ kind: auto ? "auto_merge" : "enqueue", variables });
+        const jumping = query === ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT;
+        q.mutations.push({ kind: auto ? "auto_merge" : jumping ? "enqueue_jump" : "enqueue", variables });
+        if (jumping) {
+          if (q.jumpStatus !== undefined) return json(q.jumpStatus, { message: "Bad Gateway" });
+          if (q.jumpAllowed !== true) return json(200, { data: null, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] });
+          if (q.jumpError === true) return json(200, { data: null, errors: [{ type: "INTERNAL", message: "Something went wrong while executing your query." }] });
+          if (variables["expectedHeadOid"] !== s.headSha) return json(200, { data: null, errors: [{ type: "UNPROCESSABLE", message: "Head branch was modified. Review and try the merge again." }] });
+          q.rebuilt = (q.rebuilt ?? 0) + (q.inProgress ?? 0);
+          return json(200, { data: { enqueuePullRequest: { mergeQueueEntry: { id: "MQE_kwDOfake1", position: 1 } } } });
+        }
         const mode = auto ? (q.autoMerge ?? "ok") : (q.enqueue ?? "ok");
         if (mode === "forbidden") return json(200, { data: null, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] });
         if (variables["expectedHeadOid"] !== s.headSha || mode === "head_moved") return json(200, { data: null, errors: [{ type: "UNPROCESSABLE", message: "Head branch was modified. Review and try the merge again." }] });

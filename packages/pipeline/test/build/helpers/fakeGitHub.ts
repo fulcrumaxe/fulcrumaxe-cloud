@@ -69,11 +69,11 @@ export class FakeGitHub implements MergeGateGitHubPort {
   readonly ciQueries: string[] = [];
   readonly updateCalls: { expectedHeadSha: string }[] = [];
   readonly queueModeCalls: string[] = [];
-  readonly enqueueCalls: { expectedHeadOid: string }[] = [];
+  readonly enqueueCalls: { expectedHeadOid: string; jump?: true }[] = [];
   readonly dequeueCalls: number[] = [];
   readonly entryReads: number[] = [];
   getMergeQueueMode?: (pr: PullRequestRef, baseRef: string) => Promise<MergeQueueMode>;
-  enqueuePullRequest?: (pr: PullRequestRef, args: { expectedHeadOid: string }) => Promise<EnqueueOutcome>;
+  enqueuePullRequest?: (pr: PullRequestRef, args: { expectedHeadOid: string; jump?: boolean }) => Promise<EnqueueOutcome>;
   dequeuePullRequest?: (pr: PullRequestRef) => Promise<DequeueOutcome>;
   getQueueEntry?: (pr: PullRequestRef) => Promise<QueueEntryReading>;
   mergeability: Pick<PullRequestMergeability, "mergeable" | "mergeableState">;
@@ -91,7 +91,7 @@ export class FakeGitHub implements MergeGateGitHubPort {
         return { mode, source: "fake" };
       };
       this.enqueuePullRequest = async (_pr, args) => {
-        this.enqueueCalls.push({ expectedHeadOid: args.expectedHeadOid });
+        this.enqueueCalls.push({ expectedHeadOid: args.expectedHeadOid, ...(args.jump === true ? { jump: true as const } : {}) });
         const e = opts.enqueue ?? { enqueued: true as const, via: "queue" as const, entryId: "MQE_kwDOtest1", position: 1 };
         return typeof e === "function" ? e(this, args) : e;
       };

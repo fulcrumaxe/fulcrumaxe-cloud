@@ -72,13 +72,15 @@ export interface LocalGitHubHttp extends GitHubHttp {
 export const isLocalGitHubHttp = (http: GitHubHttp): http is LocalGitHubHttp => typeof (http as Partial<LocalGitHubHttp>).graphql === "function";
 
 /**
- * D#694 B5, B6-1 and B6-6: the six GraphQL documents the hosted `merge_gate` client lets through (`@fx/github`'s mergeGateGraphql.ts, pinned there byte for byte).
+ * D#694 B5, B6-1 and B6-6: the seven GraphQL documents the hosted `merge_gate` client lets through (`@fx/github`'s mergeGateGraphql.ts, pinned there byte for byte).
  * The composition root hands them in, because this package does not depend on @fx/github; the port never writes a document of its own, so a document the
  * client has not pinned cannot be sent from here.
  */
 export interface MergeQueueDocuments {
   read: string;
   enqueue: string;
+  /** TWO-LANE-QUEUE: the seventh pinned document, the enqueue that puts the pull request at the front. Absent: the port never jumps, whatever the caller asks. */
+  enqueueJump?: string;
   autoMerge: string;
   /** B6-1: `dequeuePullRequest`. */
   dequeue: string;
@@ -132,6 +134,13 @@ const NO_RULE_MESSAGES: ReadonlySet<string> = new Set(["Branch not protected", "
 export const MERGE_QUEUE_MODE_TTL_MS = 5 * 60_000;
 export const MERGE_QUEUE_MODE_CACHE_MAX = 500;
 const queueModeCache = new Map<string, { at: number; value: MergeQueueMode }>();
+/** A GraphQL answer that was not a 200 with an object body. Its own class so the jump (which has a plain fallback) can tell it from a transport failure. */
+class GraphqlStatusError extends Error {
+  constructor(status: number) {
+    super(`GitHub graphql: unexpected status ${status}`);
+  }
+}
+
 /** Empties the queue-mode cache (a test, or a caller that must read afresh). */
 export function clearMergeQueueModeCache(): void {
   queueModeCache.clear();
@@ -636,7 +645,7 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
 
   async function graphql(document: string, variables: Record<string, unknown>): Promise<Json> {
     const res = await deps.http.request({ method: "POST", path: "/graphql", body: { query: document, variables } });
-    if (res.status !== 200 || !isObj(res.body)) throw new Error(`GitHub graphql: unexpected status ${res.status}`);
+    if (res.status !== 200 || !isObj(res.body)) throw new GraphqlStatusError(res.status);
     return res.body;
   }
 
@@ -724,14 +733,35 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         queueModeCache.delete(await queueKey(pr, (await readPr(pr)).baseRef));
       };
       const pullRequestId = await pullRequestNodeId(pr);
-      const queued = await graphql(docs.enqueue, { pullRequestId, expectedHeadOid: args.expectedHeadOid });
+      // TWO-LANE-QUEUE: a jump is asked for only with the pinned jumping document. If the host refuses it for ANY reason except a moved head (a permission, a
+      // rule, a transient error), the same pull request is enqueued ONCE more without it: the queue's rules still apply and the pull request only loses its
+      // place at the front. Surfacing the error instead would leave the cloud's own item stuck at the gate for a refused convenience. A moved head is final either way.
+      let jump: "applied" | "refused" | undefined;
+      let queued: Json;
+      if (args.jump === true && docs.enqueueJump !== undefined) {
+        // A non-200 answer to the jump is a refusal like a GraphQL one (null here): one plain enqueue follows. Any other throw (no answer at all) still propagates.
+        const tried: Json | null = await graphql(docs.enqueueJump, { pullRequestId, expectedHeadOid: args.expectedHeadOid }).catch((e: unknown) => {
+          if (e instanceof GraphqlStatusError) return null;
+          throw e;
+        });
+        const triedKind = tried === null ? "other" : classifyGraphqlErrors(tried);
+        if (tried !== null && (triedKind === "none" || triedKind === "head_moved")) {
+          queued = tried;
+          jump = triedKind === "none" ? "applied" : undefined;
+        } else {
+          jump = "refused";
+          queued = await graphql(docs.enqueue, { pullRequestId, expectedHeadOid: args.expectedHeadOid });
+        }
+      } else {
+        queued = await graphql(docs.enqueue, { pullRequestId, expectedHeadOid: args.expectedHeadOid });
+      }
       const kind = classifyGraphqlErrors(queued);
       if (kind === "none") {
         const entry = dig(queued, ["data", "enqueuePullRequest", "mergeQueueEntry"]);
         if (!isObj(entry) || typeof entry.id !== "string" || !NODE_ID.test(entry.id)) bad("mergeQueueEntry.id");
         const position = entry.position;
         if (position !== undefined && position !== null && !Number.isSafeInteger(position)) bad("mergeQueueEntry.position");
-        return { enqueued: true, via: "queue", entryId: entry.id, position: typeof position === "number" ? position : null };
+        return { enqueued: true, via: "queue", entryId: entry.id, position: typeof position === "number" ? position : null, ...(jump !== undefined ? { jump } : {}) };
       }
       if (kind === "head_moved") {
         await evict();
