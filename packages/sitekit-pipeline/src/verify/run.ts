@@ -1,6 +1,7 @@
 import type { ClaimType } from "@fx/sitekit-claims";
 import { ExtractError, checkPassInput, runSandboxedPass, type ExtractDeps, type ExtractedClaim, type PassMode } from "../extract/index.js";
 import { decideClaims } from "./decide.js";
+import { confirmExcerpts, type RepoReader } from "./excerpt.js";
 import { parseVerifyOutput } from "./parse.js";
 import { buildVerifyPrompt } from "./prompt.js";
 
@@ -18,6 +19,9 @@ export interface VerifyInput {
   checkedAt: string;
 }
 
+/** The pass's dependencies plus the reader that checks each cited excerpt exists at the pinned sha. */
+export type VerifyDeps = ExtractDeps & { repo: RepoReader };
+
 export interface VerifyPassResult {
   claims: ClaimType[];
   usedUsd: number;
@@ -29,7 +33,7 @@ export interface VerifyPassResult {
  * checkout, the same sandbox, policy and spend rules (`runSandboxedPass`). The prompt carries the claims without their
  * evidence and the verdicts come only from `decideClaims`, so nothing the agent writes can set a verdict outside its schema.
  */
-export async function runVerify(deps: ExtractDeps, input: VerifyInput): Promise<VerifyPassResult> {
+export async function runVerify(deps: VerifyDeps, input: VerifyInput): Promise<VerifyPassResult> {
   const capUsd = checkPassInput(input);
   if (input.runId === input.extractorRunId) throw new ExtractError("input_invalid");
   const prompt = buildVerifyPrompt({ owner: input.owner, name: input.name, sha: input.sha, claims: input.claims });
@@ -46,6 +50,8 @@ export async function runVerify(deps: ExtractDeps, input: VerifyInput): Promise<
     prompt,
     parse: (output) => parseVerifyOutput(output, input.sha, askedIds),
   });
-  const claims = decideClaims(input.claims, pass.value, { sha: input.sha, verifierRunId: input.runId, checkedAt: input.checkedAt });
+  const decided = decideClaims(input.claims, pass.value, { sha: input.sha, verifierRunId: input.runId, checkedAt: input.checkedAt });
+  // A VERIFIED verdict stands only when the cited excerpts are really in the pinned files.
+  const claims = await confirmExcerpts(input.claims, decided, deps.repo, input.sha);
   return { claims, usedUsd: pass.usedUsd, cleanupFailed: pass.cleanupFailed };
 }

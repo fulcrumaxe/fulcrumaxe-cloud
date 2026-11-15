@@ -1,6 +1,6 @@
 import { ProductKind, type ClaimType } from "@fx/sitekit-claims";
 import { assertRepoCoordinates, ExtractError, runExtract, type ExtractDeps, type SeedFile } from "../extract/index.js";
-import { buildReport, runVerify } from "../verify/index.js";
+import { buildReport, runVerify, type RepoReader } from "../verify/index.js";
 import {
   EXTRACT_SHARE_USD,
   SITEKIT_PREVIEW_COMPUTE_CAP_USD,
@@ -39,6 +39,8 @@ export interface ComputePort {
 export interface PreviewDeps extends Omit<ExtractDeps, "report"> {
   store: PreviewStore;
   compute: ComputePort;
+  /** Reads the cited files at the pinned sha, the same reader the full verify pass takes. The preview confirms every excerpt too; it never skips that check. */
+  repo: RepoReader;
   /** The homepage as HTML, from the verified claims. The template's own gate decides what it may show. */
   renderHomepage(claims: readonly ClaimType[], sha: string): string;
   now(): Date;
@@ -161,7 +163,7 @@ export async function runSitePreview(deps: PreviewDeps, input: PreviewInput): Pr
     cleanupFailed.push(...extracted.cleanupFailed);
     const remaining = SITEKIT_PREVIEW_MODEL_CAP_USD - extracted.usedUsd;
     if (!(remaining > 0)) throw new PreviewError("over_cap");
-    const verified = await runVerify(passDeps, {
+    const verified = await runVerify({ ...passDeps, repo: deps.repo }, {
       accountId: input.accountId,
       runId: `${input.previewId}-v`,
       extractorRunId: `${input.previewId}-x`,
