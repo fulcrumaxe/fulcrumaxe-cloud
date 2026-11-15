@@ -135,6 +135,8 @@ describe("check fix round [pg]", () => {
     expect(resumed).toHaveLength(1);
     const input = resumed[0]!;
     expect(input).toMatchObject({ role: "executor", workItemId: A.workItemId, parentRunId: failed, pr: 42, repoId: A.repoId });
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the signed job will say this round answers a failed check, so a runner never skips its check on an unmoved tip.
+    expect(input.fixRoundKind).toBe("check_fix");
     expect(input.prompt).toContain("Check command: bash scripts/check.sh");
     expect(input.prompt).toContain("failed with exit status 1");
     expect(input.prompt).toContain("fix round 1");
@@ -170,6 +172,7 @@ describe("check fix round [pg]", () => {
     const out = await startCheckFixRound(deps(), who(), failed);
     expect(out.ok).toBe(true);
     const input = started[started.length - 1]!;
+    expect(input.fixRoundKind).toBe("check_fix");
     expect(input.prompt.indexOf("DECISIONS YOU MAY MEET IN THIS WORK")).toBeGreaterThan(input.prompt.indexOf("<<END UNTRUSTED>>"));
     expect(input.inCreateTransaction).toBeTypeOf("function");
     // The stand-in starter does not run the hook; run it the way the real create transaction does, on a client with the run's tenant.

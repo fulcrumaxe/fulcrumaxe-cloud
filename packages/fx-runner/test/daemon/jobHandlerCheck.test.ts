@@ -54,7 +54,7 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> }; derived?: { table: object; files: Record<string, string>; generated: Record<string, string>; ran: string[]; dirty?: string[]; head?: Record<string, string | null>; hidden?: boolean } } = {}) {
+function rig(over: { startBase?: string; publishPushes?: boolean; tip?: string | null | "throws"; tipCalls?: string[]; updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> }; derived?: { table: object; files: Record<string, string>; generated: Record<string, string>; ran: string[]; dirty?: string[]; head?: Record<string, string | null>; hidden?: boolean } } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -80,7 +80,8 @@ function rig(over: { updatedTo?: string; prepareThrows?: GitPathError; lockfile?
     async extendTimeout() {}, async stop() { if (over.lockfile !== undefined || over.recordStop === true) order.push("agent_stopped"); if (over.lockfile?.stopFails === true) throw new Error("group survived at /home/someone/x"); }, async deleteSandbox() { order.push("sandbox_deleted"); }, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
   const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
-  const git = fakeGitPath({ prepare: async (_job, _claimed, workspace) => { held = workspace; if (over.prepareThrows !== undefined) throw over.prepareThrows; return { base: BASE, ...(over.updatedTo === undefined ? {} : { updatedTo: over.updatedTo }) }; }, publish: async () => (order.push("publish"), { pushed: true, branch: BRANCH, sha: HEAD }) });
+  const git = fakeGitPath({ prepare: async (_job, _claimed, workspace) => { held = workspace; if (over.prepareThrows !== undefined) throw over.prepareThrows; return { base: over.startBase ?? BASE, ...(over.updatedTo === undefined ? {} : { updatedTo: over.updatedTo }) }; }, publish: async () => (order.push("publish"), over.tip === BASE && over.publishPushes !== true ? { pushed: false } : { pushed: true, branch: BRANCH, sha: HEAD }) });
+  if (over.tip !== undefined) git.tip = async (_job, workspace) => { over.tipCalls?.push(workspace); if (over.tip === "throws") throw new Error("boom at the host path"); return over.tip as string | null; };
   git.mirrorDir = (job) => `/mirrors/${job.repo.id}.git`;
   // The pin is the merge-base with the default branch, never the commit the run started from (BASE).
   git.checkBase = async () => (over.pin === undefined ? PIN : over.pin);
@@ -682,5 +683,94 @@ describe("a branch the runner brought up to date with the default branch", () =>
     expect(r.order).not.toContain("agent");
     expect(r.order).not.toContain("check");
     expect(runEnded()).toEqual([expect.objectContaining({ reason: "runner_setup", detail: "base_conflict" })]);
+  });
+});
+
+describe("a fix round whose branch tip is still its start commit (D#6 RUNNER-CHECK-SKIP-NO-COMMIT)", () => {
+  const CONT = { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7 };
+  const fixJob = (kind: "check_fix" | "review_fix" | "unnamed" = "review_fix") => jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 }, check: CHECK, continues: CONT, task: { ...jobFor().task, kind: "fix" }, ...(kind === "unnamed" ? {} : { fix_round_kind: kind }) } as never);
+
+  it("tip equals the start commit: the check is not run, the reason is no_change, done is posted once, no check_failed end, and the hook runs as for a run that pushed nothing", async () => {
+    const steps: string[] = [];
+    const tipCalls: string[] = [];
+    const r = rig({ tip: BASE, tipCalls, steps });
+    const result = await r.handle(await r.claim(fixJob()));
+    expect(result.status).toBe("completed");
+    expect(tipCalls).toHaveLength(1);
+    expect(r.order).not.toContain("check");
+    expect(bodies("/done")).toHaveLength(1);
+    expect(bodies("/done")[0]!.check).toEqual({ exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: "the check was not run: the agent made no commit on this round", reason: "no_change" });
+    expect(runEnded()).toEqual([]);
+    expect(steps.some((l) => l.includes("check not run (no_change)"))).toBe(true);
+    expect(steps.some((l) => l.includes("check started"))).toBe(false);
+  });
+
+  it("the tip moved: the check runs as before", async () => {
+    const r = rig({ tip: HEAD });
+    await r.handle(await r.claim(fixJob()));
+    expect(r.order).toContain("check");
+    expect(bodies("/done")[0]!.check).toEqual(PASSED);
+  });
+
+  it("a tip that cannot be read (null, a throw, or not a full commit id) runs the check", async () => {
+    for (const tip of [null, "throws", "abc123"] as const) {
+      const r = rig({ tip });
+      await r.handle(await r.claim(fixJob()));
+      expect(r.order, String(tip)).toContain("check");
+      expect(JSON.stringify(cloud.seen)).not.toContain("host path");
+    }
+  });
+
+  it("a build (no branch continued) runs the check even when the tip is the start commit", async () => {
+    const tipCalls: string[] = [];
+    const r = rig({ tip: BASE, tipCalls });
+    await r.handle(await r.claim(withCheck()));
+    expect(tipCalls).toEqual([]);
+    expect(r.order).toContain("check");
+  });
+
+  it("a round brought up to date with the default branch (a merge commit is its tip) runs the check", async () => {
+    const r = rig({ tip: BASE, updatedTo: "d".repeat(40) });
+    await r.handle(await r.claim(fixJob()));
+    expect(r.order).toContain("check");
+  });
+
+  it("a tip equal to the start that is not a full commit id is no proof of an unchanged branch: the check runs", async () => {
+    const r = rig({ startBase: "abc123", tip: "abc123" });
+    await r.handle(await r.claim(fixJob()));
+    expect(r.order).toContain("check");
+  });
+
+  it("a skipped check whose branch is pushed after all counts as a check that did not pass: check_failed is reported, the hook is not entered, and done still goes once", async () => {
+    const r = rig({ tip: BASE, publishPushes: true });
+    await r.handle(await r.claim(fixJob()));
+    expect(r.order).not.toContain("check");
+    expect(r.order).not.toContain("hook");
+    expect(runEnded().map((e) => e.reason)).toEqual(["check_failed"]);
+    expect(bodies("/done")).toHaveLength(1);
+    expect(bodies("/done")[0]!.check).toMatchObject({ reason: "no_change" });
+  });
+
+  it("a check-fix round on an unmoved tip still runs the check (a flaky check may pass on the unchanged head)", async () => {
+    const tipCalls: string[] = [];
+    const r = rig({ tip: BASE, tipCalls });
+    await r.handle(await r.claim(fixJob("check_fix")));
+    expect(tipCalls).toEqual([]);
+    expect(r.order).toContain("check");
+    expect(bodies("/done")[0]!.check).toEqual(PASSED);
+  });
+
+  it("a job that does not name its round kind (an older cloud, a conflict round) never skips, whatever the tip", async () => {
+    const r = rig({ tip: BASE });
+    await r.handle(await r.claim(fixJob("unnamed")));
+    expect(r.order).toContain("check");
+    expect(bodies("/done")[0]!.check).toEqual(PASSED);
+  });
+
+  it("a path that cannot read a tip never skips", async () => {
+    const r = rig();
+    expect(r.deps.git.tip).toBeUndefined();
+    await r.handle(await r.claim(fixJob()));
+    expect(r.order).toContain("check");
   });
 });

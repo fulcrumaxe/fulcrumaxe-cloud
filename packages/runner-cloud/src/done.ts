@@ -213,6 +213,7 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
   // carried no check is not the cloud's to record. A failed check ends the run `check_failed` BEFORE GitHub is asked anything: no commit test, no scope test, no pull request.
   let reported = runnerReported;
   let scopeHint = false;
+  let noChangeHint = false;
   if (ctx.job.check !== undefined) {
     if (reported === undefined) return failed("internal_error");
     // What is stored is the normalised result; a field outside the contract fails the check whatever the exit status said (it is never a pass).
@@ -223,7 +224,10 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
     // its job. It does not end the run here: the commit and scope-list tests below run first, from our own rows, exactly as for a run whose check passed, and then the run ends `check_failed`
     // without a pull request (see `judgeCommit`). A hint on a result with any other field out of contract is not read as one.
     scopeHint = norm.outOfContract === null && norm.check.reason === "out_of_scope" && norm.check.exit_code === null && !norm.check.timed_out;
-    if (norm.outOfContract !== null || (!checkPassed(norm.check) && !scopeHint)) {
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the same shape for `no_change` (the runner skipped the check because the round's branch tip is still the commit it started from). Also only a hint: the commit test below
+    // reads the branch itself, a branch with no new commit takes the ordinary `no_commit` path, and one that has a commit ends `check_failed` (the check never ran). It never lends the check a pass.
+    noChangeHint = norm.outOfContract === null && norm.check.reason === "no_change" && norm.check.exit_code === null && !norm.check.timed_out;
+    if (norm.outOfContract !== null || (!checkPassed(norm.check) && !scopeHint && !noChangeHint)) {
       // The runner pushed the work to the run branch before reporting; recording it (with no pull request) is what lets the fix round continue from its tip.
       const branch = branchOf(ctx.job, i);
       return { ...(failed("check_failed", RUNNER_RUN_BRANCH.test(branch) ? { branch } : {}) as Extract<Decision, { kind: "verdict" }>), check: norm.check };
@@ -233,9 +237,9 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: s
   // FIXROUND-NOCOMMIT-CHECK-PASSED: reaching this line with a check in the job means the check passed (a failing or out-of-contract result returned above), so `reported` is a
   // passing result the cloud stores in this same `done` (run_checks and run.check_ended) and the job it signed asked for.
   // A check the runner did not run on a scope hint did not pass on the head, so it never lends the fix round its no-commit exception either.
-  const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined && !scopeHint;
+  const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined && !scopeHint && !noChangeHint;
   const log = deps.log ?? ((line: string) => console.warn(line));
-  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log), (close) => holdCloudClose(deps, i, close, log), scopeHint, checkPassedOnHead && reported !== undefined ? readDerivedFresh(DERIVED_FILE_RULES, reported.derived_fresh) : []);
+  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, log, checkPassedOnHead, (refusal) => refuseScope(deps, i, refusal, log), (close) => holdCloudClose(deps, i, close, log), scopeHint, checkPassedOnHead && reported !== undefined ? readDerivedFresh(DERIVED_FILE_RULES, reported.derived_fresh) : [], noChangeHint);
   // A check that passed (or that the runner reported it did not run on its scope hint) is recorded beside whatever the commit and scope tests decided.
   return judged.kind === "verdict" && ctx.job.check !== undefined && reported !== undefined ? { ...judged, check: reported } : judged;
 }
@@ -309,8 +313,8 @@ export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }
 const headOf = (s: { headOid: string | null } | null): { headOid?: string } => (s !== null && s.headOid !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s.headOid) ? { headOid: s.headOid } : {});
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
-async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope, holdClose: HoldCloudClose, scopeHint = false, derivedFresh: readonly string[] = []): Promise<Decision> {
-  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse, holdClose, scopeHint, derivedFresh);
+async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean, refuse: RefuseScope, holdClose: HoldCloudClose, scopeHint = false, derivedFresh: readonly string[] = [], noChangeHint = false): Promise<Decision> {
+  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead, refuse, holdClose, scopeHint, derivedFresh, noChangeHint);
   if (decision.kind !== "verdict" || decision.verdict.prNumber === null) return decision;
   return verdictOf({ ...decision.verdict, branch: branchOf(job, i) });
 }
@@ -356,6 +360,7 @@ async function judgeCommit(
   holdClose: HoldCloudClose,
   scopeHint: boolean,
   derivedFresh: readonly string[] = [],
+  noChangeHint = false,
 ): Promise<Decision> {
   // A fresh run's branch is `<prefix><run>-g<generation>`: a stale generation's branch is never looked at. A continuation works on exactly
   // the branch our issuer put in its signed job (the one recorded for the pull request it fixes).
@@ -407,6 +412,10 @@ async function judgeCommit(
       // A docs-writer that cannot be shown to have made no commit (the comparison could not be read) is not told it succeeded.
       return state.exists && state.aheadBy === null ? failed("internal_error") : verdictOf({ outcome: "succeeded", failureReason: null, prNumber: null });
     }
+
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the runner said the round added no commit and skipped the check, but this branch shows one (the cloud's own read is the judge). The check never ran on this head,
+    // so the run cannot succeed on it: it ends `check_failed` with no pull request and the branch recorded for the fix round, exactly as a check that did not pass would.
+    if (noChangeHint) return failed("check_failed", RUNNER_RUN_BRANCH.test(branch) ? { branch } : {});
 
     // C34 section 2.2: a Spec with no list (absent or empty) says so; an unreadable one keeps today's detail-less answer.
     if (ctx.scope.kind === "unknown") return failed("scope_unknown", ctx.scope.reason === "absent" ? { detail: "no_file_list" } : {});

@@ -39,6 +39,11 @@ export interface GitPath {
    * job's role does not push. `stopped` is asked right before the push: after a stop reply nothing is pushed.
    */
   publish(job: GitJob, lease: PushLease, workspace: string, base: string, stopped?: () => boolean): Promise<Published>;
+  /**
+   * D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the commit the workspace's HEAD is at now, read the way the push reads it (from a snapshot the daemon made, never from the workspace's own `.git`).
+   * Null when it cannot be read (the caller then runs the check as before). Optional: a path without it never skips a check.
+   */
+  tip?(job: GitJob, workspace: string): Promise<string | null>;
   /** The paths the job's sandbox may read besides its workspace: exactly the repo mirror's `objects` directory, which the workspace borrows from. */
   readGrants(job: GitJob): string[];
   /**
@@ -204,6 +209,7 @@ export function createGitPath(deps: GitPathDeps): GitPath {
       return { ...prepared, ...updated };
     },
     readGrants: (job) => [mirrors.objects(job.repo)],
+    tip: (job, workspace) => workspaceHead(git, mirrors.dir(job.repo), workspace, snapshotsRoot).catch(() => null),
     mirrorDir: (job) => mirrors.dir(job.repo),
     syncMirror: async (repo) => {
       await assertGitVersion(git);

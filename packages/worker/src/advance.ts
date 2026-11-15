@@ -2042,6 +2042,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
               : bindTransaction,
           ),
           ...(conflict && req.conflictRound ? { conflictRound: req.conflictRound } : {}),
+          // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: a review or person round may have its check skipped by a runner on an unmoved tip. Not a merge-conflict or renumber round, and not the round a confirmed Replace
+          // started (`answered`): that one normally adds nothing and is judged on its check passing, so it keeps running the check.
+          ...(!conflict && !answered ? { fixRoundKind: "review_fix" as const } : {}),
           // A fresh session: the repository is cloned into the workdir, as for a build.
           workdir: PREVIEW_WORKDIR,
           cloneRepo: { owner: coords.gh_owner, name: coords.gh_name },

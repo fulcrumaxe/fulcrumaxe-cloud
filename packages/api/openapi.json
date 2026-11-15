@@ -7218,6 +7218,7 @@
                                         "base_missing",
                                         "agent_not_stopped",
                                         "out_of_scope",
+                                        "no_change",
                                         "other"
                                       ]
                                     },

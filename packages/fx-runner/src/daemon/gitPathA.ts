@@ -174,6 +174,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
       return { ...prepared, ...updated };
     },
     readGrants: (job) => [forObjects.objects(job.repo)],
+    tip: (job, workspace) => workspaceHead(git, forObjects.dir(job.repo), workspace, snapshotsRoot).catch(() => null),
     mirrorDir: (job) => forObjects.dir(job.repo),
     // D#6 R-CHK-2b: the same pin as path B, from the same mirror the run was just synced into. A local read with the plain git: no ticket is asked for and nothing is fetched.
     checkBase: (job, sha) => mirrorCheckBase(git, forObjects.dir(job.repo), sha),

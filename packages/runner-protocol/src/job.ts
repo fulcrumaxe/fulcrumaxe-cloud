@@ -278,6 +278,10 @@ export type JobPins = z.infer<typeof JobPinsSchema>;
 export const JobConflictRoundSchema = z.object({ from_sha: z.string().regex(/^[0-9a-f]{40}$/), base_sha: z.string().regex(/^[0-9a-f]{40}$/), base_ref: branchName }).strict();
 export type JobConflictRound = z.infer<typeof JobConflictRoundSchema>;
 
+/** D#6 RUNNER-CHECK-SKIP-NO-COMMIT: the closed kinds of fix round a job may name (`Job.fix_round_kind`). */
+export const FIX_ROUND_KINDS = ["check_fix", "review_fix"] as const;
+export type FixRoundKind = (typeof FIX_ROUND_KINDS)[number];
+
 /** D#6 SCOPE-IN-JOB: the most entries and the longest entry a job's `scope` holds. They match the Spec parser's own caps (`MAX_SCOPE_PATTERNS` after brace expansion, and its entry length, in @fx/core), so a list the cloud can read always fits. */
 export const MAX_JOB_SCOPE_ENTRIES = 1024;
 export const MAX_JOB_SCOPE_ENTRY_CHARS = 512;
@@ -354,6 +358,10 @@ export const JobSchema = z
     // unchanged. The cloud sets it when it issues the job; the claim hands the job only to a runner holding the method's capability; the signed tool digest covers the method's list; and the verify row's
     // method is copied from this value, never from the run's output.
     browser_method: z.enum(BROWSER_METHODS).optional(),
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: which kind of fix round this is, from the cloud's own start: `check_fix` (the round answers a failed check) or `review_fix` (it answers a review or a person's request). Present only on an
+    // executor `fix` job that continues a branch (the rule below) and omitted (never null) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The runner skips the
+    // check on a tip that is still its start commit only for `review_fix`; a missing key never skips. The cloud signs it only for a runner of `FIX_ROUND_KIND_JOB_MIN_PROTOCOL` or later.
+    fix_round_kind: z.enum(FIX_ROUND_KINDS).optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),
@@ -371,6 +379,9 @@ export const SignedJobSchema = z
     job: JobSchema.superRefine((job, ctx) => {
       if (job.conflict_round !== undefined && (job.role !== "executor" || job.task.kind !== "fix" || job.continues === null)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "conflict_round is only on an executor fix job that continues a branch", path: ["conflict_round"] });
+      }
+      if (job.fix_round_kind !== undefined && (job.role !== "executor" || job.task.kind !== "fix" || job.continues === null || job.conflict_round !== undefined)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "fix_round_kind is only on an executor fix job that continues a branch and is not a conflict round", path: ["fix_round_kind"] });
       }
       if ((job.role === DEPLOY_VERIFIER_ROLE) !== (job.browser_method !== undefined)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "browser_method is on a deploy-verifier job and on no other", path: ["browser_method"] });

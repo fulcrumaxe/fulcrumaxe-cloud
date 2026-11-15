@@ -185,6 +185,8 @@ describe("queued runner runs [pg]", { timeout: 60_000 }, () => {
     expect(job.task.kind).toBe("fix");
     // D#600 CX-7: a fresh session (no session id) on the build's branch, never the build's own session.
     expect(job.continues).toEqual({ parent_run_id: parent, session_id: null, branch: BRANCH });
+    // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: this job carries no check, so it names no round kind and keeps its floor of 3 (a round with no check is not gated to protocol 17 for nothing).
+    expect((job as unknown as { fix_round_kind?: string }).fix_round_kind).toBeUndefined();
     // An older runner is not offered the job: the claim gate holds it for protocol 3 or later, and the run page reads that as "waiting for a runner update" (readModel), not a silent stall.
     expect(Number((await admin.query("SELECT min_protocol_version AS v FROM agent_runs WHERE id = $1", [out.runId])).rows[0].v)).toBe(3);
     expect(queuedLines()).toEqual([{ event: "run.queued", run_id: out.runId, account_id: a.accountId }]);
