@@ -75,6 +75,7 @@ Every edge below is a real `dependencies` entry in the source project's `package
 | `packages/runner-cloud` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/db`, `@fx/gh-policy`, `@fx/runner`, `@fx/telemetry` |
 | `packages/runner` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/features`, `@fx/net-guard`, `@fx/runtime`, `@fx/spend`, `@fx/telemetry` |
 | `packages/runtime` | `@fulcrumaxe/runner-protocol` |
+| `packages/sitekit-pipeline` | `@fx/sitekit-claims`, `@fx/trust` |
 | `packages/sitekit-publish-gates` | `@fx/sitekit-checks`, `@fx/sitekit-claims`, `@fx/sitekit-template` |
 | `packages/sitekit-template` | `@fx/design`, `@fx/sitekit-claims` |
 | `packages/spend` | `@fx/core`, `@fx/plan-data` |

@@ -1400,6 +1400,28 @@ importers:
         specifier: ^2.1.1
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
 
+  packages/sitekit-pipeline:
+    dependencies:
+      '@fx/sitekit-claims':
+        specifier: workspace:*
+        version: link:../sitekit-claims
+      '@fx/trust':
+        specifier: workspace:*
+        version: link:../trust
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.0
+        version: 24.19.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+
   packages/sitekit-publish-gates:
     dependencies:
       '@fx/sitekit-checks':
