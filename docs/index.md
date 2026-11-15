@@ -14,7 +14,7 @@ Sources:
 ## Overview
 
 - [README](../README.md) — the pipeline from proposal to browser check in one page, repo layout, getting set up, commands, the database migration scheme, and CI.
-- [Architecture](architecture.md) — the two repository planes, workspace project dependency graph, how a request moves from browser to Postgres, the pipeline (merge gate, merge queue, the cloud's own `fx-gate1`, where an agent runs, verdict envelopes) and the assistant.
+- [Architecture](architecture.md) — the two repository planes, workspace project dependency graph, how a request moves from browser to Postgres, the pipeline (merge gate, merge queue, post-merge verify, the cloud's own `fx-gate1`, where an agent runs, verdict envelopes) and the assistant.
 - [Status](status.md) — what the pipeline does today (including the post-merge browser check), what is built but off until configured, and every workspace project with its test evidence.
 - [Testing](testing.md) — what `scripts/check.sh` runs, how CI scopes a pull request, the repository-wide guard tests, e2e projects, and how test fakes stay as strict as the real services.
 - [Decisions](decisions.md) — a log of specific technical decisions, why they were made, and where they still hold at HEAD.

@@ -13,6 +13,8 @@ Sources:
 - `apps/workspace/build/first-party.mjs`
 - `apps/workspace/build/strip-comments.mjs`
 - `apps/workspace/build/budget.mjs`
+- `apps/workspace/e2e/boot-budget.spec.ts`
+- `apps/workspace/shell/core/theme-manager.js`
 - `apps/workspace/apps/README.md`
 - `apps/workspace/profiles/cloud.json`
 - `apps/workspace/shell/core/features.js`
@@ -111,7 +113,7 @@ reads `false`) if that fetch fails.
 - `budget-billing`: the plan, the three monthly budgets and billing standing.
 - `developer`: API tokens, webhooks and the API reference.
 
-The build also strips comments from the shipped JS and CSS (`apps/workspace/build/strip-comments.mjs`, #118); source files on disk keep theirs, and `node build/build.mjs --keep-comments` turns it off. `apps/workspace/build/budget.mjs` holds the boot budget (a cap on static requests and on total brotli bytes at boot) that a unit test and a Playwright spec both import.
+The build also strips comments from the shipped JS and CSS (`apps/workspace/build/strip-comments.mjs`, #118); source files on disk keep theirs, and `node build/build.mjs --keep-comments` turns it off. `apps/workspace/build/budget.mjs` holds the boot budget (a cap on static requests and on total brotli bytes at boot) that a unit test and a Playwright spec both import. The static-request cap counts anything the shell fetches by itself at boot as well as the files the build can see (`apps/workspace/build/budget.mjs`), and the cold-start request count test in `apps/workspace/e2e/boot-budget.spec.ts` counts it live in `pnpm --filter workspace e2e` (the rest of that file is opt-in and skipped unless `BOOT_BUDGET_BASE_URL` is set) (#955). To stay under it, the build embeds the profile's default theme JSON into the shipped `apps/workspace/shell/core/theme-manager.js` (`substituteDefaultThemeData` in `apps/workspace/build/profile.mjs`, called from `apps/workspace/build/build.mjs`), and that file now fetches only the theme in use, not all of them, at boot.
 
 ## Tests
 

@@ -9,7 +9,8 @@ Sources:
 - `packages/gh-policy/test/`
 - `packages/gh-policy/package.json`
 - `apps/web/app/api/gh-proxy/[...path]/handler.ts`
-- `packages/github/src/`
+- `packages/github/src/oidcVerify.ts`
+- `packages/github/src/installationToken.ts`
 - `packages/gh-policy/src/runnerPolicy.ts`
 - `packages/gh-policy/src/planePublish.ts`
 - `packages/gh-policy/src/parseUploadPack.ts`
