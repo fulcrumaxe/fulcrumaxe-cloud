@@ -1,8 +1,10 @@
 # @fx/decisions
 
 The decision-policy layer: a catalogue of decision types, three named
-presets (Cautious/Balanced/Autonomous), and `decide()` -- a pure, total
-function that resolves one decision request to a class and a disposition.
+presets (Cautious/Balanced/Autonomous), `decide()` -- a pure, total
+function that resolves one decision request to a class and a disposition --
+and the pure helpers around an ask: its answer window, its escalation route
+and the action rules a person can save.
 This package is not the same thing as `packages/db/src/decisions.ts`, which
 reads and writes the *stored* per-repo dial settings and receipts tables;
 see [`db.md`](./db.md) for that. This package is the pure policy logic that
@@ -16,6 +18,16 @@ Sources:
 - `packages/decisions/src/presets.ts`
 - `packages/decisions/src/decide.ts`
 - `packages/decisions/src/declared.ts`
+- `packages/decisions/src/askPolicy.ts`
+- `packages/decisions/src/escalation.ts`
+- `packages/decisions/src/workingHours.ts`
+- `packages/decisions/src/rules.ts`
+- `packages/decisions/src/ruleGlob.ts`
+- `packages/decisions/src/rulePointer.ts`
+- `packages/decisions/src/platformAskFacts.ts`
+- `packages/decisions/src/reversalWindow.ts`
+- `packages/decisions/src/labels.ts`
+- `packages/roles/cards/executor.md`
 - `packages/decisions/test/`
 
 ## What it does
@@ -35,23 +47,31 @@ as data, and a resolver the orchestrator calls -- and the code matches it.
 `package.json` points `"main"`/`"types"`/`"exports"` at `src/index.ts`,
 which re-exports:
 
-- `catalogue.ts`: `CATALOGUE`, `CATALOGUE_IDS`, `getCatalogueEntry(id)`
+- `catalogue.ts`: `CATALOGUE`, `CATALOGUE_IDS`, `CATALOGUE_VERSION`, `DEFAULT_REVERSAL_WINDOW_HOURS`, `getCatalogueEntry(id)`
+- `reversalWindow.ts`: `reversalWindowFor`
+- `labels.ts`: `DECISION_LABELS`, `decisionLabel`
 - `presets.ts`: `CAUTIOUS_PRESET`, `BALANCED_PRESET`, `AUTONOMOUS_PRESET`, `PRESETS`, `UnknownPresetError`, `getPreset(name)`
 - `decide.ts`: `DecisionRequestClassFieldRejectedError`, `decide(entry, settings, request)`
-- `declared.ts`: `UndeclaredCatalogueEntryError`, `assertDeclarationsResolve`, `findUnresolvedDeclarations`, `resolveDeclaredEntry` (`DeclaredEntry` type)
+- `declared.ts`: `PLATFORM_DECLARATIONS`, `UndeclaredCatalogueEntryError`, `assertDeclarationsResolve`, `findUnresolvedDeclarations`, `resolveDeclaredEntry` (`DeclaredEntry` type)
+- `askPolicy.ts`: `resolveAskPolicy`, the ask window and notify constants, `presetDefaultTimeoutOutcome`, `AskPolicyNotAskedError`
+- `escalation.ts`: `validateRoute`, `resolveAskRoute`, `planEscalation`, `r5DefaultPlan` and the route limits (it re-exports `deferToWorkingHours`, `isValidTimeZone` and `HOURS_MAX_WINDOWS` from `workingHours.ts`)
+- `rules.ts`: `validateRuleSet`, `evaluateRules`, `clampRuleOutcome`, `tightenAskDisposition`, `checkFieldPath`, `RULE_LIMITS`; `ruleGlob.ts`: `globMatch`; `rulePointer.ts`: `parsePointer`, `resolvePointer`
+- `platformAskFacts.ts`: `PLATFORM_ASK_FACTS`, `platformAskRequest`, `usdCeilCents`
 - `types.ts` (types only): `CatalogueEntry`, `CustomerProximity`, `DataSensitivity`, `DecisionClass`, `DecisionRequest`, `DecisionResult`, `DecisionSettings`, `Disposition`, `Preset`, `PresetDispositions`, `PresetName`, `ReversalDeclaration`
 
 ## How it works
 
-`catalogue.ts`'s `CATALOGUE` is a fixed array of 15 entries at version 3 (2 in
-`automated_with_monitoring`, 8 in `human_over_the_loop`, 5 in
-`human_in_the_loop`). D#483 S5-a added seven: `start_work_small`,
+`catalogue.ts`'s `CATALOGUE` is a fixed array of 21 entries at `CATALOGUE_VERSION` 10 (2 in
+`automated_with_monitoring`, 13 in `human_over_the_loop`, 6 in
+`human_in_the_loop`). `test/catalogue-version.test.ts` pins a hash of the catalogue and the presets next to that number, so changing either without bumping it fails. The receipt writer stamps the version on every receipt. The entries added after the first fifteen include seven for starting work: `start_work_small`,
 `start_work_bug`, `start_work_doc` and `launch_sub_item` (class 2, default
 `ask`), and `start_parent_item`, `spend_past_envelope` and
 `start_after_reclassify` (class 3, ask only). The pure resolvers that read them,
 `resolveStart` and `resolveSubItemLaunch`, live in `packages/core/src/autonomy/`.
 Each entry declares an id, its class, a default
 disposition, the set of dispositions that entry is allowed to resolve to,
+the timeout outcomes an unanswered ask may take (`timeoutOutcomes`: empty for class 1, otherwise `stop_and_flag`, plus `proceed_recommended` for only a few class-2 entries),
+its reversal window in hours (`reversalWindowHours`, 24 on every entry, read through `reversalWindowFor`),
 and how its effect can be reversed (`reversible_before_build`,
 `compensating_work`, or `not_reversible` with a required reason string).
 `getCatalogueEntry` looks one up by id; a type absent from the catalogue
@@ -116,7 +136,7 @@ A person's "Approve the Spec and build" on a split parent (a Spec that plans two
 
 ## The declared-classes guard
 
-`declared.ts`'s `resolveDeclaredEntry(declaration, catalogue?)` resolves one static declaration (`{ source, decisionType }`, e.g. a tool or role card naming a catalogue id) to its `CatalogueEntry`, or `undefined` when the id isn't in the catalogue. `findUnresolvedDeclarations` returns every declaration that fails to resolve, and `assertDeclarationsResolve` throws `UndeclaredCatalogueEntryError` if that list is non-empty — a declaration naming no catalogue entry is a build/test-time failure, never a silent runtime default (`#144`). This module only resolves a declaration once handed one; the scan that finds real declarations in `packages/roles/src/tools.ts` (an own `decisionType` property on a `ToolRegistryEntry`) and `packages/roles/cards/*.md` (a `decision_types:` frontmatter key) lives in `packages/roles/test/declared-classes.test.ts` instead, since `@fx/roles` owns those files. No tool or card declares a decision type yet, so that real-tree scan currently passes over an empty set — proven non-vacuous by fixtures that use the declaration convention directly.
+`declared.ts`'s `resolveDeclaredEntry(declaration, catalogue?)` resolves one static declaration (`{ source, decisionType }`, e.g. a tool or role card naming a catalogue id) to its `CatalogueEntry`, or `undefined` when the id isn't in the catalogue. `findUnresolvedDeclarations` returns every declaration that fails to resolve, and `assertDeclarationsResolve` throws `UndeclaredCatalogueEntryError` if that list is non-empty — a declaration naming no catalogue entry is a build/test-time failure, never a silent runtime default (`#144`). This module only resolves a declaration once handed one; the scan that finds real declarations in `packages/roles/src/tools.ts` (an own `decisionType` property on a `ToolRegistryEntry`) and `packages/roles/cards/*.md` (a `decision_types:` frontmatter key) lives in `packages/roles/test/declared-classes.test.ts` instead, since `@fx/roles` owns those files. A third source, `PLATFORM_DECLARATIONS`, lists the types the platform raises itself (`run_extension`), which must appear there and in no card or tool. At HEAD the one role card that declares decision types is `packages/roles/cards/executor.md` (`nonbreaking_refactor_approach` and `test_strategy_choice`); fixtures that use the declaration convention directly prove the scan is not vacuous.
 
 ## Data it touches
 
@@ -138,17 +158,25 @@ catalogue entry for its type actually has.
 
 ## Ask policy
 
-`askPolicy.ts` holds `resolveAskPolicy(entry, preset, settings, repoId)`, which is pure and returns
+`askPolicy.ts` (`packages/decisions/src/askPolicy.ts`) holds `resolveAskPolicy(entry, preset, settings, repoId)`, which is pure and returns
 `{ answerWindowMinutes, timeoutOutcome, notify }` for one ask. The first non-null value per field wins, in the order repo + type, repo +
 `'*'`, account + type, account + `'*'`, then the preset default (24 hours; Cautious stops, Balanced goes ahead on class 2, Autonomous goes
 ahead where the entry allows it). The outcome is clamped to the entry's `timeoutOutcomes`, and the window to 15 minutes through 14 days.
 Class 1 is never asked, so it has no policy. The customer's rows are stored by `packages/db/src/decisionAskSettings.ts` (migration 0812).
 
+## Escalation routes
+
+`escalation.ts` is the pure side of who is told about an ask and when. A route has 1 to 4 levels, each aimed at all owners and admins or at one named owner or admin, with 5 minutes to 7 days before the next level; optional working-hours windows (`workingHours.ts`: ISO weekdays, `HH:MM` wall-clock in an IANA zone, at most 14 windows, an empty list meaning always working); and a repeat of 0 to 3 extra laps. A route with no levels is a tombstone meaning "this scope has no route of its own". `resolveAskRoute` looks up repo + type, repo + `*`, account + type, account + `*`, falling past a tombstone to the next step; when nothing applies the caller plans `r5DefaultPlan` (every owner and admin when the ask is raised, one reminder when it goes overdue). `planEscalation` turns a route into the steps, and caps messages at one per person per level for the whole life of an ask however large the repeat is. The clock is an input, never read.
+
+## Action rules
+
+`rules.ts` is the grammar, validator and evaluator for a person's ordered list of `{ id, outcome, when }` rules, where the outcome is `approve`, `deny` or `ask` and the first matching rule decides. A rule reads only the request's tool, server and arguments, the instance name and platform-computed facts, never an agent's reasoning or context; strings match by the bounded glob in `ruleGlob.ts` (`*` and `?` only, no regular expression), and field paths are JSON Pointers resolved over own properties only (`rulePointer.ts`). Every set is bounded (`RULE_LIMITS`: 200 rules, depth 8, 64 nodes per rule) and an evaluation that exceeds its node or comparison budget answers `ask`. `clampRuleOutcome` keeps a rule from approving more than the `tool_call` dial allows, and `tightenAskDisposition` lets a rule make a platform-raised ask stricter but never looser, for `spend_past_envelope`, `run_extension` and the three start-work types only. `platformAskFacts.ts` lists the facts a rule may name for those asks (dollar figures rounded up to the cent, counts, text).
+
 ## Tests
 
-`packages/decisions/test/` covers the catalogue's fixed shape and content,
+`packages/decisions/test/` covers the catalogue's fixed shape, content and version pin,
 `decide()`'s resolution and clamping logic (including the rejected-class-field
-case), that every preset fixes classes 1 and 3 the same way and differs
+case), the ask policy, escalation, the rule grammar and its bounds, that every preset fixes classes 1 and 3 the same way and differs
 only on class 2, an import-boundary scan, and `declared.test.ts` for
 `declared.ts`'s resolution/assertion logic. A second, workspace-wide test
 extends the package-local "no never-dialed disposition flag" check across

@@ -1,32 +1,50 @@
 # @fx/partners
 
-`packages/partners` is a scaffold at HEAD: it exists so the package builds
-and typechecks, but holds no partner-feature code of its own. Partner
-tenancy -- the actual schema, roles and row-level-security isolation for
-resellers/affiliates -- already exists at HEAD, but lives in `packages/db`,
-not in this package.
+`packages/partners` is the partner layer's application code: it works out which reseller, if any, a request's host belongs to, builds the branding that host is shown, and binds a new account to the reseller whose host it signed up on. It is off unless `FX_PARTNER_LAYER` is exactly `on` (`packages/partners/src/host/layer.ts`). The partner schema, roles and row-level-security isolation live in `packages/db`, not here.
 
 Sources:
 - `packages/partners/src/index.ts`
+- `packages/partners/src/host/index.ts`
+- `packages/partners/src/host/layer.ts`
+- `packages/partners/src/host/normalize.ts`
+- `packages/partners/src/host/resolver.ts`
+- `packages/partners/src/host/pgResolver.ts`
+- `packages/partners/src/host/cache.ts`
+- `packages/partners/src/host/step.ts`
+- `packages/partners/src/context/index.ts`
+- `packages/partners/src/context/resolve.ts`
+- `packages/partners/src/context/envelope.ts`
+- `packages/partners/src/context/staticBrand.ts`
+- `packages/partners/src/signup/index.ts`
 - `packages/partners/package.json`
+- `packages/partners/vitest.config.ts`
+- `apps/web/lib/partners/hostResolver.ts`
+- `apps/web/lib/partners/registerHooks.ts`
+- `apps/web/app/api/branding/partner/handler.ts`
 - `packages/db/src/withPartner.ts`
 - `packages/db/migrations/0200_partners.sql`
+- `packages/db/migrations/0803_resolve_host.sql`
 - `packages/db/test/partners.test.ts`
 - `packages/db/test/partners-isolation.test.ts`
 
 ## What it does
 
-Nothing yet, at the application-code level. `package.json`'s `exports`
-field maps each future subpath (`./*`) to `./src/*/index.ts`, anticipating
-later, separately-added feature directories under `src/` (for example a
-host, an auth handoff, an admin surface, domains, referrals, support
-access, branding, onboarding, suspension); none of those directories exist
-in this repository yet. `src/index.ts` itself is an empty module
-(`export {}`) whose only purpose is giving TypeScript at least one file
-under `src/` to compile -- an empty `src/` directory makes `tsc --noEmit`
-fail outright rather than succeed with zero files checked.
+`package.json`'s `exports` field maps each subpath (`./*`) to `./src/*/index.ts`, so each feature folder under `src/` is imported as `@fx/partners/<folder>`. Three folders exist (`packages/partners/src/host`, `packages/partners/src/context`, `packages/partners/src/signup`). `src/index.ts` is an empty module (`export {}`) that only gives `tsc --noEmit` an input file; nothing imports it. The other partner features the schema anticipates (an admin surface, domains, referrals, support access, onboarding) have no folder here.
 
-The real partner-tenancy code -- a `withPartner` connection helper
+**Host (`@fx/partners/host`).**
+- `normalizeHostname` (`packages/partners/src/host/normalize.ts`) is the one place a request host becomes a lookup key: lowercase, no port, no trailing dot, labels matching the same pattern as `partner_domains.hostname`'s CHECK. Anything else (an IPv6 literal, a list of hosts, a path) returns null and is treated as "not a partner host".
+- `PgHostResolver` (`packages/partners/src/host/pgResolver.ts`) reads the `resolve_host(hostname)` function from migration `0803_resolve_host.sql` as the web tier's `app_user` login. It answers `active`, `suspended` or `unknown`, and anything it does not recognise counts as unknown.
+- `CachedHostResolver` (`packages/partners/src/host/cache.ts`) holds every answer, unknown ones included, for 60 seconds and at most 1,000 hostnames. A lookup error is never cached. `apps/web/lib/partners/hostResolver.ts` builds the process-wide resolver on first use.
+- `hostBrandStep` (`packages/partners/src/host/step.ts`) is a step in `apps/web/middleware.ts`. It runs on the Edge runtime, so it resolves nothing: it drops any client-sent `x-fx-host` header and, with the layer on, sets it from the `Host` header alone. `X-Forwarded-Host` and `Forwarded` are never read.
+
+**Context (`@fx/partners/context`).**
+- `resolvePartnerContext` (`packages/partners/src/context/resolve.ts`) turns a `Host` header into `direct`, `suspended` or `partner`. A host that is not a partner's (our own `FX_APP_ORIGIN` host, an unknown one, the layer off) is `direct`. An `active` host becomes `partner` only if it has a product name and https terms and privacy links. A resolver error propagates and is never turned into a brand.
+- The branding body is either `STATIC_BRAND` (our six fixed strings, `packages/partners/src/context/staticBrand.ts`) or a `PartnerBrandingEnvelope`, a strict zod object whose colours must pass `PartnerOverride` from `@fx/design` (`packages/partners/src/context/envelope.ts`). A suspended partner's host gets our brand strings with `state: suspended` and none of the partner's text. `logo_url` is always null for now.
+- `apps/web/app/api/branding/partner/handler.ts` serves it. Every answer except an outage is a 200 with the same `Cache-Control: private, no-store` and `Vary: Host` headers, so a response does not reveal whether a host is a partner's. A failed lookup answers 503.
+
+**Signup (`@fx/partners/signup`).** `assignPartnerOnSignup` (`packages/partners/src/signup/index.ts`) calls the database function `assign_partner_on_signup` inside the transaction that created the account. It does nothing unless the signup carries a host and the layer is on, and it does not swallow a refusal: a host that is no longer an active partner host, or an account that already has a partner or referrer, fails the signup. `apps/web/lib/partners/registerHooks.ts` registers it on `onAccountCreated`, so `@fx/core` does not depend on this package.
+
+The partner-tenancy database code -- a `withPartner` connection helper
 mirroring `@fx/db`'s `withTenant`, and the schema/roles/RLS policies it
 depends on -- lives in `@fx/db`:
 
@@ -53,28 +71,16 @@ depends on -- lives in `@fx/db`:
   `has_active_support_grant()` check. See
   [`../data-model.md`](../data-model.md) for the full table list.
 
+
 ## Public surface
 
-`@fx/partners`' own `package.json` exports map (`"./*": "./src/*/index.ts"`)
-resolves to nothing today, since no `src/<name>/index.ts` exists yet.
-`@fx/db`'s partner-tenancy surface (not this package's, but the place the
-real functionality lives) is `withPartner(pool, partnerId, fn)` /
-`withPartner(pool, partnerId, userId, fn)`, exported from
-`packages/db/src/withPartner.ts`.
+`@fx/partners/host` exports `normalizeHostname`, `partnerLayerOn`, `PARTNER_LAYER_ENV`, `UNKNOWN_HOST`, `PgHostResolver`, `CachedHostResolver`, `HOST_HEADER` and `hostBrandStep`. `@fx/partners/context` exports `resolvePartnerContext`, `brandingBodyFor`, `BRANDING_RESPONSE_HEADERS`, `PartnerBrandingEnvelope` and `STATIC_BRAND`. `@fx/partners/signup` exports `assignPartnerOnSignup` and `partnerSignupHook`. `@fx/db`'s partner-tenancy surface is `withPartner(pool, partnerId, fn)` / `withPartner(pool, partnerId, userId, fn)`, exported from `packages/db/src/withPartner.ts`.
 
 ## Tests
 
-`packages/partners` itself has no `test/` directory; its `package.json`
-declares a `"test": "vitest run"` script, but there is nothing under
-`src/` for it to meaningfully exercise yet. Partner-tenancy behavior is
-tested from `packages/db`'s own suite instead:
-`packages/db/test/partners.test.ts` and
-`packages/db/test/partners-isolation.test.ts` (see [`db.md`](./db.md) for
-that package's test harness).
+`packages/partners/test` holds unit tests for the normaliser, the cache, the middleware step, the context and the signup hook, and `packages/partners/test/pg/live.test.ts`, which runs the resolver and the signup hook against the real database functions on a throwaway Postgres (its `vitest.config.ts` reuses `packages/core`'s global setup, and runs files one at a time because they share that database). Partner-tenancy behavior in the schema is tested from `packages/db`'s own suite: `packages/db/test/partners.test.ts` and `packages/db/test/partners-isolation.test.ts` (see [`db.md`](./db.md) for that package's test harness).
 
 ## Known gaps
 
-- `@fx/partners` has no feature code under `src/` at HEAD; every
-  partner-facing capability described in this codebase so far
-  (`withPartner`, the partner schema and RLS policies) is implemented in
-  `@fx/db` instead.
+- Only host resolution, branding and signup assignment have code here. The admin, domains, referrals, support-access and onboarding features have schema in `@fx/db` but no application code in this package.
+- `logo_url` in the branding envelope is always null; no URL is built from the stored logo key.

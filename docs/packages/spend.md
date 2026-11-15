@@ -16,6 +16,15 @@ Sources:
 - `packages/spend/src/plans.ts`
 - `packages/spend/src/reserve.ts`
 - `packages/spend/src/settle.ts`
+- `packages/spend/src/headroom.ts`
+- `packages/spend/src/childRoom.ts`
+- `packages/spend/src/envelopeSettings.ts`
+- `packages/spend/src/usage.ts`
+- `packages/spend/src/computeNotice.ts`
+- `packages/spend/src/gatewayMeter.ts`
+- `packages/spend/src/sandboxUsage.ts`
+- `packages/spend/src/workItemSpend.ts`
+- `packages/spend/src/tables/index.ts`
 - `packages/spend/src/pg.ts`
 - `packages/spend/vitest.config.ts`
 - `packages/spend/test/`
@@ -40,8 +49,8 @@ is known (`settle.ts`).
 `package.json` declares `"main"`/`"types"`/`"exports"` all pointing at
 `src/index.ts`, so `@fx/spend` is importable as a single package (unlike
 `@fx/db` and `@fx/core`). `index.ts` re-exports everything from `types.ts`,
-`pricing.ts`, `plans.ts`, `caps.ts`, `meter.ts`,
-`reserve.ts` and `settle.ts`, plus `createPool`/`withTenant` from `pg.ts`.
+`pricing.ts`, `tables/index.ts`, `plans.ts`, `caps.ts`, `meter.ts`, `sandboxUsage.ts`,
+`reserve.ts`, `headroom.ts`, `envelope.ts`, `childRoom.ts`, `envelopeWrite.ts`, `settle.ts`, `usage.ts`, `computeNotice.ts`, `gatewayMeter.ts`, `envelopeSettings.ts` and `workItemSpend.ts`, plus `createPool`/`withTenant` from `pg.ts`.
 
 - `types.ts`: `Budget`, `ReservationState`, `PlanId`, `WorkItemKind`, `Trigger`, `Purpose`, `ModelId`, `UsageTokens`, `DenyReason`, `ReservationRef`, `ReserveResult`, `MeterDecision`
 - `pricing.ts`: `ModelRate`, `SandboxRates`, `claudePricing()`, `pricingFetchedAt()`, `claudeModelIds()`, `isClaudeModelId(model)`, `computeUsd(rate, usage)`, `computeModelUsd(model, usage)`, `sandboxRates()`, `computeComputeUsd(seconds, vcpu, memGb)`
@@ -53,6 +62,14 @@ No figure is compiled into this package. Every rate, budget, cap and limit above
 - `reserve.ts`: `ReserveParams`, `monthToDateUsd(client, accountId, budget, now?)`, `workItemCommittedUsd(client, accountId, workItemId)`, `ReserveTransactionContractError`, `reserveWith(client, params)`, `reserve(pool, params)`
 - `envelope.ts`, `envelopeWrite.ts` (D#483 S5-d): the spend envelope of an approval. `itemEnvelopeId`, `currentEnvelope`, `envelopeSpentUsd`, `envelopeRunUsd`, `envelopeAdmits` (the one check, used by `reserve()` under a per-envelope lock and by `checkHeadroom`), `recordEnvelopeCharge`, `remainingAccountBudgetUsd`, `writeEnvelopeVersion` (refuses `over_account_budget`). An item with an envelope is held to it in place of the Feature/Small cap and denied `envelope_exceeded`.
 - `creditsExhausted(client, accountId)` (reserve.ts, D#483 S5-k2): true while the account's model connection is broken for out-of-credit. `reserve()` and `checkHeadroom()` both deny a run that has a model estimate with `model_credits_exhausted` (after the account status check, before the caps); a compute-only run is not held, and a preview keeps its `model_connection_not_ok`.
+- `headroom.ts`: `checkHeadroom(pool, params)`, which answers "would this reservation be admitted right now?" with the same checks as `reserve()` and reserves nothing. The parked-stage sweep uses it so a refused run row is written only when the start will succeed.
+- `childRoom.ts`: `childEnvelopeRoom(client, input)`, what is left of a parent's envelope for a planned PR child's first run, decided under the envelope's lock; it fails closed (no envelope or no positive price gives `fits: false`) and is a pre-check, `reserve()` stays the binding one (#528).
+- `envelopeSettings.ts`: the three things a person changes about envelopes, each an append-only version plus one audit row in the same transaction: `changeEnvelope`, `changeAutostart` (the weekly auto-start envelope, which renews every Monday 00:00 UTC; 0 turns auto-start off) and `changeMargin` (the default margin added to a priced estimate), plus `readAutostart` and `autostartRoom`, which small, bug and doc items use to start on their own while the weekly limit has room (#341, #517).
+- `usage.ts`, `computeNotice.ts`: `getBudgets` and `getUsage` read the account's three budgets and month-to-date usage; `computeNoticeFor` derives a notice (`compute_allowance_80`) from that usage when a compute budget is at 80 percent or more. The notice is information only: nothing is stored and `reserve()` never reads it.
+- `gatewayMeter.ts`: the pure parts of the outside meter for runs on an `ai_gateway` connection: the per-run tag, the report request and its parsing, the read schedule, the finality rule and the comparison with what the runner metered.
+- `sandboxUsage.ts`: `sandboxRunCost` and `sandboxSessionUsd`, what Vercel bills for sandbox sessions from the figures it reports (2 vCPUs is the pinned default; a sandbox that records its own `vcpus`, such as the 1-vCPU publish sandbox, is priced at that count; only the `iad1` region has a rate row).
+- `workItemSpend.ts`: `workItemBuildSpendUsd(pool, accountId, workItemId)`, the model spend of an item's executor runs, read under `withTenant`.
+- `tables/index.ts`: `priceTableFor(backend)`, `priceFor(backend, modelId)` and `isPriced`, the per-backend price tables read from the plan data; a backend with no table (OpenCode) has every model unpriced and refused at admit.
 - `settle.ts`: `LedgerSource`, `SettleEntry`, `SettleParams`, `SettleResult`, `settleWith(client, params)`, `settle(pool, params)`, `ReleaseParams`, `releaseWith(client, params)`, `release(pool, params)`
 - `pg.ts`: `createPool(connectionString)`, `withTenant(pool, accountId, fn)`
 

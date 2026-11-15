@@ -49,7 +49,7 @@ and `packages/runner/src/runStatusWriter.ts` both do.
 - `rlsInventory.ts`: `findRlsViolations(client, exemptions?)`
 - `platformWideTables.ts`: `PLATFORM_WIDE_TABLES`
 - `opsInventory.ts`: `OPS_VIEW_ALLOWLIST`, `findOpsInventoryViolations(client, allowlist?)` (the operator console's views and functions, owned by `ops_owner`)
-- `decisions.ts`: `DecisionSetting`, `DecisionClass`, `DecisionReceipt`, `getCurrentDialSetting(client, repoId, decisionType)`, `listDialHistory(client, repoId, decisionType)`, `WriteDialSettingContext`, `WriteDialSettingInput`, `writeDialSetting(ctx, input)`, `listReceiptsForWorkItem(client, workItemId)`, `RECEIPT_RETENTION_MONTHS`, `PruneResult`, `pruneDecisionReceipts(client, retentionMonths?)`
+- `decisions.ts`: `DecisionSetting`, `DecisionClass`, `DecisionReceipt`, `DIAL_DEFAULT_MARKER`, `getCurrentDialSetting(client, repoId, decisionType)`, `getDialSettingAt(client, repoId, decisionType, version)`, `listDialHistory(client, repoId, decisionType)`, `WriteDialSettingContext`, `WriteDialSettingInput`, `writeDialSetting(ctx, input)`, `AppendDialVersionInput`, `appendDialVersion(client, input)`, `listReceiptsForWorkItem(client, workItemId)`, `RECEIPT_RETENTION_MONTHS`, `PruneResult`, `pruneDecisionReceipts(client, retentionMonths?)`
 - `dialInventory.ts`: `FixedInvariant`, `FIXED_INVARIANTS`, `FIXED_INVARIANT_KEYS`, `findDialInvariantCollisions(catalogueIds?, invariantKeys?)`
 - `aap.ts`: the Agent Approval Protocol storage client (migration `0837`): `issueCredential`, `sha256Hex`, `envArgumentsKek`, `sealArguments`/`openArguments` (AES-256-GCM under a key derived from `FX_KEK_V<n>`), `canonicalJson`, `AapError`, `createInstance`/`closeInstance`/`authenticateInstance`, `createRequest`/`getRequest`/`cancelRequest`/`consumeRequest`/`reportOutcome`, `decideRequest`. Every write is a SECURITY DEFINER function owned by `aap_definer` and executable by `aap_invoker` only; `sweepAap` (the housekeeping, on `aap_sweeper`), and `createRequest` takes an `idempotencyKey`; `createToken`/`revokeToken`, `renameInstance`/`getInstance`, `readArguments` (owner or admin only, through `aap_arguments_get`)
 
@@ -160,6 +160,8 @@ deletion. The module's own comment notes receipt-row inserts are
 deliberately not implemented here -- the application role holds no INSERT
 grant on `decision_receipts` at all.
 
+`getDialSettingAt` reads one exact version of a dial (null for version 0 or a version never written). `appendDialVersion` is the body of `writeDialSetting` for a caller that already holds a `withTenant` transaction opened as the person and wants several dials written in one commit (the Autonomy preset): one version row plus one `audit_write` each, so history and audit trail stay in step. Because dials are append-only with a NOT NULL disposition, "go back to the default" is a new version holding the catalogue's own default disposition and the `preset` marker `default` (`DIAL_DEFAULT_MARKER`, #306). Its optional `noVersionDisposition` names, in the audit row only, what was in force while the dial had no version when that was not the catalogue default, so a repository the runtime reads as Balanced is recorded truthfully (#722).
+
 ## The dial/invariant intersection guard
 
 `dialInventory.ts`'s `findDialInvariantCollisions()` (`#144`) is a second,
@@ -236,7 +238,7 @@ provisions the database the suite runs against: unless `DATABASE_URL_TEST`
 is already set in the environment (with `DATABASE_URL_APP_USER`,
 `DATABASE_URL_PLATFORM_OPS` and `DATABASE_URL_PARTNER_USER` set alongside
 it), it provisions a throwaway Postgres cluster via
-`test/support/ephemeral-pg.ts`, applies every migration once via
+`test/support/ephemeral-pg.ts` (loopback TCP only, with no Unix socket, because a sandboxed job refuses `AF_UNIX`, #870; it creates its own temp directory under the temp root and first reaps stale clusters left there by earlier runs, #562), applies every migration once via
 `runMigrations`, and hands the resulting connection strings to each test
 file through vitest's `provide`/`inject` mechanism (`test/support/bind-test-env.ts`
 reads them back into that worker's own `process.env`). Every test file
