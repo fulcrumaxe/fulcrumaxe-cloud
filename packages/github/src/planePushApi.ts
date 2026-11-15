@@ -46,6 +46,7 @@ export interface PlanePushApiDeps {
 }
 
 const CALL_TIMEOUT_MS = 15_000;
+const FULL_CI_LABEL = "ci:full";
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,330}$/;
 
 function split(codeRepo: string): { owner: string; name: string } {
@@ -294,6 +295,31 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
         if (typeof b.number !== "number" || !Number.isSafeInteger(b.number) || typeof b.html_url !== "string" || typeof b.head?.ref !== "string" || typeof b.head?.sha !== "string" || typeof b.base?.ref !== "string") throw new PlanePushApiError("public_unavailable");
         return { number: b.number, url: b.html_url, headRef: b.head.ref, headRepo: typeof b.head.repo?.full_name === "string" ? b.head.repo.full_name : "", headSha: b.head.sha, baseRef: b.base.ref };
       });
+    },
+
+    /**
+     * D#6 ONE-CI-PER-ITEM: puts `ci:full` on a pull request the platform just opened, so the public CI's first run already reads it. Idempotent and respectful of a person: when the pull request's
+     * issue events already hold ANY event of that label (ours earlier, or a person taking it off), nothing is added. The one write is `POST /issues/{n}/labels` with exactly `{ labels: ["ci:full"] }`.
+     * Returns whether the label was added. A read or write GitHub cannot answer throws `public_unavailable`; callers treat the label as best-effort (the cloud's Gate 1 adds it itself later).
+     */
+    async ensureFullCiLabel(input: { codeRepo: string; number: number; token: string }): Promise<"added" | "present"> {
+      const { owner, name } = split(input.codeRepo);
+      if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new PlanePushApiError("public_unavailable");
+      const base = `/repos/${owner}/${name}/issues/${input.number}`;
+      for (let page = 1; page <= 10; page++) {
+        const events = await call("GET", `${base}/events?per_page=100&page=${page}`, input.token);
+        if (events.status >= 500 || events.status === 429) throw new PlanePushApiError("public_unavailable", true);
+        if (events.status !== 200 || !Array.isArray(events.body)) throw new PlanePushApiError("public_unavailable");
+        for (const e of events.body) {
+          const ev = e !== null && typeof e === "object" ? (e as { event?: unknown; label?: { name?: unknown } | null }) : {};
+          if ((ev.event === "labeled" || ev.event === "unlabeled") && ev.label?.name === FULL_CI_LABEL) return "present";
+        }
+        if (events.body.length < 100) break;
+        if (page === 10) throw new PlanePushApiError("public_unavailable");
+      }
+      const res = await call("POST", `${base}/labels`, input.token, { labels: [FULL_CI_LABEL] });
+      if (res.status !== 200) throw new PlanePushApiError("public_unavailable", res.status >= 500 || res.status === 429);
+      return "added";
     },
 
     async openPullRequest(input: { codeRepo: string; branch: string; base: string; title: string; body: string; token: string }): Promise<{ number: number; url: string }> {

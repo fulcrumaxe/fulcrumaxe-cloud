@@ -45,6 +45,12 @@ interface World {
   failFirst?: number;
   /** With fail "pulls": the status to fail with (default 500). */
   failStatus?: number;
+  /** The issue events of pull request 9, as GitHub shapes them (default: none). */
+  events?: unknown[];
+  /** Repositories the hosted layer labels `ci:full` on (default: none). */
+  fullCiRepos?: string[] | (() => ReadonlySet<string>);
+  /** Make the label write answer 500. */
+  labelDown?: boolean;
   /** How `POST /pulls` answers: created (the default), refused for good (422), or down (503). */
   create?: "ok" | "refused" | "down";
   /** What the mint answer says the token holds, given what was asked (default: exactly what was asked, plus the implicit metadata read). */
@@ -73,6 +79,8 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
       if (world.create === "down") return ghError(503, "unavailable");
       return json(201, { number: 9, html_url: "https://github.com/acme/widgets/pull/9" });
     }
+    if (r.method === "GET" && r.path === "/repos/acme/widgets/issues/9/events") return json(200, world.events ?? []);
+    if (r.method === "POST" && r.path === "/repos/acme/widgets/issues/9/labels") return world.labelDown ? ghError(500, "boom") : json(200, [{ name: "ci:full" }]);
     if (r.method === "GET" && r.path === "/repos/acme/widgets/pulls") {
       if (world.fail === "list") return ghError(500, "boom");
       return json(200, world.list ?? []);
@@ -104,7 +112,7 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
     return { token, expiresAt: new Date(Date.now() + expiresInMs).toISOString(), permissions: world.answerPermissions ? world.answerPermissions(asked) : asked, repositories: (p.repositories ?? []).map((x) => x) };
   };
   const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem, webhookSecret: "unused" }), requester, cache: new InstallationTokenCache(), fetchImpl });
-  const hosted = createHostedPlanePush(api, { ...(now ? { now } : {}), ownsInstallation: OWNS });
+  const hosted = createHostedPlanePush(api, { ...(now ? { now } : {}), ownsInstallation: OWNS, ...(world.fullCiRepos ? { fullCiRepos: typeof world.fullCiRepos === "function" ? world.fullCiRepos : new Set(world.fullCiRepos) } : {}) });
   /** The order of calls that carried one of the minted tokens, plus the revokes. */
   const trail = () => s.seen.filter((x) => x.path !== "/repos/acme/widgets/installation").map((x) => `${x.method} ${x.path} ${x.headers["authorization"]?.replace("Bearer ", "")}`);
   return { hosted, server: s, mintedTokens, requested, trail, revoked };
@@ -479,6 +487,59 @@ describe("openPullRequest (D#598 P1f-5c)", () => {
       expect(t.revoked.has("ghs_hosted1")).toBe(true);
       await server?.close();
     }
+  });
+});
+
+describe("ci:full on a new public pull request (D#6 ONE-CI-PER-ITEM)", () => {
+  const open = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.openPullRequest({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH, title: "Add a thing", body: "Body text" });
+  const labelPosts = (t: Awaited<ReturnType<typeof setup>>) => t.server.seen.filter((x) => x.method === "POST" && x.path.endsWith("/labels"));
+
+  it("labels once, right after the create call, with the same token and exactly the one body, for a listed repository", async () => {
+    const t = await setup({ fullCiRepos: ["acme/widgets"] });
+    await expect(open(t)).resolves.toMatchObject({ number: 9 });
+    expect(labelPosts(t)).toHaveLength(1);
+    expect(JSON.parse(labelPosts(t)[0]!.body)).toEqual({ labels: ["ci:full"] });
+    expect(t.mintedTokens).toEqual(["ghs_hosted1"]);
+    const post = t.server.seen.filter((x) => x.method === "POST").map((x) => x.path);
+    expect(post).toEqual(["/repos/acme/widgets/pulls", "/repos/acme/widgets/issues/9/labels"]);
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+  });
+
+  it("adds nothing for a repository that is not listed, and the ensure call answers off without a token", async () => {
+    const t = await setup({ fullCiRepos: ["other/repo"] });
+    await open(t);
+    expect(labelPosts(t)).toHaveLength(0);
+    await expect(t.hosted.ensureFullCiLabel({ accountId: ACCOUNT, codeRepo: "acme/widgets", number: 9 })).resolves.toBe("off");
+    const t2 = await setup({});
+    await open(t2);
+    expect(labelPosts(t2)).toHaveLength(0);
+  });
+
+  it("is idempotent, and a person who took the label off is respected: any earlier ci:full event means no write", async () => {
+    for (const events of [[{ event: "labeled", label: { name: "ci:full" } }], [{ event: "labeled", label: { name: "ci:full" } }, { event: "unlabeled", label: { name: "ci:full" } }]]) {
+      const t = await setup({ fullCiRepos: ["acme/widgets"], events });
+      await expect(t.hosted.ensureFullCiLabel({ accountId: ACCOUNT, codeRepo: "acme/widgets", number: 9 })).resolves.toBe("present");
+      expect(labelPosts(t)).toHaveLength(0);
+    }
+    const other = await setup({ fullCiRepos: ["acme/widgets"], events: [{ event: "labeled", label: { name: "bug" } }] });
+    await expect(other.hosted.ensureFullCiLabel({ accountId: ACCOUNT, codeRepo: "acme/widgets", number: 9 })).resolves.toBe("added");
+  });
+
+  it("a list given as a function is read when a label is asked for, not when the layer is built", async () => {
+    let reads = 0;
+    const t = await setup({ fullCiRepos: () => (reads++, new Set(["acme/widgets"])) });
+    expect(reads).toBe(0);
+    await open(t);
+    expect(reads).toBeGreaterThan(0);
+    expect(labelPosts(t)).toHaveLength(1);
+  });
+
+  it("a label that cannot be written never fails the opening, and the token is still revoked", async () => {
+    const t = await setup({ fullCiRepos: ["acme/widgets"], labelDown: true });
+    await expect(open(t)).resolves.toEqual({ number: 9, url: "https://github.com/acme/widgets/pull/9" });
+    expect(t.revoked.has("ghs_hosted1")).toBe(true);
+    const t2 = await setup({ fullCiRepos: ["acme/widgets"], labelDown: true });
+    await expect(t2.hosted.ensureFullCiLabel({ accountId: ACCOUNT, codeRepo: "acme/widgets", number: 9 })).resolves.toBe("failed");
   });
 });
 

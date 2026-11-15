@@ -434,6 +434,30 @@ describe("plane-push routes [pg]", () => {
       expect(record()).toMatchObject({ outcome: { state: "pr_opened", prNumber: 9, prUrl: "https://github.com/acme/widgets-public/pull/9" }, terminal: true, label: "pr_opened" });
     });
 
+    it("pr_opened labels the confirmed pull request ci:full once (after both reads, before the record), and a mismatched address labels nothing", async () => {
+      const labelled: unknown[] = [];
+      const withLabel: PlanePushHostedPort = { ...port, ensureFullCiLabel: async (input) => void (calls.push({ method: "label", input: { ...input } }), labelled.push(input)) };
+      await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 }, deps({ planePush: withLabel }));
+      expect(names()).toEqual(["context", "verifyPushed", "verifyPullRequest", "label", "record"]);
+      expect(labelled).toEqual([{ accountId: A.accountId, codeRepo: "acme/widgets-public", number: 9 }]);
+      expect(record()).toMatchObject({ terminal: true, label: "pr_opened" });
+    });
+
+    it("a person-managed row is never labelled, and its outcome is still recorded", async () => {
+      const labelled: unknown[] = [];
+      const withLabel: PlanePushHostedPort = { ...port, ensureFullCiLabel: async (input) => void labelled.push(input) };
+      context = { ...withToken(), plane: { ...(withToken() as { plane: Record<string, unknown> }).plane, state: "managed_by_person" } } as typeof context;
+      await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 }, deps({ planePush: withLabel }));
+      expect(labelled).toEqual([]);
+      expect(record()).toMatchObject({ outcome: { state: "pr_opened", prNumber: 9 }, label: "pr_opened" });
+    });
+
+    it("a label call that throws never changes the recorded outcome", async () => {
+      const withLabel: PlanePushHostedPort = { ...port, ensureFullCiLabel: async () => Promise.reject(new Error("boom")) };
+      await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 }, deps({ planePush: withLabel }));
+      expect(record()).toMatchObject({ outcome: { state: "pr_opened", prNumber: 9 }, terminal: true, label: "pr_opened" });
+    });
+
     it.each([
       ["another pull request number", "https://github.com/acme/widgets-public/pull/10"],
       ["another repository", "https://github.com/evil/widgets-public/pull/9"],

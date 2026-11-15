@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { publicPullRequestUrlMatches } from "@fx/core/src/repos/planePushRecord.js";
 import { buildPlanePushText } from "@fx/core/src/repos/planePushText.js";
 import {
@@ -349,6 +350,8 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       if (!pr) return unconfirmed("pr_unconfirmed", m);
       // The address stored is the paired repository's pull request of the reported number, whatever the read returned.
       if (!publicPullRequestUrlMatches(plane.codeRepo, m.pr_number!, pr.url)) return mismatch("pr_address");
+      // The pull request is confirmed and open: the label goes on at once, so the first CI run is already full scope (a person-managed row is left alone).
+      if (plane.state !== "managed_by_person") await port.ensureFullCiLabel?.({ accountId, codeRepo: plane.codeRepo, number: m.pr_number! }).catch((err: unknown) => reportError(err, { stage: "plane_push.ci_full_label" }));
       return { outcome: { state: "pr_opened", headSha: m.head_sha, tipSha: m.tip_sha, prNumber: m.pr_number!, prUrl: pr.url }, terminal: true, label: "pr_opened" };
     }
   }

@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { PLANE_REFUSAL_CODES, type PlaneRefusalCode } from "@fulcrumaxe/runner-protocol/planePush";
@@ -71,6 +72,8 @@ export interface PlanePublishDeps {
     pullRequestState?(input: { accountId: string; codeRepo: string; number: number }): Promise<"open" | "closed" | "merged" | "unknown">;
     /** D#598 P1f-5c: opens the pull request on the paired repo's already-pushed branch (base `main`), with a fresh token it revokes before it returns. No git. Throws an error with `code` `pr_failed` or `public_unavailable`. */
     openPullRequest(input: { accountId: string; codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
+    /** D#6 ONE-CI-PER-ITEM: `ci:full` on a pull request the sandbox hook just opened (listed repositories only; best-effort, never throws). Absent: nothing is labelled here. */
+    ensureFullCiLabel?(input: { accountId: string; codeRepo: string; number: number }): Promise<unknown>;
     /** FIXROUND-REFRESH-HEAD: the public branch's head (null: no such branch), with a fresh token revoked before it returns. Absent: a fix round of a paired item that pushed is refused. */
     branchHead?(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;
   };
@@ -681,6 +684,19 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
   return conclude(end);
 }
 
+/** True when a person has taken the branch over by now (read fresh: the attempt's own facts were read before the hook ran). A row that cannot be read counts as managed, so nothing is labelled on a doubt. */
+async function managedNow(deps: PlanePublishDeps, accountId: string, facts: Facts): Promise<boolean> {
+  try {
+    return await withTenant(deps.pool, accountId, async (c) => {
+      const { rows } = await c.query<{ managed: boolean }>("SELECT managed_by_person_at IS NOT NULL AS managed FROM plane_pushes WHERE account_id = $1 AND id = $2", [accountId, facts.pushId]);
+      return rows[0]?.managed !== false;
+    });
+  } catch {
+    // fx-swallow-ok: an unreadable row means no label; the attester adds it later if the item goes on
+    return true;
+  }
+}
+
 /** The hook's terminal line becomes an outcome only after GitHub confirms it (report verification, C4 point 1a). Anything doubtful is `report_mismatch`, storing nothing from the line. */
 async function verify(deps: PlanePublishDeps, accountId: string, facts: Facts, line: PlanePublishLine): Promise<{ outcome: VerifiedOutcome; label: string }> {
   const mismatch = REFUSED(PUBLISH_CODES.reportMismatch);
@@ -700,6 +716,7 @@ async function verify(deps: PlanePublishDeps, accountId: string, facts: Facts, l
         if (!(await deps.hosted.verifyPushed({ accountId, codeRepo: facts.codeRepo, branch: facts.branch, headSha: line.head_sha, tipSha: line.tip_sha }))) return mismatch;
         if (line.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: line.head_sha, tipSha: line.tip_sha }, label: "pr_failed" };
         const pr = await deps.hosted.verifyPullRequest({ accountId, codeRepo: facts.codeRepo, branch: facts.branch, number: line.pr_number! });
+        if (pr !== null && publicPullRequestUrlMatches(facts.codeRepo, line.pr_number!, pr.url) && !(await managedNow(deps, accountId, facts))) await deps.hosted.ensureFullCiLabel?.({ accountId, codeRepo: facts.codeRepo, number: line.pr_number! }).catch((err: unknown) => reportError(err, { stage: "plane_push.ci_full_label" }));
         return pr === null || !publicPullRequestUrlMatches(facts.codeRepo, line.pr_number!, pr.url) ? mismatch : { outcome: { state: "pr_opened", headSha: line.head_sha, tipSha: line.tip_sha, prNumber: line.pr_number!, prUrl: pr.url }, label: "pr_opened" };
       } catch {
         // fx-swallow-ok: GitHub could not be asked; nothing is stored from the line and the item shows the fixed unavailable refusal
