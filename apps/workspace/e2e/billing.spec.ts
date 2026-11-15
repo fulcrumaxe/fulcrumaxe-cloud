@@ -688,6 +688,15 @@ test.describe("Budget & Billing: the model budget when none is set", () => {
     await expect(tid(page, "bb-reserved-note")).toHaveText("Reserved is money held for work that is still running. It is released when that work finishes.");
     await expect(page.locator(`${WIN} dt[title^="Reserved is money held"]`)).toHaveCount(3);
     expect(await page.locator(WIN).innerText()).not.toMatch(JUNK);
+    // Issue #810: the period reads in words, from the committed fixture's period_start.
+    await expect(tid(page, "bb-period")).toHaveText("Month starting Sep 1, 2026.");
+    expect(await page.locator(WIN).innerText()).not.toContain("2026-09-01");
+  });
+
+  test("issue #810: no period line, never a blank or junk one, when the API sends no readable period start", async ({ page }) => {
+    await boot(page, { admin: false, owner: false, usage: { ...USAGE, period_start: null } });
+    await expect(tid(page, "bb-period")).toHaveCount(0);
+    await expect(tid(page, "bb-reserved-note")).toBeVisible();
   });
 });
 
