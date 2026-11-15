@@ -23551,6 +23551,130 @@
         }
       }
     },
+    "/api/v1/verify-sign-in": {
+      "get": {
+        "operationId": "listVerifySignInNeeds",
+        "summary": "The repositories whose post-merge check needs the checking account signed in again on a runner",
+        "description": "Session only, any member. One entry per repository with checking on, in its most pressing kind: a check waiting for a sign-in, or the runners' saved sign-in expired, missing or about to expire. Read only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The repositories whose post-merge check needs the checking account signed in again on a runner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repo_id": {
+                            "type": "string"
+                          },
+                          "repo": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "waiting",
+                              "expired",
+                              "missing",
+                              "expiring_soon"
+                            ]
+                          },
+                          "command": {
+                            "type": "string"
+                          },
+                          "since": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "repo_id",
+                          "repo",
+                          "kind",
+                          "command",
+                          "since"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/stalled-items": {
       "get": {
         "operationId": "listStalledItems",

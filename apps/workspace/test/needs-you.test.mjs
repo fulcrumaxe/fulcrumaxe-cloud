@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, LIVE_EVENTS, MAX_ASK_PAGES, ME_URL, MERGE_URL, NEEDS_HUMAN_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readPerson, readRequest, readStalled, canMarkDone, waitingHolderWords } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, LIVE_EVENTS, MAX_ASK_PAGES, ME_URL, MERGE_URL, NEEDS_HUMAN_URL, PROVIDER_HOSTS, START_ASK_TYPES, SIGN_IN_URL, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readPerson, readRequest, readStalled, canMarkDone, waitingHolderWords } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
@@ -33,9 +33,9 @@ const closed = (state, over = {}) => req({ state, status_sentence: null, check_i
 function fakeCall(routes) {
   const log = [];
   const askLog = []; // the decision-ask calls; kept apart so the setup-request tests below count only their own requests
-  const all = { ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ["GET " + NEEDS_HUMAN_URL]: { data: [], next_cursor: null }, ["GET " + ME_URL]: { is_admin: true }, ...routes };
+  const all = { ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ["GET " + SIGN_IN_URL]: { items: [] }, ["GET " + NEEDS_HUMAN_URL]: { data: [], next_cursor: null }, ["GET " + ME_URL]: { is_admin: true }, ...routes };
   const call = vi.fn(async (method, path, body) => {
-    (path.startsWith(ASKS_URL) || path === ME_URL || path.startsWith("/api/v1/work-items") || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
+    (path.startsWith(ASKS_URL) || path === ME_URL || path.startsWith("/api/v1/work-items") || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.startsWith(SIGN_IN_URL) || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
     // The real API answers 400 to any body on the done and withdraw routes (packages/api/src/handler.ts).
     if (method === "POST" && /\/(done|withdraw)$/.test(path) && body !== undefined) throw fail(400, "invalid_request");
     const r = all[method + " " + path];
@@ -540,7 +540,7 @@ describe("decision asks", () => {
     expect(f.list.state.rows.map((r) => r.kind)).toEqual(["ask", "setup"]);
     expect(f.list.state.notShown).toBe(0);
     expect(f.log).toEqual([["GET", LIST_URL, undefined]]);
-    expect(f.askLog).toEqual([["GET", ME_URL, undefined], ["GET", ASKS_FIRST_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined], ["GET", NEEDS_HUMAN_URL, undefined]]);
+    expect(f.askLog).toEqual([["GET", ME_URL, undefined], ["GET", ASKS_FIRST_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined], ["GET", NEEDS_HUMAN_URL, undefined], ["GET", SIGN_IN_URL, undefined]]);
     expect(notShownWords(1)).toBe("1 more isn't shown.");
     expect(notShownWords(3)).toBe("3 more aren't shown.");
   });
@@ -1235,5 +1235,51 @@ describe("D#598 P1g-3a: the managed line is not counted as something that needs 
     const managed = req({ kind: "branch_pushed_by_person", state: "done", branch_managed: true, status_sentence: "Public branch managed by a person", check_interval_seconds: null });
     const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([managed, req({ id: "3a1f6c52-7a0e-4c1a-9a53-0b1d2e3f4a77" })]), ["GET " + ME_URL]: { is_admin: true } });
     expect((await readNeedsYouCount(f.call)).count).toBe(1);
+  });
+});
+
+// D#749 VERIFY-SIGNIN-EXPIRY: the sign-in rows of the Needs you list.
+import { readSignIn, arrangeRows as arrangeSignIn } from "../apps/needs-you/needs-you-model.js";
+describe("the sign-in rows", () => {
+  const ITEM = fixture("listVerifySignInNeeds", "200-ok.json").items[0];
+  it("reads the contract fixture: the repository as the title, the cloud's fixed sentence for its kind, and the one command as text", () => {
+    expect(readSignIn(ITEM)).toMatchObject({ kind: "signin", title: "example-org/example-repo", state: "open", sentence: WORDS.signInExpired, command: ITEM.command });
+    for (const [kind, key] of [["waiting", "signInWaiting"], ["expired", "signInExpired"], ["missing", "signInMissing"], ["expiring_soon", "signInExpiring"]]) expect(readSignIn({ ...ITEM, kind }).sentence).toBe(WORDS[key]);
+    expect(readSignIn({ ...ITEM, repo: null }).title).toBe(WORDS.signInRepo);
+  });
+  it("draws nothing it does not know: an unknown kind, an empty id, and any command that is not the fixed words with an address", () => {
+    expect(readSignIn({ ...ITEM, kind: "other" })).toBeNull();
+    expect(readSignIn({ ...ITEM, repo_id: "" })).toBeNull();
+    expect(readSignIn(null)).toBeNull();
+    for (const command of ["rm -rf /", "fx-runner verify-login --base-url https://a.example.test/; id", "fx-runner verify-login --base-url https://a.example.test/ && id", "fx-runner verify-login --base-url javascript:alert(1)", "fx-runner verify-login --base-url https://a.example.test/$(id)", "fx-runner verify-login --base-url https://a.example.test/`id`", "fx-runner verify-login", "", 5, null, "fx-runner verify-login --base-url " + "https://a.example.test/" + "x".repeat(300)]) {
+      expect(readSignIn({ ...ITEM, command }), String(command)).toBeNull();
+    }
+    expect(readSignIn({ ...ITEM, command: "fx-runner verify-login --base-url http://localhost:3000" })).not.toBeNull();
+  });
+  it("pins the command pattern: no whitespace-free suffix, in the host or the path, can start or smuggle another command", () => {
+    const P = "fx-runner verify-login --base-url ";
+    const shellChars = [";", "|", "&", "<", ">", "\n", "\r", "\t", '"', "'", "\\", "%", "@", "#", "?", "*", "!", "$", "`", "(", ")", "{", "}", "[", "]", "=", ",", "+", "ä", "\u0000"];
+    for (const c of shellChars) {
+      for (const url of ["https://a.example.test" + c + "id", "https://a.example.test/" + c + "id", "https://a.example.test/p" + c, "https://a.example.test:443" + c + "id", "https://" + c + "a.example.test"]) {
+        expect(readSignIn({ ...ITEM, command: P + url }), JSON.stringify(url)).toBeNull();
+      }
+    }
+    for (const url of ["https://a.example.test/;id", "https://a.example.test;id", "https://a.example.test|id", "https://a.example.test&id", "https://a.example.test<id", "https://a.example.test>id", "https://a.example.test/|id", "https://a.example.test/&id", "https://a.example.test/<id", "https://a.example.test/>id", "https://a.example.test\nid", "https://a.example.test/\nid", "https://a.example.test\n", "https://a.example.test/\n", 'https://a.example.test"id', "https://a.example.test'id", "https://a.example.test/\\id", "https://a.example.test%00", "https://a.example.test@evil.test", "https://a.example.test#x", "https://a.example.test?x=1", "https://a.example.test/*", "https://a.example.test!", "https://exämple.test", "https://[::1]:3000", "https://a.example.test/[x]"]) {
+      expect(readSignIn({ ...ITEM, command: P + url }), JSON.stringify(url)).toBeNull();
+    }
+    expect(readSignIn({ ...ITEM, command: P + "https://a.example.test:8443/base-path/x_y.z~w" })).not.toBeNull();
+  });
+  it("sits after the asks and the items that need a person, before the pull requests; one row per repository", async () => {
+    const rows = arrangeSignIn({ asks: [], stalled: [], people: [], merges: [{ kind: "merge", id: "m", workItemId: "m" }], requests: [], signIns: [readSignIn(ITEM)] });
+    expect(rows.map((r) => r.kind)).toEqual(["signin", "merge"]);
+    const f = await loaded({ [GET]: listOf([]), ["GET " + SIGN_IN_URL]: { items: [ITEM] } });
+    expect(f.list.state.rows.map((r) => r.id)).toEqual(["signin-" + ITEM.repo_id]);
+  });
+  it("a failed or malformed sign-in read is no sign-in rows: the rest of the list still loads (a cloud without the route, or one failed read, must not blank the decisions)", async () => {
+    for (const answer of [fail(500, "server_error"), fail(404, "not_found"), { nope: 1 }, null]) {
+      const f = await loaded({ [GET]: listOf([BASE]), ["GET " + SIGN_IN_URL]: answer });
+      expect(f.list.state.status, String(answer)).toBe("ready");
+      expect(f.list.state.rows.map((r) => r.kind)).toEqual(["setup"]);
+    }
   });
 });

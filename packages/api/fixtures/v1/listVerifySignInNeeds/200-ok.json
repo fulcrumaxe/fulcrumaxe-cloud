@@ -1,0 +1,11 @@
+{
+  "items": [
+    {
+      "repo_id": "6d1f3a52-8c47-4b0e-9a35-2e7b1c4d8f60",
+      "repo": "example-org/example-repo",
+      "kind": "expired",
+      "command": "fx-runner verify-login --base-url https://staging.example.test",
+      "since": null
+    }
+  ]
+}
