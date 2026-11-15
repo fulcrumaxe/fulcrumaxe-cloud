@@ -18,6 +18,8 @@ Sources:
 - `packages/db/migrations/1012_plane_push_reverify.sql`
 - `packages/db/migrations/1013_verify_hold_reason.sql`
 - `packages/db/migrations/1016_proposal_verify_fair_order.sql`
+- `packages/db/migrations/1017_sitekit_role_routing.sql`
+- `packages/db/migrations/1018_run_checks_reason_no_change.sql`
 
 ## Tables
 
@@ -125,6 +127,8 @@ The migrations create 181 tables at HEAD (`grep -hoE '^CREATE TABLE (IF NOT EXIS
 `verify_rows` and its siblings (`1003`-`1013`) store the post-merge verify stage described in [the architecture](architecture.md#pipeline). Later migrations add to `verify_rows` and `verify_settings`: the runner's browser method and driver (`1006_runner_browser_playwright_capability.sql`, `1007_verify_browser_driver.sql`), an audit row for each settings write (`1008_verify_settings_audit.sql`), the stored account check (`1009_verify_account_check.sql`), `checks_only` for the Spec criteria left to the other checks (`1010_verify_visible_criteria.sql`), `attempt` so a person's "Verify again" opens a new row while the old one stays as history, with at most one unfinished row per merge (`1011_verify_again.sql`), and `hold_reason` and `hold_since` saying why a `deploying` row is waiting (`1013_verify_hold_reason.sql`).
 
 Two other recent migrations touch existing tables. `1002_agent_run_last_alive.sql` adds `agent_runs.last_alive_at` and the run's own silence and run-time limits, written only through the `agent_run_alive_mark` function, so a durable sweep can end a hosted run whose starting process is gone. `1012_plane_push_reverify.sql` adds four nullable columns to the plane-push attempt so a push report that GitHub had not yet confirmed can be checked again against the head and tip that same report named. `1014`-`1016` change which proposals `proposal_verify_list_due` lists: Local-only repositories are included, newest first, and fair across accounts.
+
+`1017_sitekit_role_routing.sql` (#925) inserts six `routing_rows` for the site kit's `site-extractor` and `site-verifier` roles, one per size, into every `routing_tables` version whose status is `live` or `proposed`, leaving existing rows alone, and widens the `role_settings_model_floor` check so it names `site-verifier` beside the two security roles. Both steps are skipped where the table or constraint does not exist yet. `1018_run_checks_reason_no_change.sql` (#926) adds `no_change` to the values the `run_checks.reason` check accepts, matching the runner protocol's `CHECK_NOT_RUN_REASONS`.
 
 `packages/db/src/rlsInventory.ts`'s `findRlsViolations` is the mechanical version of the "RLS enabled+forced" column above: it scans `pg_class` for any `public` table missing either flag, excluding `schema_migrations` and `PLATFORM_WIDE_TABLES` (`routing_tables`, `routing_rows`, `platform_audit`), plus (since `#127`) every view/materialized view `app_user`/`partner_user` can read without `security_invoker`; its own test asserts an empty result against the real schema.
 

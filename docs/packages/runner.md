@@ -9,6 +9,9 @@ Sources:
 - `packages/net-guard/src/`
 - `packages/core/src/verify/wake.ts`
 - `packages/runner-protocol/src/verifierGuard.ts`
+- `packages/runner-protocol/src/messages.ts`
+- `packages/worker/src/checkFix.ts`
+- `packages/worker/src/advance.ts`
 
 ## What it does
 
@@ -87,6 +90,10 @@ The CLI reaches the extension through `--chrome` (only this role; every other ro
 3. CHROME UNAVAILABLE TO RUNNER JOBS: any of these with the token set: no browser tool in the `init` line, a message that Chrome needs a different login or scope, or the tool calls failing to attach while Chrome is open and the extension connected. Then the runner's credential cannot serve this role. Stop and report; do not work around it with the interactive login, which is not what a job has. (The probe passing only shows the extension is connected, not that the CLI will use it.)
 4. With Chrome closed, the same command (with the token) must fail to attach, and `fx-runner run` stops advertising `browser_chrome_v1` at its next hello.
 5. If `--tools` refuses the run, or the `init` line shows a tool outside that list, stop and report: the attach or the flag handling differs from what the runner assumes.
+
+### Which kind of fix round a job is
+
+`StartAgentRunInput` and `ExecutionRun` carry an optional `fixRoundKind` (`packages/runner/src/startAgentRun.ts`, `packages/runner/src/executionTarget.ts`), set only by the cloud's own start of a fix round and never taken from a runner (#926). The job issuer (`packages/runner/src/targets/jobIssuer.ts`) signs it into the job as `fix_round_kind` only for an executor job that continues a branch, is not a conflict round and carries a check; any other start is signed without the key, so the runner runs its check. `packages/worker/src/checkFix.ts` sets `check_fix` (the round answers a failed check) and `packages/worker/src/advance.ts` sets `review_fix` for a review or person round, but not for a conflict round and not for a round a confirmed replace started. The issuer holds such a job for a runner at `FIX_ROUND_KIND_JOB_MIN_PROTOCOL` (17) or later (`packages/runner-protocol/src/messages.ts`). `packages/runner/test/jobIssuerFixRoundKind.pg.test.ts` covers the signing rule.
 
 ### Which browser method a deploy verifier job uses
 

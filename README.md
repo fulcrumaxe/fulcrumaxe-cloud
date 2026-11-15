@@ -193,7 +193,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1016` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, and the post-merge verify stage (`1003_verify_stage.sql` onward) |
+| `0800`–`1018` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`) and the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`) |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -282,6 +282,8 @@ Sources:
 - `packages/db/scripts/check-migration-order.sh`
 - `packages/db/migrations/README.md`
 - `packages/db/migrations/1003_verify_stage.sql`
+- `packages/db/migrations/1017_sitekit_role_routing.sql`
+- `packages/db/migrations/1018_run_checks_reason_no_change.sql`
 - `packages/pipeline/`
 - `packages/api/src/routes/proposals.ts`
 - `packages/runner-cloud/src/executionMode.ts`
