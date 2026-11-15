@@ -11,7 +11,11 @@
 
 export const BOOT_BUDGET = Object.freeze({
   // Static requests at boot: index.html plus every file it references or
-  // statically imports.
+  // statically imports, plus anything the shell fetches by itself at boot:
+  // the live count (e2e/boot-budget.spec.ts, run by `pnpm --filter workspace
+  // e2e`) is the one that holds. The build-time file count alone cannot see a
+  // fetch(); the eight theme files were 8 requests over it until theme-manager
+  // loaded only the theme in use.
   maxStaticRequests: 130,
   // Total brotli (q11) bytes over the same set.
   // Raised from 250 KB to 320 KB by owner ruling 2026-09-30 (PM correction,

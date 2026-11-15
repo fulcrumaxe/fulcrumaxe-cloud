@@ -90,6 +90,14 @@ function themesRenderGallery(self) {
     if (!FULCTheme)
         return;
     const experiences = FULCTheme.list();
+    // Only the theme in use is loaded at boot; fetch the rest once, then draw again.
+    if (FULCTheme.loadAll && !self._themesAllRequested) {
+        self._themesAllRequested = true;
+        FULCTheme.loadAll().then(function () {
+            if (FULCTheme.list().length !== experiences.length)
+                themesRenderGallery(self);
+        });
+    }
     const current = FULCTheme.current();
     const currentId = current ? current.id : null;
     experiences.forEach(function (exp) {

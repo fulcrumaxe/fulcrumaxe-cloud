@@ -62,6 +62,7 @@ import {
   injectModulePreloads,
   injectFirstPartyTags,
   substituteDefaultTheme,
+  substituteDefaultThemeData,
   substituteDockOrder,
   validateThemeNames,
 } from "./profile.mjs";
@@ -476,7 +477,15 @@ export function build({
       // source tree (and any OTHER profile's build) keeps the literal's
       // own fallback untouched.
       const defaultTheme = typeof profile.default_theme === "string" ? profile.default_theme : "classic-crt";
-      writeShipped(destAbs, relPath, substituteDefaultTheme(readFileSync(srcAbs, "utf8"), defaultTheme));
+      const defaultThemeFile = join(shellDir, "core", "themes", `${defaultTheme}.json`);
+      writeShipped(
+        destAbs,
+        relPath,
+        substituteDefaultThemeData(
+          substituteDefaultTheme(readFileSync(srcAbs, "utf8"), defaultTheme),
+          readFileSync(defaultThemeFile, "utf8")
+        )
+      );
     } else if (relPath === "core/taskbar.js") {
       // D#37 WS-E criterion 6: substitute the profile's own dock_order into
       // the copy that ships, the same way theme-manager.js's default theme
