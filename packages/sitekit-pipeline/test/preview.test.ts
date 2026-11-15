@@ -17,6 +17,7 @@ import {
   type FinishOutcome,
   type PolicyRule,
   type PreviewDeps,
+  type RepoFile,
   type PreviewInput,
 } from "../src/index.js";
 
@@ -39,7 +40,28 @@ const VERIFY_ANSWER = JSON.stringify({
   ],
 });
 
+/** The README the cited excerpts are read from; it holds the verified claim's excerpt and not the others'. */
+const README_TEXT = "Widget does things.\nText c1\n";
+
+/**
+ * A reader that keeps the real contract: it serves one pinned sha and nothing else (a read at any other sha is a failed
+ * read, not a file), only plain repository paths, and answers `missing` for a path the commit does not have.
+ */
+function strictRepo(sha: string, files: Record<string, string>, reads: string[]): PreviewDeps["repo"] {
+  return {
+    async read(at: string, path: string): Promise<RepoFile> {
+      reads.push(`${at}:${path}`);
+      if (at !== sha) throw new Error("unknown revision");
+      if (path === "" || path.startsWith("/") || path.split("/").some((s) => s === "" || s === "." || s === "..")) throw new Error("invalid path");
+      const text = files[path];
+      return text === undefined ? { kind: "missing" } : { kind: "text", text };
+    },
+  };
+}
+
 interface RigOpts {
+  /** What the pinned commit holds; the default is the README alone. */
+  repoFiles?: Record<string, string>;
   dailyUsd?: number;
   computeOk?: boolean;
   startOk?: boolean;
@@ -64,11 +86,13 @@ function rig(opts: RigOpts = {}) {
   const modelSettled: number[] = [];
   const computeReserved: number[] = [];
   const prompts: string[] = [];
+  const reads: string[] = [];
   let clones = 0;
   let policies = 0;
   let agents = 0;
   const deps: PreviewDeps = {
     policies: { clone: CLONE_POLICY, agent: AGENT_POLICY },
+    repo: strictRepo(SHA, opts.repoFiles ?? { "README.md": README_TEXT }, reads),
     report: (stage) => void reports.push(stage),
     now: () => new Date("2026-11-15T12:00:00.000Z"),
     renderHomepage: () => {
@@ -149,7 +173,7 @@ function rig(opts: RigOpts = {}) {
       },
     },
   };
-  return { deps, log, finished, reports, modelReserved, modelSettled, computeReserved, prompts };
+  return { deps, log, finished, reports, reads, modelReserved, modelSettled, computeReserved, prompts };
 }
 
 const input = (over: Partial<PreviewInput> = {}): PreviewInput => ({
@@ -230,6 +254,22 @@ describe("preview result (K10 criterion 1)", () => {
     expect(out).toMatchObject({ status: "finished", homepageHtml: "<html>home</html>", summary: { claims: 3, unverifiable: 1, blockers: 1, line: "3 claims, 1 unverifiable, 1 blockers" } });
     expect(r.finished).toEqual([{ state: "finished", claimsTotal: 3, claimsUnverifiable: 1, blockers: 1, homepageHtml: "<html>home</html>" }]);
     expect(summaryLine(0, 0, 0)).toBe("0 claims, 0 unverifiable, 0 blockers");
+  });
+
+  it("confirms each verified excerpt against the pinned commit, so a cited excerpt that is absent fails the preview's claim", async () => {
+    const r = rig({ repoFiles: { "README.md": "Widget does things.\n" } });
+    const out = await runSitePreview(r.deps, input());
+    expect(r.reads).toEqual([`${SHA}:README.md`]);
+    // c1 was VERIFIED but its excerpt is not in the README at the pinned commit: it becomes a blocker alongside c3.
+    expect(out).toMatchObject({ status: "finished", summary: { claims: 3, unverifiable: 1, blockers: 2 } });
+  });
+
+  it("a cited file the commit does not have blocks the claim too, and a read that fails leaves it unverifiable", async () => {
+    const missing = rig({ repoFiles: {} });
+    expect(await runSitePreview(missing.deps, input())).toMatchObject({ summary: { blockers: 2 } });
+    const failing = rig();
+    failing.deps.repo = { read: async () => { throw new Error("adapter down"); } };
+    expect(await runSitePreview(failing.deps, input())).toMatchObject({ summary: { unverifiable: 2, blockers: 1 } });
   });
 
   it("runs in order: counter, compute, start, extract, verify, render, compute settle, final write", async () => {

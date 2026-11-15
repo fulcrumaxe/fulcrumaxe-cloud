@@ -14,7 +14,7 @@ import {
   evidenceMatches,
   revalidateClaims,
   type CycleDeps,
-  type ExtractDeps,
+  type VerifyDeps,
   type ExtractedClaim,
   type PolicyRule,
   type VerifyInput,
@@ -43,7 +43,7 @@ const res = (id: string, verdict: string, evidence: unknown[] = []) => ({ id, ve
 const rederived = (over: Record<string, unknown> = {}) => ({ path: "README.md", excerpt: "Works   offline.", ...over });
 
 interface Rig {
-  deps: ExtractDeps;
+  deps: VerifyDeps;
   log: string[];
   prompts: string[];
   roles: string[];
@@ -53,8 +53,9 @@ interface Rig {
 }
 
 function rig(opts: { output?: string; usedUsd?: number; policyFails?: boolean; agentThrows?: Error; deleteFails?: boolean } = {}): Rig {
-  const r: Rig = { log: [], prompts: [], roles: [], runIds: [], settled: [], reports: [], deps: undefined as unknown as ExtractDeps };
+  const r: Rig = { log: [], prompts: [], roles: [], runIds: [], settled: [], reports: [], deps: undefined as unknown as VerifyDeps };
   r.deps = {
+    repo: { read: async () => ({ kind: "text", text: "Intro\nWorks offline.\nMore" }) },
     policies: { clone: CLONE_POLICY, agent: AGENT_POLICY },
     report: (stage) => void r.reports.push(stage),
     spend: {
@@ -341,6 +342,15 @@ describe("verify: the excerpt half of the evidence match", () => {
     for (const e of [" ", "\n", "\t \n"]) {
       expect(() => parseVerifyOutput(answer([res("c1", "VERIFIED", [{ path: "README.md", excerpt: e }])]), SHA, ["c1"])).toThrow();
     }
+  });
+});
+
+describe("verify: the pass checks the cited excerpt exists in the pinned file", () => {
+  it("both agents agreeing on a quote that is not in the file comes out CONFLICT", async () => {
+    const quote = "Teleports your data.";
+    const r = rig({ output: answer([res("c1", "VERIFIED", [rederived({ excerpt: quote })])]) });
+    const out = await runVerify(r.deps, input({ claims: [extracted("c1", { evidence: [ev({ excerpt: quote })] })] }));
+    expect(out.claims[0]!.verdict).toBe("CONFLICT");
   });
 });
 
