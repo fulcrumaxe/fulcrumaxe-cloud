@@ -344,7 +344,9 @@ describe("api-contract rules, against the committed OpenAPI document", () => {
     const json = ops.filter((o) => o.json);
     expect(json.length).toBeGreaterThanOrEqual(40);
     expect(json.every((o) => o.okSchema !== undefined)).toBe(true);
-    expect(ops.filter((o) => !o.json).map((o) => o.template)).toEqual(["/api/v1/runs/{id}/events/export"]);
+    // The two GETs that answer something other than JSON: the run event export (a download) and the site preview
+    // render (stored HTML for a sandboxed frame, with its own CSP). Each is documented with its own content type.
+    expect(ops.filter((o) => !o.json).map((o) => o.template)).toEqual(["/api/v1/runs/{id}/events/export", "/api/v1/sites/{id}/preview/render"]);
     expect(ops.filter((o) => !o.hasPathParam && !o.hasRequiredQuery && o.json).length).toBeGreaterThanOrEqual(20);
   });
 

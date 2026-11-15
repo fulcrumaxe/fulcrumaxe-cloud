@@ -110,6 +110,10 @@ function mountApp(contentEl, launchArg) {
   const planHost = h("div", { class: "sr-plan", "data-testid": "sr-plan" });
   let plan = null;
   let planLoad = null;
+  // D#3 K10: the read-only preview panel, loaded the same way.
+  const previewHost = h("div", { class: "sr-plan", "data-testid": "sr-preview" });
+  let preview = null;
+  let previewLoad = null;
   contentEl.replaceChildren(
     h("div", { class: "sr-app" }, h("h2", { class: "sr-title" }, "Site review"), picker, byId, status, body)
   );
@@ -299,7 +303,7 @@ function mountApp(contentEl, launchArg) {
     const held = at && body.contains(at) ? at.getAttribute("data-key") : null;
     focusKey = focusKey || held;
     body.replaceChildren(...(review ? view().filter(Boolean) : []));
-    if (review && UUID.test(review.site_id || "")) body.append(planHost);
+    if (review && UUID.test(review.site_id || "")) body.append(planHost, previewHost);
     // Focus stays on the control that was used; if it is gone, it goes to the heading.
     const keyed = (k) => Array.from(body.querySelectorAll("[data-key]")).find((n) => n.getAttribute("data-key") === k);
     const el = review && focusKey && (keyed(focusKey) || keyed("heading"));
@@ -342,6 +346,9 @@ function mountApp(contentEl, launchArg) {
     planLoad = planLoad || import("./site-review-plan.js").then((m) => m.mountPlan(planHost), () => null);
     plan = await planLoad;
     if (plan && !closed && review) plan.show(review.site_id, isAdmin === true);
+    previewLoad = previewLoad || import("./site-review-plan.js").then((m) => m.mountPreview(previewHost), () => null);
+    preview = await previewLoad;
+    if (preview && !closed && review) preview.show(review.site_id, isAdmin === true);
   }
 
   function choose(id) {
@@ -400,6 +407,7 @@ function mountApp(contentEl, launchArg) {
     destroy() {
       closed = true;
       if (plan) plan.destroy();
+      if (preview) preview.destroy();
       off();
       seq++;
       if (ctl) ctl.abort();

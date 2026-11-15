@@ -357,7 +357,9 @@ export async function handleApiRequest(
     const { status, body, headers } = mapError(err, requestId);
     // A 4xx is the caller's answer. A 5xx is ours: its class (stage, route template, allowlisted code) goes to the
     // reporter, never the message the envelope deliberately withholds.
-    if (status >= 500) reportError(err, { stage: "api.dispatch", route: pathOf(req) });
+    // 503 preview_unavailable is the expected answer while the preview run starter is not wired: it is not a fault, so it is not reported at error level.
+    const expected = status === 503 && err instanceof ApiError && err.code === "preview_unavailable";
+    if (status >= 500 && !expected) reportError(err, { stage: "api.dispatch", route: pathOf(req) });
     return jsonResponse(body, status, requestId, undefined, headers);
   }
 }

@@ -350,6 +350,9 @@ importers:
       '@fx/runner-cloud':
         specifier: workspace:*
         version: link:../runner-cloud
+      '@fx/sitekit-pipeline':
+        specifier: workspace:*
+        version: link:../sitekit-pipeline
       '@fx/sitekit-publish-gates':
         specifier: workspace:*
         version: link:../sitekit-publish-gates

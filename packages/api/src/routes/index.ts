@@ -43,6 +43,7 @@ import { runEventsExportRoutes } from "./runEventsExport.js";
 import { commentRoutes, discussionRoutes } from "./discussions.js";
 import { siteRoutes } from "./sites.js";
 import { sitekitBillingRoutes } from "./sitekitBilling.js";
+import { sitePreviewRoutes } from "./sitePreview.js";
 import { planRoutes } from "./plan.js";
 import { proposalRoutes } from "./proposals.js";
 import { proposalEnvelopeRoutes } from "./proposal-envelopes.js";
@@ -118,6 +119,7 @@ export const ROUTES: RouteEntry[] = [
   ...commentRoutes,
   ...siteRoutes,
   ...sitekitBillingRoutes,
+  ...sitePreviewRoutes,
   ...planRoutes,
   ...proposalRoutes,
   ...proposalEnvelopeRoutes,

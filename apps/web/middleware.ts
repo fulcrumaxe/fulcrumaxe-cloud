@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE_NAME, verifySession } from "@fx/core/src/auth/session";
 import { hostBrandStep } from "@fx/partners/host";
 import { csrfStep } from "./lib/shell/csrf";
+import { SHELL_SECURITY_HEADERS } from "./lib/shell/headers";
 import { SHELL_PATH_HEADER, shellSessionRewriteStep } from "./lib/shell/shell-paths";
 
 /**
@@ -54,7 +55,22 @@ async function sessionStep(req: NextRequest, headers: Headers): Promise<void> {
 // rewrites the destination the request continues to, and both CSRF
 // classification and sessionStep's downstream headers must be decided
 // against the ORIGINAL request path first.
-const STEPS: MiddlewareStep[] = [csrfStep, hostBrandStep, sessionStep, shellSessionRewriteStep];
+/**
+ * next.config.mjs leaves the shell policy off a site's preview render path, and Next matches header sources case-insensitively, so
+ * `/api/V1/sites/x/preview/RENDER` loses it too. The API router matches literally and has no such route, so any case variant is a
+ * dead path: answer it here with a 404 that carries the shell headers, and let only the exact lowercase path through.
+ */
+const RENDER_PATH_ANY_CASE = /^\/api\/v1\/sites\/[^/]+\/preview\/render$/i;
+const RENDER_PATH_EXACT = /^\/api\/v1\/sites\/[^/]+\/preview\/render$/;
+function renderPathCaseStep(req: NextRequest): NextResponse | void {
+  const pathname = req.nextUrl.pathname;
+  if (!RENDER_PATH_ANY_CASE.test(pathname) || RENDER_PATH_EXACT.test(pathname)) return;
+  const res = new NextResponse("Not found", { status: 404 });
+  for (const { key, value } of SHELL_SECURITY_HEADERS) res.headers.set(key, value);
+  return res;
+}
+
+const STEPS: MiddlewareStep[] = [csrfStep, renderPathCaseStep, hostBrandStep, sessionStep, shellSessionRewriteStep];
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const headers = new Headers(req.headers);
