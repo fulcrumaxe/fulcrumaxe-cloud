@@ -168,6 +168,8 @@ export interface PlanePushHostedPort {
   branchHead?(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;
   /** The pull request's address if it is OPEN with head ref `branch` in `codeRepo` itself, base `main` and an address in `codeRepo`; otherwise null. */
   verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+  /** D#6 ONE-CI-PER-ITEM: `ci:full` on a pull request the runner just opened (listed repositories only; best-effort, never throws). Absent from an older port: nothing is labelled. */
+  ensureFullCiLabel?(input: { accountId: string; codeRepo: string; number: number }): Promise<unknown>;
   /** Revokes a token this side minted and could not hand out. True when it is gone (revoked, or already invalid); never throws. */
   revokeToken(token: string): Promise<boolean>;
   /**

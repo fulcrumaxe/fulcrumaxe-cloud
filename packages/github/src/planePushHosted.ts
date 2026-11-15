@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { retryTransientRead } from "@fx/core/src/github/transientRead.js";
 import { createPlanePushApi } from "./planePushApi.js";
 
@@ -53,6 +54,11 @@ export interface HostedPlanePush {
    */
   openPullRequest(input: { accountId: string; codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   /**
+   * D#6 ONE-CI-PER-ITEM: puts `ci:full` on a public pull request of a repository in `fullCiRepos` (the Gate 1 attester's own list), once: a pull request that ever had the label's event (added or taken off) is left as it is.
+   * Best-effort: it never throws (the attester adds the label itself later). Resolves `added`, `present` (nothing to do), `off` (repository not listed) or `failed`.
+   */
+  ensureFullCiLabel(input: { accountId: string; codeRepo: string; number: number }): Promise<"added" | "present" | "off" | "failed">;
+  /**
    * Closes a public pull request the cloud refused after it was published, and leaves one plain comment (a fresh token revoked before this returns). A pull request that is not open is left as it is
    * (`not_open`), and so is one whose head is not the recorded branch of the paired repository (`not_ours`). The branch is never touched. An unreadable answer throws a `PlanePushApiError`.
    */
@@ -61,8 +67,11 @@ export interface HostedPlanePush {
   revokeToken(token: string): Promise<boolean>;
 }
 
-export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => number; ownsInstallation: (accountId: string, ghInstallationId: number) => Promise<boolean> }): HostedPlanePush {
+export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => number; ownsInstallation: (accountId: string, ghInstallationId: number) => Promise<boolean>; fullCiRepos?: ReadonlySet<string> | (() => ReadonlySet<string>) }): HostedPlanePush {
   const now = deps.now ?? Date.now;
+  // The list may be given as a function so a bad setting is read on the first label call, not while a route is being wired.
+  const fullCiOn = (codeRepo: string): boolean => (typeof deps.fullCiRepos === "function" ? deps.fullCiRepos() : deps.fullCiRepos)?.has(codeRepo.toLowerCase()) === true;
+  const labelFailed = (err: unknown): void => reportError(err, { stage: "plane_push.ci_full_label" });
   const ownedBy = (accountId: string) => (ghInstallationId: number) => deps.ownsInstallation(accountId, ghInstallationId);
 
   async function withFreshToken<T>(accountId: string, codeRepo: string, use: (token: string) => Promise<T>): Promise<T> {
@@ -93,7 +102,31 @@ export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => num
 
     branchHead: ({ accountId, codeRepo, branch }) => withFreshToken(accountId, codeRepo, (token) => api.branchHead({ codeRepo, branch, token })),
 
-    openPullRequest: ({ accountId, codeRepo, branch, title, body }) => withFreshToken(accountId, codeRepo, (token) => api.openPullRequest({ codeRepo, branch, base: "main", title, body, token })),
+    // The label goes on right after the create call, with the same token, before anything else: the public CI's scope step reads it from the API when a run starts.
+    openPullRequest: ({ accountId, codeRepo, branch, title, body }) =>
+      withFreshToken(accountId, codeRepo, async (token) => {
+        const opened = await api.openPullRequest({ codeRepo, branch, base: "main", title, body, token });
+        if (fullCiOn(codeRepo)) {
+          try {
+            await api.ensureFullCiLabel({ codeRepo, number: opened.number, token });
+          } catch (err) {
+            // fx-swallow-ok: the label is an optimisation; Gate 1's attester adds it (and waits for a run after it) when this could not; the failure is reported
+            labelFailed(err);
+          }
+        }
+        return opened;
+      }),
+
+    async ensureFullCiLabel({ accountId, codeRepo, number }) {
+      if (!fullCiOn(codeRepo)) return "off";
+      try {
+        return await withFreshToken(accountId, codeRepo, (token) => api.ensureFullCiLabel({ codeRepo, number, token }));
+      } catch (err) {
+        // fx-swallow-ok: best-effort, see above; the failure is reported
+        labelFailed(err);
+        return "failed";
+      }
+    },
 
     verifyPushed: ({ accountId, codeRepo, branch, headSha, tipSha }) =>
       withFreshToken(accountId, codeRepo, async (token) => {

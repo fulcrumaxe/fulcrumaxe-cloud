@@ -148,6 +148,35 @@ describe("the paired publish step [pg]", () => {
   }
 
   describe("one attempt, end to end", () => {
+    const withLabel = (ensure: (i: { accountId: string; codeRepo: string; number: number }) => Promise<unknown>): PlanePublishDeps => {
+      const d = deps();
+      return { ...d, hosted: { ...d.hosted, ensureFullCiLabel: ensure } };
+    };
+
+    it("labels the confirmed public pull request ci:full once", async () => {
+      const labelled: unknown[] = [];
+      expect(await createPlanePublish(withLabel(async (i) => void labelled.push(i))).publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "published", state: "pr_opened", attemptNo: 1 });
+      expect(labelled).toEqual([{ accountId: A.accountId, codeRepo: "acme/widgets-public", number: 9 }]);
+    });
+
+    it("labels nothing when GitHub did not confirm the pull request", async () => {
+      const labelled: unknown[] = [];
+      github.pr = null;
+      expect(await createPlanePublish(withLabel(async (i) => void labelled.push(i))).publishPairedChange({ accountId: A.accountId, executorRunId })).toMatchObject({ kind: "refused", code: "report_mismatch" });
+      expect(labelled).toEqual([]);
+    });
+
+    it("a person taking the branch over while the hook runs: the pull request is never labelled", async () => {
+      const labelled: unknown[] = [];
+      onRun = async () => void (await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId]));
+      await createPlanePublish(withLabel(async (i) => void labelled.push(i))).publishPairedChange({ accountId: A.accountId, executorRunId });
+      expect(labelled).toEqual([]);
+    });
+
+    it("a label call that throws never changes the outcome", async () => {
+      expect(await createPlanePublish(withLabel(() => Promise.reject(new Error("boom")))).publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "published", state: "pr_opened", attemptNo: 1 });
+    });
+
     it("opens the public change: the rows have the specified fields, the name is pp- plus the attempt whose run_id is this run, the sandbox is 1 vCPU and gone", async () => {
       const r = await publish().publishPairedChange({ accountId: A.accountId, executorRunId });
       expect(r).toEqual({ kind: "published", state: "pr_opened", attemptNo: 1 });
