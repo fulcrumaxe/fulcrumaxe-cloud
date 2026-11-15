@@ -92,6 +92,7 @@ export default defineWorkspace([
   "packages/runtime",
   "packages/sitekit-checks",
   "packages/sitekit-claims",
+  "packages/sitekit-pipeline",
   "packages/sitekit-publish-gates",
   "packages/sitekit-template",
   "packages/spend",

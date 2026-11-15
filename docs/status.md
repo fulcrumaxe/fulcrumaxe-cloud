@@ -44,6 +44,7 @@ Sources:
 - `packages/runtime/`
 - `packages/sitekit-checks/`
 - `packages/sitekit-claims/`
+- `packages/sitekit-pipeline/`
 - `packages/sitekit-publish-gates/`
 - `packages/sitekit-template/`
 - `packages/spend/`
@@ -125,6 +126,7 @@ Sources:
 | `packages/runtime` | implemented-and-tested | 18 test files. Local, production and fake model runners. |
 | `packages/sitekit-checks` | implemented-and-tested | 20 test files. Mechanical checks over rendered site kit output. |
 | `packages/sitekit-claims` | implemented-and-tested | 4 test files. The claim schema and the render-refuses-unverified gate. |
+| `packages/sitekit-pipeline` | implemented-and-tested | 1 test file. The extract pass: pinned clone, narrowed network policy, fenced prompt, claim parsing, spend reservation. Fixture-replayed; the live sandbox adapter is not wired yet. |
 | `packages/sitekit-publish-gates` | implemented-and-tested | 3 test files. Publish gates: secret and PII scan and outbound-link policy. |
 | `packages/sitekit-template` | implemented-and-tested | 6 test files. The fixed site template. |
 | `packages/spend` | implemented-and-tested | 27 test files. Reservation, metering and caps across the budgets. |
