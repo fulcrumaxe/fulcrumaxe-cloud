@@ -21,12 +21,16 @@ whose driver is deterministic code, not a model (`packages/pipeline`,
    (`packages/pipeline/src/review/gate1Attest.ts`).
 6. **Merge queue.** Where GitHub's merge queue is on, the cloud keeps its own entries
    and a one-at-a-time merge slot per repository
-   (`packages/pipeline/src/mergeQueue/`).
+   (`packages/pipeline/src/mergeQueue/`). The cloud's own pull requests may
+   ask GitHub for the front of the queue, at most once per repository in a
+   set window (`packages/pipeline/src/review/queueJump.ts`).
 7. **Deploy and browser verify.** For a repository that switched it on, a
    post-merge stage deploys the merge commit, waits for the app to report it, and
    has a tester drive the app in a real browser against the item's journeys
    (`packages/worker/src/verifyStage.ts`, `packages/worker/src/verifyRun.ts`,
-   `packages/fx-runner/src/verifyBrowser/`).
+   `packages/fx-runner/src/verifyBrowser/`). A check waits, rather than fails,
+   while the runner's saved sign-in has expired
+   (`packages/core/src/verify/signIn.ts`).
 
 It also hosts the **site kit**, which turns a customer's repo into a
 fact-verified project website (`packages/sitekit-claims`,
@@ -103,8 +107,9 @@ packages/
                       claims, events, the merge order
   runner-protocol/    wire protocol between the cloud and a runner
   runtime/            model/runtime adapters: local, production, fake
-  sitekit-checks/ sitekit-claims/ sitekit-publish-gates/ sitekit-template/
-                      the site kit
+  sitekit-checks/ sitekit-claims/ sitekit-pipeline/ sitekit-publish-gates/
+  sitekit-template/   the site kit; sitekit-pipeline holds its workflows
+                      around the model (extract, verify, preview)
   spend/              reservation, metering and caps across the budgets
   stats/              pure KPI formula registry, no I/O
   telemetry/          redacting logger and the error-code allowlist
@@ -193,7 +198,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1018` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`) and the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`) |
+| `0800`–`1020` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`) and the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`) |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -284,6 +289,11 @@ Sources:
 - `packages/db/migrations/1003_verify_stage.sql`
 - `packages/db/migrations/1017_sitekit_role_routing.sql`
 - `packages/db/migrations/1018_run_checks_reason_no_change.sql`
+- `packages/db/migrations/1019_sitekit_preview.sql`
+- `packages/db/migrations/1020_verify_sign_in_expiry.sql`
+- `packages/pipeline/src/review/queueJump.ts`
+- `packages/core/src/verify/signIn.ts`
+- `packages/sitekit-pipeline/package.json`
 - `packages/pipeline/`
 - `packages/api/src/routes/proposals.ts`
 - `packages/runner-cloud/src/executionMode.ts`

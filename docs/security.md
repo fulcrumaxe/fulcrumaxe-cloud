@@ -27,6 +27,11 @@ Sources:
 - `packages/worker/src/verifyRun.ts`
 - `packages/pipeline/src/verify/envelope.ts`
 - `packages/pipeline/src/verify/rules.ts`
+- `packages/pipeline/src/review/queueJump.ts`
+- `packages/pipeline/src/build/githubMergePort.ts`
+- `packages/github/src/mergeGateGraphql.ts`
+- `packages/fx-runner/src/verifyBrowser/server.ts`
+- `packages/core/src/verify/signIn.ts`
 - `packages/api/src/routes/assistant.ts`
 - `packages/api/src/assistant/turn.ts`
 - `packages/core/src/assistant/tools.ts`
@@ -96,6 +101,7 @@ Every merge the product makes passes `runMergeGate` (`packages/pipeline/src/buil
 - **Reviews on the exact head.** A reviewer's verdict counts only for the head sha it reviewed, and a run on a customer's runner counts only when local review is on and that runner is trusted for the role.
 - **CI on the head.** `runMergeGate` stops with `ci_not_green` unless CI on the exact head is green and every signal the item expects is present. When CI is entirely green and the repository has CI of its own (not only the cloud's review status), an acceptance tester whose latest run succeeded with the verdict `unverifiable` counts as covered; every other non-pass verdict still stops the gate. A repository whose own CI is still running is not also given `repo_ci_missing`, which only a person could fix.
 - **Ordering.** A direct merge takes a per-repository lease that excludes the merge queue's slot, so the order check guarding the queue also guards the direct merge.
+- **Queue jump stays on the cloud's own gate.** Asking GitHub for the front of the merge queue is reachable only from the gate that merges pull requests the platform built, only for a repository listed in `FX_GATE1_ATTEST_REPOS`, only while `FX_QUEUE_JUMP` is unset, empty or `on` (any other value, `off` included, reads as off), and at most once per repository per `FX_QUEUE_JUMP_MIN_MINUTES` (`packages/pipeline/src/review/queueJump.ts`, #944). The jump uses a GraphQL document pinned beside the others in `packages/github/src/mergeGateGraphql.ts`; GitHub refusing it never skips the queue's rules, because the same pull request is enqueued once more as a plain entry (`packages/pipeline/src/build/githubMergePort.ts`).
 
 ## `gh-policy`
 
@@ -119,6 +125,7 @@ The post-merge verify stage drives a real browser at a deployed app, so its inpu
 - A `pass` needs evidence (a step stating what was done and the page fact that showed it, an undo check and a reload); a pass without it ends the row `unverified`, never `verified`.
 - The deploy order the cloud places can only say "deploy this commit of this repository": the table has no column for a command, a path, a URL or a credential, and the command lives in the runner's own local configuration (`packages/db/migrations/1004_runner_browser_capabilities.sql`).
 - When the repository names a test account, the signed-in account is judged from what the trusted verify server recorded (`signed_in_as`), never from anything the model said (`packages/pipeline/src/verify/rules.ts`); a mismatch, or a method with no trusted record, ends the row `unverified`.
+- A saved sign-in that the app has stopped honouring does not end a row as the wrong account. The runner's verify server, not the model, writes a `signed_in_as_unavailable` marker (the single word `sign_in_expired`) when the app's identity route gave no account; the pipeline rejects the marker if it comes beside a `signed_in_as`, and otherwise parks the row (`packages/pipeline/src/verify/envelope.ts`, `packages/pipeline/src/verify/rules.ts`, `packages/fx-runner/src/verifyBrowser/server.ts`, #947). A parked row waits at most 24 hours and at most three parks before it ends `unverified: sign_in_expired` (`packages/worker/src/verifyRun.ts`). A runner reports only a closed state word for its saved sign-in, never the sign-in itself (`packages/core/src/verify/signIn.ts`).
 - Only an owner or admin of the account can turn the stage on or change its settings, enforced by the table's policy.
 
 ## The assistant's boundaries

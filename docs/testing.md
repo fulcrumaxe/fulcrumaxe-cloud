@@ -20,6 +20,7 @@ Sources:
 - `packages/pipeline/test/build/mergeCallSites.test.ts`
 - `packages/pipeline/test/stackedPathsNoRepoGate.test.ts`
 - `packages/telemetry/test/errorCodes.test.ts`
+- `packages/telemetry/src/errorCodes.ts`
 - `packages/telemetry/test/errorCodesBranchBinding.test.ts`
 - `packages/runner/test/runStatusWriter.test.ts`
 - `packages/api/test/openapi-drift.test.ts`
@@ -58,7 +59,7 @@ These tests read the source tree, not one package's behaviour. A change that add
 | `packages/api/test/openapi-drift.test.ts` | `packages/api/openapi.json` differing, byte for byte, from the document built from the route registry. Fix with `pnpm --filter @fx/api gen-openapi`. |
 | `packages/api/test/inventory.test.ts` | The route registry's method and path set differing from the one the dispatcher serves and the one in `openapi.json`. |
 | `apps/web/test/route-inventory.test.ts` | A `route.ts` under `apps/web/app/api/**` that is not in `apps/web/app/api/ROUTES.allowlist` (and the reverse). A new route needs its allowlist line. |
-| `packages/telemetry/test/errorCodes.test.ts`, `errorCodesBranchBinding.test.ts` | A new stop or error code that is not in the telemetry allowlist. A code missing from it is stored as `other`. Every list that names codes needs the new one. |
+| `packages/telemetry/test/errorCodes.test.ts`, `errorCodesBranchBinding.test.ts` | A new stop or error code that is not in the telemetry allowlist. A code missing from it is stored as `other`. Every list that names codes needs the new one. `errorCodes.test.ts` also fails when an app directory under `apps/workspace/apps` or `apps/workspace/shell/apps`, or the shell itself, is missing from the client window ids a browser report may name (#953). |
 | `packages/db/test/audit-log-guard.test.ts` | Any `audit_log` identifier in source or SQL under `packages/*/src` and `apps/*/{app,src,lib}`, however it is qualified or quoted. Code calls the `audit_write` functions instead; the table's grants are the real control and this scan is a second layer. |
 | `packages/pipeline/test/build/mergeCallSites.test.ts` | A file outside the reviewed list that can call the merge, the queue enqueue, the auto-merge document or the merge endpoint, or mint a merge credential. It scans the production sources. |
 | `packages/pipeline/test/stackedPathsNoRepoGate.test.ts` | The stacked start and the stacked gate stop naming a repository, a pairing, a plan or an account list: the same code must run for every connected repository. |
