@@ -108,3 +108,41 @@ describe('checkFailureFiles (CHECK-FAILURE-NAMES-ON-CARD)', () => {
     expect(failedOutsideChange('failed test files (1): apps/ops/test/a.test.ts\nhint for apps/ops/test/a.test.ts: pnpm gen\nchanged files (1): packages/a/src/a.ts\nFAIL')).toBe(true);
   });
 });
+
+describe('failedOutsideChange: a failed test file that imports changed code is inside the change (CHECK-SCOPE-BY-IMPORTS)', () => {
+  // The 11-15 shape: the change edited packages/spend/src/usage.ts; the failing test sits in packages/worker and imports getUsage from @fx/spend.
+  const base = 'failed test files (1): packages/worker/test/runnerUsage.pg.test.ts\nchanged files (1): packages/spend/src/usage.ts\n';
+  const imports = 'failed test files that import changed code (1): packages/worker/test/runnerUsage.pg.test.ts\n';
+
+  it('without the runner line the package rule still calls it outside (an older runner): the old behaviour', () => {
+    expect(failedOutsideChange(`${base}FAIL x`)).toBe(true);
+  });
+  it('a file the runner says imports changed code gets a fix round, whatever its package', () => {
+    expect(failedOutsideChange(`${base}${imports}FAIL x`)).toBe(false);
+    expect(failedOutsideChange(`failed test files (1): packages/worker/test/runnerUsage.pg.test.ts\n${imports}changed files (1): packages/spend/src/usage.ts\nFAIL x`)).toBe(false);
+  });
+  it('a file the line does not name stays outside: only the named one is inside the change', () => {
+    const two = 'failed test files (2): packages/worker/test/runnerUsage.pg.test.ts, apps/ops/test/o.test.ts\nchanged files (1): packages/spend/src/usage.ts\n';
+    expect(failedOutsideChange(`${two}FAIL x`)).toBe(true);
+    expect(failedOutsideChange(`${two}${imports}FAIL x`)).toBe(false);
+    // an unrelated failure alone: outside, same closed code
+    expect(failedOutsideChange('failed test files (1): apps/ops/test/o.test.ts\nchanged files (1): packages/spend/src/usage.ts\nFAIL x')).toBe(true);
+  });
+  it('an import graph the runner could not read is a fix round', () => {
+    expect(failedOutsideChange(`${base}import graph not read\nFAIL x`)).toBe(false);
+  });
+  it('a cut import line is not trusted to say "outside": fix round', () => {
+    expect(failedOutsideChange(`${base}failed test files that import changed code (3): packages/worker/test/runnerUsage.pg.test.ts (and 2 more)\nFAIL x`)).toBe(false);
+  });
+  it('the line is read from the header only: the same words in the output tail change nothing', () => {
+    expect(failedOutsideChange(`${base}FAIL x\n${imports}import graph not read\n`)).toBe(true);
+  });
+  it('against the chain: a later round names it, and the first check still defines the change', () => {
+    const first = 'failed test files (1): packages/a/test/a.test.ts\nchanged files (1): packages/a/src/a.ts\n';
+    const later = 'failed test files (1): packages/worker/test/w.test.ts\nchanged files (2): packages/a/src/a.ts, packages/worker/src/w.ts\nfailed test files that import changed code (1): packages/worker/test/w.test.ts\nFAIL x';
+    expect(failedOutsideChange(later, first)).toBe(false);
+  });
+  it('the card still lists the failing files with the new line in the header', () => {
+    expect(checkFailureFiles(`${base}${imports}FAIL x`)?.files).toEqual([{ name: 'packages/worker/test/runnerUsage.pg.test.ts' }]);
+  });
+});

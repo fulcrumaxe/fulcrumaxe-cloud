@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
-import { changedFilesLine, createBaseFile, createChangedFiles, createCheckStep, createFailedFiles, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
+import { changedFilesLine, createBaseFile, createChangedFiles, createCheckStep, createFailedFiles, createImportScope, createTrackedFiles, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
 import { testLaunch } from "../helpers/launch.js";
 import { GitPathError } from "../../src/daemon/git.js";
@@ -317,6 +317,66 @@ describe("the files the branch changed, named in the summary's header of a faile
     expect(out.passed).toBe(false);
     expect(out.body.exit_code).toBe(4);
     expect(out.body.summary).not.toContain("changed files");
+  });
+});
+
+describe("CHECK-SCOPE-BY-IMPORTS: the summary names the failed test files that import changed code", () => {
+  const gitCapture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048);
+  const trackedFiles = createTrackedFiles(gitCapture, {});
+  const build = (importScope?: NonNullable<Parameters<typeof createCheckStep>[0]["importScope"]>) =>
+    createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed, onLine) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed, onLine), now: () => new Date(), vcsState, changedFiles: createChangedFiles(gitCapture, {}), trackedFiles, ...(importScope === undefined ? {} : { importScope }) });
+  /** Built at run time so the public-boundary scan does not read a fixture as an import of a real workspace package. */
+  const SPEND = ["@fx", "spend"].join("/");
+  let from = "";
+  const runWith = (step: ReturnType<typeof build>, argv: string[]) =>
+    step({ check: { argv, dev_shell: false, timeout_s: 60 }, workspace: ws, base: from, baseDir: ws, baseFile, launch: (v) => ({ tool: v[0]!, args: v.slice(1), env: { PATH: process.env.PATH ?? "" } }) });
+  const put = (rel: string, text: string): void => {
+    mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
+    writeFileSync(path.join(ws, rel), text);
+  };
+  /** The 11-15 shape: a change to the spend package's usage module breaks a worker test that imports it through the package name. */
+  const spendChange = (): void => {
+    put("packages/spend/package.json", JSON.stringify({ name: SPEND, main: "dist/index.js" }));
+    put("packages/spend/src/index.ts", 'export { getUsage } from "./usage.js";\n');
+    put("packages/spend/src/usage.ts", "export const getUsage = () => 1;\n");
+    put("packages/worker/package.json", JSON.stringify({ name: ["@fx", "worker"].join("/") }));
+    put("packages/worker/test/runnerUsage.pg.test.ts", `import { getUsage } from "${SPEND}";\n`);
+    put("packages/other/test/unrelated.test.ts", 'import "node:fs";\n');
+    git("add", "-A");
+    from = commit("spend and worker");
+    put("packages/spend/src/usage.ts", "export const getUsage = () => 2;\n");
+    git("add", "-A");
+    commit("change usage");
+  };
+  const fail = (name: string, ...files: string[]): string => script(name, `${files.map((file) => `echo ' FAIL  ${file} > t'`).join("\n")}\nexit 1`);
+
+  it("names a failed test file in another package that imports the changed file through the package name", async () => {
+    spendChange();
+    const out = await runWith(build(createImportScope(trackedFiles)), [fail("scope-1.sh", "packages/worker/test/runnerUsage.pg.test.ts")]);
+    const lines = out.body.summary.split("\n");
+    expect(lines[0]).toBe("failed test files (1): packages/worker/test/runnerUsage.pg.test.ts");
+    expect(lines).toContain("failed test files that import changed code (1): packages/worker/test/runnerUsage.pg.test.ts");
+  });
+
+  it("names nothing for a failed file that depends on no changed file: the summary is as it was", async () => {
+    spendChange();
+    const out = await runWith(build(createImportScope(trackedFiles)), [fail("scope-2.sh", "packages/other/test/unrelated.test.ts")]);
+    expect(out.body.summary).not.toContain("import changed code");
+    expect(out.body.summary).not.toContain("import graph not read");
+  });
+
+  it("says the graph was not read when the dependency answers null or throws", async () => {
+    spendChange();
+    for (const importScope of [async () => null, async () => { throw new Error("boom"); }]) {
+      const out = await runWith(build(importScope), [fail("scope-3.sh", "packages/worker/test/runnerUsage.pg.test.ts")]);
+      expect(out.body.summary.split("\n")).toContain("import graph not read");
+    }
+  });
+
+  it("a daemon without the dependency, and a passing check, send no line", async () => {
+    spendChange();
+    expect((await runWith(build(), [fail("scope-4.sh", "packages/worker/test/runnerUsage.pg.test.ts")])).body.summary).not.toMatch(/import (changed code|graph)/);
+    expect((await runWith(build(createImportScope(trackedFiles)), [script("scope-5.sh", "exit 0")])).body.summary).not.toMatch(/import (changed code|graph)/);
   });
 });
 

@@ -7,6 +7,10 @@
  * the round only spends an attempt. The item goes to Needs a person instead. A failure in a package the change touched, or anything this reader cannot be sure of, keeps today's
  * behaviour (a fix round).
  *
+ * A package-level match is too coarse in one direction: a test in an untouched package can import a changed file (a worker test that imports `getUsage` from `@fx/spend`). The runner follows
+ * the imports of the failed test files (it alone can read the repository) and names those that reach a changed file on `failed test files that import changed code (K): ...`; such a file
+ * is inside the change. `import graph not read` means the runner could not follow them, and that is a fix round too. A runner that sends neither line behaves as before.
+ *
  * The change is the one the chain's FIRST failed check saw: a later round's check is judged against that first list of changed files, so the files a fix round edited in a package the
  * change never touched do not make that package part of the change (and a failure there still goes to a person). Fail closed toward the fix round: a missing line, a line that was cut, a list that is shorter than its count (`and K more`), a name that is not a plain relative path,
  * or no failed file at all is "not decided here". Only the header at the very top of the summary is read, never the output tail below it. (A test script can print
@@ -34,11 +38,17 @@ export const CHECK_NOT_RUN_OUT_OF_SCOPE_SENTENCE =
 export const CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE =
   "The check failed in parts of the repo this change didn't touch, so a fix round would not help: the failure comes from the environment or from code that is already on the base branch. Nothing was started. Look at the check's output in the run, then press Build again if it was a one-off, or fix the base branch.";
 
+/** CHECK-SCOPE-BY-IMPORTS: the runner's line naming the failed test files that import (directly or through other files) a file the change touched, and its "could not follow the imports" line. */
+const IMPORT_LINE = 'failed test files that import changed code (';
+const IMPORT_NOT_READ = 'import graph not read';
+
 /** The header lines the runner writes before the output tail. Anything else ends the header. */
 const HEADER_PREFIXES = [
   'failed test files (',
   'hint for ',
   'changed files (',
+  IMPORT_LINE,
+  IMPORT_NOT_READ,
   'the check needed the network',
   'check files changed by this branch:',
   'check files not given back',
@@ -79,16 +89,20 @@ function readFileLine(line: string, prefix: string): FileLine | null {
   return { count, files, complete: !cut && plain && count > 0 && files.size === count && names.length === count };
 }
 
-function readHeader(summary: string | null | undefined): { failed: FileLine | null; changed: FileLine | null } {
+function readHeader(summary: string | null | undefined): { failed: FileLine | null; changed: FileLine | null; importing: FileLine | null; importsNotRead: boolean } {
   let failed: FileLine | null = null;
   let changed: FileLine | null = null;
-  if (typeof summary !== 'string' || summary === '') return { failed, changed };
+  let importing: FileLine | null = null;
+  let importsNotRead = false;
+  if (typeof summary !== 'string' || summary === '') return { failed, changed, importing, importsNotRead };
   for (const line of summary.split('\n')) {
     if (!HEADER_PREFIXES.some((p) => line.startsWith(p))) break;
     failed ??= readFileLine(line, 'failed test files (');
     changed ??= readFileLine(line, 'changed files (');
+    importing ??= readFileLine(line, IMPORT_LINE);
+    if (line === IMPORT_NOT_READ) importsNotRead = true;
   }
-  return { failed, changed };
+  return { failed, changed, importing, importsNotRead };
 }
 
 /**
@@ -105,6 +119,12 @@ export function failedOutsideChange(summary: string | null | undefined, chainRoo
   const changed = root !== null && root.complete ? root : now.changed;
   const failed = now.failed;
   if (changed === null || !changed.complete) return false;
+  // CHECK-SCOPE-BY-IMPORTS: the runner followed the imports of the failed test files. A graph it could not read, or a line that names files but is cut or oddly shaped, is "not decided
+  // here" (a fix round); a failed file the runner says imports changed code is inside the change, whichever package it sits in. The line is the current check's own: it is computed
+  // against everything the branch changed so far, so a file that depends only on a fix round's edit also gets another round (bounded by the round caps).
+  if (now.importsNotRead) return false;
+  if (now.importing !== null && !now.importing.complete) return false;
+  const importing = now.importing?.files ?? null;
   // Package level: a failed test file is outside the change only when its package holds no changed file. A package is the first two path segments under apps/,
   // packages/ or scripts/. A name outside those (the repo root, or a name a runner printed relative to its own project, which cannot be mapped) is ambiguous, and
   // an ambiguous name keeps the fix round.
@@ -115,7 +135,7 @@ export function failedOutsideChange(summary: string | null | undefined, chainRoo
   const laterChanged = now.changed !== null && now.changed.complete ? now.changed.files : null;
   for (const file of failed.files) {
     const pkg = packageOf(file);
-    if (pkg === null || touched.has(pkg) || laterChanged?.has(file) === true) return false;
+    if (pkg === null || touched.has(pkg) || laterChanged?.has(file) === true || importing?.has(file) === true) return false;
   }
   return true;
 }
