@@ -616,19 +616,23 @@ export const CLIENT_ERROR_CODES: readonly string[] = [
 /** The one class an anonymous browser report is stored under: the caller chooses nothing. */
 export const CLIENT_ANONYMOUS_CODE = "client.anonymous";
 
-/** The workspace windows a signed-in report may name (the directory names under apps/workspace). */
+/** The workspace windows a signed-in report may name (the app directory names under apps/workspace, and `shell` for the shell's own scripts). */
 export const CLIENT_WINDOW_IDS: readonly string[] = [
   "activation",
   "agents",
   "budget-billing",
   "developer",
   "kanban",
+  "memory",
   "model-key",
+  "needs-you",
   "onboarding",
   "pipeline",
   "repos",
   "roles",
+  "runners",
   "runs",
+  "shell",
   "site-review",
   "themes",
   "vercel",
