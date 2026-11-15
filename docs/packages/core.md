@@ -30,6 +30,8 @@ Sources:
 - `packages/core/src/tokens/service.ts`
 - `packages/core/src/stats/read.ts`
 - `packages/core/src/runs/read.ts`
+- `packages/core/src/runs/refusal.ts`
+- `packages/core/src/pendingWork.ts`
 - `packages/core/src/work-items/read.ts`
 - `packages/core/test/globalSetup.ts`
 - `packages/core/vitest.config.ts`
@@ -87,7 +89,7 @@ package deep-imports the specific file it needs, for example
 - `role-settings/internal.ts`: `getRepoSettingsOrNotFound(client, repoId)`, `assertRepoExists(client, repoId)`
 - `role-settings/errors.ts`: re-exports `NotFoundError`/`ForbiddenError` from `tenancy/errors.ts`, plus `InvalidRoleSettingsInputError`
 - `role-settings/costModel.ts`: `MEDIAN_COST_SEED_USD_PROVISIONAL`, `SeedTier`, `medianCostSeedUsd(defaultModel)`, `tierMonthlyWorkload(plan)`, `PlanTier`, `normalizePlanTier(rawPlan)`, `WEEKLY_RUNS_PER_MONTH`, `runsPerMonthSeed(mode, plan)`, `formatCostLine(monthlyUsd)`, `TOKEN_COVERAGE_CAVEAT`, `roundUsd(value)`
-- `tokens/service.ts`: `Scope`, `MembershipRole`, `ROLE_RANK`, `assertScopesAllowedForRole(scopes, role)`, `expiresAtFromDays(days?)`, `InsertApiTokenParams`, `InsertedApiToken`, `insertApiToken(pool, params)`, `ApiTokenListRow`, `ListApiTokensInput`, `ListApiTokensResult`, `listApiTokens(pool, input)`, `RevokeReason`, `revokeToken(...)`, `revokeTokensForCreatorChange(client, accountId, targetUserId, reason)`, `revokeAllMine(pool, accountId, userId)`
+- `tokens/service.ts`: `Scope`, `MembershipRole`, `ROLE_RANK`, `assertScopesAllowedForRole(scopes, role)`, `expiresAtFromDays(days?)`, `InsertApiTokenParams`, `InsertedApiToken`, `insertApiToken(pool, params)`, `ApiTokenListRow`, `ListApiTokensInput`, `ListApiTokensResult`, `listApiTokens(pool, input)`, `RevokeReason`, `revokeToken(...)`, `revokeTokensForCreatorChange(client, accountId, targetUserId, reason)`, `revokeAllMine(pool, accountId, userId)`. `InsertApiTokenParams` also takes an optional `delegation: { repoId, clientId }` for the assistant's delegation token: `insertApiToken` checks the repo is visible to the account (another account's repo is not found), stores `delegated`, `repo_id` and `client_id`, clips the expiry to one hour from the database's clock, and returns the stored `expiresAt` (#687)
 - `stats/read.ts`: `StatsReadCtx`, `GetStatsInput`, `GetStatsResult`, `getStats(ctx, input)`, `TimelineTransition`, `GetWorkItemTimelineResult`, `getWorkItemTimeline(ctx, workItemId)`
 - `runs/read.ts`: `RunsReadCtx`, `RunDTO`, `getRun(ctx, id)`, `ListRunsInput`, `ListRunsResult`, `listRuns(ctx, input)`
 - `work-items/read.ts`: `WorkItemsReadCtx`, `WorkItemDTO`, `getWorkItem(ctx, id)`, `ListWorkItemsInput`, `ListWorkItemsResult`, `listWorkItems(ctx, input)`
@@ -118,7 +120,7 @@ still-live API token the target created (`tokens/service.ts`'s
 decrease in `ROLE_RANK` (a promotion or same-rank change revokes
 nothing), and `removeMember` revokes before its own `DELETE` so the
 audit write's actor lookup still finds the acting user's own membership
-row even on a self-removal. `scopedAccess.ts`'s
+row even on a self-removal. After the transaction commits, both also call `revokeRunnerWake` (`packages/core/src/pendingWork.ts`) with the runners the database trigger revoked, so their wake allow records are dropped; it never throws (#425). `scopedAccess.ts`'s
 `getTenantRowOrNotFound` additionally re-checks that the caller is still
 an active member of the account before returning a row, since a 30-day
 session cookie cannot itself be revoked server-side if the caller was
@@ -193,8 +195,8 @@ also reads `agent_runs` and `ledger` to compute a tenant's own median run
 cost once enough runs exist. `tokens/service.ts` reads/writes `api_tokens`
 (minting, listing, revocation) and reads `accounts.status` to refuse
 minting for an inactive account; `stats/read.ts` reads
-`v_kpi_work_items`/`v_kpi_runs`/`installations`; `runs/read.ts` and
-`work-items/read.ts` read `agent_runs` and `work_items` respectively.
+`v_kpi_work_items`/`v_kpi_runs`/`installations` and carries `n_person_change_requests`, so a person's request for changes stays out of the review-verdict KPIs (#432); `runs/read.ts` and
+`work-items/read.ts` read `agent_runs` and `work_items` respectively. A run refused for spend carries a fixed `failure_reason` code, derived on read by `runs/refusal.ts` (#898). A run on a member's plan counts as claim-approved only when its `runner_run_on_member_plan` receipt has actor `policy`, so a Yes answered in Needs you is not mistaken for the claim's (#718). `WorkItemDTO` gains `parent_issue_number` for a planned PR child (the issue number of its parent, which a card needs to offer Approve, #839) and `context_pct`, the whole percent of the context window the item's newest running run has filled, shown only from the warning level and derived on every read from the run's figure row (#743).
 
 `setup-requests/` (D#598 P8a) reads and writes `setup_requests` (migration 0856): `kinds.ts` is the closed list of six step kinds, the
 plain-text limits, the provider-link host list (github.com, vercel.com) and the fixed title templates; `store.ts` proposes, lists,
