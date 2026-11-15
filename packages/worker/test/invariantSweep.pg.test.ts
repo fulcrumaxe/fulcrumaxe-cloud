@@ -13,6 +13,7 @@ interface PlanNode {
   "Node Type"?: string;
   "Relation Name"?: string;
   "Index Name"?: string;
+  "Index Cond"?: string;
   Plans?: PlanNode[];
 }
 
@@ -279,18 +280,28 @@ describe("platform invariant sweep [pg]", () => {
       // The fixture tables are tiny, so the planner is told not to prefer a sequential scan; what is checked is that an index path EXISTS for each read.
       await admin.query("SET LOCAL enable_seqscan = off");
       await admin.query("ANALYZE agent_runs, run_events, work_items, runner_run_usage, platform_invariant_alerts");
-      // Inside this rolled-back transaction, take away every way into agent_runs by the run's id or by a non-window column that the planner could
-      // start a body from: the primary key (CASCADE takes the foreign keys hung on it) and every other index except agent_runs_ended_at_recent and
-      // the constraint-backed (account_id, id) one, which the stage check's "no other run in flight" subquery reads. Left in place, the primary key
-      // lets the planner start a body from run_events and reach agent_runs by id, and whether it does depends on row counts other suites leave in
-      // this shared database; that is what made earlier versions flaky. With the rest gone and a sequential scan priced out, the recent-ended
-      // index is the only way to the time window, so the body must name it, and dropping that index from the migration fails every body.
-      await admin.query("ALTER TABLE agent_runs DROP CONSTRAINT agent_runs_pkey CASCADE");
+      // Inside this rolled-back transaction, take away every way into agent_runs other than the recent-ended index, so the plan cannot depend on
+      // how many rows other suites left in this shared database. A body that reads run_events with EXISTS may start from run_events and reach
+      // agent_runs by id through the primary key or the (account_id, id) unique index; which it picks flips with row counts, and it did flip in
+      // full-suite CI for usage_not_recorded. So: drop the primary key and every other unique constraint (CASCADE takes the foreign keys hung on
+      // them) and every plain index except agent_runs_ended_at_recent. The one exception is the (account_id, id) unique constraint for the stage
+      // check only, whose "no other run in flight" subquery reads agent_runs by account. With the rest gone and a sequential scan priced out, the
+      // recent-ended index is the only way to the time window for the other bodies, whatever the row counts, so the body must name it; dropping
+      // that index from the migration (or making a body's predicate unable to use it) fails every body.
+      const keepUnique = fn === "platform_invariant_stage_not_moved" ? "UNIQUE (account_id, id)" : null;
+      const constraints = (await admin.query<{ conname: string }>(
+        `SELECT c.conname FROM pg_constraint c WHERE c.conrelid = 'agent_runs'::regclass AND c.contype IN ('p', 'u') AND pg_get_constraintdef(c.oid) IS DISTINCT FROM $1`,
+        [keepUnique],
+      )).rows;
+      for (const c of constraints) await admin.query(`ALTER TABLE agent_runs DROP CONSTRAINT IF EXISTS "${c.conname}" CASCADE`);
       const others = (await admin.query<{ indexname: string }>(
         `SELECT i.indexname FROM pg_indexes i WHERE i.tablename = 'agent_runs' AND i.schemaname = current_schema() AND i.indexname <> 'agent_runs_ended_at_recent'
             AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = (quote_ident(i.schemaname) || '.' || quote_ident(i.indexname))::regclass)`,
       )).rows;
       for (const o of others) await admin.query(`DROP INDEX "${o.indexname}"`);
+      // Nothing but the recent-ended index (and, for the stage check, the one unique index) may be left on agent_runs, or the premise above is false.
+      const left = (await admin.query<{ indexname: string }>("SELECT indexname FROM pg_indexes WHERE tablename = 'agent_runs' AND schemaname = current_schema() ORDER BY 1")).rows.map((r) => r.indexname);
+      expect(left.filter((n) => n !== "agent_runs_ended_at_recent").length).toBe(keepUnique === null ? 0 : 1);
       await admin.query(`PREPARE inv_plan(int, int, int) AS ${body}`);
       // The plan is read as a tree, not as text: the node that scans agent_runs may sit under a CTE, a join or a sort, and a regex over the text
       // is only as good as where in the text the planner happened to print it.
@@ -301,7 +312,16 @@ describe("platform invariant sweep [pg]", () => {
       const READ = ["agent_runs", "run_events", "work_items", "runner_run_usage", "platform_invariant_alerts"];
       // agent_runs is reached through the recent-ended index (an index, index-only or bitmap-index node anywhere in the tree), and no read table is
       // scanned sequentially anywhere in it.
-      expect(nodes.filter((n) => n["Index Name"] === "agent_runs_ended_at_recent" && /^(Index Scan|Index Only Scan|Bitmap Index Scan)$/.test(n["Node Type"] ?? "")).length).toBeGreaterThan(0);
+      // The node must carry an index condition on ended_at: with seq scans priced out the planner would also walk the whole partial index for a
+      // predicate it cannot use (say, ended_at wrapped in an expression), and that walk has no Index Cond, so the name alone would not tell.
+      expect(
+        nodes.filter(
+          (n) =>
+            n["Index Name"] === "agent_runs_ended_at_recent" &&
+            /^(Index Scan|Index Only Scan|Bitmap Index Scan)$/.test(n["Node Type"] ?? "") &&
+            /\bended_at\b/.test(n["Index Cond"] ?? ""),
+        ).length,
+      ).toBeGreaterThan(0);
       expect(nodes.filter((n) => n["Node Type"] === "Seq Scan" && READ.includes(n["Relation Name"] ?? "")).map((n) => n["Relation Name"])).toEqual([]);
     } finally {
       await admin.query("ROLLBACK");
