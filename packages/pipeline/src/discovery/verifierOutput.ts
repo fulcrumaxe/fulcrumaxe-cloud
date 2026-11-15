@@ -14,7 +14,8 @@ import { toWellFormedString } from "../plan/unicode.js";
  *                   "cites": [ { "path": "src/a.ts", "start_line": 3, "end_line": 9 } ] } ] }
  *
  * At most MAX_NEW_CLAIMS claims (a first pass: discovery writes none), MAX_CITES_PER_CLAIM cites each, and each cite at most
- * MAX_CITE_LINES lines. The model's verdict is a proposal only: the system reads the cites itself (verifierCites.ts).
+ * MAX_CITE_LINES lines. A cite over that length (and otherwise well-formed) downgrades only its own claim to `unverifiable`
+ * with no cites; every other malformed cite rejects the whole output. The model's verdict is a proposal only: the system reads the cites itself (verifierCites.ts).
  */
 export const MAX_NEW_CLAIMS = 5;
 export const MAX_CITES_PER_CLAIM = 3;
@@ -74,6 +75,15 @@ export function parseCite(raw: unknown): Cite | null {
   return { path, start_line: start, end_line: end };
 }
 
+/** A cite that would be valid except that it spans more than MAX_CITE_LINES lines. */
+function citeOnlyTooLong(raw: unknown): boolean {
+  if (!isObject(raw) || hasOtherKeys(raw, ["path", "start_line", "end_line"])) return false;
+  const path = ownData(raw, "path");
+  const start = ownData(raw, "start_line");
+  const end = ownData(raw, "end_line");
+  return isSafeRepoPath(path) && isLine(start) && isLine(end) && end >= start && end - start + 1 > MAX_CITE_LINES;
+}
+
 export function parseVerifierOutput(envelope: unknown): ParsedVerifierOutput {
   const fail = (reason: VerifierOutputRejection): ParsedVerifierOutput => ({ ok: false, reason });
   if (!isObject(envelope)) return fail("not_an_object");
@@ -101,12 +111,21 @@ export function parseVerifierOutput(envelope: unknown): ParsedVerifierOutput {
     if (clean === "" || !Array.isArray(rawCites)) return fail("bad_claim");
     if (rawCites.length > MAX_CITES_PER_CLAIM) return fail("bad_cite");
     const cites: Cite[] = [];
+    let tooLong = false;
     for (const c of rawCites as unknown[]) {
       const cite = parseCite(c);
-      if (cite === null) return fail("bad_cite");
+      if (cite === null) {
+        // A cite that is well-formed apart from spanning more than MAX_CITE_LINES costs only its own claim: that claim becomes
+        // `unverifiable` with no cites. Any other malformed cite still refuses the whole answer.
+        if (citeOnlyTooLong(c)) {
+          tooLong = true;
+          continue;
+        }
+        return fail("bad_cite");
+      }
       cites.push(cite);
     }
-    claims.push({ text: clean, verdict: verdict as ModelVerdict, cites });
+    claims.push(tooLong ? { text: clean, verdict: "unverifiable", cites: [] } : { text: clean, verdict: verdict as ModelVerdict, cites });
   }
   return { ok: true, output: { category: category.category, claims } };
 }

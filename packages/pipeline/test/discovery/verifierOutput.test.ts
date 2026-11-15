@@ -29,7 +29,10 @@ describe("S4b-2: the verifier output is parsed whole or not at all", () => {
     ["lines that run backwards", { ...ok, claims: [{ ...claim, cites: [{ ...cite, start_line: 9, end_line: 3 }] }] }, "bad_cite"],
     ["line zero", { ...ok, claims: [{ ...claim, cites: [{ ...cite, start_line: 0 }] }] }, "bad_cite"],
     ["a fractional line", { ...ok, claims: [{ ...claim, cites: [{ ...cite, end_line: 9.5 }] }] }, "bad_cite"],
-    ["a range longer than the cap", { ...ok, claims: [{ ...claim, cites: [{ ...cite, start_line: 1, end_line: MAX_CITE_LINES + 1 }] }] }, "bad_cite"],
+    ["an oversized cite beside another malformed cite in the same claim", { ...ok, claims: [{ ...claim, cites: [{ ...cite, start_line: 1, end_line: MAX_CITE_LINES + 1 }, { ...cite, path: "../x" }] }] }, "bad_cite"],
+    ["an oversized cite with an extra key", { ...ok, claims: [{ ...claim, cites: [{ ...cite, start_line: 1, end_line: MAX_CITE_LINES + 1, url: "x" }] }] }, "bad_cite"],
+    ["an oversized cite with a bad path", { ...ok, claims: [{ ...claim, cites: [{ ...cite, path: "../x", start_line: 1, end_line: MAX_CITE_LINES + 1 }] }] }, "bad_cite"],
+    ["an oversized cite in one claim and a bad path in another", { ...ok, claims: [{ ...claim, cites: [{ ...cite, start_line: 1, end_line: MAX_CITE_LINES + 1 }] }, { ...claim, cites: [{ ...cite, path: "../x" }] }] }, "bad_cite"],
     ["too many cites", { ...ok, claims: [{ ...claim, cites: Array.from({ length: MAX_CITES_PER_CLAIM + 1 }, () => cite) }] }, "bad_cite"],
     ["too many claims", { ...ok, claims: Array.from({ length: MAX_NEW_CLAIMS + 1 }, () => claim) }, "too_many_claims"],
     ["a list", [ok], "not_an_object"],
@@ -37,6 +40,16 @@ describe("S4b-2: the verifier output is parsed whole or not at all", () => {
     ["a string", JSON.stringify(ok), "not_an_object"],
   ])("rejects %s", (_name, envelope, reason) => {
     expect(parseVerifierOutput(envelope)).toEqual({ ok: false, reason });
+  });
+
+  it("a range longer than the cap costs only its own claim", () => {
+    const long = { ...cite, start_line: 1, end_line: MAX_CITE_LINES + 8 };
+    const other = { text: "Another claim", verdict: "refuted", cites: [cite] };
+    const parsed = parseVerifierOutput({ ...ok, claims: [{ ...claim, cites: [cite, long] }, other] });
+    expect(parsed).toEqual({ ok: true, output: { category: "bug", claims: [{ text: claim.text, verdict: "unverifiable", cites: [] }, other] } });
+    // A span of exactly the cap is still accepted as written.
+    const exact = { ...cite, start_line: 1, end_line: MAX_CITE_LINES };
+    expect(parseVerifierOutput({ ...ok, claims: [{ ...claim, cites: [exact] }] })).toEqual({ ok: true, output: { category: "bug", claims: [{ ...claim, cites: [exact] }] } });
   });
 
   it("one bad claim among good ones rejects the whole output", () => {
