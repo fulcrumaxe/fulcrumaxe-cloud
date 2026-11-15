@@ -10,6 +10,8 @@ import { FLOORED_PIN, isAllowlisted, type BackendRef } from './backendAllowlist.
 export const ROLE_FLOORS: Readonly<Record<string, ModelId>> = {
   'security-reviewer': 'sonnet-5',
   'security-expert': 'sonnet-5',
+  // D#3 K05a (D#2 C12 item 5): accuracy is the product, so the site verifier never runs on Haiku. site-extractor has no floor.
+  'site-verifier': 'sonnet-5',
 };
 
 export function floorFor(role: string): ModelId | undefined {

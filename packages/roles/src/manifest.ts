@@ -293,8 +293,39 @@ export const ROLE_MANIFEST: readonly RoleManifestEntry[] = [
   },
 ] as const;
 
+/**
+ * D#3 K05 (D#2 C12 item 3): the two roles site kit runs. A separate list on purpose: ROLE_MANIFEST is the hosted
+ * team's 26 roles (the per-repo role settings and their tests list exactly those), and a site-kit role has no
+ * per-repo mode control. The cards are product cards, looked up through `loadPlatformCard`. The spend figure is the
+ * default cap of a full pass; the customer can change it.
+ */
+export const SITEKIT_ROLE_MANIFEST: readonly RoleManifestEntry[] = [
+  {
+    name: "site-extractor",
+    trigger: "a site kit extract pass: the first one for a repository, or one scoped to a diff on sync",
+    defaultMode: "always",
+    allowedModes: ["off", "always"],
+    defaultModel: "sonnet",
+    perSpawnCapUsd: 225,
+    needsBrowser: false,
+    writeAccess: false,
+  },
+  {
+    name: "site-verifier",
+    trigger: "a site kit verify pass, in a run of its own after an extract pass",
+    defaultMode: "always",
+    allowedModes: ["off", "always"],
+    defaultModel: "sonnet",
+    perSpawnCapUsd: 225,
+    needsBrowser: false,
+    writeAccess: false,
+  },
+] as const;
+
 export function getRoleEntry(name: string): RoleManifestEntry | undefined {
   return ROLE_MANIFEST.find((r) => r.name === name);
 }
 
 export const ROLE_NAMES: readonly string[] = ROLE_MANIFEST.map((r) => r.name);
+
+export const SITEKIT_ROLE_NAMES: readonly string[] = SITEKIT_ROLE_MANIFEST.map((r) => r.name);
