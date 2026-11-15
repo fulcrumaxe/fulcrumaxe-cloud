@@ -9,7 +9,7 @@ import { listDriverEvents, recordDriverEvent } from '../src/work-items/driverEve
 import { readVerifySettings } from '../src/verify/settings.js';
 import {
   attachBugItem, canMove, endUnstartedRows, finishVerifyRow, listVerifyRows, markPersonStep, openVerifyRow, readStreak, readVerifyRow, saveVerifySettings,
-  startDeploying, startRunning, VERIFY_ROW_STATUSES, type JourneyResult, type VerifyRowStatus,
+  parkVerifyRow, setVerifyHold, startDeploying, startRunning, VERIFY_ROW_STATUSES, type JourneyResult, type VerifyRowStatus,
 } from '../src/verify/rows.js';
 
 /** D#6 V1: the verify stage's tables, rules and store against a real Postgres, as app_user, through withTenant. */
@@ -688,6 +688,41 @@ describe('verify stage store', () => {
       const pending = await rowAt('pending');
       await refused(asWorker((c) => c.query(`UPDATE verify_rows SET status = 'unverified', reason_code = 'deploy_failed', finished_at = now(), method = 'chrome_runner' WHERE id = $1`, [pending.rowId])));
       expect(await asWorker((c) => readVerifyRow(c, a.accountId, r.rowId))).toMatchObject({ status: 'running', method: 'chrome_runner', deployed_commit: sha('d') });
+    });
+
+    // D#749 VERIFY-SIGNIN-EXPIRY (migration 1020): the one new move, running -> pending, and only for the reason `needs_sign_in`.
+    it('a running row may go back to pending only with the hold `needs_sign_in`; every other write of that move, and every other state, is refused', async () => {
+      const r = await rowAt('running');
+      for (const sql of [`UPDATE verify_rows SET status = 'pending' WHERE id = $1`, `UPDATE verify_rows SET status = 'pending', hold_reason = 'daily_cap', hold_since = now() WHERE id = $1`,
+        `UPDATE verify_rows SET status = 'pending', hold_reason = 'unconfigured', hold_since = now() WHERE id = $1`]) {
+        await refused(asWorker((c) => c.query(sql, [r.rowId])));
+      }
+      // The hold alone, on a row that stays running, is refused by the table's own check (a hold is for a row that has not started).
+      await refused(asWorker((c) => c.query(`UPDATE verify_rows SET hold_reason = 'needs_sign_in', hold_since = now() WHERE id = $1`, [r.rowId])), '23514');
+      expect(await asWorker((c) => readVerifyRow(c, a.accountId, r.rowId))).toMatchObject({ status: 'running', hold_reason: null });
+      // The move itself, with its reason: the row keeps method, deployed commit and start; the hold, the park count and the cleared run id come with it. No verdict is written.
+      const before = (await asWorker((c) => readVerifyRow(c, a.accountId, r.rowId)))!;
+      const moved = await asWorker((c) => parkVerifyRow(c, a.accountId, r.rowId));
+      expect(moved.moved).toBe(true);
+      const parked = (await asWorker((c) => readVerifyRow(c, a.accountId, r.rowId)))!;
+      expect(parked).toMatchObject({ status: 'pending', hold_reason: 'needs_sign_in', run_id: null, sign_in_parks: 1, method: before.method, deployed_commit: before.deployed_commit, reason_code: null, result: null, finished_at: null });
+      expect(parked.hold_since).toBeInstanceOf(Date);
+      expect(parked.started_at?.getTime()).toBe(before.started_at?.getTime());
+      // The row can start again (the hold goes with the move), and a repeat of the park on a row that is not running writes nothing.
+      expect(await asWorker((c) => parkVerifyRow(c, a.accountId, r.rowId))).toEqual({ moved: false, status: 'pending' });
+      expect((await asWorker((c) => startDeploying(c, a.accountId, r.rowId, true))).moved).toBe(true);
+      expect(await asWorker((c) => readVerifyRow(c, a.accountId, r.rowId))).toMatchObject({ status: 'deploying', hold_reason: null, hold_since: null, sign_in_parks: 1 });
+      // The hold needs the reason's own word in the table, and a deploying row takes it the way the stage writes it.
+      expect(await asWorker((c) => setVerifyHold(c, a.accountId, r.rowId, 'needs_sign_in'))).toBe(true);
+      await refused(asWorker((c) => c.query(`UPDATE verify_rows SET hold_reason = 'someone_else', hold_since = now() WHERE id = $1`, [r.rowId])));
+    });
+
+    it('a finished row and a pending or deploying row cannot take the park move, and the park count stays within its bound', async () => {
+      const failed = await rowAt('failed');
+      await refused(asWorker((c) => c.query(`UPDATE verify_rows SET status = 'pending', hold_reason = 'needs_sign_in', hold_since = now() WHERE id = $1`, [failed.rowId])));
+      const deploying = await rowAt('deploying');
+      expect((await asWorker((c) => parkVerifyRow(c, a.accountId, deploying.rowId)))).toEqual({ moved: false, status: 'deploying' });
+      await refused(asWorker((c) => c.query(`UPDATE verify_rows SET sign_in_parks = 11 WHERE id = $1`, [deploying.rowId])));
     });
 
     it('the bug item is set only on a failed row, only once, and no statement clears it; deleting the item still does', async () => {

@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { bypassAllowedFor } from "./bypass.js";
 import { findChromium, launchDriver, ToolError, type DriverConfig, type PageDriver } from "./driver.js";
-import { groundAnswer } from "./ground.js";
+import { SIGNED_IN_AS_UNAVAILABLE, groundAnswer } from "./ground.js";
 import { isAllowedUrl, parseBase, resolveOpenPath, type BasePin } from "./pin.js";
 import { cleanPageText, fenced, MAX_RESULT_CHARS, snapshotBody } from "./snapshot.js";
 import { MAX_JOB_MS, Trace, numbersIn } from "./trace.js";
@@ -181,7 +181,10 @@ export function startVerifyBrowserServer(opts: ServerOptions): { done: Promise<v
       // The signed-in account is recorded here, by the server, from the app's own identity route through the saved session. The model cannot set it (a `signed_in_as` of its own was
       // refused above); when the lookup gives nothing the field is left out, and the cloud then fails the row closed.
       const login = driver === undefined ? undefined : await driver.identity().catch(() => undefined);
-      const json = login === undefined ? verdict.json : JSON.stringify({ ...(JSON.parse(verdict.json) as Record<string, unknown>), signed_in_as: login });
+      // D#749 VERIFY-SIGNIN-EXPIRY: a browser that was started and got no account from the app's identity route holds a sign-in the app no longer knows. The server says so with one fixed word, so the
+      // cloud waits for a new sign-in instead of calling it the wrong account. With no browser started there is nothing to say, and the field is left out as before.
+      const extra = login !== undefined ? { signed_in_as: login } : driver !== undefined ? { signed_in_as_unavailable: SIGNED_IN_AS_UNAVAILABLE } : undefined;
+      const json = extra === undefined ? verdict.json : JSON.stringify({ ...(JSON.parse(verdict.json) as Record<string, unknown>), ...extra });
       await fs.writeFile(path.join(opts.jobDir, "answer.json"), scrub(json), { flag: "wx", mode: 0o600 });
       accepted = true;
       return ok("answer accepted");

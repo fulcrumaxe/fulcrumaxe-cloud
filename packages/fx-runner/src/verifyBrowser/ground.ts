@@ -17,6 +17,13 @@ const JOURNEY_KEYS = ["id", "result", "steps", "console_errors", "undo_checked",
 /** The signed-in account's GitHub login, as the server recorded it: 1 to 100 characters, no control character. */
 export const SIGNED_IN_AS = /^[^\u0000-\u001f\u007f]{1,100}$/;
 
+/**
+ * D#749 VERIFY-SIGNIN-EXPIRY: the one word the server writes at the top level, as `signed_in_as_unavailable`, when the app's identity route gave no account to the saved session (the app ended
+ * that session on its own side). Like `signed_in_as` it is the server's and never the model's: a model's answer holding it is refused, and the runner's reader of the finished file takes it only
+ * as exactly this word and never beside a `signed_in_as`.
+ */
+export const SIGNED_IN_AS_UNAVAILABLE = "sign_in_expired";
+
 export type Verdict = { ok: true; json: string } | { ok: false; reason: string };
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -37,7 +44,7 @@ function stepProblem(journey: string, step: unknown, trace: Pick<Trace, "sawFact
 }
 
 /**
- * Checks an answer (an object, or JSON text) against the V1 shape and the trace. `signedInAs`: whether the optional top-level `signed_in_as` is accepted. The server never accepts it
+ * Checks an answer (an object, or JSON text) against the V1 shape and the trace. `signedInAs`: whether the optional top-level `signed_in_as` (or the server's `signed_in_as_unavailable`) is accepted. The server never accepts it
  * from the model (it records the account itself, after this check); the runner's reader of the finished file does.
  */
 export function groundAnswer(raw: unknown, trace: Pick<Trace, "sawFact" | "sawNumber">, opts: { signedInAs?: boolean } = {}): Verdict {
@@ -55,7 +62,11 @@ export function groundAnswer(raw: unknown, trace: Pick<Trace, "sawFact" | "sawNu
     if (opts.signedInAs !== true) return { ok: false, reason: "signed_in_as_not_allowed" };
     if (typeof value.signed_in_as !== "string" || !SIGNED_IN_AS.test(value.signed_in_as)) return { ok: false, reason: "bad_value" };
   }
-  if (!isObject(value) || !onlyKeys(value, ["journeys", "signed_in_as"], ["journeys"]) || !Array.isArray(value.journeys) || value.journeys.length > MAX_JOURNEYS) return { ok: false, reason: "bad_shape" };
+  if (isObject(value) && Object.hasOwn(value, "signed_in_as_unavailable")) {
+    if (opts.signedInAs !== true) return { ok: false, reason: "signed_in_as_unavailable_not_allowed" };
+    if (value.signed_in_as_unavailable !== SIGNED_IN_AS_UNAVAILABLE || Object.hasOwn(value, "signed_in_as")) return { ok: false, reason: "bad_value" };
+  }
+  if (!isObject(value) || !onlyKeys(value, ["journeys", "signed_in_as", "signed_in_as_unavailable"], ["journeys"]) || !Array.isArray(value.journeys) || value.journeys.length > MAX_JOURNEYS) return { ok: false, reason: "bad_shape" };
   const seen = new Set<string>();
   for (const [j, entry] of value.journeys.entries()) {
     if (!isObject(entry) || !onlyKeys(entry, JOURNEY_KEYS, JOURNEY_KEYS)) return { ok: false, reason: `journey ${j}: bad_shape` };

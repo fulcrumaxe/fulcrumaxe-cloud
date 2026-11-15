@@ -25,7 +25,7 @@ export const GATE_METHODS: readonly VerifyMethod[] = ['chrome_runner', 'playwrig
 export const VERIFY_REASON_CODES = [
   'no_browser', 'chrome_not_connected', 'wrong_account', 'sign_in_refused', 'deploy_failed', 'deployment_unreachable',
   'commit_not_deployed', 'envelope_rejected', 'hollow_pass', 'journey_blocked', 'journeys_missing', 'run_failed', 'verify_disabled',
-  'account_unverifiable', 'no_visible_journeys',
+  'account_unverifiable', 'no_visible_journeys', 'sign_in_expired',
 ] as const;
 export type VerifyReasonCode = (typeof VERIFY_REASON_CODES)[number];
 /**
@@ -48,8 +48,9 @@ export type AccountCheck = (typeof ACCOUNT_CHECKS)[number];
 /**
  * The closed reasons a `deploying` row is held back from starting its tester job (migration 1013): the cost figures are not set (`unconfigured`), the per-run figure is above the daily one
  * (`run_over_daily`) or the repository's own daily budget is used (`daily_cap`). The first two are the plan data's refusal codes with the prefix `deploy_verify_` removed.
+ * D#749 VERIFY-SIGNIN-EXPIRY (migration 1020): `needs_sign_in`, the runner's saved verify sign-in is gone. It may also sit on a `pending` row, a running check that was parked for it.
  */
-export const VERIFY_HOLD_REASONS = ['unconfigured', 'run_over_daily', 'daily_cap'] as const;
+export const VERIFY_HOLD_REASONS = ['unconfigured', 'run_over_daily', 'daily_cap', 'needs_sign_in'] as const;
 export type VerifyHoldReason = (typeof VERIFY_HOLD_REASONS)[number];
 export const JOURNEY_RESULTS = ['pass', 'fail', 'blocked', 'unverified'] as const;
 export type JourneyResultWord = (typeof JOURNEY_RESULTS)[number];
@@ -68,6 +69,7 @@ export interface JourneyResult {
 export const ROW_MOVES: Readonly<Record<VerifyRowStatus, readonly VerifyRowStatus[]>> = {
   pending: ['deploying', 'unverified'],
   deploying: ['running', 'unverified'],
+  // Not listed: running -> pending, the park for a new sign-in (migration 1020's guard allows it for hold_reason `needs_sign_in` only). `parkVerifyRow` is its one writer; this table is the moves that finish or start a row.
   running: ['verified', 'failed', 'unverified'],
   verified: [],
   failed: [],
@@ -104,12 +106,14 @@ export interface VerifyRow {
   /** Why a `deploying` row cannot start its tester job right now, and since when (migration 1013). Null on every row that is not held for one of the closed reasons. */
   hold_reason: VerifyHoldReason | null;
   hold_since: Date | null;
+  /** How many times a running check of this row was parked for a new sign-in (migration 1020). */
+  sign_in_parks: number;
   started_at: Date | null;
   finished_at: Date | null;
   created_at: Date;
 }
 const ROW_COLUMNS = `id, repo_id, batch_id, work_item_id, pr_number, merge_sha, status, method, deployed_commit, journeys, checks_only, result, reason_code, bug_item_id, account_check, run_id,
-  deploy_by_order, person_step, attempt, hold_reason, hold_since, started_at, finished_at, created_at`;
+  deploy_by_order, person_step, attempt, hold_reason, hold_since, sign_in_parks, started_at, finished_at, created_at`;
 
 function bad(message: string): VerifyInputError {
   return new VerifyInputError('verify_row_invalid', message);
@@ -328,7 +332,7 @@ export async function listVerifyRows(client: PoolClient, accountId: string, repo
 
 /** pending -> deploying. `byOrder`: the stage's own deploy order did it (not a person). A row that is not pending is left as it is. */
 export async function startDeploying(client: PoolClient, accountId: string, rowId: string, byOrder: boolean): Promise<MoveResult> {
-  const r = await client.query<VerifyRow>(`UPDATE verify_rows SET status = 'deploying', deploy_by_order = $3 WHERE id = $1 AND account_id = $2 AND status = 'pending' RETURNING ${ROW_COLUMNS}`, [rowId, accountId, byOrder]);
+  const r = await client.query<VerifyRow>(`UPDATE verify_rows SET status = 'deploying', deploy_by_order = $3, hold_reason = NULL, hold_since = NULL WHERE id = $1 AND account_id = $2 AND status = 'pending' RETURNING ${ROW_COLUMNS}`, [rowId, accountId, byOrder]);
   if (r.rows[0] === undefined) return { moved: false, status: (await readRow(client, accountId, rowId))?.status ?? null };
   return { moved: true, row: r.rows[0] };
 }
@@ -346,6 +350,25 @@ export async function setVerifyHold(client: Pick<PoolClient, 'query'>, accountId
     [rowId, accountId, reason],
   );
   return (r.rowCount ?? 0) > 0;
+}
+
+/** The most times one row is parked for a new sign-in; the next park ends it `unverified: sign_in_expired` (a re-run that is parked again and again must not loop). */
+export const MAX_SIGN_IN_PARKS = 3;
+/** How long a row waits for a new sign-in before it ends `unverified: sign_in_expired`. */
+export const SIGN_IN_WAIT_HOURS = 24;
+
+/**
+ * D#749 VERIFY-SIGNIN-EXPIRY: running -> pending, waiting for a good sign-in on the runner. `hold_reason = needs_sign_in` and `hold_since = now()` are written in the same statement (migration 1020's
+ * guard allows this move for that reason only), the finished job's run id is cleared and `sign_in_parks` counts the park. The row keeps its method, deployed commit and start. A row that is not
+ * running is left as it is.
+ */
+export async function parkVerifyRow(client: PoolClient, accountId: string, rowId: string): Promise<MoveResult> {
+  const r = await client.query<VerifyRow>(
+    `UPDATE verify_rows SET status = 'pending', hold_reason = 'needs_sign_in', hold_since = now(), run_id = NULL, sign_in_parks = sign_in_parks + 1 WHERE id = $1 AND account_id = $2 AND status = 'running' RETURNING ${ROW_COLUMNS}`,
+    [rowId, accountId],
+  );
+  if (r.rows[0] === undefined) return { moved: false, status: (await readRow(client, accountId, rowId))?.status ?? null };
+  return { moved: true, row: r.rows[0] };
 }
 
 /** deploying -> running with the method that drives the browser (never defaulted: the row says what was used) and the commit the app reported. Writes the `verify_started` fact. */

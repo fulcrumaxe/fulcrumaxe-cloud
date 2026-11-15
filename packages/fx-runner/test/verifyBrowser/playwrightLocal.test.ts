@@ -5,6 +5,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { parseEnvelope } from "../../../pipeline/src/verify/envelope.js";
 import { BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS, DEPLOY_VERIFIER_PLAYWRIGHT_BROWSER_TOOLS, DEPLOY_VERIFIER_ROLE, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import { runCli } from "../../src/cli.js";
+import { readSignInState } from "../../src/daemon/signInState.js";
 import { verifyLoginCommand, type VerifyLoginHost } from "../../src/commands/verifyLogin.js";
 import { serverOptionsFrom } from "../../src/commands/verifyBrowserServer.js";
 import { readVerifyAnswer, withAnswerFile } from "../../src/daemon/answerFile.js";
@@ -360,6 +361,36 @@ describe("fx-runner verify-login", () => {
     for (const secret of ["LOGIN-SECRET-VALUE", "LS-SECRET", APP_SESSION_COOKIE, "token"]) expect(shown).not.toContain(secret);
     expect(shown).toContain("2030-01-01");
     expect(readFileSync(path.join(m.stateDir, "runner-settings.json"), "utf8")).not.toContain("SECRET");
+  });
+
+  it("D#749 sign-in expiry: writes a dates file beside the saved state (0600, timestamps only, never a cookie value), reads back as ok, and --forget removes it with the state", async () => {
+    const { m, ctx, host } = rig();
+    const savedAt = new Date("2026-11-15T10:00:00.000Z");
+    expect(await verifyLoginCommand(new Map([["base-url", "https://app.example.test"]]), { ...ctx, now: () => savedAt }, host)).toBe(0);
+    const sidecar = `${m.state}.meta.json`;
+    expect(statSync(sidecar).mode & 0o777).toBe(0o600);
+    const text = readFileSync(sidecar, "utf8");
+    expect(JSON.parse(text)).toEqual({ created_at: "2026-11-15T10:00:00.000Z", cookie_expires_at: "2030-01-01T00:00:00.000Z" });
+    for (const secret of ["LOGIN-SECRET-VALUE", "LS-SECRET", APP_SESSION_COOKIE]) expect(text).not.toContain(secret);
+    const read = (nowMs: number) => readSignInState({ settings: () => loadSettings(m.stateDir).verify, home: m.home, now: () => nowMs });
+    expect(read(savedAt.getTime() + 60_000)).toBe("ok");
+    expect(read(savedAt.getTime() + 21 * 3_600_000)).toBe("expiring_soon");
+    expect(read(savedAt.getTime() + 22 * 3_600_000)).toBe("expired");
+    expect(await verifyLoginCommand(new Map<string, string | true>([["forget", true]]), ctx, host)).toBe(0);
+    expect(existsSync(sidecar)).toBe(false);
+    expect(read(Date.now())).toBe("missing");
+  });
+
+  it("D#749 sign-in expiry: a sign-in saved before the dates file existed counts from the saved file's own time, and no address set says nothing", async () => {
+    const { m, run } = rig();
+    expect(await run("https://app.example.test")).toBe(0);
+    rmSync(`${m.state}.meta.json`);
+    const saved = statSync(m.state).mtimeMs;
+    const read = (nowMs: number) => readSignInState({ settings: () => loadSettings(m.stateDir).verify, home: m.home, now: () => nowMs });
+    expect(read(saved + 3_600_000)).toBe("ok");
+    expect(read(saved + 23 * 3_600_000)).toBe("expired");
+    unsetSetting(m.stateDir, "verify.browser.base_url");
+    expect(read(saved)).toBeUndefined();
   });
 
   it("saves only the app's own origin: a github.com cookie, a parent-domain cookie and another origin's page storage are never written", async () => {

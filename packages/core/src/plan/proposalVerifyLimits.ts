@@ -63,9 +63,12 @@ const verifierRunsToday = (externalOnly: boolean): string => `SELECT k.run_id FR
 export const ANALYSIS_KEY_PREFIX = 'docs-code-analysis:';
 export const analysisRunKey = (analysisId: string, attempt: number): string => `${ANALYSIS_KEY_PREFIX}${analysisId}:${attempt}`;
 
-/** D#749 V3b: the post-merge tester's run key, `verify-stage:<verify_row_id>`. The row id stays the second `:` field. */
+/**
+ * D#749 V3b: the post-merge tester's run key, `verify-stage:<verify_row_id>`. The row id stays the second `:` field. D#749 VERIFY-SIGNIN-EXPIRY: a row that was parked for a new sign-in and starts
+ * again takes `verify-stage:<verify_row_id>:<n>` (n = how many times it was parked), so the second job is not the first one replayed; a row never parked keeps the plain key.
+ */
 export const VERIFY_STAGE_KEY_PREFIX = 'verify-stage:';
-export const verifyStageRunKey = (rowId: string): string => `${VERIFY_STAGE_KEY_PREFIX}${rowId}`;
+export const verifyStageRunKey = (rowId: string, parks = 0): string => (parks > 0 ? `${VERIFY_STAGE_KEY_PREFIX}${rowId}:${parks}` : `${VERIFY_STAGE_KEY_PREFIX}${rowId}`);
 
 /**
  * The repository's day is counted in TWO counters that never see each other's runs (D#749):

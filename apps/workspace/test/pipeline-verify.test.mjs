@@ -22,9 +22,9 @@ function coreList(name) {
 const row = (over) => ({ verify: { status: "unverified", reason: "run_failed", method: "playwright_runner", journeys: null, account: null, bug_item_id: null, pr_number: 57, at: "2026-11-10T12:00:00.000Z", ...over } });
 
 describe("D#749 V4b: verify section words", () => {
-  it("has a plain sentence for each of the 15 closed reasons, and no others", () => {
+  it("has a plain sentence for each of the 16 closed reasons, and no others", () => {
     const codes = coreList("VERIFY_REASON_CODES");
-    expect(codes).toHaveLength(15);
+    expect(codes).toHaveLength(16);
     expect(Object.keys(VERIFY_REASON_SENTENCES).sort()).toEqual([...codes].sort());
     for (const code of codes) {
       const s = verifySection(row({ reason: code }));
@@ -32,7 +32,7 @@ describe("D#749 V4b: verify section words", () => {
       expect(s.reason, code).not.toMatch(/_|null|undefined/);
       expect(s.reason.endsWith("."), code).toBe(true);
     }
-    expect(new Set(Object.values(VERIFY_REASON_SENTENCES)).size).toBe(15);
+    expect(new Set(Object.values(VERIFY_REASON_SENTENCES)).size).toBe(16);
   });
 
   it("names every method with words, and the same methods the store allows", () => {
@@ -122,9 +122,9 @@ describe("D#749 V4b: verify section states", () => {
     expect(verifySection(fx("200-verify-waiting.json")).text).toBe("Waiting to start.");
   });
 
-  it("a waiting row held by one of the three limits says why, in a fixed sentence and with when the wait began; never the code", () => {
+  it("a waiting row held by one of the four holds says why, in a fixed sentence and with when the wait began; never the code", () => {
     const codes = coreList("VERIFY_HOLD_REASONS");
-    expect(codes).toEqual(["unconfigured", "run_over_daily", "daily_cap"]);
+    expect(codes).toEqual(["unconfigured", "run_over_daily", "daily_cap", "needs_sign_in"]);
     expect(Object.keys(VERIFY_HOLD_SENTENCES).sort()).toEqual([...codes].sort());
     expect(new Set(Object.values(VERIFY_HOLD_SENTENCES)).size).toBe(codes.length);
     for (const status of ["pending", "deploying"]) {

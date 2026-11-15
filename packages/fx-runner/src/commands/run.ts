@@ -34,6 +34,7 @@ import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readVerifyAnswer } from "../daemon/answerFile.js";
 import { createVerifyLocal } from "../daemon/verifyLocal.js";
+import { readSignInState } from "../daemon/signInState.js";
 import { readHostFacts } from "../hostFacts.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createRunnerClient } from "../daemon/client.js";
@@ -341,7 +342,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const tipPublish = (): boolean => tipPublishAccepted;
     /** D#601 MEM-6: set once the hello is answered; a finished run's memory proposals are offered at a terminal only when the cloud kept `mem_proposal_v1`. */
     let memProposalAccepted = false;
-    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
+    // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
+    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
     const git = createGitPath({ platform: host.platform, pushLog, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });

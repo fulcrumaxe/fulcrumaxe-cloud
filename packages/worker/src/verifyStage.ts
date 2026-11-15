@@ -2,8 +2,9 @@ import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { expireOrder, placeDeployOrder, readOrderOfRow, type DeployOrder } from "@fx/core/src/verify/orders.js";
 import { genuineSyncCommit, qualifyDeployedCommit, type CommitFacts, type CommitRelation } from "@fx/core/src/verify/qualify.js";
-import { finishVerifyRow, openVerifyRow, readVerifyRow, startDeploying, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
+import { SIGN_IN_WAIT_HOURS, finishVerifyRow, openVerifyRow, readVerifyRow, startDeploying, type VerifyReasonCode, type VerifyRow } from "@fx/core/src/verify/rows.js";
 import { readVerifySettings } from "@fx/core/src/verify/settings.js";
+import { readSignInReports, signInGate } from "@fx/core/src/verify/signIn.js";
 import { reportError } from "@fx/telemetry";
 
 /**
@@ -241,6 +242,15 @@ export function createVerifyStageSweep(deps: VerifyStageDeps): () => Promise<Ver
       return false;
     }
     if (row.status === "pending") {
+      // D#749 VERIFY-SIGNIN-EXPIRY: a check parked for a new sign-in (it was running) starts again only once a runner reports a good one newer than the park; after 24 hours it ends.
+      if (row.hold_reason === "needs_sign_in" && row.hold_since !== null) {
+        const reports = await tenant(accountId, (client) => readSignInReports(client, accountId));
+        if (signInGate(reports, { since: row.hold_since }) === "park") {
+          if ((deps.now ?? Date.now)() - row.hold_since.getTime() > SIGN_IN_WAIT_HOURS * 3_600_000) return endRow(accountId, row.id, "sign_in_expired", counts);
+          counts.waiting += 1;
+          return false;
+        }
+      }
       // The move and the order are one transaction: a row never deploys without its order, and a replay of the pass places no second one.
       const placed = await tenant(accountId, async (client) => {
         const moved = await startDeploying(client, accountId, row.id, true);

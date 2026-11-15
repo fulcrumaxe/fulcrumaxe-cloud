@@ -386,6 +386,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "verify_disabled",
   "account_unverifiable",
   "no_visible_journeys",
+  "sign_in_expired",
   "verify_base_url_invalid",
   "verify_base_url_required",
   "verify_setting_invalid",

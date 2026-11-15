@@ -32,6 +32,14 @@ describe('parseEnvelope', () => {
     expect(rejected({ signed_in_as: 'x' })).toBe('bad_shape');
   });
 
+  it('D#749 VERIFY-SIGNIN-EXPIRY: reads the verify server\'s signed_in_as_unavailable only as the exact word sign_in_expired and never beside a signed_in_as', () => {
+    expect(parseEnvelope(env([journey()], { signed_in_as_unavailable: 'sign_in_expired' }))).toMatchObject({ ok: true, signInUnavailable: true });
+    const plain = parseEnvelope(env([journey()]));
+    expect(plain.ok && Object.hasOwn(plain, 'signInUnavailable')).toBe(false);
+    for (const bad of ['', 'other', 'SIGN_IN_EXPIRED', true, null, 1, {}]) expect(rejected(env([journey()], { signed_in_as_unavailable: bad })), JSON.stringify(bad)).toBe('bad_value');
+    expect(rejected(env([journey()], { signed_in_as_unavailable: 'sign_in_expired', signed_in_as: 'x' }))).toBe('bad_value');
+  });
+
   it('rejects a key it does not know, at the top, in a journey and in a step', () => {
     expect(rejected(env([journey()], { verdict: 'pass' }))).toBe('extra_key');
     expect(rejected(env([journey({ notes: 'all good' })]))).toBe('extra_key');

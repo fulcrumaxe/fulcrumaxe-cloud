@@ -7,6 +7,7 @@ import { createPool } from "@fx/db/src/pool.js";
 import { configureErrorReporter, type ErrorClass } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { placeDeployOrder } from "@fx/core/src/verify/orders.js";
 import { finishVerifyRow, openVerifyRow, readStreak, readVerifyRow, setVerifyHold, startDeploying, startRunning, type VerifyRow } from "@fx/core/src/verify/rows.js";
 import { overRepoDailyUsd } from "@fx/core/src/plan/proposalVerifyLimits.js";
@@ -28,7 +29,7 @@ import { createVerifyStageSweep } from "../src/verifyStage.js";
 const RUN_USD = 1.25;
 const sha = (c: string): string => c.repeat(40);
 const shaN = (n: number): string => n.toString(16).padStart(40, "0");
-const KEY_RE = /^verify-stage:[0-9a-f-]{36}$/;
+const KEY_RE = /^verify-stage:[0-9a-f-]{36}(:[1-9])?$/;
 
 class StrictStarter implements RunStarter {
   calls: StartAgentRunInput[] = [];
@@ -931,6 +932,159 @@ describe("the verify stage's run hand-offs [pg]", { timeout: 180_000 }, () => {
       expect((await reread(a, row.id))!.status).toBe("verified");
       expect(await factKinds(itemId)).toEqual(["verify_started", "verify_passed"]);
       expect(starter.calls).toHaveLength(1);
+    });
+  });
+  // D#749 VERIFY-SIGNIN-EXPIRY: what the runners last said about their saved verify sign-in (runners.verify_sign_in, migration 1020) decides whether a check starts, waits or runs again; the tester's own
+  // marker (`signed_in_as_unavailable`) parks a running check. The starter and the answer rules are the real ones above; the one thing faked is the runner's report, written straight to the row the
+  // claim's `runner_verify_sign_in_record` writes (that function is covered against the real claim route in runner-cloud's suite).
+  describe("the saved verify sign-in", () => {
+    const MARKER = { signed_in_as_unavailable: "sign_in_expired" };
+    let runnerId: string;
+    let repo: string;
+    beforeAll(async () => {
+      runnerId = await insertRunner(admin, a.accountId, a.userId, { protocolVersion: 18 });
+    });
+    beforeEach(async () => {
+      await admin.query("UPDATE runners SET verify_sign_in = NULL, verify_sign_in_at = NULL WHERE account_id = $1", [a.accountId]);
+      repo = await newRepo(a);
+      await admin.query("UPDATE verify_settings SET standing_journeys = $2::jsonb, test_account_label = 'fx-tester' WHERE repo_id = $1", [repo, JSON.stringify([{ id: "sign_in", text: "A person can sign in." }])]);
+    });
+    const report = (state: string | null, ago = "0 seconds") =>
+      admin.query(`UPDATE runners SET verify_sign_in = $2::text, verify_sign_in_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() - $3::interval END WHERE id = $1`, [runnerId, state, ago]);
+    const answerOf = (extra: Record<string, unknown> = {}) => ({ journeys: [pass("c1"), pass("c2"), pass("s_sign_in")], ...extra });
+    const succeedOrder = async (rowId: string) => {
+      await admin.query("ALTER TABLE verify_deploy_orders DISABLE TRIGGER verify_deploy_orders_guard");
+      try {
+        await admin.query(`UPDATE verify_deploy_orders SET state = 'succeeded', exit_code = 0, finished_at = now() WHERE verify_row_id = $1`, [rowId]);
+      } finally {
+        await admin.query("ALTER TABLE verify_deploy_orders ENABLE TRIGGER verify_deploy_orders_guard");
+      }
+    };
+    const sweep = (row: VerifyRow) =>
+      createVerifyStageSweep({
+        pool: writerPool,
+        host: { mergeCommit: async () => null, commit: async () => null, relation: async () => "unknown" },
+        health: async () => ({ kind: "ok", commit: row.merge_sha }),
+        list: async () => [{ account_id: a.accountId, repo_id: repo }],
+        ...run(),
+      })();
+
+    it("expired or missing before the job starts: the row waits with `needs_sign_in` and no job is made; once the runner reports a good one the job starts and the hold goes", async () => {
+      const { row } = await deployingRow(a, repo);
+      await report("expired");
+      expect(await run().ready(readyInput(a, repo, row))).toBe("held");
+      expect(starter.calls).toHaveLength(0);
+      const held = (await reread(a, row.id))!;
+      expect(held).toMatchObject({ status: "deploying", hold_reason: "needs_sign_in" });
+      expect(held.hold_since).toBeInstanceOf(Date);
+      // A repeat keeps the start of the wait; `missing` is the same wait.
+      await report("missing");
+      expect(await run().ready(readyInput(a, repo, held))).toBe("held");
+      expect((await reread(a, row.id))!.hold_since?.getTime()).toBe(held.hold_since!.getTime());
+      // The runner's report after the park decides: a good one starts the job.
+      await report("expiring_soon");
+      expect(await run().ready(readyInput(a, repo, (await reread(a, row.id))!))).toBe("started");
+      expect(starter.calls).toHaveLength(1);
+      expect(await reread(a, row.id)).toMatchObject({ status: "running", hold_reason: null, hold_since: null });
+    });
+
+    it("an old runner (protocol 17, or no address set) never said anything: the row starts as before and nothing is written about a sign-in", async () => {
+      const { row } = await deployingRow(a, repo);
+      expect((await admin.query("SELECT verify_sign_in FROM runners WHERE id = $1", [runnerId])).rows[0].verify_sign_in).toBeNull();
+      expect(await run().ready(readyInput(a, repo, row))).toBe("started");
+      expect(starter.calls[0]!.idempotency?.key).toBe(`verify-stage:${row.id}`);
+      expect(await reread(a, row.id)).toMatchObject({ status: "running", hold_reason: null, sign_in_parks: 0 });
+    });
+
+    it("the tester's marker parks the running row: pending, `needs_sign_in`, the job's run id cleared, the method and commit kept, no verdict, no bug item", async () => {
+      await report("ok");
+      const { row, itemId } = await runningRow(a, repo);
+      await endRun(row.run_id!, "succeeded", answerOf(MARKER));
+      expect(await run().settle({ accountId: a.accountId, repoId: repo, row })).toBe("waiting");
+      const parked = (await reread(a, row.id))!;
+      expect(parked).toMatchObject({ status: "pending", hold_reason: "needs_sign_in", run_id: null, sign_in_parks: 1, method: "playwright_runner", deployed_commit: row.deployed_commit, reason_code: null, account_check: null, finished_at: null });
+      expect(parked.hold_since).toBeInstanceOf(Date);
+      expect(await itemsOf(repo)).toEqual([]);
+      expect(await factKinds(itemId)).toEqual(["verify_started"]);
+      // The card's read model draws the wait while the row is pending and held.
+      expect((await tenant(a, (c) => readItemVerify(c, itemId)))?.hold).toMatchObject({ reason: "needs_sign_in" });
+    });
+
+    it("a genuine mismatch still ends wrong_account and an absent account with no marker too; neither parks", async () => {
+      const first = await runningRow(a, repo, 71, sha("7"));
+      await endRun(first.row.run_id!, "succeeded", answerOf({ signed_in_as: "the-owner" }));
+      expect(await run().settle({ accountId: a.accountId, repoId: repo, row: first.row })).toBe("settled");
+      expect(await reread(a, first.row.id)).toMatchObject({ status: "unverified", reason_code: "wrong_account", account_check: "mismatch" });
+      const second = await runningRow(a, repo, 72, sha("8"));
+      await endRun(second.row.run_id!, "succeeded", answerOf());
+      expect(await run().settle({ accountId: a.accountId, repoId: repo, row: second.row })).toBe("settled");
+      expect(await reread(a, second.row.id)).toMatchObject({ status: "unverified", reason_code: "wrong_account", account_check: "mismatch" });
+    });
+
+    it("through the sweep: parked, it waits on a stale or bad report, runs again on a newer good one with a key of its own, and then verifies", async () => {
+      await report("ok");
+      const made = await deployingRow(a, repo, 73, sha("9"));
+      await succeedOrder(made.row.id);
+      expect(await sweep(made.row)).toMatchObject({ started: 1 });
+      const running = (await reread(a, made.row.id))!;
+      await endRun(running.run_id!, "succeeded", answerOf(MARKER));
+      expect(await sweep(running)).toMatchObject({ waiting: 1, settled: 0 });
+      expect((await reread(a, made.row.id))!).toMatchObject({ status: "pending", hold_reason: "needs_sign_in" });
+      // The report that was true when it parked (ok, but older than the park) does not release it; neither does a bad one.
+      await report("ok", "1 hour");
+      expect(await sweep(running)).toMatchObject({ waiting: 1, started: 0 });
+      await report("expired");
+      expect(await sweep(running)).toMatchObject({ waiting: 1, started: 0 });
+      expect((await reread(a, made.row.id))!.status).toBe("pending");
+      expect(starter.calls).toHaveLength(1);
+      // A newer good report: the row goes back to deploying (its order is already done), then starts a second job under the next key.
+      await report("ok");
+      await sweep(running);
+      expect(await reread(a, made.row.id)).toMatchObject({ status: "deploying", hold_reason: null, hold_since: null });
+      expect(await sweep(running)).toMatchObject({ started: 1 });
+      expect(starter.calls).toHaveLength(2);
+      expect(starter.calls[1]!.idempotency?.key).toBe(`verify-stage:${made.row.id}:1`);
+      const again = (await reread(a, made.row.id))!;
+      expect(again).toMatchObject({ status: "running", sign_in_parks: 1 });
+      expect(again.run_id).not.toBe(running.run_id);
+      await endRun(again.run_id!, "succeeded", answerOf({ signed_in_as: "fx-tester" }));
+      expect(await sweep(again)).toMatchObject({ settled: 1 });
+      expect(await reread(a, made.row.id)).toMatchObject({ status: "verified", account_check: "matched" });
+    });
+
+    it("after 24 hours parked the row ends unverified: sign_in_expired, from the pending wait and from the deploying wait", async () => {
+      await report("ok");
+      const made = await deployingRow(a, repo, 74, sha("a"));
+      await succeedOrder(made.row.id);
+      await sweep(made.row);
+      const running = (await reread(a, made.row.id))!;
+      await endRun(running.run_id!, "succeeded", answerOf(MARKER));
+      await sweep(running);
+      await report("expired");
+      await admin.query("UPDATE verify_rows SET hold_since = now() - interval '23 hours' WHERE id = $1", [made.row.id]);
+      expect(await sweep(running)).toMatchObject({ waiting: 1, unverified: 0 });
+      await admin.query("UPDATE verify_rows SET hold_since = now() - interval '25 hours' WHERE id = $1", [made.row.id]);
+      expect(await sweep(running)).toMatchObject({ unverified: 1 });
+      expect(await reread(a, made.row.id)).toMatchObject({ status: "unverified", reason_code: "sign_in_expired", hold_reason: null, hold_since: null });
+      // The same end for a row that never started and waited in `deploying`.
+      const waiting = await deployingRow(a, repo, 75, sha("b"));
+      await report("missing");
+      expect(await run().ready(readyInput(a, repo, waiting.row))).toBe("held");
+      await admin.query("UPDATE verify_rows SET hold_since = now() - interval '25 hours' WHERE id = $1", [waiting.row.id]);
+      expect(await run().ready(readyInput(a, repo, (await reread(a, waiting.row.id))!))).toBe("ended");
+      expect(await reread(a, waiting.row.id)).toMatchObject({ status: "unverified", reason_code: "sign_in_expired" });
+      expect(starter.calls).toHaveLength(1);
+    });
+
+    it("a check parked three times already ends sign_in_expired on the next marker, so a sign-in that keeps failing cannot loop", async () => {
+      await report("ok");
+      const { row } = await runningRow(a, repo, 76, sha("c"));
+      await admin.query("UPDATE verify_rows SET sign_in_parks = 3 WHERE id = $1", [row.id]);
+      const stale = (await reread(a, row.id))!;
+      await endRun(stale.run_id!, "succeeded", answerOf(MARKER));
+      expect(await run().settle({ accountId: a.accountId, repoId: repo, row: stale })).toBe("settled");
+      expect(await reread(a, row.id)).toMatchObject({ status: "unverified", reason_code: "sign_in_expired", account_check: null });
+      expect(await itemsOf(repo)).toEqual([]);
     });
   });
 });

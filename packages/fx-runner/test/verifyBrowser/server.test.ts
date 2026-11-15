@@ -213,9 +213,10 @@ describe("grounding", () => {
 
   it("accepts a fact and a number the page showed and writes the envelope to answer.json", async () => {
     const r = await seen();
+    r.driver()!.login = "octo-cat";
     const out = await r.call("submit_answer", { envelope: ENVELOPE("count:   3", 3) });
     expect(out.isError).toBe(false);
-    expect(JSON.parse(readFileSync(path.join(r.jobDir, "answer.json"), "utf8"))).toEqual(ENVELOPE("count:   3", 3));
+    expect(JSON.parse(readFileSync(path.join(r.jobDir, "answer.json"), "utf8"))).toEqual({ ...ENVELOPE("count:   3", 3), signed_in_as: "octo-cat" });
     expect((await r.call("submit_answer", { envelope: ENVELOPE("count: 3") })).text).toContain("already_submitted");
     await r.server.stop();
   });
