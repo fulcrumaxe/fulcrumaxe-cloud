@@ -51,6 +51,32 @@ function isStaticRequest(res: Response): boolean {
   return url.pathname === "/" || url.pathname.startsWith("/s/");
 }
 
+// The cold-start request count does not depend on compression or Next's cache headers, so unlike the
+// timing and byte budgets it is checked on every run, against the built dist/ the fixture server serves
+// (`pnpm --filter workspace e2e`, which CI calls). That is what keeps a file added at boot, or a request
+// the shell makes by itself at boot (the theme JSON files once did), from slipping past the build-time file
+// count in test/profile.test.mjs, which cannot see a fetch(). Once per run: the project is irrelevant here.
+test.describe("D#37 WS-D criterion 6: cold-start static request count (every run, fixture server)", () => {
+  test("a cold load of the signed-out desktop asks for <= BOOT_BUDGET.maxStaticRequests files from / and /s/**", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "the request count does not vary by viewport; counted once, on desktop");
+    await page.route("**/api/cloud/auth/me", (route) => route.fulfill({ status: 401, contentType: "application/json", body: "" }));
+
+    const urls: string[] = [];
+    page.on("response", (res) => {
+      const url = new URL(res.url());
+      if (url.pathname === "/" || url.pathname.startsWith("/s/")) urls.push(url.pathname);
+    });
+
+    await page.goto("/");
+    await expect(page.locator("#cloud-login-screen")).toBeVisible();
+    // Late starters (a fetch kicked off after first paint) still count against a cold start.
+    await page.waitForLoadState("networkidle");
+
+    expect(urls.length, `static requests at boot:\n${urls.join("\n")}`).toBeLessThanOrEqual(BOOT_BUDGET.maxStaticRequests);
+    for (const u of urls) expect(u, "no .wasm ships at boot").not.toMatch(/\.wasm$/);
+  });
+});
+
 test.describe("D#37 WS-D criterion 6: boot performance budgets (anonymous path, no database needed)", () => {
   test.skip(!BASE_URL, "BOOT_BUDGET_BASE_URL not set -- opt-in only, see this file's header comment");
 

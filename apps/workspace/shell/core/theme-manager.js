@@ -113,6 +113,41 @@ export const FULCTheme = {};
   // build (not going through build.mjs) simply keeps this default.
   var DEFAULT_THEME_ID = "classic-crt"; // build.mjs:injectDefaultTheme substitutes this literal
 
+  // The start theme's JSON, embedded by the build so a cold start with no
+  // stored choice needs no request for it (the boot request budget counts
+  // every /s/** file, build/budget.mjs). Null in a source-tree build, which
+  // fetches the file like any other theme.
+  var DEFAULT_THEME_DATA = null; // build.mjs:substituteDefaultThemeData substitutes this literal
+
+  // One in-flight or finished load per id, so two callers never fetch twice.
+  var _loads = {};
+
+  function _isKnown(id) {
+    return !!id && (!!_experiences[id] || THEME_IDS.indexOf(id) !== -1);
+  }
+
+  // Resolves once `id` is in _experiences, or stays absent when it cannot be
+  // loaded (a failed load is logged, as it always was). Only the themes a
+  // visitor actually uses are fetched; the rest wait for loadAll().
+  function _ensure(id) {
+    if (_experiences[id]) return Promise.resolve();
+    if (THEME_IDS.indexOf(id) === -1) return Promise.resolve();
+    if (id === DEFAULT_THEME_ID && DEFAULT_THEME_DATA) {
+      _experiences[id] = DEFAULT_THEME_DATA;
+      return Promise.resolve();
+    }
+    if (!_loads[id]) {
+      _loads[id] = fetch('core/themes/' + id + '.json')
+        .then(function (r) { return r.json(); })
+        .then(function (exp) { _experiences[exp.id || id] = exp; })
+        .catch(function (reason) {
+          delete _loads[id];
+          console.warn('FULCTheme: failed to load', id, reason);
+        });
+    }
+    return _loads[id];
+  }
+
   function _applyTokens(tokens) {
     var root = document.documentElement;
     for (var key in tokens) {
@@ -152,21 +187,6 @@ export const FULCTheme = {};
   }
 
   async function _doInit() {
-    var loaded = await Promise.allSettled(
-      THEME_IDS.map(function (tid) {
-        return fetch('core/themes/' + tid + '.json').then(function (r) { return r.json(); });
-      })
-    );
-
-    loaded.forEach(function (result, i) {
-      if (result.status === 'fulfilled') {
-        var exp = result.value;
-        _experiences[exp.id || THEME_IDS[i]] = exp;
-      } else {
-        console.warn('FULCTheme: failed to load', THEME_IDS[i], result.reason);
-      }
-    });
-
     // Determine starting experience from preferences.
     //
     // D#37 WS-C2 fix round 3 (criterion 15, console-error elimination):
@@ -187,7 +207,7 @@ export const FULCTheme = {};
         var res = await fetch('/api/preferences');
         if (res.ok) {
           var prefs = await res.json();
-          if (prefs.experience && _experiences[prefs.experience]) {
+          if (_isKnown(prefs.experience)) {
             startId = prefs.experience;
           } else if (prefs.theme && LEGACY_THEME_MAP[prefs.theme]) {
             startId = LEGACY_THEME_MAP[prefs.theme];
@@ -201,12 +221,19 @@ export const FULCTheme = {};
     // without this the user's theme silently reverted to classic-crt on every
     // reload while the picker reported the change had been saved.
     var stored = readStoredPreferences();
-    if (stored.experience && _experiences[stored.experience]) {
+    if (_isKnown(stored.experience)) {
       startId = stored.experience;
     } else if (stored.theme && LEGACY_THEME_MAP[stored.theme]) {
       startId = LEGACY_THEME_MAP[stored.theme];
     }
 
+    await _ensure(startId);
+    if (!_experiences[startId] && startId !== DEFAULT_THEME_ID) {
+      // The chosen theme would not load: start on the default, as a stored
+      // name nobody ships already does.
+      startId = DEFAULT_THEME_ID;
+      await _ensure(startId);
+    }
     await _applyExperience(startId);
   }
 
@@ -315,6 +342,7 @@ export const FULCTheme = {};
   async function apply(id) {
     if (!_initPromise) init();
     await _initPromise;
+    await _ensure(id);
     await _applyExperience(id);
   }
 
@@ -324,6 +352,7 @@ export const FULCTheme = {};
     await _initPromise;
 
     var expId = LEGACY_THEME_MAP[themeId] || 'classic-crt';
+    await _ensure(expId);
     var override = LEGACY_OVERRIDES[themeId];
 
     if (override && _experiences[expId]) {
@@ -351,8 +380,18 @@ export const FULCTheme = {};
     return _current;
   }
 
+  // Themes are fetched lazily and finish in any order, so insertion order is
+  // not stable: THEME_IDS order first, then anything else registered (in the
+  // order it was registered).
   function list() {
-    return Object.values(_experiences);
+    var ordered = THEME_IDS.filter(function (id) { return _experiences[id]; }).map(function (id) { return _experiences[id]; });
+    return ordered.concat(Object.values(_experiences).filter(function (e) { return ordered.indexOf(e) === -1; }));
+  }
+
+  // Loads every shipped theme (the gallery needs them all) and resolves to the
+  // loaded list: THEME_IDS order first, then anything registered.
+  function loadAll() {
+    return Promise.all(THEME_IDS.map(_ensure)).then(list);
   }
 
   function onChange(callback) {
@@ -372,6 +411,7 @@ export const FULCTheme = {};
     applyLegacy: applyLegacy,
     current: current,
     list: list,
+    loadAll: loadAll,
     onChange: onChange,
     register: register,
     _applyTokens: _applyTokens,

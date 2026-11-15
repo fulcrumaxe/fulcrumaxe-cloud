@@ -256,6 +256,21 @@ export function substituteDefaultTheme(content, themeId) {
   return content.replace(DEFAULT_THEME_MARKER_RE, `var DEFAULT_THEME_ID = "${themeId}";`);
 }
 
+// The start theme's JSON, embedded into theme-manager.js so a cold start does
+// not spend a request on it (BOOT_BUDGET.maxStaticRequests counts every /s/**
+// file the page asks for). The marker is a null literal in the source tree.
+const DEFAULT_THEME_DATA_MARKER_RE = /var DEFAULT_THEME_DATA = null;/;
+
+export function substituteDefaultThemeData(content, themeJsonText) {
+  if (!DEFAULT_THEME_DATA_MARKER_RE.test(content)) {
+    throw new Error("profile.mjs: DEFAULT_THEME_DATA marker not found in theme-manager.js content");
+  }
+  // Re-serialised so the embedded text is one line whatever the file's layout; a
+  // replacer function, because a string replacement would read "$&" and friends.
+  const literal = JSON.stringify(JSON.parse(themeJsonText));
+  return content.replace(DEFAULT_THEME_DATA_MARKER_RE, () => `var DEFAULT_THEME_DATA = ${literal};`);
+}
+
 // D#37 WS-E criterion 6: taskbar.js's own DOCK_ORDER literal is the one
 // place the dock's pin order comes from when nothing is saved yet. This
 // mirrors substituteDefaultTheme() above exactly (same marker-and-replace

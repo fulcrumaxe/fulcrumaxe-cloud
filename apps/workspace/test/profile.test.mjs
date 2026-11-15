@@ -29,6 +29,7 @@ import {
   injectBaseHref,
   injectModulePreloads,
   substituteDefaultTheme,
+  substituteDefaultThemeData,
   validateThemeNames,
 } from "../build/profile.mjs";
 import { build, shippedPath } from "../build/build.mjs";
@@ -223,6 +224,20 @@ describe("injectModulePreloads", () => {
     const out = injectModulePreloads(injectBaseHref(html, "/s/x/"), ["c.js"]);
     const after = [...out.matchAll(/<(?:script|link)\b[^>]*rel="stylesheet"[^>]*>|<script\b[^>]*>/g)].map((m) => m[0]);
     expect(after).toEqual(before);
+  });
+});
+
+describe("substituteDefaultThemeData", () => {
+  const source = "var a = 1;\nvar DEFAULT_THEME_DATA = null; // marker\nvar b = 2;\n";
+
+  it("embeds the theme JSON as one literal, whatever its layout, and keeps replacement patterns literal", () => {
+    const out = substituteDefaultThemeData(source, '{\n  "id": "x",\n  "name": "cost $& $1 $`"\n}');
+    expect(out).toContain('var DEFAULT_THEME_DATA = {"id":"x","name":"cost $& $1 $`"};');
+    expect(out).not.toContain("= null");
+  });
+
+  it("throws when the marker is missing", () => {
+    expect(() => substituteDefaultThemeData("no marker here", "{}")).toThrow(/DEFAULT_THEME_DATA/);
   });
 });
 
@@ -499,6 +514,16 @@ describe("cloud profile: real build", () => {
     const result = realBuild();
     const themeManagerJs = readFileSync(shippedPath(result, "core/theme-manager.js"), "utf8");
     expect(themeManagerJs).toContain(`var DEFAULT_THEME_ID = "${result.profile.default_theme}";`);
+  });
+
+  it("criterion 3: the start theme is embedded in the shipped theme-manager.js, so a cold start does not fetch it", () => {
+    // The file count above cannot see a fetch(), and the live count (e2e/boot-budget.spec.ts) is the whole
+    // of it. This pins the part that lives in code: the shell used to fetch all eight theme files at boot,
+    // which ran the live count 8 over the file count.
+    const result = realBuild();
+    const themeManagerJs = readFileSync(shippedPath(result, "core/theme-manager.js"), "utf8");
+    const themeJson = JSON.parse(readFileSync(shippedPath(result, `core/themes/${result.profile.default_theme}.json`), "utf8"));
+    expect(themeManagerJs).toContain(`var DEFAULT_THEME_DATA = ${JSON.stringify(themeJson)};`);
   });
 
   it("WS-D criterion 8: no shipped theme JSON's id/name matches the vendor-name pattern", () => {
