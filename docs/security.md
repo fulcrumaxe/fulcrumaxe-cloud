@@ -22,6 +22,11 @@ Sources:
 - `packages/pipeline/src/review/gate1Creator.ts`
 - `packages/runner-protocol/src/envelope.ts`
 - `packages/runner/src/vercelSandboxPort.ts`
+- `packages/runner/src/recordParser.ts`
+- `packages/pipeline/src/build/checkRunSettle.ts`
+- `packages/worker/src/verifyRun.ts`
+- `packages/pipeline/src/verify/envelope.ts`
+- `packages/pipeline/src/verify/rules.ts`
 - `packages/api/src/routes/assistant.ts`
 - `packages/api/src/assistant/turn.ts`
 - `packages/core/src/assistant/tools.ts`
@@ -89,6 +94,7 @@ Every merge the product makes passes `runMergeGate` (`packages/pipeline/src/buil
 - **Who may have a pull request merged.** `packages/pipeline/src/build/authorTrust.ts` decides from identity only, in this order: the platform's own App bot accounts, then the intake allowlist, then `admin` or `maintain` on the repository, read live from GitHub on each run and never stored. `write` does not count. A missing login is untrusted; a read that fails, times out or names no permission is `unverified`, and the gate stops (`pr_author_unverified`) and asks again next run. An untrusted author stops it with `pr_author_untrusted`. This applies to the public pull request of a paired item whatever the repository says about itself, and to any pull request in a public repository.
 - **`fx-gate1` counts only from our App.** For a cloud item the gate reads who posted the newest `fx-gate1` status on the head (`packages/pipeline/src/review/gate1Creator.ts`). It counts only when the poster is our GitHub App's bot account (type `Bot`, login compared exactly). A status posted by a person, a token or another app reads as failed and stops the gate with `gate1_status_foreign`. The read uses GitHub's own record of the poster; no text a pull request controls is read.
 - **Reviews on the exact head.** A reviewer's verdict counts only for the head sha it reviewed, and a run on a customer's runner counts only when local review is on and that runner is trusted for the role.
+- **CI on the head.** `runMergeGate` stops with `ci_not_green` unless CI on the exact head is green and every signal the item expects is present. When CI is entirely green and the repository has CI of its own (not only the cloud's review status), an acceptance tester whose latest run succeeded with the verdict `unverifiable` counts as covered; every other non-pass verdict still stops the gate. A repository whose own CI is still running is not also given `repo_ci_missing`, which only a person could fix.
 - **Ordering.** A direct merge takes a per-repository lease that excludes the merge queue's slot, so the order check guarding the queue also guards the direct merge.
 
 ## `gh-policy`
@@ -103,7 +109,17 @@ The GitHub proxy's forward host itself is now operator-configured rather than ac
 
 ## Verdict envelopes
 
-A reviewer's verdict is a JSON block between `AGENT_OUTPUT` markers at the end of its final message, and the text a reviewer reads (a diff, a log, a pull request body) can contain a block planted to look like a pass. `packages/runner-protocol/src/envelope.ts` therefore takes the last block, never the first. If the last block is malformed there is no verdict, and an earlier block is never used as a fallback. A block body may not contain another opening marker, so an unterminated earlier block can't swallow the real one, and input over 256 KB is refused. On a hosted sandbox, `packages/runner/src/vercelSandboxPort.ts` keeps a fallback for a run whose last turn spoke after the verdict: it is the block of the last main-thread message that carried a marker, only if it parsed and is not a checkpoint. Subagent output, user and tool lines and failed runs never feed it, and a later marker that does not parse clears it. The residual risk is stated in that file: a quoted envelope followed only by prose with no marker would look the same as a real verdict followed by a closing line.
+A reviewer's verdict is a JSON block between `AGENT_OUTPUT` markers at the end of its final message, and the text a reviewer reads (a diff, a log, a pull request body) can contain a block planted to look like a pass. `packages/runner-protocol/src/envelope.ts` therefore takes the last block, never the first. If the last block is malformed there is no verdict, and an earlier block is never used as a fallback. A block body may not contain another opening marker, so an unterminated earlier block can't swallow the real one, and input over 256 KB is refused. On a hosted sandbox, `packages/runner/src/vercelSandboxPort.ts` keeps a fallback for a run whose last turn spoke after the verdict: it is the block of the last main-thread message that carried a marker, only if that message ends with the block (`endsWithEnvelopeBlock`, so a block quoted in the middle of a message with prose after it never counts), it parsed, and it is not a checkpoint. Subagent output, user and tool lines and failed runs never feed it, and a later marker that does not parse clears it. The check is on how the message ends, not on who wrote the block: a quoted block that is the very last thing in a message would still be taken.
+
+## Post-merge verify
+
+The post-merge verify stage drives a real browser at a deployed app, so its inputs are treated as data (`packages/worker/src/verifyRun.ts`, `packages/pipeline/src/verify/envelope.ts`):
+
+- The pipeline decides; nothing a page or a model wrote reaches a prompt, a label or a decision. The tester's answer is strict JSON: any unknown key at any depth rejects the whole envelope, and what a page showed is cut, stripped of control characters and links, and stored as text only.
+- A `pass` needs evidence (a step stating what was done and the page fact that showed it, an undo check and a reload); a pass without it ends the row `unverified`, never `verified`.
+- The deploy order the cloud places can only say "deploy this commit of this repository": the table has no column for a command, a path, a URL or a credential, and the command lives in the runner's own local configuration (`packages/db/migrations/1004_runner_browser_capabilities.sql`).
+- When the repository names a test account, the signed-in account is judged from what the trusted verify server recorded (`signed_in_as`), never from anything the model said (`packages/pipeline/src/verify/rules.ts`); a mismatch, or a method with no trusted record, ends the row `unverified`.
+- Only an owner or admin of the account can turn the stage on or change its settings, enforced by the table's policy.
 
 ## The assistant's boundaries
 

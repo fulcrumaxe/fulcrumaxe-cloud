@@ -11,6 +11,7 @@ Sources:
 - `packages/db/test/globalSetup.ts`
 - `packages/db/scripts/check-migration-order.sh`
 - `scripts/ci/affected.mjs`
+- `scripts/ci/same-tree.mjs`
 - `apps/web/env-manifest.ts`
 - `packages/github/src/handledEventNames.js`
 - `infra/sandbox-image/versions.lock.json`
@@ -34,8 +35,8 @@ The same script runs on a workstation, in CI and as the platform's own check ste
 `.github/workflows/ci.yml` runs on pushes to `main`, on pull requests (opened, synchronize, reopened) and on `merge_group` for GitHub's merge queue. Its jobs:
 
 - `pr-gates` (public pull requests only): the PR link policy and the publish denylist.
-- `check`: `nix develop .#ci --command bash scripts/check.sh`, in the scope `scripts/ci/affected.mjs` chose for the pull request. A push to `main` and a merge-queue run are always full.
-- `workspace-e2e`: Playwright for `apps/workspace`, once per viewport project (`desktop`, `phone`, `tablet`).
+- `check`: `nix develop .#ci --command bash scripts/check.sh`, in the scope `scripts/ci/affected.mjs` chose for the pull request. A push to `main` and a merge-queue run are always full, with one exception: a merge-queue run for a single pull request whose tree is byte-identical to a head that already carries the cloud's `fx-gate1` success skips the test steps (`scripts/ci/same-tree.mjs`, #923). The job's timeout is 90 minutes, because a full-scope run in the queue has passed 60 (#915).
+- `workspace-e2e`: Playwright for `apps/workspace`, once per viewport project (`desktop`, `phone`, `tablet`). It is skipped on a private pull request that changes only overlay paths (#894) and, like `check`, in a queue run whose tree was already proven.
 - `e2e-runner`: `pnpm test:e2e-runner`.
 
 Runners: a public repository runs on GitHub-hosted `ubuntu-latest`; the private repository runs on a self-hosted runner (the `CI_RUNS_ON` repository variable can name another). Node, pnpm and PostgreSQL come from the same `flake.nix` dev shell a developer uses, so CI has no separate image. Every job has a timeout. A repository variable `CI_DISABLED=true` skips the jobs, and `CI_FORCE_FULL=true` forces every pull request run to full scope.
@@ -55,6 +56,10 @@ The full list, with what happens when one is missing, is `apps/web/env-manifest.
 - `FX_GATE1_ATTEST_REPOS`: comma-separated `owner/name` code repositories where the cloud posts `fx-gate1` itself (see [the architecture](architecture.md#the-clouds-own-fx-gate1)). Unset, the cloud never posts it, and a paired item whose public pull request lacks only `fx-gate1` waits and then ends at Needs a person. Only a listed repository is ever labelled or attested, so a customer repository is never touched. A malformed value stops the worker at start with an error.
 - `FX_HUMAN_MERGE_ONLY_REPO_IDS`: GitHub ids of repositories that only a person may merge. A malformed value locks every repository to human merges (fail closed).
 - `FX_OPERATOR_SUBSCRIPTION`, `FX_OPERATOR_ACCOUNT_IDS`: the operator's own Claude subscription for allow-listed accounts; removing the first turns the feature off (see [the security model](security.md#the-operator-subscription-exception)).
+
+- `FX_DEPLOY_COMMIT`: the commit a deployment made from the command line is running. `/api/health` reports the platform's git commit, which such a deployment does not have, so without this the post-merge verify stage cannot tell what is deployed and ends its row `unverified` with `commit_not_deployed`. The deploy command stamps it (`vercel deploy --env FX_DEPLOY_COMMIT=<commit>`).
+- `FX_VERIFY_OWN_HOSTS`: extra custom hostnames of this project that may receive the Deployment Protection bypass header on the verify health read and the sweep kicks. Besides these, only the hosts Vercel names (`VERCEL_URL`, `VERCEL_BRANCH_URL`, `VERCEL_PROJECT_PRODUCTION_URL`) count. Without a match a protected app reads as unreachable. `VERCEL_AUTOMATION_BYPASS_SECRET` is provided by Vercel when Protection Bypass for Automation is on.
+- `FX_READER_SLICE_MS`: when set (10,000 to 600,000 ms), a hosted run's log is read by its follower in slices of at most this long instead of by the invocation that started the run.
 
 The GitHub App has to be subscribed to the `check_run`, `check_suite` and `status` events as well as the issue and pull request ones: they wake the merge queue and the gate to look again when CI finishes, and map to no work item change. The events the cloud handles are listed in `packages/github/src/handledEventNames.js`; an App created before those three were added needs them added by hand in its settings.
 
