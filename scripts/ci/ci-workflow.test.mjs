@@ -442,6 +442,7 @@ test("check job: nothing is narrowed outside Run checks and the Node 22 step", (
     "Nix store cache (hosted)",
     "Overlay checks",
     "Paired copy",
+    "Rollup",
     "Run checks",
     "Runner protocol tests on Node 22",
     "Same tree",
@@ -485,7 +486,7 @@ test("e2e job: the first step after checkout (and the hosted-only Nix install) r
 
 test("e2e job: every step after the scope step is guarded on the scope answer", () => {
   const at = e2eSteps.findIndex((s) => s.name === "E2E scope (${{ matrix.project }})");
-  const later = e2eSteps.slice(at + 1).filter((s) => s.name !== "Paired copy" && !s.name.startsWith("Same tree"));
+  const later = e2eSteps.slice(at + 1).filter((s) => s.name !== "Paired copy" && !s.name.startsWith("Same tree") && !s.name.startsWith("Rollup"));
   assert.ok(later.length >= 4);
   for (const s of later) {
     assert.match(ifOf(s) ?? "", /env\.CI_SCOPE_E2E == 'true'/, `${s.name} is not guarded`);
@@ -504,7 +505,8 @@ test("e2e-runner job: runs on every pull request and push (only CI_DISABLED stan
   assert.equal(job["runs-on"], GUARD);
   assert.deepEqual(job.permissions, { contents: "read", "pull-requests": "read" });
   assert.equal(job.needs, undefined);
-  assert.ok(job["timeout-minutes"] > 0 && job["timeout-minutes"] <= 60);
+  // 30 minutes everywhere but a merge queue run with rollups switched on (vars.ROLLUP_ENABLED), which adds the wait (see the rollup test).
+  assert.equal(job["timeout-minutes"], "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 115 || 30 }}");
   const text = noComments(runnerE2eJob);
   // The one narrowing: an overlay-only pull request on the private repository (no product code changed).
   // Nothing else of the classifier's answer is read, so a package change never skips the test.
@@ -2501,6 +2503,24 @@ test("same tree: each required job has one merge-group-only step with the same r
   assert.doesNotMatch(noComments(ci), /(contents|pull-requests|statuses|checks|actions): write/);
 });
 
+// ---- merge queue rollups (scripts/ci/rollup-position.mjs) -------------------------------------------------------
+test("rollup: each required job has one merge-group-only Rollup step, read-only, placed right before Same tree", () => {
+  for (const [job, steps] of [["check", checkSteps], ["workspace-e2e", e2eSteps], ["e2e-runner", runnerE2eSteps]]) {
+    const s = steps.filter((x) => x.name.startsWith("Rollup"));
+    assert.equal(s.length, 1, job);
+    assert.equal(ifOf(s[0]), "github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true'", job);
+    assert.match(s[0].text, /command node scripts\/ci\/rollup-position\.mjs\n?$/m, job);
+    for (const v of ["CI_EVENT_NAME", "MG_HEAD_REF", "MG_HEAD_SHA", "GITHUB_REPOSITORY", "GH_TOKEN"]) assert.match(s[0].text, new RegExp(`\\n {10}${v}: `), `${job} ${v}`);
+    assert.match(s[0].text, /GH_TOKEN: \$\{\{ github\.token \}\}/, job);
+    assert.doesNotMatch(s[0].text, /secrets\.|continue-on-error/, job);
+    const at = (n) => steps.findIndex((x) => x.name.startsWith(n));
+    assert.equal(at("Rollup") + 1, at("Same tree"), job);
+    assert.ok(at("Rollup") > at("Install Nix (hosted)"), job);
+  }
+  assert.match(stepNamed(e2eSteps, "Rollup (${{ matrix.project }})").text, /SAME_TREE_ALSO_SET: CI_SCOPE_E2E=false/);
+  for (const t of [checkSteps, runnerE2eSteps]) assert.doesNotMatch(stepNamed(t, "Rollup").text, /SAME_TREE_ALSO_SET/);
+});
+
 test("same tree: every job that runs the step checks out two commits on a merge group (the script reads HEAD^1)", () => {
   assert.match(checkSteps[0].text, /fetch-depth: 2/);
   assert.match(e2eSteps[0].text, /fetch-depth: 2/);
@@ -2538,7 +2558,13 @@ test("same tree: required check names, timeouts and permissions are unchanged", 
   assert.equal(py.status, 0, py.stderr);
   const doc = JSON.parse(py.stdout);
   assert.equal(doc.jobs["workspace-e2e"].name, "workspace-e2e (${{ matrix.project }})");
-  assert.deepEqual([doc.jobs.check["timeout-minutes"], doc.jobs["workspace-e2e"]["timeout-minutes"], doc.jobs["e2e-runner"]["timeout-minutes"]], [90, 40, 30]);
+  // Rollups (scripts/ci/rollup-position.mjs, DORMANT unless vars.ROLLUP_ENABLED is 'true'): only then do merge queue runs get the wait (settle + 80 min cap) on top; every other run keeps the old backstop.
+  const t = (j) => doc.jobs[j]["timeout-minutes"];
+  assert.deepEqual([t("check"), t("workspace-e2e"), t("e2e-runner")], [
+    "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 175 || 90 }}",
+    "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 125 || 40 }}",
+    "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 115 || 30 }}",
+  ]);
   for (const j of ["check", "workspace-e2e", "e2e-runner"]) assert.deepEqual(doc.jobs[j].permissions, { contents: "read", "pull-requests": "read" });
   assert.deepEqual(doc.permissions, { contents: "read" });
 });
