@@ -51,6 +51,7 @@ const patched = (filename: string) => ({ ...file(filename), patch: "@@ -1 +1 @@\
 const ENV = "FX_HUMAN_MERGE_ONLY_REPO_IDS";
 const saved = process.env[ENV];
 afterEach(() => {
+  clearMergeQueueModeCache();
   if (saved === undefined) delete process.env[ENV];
   else process.env[ENV] = saved;
 });
@@ -131,6 +132,7 @@ const gate = (w: World, o: { optIn?: LocalReviewOptInPort; pubHttp?: GitHubHttp;
     {
       pool: h.runWriterPool,
       authorTrust: BOT_TRUST,
+      queueDocuments: QUEUE_DOCUMENTS,
       http: o.privHttp ?? (w.local ? w.privLocal.http : fakeGitHubRest(w.priv)),
       localReviewOptIn: o.optIn ?? on,
       publicPlane: {
@@ -433,7 +435,7 @@ describe("the operator's human-merge lock names either repository", () => {
     expect(reasons(await gate(locked))).toEqual(["human_merge_only"]);
     expect(locked.pub.merges).toEqual([]);
     process.env[ENV] = "999";
-    const control = await world({ executionMode: "sandbox" });
+    const control = await world({ executionMode: "sandbox", pub: { mergeQueue: { exists: false, mutations: [] }, rulesetRules: [] } });
     expect((await gate(control)).outcome).toBe("merged");
     expect(control.pub.merges).toEqual([{ sha: PUB_HEAD, method: "squash" }]);
   });
@@ -666,7 +668,8 @@ function delegating(w: World, o: { go?: Partial<GoAttestation>; optIn?: LocalRev
         localReviewOptIn: o.optIn ?? on,
         publicPlane: { open: async () => o.pubHttp ?? w.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) },
         mergeDelegate: async (a, c) => (calls.push(a), contexts.push(c), delegate(a, c)),
-        ...(o.queueDocuments ? { queueDocuments: QUEUE_DOCUMENTS } : {}),
+        // A paired gate is wired with the queue documents unless a case says otherwise: without them the gate stops (merge_queue_unreadable).
+        ...(o.queueDocuments !== false ? { queueDocuments: QUEUE_DOCUMENTS } : {}),
       },
       { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(o.go !== undefined ? { goPhase: { attestation: attest(o.go) } } : {}) },
     );
@@ -997,6 +1000,15 @@ describe("a paired item and the merge queue: the mode is read on the public repo
     const plain = createReviewGitHubPort({ pool: h.runWriterPool, http: w.pubLocal.http, queueDocuments: QUEUE_DOCUMENTS }, { owner: "acme", name: "widgets-public", executionMode: "runner_local" } as never, { accountId: w.accountId, workItemId: w.workItemId, prNumber: PUB_PR, recordedBranch: w.pubBranch });
     await expect(plain.getQueueEntry!({ repoId: w.repoId, prNumber: PUB_PR })).rejects.toThrow(/allowlist/);
   });
+
+  it("a paired world without queueDocuments is unreadable and the delegate is never invoked", async () => {
+    const w = await world({});
+    const b = delegating(w, { queueDocuments: false });
+    const out = await b.run();
+    expect(reasons(out)).toEqual(["merge_queue_unreadable"]);
+    expect(b.calls).toEqual([]);
+    expectNoMergeAnywhere(w);
+  });
 });
 
 describe("D#598 P1d-1: a paired item's public pull request is refused when an outsider opened it", () => {
@@ -1060,11 +1072,11 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
   /** The public head carries `fx-gate1` (state as given) from `creator`; the code repository's client is the go phase's (A17 only) unless `fence` says otherwise. */
   async function posted(creator: { __typename: string; login: string } | null, o: { state?: string; fence?: "attest" | "status" } = {}) {
     const w = await world({ pub: creator === null ? {} : { statuses: { [PUB_HEAD]: { "fx-gate1": o.state ?? "success" } } } });
-    const pub = fakeGitHubLocal(w.pub, { exclude: ["A10"], gate1: gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator } }), gate1Fence: o.fence ?? "status" });
+    const pub = fakeGitHubLocal(w.pub, { exclude: ["A10"], queue: { graphql: false, rules: false }, gate1: gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator } }), gate1Fence: o.fence ?? "status" });
     const calls: DelegateCall[] = [];
     const run = (gate1Status?: Gate1StatusCheck, go = true) =>
       runMergeGateForItem(
-        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
+        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, queueDocuments: QUEUE_DOCUMENTS, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
         { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(go ? { goPhase: { attestation: attest() } } : {}) },
       );
     const a17 = () => pub.calls.filter((c) => c.label === "A17").length;
@@ -1115,14 +1127,14 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
     const t = await posted(OURS);
     const isStatusRead = (body: unknown) => (body as { query?: string } | undefined)?.query?.startsWith("query Gate1Status") === true;
     const pub = fakeGitHubLocal(t.w.pub, {
-      exclude: ["A10"],
+      exclude: ["A10"], queue: { graphql: false, rules: false },
       gate1: gate1World({ creators: { [PUB_HEAD]: OURS } }),
       gate1Fence: "status",
       transport: (inner) => ({ request: async (req) => (isStatusRead(req.body) && (t.w.pub.statuses[PUB_HEAD]!["fx-gate1"] = "failure"), inner.request(req)) }),
     });
     const calls: DelegateCall[] = [];
     const out = await runMergeGateForItem(
-      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), gate1Status: LISTED },
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), gate1Status: LISTED, queueDocuments: QUEUE_DOCUMENTS },
       { accountId: t.w.accountId, workItemId: t.w.workItemId, prNumber: t.w.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(reasons(out)).toContain("ci_not_green");
@@ -1132,9 +1144,9 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
 
   it("the snapshot shows fx-gate1 but A17 has no creator on it: foreign (fail closed)", async () => {
     const t = await posted(OURS);
-    const pub = fakeGitHubLocal(t.w.pub, { exclude: ["A10"], gate1: gate1World({ creators: {} }), gate1Fence: "status" });
+    const pub = fakeGitHubLocal(t.w.pub, { exclude: ["A10"], queue: { graphql: false, rules: false }, gate1: gate1World({ creators: {} }), gate1Fence: "status" });
     const out = await runMergeGateForItem(
-      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async () => ({ delegated: true }), gate1Status: LISTED },
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async () => ({ delegated: true }), gate1Status: LISTED, queueDocuments: QUEUE_DOCUMENTS },
       { accountId: t.w.accountId, workItemId: t.w.workItemId, prNumber: t.w.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(reasons(out)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
@@ -1197,11 +1209,11 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
       const creator = o.creator === undefined ? AGENT : o.creator;
       const w = await world({ pub: { checks: { [PUB_HEAD]: o.runs ?? actions(AFTER) }, ...(creator === null ? {} : { statuses: { [PUB_HEAD]: { "fx-gate1": "success" } } }) } });
       const g1 = gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator }, ...(o.labeled === false ? {} : { labels: ["ci:full"], labelEvents: [{ event: "labeled" as const, label: "ci:full", createdAt: T }] }) });
-      const pub = fakeGitHubLocal(w.pub, { exclude: ["A10"], gate1: g1, gate1Fence: o.fence ?? "attest" });
+      const pub = fakeGitHubLocal(w.pub, { exclude: ["A10"], queue: { graphql: false, rules: false }, gate1: g1, gate1Fence: o.fence ?? "attest" });
       const calls: DelegateCall[] = [];
       const run = (gate1Status?: Gate1StatusCheck) =>
         runMergeGateForItem(
-          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
+          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, queueDocuments: QUEUE_DOCUMENTS, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
           { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
         );
       const labels = () => new Set(pub.calls.map((c) => c.label));

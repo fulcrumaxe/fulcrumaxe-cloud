@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
@@ -15,6 +15,12 @@ import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { FAKE_MERGE_BASE, defaultGhId, fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
+
+// The mode answer is kept per repository and branch in the process: every case reads afresh.
+beforeEach(() => clearMergeQueueModeCache());
+
+/** A paired gate is wired with the queue documents (without them it stops at merge_queue_unreadable). */
+const QUEUE_DOCS = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
 
 /** D#598 P1d-1: the platform's own App bot opened the public pull request (the normal case), so the author rule trusts it without a permission read. */
 const BOT_LOGIN = "fulcrumaxe-app[bot]";
@@ -69,6 +75,11 @@ async function world(o: Opts = {}) {
   const pubHead = o.pubHead ?? PUB_HEAD;
   const priv = freshRepo({ headSha: HEAD, checks: { [HEAD]: [] }, files: [file("src/ui/button.tsx")] });
   const pub = freshRepo({ owner: "acme", name: "widgets-public", prNumber: PUB_PR, isPublic: true, authorLogin: BOT_LOGIN, headSha: pubHead, checks: o.pubChecks ?? { [pubHead]: green }, files: [file("src/ui/button.tsx")] });
+  // Both repositories read as direct unless a case sets a queue: the gate is wired with the queue documents, and an unreadable queue stops it.
+  for (const r of [priv, pub]) {
+    r.mergeQueue = { exists: false, mutations: [] };
+    r.rulesetRules = [];
+  }
   if (o.paired !== false) {
     await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['.autonomous-team/**'])", [repoId, accountId]);
     const stamp = o.stamp === undefined ? PUB_HEAD : o.stamp;
@@ -103,6 +114,7 @@ const gate = (w: World) =>
     {
       pool: h.runWriterPool,
       authorTrust: BOT_TRUST,
+      queueDocuments: QUEUE_DOCS,
       http: fakeGitHubRest(w.priv),
       publicPlane: {
         open: async (c) => {
@@ -222,6 +234,7 @@ describe("a paired item: the gate merges the public pull request", () => {
       {
         pool: h.runWriterPool,
         authorTrust: BOT_TRUST,
+        queueDocuments: QUEUE_DOCS,
         http: fakeGitHubRest(w.priv),
         publicPlane: {
           open: async () => ({ request: async (req) => { if (req.method === "GET" && req.path === `/repos/acme/widgets-public/pulls/${PUB_PR}` && ++reads === 2) w.pub.headSha = OTHER; return real.request(req); } }),
@@ -244,6 +257,7 @@ describe("a paired item: the gate merges the public pull request", () => {
       {
         pool: h.runWriterPool,
         authorTrust: BOT_TRUST,
+        queueDocuments: QUEUE_DOCS,
         http: fakeGitHubRest(w.priv),
         publicPlane: {
           open: async () => ({ request: async (req) => { if (req.method === "GET" && req.path === `/repos/acme/widgets-public/pulls/${PUB_PR}` && ++reads === 3) w.pub.headSha = OTHER; return real.request(req); } }),
@@ -546,6 +560,7 @@ describe("a single-plane item is unchanged", () => {
       {
         pool: h.runWriterPool,
         authorTrust: BOT_TRUST,
+        queueDocuments: QUEUE_DOCS,
         http: fakeGitHubRest(w.priv),
         publicPlane: {
           open: async () => {
@@ -604,7 +619,7 @@ describe("D#483 S5-j2a2: the order check of a paired item reads the code reposit
   };
   const gateOf = (w: World, workItemId: string, priv: FakeRepoState, pub: FakeRepoState) =>
     runMergeGateForItem(
-      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(priv), publicPlane: { open: async () => fakeGitHubRest(pub), read: readPublicPullRequest(h.runWriterPool) } },
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, queueDocuments: QUEUE_DOCS, http: fakeGitHubRest(priv), publicPlane: { open: async () => fakeGitHubRest(pub), read: readPublicPullRequest(h.runWriterPool) } },
       { accountId: w.accountId, workItemId, prNumber: priv.prNumber },
     );
 
@@ -767,7 +782,7 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1e: a hosted cloud item counts fx-gate1 on
     const g1 = gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator } });
     const run = (gate1Status?: Gate1StatusCheck) =>
       runMergeGateForItem(
-        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, ...(gate1Status ? { gate1Status } : {}) },
+        { pool: h.runWriterPool, authorTrust: BOT_TRUST, queueDocuments: QUEUE_DOCS, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, ...(gate1Status ? { gate1Status } : {}) },
         { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
       );
     const creatorReads = () => w.pub.requests.filter((r) => r.method === "GET" && r.path === `/repos/acme/widgets-public/commits/${PUB_HEAD}/statuses`).length;
@@ -846,7 +861,7 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1e: a hosted cloud item counts fx-gate1 on
       const g1 = gate1World({ creators: creator === null ? {} : { [PUB_HEAD]: creator }, ...(o.labeled === false ? {} : { labels: ["ci:full"], labelEvents: [{ event: "labeled" as const, label: "ci:full", createdAt: T }] }) });
       const run = (gate1Status?: Gate1StatusCheck) =>
         runMergeGateForItem(
-          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, ...(gate1Status ? { gate1Status } : {}) },
+          { pool: h.runWriterPool, authorTrust: BOT_TRUST, queueDocuments: QUEUE_DOCS, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, ...(gate1Status ? { gate1Status } : {}) },
           { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
         );
       const attesterReads = () => w.pub.requests.filter((r) => r.path.endsWith("/events") || r.path.endsWith(`/pulls/${PUB_PR}/files`)).length;
@@ -931,7 +946,7 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1e: a hosted cloud item counts fx-gate1 on
         w.pub.statuses[PUB_HEAD] = { "fx-gate1": "success" };
         const g1 = gate1World({ creators: { [PUB_HEAD]: AGENT }, labels: ["ci:full"], labelEvents: [{ event: "labeled" as const, label: "ci:full", createdAt: T }] });
         await runMergeGateForItem(
-          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, gate1Status: ATTEST },
+          { pool: h.runWriterPool, authorTrust: BOT_TRUST, queueDocuments: QUEUE_DOCS, http: fakeGitHubRest(w.priv), publicPlane: { open: async () => fakeGitHubRest(w.pub, { gate1: g1 }), read: readPublicPullRequest(h.runWriterPool) }, gate1Status: ATTEST },
           { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
         );
         expect(gate1Posts(w)).toEqual([]);
