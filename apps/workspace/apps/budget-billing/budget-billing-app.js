@@ -81,6 +81,12 @@ function dateWords(iso) {
   return new Date(t).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
+/** "2026-10-01T00:00:00.000Z" -> "Month starting Oct 1, 2026."; "" when it is not a readable date. */
+export function periodWords(iso) {
+  const d = dateWords(iso);
+  return d ? "Month starting " + d + "." : "";
+}
+
 const MODEL_NOT_SET = "Not set";
 const RESERVED_WORDS = "Reserved is money held for work that is still running. It is released when that work finishes.";
 
@@ -507,7 +513,7 @@ export function mountBudgetBilling(host) {
       "section",
       { "aria-labelledby": uid + "-usage" },
       h("h2", { class: "bb-heading", id: uid + "-usage" }, "This month"),
-      h("p", { class: "bb-muted" }, "Month starting " + String(state.usage.period_start).slice(0, 10) + "."),
+      periodWords(state.usage.period_start) ? h("p", { class: "bb-muted", "data-testid": "bb-period" }, periodWords(state.usage.period_start)) : null,
       h("p", { class: "bb-muted", "data-testid": "bb-reserved-note" }, RESERVED_WORDS),
       // D#483 S5-k3: the 80% compute notice. Information only: the API derives it on each read and sends the sentence, so the text is not
       // retyped here and the notice goes away on the next load once the cap is raised or the month turns.
