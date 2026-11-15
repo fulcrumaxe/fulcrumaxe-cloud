@@ -516,6 +516,29 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
       expect(t.pub.posts).toEqual([]);
     });
 
+    // Production shape: the wait's port reads no rulesets, so fx-gate1 is NOT in the required list; "still missing" must come from the head's statuses.
+    it("fx-gate1 not in the required list (rules unread), first CI running, no fx-gate1 status: the label is added during the wait", async () => {
+      const g = gate1World({ now: "2026-11-07T10:00:00Z" });
+      const running = [...runs("2026-11-07T09:00:00Z").slice(1), { name: GATE1_WORKFLOW_CONTEXTS[0]!, status: "in_progress", conclusion: null, app: { id: ACTIONS_APP_ID } }];
+      const t = await pairedWorld({ required: [...GATE1_WORKFLOW_CONTEXTS], pub: { [PUB_HEAD]: running }, gate1World: g, gate1Repos: LISTED });
+      const out = await record(t.w, PASS_BOTH, t.gate);
+      expect(out.decision).toBe("ci_pending");
+      expect(out.ciReasons).toContain("check_running");
+      expect(g.labelAdds).toBe(1);
+      await expectNothingRecorded(t.w);
+    });
+
+    it("fx-gate1 not in the required list, another poster's fx-gate1 status on the head, first CI running: the attester is not called", async () => {
+      const g = gate1World({ now: "2026-11-07T10:00:00Z" });
+      const running = [...runs("2026-11-07T09:00:00Z").slice(1), { name: GATE1_WORKFLOW_CONTEXTS[0]!, status: "in_progress", conclusion: null, app: { id: ACTIONS_APP_ID } }];
+      const t = await pairedWorld({ required: [...GATE1_WORKFLOW_CONTEXTS], pub: { [PUB_HEAD]: running }, gate1World: g, gate1Repos: LISTED });
+      t.pub.statuses[PUB_HEAD] = { "fx-gate1": "pending" };
+      const out = await record(t.w, PASS_BOTH, t.gate);
+      expect(out.decision).toBe("ci_pending");
+      expect(g.labelAdds).toBe(0);
+      expect(t.pub.posts).toEqual([]);
+    });
+
     const g1Posts = (t: { pub: { posts: Array<{ body: { context?: string; state?: string; description?: string } }> } }) => t.pub.posts.filter((p) => p.body.context === "fx-gate1");
     const AFTER_LABEL = "2026-11-07T10:05:00Z";
     const labelled = () => gate1World({ now: "2026-11-07T10:10:00Z", labels: ["ci:full"], labelEvents: [{ event: "labeled", label: "ci:full", createdAt: "2026-11-07T10:00:00Z" }] });
