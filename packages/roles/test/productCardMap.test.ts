@@ -28,6 +28,7 @@ const EXPECTED_ROLES = [
   "researcher",
   "security-expert",
   "security-reviewer",
+  "site-extractor",
   "technical-architect",
   "ux-designer",
 ];
@@ -174,10 +175,10 @@ describe("the executor card for a run on the person's own machine (D#6 R4d-1, C3
 });
 
 describe("the platform cards (D#483 S4-b2a, S4-f1): looked up by name, outside the manifest", () => {
-  it("the verifiers and the discovery analyst have a platform card and nothing else does; neither is a manifest role or a product-run card", async () => {
+  it("the verifiers, the discovery analyst and the site extractor have a platform card and nothing else does; neither is a manifest role or a product-run card", async () => {
     const { PLATFORM_CARD_ROLES, loadPlatformCard, loadProductCard } = await import("../src/cards.js");
     const { ROLE_MANIFEST } = await import("../src/manifest.js");
-    expect([...PLATFORM_CARD_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "proposal-verifier"]);
+    expect([...PLATFORM_CARD_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "proposal-verifier", "site-extractor"]);
     for (const role of PLATFORM_CARD_ROLES) {
       expect(loadPlatformCard(role), role).toBe(MAP[role]);
       expect(ROLE_MANIFEST.map((r) => r.name)).not.toContain(role);

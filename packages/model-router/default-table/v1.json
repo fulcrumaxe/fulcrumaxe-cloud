@@ -79,6 +79,12 @@
     {"role": "visual-verifier", "size": "Critical", "model": "sonnet-5", "rationale": "role default (haiku) size-adjusted for Critical"},
     {"role": "quality-sweep", "size": "Small", "model": "haiku-4.5", "rationale": "role default (haiku) size-adjusted for Small"},
     {"role": "quality-sweep", "size": "Feature", "model": "haiku-4.5", "rationale": "role default (haiku) size-adjusted for Feature"},
-    {"role": "quality-sweep", "size": "Critical", "model": "sonnet-5", "rationale": "role default (haiku) size-adjusted for Critical"}
+    {"role": "quality-sweep", "size": "Critical", "model": "sonnet-5", "rationale": "role default (haiku) size-adjusted for Critical"},
+    {"role": "site-extractor", "size": "Small", "model": "sonnet-5", "rationale": "site-kit role, provisional until the accuracy benchmark: a diff-scoped pass"},
+    {"role": "site-extractor", "size": "Feature", "model": "sonnet-5", "rationale": "site-kit role, provisional until the accuracy benchmark: a full pass"},
+    {"role": "site-extractor", "size": "Critical", "model": "opus-5", "rationale": "site-kit role, provisional until the accuracy benchmark: re-confirming a blocker"},
+    {"role": "site-verifier", "size": "Small", "model": "sonnet-5", "rationale": "site-kit role, provisional until the accuracy benchmark, floored at sonnet-5 for site-verifier: a diff-scoped pass"},
+    {"role": "site-verifier", "size": "Feature", "model": "opus-5", "rationale": "site-kit role, provisional until the accuracy benchmark, floored at sonnet-5 for site-verifier: a full pass"},
+    {"role": "site-verifier", "size": "Critical", "model": "opus-5", "rationale": "site-kit role, provisional until the accuracy benchmark, floored at sonnet-5 for site-verifier: re-confirming a blocker"}
   ]
 }
