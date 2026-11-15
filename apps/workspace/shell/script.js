@@ -12,7 +12,10 @@ import { FULCWM } from './core/window-manager.js';
 // saved layout was never restored (FULCWM.restoreLayout() below never
 // ran) since namespacing landed.
 import { getItem } from './core/storage-ns.js';
-import { markDesktopReady } from './core/boot-metrics.js';
+import { markDesktopReady, installClientErrors } from './core/boot-metrics.js';
+
+// Browser errors reach the server's error digest as a class (core/boot-metrics.js).
+installClientErrors(window);
 
 // ── Global State ───────────────────────────────────────────────────
 

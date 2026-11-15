@@ -256,3 +256,14 @@ describe("the thrown-code scan", () => {
     }
   });
 });
+
+describe("the workspace's client windows", () => {
+  it("name every app directory the workspace ships, and the shell itself", async () => {
+    const fs = await import("node:fs");
+    const dirs = (rel: string) =>
+      fs.readdirSync(path.join(REPO_ROOT, rel), { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith("_")).map((e) => e.name);
+    for (const id of [...dirs("apps/workspace/apps"), ...dirs("apps/workspace/shell/apps"), "shell"]) {
+      expect(CLIENT_WINDOW_IDS, id).toContain(id);
+    }
+  });
+});

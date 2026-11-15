@@ -164,3 +164,14 @@ describe("buildDigest: overflow and lap time", () => {
     for (const a of d.alerts) expect(a.note).not.toMatch(/ghp_/);
   });
 });
+
+describe("buildDigest: browser-reported classes", () => {
+  it("lists a client class and flags it new, like any other class", () => {
+    const client = { service: "web", route: "/api/rum", stage: "client.runs", code: "client.script_error" };
+    const d = buildDigest({ now: NOW, laps: [], rows: [row(1, 3, client)] });
+    expect(d.classes).toHaveLength(1);
+    expect(d.classes[0]).toMatchObject({ ...client, count: 3 });
+    expect(d.newClasses.map((c) => c.code)).toContain("client.script_error");
+    expect(d.alerts.some((a) => a.kind === "new_class")).toBe(true);
+  });
+});
