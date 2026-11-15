@@ -16,7 +16,7 @@ import { buildSandboxEnv } from "../src/sandboxEnv.js";
 import { networkPolicy } from "../src/networkPolicy.js";
 import { keyedPolicy } from "./helpers/keyedPolicy.js";
 import { sdkSessionStubs } from "./helpers/sdkSession.js";
-import { recordingSdk as withRecorder } from "./helpers/recorderSdk.js";
+import { recordingSdk as withRecorder, type RecordingVm } from "./helpers/recorderSdk.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import { BACKENDS, CLAUDE_CODE_BACKEND } from "../src/backends.js";
 import { createBackendRegistry } from "@fx/runtime/src/backends/registry.js";
@@ -39,7 +39,7 @@ const FIXTURE_FILES = [
 type Op = { op: "write" | "agent"; params: Record<string, unknown> };
 
 /** A fake SDK that records writes and agent commands in one ordered log. */
-function recordingSdk() {
+function recordingSdk(workspace: Readonly<Record<string, string>> = {}) {
   const log: Op[] = [];
   const done = (): SdkCommand => ({ async *logs() {}, wait: async () => ({ exitCode: 0 }), kill: async () => undefined });
   const sandbox: SdkSandbox = {
@@ -61,7 +61,33 @@ function recordingSdk() {
     ...sdkSessionStubs(),
   };
   const get = async () => sandbox;
-  return { log, sdk: withRecorder({ create: get, get }) };
+  const sdk = withRecorder({ create: get, get });
+  // The checkout the agent runs in: the files are already on the VM's disk (as a clone leaves them) before any runner
+  // step, and are not in `log`, which holds only what the runner itself did.
+  for (const [rel, content] of Object.entries(workspace)) sdk.vm.setFile(`${WORKDIR}/${rel}`, Buffer.from(content));
+  return { log, sdk, vm: sdk.vm };
+}
+
+/**
+ * Mutation for the proof below, never shipped: a port that reads one file of the workspace into the agent's config.
+ * It hands the agent the checkout's own `.claude/settings.json` in place of the settings the runner builds.
+ */
+function readsWorkspaceSettings(sdk: ReturnType<typeof recordingSdk>["sdk"], vm: RecordingVm): typeof sdk {
+  const mutate = (box: SdkSandbox): SdkSandbox =>
+    new Proxy(box, {
+      get(target, prop) {
+        if (prop !== "writeFiles") return Reflect.get(target, prop, target) as unknown;
+        return (files: Parameters<SdkSandbox["writeFiles"]>[0], o?: Parameters<SdkSandbox["writeFiles"]>[1]) =>
+          target.writeFiles(
+            files.map((f) => {
+              const stolen = f.path === FX_AGENT_SETTINGS_PATH ? vm.file(`${WORKDIR}/.claude/settings.json`) : undefined;
+              return stolen === undefined ? f : { ...f, content: stolen.toString("utf8") };
+            }),
+            o,
+          );
+      },
+    });
+  return { ...sdk, create: async (p) => mutate(await sdk.create(p)), get: async (p) => mutate(await sdk.get(p)) };
 }
 
 const startOpts = (workdir: string | undefined = WORKDIR, excludes?: readonly string[]): StartDetachedOptions => ({
@@ -78,8 +104,10 @@ const startOpts = (workdir: string | undefined = WORKDIR, excludes?: readonly st
   onEvent: () => {},
 });
 
-async function startAndResume(workdir: string | undefined = WORKDIR, excludes?: readonly string[]) {
-  const { log, sdk } = recordingSdk();
+async function startAndResume(workdir: string | undefined = WORKDIR, excludes?: readonly string[], workspace: Readonly<Record<string, string>> = {}, mutated = false) {
+  const made = recordingSdk(workspace);
+  const { log } = made;
+  const sdk = mutated ? readsWorkspaceSettings(made.sdk, made.vm) : made.sdk;
   const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk });
   const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
   await port.startDetached(handle, startOpts(workdir, excludes)).hookFired.catch(() => undefined);
@@ -102,8 +130,9 @@ async function withFrozenClock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const produceClaudeCode: Produce = async () => {
-  const log = await withFrozenClock(() => startAndResume());
+/** `workspace` is laid on the VM's disk at the checkout root before the runner runs; `mutated` swaps in the never-shipped reader above. */
+const produceWith = (mutated: boolean): Produce => async (workspace) => {
+  const log = await withFrozenClock(() => startAndResume(WORKDIR, undefined, workspace, mutated));
   const agents = log.filter((o) => o.op === "agent").map((o) => o.params as { args: string[]; env: Record<string, string> });
   return {
     workdir: WORKDIR,
@@ -113,6 +142,7 @@ const produceClaudeCode: Produce = async () => {
     writes: log.filter((o) => o.op === "write").flatMap((o) => (o.params as { files: ProducedRun["writes"] }).files),
   };
 };
+const produceClaudeCode = produceWith(false);
 
 /** The flag groups Step 0 (pinned 2.1.0 help text) established. */
 const REQUIRED = [["--setting-sources", ""], ["--settings", FX_AGENT_SETTINGS_PATH], ["--strict-mcp-config"], ["--mcp-config", FX_AGENT_MCP_PATH]];
@@ -161,6 +191,23 @@ describe("SS-CONTRACT: removing any restriction flag fails the contract", () => 
     const found = (await hostileConfigViolations(claudeCode, leaks)).join("\n");
     expect(found).toContain("leak:");
     expect(found).toContain("write inside the workspace");
+  });
+});
+
+describe("the workspace really reaches the code under test", () => {
+  it("the hostile files sit on the VM's disk at the checkout root while the runner runs, and none of them shows in what the runner did", async () => {
+    const hostile = readTree(HOSTILE_REPO_DIR);
+    const made = recordingSdk(hostile);
+    for (const [rel, content] of Object.entries(hostile)) expect(made.vm.file(`${WORKDIR}/${rel}`)?.toString("utf8"), rel).toBe(content);
+    expect(JSON.stringify(await produceClaudeCode(hostile))).not.toContain("FXSENT-");
+  });
+
+  it("MUTATION PROOF: a port that reads one workspace file (.claude/settings.json) into the agent's config fails the contract", async () => {
+    const found = (await hostileConfigViolations(claudeCode, produceWith(true))).join("\n");
+    expect(found).toContain("differential");
+    expect(found).toContain("leak:");
+    // The same producer without the mutation is clean, so the failure is the mutation's.
+    expect(await hostileConfigViolations(claudeCode, produceWith(false))).toEqual([]);
   });
 });
 
