@@ -553,6 +553,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // The receipt behind a merge by policy (D#7 DW-R4): the write failed, or no review run is on the merged head. The merge itself stands.
   "merge_receipt_failed",
   "merge_receipt_no_run",
+  // TWO-LANE-QUEUE: GitHub refused the jump to the front of the merge queue; the pull request was queued at the back instead.
+  "merge_queue_jump_refused",
   "runner_ordered_unsupported",
   // Cloud Gate 1 (D#6 CLOUD-POSTS-FX-GATE1 PR 1c): the merge gate's stop for an fx-gate1 that our App did not post.
   "gate1_status_foreign",

@@ -6,6 +6,7 @@ import { PERSON_REQUEUE_REASON, queueAgainPending } from "@fx/core/src/work-item
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { reportError } from "@fx/telemetry";
+import { decideQueueJump, JUMP_REFUSED_REASON, JUMP_THROTTLED_REASON, QUEUE_JUMP_REASON, type QueueJumpSettings } from "./queueJump.js";
 import { readMergeDial, type MergeDial } from "@fx/db/src/mergeDial.js";
 import { recordMergeReceiptOn, type MergeReceiptCall, type MergeReceiptResult } from "@fx/db/src/mergeReceipt.js";
 import { autoMergeAllowed } from "@fx/trust";
@@ -252,7 +253,7 @@ export interface Gate1StatusCheck {
   attest?: boolean;
 }
 
-export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs; gate1Status?: Gate1StatusCheck };
+export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs; gate1Status?: Gate1StatusCheck; /** TWO-LANE-QUEUE: the jump rule (switch, eligible repositories, throttle). Absent: no jump, as before. */ queueJump?: QueueJumpSettings };
 
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation; orderId?: string } }): Promise<MergeGateGoResult>;
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult>;
@@ -459,10 +460,49 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   let mergeDial: MergeDial = { disposition: "act", version: 0 };
   // Whether the gate read the dial at all: a stop before that read has no dial to name, so its facts carry no version.
   let dialRead = false;
+  // D#694 B5: a pull request put in GitHub's queue is a one-time stamp of what was sent. `merged_by_gate` stays for the direct path only; the merge itself is the webhook's to record.
+  // TWO-LANE-QUEUE: written by the gate's `onEnqueued` while the repository's merge lease is still held, so the throttle (which reads this fact back) sees a jump before another gate can take
+  // the lease and decide. The gate's own result is the only input; the facts below read the same variables the step 5 facts do.
+  const recordEnqueued = async (e: { headSha: string; entryId: string | null; via: "queue" | "auto_merge"; jump?: "applied" | "refused" | "throttled" }): Promise<void> => {
+    const enqueuedRow = publicPr !== null ? (SHA_PATTERN.test(headSha) ? headSha : null) : SHA_PATTERN.test(e.headSha) ? e.headSha : null;
+    const dialFact = dialRead ? { dialVersion: mergeDial.version } : {};
+    const keyHead = publicPr !== null ? `${enqueuedRow ?? "nohead"}:${SHA_PATTERN.test(e.headSha) ? e.headSha : "nopublic"}` : (enqueuedRow ?? "nohead");
+    await withTenant(pool, accountId, async (client) => {
+      // The gate's own fact first, with the key step 5 writes for this outcome (so step 5's write is then a no-op): the order of the two facts is what it always was.
+      await recordDriverEvent(client, accountId, {
+        ...dialFact,
+        workItemId,
+        kind: "merge_gate",
+        dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}merge_enqueued`,
+        code: toCode("merge_enqueued"),
+        reasons: [],
+        headSha: enqueuedRow,
+        prNumber,
+      });
+      await recordDriverEvent(client, accountId, {
+        ...dialFact,
+        workItemId,
+        kind: "merge_enqueued",
+        // A head the queue took out and the gate put back is a new fact (the retry's), not the first one again.
+        dedupeKey: enqueueDedupeKey(e.headSha, (await listHeadRemovals(client, accountId, workItemId, e.headSha, prNumber, { all: true })).length),
+        code: e.via,
+        // D#694 B6-5: an enqueue that answers a person's Queue again says so; the retry rule then counts only the removals after it.
+        reasons: [
+          ...(enqueuedRow !== null && (await queueAgainPending(client, accountId, workItemId, prNumber, enqueuedRow)) ? [PERSON_REQUEUE_REASON] : []),
+          // TWO-LANE-QUEUE: the jump is recorded on the fact itself (the queue record), and the throttle reads these facts back.
+          ...(e.jump === "applied" ? [QUEUE_JUMP_REASON] : e.jump === "refused" ? [JUMP_REFUSED_REASON] : e.jump === "throttled" ? [JUMP_THROTTLED_REASON] : []),
+        ],
+        headSha: enqueuedRow,
+        prNumber,
+        ...(e.entryId !== null ? { queueEntryId: e.entryId } : {}),
+      });
+    });
+  };
   const out = await runMergeGate(
     {
       pool,
       github: mergePort,
+      onEnqueued: recordEnqueued,
       // D#483 S5-j2a1: the repository's merge lease, taken before the gate reads anything and freed on every exit. The queue tick holds the slot instead and takes none.
       ...(input.underQueueSlot === true
         ? {}
@@ -496,6 +536,10 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       },
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
       requestReviews: async () => undefined,
+      // TWO-LANE-QUEUE: this gate only ever handles the cloud's own pull requests; whether this one jumps is the switch, the repository list and the throttle (queueJump.ts).
+      ...(deps.queueJump !== undefined
+        ? { queueJump: () => withTenant(pool, accountId, (client) => decideQueueJump(deps.queueJump, client, { accountId, repoId: ctx.repoId, owner: mergeTarget.owner, name: mergeTarget.name })) }
+        : {}),
       // D#598 P3b: the parent's pull request number, for the sentence on a stacked stop. Our rows only; no GitHub call.
       stackParentPullNumber: async () => (await withTenant(pool, accountId, (client) => readStackParentPull(client, workItemId)))?.prNumber ?? null,
       // D#598 P1d-1: the author of the pull request that merges (the public one for a paired item), read on the client that reads it. A fenced `runner_local` client is never asked.
@@ -557,23 +601,11 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
     if (out.outcome === "merged") {
       await recordDriverEvent(client, accountId, { ...dialFact, workItemId, kind: "merged_by_gate", dedupeKey: `merged:${out.headSha}`, headSha: headForRow, prNumber });
     }
-    // D#694 B5: a pull request put in GitHub's queue is a one-time stamp of what was sent. `merged_by_gate` stays for the direct path only; the merge itself is the webhook's to record.
-    if (out.outcome === "merge_enqueued") {
-      await recordDriverEvent(client, accountId, {
-        ...dialFact,
-        workItemId,
-        kind: "merge_enqueued",
-        // A head the queue took out and the gate put back is a new fact (the retry's), not the first one again.
-        dedupeKey: enqueueDedupeKey(out.headSha, (await listHeadRemovals(client, accountId, workItemId, out.headSha, prNumber, { all: true })).length),
-        code: out.via,
-        // D#694 B6-5: an enqueue that answers a person's Queue again says so; the retry rule then counts only the removals after it.
-        ...(headForRow !== null && (await queueAgainPending(client, accountId, workItemId, prNumber, headForRow)) ? { reasons: [PERSON_REQUEUE_REASON] } : {}),
-        headSha: headForRow,
-        prNumber,
-        ...(out.entryId !== null ? { queueEntryId: out.entryId } : {}),
-      });
-    }
   });
+  // A no-op when `onEnqueued` already wrote it (same dedupe keys); the safety net for a gate that returned `merge_enqueued` without calling it.
+  if (out.outcome === "merge_enqueued") await recordEnqueued(out);
+  // TWO-LANE-QUEUE: a refused jump is reported in the closed set (the pull request is queued at the back; the fact above says so). Never fails the gate.
+  if (out.outcome === "merge_enqueued" && out.jump === "refused") reportError(new Error("merge queue jump refused; enqueued without it"), { stage: "merge.queue", code: "merge_queue_jump_refused" });
   // 6. The receipt (D#7 DW-R4), after the facts: a merge the gate made, or a pull request the policy alone left for a person. It never fails or undoes the merge.
   // A hold is receipted only when the merge dial itself says ask: a hold the role setting alone causes names no dial, so it gets none.
   if (headForRow !== null && (out.outcome === "merged" || (policyHold && mergeDial.disposition === "ask"))) {

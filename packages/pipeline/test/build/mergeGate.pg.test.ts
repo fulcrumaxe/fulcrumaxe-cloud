@@ -896,6 +896,56 @@ describe("H14b merge gate: table [pg]", () => {
       return { world, github };
     }
 
+    describe("TWO-LANE-QUEUE: the jump rule", () => {
+      const withRule = (github: FakeGitHub, answer: "jump" | "throttled" | "none" | "throw" | undefined): MergeGateDeps => ({
+        ...makeDeps(github, undefined, []),
+        ...(answer === undefined ? {} : { queueJump: async () => (answer === "throw" ? Promise.reject(new Error("rule unreadable")) : answer) }),
+      });
+
+      it("the rule says jump: the enqueue is asked for the front, still bound to the gated head, and the jump the port reports is on the outcome", async () => {
+        const { world, github } = await ready({ queueMode: "queue", enqueue: { enqueued: true, via: "queue", entryId: "MQE_kwDOtest1", position: 1, jump: "applied" } });
+        const result = await runMergeGate(withRule(github, "jump"), inputFor(world, {}));
+        expect(result).toEqual({ outcome: "merge_enqueued", headSha: HEAD, entryId: "MQE_kwDOtest1", position: 1, via: "queue", jump: "applied" });
+        expect(github.enqueueCalls).toEqual([{ expectedHeadOid: HEAD, jump: true }]);
+        expect(github.mergeCalls).toEqual([]);
+      });
+
+      it.each([["no rule wired", undefined], ["the rule says none", "none"], ["the rule cannot be read", "throw"]] as const)("%s: a plain enqueue, never a jump", async (_n, answer) => {
+        const { world, github } = await ready({ queueMode: "queue" });
+        const result = await runMergeGate(withRule(github, answer), inputFor(world, {}));
+        expect(result).toEqual({ outcome: "merge_enqueued", headSha: HEAD, entryId: "MQE_kwDOtest1", position: 1, via: "queue" });
+        expect(github.enqueueCalls).toEqual([{ expectedHeadOid: HEAD }]);
+      });
+
+      it("throttled: a plain enqueue, and the outcome says why so the fact can record it", async () => {
+        const { world, github } = await ready({ queueMode: "queue" });
+        const result = await runMergeGate(withRule(github, "throttled"), inputFor(world, {}));
+        expect(result).toEqual({ outcome: "merge_enqueued", headSha: HEAD, entryId: "MQE_kwDOtest1", position: 1, via: "queue", jump: "throttled" });
+        expect(github.enqueueCalls).toEqual([{ expectedHeadOid: HEAD }]);
+      });
+
+      it("the enqueue is reported to the composition root BEFORE the repository's lease is freed (so the throttle's fact cannot lag behind the lease), and a throw there still frees it", async () => {
+        const log: string[] = [];
+        const lease = { release: async () => void log.push("release") };
+        const { world, github } = await ready({ queueMode: "queue", enqueue: { enqueued: true, via: "queue", entryId: "MQE_kwDOtest1", position: 1, jump: "applied" } });
+        const deps: MergeGateDeps = { ...withRule(github, "jump"), acquireMergeLease: async () => lease, onEnqueued: async (r) => void log.push(`fact:${r.jump}`) };
+        await runMergeGate(deps, inputFor(world, {}));
+        expect(log).toEqual(["fact:applied", "release"]);
+
+        const log2: string[] = [];
+        const again = await ready({ queueMode: "queue" });
+        const failing: MergeGateDeps = { ...withRule(again.github, "jump"), acquireMergeLease: async () => ({ release: async () => void log2.push("release") }), onEnqueued: async () => Promise.reject(new Error("fact write failed")) };
+        await expect(runMergeGate(failing, inputFor(again.world, {}))).rejects.toThrow("fact write failed");
+        expect(log2).toEqual(["release"]);
+      });
+
+      it("a refused jump the port retried at the back is reported as refused", async () => {
+        const { world, github } = await ready({ queueMode: "queue", enqueue: { enqueued: true, via: "queue", entryId: "MQE_kwDOtest1", position: 4, jump: "refused" } });
+        const result = await runMergeGate(withRule(github, "jump"), inputFor(world, {}));
+        expect(result).toMatchObject({ outcome: "merge_enqueued", position: 4, jump: "refused" });
+      });
+    });
+
     it("queue on: the pull request is enqueued bound to the gated head, and nothing is merged directly (the fake would have let the app bypass the queue)", async () => {
       const { world, github } = await ready({ queueMode: "queue" });
       const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));

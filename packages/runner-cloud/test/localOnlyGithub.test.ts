@@ -9,7 +9,7 @@ import {
   MERGE_QUEUE_READ_DOCUMENTS,
   type GithubRequest,
 } from "../src/localOnlyGithub.js";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../github/src/mergeGateGraphql.js";
 
 const R = "/repos/acme/app";
 const NOT = "not_allowlisted";
@@ -563,9 +563,9 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       for (const req of cases) expect((await attempt(req)).result, JSON.stringify(req.body)).toBe(NOT);
     });
 
-    it("the enqueue, dequeue and auto-merge documents stay refused, and so does any other operation name", async () => {
+    it("the enqueue (plain and jumping), dequeue and auto-merge documents stay refused, and so does any other operation name", async () => {
       const vars = { pullRequestId: "PR_kwDOAbCd123", expectedHeadOid: SHA, mergeMethod: "SQUASH" };
-      for (const query of [ENQUEUE_PULL_REQUEST_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT]) expect((await attempt(graphql(query, vars))).result).toBe(NOT);
+      for (const query of [ENQUEUE_PULL_REQUEST_DOCUMENT, ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT]) expect((await attempt(graphql(query, vars))).result).toBe(NOT);
       const { client, seen } = recorder();
       const gh = localOnlyGithub(client);
       await expect(gh.graphql("EnqueuePullRequest" as never, vars)).rejects.toMatchObject({ rule: NOT });
