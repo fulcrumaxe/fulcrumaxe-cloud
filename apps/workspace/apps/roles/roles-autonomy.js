@@ -512,6 +512,17 @@ export function mountLimits(host) {
 //   * Every user-visible string comes from MERGE_COPY. Nothing is composed from server text, an id or a raw enum value.
 //   * Nothing is written from here, for any role: no control, no button, no input.
 //   * In the shape of mountLimits above: mountMerge(host) returns { load(repoId), clear(), destroy() }.
+
+// Customer wording for every mode `@fx/roles` defines (packages/roles/src/manifest.ts, RoleMode). The Roles app's mode
+// select and MERGE_COPY.debater below both read from this one map, so the two cannot drift apart. A code with no
+// wording here (none in production) keeps showing verbatim, as word() already does for every other enum in this file.
+export const MODE_TEXT = Object.freeze({
+  off: "Off",
+  always: "On for every pull request",
+  feature_critical: "On for features and critical work",
+  weekly: "Once a week",
+});
+
 export const MERGE_COPY = Object.freeze({
   heading: "Merging",
   intro:
@@ -546,9 +557,9 @@ export const MERGE_COPY = Object.freeze({
   }),
   debater: Object.freeze({
     name: "Debater",
-    off: "Off",
-    feature_critical: "On for features and critical work",
-    always: "On for every pull request",
+    off: MODE_TEXT.off,
+    feature_critical: MODE_TEXT.feature_critical,
+    always: MODE_TEXT.always,
     effect: "A pull request the Debater reviews waits for its sign-off before it merges.",
     where: "Change this in the Roles tab.",
   }),

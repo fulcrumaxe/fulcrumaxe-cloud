@@ -125,7 +125,7 @@ test("lists installed repos only, and each role with its mode, model and spend",
   await expect(tid(page, "roles-repo").locator("option")).toHaveText(["acme/widgets"]);
   const build = page.locator(`${WIN} [data-role="build"]`);
   await expect(build).toContainText("fulcrumaxe build");
-  await expect(build.locator("option")).toHaveText(["off", "suggest", "auto"]);
+  await expect(build.locator("option")).toHaveText(["Off", "suggest", "auto"]);
   await expect(build.locator("select")).toHaveValue("auto");
   await expect(build.locator("select")).toBeDisabled();
   await expect(build.locator('[data-testid="roles-model"]')).toHaveText("Follows the routing table");
@@ -133,7 +133,7 @@ test("lists installed repos only, and each role with its mode, model and spend",
   await expect(spend).toHaveText(ROLES.data[0].expected_spend.text);
   await expect(spend).toHaveAttribute("title", ROLES.data[0].expected_spend.caveat);
   const reviewer = page.locator(`${WIN} [data-role="code-reviewer"]`);
-  await expect(reviewer.locator("option")).toHaveText(["off", "suggest"]);
+  await expect(reviewer.locator("option")).toHaveText(["Off", "suggest"]);
   await expect(reviewer.locator('[data-testid="roles-model"]')).toHaveText("opus-5");
   // Read view only: every request is a GET.
   expect(seen.requests.every((r) => r.startsWith("GET "))).toBe(true);
@@ -623,13 +623,36 @@ test("changing debater mode to 'off' sends PATCH and persists after reload", asy
   await expect(modeSelect).toHaveValue("off");
 });
 
-test("non-debater roles show raw mode values in select options", async ({ page }) => {
+test("non-debater roles render known mode codes as words, and an unknown code raw", async ({ page }) => {
   await boot(page, {
     admin: true,
     roles: () => ({ data: [ROLES.data[0]] }),
   });
   const build = page.locator(`${WIN} [data-role="build"]`);
-  await expect(build.locator("[data-testid='roles-mode'] option")).toHaveText(["off", "suggest", "auto"]);
+  // "off" is a known RoleMode and renders as "Off"; "suggest" and "auto" are retired codes the fixture still
+  // carries, with no wording in MODE_TEXT, so they keep rendering raw.
+  await expect(build.locator("[data-testid='roles-mode'] option")).toHaveText(["Off", "suggest", "auto"]);
+});
+
+test("a non-debater role's weekly and feature_critical modes render as words, with raw values on the options", async ({ page }) => {
+  const analyst = {
+    role: "mission-analyst",
+    allowed_modes: ["off", "weekly", "feature_critical"],
+    mode: "weekly",
+    model: null,
+    allowed_models: [],
+    expected_spend: { text: "test spend", caveat: "test caveat" },
+  };
+  await boot(page, {
+    admin: true,
+    roles: () => ({ data: [analyst] }),
+  });
+  const row = page.locator(`${WIN} [data-role="mission-analyst"]`);
+  const modeSelect = row.locator("[data-testid='roles-mode']");
+  await expect(modeSelect.locator("option")).toHaveText(["Off", "Once a week", "On for features and critical work"]);
+  const options = await modeSelect.locator("option").all();
+  const values = await Promise.all(options.map((opt) => opt.getAttribute("value")));
+  expect(values).toEqual(["off", "weekly", "feature_critical"]);
 });
 
 test("the app source has no sink, no direct fetch, only the PATCH mutation, no 401 branch, no SDK state", () => {
