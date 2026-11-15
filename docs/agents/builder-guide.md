@@ -15,6 +15,7 @@ Sources:
 - `vitest.workspace.ts`
 - `.github/workflows/ci.yml`
 - `scripts/ci/affected.mjs`
+- `scripts/ci/same-tree.mjs`
 - `scripts/ci/declared-imports.test.mjs`
 - `scripts/ci/check-migration-compat.mjs`
 - `scripts/ci/pr-link-policy.sh`
@@ -26,6 +27,7 @@ Sources:
 - `packages/test-guard/src/setup.ts`
 - `packages/api/test/contract.test.ts`
 - `apps/workspace/playwright.config.ts`
+- `apps/workspace/e2e/runner-job-guard.mjs`
 - `apps/workspace/e2e/helpers/boot.ts`
 - `apps/workspace/e2e/helpers/pixel.ts`
 - `lint/no-silent-catch.mjs`
@@ -223,6 +225,10 @@ The rules live in `packages/db/migrations/README.md`. In short:
 - For any change to layout, the shell, shared CSS, or anything always on screen, run the full suite
   on all three projects, not only your own specs. A fixed strip or overlay can cover other apps'
   buttons on one viewport and nowhere else.
+- Inside a runner job or the runner's own check (`FX_RUNNER_JOB=1` or `FX_RUNNER_CHECK=1`) the
+  workspace Playwright config prints a skip line and exits 0 before any server starts
+  (`apps/workspace/e2e/runner-job-guard.mjs`). The real-browser specs are covered by CI, not by your
+  sandbox; do not try to work around the skip.
 - Locally, Playwright reuses a server already listening on the default ports and may serve an old
   build. Run on free ports after a fresh build: `E2E_PORT=4419 E2E_FIRST_PARTY_PORT=4420`.
 - Pages run on a fake clock (`apps/workspace/e2e/helpers/boot.ts` installs it). Derive test dates
@@ -233,6 +239,9 @@ The rules live in `packages/db/migrations/README.md`. In short:
 - Test a flow through the real controls: click, type, save, reload, check what persisted, then
   undo and check again. A test that only proves a window opens is a render check.
 - Touch targets, focus order and labels are part of the change. Check them on the phone project.
+- A merge-queue run may skip the heavy suites when the tree is byte-identical to a pull request head
+  that already has a green full-scope `fx-gate1` (`scripts/ci/same-tree.mjs`). Your pull request
+  still needs its own full run first; the queue never replaces it.
 - A job that times out on your change and not on others is your regression. Never raise a timeout
   to make it pass.
 - `pnpm test:e2e-runner` runs the runner path end to end; run it if you change the job path, the

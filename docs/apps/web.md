@@ -14,6 +14,10 @@ Sources:
 - `apps/web/lib/shell/headers.ts`
 - `apps/web/lib/shell/shell-paths.ts`
 - `apps/web/app/api/ROUTES.allowlist`
+- `apps/web/app/api/cron/proposal-verify-sweep/handler.ts`
+- `apps/web/app/api/cron/proposal-verify-sweep/route.ts`
+- `apps/web/vercel.json`
+- `packages/webhooks/src/verifyKick.ts`
 - `apps/web/package.json`
 
 ## What it does
@@ -48,6 +52,8 @@ API routes under `apps/web/app/api/` (also enumerated in
 | `/api/branding` | GET | Static, anonymous `{name, shortName}` branding payload. |
 | `/api/cron/api-sweep` | GET | Runs `@fx/webhooks`' sweep (fan-out, delivery claiming, auto-disable, purge); authenticates against `CRON_SECRET`, not a customer token — not under `/api/v1`. |
 | `/api/cron/api-sweep` | POST | The signed kick sent by the process that just enqueued a domain event (header `x-fx-kick`, fixed body, HMAC under a key derived from `CRON_SECRET`): answers 202 at once and sweeps after the response; a bad signature is a bare 401. |
+| `/api/cron/proposal-verify-sweep` | GET | The post-merge verify sweep, scheduled every 15 minutes in `apps/web/vercel.json`. Authenticates against `CRON_SECRET`; a tick that finds no pending work at the gate answers `{skipped: true, reason: "no_pending_work"}`. It starts verifier runs itself, so the route sets `maxDuration = 800`. |
+| `/api/cron/proposal-verify-sweep` | POST | The signed kick sent right after a verify wake point wrote its row (Verify again, a deploy-order report, a finished tester run): header `x-fx-kick`, HMAC under a key derived from `CRON_SECRET`. A bad signature is a bare 401 and builds nothing. A good one answers 202 at once and runs one pass after the response, past the marker gate; a kick that finds a pass already running does nothing. The GET cron stays as the fallback. |
 | `/api/csp-report` | POST | Receives CSP violation reports (max 16 KB, `application/csp-report` or `application/reports+json`), logs one structured line, stores nothing. |
 | `/api/gh-proxy/{...path}` (`#140`, `#160`) | GET, HEAD, POST, PUT, PATCH, DELETE | The GitHub proxy: verifies the caller's OIDC identity, mints a GitHub App installation token, and forwards a request `@fx/gh-policy`'s `decide()` approved — never a raw customer credential against `github.com`. |
 | `/api/github/webhook` (`#135`) | POST | GitHub App webhook intake: HMAC-verifies the payload, maps the event to a work-item/run trigger, and drives stage recording. |
