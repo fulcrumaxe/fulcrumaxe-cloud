@@ -1,22 +1,37 @@
 # apps/live-e2e
 
-Live end-to-end packs that will run against the deployed app: staging now,
-a read-only production smoke after launch. This first slice holds only the
-parts that need no browser and no credentials: the pack manifest, selection,
-the targets with the production guard, the env-only needs, and the `plan`
-command. Nothing here starts Chromium or touches the network.
+Live end-to-end packs that run against a deployed app: staging today, and a read-only production smoke for the packs that list production. `apps/live-e2e` holds the pack manifest and selection, the targets with their production guards, the needs checks, the `plan` and `run` commands, signed-in session storage, the janitors that reset the test account and repos, issue reporting, and the scrub that gates artifact upload. `run` starts Playwright's Chromium for each selected pack; `plan` never loads a browser or touches the network.
 
 Sources:
+- `apps/live-e2e/package.json`
+- `apps/live-e2e/bin/live-e2e.mjs`
 - `apps/live-e2e/src/manifest.ts`
 - `apps/live-e2e/src/select.ts`
 - `apps/live-e2e/src/targets.ts`
+- `apps/live-e2e/src/client.ts`
 - `apps/live-e2e/src/needs.ts`
+- `apps/live-e2e/src/needs-network.ts`
 - `apps/live-e2e/src/plan.ts`
+- `apps/live-e2e/src/run.ts`
+- `apps/live-e2e/src/limits.ts`
 - `apps/live-e2e/src/routing.ts`
 - `apps/live-e2e/src/ledger.ts`
 - `apps/live-e2e/src/affected.ts`
 - `apps/live-e2e/routing-ledger.json`
 - `apps/live-e2e/src/cli.ts`
+- `apps/live-e2e/src/probes.ts`
+- `apps/live-e2e/src/staging-only.ts`
+- `apps/live-e2e/src/workflow-routes.ts`
+- `apps/live-e2e/src/store.ts`
+- `apps/live-e2e/src/sessions.ts`
+- `apps/live-e2e/src/sessions-cli.ts`
+- `apps/live-e2e/src/last-tested.ts`
+- `apps/live-e2e/src/issues.ts`
+- `apps/live-e2e/src/janitor/cli.ts`
+- `apps/live-e2e/src/janitor/account.ts`
+- `apps/live-e2e/src/janitor/repo.ts`
+- `apps/live-e2e/src/janitor/repos.ts`
+- `apps/live-e2e/pw/config.ts`
 - `apps/live-e2e/src/report.ts`
 - `apps/live-e2e/src/scrub.ts`
 - `apps/live-e2e/src/mask.ts`
@@ -24,17 +39,43 @@ Sources:
 - `apps/live-e2e/targets/production.json`
 - `apps/live-e2e/packs/platform/pack.json`
 - `apps/live-e2e/packs/auth-negative/pack.json`
+- `apps/live-e2e/packs/auth/pack.json`
+- `apps/live-e2e/packs/auth-scripted/pack.json`
+- `apps/live-e2e/packs/api-contract/pack.json`
+- `apps/live-e2e/packs/shell/pack.json`
 
 ## Using it
 
 ```
 pnpm --filter live-e2e exec live-e2e plan --target staging --tier smoke
+pnpm --filter live-e2e exec live-e2e run  --target staging --tier smoke
 ```
 
-writes `plan.json` (ignored by git) and prints one line per selected pack:
-`RUN`, `SKIPPED-NEED <need>` (green, listed) or `REFUSED <reason>`. A refusal
-of a pack named with `--pack` exits non-zero; an empty selection exits
-non-zero with `EMPTY-SELECTION`.
+`plan` writes `plan.json` (ignored by git) and prints one line per selected pack: `RUN`, `SKIPPED-NEED <need>` (green, listed) or `REFUSED <reason>`. A refusal of a pack named with `--pack` exits non-zero; an empty selection exits non-zero with `EMPTY-SELECTION`. `run` takes the same flags (`--target`, `--tier`, `--pack`, `--tag`, `--trigger`, `--changed-from`, `--out`), builds the same plan, then runs the selected packs through Playwright one after another and writes `results.json`, `summary.md` and a scrubbed log per pack next to the plan (`apps/live-e2e/src/run.ts`). `--budget-usd` is not accepted.
+
+The other commands in `apps/live-e2e/src/cli.ts`:
+
+- `scrub --dir <folder>`: the upload gate, described below.
+- `issues --results <file> --repo <owner/name>`: opens, comments on or closes one issue per failing pack and target, labelled `live-e2e` (a production failure also gets `needs-owner`). It reads `GITHUB_TOKEN` and posts a scrubbed team-log line for an unattended run that failed (`apps/live-e2e/src/issues.ts`).
+- `last-tested record|show --target <name>`: a small JSON store in the run user's home with the last commit tested per target, its tier and outcome (`apps/live-e2e/src/last-tested.ts`).
+- `workflow-routes --build-dir <apps/web/.next>`: lists the Workflow SDK routes from the built output, which every probe list in the `platform` pack must cover (`apps/live-e2e/src/workflow-routes.ts`).
+- `capture-session` and `sessions keep-alive|status|forget`: see Sessions.
+- `janitor account|repo|repos`: see Janitors.
+
+## Packs
+
+A pack is a folder under `apps/live-e2e/packs/` with a `pack.json` and a Playwright spec. At HEAD there are six:
+
+| Pack | Tier | Targets | Needs |
+|---|---|---|---|
+| `platform` | smoke | staging, production | `bypass` |
+| `auth-negative` | smoke | staging, production | `bypass` |
+| `auth` | standard | staging | `bypass`, `session:owner` |
+| `shell` | standard | staging | `bypass`, `session:owner` |
+| `api-contract` | standard | staging | `bypass`, `session:owner` |
+| `auth-scripted` | standard | staging | `bypass`, `signin:scripted` (destructive) |
+
+`platform` also declares 21 refusal probes: requests that must be answered with a 4xx. Only `auth-scripted` is destructive, and its `signin:scripted` need is never met, because the list of roles allowed to sign in by script is empty (`SCRIPTED_SIGNIN_ROLES` in `apps/live-e2e/src/needs.ts`); its selection is skipped.
 
 ## Rules the code enforces
 
@@ -51,8 +92,30 @@ non-zero with `EMPTY-SELECTION`.
 - A target file names, rather than holds, its deployment origin and Vercel project id (`origin_env`, `project_id_env`). The loader reads those variables when the target is selected (`LIVE_E2E_STAGING_ORIGIN` and `LIVE_E2E_STAGING_PROJECT_ID` for staging; the `PRODUCTION` pair for production) and refuses, naming the variable, if one is unset. There is no default host.
 - Env-only needs: `bypass` (the target is protected and the bypass secret is
   present), `stripe-test` (a restricted test-mode key, never a live one) and
-  `host-capacity` (load under 18 and at least 4 GiB available). A need that
-  needs the network is not evaluated yet and counts as unmet.
+  `host-capacity` (load under 18 and at least 4 GiB available). Network needs
+  (`session:<role>`, `model-key`, `test-repo`, `caps-set`, `sandbox`,
+  `github-app:<name>`, `fresh-state:<name>`) are probed only by `run`, with GET
+  requests, for the packs about to start; `plan` is offline, so it counts them
+  as unmet. An unproven need skips the pack, except `caps-set`: a spend limit
+  above the ceiling, or caps that cannot be read, is `REFUSED caps` and fails
+  the run (`apps/live-e2e/src/needs-network.ts`).
+- Before any pack that is not production-safe runs, the origin is asked who it
+  is (`/api/health`): `deploy_env` must be `staging` and the project id must
+  match the staging target file (layer 2, `identityGuard` in `targets.ts`).
+- The API client is the fence (`apps/live-e2e/src/client.ts`): the bypass secret
+  goes only to the exact target origin, redirects are followed by hand and
+  re-checked at every hop, a write to the production host is refused, a
+  staging run may not reach the production host at all, and a 3xx answer to a
+  non-read is an error. The only writes allowed on production are declared
+  refusal probes (`probes.ts`), sent with no credentials and expected to be
+  answered 4xx.
+- A test titled `@staging-only` is listed as skipped by `plan` on production
+  and filtered out of the Playwright run with `--grep-invert`
+  (`apps/live-e2e/src/staging-only.ts`).
+- Playwright is configured in `apps/live-e2e/pw/config.ts`: the same three
+  device projects as the workspace app, trace, video and HAR off, service
+  workers blocked, and 2 workers by default (4 at most, `LIVE_E2E_WORKERS`). Each
+  pack runs in a child process that gets only the variables its needs call for.
 
 ## Changed-files routing
 
@@ -78,6 +141,14 @@ pack.
 - Both refs are validated (a hex commit id or a plain ref name) before git is
   run, and git is run with an argument list, never a shell. A malformed range is
   a usage error (exit 2).
+
+## Sessions
+
+Signed-in packs use stored sessions, not a password flow. `live-e2e capture-session --target <name> --role <role>` opens a headed browser on the owner's machine, the owner signs in by hand, and only the `__Host-fx_session` cookie is kept. The store is one AES-256-GCM file per target under `$HOME/.local/state/live-e2e/`, keyed by `LIVE_E2E_SESSION_KEY`, and the roles are `owner`, `member`, `outsider`, `revoke` and `canary` (`apps/live-e2e/src/store.ts`). `sessions keep-alive` makes one request per stored role and writes the refreshed cookie back, warns three days ahead of a lapse and files one issue per lapsed role. The commands are in `apps/live-e2e/src/sessions-cli.ts`.
+
+## Janitors
+
+`live-e2e janitor account --target staging [--apply]` puts the staging owner account back to a fixed spend baseline through the product's own API: it only lowers limits (per-run dollars, model calls, run minutes), the monthly model budget and each role's model, and refuses to write anything if the account has a repository outside the test org. `janitor repo` resets the fixture repository to its `e2e-baseline` tag. Both run automatically before a destructive pack and are dry-run by default for the commands (`apps/live-e2e/src/janitor/account.ts`, `apps/live-e2e/src/janitor/repo.ts`). `janitor repos --org <name> [--apply]` deletes `e2e-tmp-*` repositories more than a day old in the test org; it runs only on a person's machine with their own `gh` login and asks them to type the org name before deleting (`apps/live-e2e/src/janitor/repos.ts`).
 
 ## Report and scrub
 
@@ -154,5 +225,3 @@ digit and no known token prefix, and the inside of any file that was opted in.
 Redaction before writing (`writeReport`, `writeScrubbed`) is separate: the
 report and any log the runner writes are redacted first and refused if a
 secret survives.
-
-Later tasks add the Playwright config, the `run` command and the packs' specs.

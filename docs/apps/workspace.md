@@ -10,6 +10,10 @@ Sources:
 - `apps/workspace/import/allowlist.txt`
 - `apps/workspace/build/build.mjs`
 - `apps/workspace/build/profile.mjs`
+- `apps/workspace/build/first-party.mjs`
+- `apps/workspace/build/strip-comments.mjs`
+- `apps/workspace/build/budget.mjs`
+- `apps/workspace/apps/README.md`
 - `apps/workspace/profiles/cloud.json`
 - `apps/workspace/shell/core/features.js`
 - `apps/workspace/package.json`
@@ -66,11 +70,13 @@ reachable set into `dist/`, and re-runs the ship-time checks against `dist/`.
 ## The cloud profile
 
 `apps/workspace/profiles/cloud.json` is the one profile shipped at this HEAD:
-`app_modules` is `["themes", "heritage"]` — `activation` was dropped
+`app_modules` lists 15 apps: the imported `themes` and `heritage` (the
+Cupertino+/Fluent+ adapter set, renamed Orchard/Crystal — `#172`, `#176`), and
+thirteen first-party apps (below). `activation` was dropped
 (`#162`, D#37 WS-L1 owner ruling: a subscription unlocks the workspace
 instead of a licence-activation flow; see [`../security.md`](../security.md)'s
-"Workspace subscription gate" section) and `heritage` (the Cupertino+/Fluent+
-adapter set, renamed Orchard/Crystal — `#172`, `#176`) ships instead.
+"Workspace subscription gate" section). `dock_order` in the same file sets the
+dock's order, with `onboarding` first.
 `excluded_themes` (`#163`) lists `windows-aero` and `ubuntu-gnome`, dropped
 per an owner ruling against themes that too closely mimic a real OS/vendor's
 branding; `default_theme` (`#172`) is `classic-crt`, read by
@@ -87,6 +93,26 @@ profile is a build-time declaration of what the server is expected to answer,
 not something shipped to the browser — and fails closed (every gated flag
 reads `false`) if that fetch fails.
 
+## First-party apps
+
+`apps/workspace/apps/<id>/` holds the first-party apps, each a `manifest.json` (`id`, `entry`, `styles`) plus plain JS, TS or TSX and CSS; `apps/workspace/apps/README.md` has the rules, and `apps/workspace/build/first-party.mjs` loads them. They are not a framework: an app registers itself through the shell's `FULC` global, builds its DOM with the shared `h()` helper so server text stays text, and TS/TSX is compiled per file with no bundler. An app ships only if its id is in the profile's `app_modules`, and a literal import that is not relative, or that names a dropped module, fails the build. A directory starting with `_` (`apps/workspace/apps/_lib`) is a shared library with no manifest. At HEAD the apps are:
+
+- `onboarding`: the six setup steps, with progress read from the server.
+- `pipeline`: the board of work items by stage, with the approve, cancel, retry and verify-again controls the server offers.
+- `needs-you`: the list of setup requests people must act on.
+- `runs`: the account's runs and one run's events.
+- `memory`: the memory review queue and all memory by scope.
+- `repos`: installed repositories and their auto-merge settings.
+- `runners`: the runner fleet page and the "Add a runner" sheet.
+- `roles`: per-repository role modes, models and expected spend.
+- `site-review`: a site version's review report, with attest and approve for owners and admins.
+- `model-key`: the account's model connection.
+- `vercel`: the Vercel connection screen.
+- `budget-billing`: the plan, the three monthly budgets and billing standing.
+- `developer`: API tokens, webhooks and the API reference.
+
+The build also strips comments from the shipped JS and CSS (`apps/workspace/build/strip-comments.mjs`, #118); source files on disk keep theirs, and `node build/build.mjs --keep-comments` turns it off. `apps/workspace/build/budget.mjs` holds the boot budget (a cap on static requests and on total brotli bytes at boot) that a unit test and a Playwright spec both import.
+
 ## Tests
 
 `apps/workspace/test/profile.test.mjs` unit-tests `loadProfile` and
@@ -94,7 +120,7 @@ reads `false`) if that fetch fails.
 `apps/workspace/test/checks.test.mjs`, `apps/workspace/test/import.test.mjs`,
 and `apps/workspace/test/tar.test.mjs` cover the import-time checks, the
 importer, and its tar handling. `apps/workspace/test/features-fail-closed.test.mjs`
-covers `core/features.js`'s fail-closed behavior. Run with
+covers `core/features.js`'s fail-closed behavior. Most first-party apps have a unit test under `apps/workspace/test/` (for example `pipeline-*.test.mjs`, `memory-app.test.mjs`, `needs-you.test.mjs`) and a Playwright spec under `apps/workspace/e2e/`; `developer`, `model-key` and `vercel` have Playwright specs only. Run with
 `pnpm --filter workspace test` (`vitest run`, config at
 `apps/workspace/vitest.config.mjs`). `apps/workspace/e2e/idle-network.spec.ts`
 is a Playwright spec (`apps/workspace/playwright.config.ts`), run via
