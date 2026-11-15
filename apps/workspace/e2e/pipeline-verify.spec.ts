@@ -86,6 +86,17 @@ async function mockApi(page: Page, activity: Record<string, unknown>): Promise<M
       mock.activity = activityOf("waiting");
       return send(route, 202, { action_id: "11111111-1111-4111-8111-111111111111", state: "accepted" });
     }
+    if (p === `/api/v1/work-items/${ITEM}/verify-attempts/1` && req.method() === "GET") {
+      // The older attempt: it ended unverified, one journey blocked, none answered.
+      const a = fx("getWorkItemVerifyAttempt", "200-failed.json");
+      return send(route, 200, {
+        ...a,
+        attempt: 1,
+        status: "unverified",
+        reason: "journey_blocked",
+        journeys: [{ ...a.journeys[0], id: "c1", status: "blocked", reason: "blocked", steps: [{ index: 1, label: "opened the sign-in page", result: "not_passed", reason: "blocked", note: "a sign-in form is shown" }], steps_done: 1 }],
+      });
+    }
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
     if (p === `/api/v1/work-items/${ITEM}/activity`) {
       const { verify, ...rest } = mock.activity;
@@ -184,6 +195,77 @@ test.describe("D#749 V4b: the verify section on the item card (mocked API)", () 
     await press(page, bug);
     await expect.poll(() => mock.requests.includes(`GET /api/v1/work-items/${BUG}/activity`)).toBe(true);
     await expect(tid(page, "pl-verify")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("D#749: each journey has a status chip and opens to its steps; a failed journey is open with the failing step, its note and the evidence", async ({ page }) => {
+    const { errors } = await setup(page, activityOf("failed"));
+    const rows = tid(page, "pl-verify-journey");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0).locator('[data-testid="pl-verify-journey-status"]')).toHaveText("Passed");
+    await expect(rows.nth(0).locator('[data-testid="pl-verify-journey-title"]')).toHaveText("Criterion 1");
+    await expect(rows.nth(1).locator('[data-testid="pl-verify-journey-status"]')).toHaveText("Failed");
+    await expect(rows.nth(1).locator('[data-testid="pl-verify-journey-steps"]')).toHaveText("2 steps recorded");
+    // The failed journey is open by default, the passed one is closed until the person opens it.
+    await expect(rows.nth(1).locator('[data-testid="pl-verify-step"]')).toHaveCount(2);
+    await expect(rows.nth(1).locator('[data-testid="pl-verify-step"]').nth(1)).toHaveAttribute("data-result", "failed");
+    // A step the tester only recorded is not called passed; the failing one says Failed.
+    await expect(rows.nth(1).locator('[data-testid="pl-verify-step"] .pl-verify-chip')).toHaveText(["Recorded", "Failed"]);
+    await expect(rows.nth(1).locator('[data-testid="pl-verify-step-note"]')).toContainText("Could not save");
+    await expect(rows.nth(1).locator('[data-testid="pl-verify-journey-evidence"]')).toHaveText("Page fact seen: yes. Undo checked: no. Reload checked: no.");
+    await expect(rows.nth(0).locator('[data-testid="pl-verify-step"]').first()).not.toBeVisible();
+    await press(page, rows.nth(0).locator("summary"));
+    await expect(rows.nth(0).locator('[data-testid="pl-verify-step-label"]')).toHaveText("opened the settings page");
+    await expect(tid(page, "pl-verify-attempt-times")).toContainText("Times are for the whole attempt.");
+    expect(errors).toEqual([]);
+  });
+
+  test("D#749: the attempt selector lists every attempt, and an older one is read from its own route and drawn without losing the newest", async ({ page }) => {
+    const { mock, errors } = await setup(page, activityOf("failed"));
+    const pick = tid(page, "pl-verify-attempt-select");
+    await expect(pick.locator("option")).toHaveCount(2);
+    await expect(pick).toHaveValue("2");
+    await pick.selectOption("1");
+    await expect.poll(() => mock.requests.includes(`GET /api/v1/work-items/${ITEM}/verify-attempts/1`)).toBe(true);
+    await expect(tid(page, "pl-verify-journey")).toHaveCount(1);
+    await expect(tid(page, "pl-verify-journey-status")).toHaveText("Blocked");
+    // The stopping step carries the blocked marker; the journey line speaks of the journey, not "this step", and no step reads Passed.
+    await expect(tid(page, "pl-verify-journey-reason")).toHaveText("The tester was stopped before finishing this journey.");
+    await expect(tid(page, "pl-verify-step")).toHaveAttribute("data-result", "not_passed");
+    await expect(tid(page, "pl-verify-step").locator(".pl-verify-chip")).toHaveText("Blocked here");
+    await expect(tid(page, "pl-verify-step-reason")).toContainText("The tester was stopped on this step.");
+    await expect(tid(page, "pl-verify-step-note")).toHaveText("a sign-in form is shown");
+    await expect(page.locator(`${WIN} [data-testid="pl-verify-attempt"]`)).not.toContainText("Passed");
+    await tid(page, "pl-verify-attempt-select").selectOption("2");
+    await expect(tid(page, "pl-verify-journey")).toHaveCount(2);
+    expect(errors).toEqual([]);
+  });
+
+  test("D#749: an attempt the server cannot give is said in words, and model text is shown as text, never as markup", async ({ page }) => {
+    const hostile = activityOf("failed");
+    hostile.verify.attempt_detail.journeys[1].steps[1].note = "<img src=x onerror=window.__pwned=1>";
+    const { errors } = await setup(page, hostile);
+    await page.route((u) => u.pathname === `/api/v1/work-items/${ITEM}/verify-attempts/1`, (route) => route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "not_found", message: "x", request_id: "req_1" } }) }));
+    await expect(tid(page, "pl-verify-step-note")).toContainText("<img src=x");
+    await expect(page.locator(`${WIN} img`)).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+    await tid(page, "pl-verify-attempt-select").selectOption("1");
+    await expect(tid(page, "pl-verify-attempt-error")).toHaveText("This attempt could not be read.");
+    expect(errors).toEqual([]);
+  });
+
+  test("a row the account check rejected shows its journeys as not judged, with the reason in words and no evidence facts", async ({ page }) => {
+    const { errors } = await setup(page, activityOf("unverified-wrong-account"));
+    const rows = tid(page, "pl-verify-journey");
+    await expect(rows).toHaveCount(2);
+    for (let i = 0; i < 2; i++) {
+      await expect(rows.nth(i).locator('[data-testid="pl-verify-journey-status"]')).toHaveText("Not judged");
+      await expect(rows.nth(i).locator('[data-testid="pl-verify-journey-reason"]')).toContainText("Not judged: the account check failed.");
+      await expect(rows.nth(i).locator('[data-testid="pl-verify-journey-evidence"]')).toHaveCount(0);
+    }
+    await expect(rows.nth(0).locator('[data-testid="pl-verify-step"] .pl-verify-chip')).toHaveText("Recorded");
+    await expect(tid(page, "pl-verify-attempt")).not.toContainText("Passed");
+    await expect(tid(page, "pl-verify-attempt")).not.toContainText(/_/);
     expect(errors).toEqual([]);
   });
 
@@ -303,6 +385,9 @@ test.describe("D#749 V4b: the verify section on the item card (mocked API)", () 
     expect(r.wide).toBe(0);
     const box = await tid(page, "pl-verify-bug").boundingBox();
     expect(box!.height).toBeGreaterThanOrEqual(44);
+    // D#749: the attempt selector and the journey rows are touch-sized and stay inside the card.
+    expect((await tid(page, "pl-verify-attempt-select").boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect((await tid(page, "pl-verify-journey").first().locator("summary").boundingBox())!.height).toBeGreaterThanOrEqual(44);
   });
 });
 

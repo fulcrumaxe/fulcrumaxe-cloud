@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildInsight, verifySection, VERIFY_BUG_LABEL, VERIFY_DETAIL_SENTENCES, VERIFY_HEADING, VERIFY_HOLD_SENTENCES, VERIFY_METHOD_WORDS, VERIFY_REASON_SENTENCES, VERIFY_REASON_UNKNOWN, VERIFY_STATUS_WORDS } from "../apps/pipeline/pipeline-insight.js";
+import { buildInsight, verifySection, verifyAttemptView, VERIFY_BUG_LABEL, VERIFY_DETAIL_SENTENCES, VERIFY_HEADING, VERIFY_HOLD_SENTENCES, VERIFY_METHOD_WORDS, VERIFY_REASON_SENTENCES, VERIFY_REASON_UNKNOWN, VERIFY_STATUS_WORDS, VERIFY_STEP_WORDS } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fx = (name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", "getWorkItemActivity", name), "utf8"));
@@ -183,5 +183,68 @@ describe("D#749 V4b: verify section states", () => {
 
   it("the bug item button label is plain words", () => {
     expect(VERIFY_BUG_LABEL).toBe("Open the bug item");
+  });
+});
+
+describe("D#749: the journeys and steps of an attempt", () => {
+  const detail = fx("200-verify-failed.json").verify.attempt_detail;
+
+  it("turns the server's attempt into journeys with a chip word, a title, evidence words and steps", () => {
+    const v = verifyAttemptView(detail);
+    expect(v.title).toBe("Attempt 2");
+    expect(v.times).toMatch(/^Started .+\. Finished .+\. Times are for the whole attempt\.$/);
+    expect(v.journeys.map((j) => [j.title, j.statusWord, j.stepsText])).toEqual([["Criterion 1", "Passed", "1 step recorded"], ["Criterion 2", "Failed", "2 steps recorded"]]);
+    expect(v.journeys[1].evidence).toEqual(["Page fact seen: yes", "Undo checked: no", "Reload checked: no"]);
+    expect(v.journeys[1].steps.map((s) => [s.index, s.resultWord, s.reason, s.note])).toEqual([[1, "Recorded", null, null], [2, "Failed", "A problem was found on this step.", "an error banner says: Could not save"]]);
+    expect(v.attempts.map((a) => a.label)).toEqual(["Attempt 1: Not verified: the check could not be made", "Attempt 2: Failed: the deployed app has a problem"]);
+  });
+
+  it("a step the tester only recorded is never called passed; the stopping step says so, and the journey line speaks of the journey", () => {
+    const d = structuredClone(detail);
+    d.journeys[1] = { ...d.journeys[1], status: "blocked", reason: "blocked", steps: [{ index: 1, label: "opened", result: "passed", reason: null, note: null }, { index: 2, label: "pressed Save", result: "not_passed", reason: "blocked", note: "a sign-in form is shown" }] };
+    const j = verifyAttemptView(d).journeys[1];
+    expect(j.statusWord).toBe("Blocked");
+    expect(j.reason).toBe("The tester was stopped before finishing this journey.");
+    expect(j.steps.map((s) => [s.resultWord, s.reason])).toEqual([["Recorded", null], ["Blocked here", "The tester was stopped on this step."]]);
+    expect(JSON.stringify(verifyAttemptView(d))).not.toMatch(/get past/);
+    for (const w of Object.values(VERIFY_STEP_WORDS)) expect(w).not.toBe("Passed");
+  });
+
+  it("a journey that was not judged says why in words, shows no evidence facts, and is never called passed", () => {
+    for (const [reason, text] of [["wrong_account", /^Not judged: the account check failed\./], ["account_unverifiable", /^Not judged: the account check could not confirm/]]) {
+      const d = structuredClone(detail);
+      d.journeys[0] = { ...d.journeys[0], status: "not_judged", reason };
+      const j = verifyAttemptView(d).journeys[0];
+      expect(j.statusWord).toBe("Not judged");
+      expect(j.reason).toMatch(text);
+      expect(j.evidence).toEqual([]);
+      expect(j.reason).not.toMatch(/_/);
+    }
+    const d = structuredClone(detail);
+    d.journeys[0].status = "unproven";
+    expect(verifyAttemptView(d).journeys[0].statusWord).toBe("Not proven");
+  });
+
+  it("is on the section the card draws, and absent when the server sent none", () => {
+    expect(verifySection(fx("200-verify-failed.json")).attempt.journeys).toHaveLength(2);
+    expect(verifySection(fx("200-verify-verified.json")).attempt).toBeNull();
+  });
+
+  it("cuts and cleans model text, and drops what it does not know instead of drawing a code", () => {
+    const hostile = structuredClone(detail);
+    hostile.journeys[1].steps[0].label = "a\u0007b‮c " + "x".repeat(300);
+    hostile.journeys[1].steps[1].note = "n".repeat(500);
+    hostile.journeys.push({ ...hostile.journeys[0], id: "c9", status: "mystery" });
+    hostile.journeys[0].steps[0].result = "mystery";
+    const v = verifyAttemptView(hostile);
+    expect(v.journeys).toHaveLength(2);
+    expect(v.journeys[1].steps[0].label.length).toBeLessThanOrEqual(120);
+    expect(v.journeys[1].steps[0].label).not.toMatch(/[\u0007‮]/);
+    expect(v.journeys[1].steps[1].note.length).toBe(200);
+    expect(v.journeys[0].steps).toHaveLength(0);
+  });
+
+  it("reads nothing from an answer that is not an attempt", () => {
+    for (const bad of [null, "x", {}, { attempt: 1, status: "mystery", journeys: [] }, { attempt: 1, status: "failed", journeys: "no" }]) expect(verifyAttemptView(bad)).toBeNull();
   });
 });

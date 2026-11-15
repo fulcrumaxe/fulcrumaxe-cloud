@@ -27,6 +27,39 @@
     "criteria": { "browser": [1, 2], "checks": [] },
     "bug_item_id": null,
     "pr_number": 57,
-    "at": "2026-11-10T12:00:00.000Z"
+    "at": "2026-11-10T12:00:00.000Z",
+    "attempt_detail": {
+      "attempt": 1,
+      "status": "unverified",
+      "reason": "wrong_account",
+      "method": "playwright_runner",
+      "started_at": "2026-11-10T11:58:00.000Z",
+      "finished_at": "2026-11-10T12:00:00.000Z",
+      "journeys": [
+        {
+          "id": "c1",
+          "source": "criterion",
+          "criterion": 1,
+          "status": "not_judged",
+          "reason": "wrong_account",
+          "steps_done": 1,
+          "evidence": { "page_fact": false, "undo_checked": false, "reloaded": false },
+          "console_errors": 0,
+          "steps": [{ "index": 1, "label": "opened the settings page", "result": "passed", "reason": null, "note": null }]
+        },
+        {
+          "id": "c2",
+          "source": "criterion",
+          "criterion": 2,
+          "status": "not_judged",
+          "reason": "wrong_account",
+          "steps_done": 0,
+          "evidence": { "page_fact": false, "undo_checked": false, "reloaded": false },
+          "console_errors": 0,
+          "steps": []
+        }
+      ],
+      "attempts": [{ "attempt": 1, "status": "unverified", "reason": "wrong_account", "at": "2026-11-10T12:00:00.000Z" }]
+    }
   }
 }

@@ -268,3 +268,13 @@
 .asst-card p { margin: 4px 0; }
 .asst-body { box-sizing: border-box; max-width: 100%; margin: 4px 0; padding: 6px 8px; border-left: 2px solid var(--accent, #1aff80); background: var(--bg-base, #000); color: inherit; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; unicode-bidi: isolate; }
 .asst button:disabled { opacity: 0.5; cursor: default; }
+.pl-verify-attempt { margin-top: 8px; min-width: 0; overflow-wrap: anywhere; }
+.pl-verify-attempt select { max-width: 100%; font: inherit; }
+.pl-verify-journey { margin: 6px 0; }
+.pl-verify-chip { display: inline-block; padding: 0 8px; border: 1px solid var(--accent, #1aff80); font-size: 0.78rem; white-space: nowrap; }
+.pl-verify-chip[data-status="failed"], .pl-verify-chip[data-result="failed"] { border-color: rgba(210, 120, 60, 0.8); }
+.pl-verify-chip[data-status="blocked"], .pl-verify-chip[data-status="unproven"], .pl-verify-chip[data-status="skipped"], .pl-verify-chip[data-status="not_judged"], .pl-verify-chip[data-result="not_reached"], .pl-verify-chip[data-result="not_passed"] { border-style: dashed; }
+.pl-verify-chip[data-result="not_passed"] { border-color: rgba(210, 120, 60, 0.8); }
+.pl-verify-steps { margin: 4px 0 0; padding-left: 22px; }
+.pl-verify-steps li { margin: 2px 0; }
+.pl-verify-attempt select, .pl-verify-journey > summary { min-height: 44px; }

@@ -591,6 +591,77 @@ export function verifyCriteriaLines(criteria) {
     checks: checks.length > 0 ? "Left to the code checks and reviews: " + criterionList(checks) + "." : null,
   };
 }
+/**
+ * D#749: what each attempt of the check did, journey by journey and step by step (the server's `verify.attempt_detail`, or `GET .../verify-attempts/{n}` for an older
+ * attempt). Closed words come from here; the only free text is each step's label and, on the last step of a journey that did not pass, a note. Both are model and page
+ * text: they are cut again and drawn as text only, never as markup.
+ */
+export const VERIFY_JOURNEY_WORDS = { passed: "Passed", failed: "Failed", blocked: "Blocked", unproven: "Not proven", skipped: "Not run", not_judged: "Not judged" };
+/** A step is "Recorded" when the tester wrote it down: nothing checked that step on its own, so it is not called passed. Only the stopping or failing step carries a verdict word. */
+export const VERIFY_STEP_WORDS = { passed: "Recorded", failed: "Failed", not_passed: "Blocked here", not_reached: "Not reached" };
+export const VERIFY_JOURNEY_REASON_WORDS = {
+  defect_found: "A problem was found.",
+  blocked: "The tester was stopped before finishing this journey.",
+  no_evidence: "The tester did not show a page fact, an undo and a reload, so the pass does not count.",
+  not_answered: "The tester gave no answer for this one.",
+  wrong_account: "Not judged: the account check failed. The browser was signed in as a different account than the checking account, so nothing it recorded is counted.",
+  account_unverifiable: "Not judged: the account check could not confirm which account the browser was signed in as, so nothing it recorded is counted.",
+};
+/** The same closed reasons, said about one step: only the failing and the stopping step carry one. */
+export const VERIFY_STEP_REASON_WORDS = { defect_found: "A problem was found on this step.", blocked: "The tester was stopped on this step." };
+export const VERIFY_ATTEMPT_LOADING = "Loading this attempt.";
+export const VERIFY_ATTEMPT_UNAVAILABLE = "This attempt could not be read.";
+export const VERIFY_NO_JOURNEYS = "No steps were recorded for this attempt.";
+export const VERIFY_TIMES_NOTE = "Times are for the whole attempt.";
+const STEP_LABEL_CAP = 120;
+const STEP_NOTE_CAP = 200;
+const shortText = (t, cap) => (typeof t === "string" ? t.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, " ").replace(/\s+/g, " ").trim().slice(0, cap) : "");
+const yesNo = (b) => (b === true ? "yes" : "no");
+function journeyTitle(j) {
+  const n = Number.isInteger(j.criterion) && j.criterion >= 1 && j.criterion <= 30 ? j.criterion : null;
+  if (j.source === "criterion" && n !== null) return "Criterion " + n;
+  if (j.source === "recheck" && n !== null) return "Re-check of criterion " + n;
+  if (j.source === "standing") return "Standing check " + shortText(j.id, 40);
+  return "Check " + shortText(j.id, 40);
+}
+/** One attempt for display, or null when the answer is not one this build can draw. */
+export function verifyAttemptView(d) {
+  if (!isObj(d) || !Number.isInteger(d.attempt) || typeof d.status !== "string" || !Object.hasOwn(VERIFY_STATUS_WORDS, d.status) || !Array.isArray(d.journeys)) return null;
+  const journeys = [];
+  for (const j of d.journeys.slice(0, 60)) {
+    if (!isObj(j) || typeof j.id !== "string" || typeof j.status !== "string" || !Object.hasOwn(VERIFY_JOURNEY_WORDS, j.status)) continue;
+    const ev = isObj(j.evidence) ? j.evidence : {};
+    const steps = [];
+    for (const s of (Array.isArray(j.steps) ? j.steps : []).slice(0, 20)) {
+      if (!isObj(s) || typeof s.result !== "string" || !Object.hasOwn(VERIFY_STEP_WORDS, s.result)) continue;
+      steps.push({
+        index: Number.isInteger(s.index) ? s.index : steps.length + 1,
+        label: shortText(s.label, STEP_LABEL_CAP),
+        result: s.result,
+        resultWord: VERIFY_STEP_WORDS[s.result],
+        reason: typeof s.reason === "string" && Object.hasOwn(VERIFY_STEP_REASON_WORDS, s.reason) ? VERIFY_STEP_REASON_WORDS[s.reason] : null,
+        note: shortText(s.note, STEP_NOTE_CAP) || null,
+      });
+    }
+    journeys.push({
+      id: j.id.slice(0, 40),
+      title: journeyTitle(j),
+      status: j.status,
+      statusWord: VERIFY_JOURNEY_WORDS[j.status],
+      reason: typeof j.reason === "string" && Object.hasOwn(VERIFY_JOURNEY_REASON_WORDS, j.reason) ? VERIFY_JOURNEY_REASON_WORDS[j.reason] : null,
+      stepsText: (Number.isInteger(j.steps_done) ? j.steps_done : steps.length) + (steps.length === 1 ? " step recorded" : " steps recorded"),
+      // A journey that was not judged has no evidence verdict: the three facts are not shown, so they cannot read as a result.
+      evidence: j.status === "not_judged" ? [] : ["Page fact seen: " + yesNo(ev.page_fact), "Undo checked: " + yesNo(ev.undo_checked), "Reload checked: " + yesNo(ev.reloaded)],
+      steps,
+    });
+  }
+  const times = [typeof d.started_at === "string" ? "Started " + formatWhen(d.started_at) : null, typeof d.finished_at === "string" ? "Finished " + formatWhen(d.finished_at) : null].filter((t) => t);
+  const attempts = (Array.isArray(d.attempts) ? d.attempts : [])
+    .filter((a) => isObj(a) && Number.isInteger(a.attempt) && typeof a.status === "string" && Object.hasOwn(VERIFY_STATUS_WORDS, a.status))
+    .slice(-20)
+    .map((a) => ({ n: a.attempt, label: "Attempt " + a.attempt + ": " + VERIFY_STATUS_WORDS[a.status].replace(/\.$/, "") }));
+  return { attempt: d.attempt, title: "Attempt " + d.attempt, times: times.length > 0 ? times.join(". ") + ". " + VERIFY_TIMES_NOTE : null, journeys, attempts };
+}
 const countOf = (n) => (Number.isInteger(n) && n >= 0 ? n : null);
 export function verifySection(data) {
   const v = data && data.verify;
@@ -616,6 +687,7 @@ export function verifySection(data) {
     method: !held && typeof v.method === "string" && Object.hasOwn(VERIFY_METHOD_WORDS, v.method) ? { id: v.method, label: VERIFY_METHOD_WORDS[v.method] } : null,
     criteria: verifyCriteriaLines(v.criteria),
     account: v.account === "matched" ? "Signed in as the account set for checking." : null,
+    attempt: verifyAttemptView(v.attempt_detail),
     bugItemId: v.status === "failed" && typeof v.bug_item_id === "string" && ITEM_ID.test(v.bug_item_id) ? v.bug_item_id.toLowerCase() : null,
     // The server decides (its list of actions); this only checks the status is one the button belongs to.
     again: (v.status === "failed" || v.status === "unverified") && Array.isArray(data.actions) && data.actions.includes("verify_again"),
@@ -1202,6 +1274,101 @@ export function createInsightPanel(deps) {
     load();
   }
 
+  /** An older attempt the person picked: { n, phase: "loading" | "ready" | "error", view }. Null shows the newest, which the activity read carries. */
+  let vPick = null;
+
+  async function pickAttempt(n, newest) {
+    const id = itemId;
+    if (id === null) return;
+    if (n === newest) {
+      vPick = null;
+      render();
+      return;
+    }
+    vPick = { n, phase: "loading", view: null };
+    render();
+    try {
+      const view = verifyAttemptView(await deps.call("GET", "/api/v1/work-items/" + encodeURIComponent(id) + "/verify-attempts/" + encodeURIComponent(String(n))));
+      if (itemId !== id || vPick === null || vPick.n !== n) return;
+      vPick = view === null ? { n, phase: "error", view: null } : { n, phase: "ready", view };
+    } catch {
+      // fx-swallow-ok: the card says the attempt could not be read, in its own words; the error text is not shown
+      if (itemId !== id || vPick === null || vPick.n !== n) return;
+      vPick = { n, phase: "error", view: null };
+    }
+    render();
+    const pick = el.querySelector('[data-testid="pl-verify-attempt-select"]');
+    if (pick) pick.focus({ preventScroll: true });
+  }
+
+  function journeyRow(j, attemptNo) {
+    return fold(
+      "verify-journey:" + attemptNo + ":" + j.id,
+      j.status === "failed" || j.status === "blocked" || j.status === "not_judged",
+      { class: "pl-verify-journey", "data-testid": "pl-verify-journey", "data-journey": j.id, "data-status": j.status },
+      [
+        h("span", { class: "pl-verify-chip", "data-testid": "pl-verify-journey-status", "data-status": j.status }, j.statusWord),
+        " ",
+        h("span", { "data-testid": "pl-verify-journey-title" }, j.title),
+        " ",
+        h("span", { class: "pl-muted", "data-testid": "pl-verify-journey-steps" }, j.stepsText),
+      ],
+      j.reason ? h("p", { "data-testid": "pl-verify-journey-reason" }, j.reason) : null,
+      j.evidence.length > 0 ? h("p", { class: "pl-muted", "data-testid": "pl-verify-journey-evidence" }, j.evidence.join(". ") + ".") : null,
+      j.steps.length > 0
+        ? h(
+            "ol",
+            { class: "pl-verify-steps", "data-testid": "pl-verify-steps" },
+            j.steps.map((s) =>
+              h(
+                "li",
+                { "data-testid": "pl-verify-step", "data-result": s.result },
+                h("span", { class: "pl-verify-chip", "data-result": s.result }, s.resultWord),
+                " ",
+                h("span", { "data-testid": "pl-verify-step-label" }, s.label),
+                s.reason ? h("span", { class: "pl-muted", "data-testid": "pl-verify-step-reason" }, " " + s.reason) : null,
+                s.note ? h("span", { class: "pl-muted", "data-testid": "pl-verify-step-note" }, " " + s.note) : null
+              )
+            )
+          )
+        : h("p", { class: "pl-muted", "data-testid": "pl-verify-no-steps" }, VERIFY_NO_JOURNEYS)
+    );
+  }
+
+  function attemptBlock(newestView) {
+    if (!newestView) return null;
+    if (vPick !== null && vPick.n === newestView.attempt) vPick = null;
+    const shown = vPick !== null && vPick.phase === "ready" ? vPick.view : newestView;
+    const options = newestView.attempts;
+    return h(
+      "div",
+      { class: "pl-verify-attempt", "data-testid": "pl-verify-attempt", "data-attempt": String(vPick !== null ? vPick.n : newestView.attempt) },
+      options.length > 1
+        ? h(
+            "label",
+            { class: "pl-muted" },
+            "Attempt ",
+            h(
+              "select",
+              {
+                "data-testid": "pl-verify-attempt-select",
+                onChange: (e) => pickAttempt(Number(e.target.value), newestView.attempt),
+              },
+              options.map((o) => h("option", { value: String(o.n), selected: o.n === (vPick !== null ? vPick.n : newestView.attempt) ? true : null }, o.label))
+            )
+          )
+        : null,
+      vPick !== null && vPick.phase === "loading" ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-verify-attempt-loading" }, VERIFY_ATTEMPT_LOADING) : null,
+      vPick !== null && vPick.phase === "error" ? h("p", { role: "status", "data-testid": "pl-verify-attempt-error" }, VERIFY_ATTEMPT_UNAVAILABLE) : null,
+      vPick === null || vPick.phase === "ready"
+        ? [
+            shown.times ? h("p", { class: "pl-muted", "data-testid": "pl-verify-attempt-times" }, shown.times) : null,
+            shown.journeys.length > 0 ? h("div", { "data-testid": "pl-verify-journeys" }, shown.journeys.map((j) => journeyRow(j, shown.attempt))) : null,
+          ]
+        : null
+    );
+  }
+
   function verifyBlock(v) {
     return h(
       "section",
@@ -1215,6 +1382,7 @@ export function createInsightPanel(deps) {
       v.criteria && v.criteria.browser ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-browser" }, v.criteria.browser) : null,
       v.criteria && v.criteria.checks ? h("p", { class: "pl-muted", "data-testid": "pl-verify-criteria-checks" }, v.criteria.checks) : null,
       v.account ? h("p", { class: "pl-muted", "data-testid": "pl-verify-account" }, v.account) : null,
+      attemptBlock(v.attempt),
       v.bugItemId && deps.onOpenItem ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-verify-bug", onClick: () => deps.onOpenItem(v.bugItemId) }, VERIFY_BUG_LABEL) : null,
       v.again
         ? [
@@ -1543,6 +1711,7 @@ export function createInsightPanel(deps) {
       notes.clear();
       busy.clear();
       vAgain = { phase: "idle", text: "" };
+      vPick = null;
       signature = "";
       state = { status: "loading", data: null, stale: false };
       render();
