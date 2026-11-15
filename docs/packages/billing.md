@@ -18,6 +18,13 @@ Sources:
 - `packages/billing/src/returnUrl.ts`
 - `packages/billing/src/stripeClient.ts`
 - `packages/billing/src/webhook.ts`
+- `packages/billing/src/subscriptionSync.ts`
+- `packages/billing/src/priceMap.ts`
+- `packages/billing/src/accountSettings.ts`
+- `packages/billing/src/statusReasons.ts`
+- `packages/billing/src/sitekit/webhook.ts`
+- `packages/billing/src/sitekit/checkout.ts`
+- `packages/billing/src/sitekit/entitlements.ts`
 - `packages/billing/test/publicSurface.test.ts`
 - `packages/db/migrations/0001_core.sql`
 - `packages/db/migrations/0606_derived_account_status.sql`
@@ -57,6 +64,11 @@ several internal functions are *not* on this list.
 - `returnUrl.ts`: `buildValidatedReturnUrl(path, appOrigin)`
 - `env.ts`: `requireEnv(name)`, `stripeSecretKeyFromEnv()`, `stripeWebhookSecretFromEnv()`, `appOriginFromEnv()`, `stripePriceIdFromEnv(plan)`
 - `pg.ts`: `createPool(connectionString)`, `withPlatformOps(pool, fn)`
+- `accountSettings.ts`: `AccountSettingResult`, `SetAccountBudgetsInput`, `setAccountBudgets(ctx, input)`, `SetSharePublicFiguresInput`, `setSharePublicFigures(ctx, input)`
+- `statusReasons.ts` also exports `AccountBillingBoundaries`; `env.ts` also exports `assertStripePriceIdsConfigured`, `assertSitekitPriceIdsConfigured`, `stripeKeyIsLive`, `stripeReconcileKeyFromEnv`, `stripeSitekitPriceIdFromEnv`, `sitekitBundleCouponFromEnv`
+- `priceMap.ts`: the `PriceMap` type; `subscriptionSync.ts`: `NO_REFUNDS_POLICY_VERSION`; and `listPlans`/`Plan`, re-exported read-only from `@fx/spend`
+- `sitekit/`: `isSetupPaid`, `isSyncEntitled`, `createSitekitCheckout`, `cancelSitekitSync`, `readSitekitBilling`, `SITEKIT_EXPECTED_SPEND`, `listSites`, `checkNoPaymentLinks`, `SITEKIT_PLANS`, `SITEKIT_PRICES_PROVISIONAL`
+- `package.json` also exposes the subpath `@fx/billing/subscriptionSync`
 
 Deliberately **not** re-exported from `index.ts`, even though each is a
 real, importable export of its own file: `accountLifecycle.ts`'s
@@ -99,17 +111,34 @@ own holder; the trigger computes `status` and rejects (Postgres error
 code `42501`) any write that names `status` explicitly with a value that
 disagrees with that computation.
 
-**Webhook.** `webhook.ts`'s `handleStripeWebhookRequest` verifies the
-Stripe signature before touching the database at all, ignores (with a
-`200`) any event type outside its three handled ones, resolves the target
-account (from `client_reference_id` for checkout completion, or from the
-Stripe customer id for invoice events), and -- inside one `platform_ops`
-transaction -- takes a transaction-scoped advisory lock keyed on the
-Stripe event id, checks whether that event id is already present in
-`stripe_webhook_events`, and if not, applies the event and inserts a row
-recording it as processed. A `customer.subscription.deleted` event is
-still explicitly acknowledged (`200`, `handled: false`) and left
-unhandled by `applyEvent`.
+**Webhook.** `webhook.ts`'s `handleStripeWebhookRequest` refuses an empty
+webhook secret (`500`) and a missing signature header (`400`), and verifies
+the Stripe signature before touching the database at all (`400
+invalid_signature`; the SDK's error is never forwarded). A site-kit event is
+recorded first by its own handler (see Site-kit billing below); every other
+event goes to `syncSubscriptionEvent` (`packages/billing/src/subscriptionSync.ts`).
+That sync handles five event types (`checkout.session.completed`,
+`invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`,
+`customer.subscription.deleted`) and acknowledges any other with `200`. The
+event body is only a trigger: it answers `200` and does nothing for an event
+whose `livemode` differs from the configured key's. Otherwise it fetches the
+subscription from Stripe (one `retrieve` per event, outside any database
+transaction; `503 stripe_unavailable` on failure) and takes the account
+(from `client_reference_id` for a paid checkout session, whose customer must
+match the fetched subscription's, or from the fetched subscription's customer
+id), the plan and the standing from that fetched subscription, never from
+the event payload. The plan comes from the subscription's price id through a
+price map built from the `STRIPE_PRICE_ID_*` settings
+(`packages/billing/src/priceMap.ts`); a price id listed under two plans is a
+configuration error that answers `500 price_map_invalid`, and an unlisted
+price is logged as `billing_unknown_price`. The write runs in one
+`platform_ops` transaction that takes a transaction-scoped advisory lock keyed
+on the Stripe event id, checks `stripe_webhook_events`, applies the
+subscription, and only then records the event as processed, so a refusal or a
+stale fetch leaves the event free to be retried. After the commit, when the
+write moved the account's subscription to active or trialing from another
+state, the optional `onSubscriptionActivated` hook is called once; a replayed
+event never calls it and a throw from it never fails the webhook.
 
 **Idempotency.** The Stripe-event dedupe ledger is `stripe_webhook_events`
 (`packages/db/migrations/0606_derived_account_status.sql`), a dedicated
@@ -205,6 +234,14 @@ every Stripe SDK error is converted to before it can reach a caller --
 Stripe's own thrown errors can embed request details that must never
 surface in a response.
 
+**Status reasons and dates.** `accountStatusReasons` (`packages/billing/src/statusReasons.ts`) turns the account's marker columns into the sentences and actions the Budget & Billing screen shows. The grace period (7 days after the first failed payment) and the retention period (30 days after the subscription ended, or after grace ran out) are counted in the database's own calendar days: `readAccountBillingSummary` reads the boundary dates and the grace-expired test from the same query as the facts (`AccountBillingBoundaries`), and without them the function counts UTC calendar days.
+
+**Account settings.** `setAccountBudgets` sets the account's monthly model budget in USD, and `setSharePublicFigures` the public-figures sharing switch (`packages/billing/src/accountSettings.ts`). Each runs in one `platform_ops` transaction: authorize the caller, read the current value under a row lock, write, then record an audit row through `audit_write_account_action`, which takes the write back with it if it fails. Only the model budget is settable; the compute budgets come from the plan.
+
+**Closing an account** also revokes the wake allow records of the account's runners after the commit (`revokeRunnerWake` from `@fx/core`), so the runner wake check, which answers from the cache and never the database, stops answering for a closed account.
+
+**Site-kit billing** (`packages/billing/src/sitekit/`). Two site-kit products are sold per site: `setup` (a one-time Checkout payment) and `sync` (a subscription); the amounts live in Stripe prices named by `STRIPE_PRICE_ID_SITEKIT_*`. A Checkout Session is created only on our server for one site of the caller's own account, and its id is stored before the URL is returned, because the webhook finds the site through that row, never through metadata. `handleSitekitEvent` records a site-kit event (a completed session in `sitekit_checkout_sessions`, or a subscription or invoice event whose fetched subscription sells a site-kit price) and never writes `accounts`, so a site-kit-only account does not look active for the hosted product. `isSetupPaid` and `isSyncEntitled` (`sitekit/entitlements.ts`) are the only two payment reads that publish and sync make. While `SITEKIT_PRICES_PROVISIONAL` is true, creating a session with a live Stripe key is refused.
+
 ## Tests
 
 `packages/billing/test/` covers the account-status state machine,
@@ -216,6 +253,6 @@ cluster the same way the other database-backed packages in this run do.
 
 ## Known gaps
 
-- `webhook.ts` leaves `customer.subscription.deleted` unhandled (see "How
-  it works"); this is a real product gap in the schema/state machine, not
-  an oversight in the webhook code itself.
+- The site-kit prices are provisional (`SITEKIT_PRICES_PROVISIONAL` in
+  `packages/billing/src/sitekit/plans.ts` is `true`), so a site-kit Checkout
+  Session is refused with a live Stripe key.

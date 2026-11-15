@@ -5,6 +5,8 @@
 Sources:
 - `packages/roles/src/`
 - `packages/roles/cards/`
+- `packages/roles/cards-product/`
+- `packages/roles/scripts/generate-card-map.mjs`
 - `packages/roles/test/`
 - `packages/roles/package.json`
 
@@ -29,6 +31,10 @@ Sources:
 **`decision_request`.** An envelope field beside `next_role_request`: `{ type, options, proposed, rationale }` or `null`, checked by `isDecisionRequestField()` (`src/decision-request.ts`). A role supplies the facts of a decision and never its class, so a `class` key is refused by name. The orchestrator resolves the request against the decision policy; this package holds none. A card names the decision types it may raise with a `decision_types: [...]` frontmatter line, which a static guard reads and which never reaches the role.
 
 **`decisions_taken`.** The companion field (D#7 DP4b-2): `[{ type, options, chosen, rationale }]` or `null`, checked by `isDecisionsTakenField()`. It reports decisions a role took itself, where `decision_request` reports a stop to ask. Same shape rules and the same refusal of a `class` key; `chosen` replaces `proposed`, the rationale is at most 1 KiB, and more than 50 entries is refused whole. `type` is the per-run key the orchestrator offered, never a catalogue id.
+
+**Which card a run reads** (`packages/roles/src/cards.ts`, entry `@fx/roles/cards`). The cards are compiled into JSON maps, because a deployed function cannot read them from disk: `cardMap.json` from `cards/*.md` and `productCardMap.json` from `cards-product/*.md`, both built by `packages/roles/scripts/generate-card-map.mjs` (a test fails when a map is stale). `loadRoleCard` serves the dev-team card for a role in the manifest. A product run never uses those: `loadProductCard` reads only `cards-product/`, with no fallback to the dev-team card, and a role with no product card gives `undefined`, so the run is refused. On a run that executes on the person's own machine, `loadProductCard` reads the `executor.runner` card for `executor` (`RUNNER_CARD_VARIANTS`); every other role has one card whatever the runtime. Three roles are run by the platform itself and are not in the manifest: `proposal-verifier`, `discovery-analyst` and `deploy-verifier`. `loadPlatformCard` serves only those names, from the product map.
+
+**Per-role tool sets** (`packages/roles/src/toolsets.ts`, entry `@fx/roles/toolsets`). `toolsetFor(role)` is the one per-role tool list; it denies by default, so an unknown role throws. Every role gets read, search, `Bash`, `gh`, `git` and `fx test`; write tools unless the role is read-only (`READ_ONLY_ROLES`); the browser tool namespace for roles with `needsBrowser`; and web fetch and search for `researcher` only. `Agent` and `next_role_request` are never granted.
 
 ## Data it touches
 
