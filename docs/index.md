@@ -6,14 +6,20 @@ to start.
 Sources:
 - `apps/`
 - `packages/`
+- `apps/workspace/apps/`
+- `docs/agents/builder-guide.md`
+- `docs/stats/README.md`
+- `AGENTS.md`
 
 ## Overview
 
-- [README](../README.md) — repo layout, getting set up, commands, the database migration scheme, and CI.
+- [README](../README.md) — the pipeline from proposal to browser check in one page, repo layout, getting set up, commands, the database migration scheme, and CI.
 - [Architecture](architecture.md) — the two repository planes, workspace project dependency graph, how a request moves from browser to Postgres, the pipeline (merge gate, merge queue, the cloud's own `fx-gate1`, where an agent runs, verdict envelopes) and the assistant.
-- [Status](status.md) — what the pipeline does today, what is built but off until configured, and every workspace project with its test evidence.
+- [Status](status.md) — what the pipeline does today (including the post-merge browser check), what is built but off until configured, and every workspace project with its test evidence.
 - [Testing](testing.md) — what `scripts/check.sh` runs, how CI scopes a pull request, the repository-wide guard tests, e2e projects, and how test fakes stay as strict as the real services.
 - [Decisions](decisions.md) — a log of specific technical decisions, why they were made, and where they still hold at HEAD.
+- [Builder guide](agents/builder-guide.md) — the working checklist for anyone, human or agent, changing this repo: the check, the guard tests, migrations, database tests, fakes, UI work and the pull request. The root `AGENTS.md` points to it.
+- [Stats and KPIs](stats/README.md) — the work-item stage model, the KPI views and the `@fx/stats` formula registry.
 
 ## Packages
 
@@ -21,7 +27,7 @@ Sources:
 - [`@fx/core`](packages/core.md) — tenancy and auth: sessions, sign-in, invitations, membership, role authorization.
 - [`@fx/spend`](packages/spend.md) — reservation, metering and caps across three independent budgets.
 - [`@fx/billing`](packages/billing.md) — Stripe test-mode billing.
-- [`@fx/partners`](packages/partners.md) — partner layer (scaffold).
+- [`@fx/partners`](packages/partners.md) — partner layer.
 - [`@fx/decisions`](packages/decisions.md) — decision-type catalogue, presets, and the pure `decide()` resolver.
 - [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam.
 - [`@fx/runtime`](packages/runtime.md) — model/runtime adapters.
@@ -39,7 +45,7 @@ Sources:
 ## Apps
 
 - [`apps/web`](apps/web.md) — the Next.js App Router console.
-- [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile.
+- [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile; its first-party apps are under `apps/workspace/apps/`.
 - [`apps/live-e2e`](apps/live-e2e.md) — live end-to-end packs: manifest, selection, targets and the `plan` command.
 
 ## Cross-cutting
