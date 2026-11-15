@@ -87,8 +87,23 @@ async function startAndResume(workdir: string | undefined = WORKDIR, excludes?: 
   return log;
 }
 
+/**
+ * The runner stamps the run's start time into the run-limits file it writes. Two runs that straddle a millisecond
+ * tick differ in that one number, which is not the workspace changing the output (the contract's differential check
+ * then fails about once in several hundred runs). Only the clock is held still; timers stay real.
+ */
+const FROZEN_NOW = new Date("2026-01-01T00:00:00.000Z");
+async function withFrozenClock<T>(fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ["Date"], now: FROZEN_NOW });
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 const produceClaudeCode: Produce = async () => {
-  const log = await startAndResume();
+  const log = await withFrozenClock(() => startAndResume());
   const agents = log.filter((o) => o.op === "agent").map((o) => o.params as { args: string[]; env: Record<string, string> });
   return {
     workdir: WORKDIR,
