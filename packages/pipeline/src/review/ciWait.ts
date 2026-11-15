@@ -194,7 +194,10 @@ export function createCiGate(deps: {
         // instead of after it: with no `ci:full` label the attester adds it at once; with the label on it can only wait or fail early. Once `fx-gate1` exists on the
         // head (ours or someone else's) the attester is not called again: a failure post is terminal and a foreign status is never overwritten. A pending reading keeps
         // its own reasons plus the Gate 1 one; after a post GitHub is read again.
-        if ((onlyGate1Missing(reading, snapshot) || (reading.state === "pending" && missingRequired(snapshot).includes(GATE1_CONTEXT))) && !publicPr.managedByPerson && publicPr.stampedHead === live) {
+        // "Still missing" is read from the head's own statuses, not from the required list: the wait's port does not read repository rulesets (where `fx-gate1` is
+        // required), so its required list can be empty in production.
+        const gate1Absent = !(snapshot.statuses ?? []).some((s) => s.context === GATE1_CONTEXT);
+        if ((onlyGate1Missing(reading, snapshot) || (reading.state === "pending" && gate1Absent && deps.gate1 !== undefined && deps.gate1.repos.size > 0)) && !publicPr.managedByPerson && publicPr.stampedHead === live) {
           const gate1 = deps.gate1;
           if (gate1 === undefined || gate1.repos.size === 0) {
             reading = { ...reading, state: "pending", reasons: [...reading.reasons, "gate1_attest_off"] };
