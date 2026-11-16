@@ -807,9 +807,9 @@ test("the classifier asks for scripts/ci to be linted exactly when a standalone 
     vcs("commit", "-q", "-m", "c");
     const head = vcs("rev-parse", "HEAD").stdout.trim();
     writeFileSync(envFile, "");
-    // the scratch workspace has one package, so the real extra edges (which name real packages) are dropped
+    // the scratch workspace has one package, so the real extra edges and repo-wide scans (which name real packages) are dropped
     const triggers = path.join(dir, "..", `d507c-triggers-${process.pid}.json`);
-    writeFileSync(triggers, JSON.stringify({ ...JSON.parse(readFileSync(path.join(here, "full-run-triggers.json"), "utf8")), extra_edges: [] }));
+    writeFileSync(triggers, JSON.stringify({ ...JSON.parse(readFileSync(path.join(here, "full-run-triggers.json"), "utf8")), extra_edges: [], repo_wide_scans: [] }));
     const r = spawnSync(process.execPath, [path.join(here, "affected.mjs"), "--repo", dir, "--base", base, "--head", head, "--triggers", triggers, "--github"], {
       encoding: "utf8",
       env: { ...process.env, GITHUB_ENV: envFile },

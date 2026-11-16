@@ -75,8 +75,30 @@ function expectedSet(x, edges) {
 }
 
 const DECLARED = declaredEdges();
-const WITH_EXTRA = new Map([...DECLARED].map(([k, v]) => [k, new Set(v)]));
-for (const e of rules.extra_edges) WITH_EXTRA.get(e.from).add(e.to);
+// The walk follows declared edges and the extra edges of kind "src". Edges of kind "test" are not walked.
+const WITH_SRC = new Map([...DECLARED].map(([k, v]) => [k, new Set(v)]));
+for (const e of rules.extra_edges) if (e.kind === "src") WITH_SRC.get(e.from).add(e.to);
+const TEST_EDGES = rules.extra_edges.filter((e) => e.kind === "test");
+
+/**
+ * The independent answer for a change to `files` inside package `x`: x and its dependents over declared and "src"
+ * edges; then each "test" edge whose `to` is in that set adds its `from` (once, no dependents of it); then each
+ * repo-wide scan whose watch globs match a changed file.
+ */
+function expectedAffected(x, files) {
+  const walked = expectedSet(x, WITH_SRC);
+  const out = new Set(walked);
+  for (const e of TEST_EDGES) if (walked.includes(e.to)) out.add(e.from);
+  for (const p of scanPackages(files)) out.add(p);
+  return [...out].sort();
+}
+
+/** The packages whose repo-wide scan watches one of `files`. */
+function scanPackages(files) {
+  return (rules.repo_wide_scans ?? [])
+    .filter((s) => files.some((f) => s.watch.some((g) => globToRegExp(g).test(f))))
+    .map((s) => s.package);
+}
 
 let fx; // { dir, base }
 let aux; // scratch files that must stay out of the fixture repository
@@ -248,9 +270,10 @@ test("leaf test: a change to one package selects it and exactly its dependents (
   assert.equal(r.mode, "affected");
   const expected = expectedSet("packages/env-spec", DECLARED);
   assert.ok(expected.length > 1, "the fixture must have dependents, or the test proves nothing");
-  assert.deepEqual(r.packages, expected);
-  // The extra edges add nothing for this package, so the declared walk is the whole answer.
-  assert.deepEqual(expectedSet("packages/env-spec", WITH_EXTRA), expected);
+  // The extra edges add nothing for this package, so the declared walk is the whole answer, plus the scan
+  // that watches every package's src.
+  assert.deepEqual(expectedSet("packages/env-spec", WITH_SRC), expected);
+  assert.deepEqual(r.packages, expectedAffected("packages/env-spec", ["packages/env-spec/src/new.ts"]));
 });
 
 test("pnpm's own selection agrees with the independent walk", (t) => {
@@ -270,7 +293,7 @@ test("every workspace package: the answer is its declared dependents plus the li
     if (rules.triggers.some((t) => globToRegExp(t.glob).test(`${x}/src/probe.ts`))) continue; // a full run, covered below
     const r = change({ [`${x}/src/probe.ts`]: "export {};\n" });
     assert.equal(r.mode, "affected", x);
-    assert.deepEqual(r.packages, expectedSet(x, WITH_EXTRA), x);
+    assert.deepEqual(r.packages, expectedAffected(x, [`${x}/src/probe.ts`]), x);
     for (const d of expectedSet(x, DECLARED)) assert.ok(r.packages.includes(d), `${x}: declared dependent ${d} is missing`);
     checked += 1;
   }
@@ -282,7 +305,7 @@ test("with the undeclared imports switched off, the Spec's example is exactly th
   writeFileSync(off, JSON.stringify({ ...rules, active_edge_kinds: [] }));
   const r = change({ "packages/sitekit-claims/src/new.ts": "export {};\n" }, { triggerFile: off });
   assert.equal(r.mode, "affected");
-  assert.deepEqual(r.packages, expectedSet("packages/sitekit-claims", DECLARED));
+  assert.deepEqual(r.packages, [...new Set([...expectedSet("packages/sitekit-claims", DECLARED), ...scanPackages(["packages/sitekit-claims/src/new.ts"])])].sort());
   // ... and with them on, packages that import it by relative path are included.
   const on = change({ "packages/sitekit-claims/src/new.ts": "export {};\n" });
   assert.ok(on.packages.includes("packages/sitekit-publish-gates"));
@@ -301,6 +324,320 @@ test("dependent test: a mid-graph package's dependents include apps/web", () => 
   assert.equal(r.mode, "affected");
   assert.ok(r.packages.includes("apps/web"));
   assert.ok(r.packages.includes("packages/billing"));
+});
+
+test("test edges are not walked: db's tests import packages/api, so an api change selects db but not db's own dependents", () => {
+  const edge = TEST_EDGES.find((e) => e.from === "packages/db" && e.to === "packages/api");
+  assert.ok(edge, "the fixture edge db -> api must exist");
+  const r = change({ "packages/api/src/new.ts": "export {};\n" });
+  assert.equal(r.mode, "affected");
+  assert.ok(r.packages.includes("packages/db"), "the test edge still selects its `from`");
+  const expected = expectedAffected("packages/api", ["packages/api/src/new.ts"]);
+  assert.deepEqual(r.packages, expected);
+  const only = expectedSet("packages/db", WITH_SRC).filter((d) => !expected.includes(d));
+  assert.ok(only.length > 0, "the fixture must have a dependent of db that nothing else reaches, or the test proves nothing");
+  for (const d of only) assert.ok(!r.packages.includes(d), `${d} was pulled in through a test edge`);
+});
+
+test("test edges do not chain: spend -> runner and runner -> github are both test edges, and a github change stops at runner", () => {
+  assert.ok(TEST_EDGES.some((e) => e.from === "packages/spend" && e.to === "packages/runner"));
+  assert.ok(TEST_EDGES.some((e) => e.from === "packages/runner" && e.to === "packages/github"));
+  assert.ok(!expectedSet("packages/github", WITH_SRC).includes("packages/spend"), "the fixture must not reach spend some other way");
+  const r = change({ "packages/github/src/new.ts": "export {};\n" });
+  assert.ok(r.packages.includes("packages/runner"));
+  assert.ok(!r.packages.includes("packages/spend"));
+});
+
+test("repo-wide scan: a source change in any package selects packages/telemetry, a test-only change does not", () => {
+  assert.ok(!expectedSet("packages/env-spec", WITH_SRC).includes("packages/telemetry"), "the fixture must not reach telemetry by an edge");
+  const src = change({ "packages/env-spec/src/new.ts": "export {};\n" });
+  assert.ok(src.packages.includes("packages/telemetry"));
+  const web = change({ "apps/web/app/new.ts": "export {};\n" });
+  assert.equal(web.mode, "affected");
+  assert.ok(web.packages.includes("packages/telemetry"), "apps/web is one of the scanned roots");
+  const onlyTests = change({ "packages/env-spec/test/new.test.ts": "export {};\n" });
+  assert.equal(onlyTests.mode, "affected");
+  assert.ok(!onlyTests.packages.includes("packages/telemetry"));
+  assert.deepEqual(onlyTests.packages, expectedAffected("packages/env-spec", ["packages/env-spec/test/new.test.ts"]));
+});
+
+test("repo-wide scan: a malformed list, or a package that does not exist, is a full run naming the problem", () => {
+  const bad = path.join(aux, "bad-scans.json");
+  const good = { package: "packages/telemetry", watch: ["packages/*/src/**"], reason: "x" };
+  for (const [name, scans] of [
+    ["no watch", [{ package: good.package, reason: "x" }]],
+    ["empty watch", [{ ...good, watch: [] }]],
+    ["no reason", [{ package: good.package, watch: good.watch }]],
+    ["not a list", { ...good }],
+  ]) {
+    writeFileSync(bad, JSON.stringify({ ...rules, repo_wide_scans: scans }));
+    const r = change({ "packages/env-spec/src/a.ts": "x" }, { triggerFile: bad });
+    assert.equal(r.mode, "full", name);
+    assert.match(r.reason, /repo_wide_scans must be a list/, name);
+  }
+  writeFileSync(bad, JSON.stringify({ ...rules, repo_wide_scans: [{ ...good, package: "packages/nope" }] }));
+  const missing = change({ "packages/env-spec/src/a.ts": "x" }, { triggerFile: bad });
+  assert.equal(missing.mode, "full");
+  assert.match(missing.reason, /repo_wide_scans names a directory that is not a workspace package/);
+  // An absent list is the same as an empty one.
+  const without = { ...rules };
+  delete without.repo_wide_scans;
+  writeFileSync(bad, JSON.stringify(without));
+  const none = change({ "packages/env-spec/src/a.ts": "x" }, { triggerFile: bad });
+  assert.ok(!none.packages.includes("packages/telemetry"));
+});
+
+test("every repo-wide scan names a workspace package, a reason and at least one glob", () => {
+  for (const s of rules.repo_wide_scans) {
+    assert.ok(WORKSPACE.has(s.package), s.package);
+    assert.ok(s.reason.length > 0);
+    assert.ok(s.watch.length > 0);
+  }
+});
+
+// ---- the reach scanner: a test that reads another package must be covered by a rule ---------------------
+const SCAN_EXT = /\.(ts|tsx|mts|cts|js|mjs|cjs)$/;
+const SCAN_SKIP = new Set(["node_modules", "dist", ".next", "coverage", "fixtures", "lint-fixtures", ".turbo"]);
+const TEST_SUPPORT = /(^|\/)(test|tests|e2e|__tests__)\/|\.(test|spec)\.[a-z]+$|(^|\/)(setup|globalSetup)[^/]*\.[a-z]+$/;
+
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1");
+}
+
+function walkFiles(dir, rel = "", out = []) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (e.isDirectory()) {
+      if (!SCAN_SKIP.has(e.name)) walkFiles(path.join(dir, e.name), `${rel}${e.name}/`, out);
+    } else if (SCAN_EXT.test(e.name)) out.push(`${rel}${e.name}`);
+  }
+  return out;
+}
+
+/** The workspace package (directory) that owns a repo-relative path, longest match first. */
+function ownerOf(repoRel) {
+  return [...WORKSPACE.keys()].sort((a, b) => b.length - a.length).find((d) => repoRel === d || repoRel.startsWith(`${d}/`)) ?? null;
+}
+
+/**
+ * Every other workspace directory that one test-side file reaches: a string literal that climbs out of the
+ * package ("../../github/src/x.js", whether imported or read), a literal that names "packages/<x>" or
+ * "apps/<x>" from the repository root, or the same split into path.join segments ("packages", "<x>").
+ * Returns Map<target dir, first repo-relative path reached>.
+ */
+function reachesOf(pkgDir, relFile, text) {
+  const reached = new Map();
+  const note = (repoRel) => {
+    const owner = ownerOf(path.posix.normalize(repoRel));
+    if (owner && owner !== pkgDir && !reached.has(owner)) reached.set(owner, path.posix.normalize(repoRel));
+  };
+  const body = stripComments(text);
+  const literals = [...body.matchAll(/(["'`])((?:\\.|(?!\1)[^\\\n])*)\1/g)].map((m) => m[2]);
+  const fileDir = path.posix.dirname(`${pkgDir}/${relFile}`);
+  for (const lit of literals) {
+    if (lit.startsWith("../")) note(path.posix.join(fileDir, lit));
+    for (const m of lit.matchAll(/(?:^|[\\/.])(packages|apps)\/([A-Za-z0-9_.-]+)(?:\/([^\s"'`$]*))?/g)) note(`${m[1]}/${m[2]}/${m[3] ?? ""}`);
+  }
+  for (const m of body.matchAll(/["'`](packages|apps)["'`]\s*,\s*["'`]([A-Za-z0-9_.-]+)["'`]((?:\s*,\s*["'`][^"'`,]+["'`])*)/g)) {
+    const rest = [...m[3].matchAll(/["'`]([^"'`,]+)["'`]/g)].map((x) => x[1]);
+    note([m[1], m[2], ...rest].join("/"));
+  }
+  return reached;
+}
+
+/** Whether a rule makes a change to `target` select `pkg`: a declared or src walk, a test edge, or a scan. */
+function reachCovered(pkg, target, repoRelReached) {
+  // a change to the reached file is a full run on its own
+  const probes = [repoRelReached, `${repoRelReached.replace(/\/$/, "")}/x`];
+  if (rules.triggers.some((t) => probes.some((f) => globToRegExp(t.glob).test(f)))) return true;
+  if (expectedSet(target, WITH_SRC).includes(pkg)) return true; // pkg depends on target, directly or not
+  if (TEST_EDGES.some((e) => e.from === pkg && e.to === target)) return true;
+  return (rules.repo_wide_scans ?? []).some(
+    (s) => s.package === pkg && s.watch.some((g) => globToRegExp(g).test(repoRelReached) || globToRegExp(g).test(`${repoRelReached.replace(/\/$/, "")}/x`)),
+  );
+}
+
+/** Reaches that are only a name in a string (an assertion, a message, an expected path), never opened. */
+const NAME_ONLY = "the other package's path is only a name in a string (a fixture path, an expected value or a comment); no file of it is opened";
+const TEMP_TREE = "the path is written into a temporary directory the test builds, never read from the checkout";
+const REACH_MENTION_ONLY = new Map(
+  [
+    [NAME_ONLY, [
+      "apps/live-e2e/test/routing.test.ts -> apps/web",
+      "apps/live-e2e/test/routing.test.ts -> packages/billing",
+      "apps/workspace/e2e/runs-check.spec.ts -> apps/ops",
+      "apps/workspace/test/pipeline-notice-failed-files.test.mjs -> apps/ops",
+      "apps/workspace/test/pipeline-notice-failed-files.test.mjs -> packages/api-client",
+      "apps/workspace/test/runs-check.test.mjs -> apps/ops",
+      "packages/fx-runner/test/daemon/checkStep.test.ts -> apps/ops",
+      "packages/fx-runner/test/daemon/checkStepFailedFileNames.test.ts -> packages/worker",
+      "packages/fx-runner/test/daemon/derivedFiles.test.ts -> packages/api-client",
+      "packages/fx-runner/test/daemon/derivedPinRepro.test.ts -> packages/api",
+      "packages/fx-runner/test/daemon/derivedPinRepro.test.ts -> packages/api-client",
+      "packages/fx-runner/test/lockfileCheck.test.ts -> apps/gh-proxy",
+      "packages/runner-protocol/test/doneCheck.test.ts -> apps/ops",
+      "packages/test-guard/test/workspace-coverage.test.ts -> packages/doc-templates",
+    ]],
+    [TEMP_TREE, [
+      "packages/fx-runner/test/checkOfflinePnpm.real.test.ts -> apps/web",
+      "packages/fx-runner/test/daemon/checkStep.test.ts -> packages/worker",
+      "packages/fx-runner/test/daemon/gitPath.test.ts -> apps/web",
+      "packages/fx-runner/test/daemon/gitPathA.test.ts -> apps/web",
+      "packages/fx-runner/test/daemon/importScope.test.ts -> packages/worker",
+      "packages/fx-runner/test/daemon/lockfileSync.test.ts -> apps/web",
+      "packages/fx-runner/test/daemon/resumeClean.test.ts -> apps/web",
+      "packages/fx-runner/test/filePermissions.test.ts -> apps/web",
+      "packages/test-guard/test/sourceFiles.test.ts -> apps/web",
+      "packages/test-guard/test/sourceFiles.test.ts -> packages/api",
+      "packages/test-guard/test/sourceFiles.test.ts -> packages/runner",
+      "packages/test-guard/test/sourceFiles.test.ts -> packages/worker",
+      "packages/test-guard/test/workspace-coverage.test.ts -> apps/web",
+    ]],
+  ].flatMap(([why, keys]) => keys.map((k) => [k, why])),
+);
+
+const WALK_TOKEN = /readdirSync|readdir\(|ls-files|globSync|\bwalk\(|\bsources\(|listSource|collectFiles/;
+
+/** The bare tree roots ("packages", "apps") a test file hands to a directory walk, whatever it then reads. */
+function bareRoots(text) {
+  const body = stripComments(text);
+  if (!WALK_TOKEN.test(body)) return [];
+  const roots = new Set();
+  for (const m of body.matchAll(/["'`](packages|apps)["'`](?!\s*,\s*["'`][^"'`]+["'`])/g)) roots.add(m[1]);
+  return [...roots];
+}
+
+/**
+ * A walk rooted at the repository root: a directory walker or lister handed the root variable, or a `git ls-files`
+ * with no pathspec (everything tracked). Returns a short description of each.
+ */
+function repoRootWalks(text) {
+  const body = stripComments(text);
+  const found = [];
+  // One argument, the root itself: a walker handed other arguments (a list of directories to read) is not whole-tree.
+  if (/\b\w*(?:walk|list|scan|sources|collect)\w*\(\s*(?:REPO_ROOT|ROOT|repoRoot|REPO|root)\s*\)/i.test(body)) found.push("a walk of the repository root");
+  if (/readdirSync\(\s*(?:REPO_ROOT|ROOT|repoRoot|REPO)\s*[,)]/.test(body)) found.push("a listing of the repository root");
+  for (const m of body.matchAll(/["'`]ls-files["'`]([^)\n]*)/g)) if (!/["'`]--["'`]/.test(m[1])) found.push("a git ls-files with no pathspec");
+  return found;
+}
+
+/** Whether the package has a repo-wide scan that watches at least one of these sample paths. */
+function scanWatchesAny(pkg, samples) {
+  return (rules.repo_wide_scans ?? []).some((s) => s.package === pkg && s.watch.some((g) => samples.some((x) => globToRegExp(g).test(x))));
+}
+const TREE_SAMPLES = {
+  packages: ["packages/zzz/src/a.ts", "packages/zzz/vitest.config.ts", "packages/zzz/package.json"],
+  apps: ["apps/zzz/a.ts", "apps/zzz/vitest.config.ts", "apps/zzz/package.json"],
+};
+
+/**
+ * A bare-root walk is covered when the file's own package has a scan entry that watches something in that tree.
+ * What a given test reads is not knowable here, so the entry's watch is the author's claim; the test only
+ * insists that one exists.
+ */
+function bareRootCovered(pkg, root) {
+  return scanWatchesAny(pkg, TREE_SAMPLES[root]);
+}
+
+/** A repo-root walk is covered when the package has a scan entry watching something under packages, apps or docs. */
+function repoRootCovered(pkg) {
+  return scanWatchesAny(pkg, [...TREE_SAMPLES.packages, ...TREE_SAMPLES.apps, "docs/zzz/a.md"]);
+}
+
+/** Test files whose walk is over a temporary or synthetic tree, or the app's own directory, never the checkout's other packages. */
+const BARE_ROOT_EXEMPT = new Map([
+  ["apps/workspace/test/first-party-build.test.mjs", "walks apps/workspace/apps, the app's own directory"],
+  ["apps/workspace/test/lib-helpers.test.mjs", "walks apps/workspace/apps, the app's own directory"],
+  ["apps/workspace/test/pipeline-needs-you-entry.test.mjs", "reads named files under packages/api/fixtures; its walk is of the app's own directory"],
+  ["packages/fx-runner/test/daemon/lockfileSync.test.ts", "builds its own temporary workspace with a packages directory"],
+  ["apps/workspace/test/roles-autonomy-limits.test.mjs", "its root is apps/workspace, the app's own directory"],
+  ["packages/fx-runner/test/daemon/checkStepFailedFileNames.test.ts", "lists files of a temporary git repository it builds"],
+  ["packages/fx-runner/test/daemon/gitPathA.test.ts", "lists files of a temporary git repository it builds"],
+  ["packages/fx-runner/test/daemon/hostReadFollowups.test.ts", "lists files of a temporary git repository it builds"],
+  ["packages/fx-runner/test/daemon/jobHandlerMemoryOffer.test.ts", "walks a temporary directory it creates"],
+  ["packages/fx-runner/test/daemon/nestedGitCasefold.test.ts", "lists files of a temporary git repository it builds"],
+  ["packages/fx-runner/test/selfBuildProbe.test.ts", "walks a temporary directory it creates"],
+  ["packages/test-guard/test/sourceFiles.test.ts", "lists synthetic trees it writes into a temporary directory"],
+]);
+
+function uncoveredBareWalks() {
+  const missing = [];
+  for (const pkg of WORKSPACE.keys()) {
+    for (const rel of walkFiles(path.join(repoRoot, pkg))) {
+      if (!TEST_SUPPORT.test(rel) || BARE_ROOT_EXEMPT.has(`${pkg}/${rel}`)) continue;
+      for (const root of bareRoots(readFileSync(path.join(repoRoot, pkg, rel), "utf8"))) {
+        if (!bareRootCovered(pkg, root)) missing.push(`${pkg}/${rel} walks the bare "${root}" root`);
+      }
+      const text = readFileSync(path.join(repoRoot, pkg, rel), "utf8");
+      for (const what of repoRootWalks(text)) {
+        if (!repoRootCovered(pkg)) missing.push(`${pkg}/${rel} does ${what}`);
+      }
+    }
+  }
+  return missing;
+}
+
+test("scanner: a test that walks a bare packages or apps root has a repo_wide_scans entry for what it can reach", () => {
+  const missing = uncoveredBareWalks();
+  assert.deepEqual(missing, [], `these tests walk a whole tree, which no edge can describe (add a repo_wide_scans entry with a watch for it):\n${missing.join("\n")}`);
+});
+
+test("scanner: bare-root detection sees a walk over a root and ignores a named package or a file with no walk", () => {
+  assert.deepEqual(bareRoots('const a = readdirSync(path.join(root, "packages"));'), ["packages"]);
+  assert.deepEqual(bareRoots('walk(join(ROOT, "apps")); walk(join(ROOT, "packages"));').sort(), ["apps", "packages"]);
+  assert.deepEqual(bareRoots('readdirSync(path.join(root, "packages", "telemetry", "src"));'), []);
+  assert.deepEqual(bareRoots('const a = join(root, "packages");'), []);
+  assert.equal(bareRootCovered("packages/env-spec", "packages"), false);
+  assert.deepEqual(repoRootWalks('const files = git(REPO_ROOT, "ls-files", "-z").split("\\0");'), ["a git ls-files with no pathspec"]);
+  assert.deepEqual(repoRootWalks('git("ls-files", "--", "apps", "packages")'), []);
+  assert.deepEqual(repoRootWalks("const files = listFiles(REPO_ROOT).filter(Boolean);"), ["a walk of the repository root"]);
+  assert.deepEqual(repoRootWalks('const one = listFiles(path.join(REPO_ROOT, "packages", "x"));'), []);
+  assert.equal(repoRootCovered("packages/env-spec"), false);
+});
+
+function uncoveredReaches() {
+  const missing = [];
+  for (const pkg of WORKSPACE.keys()) {
+    for (const rel of walkFiles(path.join(repoRoot, pkg))) {
+      if (!TEST_SUPPORT.test(rel)) continue;
+      const text = readFileSync(path.join(repoRoot, pkg, rel), "utf8");
+      for (const [target, reachedPath] of reachesOf(pkg, rel, text)) {
+        if (reachCovered(pkg, target, reachedPath)) continue;
+        if (REACH_MENTION_ONLY.has(`${pkg}/${rel} -> ${target}`)) continue;
+        missing.push(`${pkg}/${rel} -> ${reachedPath}`);
+      }
+    }
+  }
+  return missing;
+}
+
+test("scanner: every package's test files that import or read another package are covered by a declared dependency, a src or test extra edge, or a repo-wide scan", () => {
+  const missing = uncoveredReaches();
+  assert.deepEqual(missing, [], `these tests reach another package with no rule that selects them when it changes (add an extra_edges entry or a repo_wide_scans watch):\n${missing.join("\n")}`);
+});
+
+test("scanner: every mention-only entry names a test file, a target directory and a reason", () => {
+  for (const [key, why] of REACH_MENTION_ONLY) {
+    assert.match(key, /^(apps|packages)\/[\w.-]+\/\S+ -> (apps|packages)\/[\w.-]+$/, key);
+    assert.ok(why.length > 0, key);
+  }
+});
+
+test("scanner: it sees an import, a by-path read and a segmented path, and it has teeth", () => {
+  const imp = reachesOf("packages/a", "test/x.test.ts", 'import { f } from "../../github/src/x.js";');
+  assert.deepEqual([...imp.keys()], ["packages/github"]);
+  const read = reachesOf("packages/a", "test/x.test.ts", 'readFileSync(new URL("../../../apps/web/vercel.json", import.meta.url));');
+  assert.deepEqual([...read.keys()], ["apps/web"]);
+  const seg = reachesOf("packages/a", "test/x.test.ts", 'path.join(ROOT, "packages", "telemetry", "src", "a.ts")');
+  assert.deepEqual([...seg.keys()], ["packages/telemetry"]);
+  assert.equal(reachesOf("packages/a", "test/x.test.ts", '// "../../github/src/x.js"\nconst a = "../src/y.js";').size, 0);
+  // a reach no rule covers is reported: a package with no dependency, edge or scan on its target
+  assert.equal(reachCovered("packages/env-spec", "packages/runner-protocol", "packages/runner-protocol/x"), false);
 });
 
 test("every extra edge names two workspace packages and a real reason", () => {
@@ -452,7 +789,7 @@ test("range test: uncommitted edits to a trigger file are never seen", () => {
   writeFileSync(path.join(fx.dir, "package.json"), "{}\n");
   const r = classify({ repoRoot: fx.dir, base: fx.base, head });
   assert.equal(r.mode, "affected");
-  assert.deepEqual(r.packages, expectedSet("packages/env-spec", WITH_EXTRA));
+  assert.deepEqual(r.packages, expectedAffected("packages/env-spec", ["packages/env-spec/src/probe.ts"]));
   git(fx.dir, "reset", "-q", "--hard", fx.base);
   rmSync(path.join(fx.dir, "package.json"), { force: true });
 });
@@ -483,7 +820,7 @@ test("range test: a branch that already merged main does not widen the scope (HE
   assert.equal(git(fx.dir, "rev-list", "--parents", "-n", "1", synth).split(" ").length, 3, "a two-parent merge commit");
   const right = classify({ repoRoot: fx.dir, base: `${synth}^1`, head: synth });
   assert.equal(right.mode, "affected");
-  assert.deepEqual(right.packages, expectedSet("packages/env-spec", WITH_EXTRA));
+  assert.deepEqual(right.packages, expectedAffected("packages/env-spec", ["packages/env-spec/src/probe.ts"]));
   // The same answer through the command line, spelled as the workflow spells it.
   const cli = spawnSync(process.execPath, [CLI, "--repo", fx.dir, "--base", "HEAD^1", "--head", "HEAD"], { encoding: "utf8", cwd: fx.dir });
   assert.equal(cli.status, 0, cli.stderr);
@@ -499,7 +836,7 @@ test("range test: the same holds when the branch never merged main", () => {
   const { synth } = syntheticMerge({ branchMergesMain: false });
   const r = classify({ repoRoot: fx.dir, base: `${synth}^1`, head: synth });
   assert.equal(r.mode, "affected");
-  assert.deepEqual(r.packages, expectedSet("packages/env-spec", WITH_EXTRA));
+  assert.deepEqual(r.packages, expectedAffected("packages/env-spec", ["packages/env-spec/src/probe.ts"]));
   git(fx.dir, "checkout", "-q", "-B", "main", fx.base);
 });
 
@@ -611,7 +948,7 @@ function runStep(files, args = []) {
 }
 
 test("--github: an affected run exports the package list, the scope line and the e2e answer", () => {
-  const s = runStep({ "packages/env-spec/src/a.ts": "x" });
+  const s = runStep({ "packages/env-spec/README.md": "x" });
   const r = JSON.parse(s.out.stdout);
   assert.equal(s.env.CI_SCOPE_MODE, "affected");
   assert.equal(s.env.FX_CHECK_AFFECTED, r.packages.join(","));
@@ -639,7 +976,9 @@ test("--github: an ignored-only change exports the word none, never an empty lis
 test("--github: the Node 22 step is wanted exactly when runner-protocol or fx-runner is affected", () => {
   assert.equal(runStep({ "packages/runner-protocol/src/a.ts": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "true");
   assert.equal(runStep({ "packages/fx-runner/src/a.ts": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "true");
-  assert.equal(runStep({ "packages/env-spec/src/a.ts": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "false");
+  assert.equal(runStep({ "packages/env-spec/README.md": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "false");
+  // runner-protocol's test walks every package's src, so a src change anywhere selects it
+  assert.equal(runStep({ "packages/env-spec/src/a.ts": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "true");
 });
 
 test("--e2e-step: prints the skip line when the specs are not affected and stays quiet when they are", () => {
@@ -910,7 +1249,7 @@ test("package.json: a license-only edit to runner-protocol still selects it, so 
   assert.deepEqual(r.packages, [dir]);
   assert.equal(r.e2e, false);
   // its dependents are not pulled in
-  assert.ok(expectedSet(dir, WITH_EXTRA).length > 1);
+  assert.ok(expectedSet(dir, WITH_SRC).length > 1);
   // a root manifest edit selects no package and is no trigger
   const root = changeFrom({ "package.json": REAL_ROOT_PKG }, { "package.json": withKey("license", "AGPL-3.0-only-ex507c")(REAL_ROOT_PKG) });
   assert.equal(root.mode, "affected");
@@ -922,12 +1261,12 @@ test("package.json fail-safe: metadata plus a dependency, a script, a version or
   const both = (edit) => (text) => edited(text, (d) => { d.license = "AGPL-3.0-only"; edit(d); });
   const dep = changeFrom({}, { [`${dir}/package.json`]: both((d) => (d.dependencies = { ...d.dependencies, "left-pad": "1.3.0" }))(manifestText(dir)) });
   assert.equal(dep.mode, "affected");
-  assert.deepEqual(dep.packages, expectedSet(dir, WITH_EXTRA));
+  assert.deepEqual(dep.packages, expectedAffected(dir, [`${dir}/package.json`]));
   const rootScript = changeFrom({ "package.json": REAL_ROOT_PKG }, { "package.json": both((d) => (d.scripts = { ...d.scripts, extra: "true" }))(REAL_ROOT_PKG) });
   assert.equal(rootScript.mode, "full");
   assert.equal(rootScript.trigger, "package.json");
   const version = changeFrom({}, { [`${dir}/package.json`]: both((d) => (d.version = "9.9.9"))(manifestText(dir)) });
-  assert.deepEqual(version.packages, expectedSet(dir, WITH_EXTRA));
+  assert.deepEqual(version.packages, expectedAffected(dir, [`${dir}/package.json`]));
   const engines = changeFrom({ "package.json": REAL_ROOT_PKG }, { "package.json": withKey("engines", { node: ">=99" })(REAL_ROOT_PKG) });
   assert.equal(engines.trigger, "package.json");
 });
@@ -954,7 +1293,7 @@ test("package.json fail-safe: reordering the keys that remain is not exempt (exp
   const reordered = { version: doc.version, name: doc.name, ...doc };
   reordered.license = "AGPL-3.0-only";
   const r = changeFrom({}, { [`${dir}/package.json`]: `${JSON.stringify(reordered, null, 2)}\n` });
-  assert.deepEqual(r.packages, expectedSet(dir, WITH_EXTRA));
+  assert.deepEqual(r.packages, expectedAffected(dir, [`${dir}/package.json`]));
 });
 
 test("package.json: the parsed JSON is compared, so a whitespace-only rewrite is exempt", () => {
@@ -972,7 +1311,7 @@ test("documentation: LICENSE*, NOTICE*, THIRD-PARTY-NOTICES* and CONTRIBUTING* a
     assert.equal(r.e2e, false, file);
   }
   // inside a package they still select the package, exactly as a Markdown file there does
-  assert.deepEqual(change({ "packages/env-spec/LICENSE": "x\n" }).packages, expectedSet("packages/env-spec", WITH_EXTRA));
+  assert.deepEqual(change({ "packages/env-spec/LICENSE": "x\n" }).packages, expectedAffected("packages/env-spec", ["packages/env-spec/LICENSE"]));
   // a trigger still beats documentation
   assert.equal(change({ "packages/core/LICENSE": "x\n" }).trigger, "packages/core/**");
 });
@@ -989,7 +1328,7 @@ test("scripts: adding or editing a standalone scripts/ci/*.test.mjs is not a tri
   assert.match(change({ "scripts/ci/licence.test.mjs": "x" }).reason, /standalone/);
   // together with a real package change, only that package (and dependents) is selected
   const both = change({ "scripts/ci/licence.test.mjs": "x", "packages/env-spec/src/a.ts": "x" });
-  assert.deepEqual(both.packages, expectedSet("packages/env-spec", WITH_EXTRA));
+  assert.deepEqual(both.packages, expectedAffected("packages/env-spec", ["packages/env-spec/src/a.ts"]));
 });
 
 test("scripts: everything else under scripts/ stays a full-run trigger", () => {
@@ -1165,7 +1504,7 @@ test("replay #537 (apps/workspace/perf scripts, one workspace test, two archived
     "apps/workspace/test/brotli-proxy-tls.test.mjs": "x",
   });
   assert.equal(withoutArchive.mode, "affected");
-  assert.deepEqual(withoutArchive.packages, expectedSet("apps/workspace", WITH_EXTRA));
+  assert.deepEqual(withoutArchive.packages, expectedAffected("apps/workspace", ["apps/workspace/perf/dev-tls.mjs"]));
   // apps/workspace/** is an e2e path: the perf scripts live in the app the specs drive, and the glob does
   // not try to tell perf tooling from shell code
   assert.equal(withoutArchive.e2e, true);
@@ -1177,7 +1516,7 @@ test("replay #537 (apps/workspace/perf scripts, one workspace test, two archived
     "archive/dev-tls-pem-2026-10-05/dev-tls-key.pem": "x",
   });
   assert.equal(withArchive.mode, "affected");
-  assert.deepEqual(withArchive.packages, expectedSet("apps/workspace", WITH_EXTRA));
+  assert.deepEqual(withArchive.packages, expectedAffected("apps/workspace", ["apps/workspace/perf/dev-tls.mjs"]));
   assert.equal(withArchive.e2e, true);
   const archiveOnly = change({ "archive/x-2026-10-05/a.pem": "x", "archive/y/z.ts": "x" });
   assert.equal(archiveOnly.mode, "affected");
