@@ -3,6 +3,7 @@ import { reportError } from "@fx/telemetry";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { readGateBlockReasonsSince } from "@fx/core/src/work-items/driverEvents.js";
 import { createReviewGitHubPort, expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest, type GitHubHttp } from "@fx/pipeline";
 import { bindCompleteConflictRound, bindCompleteEntryless, completeRunnerEntryless, endRoundWithoutPr, endRunnerRoundIfTargetChanged, entrylessStartPorts, openRunnerRound, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
 import { bindCompleteDeltaReview } from "./mergeQueueDeltaReview";
@@ -221,10 +222,8 @@ export async function runnerOrderRerouteBody(worker: QueueWorker | null, who: St
     );
     if (!order || order.state !== "blocked" || order.outcome_code === null || !ORDER_REROUTE_CODES.includes(order.outcome_code)) return { state: "not_applicable" };
     // The order stores only the first reason; the gate's own event holds all of them (the F1 ruling: every reason must be an ordering one).
-    const gate = await withTenant(pool, who.accountId, async (c) =>
-      (await c.query<{ reasons: string[] }>(`SELECT reasons FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_gate' AND code = 'ready_human_merges' AND created_at >= $3 ORDER BY seq DESC LIMIT 1`, [who.accountId, who.workItemId, order.created_at])).rows[0],
-    );
-    if (!gate || gate.reasons.length === 0 || !gate.reasons.every((r) => ORDER_REROUTE_CODES.includes(r)) || !gate.reasons.includes("overlap_unreviewed")) return { state: "not_applicable" };
+    const gateReasons = await withTenant(pool, who.accountId, (c) => readGateBlockReasonsSince(c, who.accountId, who.workItemId, order.created_at));
+    if (!gateReasons || gateReasons.length === 0 || !gateReasons.every((r) => ORDER_REROUTE_CODES.includes(r)) || !gateReasons.includes("overlap_unreviewed")) return { state: "not_applicable" };
     const base = { pool, worker, open: openInstallationHttp };
     const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
     if (!("id" in subject)) return { state: "not_applicable" };

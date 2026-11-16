@@ -308,5 +308,17 @@ export async function listDriverEvents(client: PoolClient, workItemId: string, l
     .reverse();
 }
 
+/**
+ * The reasons of the gate's newest `ready_human_merges` answer written at or after `since` (a plane merge order's creation time), or null when there is none. The go phase writes one answer per
+ * order (its dedupe key names the order), so an order placed on a head the gate already answered for still finds its own.
+ */
+export async function readGateBlockReasonsSince(client: PoolClient, accountId: string, workItemId: string, since: Date): Promise<string[] | null> {
+  const r = await client.query<{ reasons: string[] }>(
+    `SELECT reasons FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_gate' AND code = 'ready_human_merges' AND created_at >= $3 ORDER BY seq DESC LIMIT 1`,
+    [accountId, workItemId, since],
+  );
+  return r.rows[0]?.reasons ?? null;
+}
+
 /** SPEC-REFUSED-SILENT: the `stopped` code a first (panel) Spec leaves when the project manager file list could not be read, even after the step one automatic retry. */
 export const SPEC_LIST_UNREADABLE_CODE = "spec_list_unreadable";
