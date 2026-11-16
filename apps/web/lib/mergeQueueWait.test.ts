@@ -38,10 +38,14 @@ const h = vi.hoisted(() => ({
   /** C18-15: what the end-of-round target check answers (null: unchanged). */
   targetChanged: null as null | Record<string, unknown>,
   stops: [] as unknown[][],
+  /** S5-j2e-RUNNER: the gate's newest answer (null: none), the fence's reads, and whether the runner round can be opened. */
+  gateEvent: null as Record<string, unknown> | null,
+  fenceCalls: [] as string[],
+  runnerOpen: true,
 }));
 
 vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({
-  withTenant: async (_pool: unknown, _account: string, fn: (c: unknown) => unknown) => fn({ query: async (sql: string) => ({ rows: /plane_merge_orders/.test(sql) ? (h.order ? [h.order] : []) : [h.halt] }) }),
+  withTenant: async (_pool: unknown, _account: string, fn: (c: unknown) => unknown) => fn({ query: async (sql: string) => ({ rows: /plane_merge_orders/.test(sql) ? (h.order ? [h.order] : []) : /work_item_driver_events/.test(sql) ? (h.gateEvent ? [h.gateEvent] : []) : [h.halt] }) }),
 }));
 vi.mock("@fx/core/src/pendingWork.js", () => ({ markWorkPending: async (...a: unknown[]) => void h.pending.push(a) }));
 vi.mock("@fx/core/src/work-items/stackParentPull.js", () => ({ readStackParentPull: async () => h.stackParent }));
@@ -56,7 +60,7 @@ vi.mock("@fx/pipeline", () => ({
     startEntrylessConflict: async (_ports: unknown, subject: unknown, eventCode?: unknown) => (h.started.push(subject), h.eventCodes.push(eventCode), h.startOut),
     startEntrylessRenumber: async (_ports: unknown, subject: unknown) => (h.renumbers.push(subject), h.startOut),
     recordStop: async (...a: unknown[]) => void h.stops.push(a),
-    startEntrylessFromRunnerFacts: async (_ports: unknown, subject: unknown, facts: unknown) => (h.runnerStarts.push([subject, facts]), h.startOut),
+    startEntrylessFromRunnerFacts: async (_ports: unknown, subject: unknown, facts: unknown, shape?: unknown) => (h.runnerStarts.push(shape === undefined ? [subject, facts] : [subject, facts, shape]), h.startOut),
   },
 }));
 vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => h.github }));
@@ -68,12 +72,26 @@ vi.mock("./mergeQueueConflict", () => ({
   runnerStartPorts: () => ({}),
   endRunnerRoundIfTargetChanged: async () => h.targetChanged,
   bindCompleteEntryless: () => async () => h.entrylessDone,
+  // The fence of a runner_local repository: only the default branch's tip may be read here; any other read is recorded (and the test that watches it fails).
+  openRunnerRound: async () =>
+    h.runnerOpen
+      ? {
+          fence: {
+            defaultBranchTip: async () => (h.fenceCalls.push("defaultBranchTip"), { branch: "main", sha: "f".repeat(40) }),
+            prFiles: async () => (h.fenceCalls.push("prFiles"), null),
+            getMergeability: async () => (h.fenceCalls.push("getMergeability"), {}),
+          },
+          adapter: {},
+          round: undefined,
+          ci: async () => (h.fenceCalls.push("ci"), {}),
+        }
+      : null,
 }));
 vi.mock("./mergeQueueRenumber", () => ({ entrylessRenumberPorts: () => ({}) }));
 vi.mock("./mergeQueueDeltaReview", () => ({ bindCompleteDeltaReview: () => async () => (h.completed++, h.completion) }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}) }));
 
-import { RUNNER_CONFLICT_START_ENABLED, conflictStartBody, conflictWaitBody, enqueueBody, rerouteStartBody, runnerConflictBody as runnerConflictBodyWith, waitBody, type QueueWorker } from "./mergeQueueWait";
+import { RUNNER_CONFLICT_START_ENABLED, RUNNER_ORDER_REROUTE_ENABLED, runnerOrderRerouteBody, conflictStartBody, conflictWaitBody, enqueueBody, rerouteStartBody, runnerConflictBody as runnerConflictBodyWith, waitBody, type QueueWorker } from "./mergeQueueWait";
 
 const WHO = { accountId: "acct", userId: "u", workItemId: "item", haltEpoch: 0 };
 const worker = { withRunnerPool: async (fn: (pool: unknown) => unknown) => fn({}) } as unknown as QueueWorker;
@@ -512,5 +530,116 @@ describe("D#519 MQ4-e2-c3 (C18-14, C18-15): what the constant touches, and a run
     expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: "not_applicable" });
     expect(h.started).toEqual([]);
     expect(h.runnerStarts).toEqual([]);
+  });
+});
+
+// D#483 S5-j2e-RUNNER: a runner_local item's plane-merge order was blocked for an overlap and the runner sent facts. The facts are a hint: see the lying-runner tests.
+describe("runnerOrderRerouteBody", () => {
+  const ORDER = { state: "blocked", reviewed_head: "c".repeat(40), created_at: new Date(0), outcome_code: "overlap_unreviewed", conflict_verdict: "conflict_platform", conflict_base_sha: "d".repeat(40), conflict_base_ref: "main", conflict_files: ["src/a.ts"] };
+  beforeEach(() => {
+    h.order = { ...ORDER };
+    h.gateEvent = { reasons: ["overlap_unreviewed"] };
+    h.github = null;
+    h.runnerOpen = true;
+    h.fenceCalls.length = 0;
+  });
+
+  it("ships switched on", () => expect(RUNNER_ORDER_REROUTE_ENABLED).toBe(true));
+
+  it("starts the existing round from the stored facts, with the default branch's tip as read now, and records its stops under the gate's code", async () => {
+    for (const outcome of ["started", "running", "waiting"]) {
+      h.startOut = { outcome };
+      expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: outcome });
+    }
+    expect(h.runnerStarts[0]).toEqual([h.subject, { verdict: "conflict_platform", baseSha: "f".repeat(40), baseRef: "main", files: ["src/a.ts"] }, { eventCode: "overlap_unreviewed" }]);
+    expect(h.started).toEqual([]);
+    h.startOut = { outcome: "stopped", reason: "overlap_unreviewed" };
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "stopped", reason: "overlap_unreviewed" });
+  });
+
+  it("an overlap together with an out-of-order number still re-routes (the round runs for the overlap)", async () => {
+    h.gateEvent = { reasons: ["ordered_resource_out_of_order", "overlap_unreviewed"] };
+    h.startOut = { outcome: "started" };
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "started" });
+  });
+
+  it("a foreign verdict is handed on as it is: the start makes the foreign stop and no round runs", async () => {
+    h.order = { ...ORDER, conflict_verdict: "conflict_foreign" };
+    await runnerOrderRerouteBody(worker, WHO);
+    expect(h.runnerStarts[0]![1]).toMatchObject({ verdict: "conflict_foreign" });
+  });
+
+  it.each([
+    ["no order", () => void (h.order = null)],
+    ["an order that is not blocked", () => void (h.order = { ...ORDER, state: "failed" })],
+    ["a block for another code", () => void (h.order = { ...ORDER, outcome_code: "ci_not_green" })],
+    ["no gate answer on record", () => void (h.gateEvent = null)],
+    ["a gate answer with another reason beside the overlap", () => void (h.gateEvent = { reasons: ["overlap_unreviewed", "ci_not_green"] })],
+    ["a number out of order alone (renumber is not automatic on a local runner)", () => void (h.gateEvent = { reasons: ["ordered_resource_out_of_order"] })],
+    ["an item that is not this path's", () => void (h.subject = { reason: "conflict_public_copy" })],
+    ["a repository the fence cannot open", () => void (h.runnerOpen = false)],
+  ])("%s: not applicable, nothing starts", async (_name, arrange) => {
+    arrange();
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "not_applicable" });
+    expect(await runnerOrderRerouteBody(null, WHO)).toEqual({ state: "not_applicable" });
+    expect(h.runnerStarts).toEqual([]);
+  });
+
+  it("a head that moved since the order was reviewed goes back to review, nothing starts", async () => {
+    h.subject = { id: "item", headSha: "e".repeat(40) };
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "in_review" });
+    expect(h.runnerStarts).toEqual([]);
+  });
+
+  it("an order with no verdict (an older runner, unknown) is a recorded stop under overlap_unreviewed with its own reason, and no round starts", async () => {
+    h.order = { ...ORDER, conflict_verdict: null, conflict_base_sha: null, conflict_base_ref: null, conflict_files: null };
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "stopped", reason: "overlap_unreviewed" });
+    expect(h.stops).toEqual([[expect.anything(), h.subject, "overlap_facts_missing", "c".repeat(40), "overlap_unreviewed"]]);
+    expect(h.runnerStarts).toEqual([]);
+  });
+
+  it("a halted item starts nothing", async () => {
+    h.halt = { halted: true, halt_epoch: 0 };
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "halted" });
+    expect(h.runnerStarts).toEqual([]);
+  });
+
+  it("undo path: with the constant false the answer is not applicable before any read, and the order's stop stands", async () => {
+    h.subjectCalls.length = 0;
+    expect(await runnerOrderRerouteBody(worker, WHO, false)).toEqual({ state: "not_applicable" });
+    expect(h.runnerStarts).toEqual([]);
+    expect(h.stops).toEqual([]);
+    expect(h.subjectCalls).toEqual([]);
+    expect(h.fenceCalls).toEqual([]);
+  });
+
+  it("a lying runner: a hundred paths that name nothing change nothing the cloud reads. The only fence read is the default branch's tip, and the paths reach the start as its file list alone", async () => {
+    const lie = Array.from({ length: 100 }, (_, i) => `nowhere/${i}.ts`);
+    h.order = { ...ORDER, conflict_files: lie };
+    h.startOut = { outcome: "started" };
+    await runnerOrderRerouteBody(worker, WHO);
+    expect(h.fenceCalls).toEqual(["defaultBranchTip"]);
+    expect(h.runnerStarts).toHaveLength(1);
+    expect((h.runnerStarts[0]![1] as { files: string[] }).files).toEqual(lie);
+  });
+});
+
+// The bound itself lives in the real decision (not mocked here): a lying runner's facts cost at most one round and fail closed when the table would not hold them.
+describe("a lying runner's facts at the decision: one bounded round, never more", () => {
+  const FACTS = { verdict: "conflict_platform" as const, baseSha: "d".repeat(40), baseRef: "main", files: ["src/a.ts"] };
+  const actual = () => vi.importActual<typeof import("../../../packages/pipeline/src/mergeQueue/conflict")>("../../../packages/pipeline/src/mergeQueue/conflict");
+
+  it("with every round used the start refuses (rounds_exhausted), whatever the facts say", async () => {
+    const { decideFromRunnerFacts } = await actual();
+    const { MAX_CONFLICT_ROUNDS } = await vi.importActual<typeof import("../../../packages/pipeline/src/mergeQueue/policy")>("../../../packages/pipeline/src/mergeQueue/policy");
+    expect(MAX_CONFLICT_ROUNDS).toBe(2);
+    expect(decideFromRunnerFacts(FACTS, MAX_CONFLICT_ROUNDS - 1)).toMatchObject({ go: true });
+    expect(decideFromRunnerFacts(FACTS, MAX_CONFLICT_ROUNDS)).toMatchObject({ go: false, code: "rounds_exhausted" });
+  });
+
+  it("facts the table would not hold (a path outside the repository, more than a hundred, an empty list, a bad sha) fail closed as unreadable: no round", async () => {
+    const { decideFromRunnerFacts } = await actual();
+    for (const files of [["../x"], ["/abs/x"], Array.from({ length: 101 }, (_, i) => `a${i}.ts`), []]) expect(decideFromRunnerFacts({ ...FACTS, files }, 0)).toMatchObject({ go: false, code: "unreadable" });
+    expect(decideFromRunnerFacts({ ...FACTS, baseSha: "zz" }, 0)).toMatchObject({ go: false, code: "unreadable" });
   });
 });

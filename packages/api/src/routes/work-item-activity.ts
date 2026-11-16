@@ -116,7 +116,7 @@ export const activityResponseSchema = z.object({
     .object({ state: z.enum(["queued", "removed", "not_in_queue", "no_answer"]), position: z.number().int().optional(), removed_by: z.enum(["you", "person", "github"]).optional(), reason: z.string().optional(), at: z.string() })
     .optional(),
   // D#519 MQ4-d: present only while a merge-conflict fix round runs for the item (derived on this read; gone on the next read after it ends). `of` is the round bound.
-  conflict_round: z.object({ running: z.literal(true), attempt: z.number().int(), of: z.number().int(), base_ref: z.string().nullable() }).optional(),
+  conflict_round: z.object({ running: z.literal(true), kind: z.enum(["conflict", "renumber", "overlap", "overlap_review"]).optional(), attempt: z.number().int(), of: z.number().int(), base_ref: z.string().nullable() }).optional(),
   // D#519 MQ4-d: present only for an item whose queue entry stopped at a merge conflict. `kind`: `attempts_spent` (fix rounds were tried), `foreign_commits` (the conflict files hold commits the platform did not write), `direct` (no fix round ran). `files` is at most 100 repository paths; `base_ref` is null when it was not recorded.
   conflict_stop: z.object({ kind: z.enum(["attempts_spent", "foreign_commits", "direct"]), attempts: z.number().int(), files: z.array(z.string()), base_ref: z.string().nullable() }).optional(),
   // D#519 MQ5-c1: present only for an item whose own queue entry waits (`ahead`: entries in front of it in this repository's queue) or stopped with a code whose sentence names a branch, a resource, a key or a parent pull request. Derived on this read; every field is optional and absent when unknown.

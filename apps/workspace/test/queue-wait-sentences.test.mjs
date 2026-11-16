@@ -23,7 +23,7 @@ const BAD = /null|undefined|[{}]|\(\)|\[\]/;
 const gate = (code, queue_wait) => ({ stage: "review_passed", steps: [{ kind: "merge_gate", result: "ready_human_merges", reasons: [code] }], ...(queue_wait ? { queue_wait } : {}) });
 
 /** Codes with a fixed sentence from before this row that the gate's TypeScript union does not list (the page-side table is wider than the union). */
-const OUTSIDE_THE_UNION = ["pairing_changed", "no_pull_request", "go_not_applicable"];
+const OUTSIDE_THE_UNION = ["pairing_changed", "no_pull_request", "go_not_applicable", "overlap_facts_missing" /* a stop reason the round start records under overlap_unreviewed (D#483 S5-j2e-RUNNER), never a gate reason */];
 
 /** The completeness rule, as a function of the tables so a test can prove it fails. */
 function incomplete(vocabulary, sentences, filled) {

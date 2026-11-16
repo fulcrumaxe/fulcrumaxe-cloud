@@ -197,6 +197,8 @@ const REASON_WORDS = {
   ordered_resource_waiting: "Waiting for a pull request ahead of it in GitHub's merge queue, so the migration numbers stay in order.",
   overlap_unreviewed: "The base branch changed files this pull request also changes after it was last reviewed. It needs a fresh review before it merges.",
   runner_ordered_unsupported: "Update the runner on your machine so it can check migration order.",
+  // D#483 S5-j2e-RUNNER: the order was held for an overlap and the runner sent no facts to start the update from (a stop reason recorded under overlap_unreviewed, never a gate reason).
+  overlap_facts_missing: "The base branch changed files this change also changes. Your runner needs updating to merge it in automatically; until then use Request changes.",
   // D#598 P1d-1: the author of the pull request that would merge. A person reviews and merges an outside author's pull request on GitHub.
   pr_author_untrusted: "This pull request was opened by someone who isn't an admin or maintainer of the repository, or the platform's app. The platform won't merge it. A person can review it and merge it on GitHub.",
   pr_author_unverified: "We couldn't check who opened this pull request, so the platform didn't merge it. It is checked again when a check on the pull request next finishes green, or when the pull request is reopened or marked ready. You can press Check the merge to check now.",
@@ -859,6 +861,7 @@ export const BLOCKING_SENTENCES = {
   ordered_resource_path_too_long: "A file path is too long to check the order of this repository's migrations",
   overlap_unreviewed: "Files it changes were also changed on the base branch after its last review",
   runner_ordered_unsupported: "Update the runner on your machine so it can check migration order.",
+  overlap_facts_missing: "Your runner sent no facts to update this change from the base branch. Update the runner, or use Request changes",
   renumber_out_of_scope: "The automatic renumber changed more than the numbered files, so a person needs to look at it",
   merge_dependency_closed: "The pull request it builds on was closed without merging",
   history_rewritten: "The branch history was rewritten after review",
@@ -1016,6 +1019,9 @@ export function queueLine(data, timeZone) {
 export const CONFLICT_SENTENCES = Object.freeze({
   running: (b, k, max) => "Resolving a conflict with " + b + ": fix attempt " + k + " of " + max + " is running.",
   renumbering: (b, k, max) => "Renumbering its new files to follow " + b + ": attempt " + k + " of " + max + " is running.",
+  // D#483 S5-j2e-RUNNER: a runner's merge held for an overlap with the base branch; the round merges it in, then the merge is reviewed.
+  updating: (b, k, max) => "Updating from " + b + ": round " + k + " of " + max + " is running. Files this change shares with it changed after the last review.",
+  reviewing: (b, k, max) => "Reviewing the merge of " + b + ": round " + k + " of " + max + ".",
   attempts_spent: (b, f, k) => "It conflicts with " + b + f + ". We tried " + (k === 1 ? "once" : k + " times") + ", so a person needs to resolve it.",
   foreign_commits: (b, f) => "It conflicts with " + b + (f === "" ? ", and some files have commits we didn't write" : f + ", and these files have commits we didn't write") + ", so a person needs to resolve it.",
   direct: (b) => "It conflicts with " + b + ". Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.",
@@ -1037,7 +1043,8 @@ export function conflictLine(data) {
   const round = data && isObj(data.conflict_round) ? data.conflict_round : null;
   const stop = data && isObj(data.conflict_stop) ? data.conflict_stop : null;
   const branch = (o) => (typeof o.base_ref === "string" && o.base_ref.trim() !== "" ? o.base_ref : CONFLICT_NO_BRANCH);
-  if (round !== null && round.running === true && posInt(round.attempt) && posInt(round.of)) return { kind: "running", text: (round.kind === "renumber" ? CONFLICT_SENTENCES.renumbering : CONFLICT_SENTENCES.running)(branch(round), round.attempt, round.of) };
+  const roundWords = { renumber: CONFLICT_SENTENCES.renumbering, overlap: CONFLICT_SENTENCES.updating, overlap_review: CONFLICT_SENTENCES.reviewing };
+  if (round !== null && round.running === true && posInt(round.attempt) && posInt(round.of)) return { kind: "running", text: (Object.hasOwn(roundWords, round.kind) ? roundWords[round.kind] : CONFLICT_SENTENCES.running)(branch(round), round.attempt, round.of) };
   if (stop === null) return null;
   if (stop.kind === "attempts_spent" && posInt(stop.attempts)) return { kind: "attempts_spent", text: CONFLICT_SENTENCES.attempts_spent(branch(stop), conflictFilesText(stop.files), stop.attempts) };
   if (stop.kind === "foreign_commits") return { kind: "foreign_commits", text: CONFLICT_SENTENCES.foreign_commits(branch(stop), conflictFilesText(stop.files)) };

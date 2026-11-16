@@ -543,6 +543,7 @@ export interface Operations {
       };
       conflict_round?: {
         running: true;
+        kind?: "conflict" | "renumber" | "overlap" | "overlap_review";
         attempt: number;
         of: number;
         base_ref: string | null;

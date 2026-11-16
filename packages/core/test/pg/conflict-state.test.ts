@@ -150,4 +150,53 @@ describe('readConflictState', () => {
     await entry('stopped', { reason: 'ci_not_green' });
     expect(await read()).toBeNull();
   });
+
+  // D#483 S5-j2e-RUNNER: a runner's plane-merge order held for an overlap, with the round started from its facts (no queue entry).
+  describe('a round with no queue entry', () => {
+    const CODE_REPO = 'acme/widgets-public';
+    const placed = async (state: string, code: string | null) => {
+      const push = (
+        await admin.query<{ id: string }>(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, pr_number, pr_url, source_head)
+           VALUES ($1, $2, $3, $4, $5, 'pr_opened', $6, $6, 7, 'https://github.com/acme/widgets-public/pull/7', $7) RETURNING id`,
+          [refs.accountId, refs.workItemId, refs.repoId, CODE_REPO, 'c'.repeat(64), 'd'.repeat(40), head],
+        )
+      ).rows[0]!.id;
+      // An order is inserted pending and ended afterwards, as the store does.
+      const id = (
+        await admin.query<{ id: string }>(
+          `INSERT INTO plane_merge_orders (account_id, work_item_id, plane_push_id, repo_id, code_repo, pr_number, expected_public_head, reviewed_head, pairing_digest, deadline_at)
+           VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, now() + interval '1 hour') RETURNING id`,
+          [refs.accountId, refs.workItemId, push, refs.repoId, CODE_REPO, 'd'.repeat(40), head, 'c'.repeat(64)],
+        )
+      ).rows[0]!.id;
+      await admin.query(`UPDATE plane_merge_orders SET state = $2, outcome_code = $3, finished_at = now() WHERE id = $1`, [id, state, code]);
+    };
+    const open = (toSha: string | null, outcome: string | null = null) =>
+      admin.query(
+        `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, to_sha, outcome)
+         VALUES ($1, $2, $3, NULL, 1, $4, $5, 'main', ARRAY['src/a.ts'], $6, $7)`,
+        [refs.accountId, refs.repoId, refs.workItemId, head, 'b'.repeat(40), toSha, outcome],
+      );
+
+    it('an open round on an order blocked for the overlap says overlap, and overlap_review once its merge commit is recorded', async () => {
+      await placed('blocked', 'overlap_unreviewed');
+      await open(null);
+      expect(await read()).toEqual({ conflict_round: { running: true, kind: 'overlap', attempt: 1, of: OF, base_ref: 'main' } });
+      await admin.query(`UPDATE merge_conflict_rounds SET to_sha = $1 WHERE work_item_id = $2`, ['e'.repeat(40), refs.workItemId]);
+      expect(await read()).toEqual({ conflict_round: { running: true, kind: 'overlap_review', attempt: 1, of: OF, base_ref: 'main' } });
+    });
+
+    it('a round that has ended says nothing', async () => {
+      await placed('blocked', 'overlap_unreviewed');
+      await open('e'.repeat(40), 'passed');
+      expect(await read()).toBeNull();
+    });
+
+    it('an order blocked for another reason says nothing, whatever round is open', async () => {
+      await placed('blocked', 'ci_not_green');
+      await open(null);
+      expect(await read()).toBeNull();
+    });
+  });
 });

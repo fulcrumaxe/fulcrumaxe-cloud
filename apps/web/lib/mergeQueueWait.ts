@@ -187,6 +187,60 @@ export async function runnerConflictBody(worker: QueueWorker | null, who: StepWh
   });
 }
 
+/**
+ * D#483 S5-j2e-RUNNER: on. A paired `runner_local` item whose plane-merge order the gate blocked for an overlap, and whose runner sent platform-authored overlap facts, starts the existing conflict
+ * round (the agent merges the default branch in). Undo: set it to false (one line); `runnerOrderRerouteBody` then answers `not_applicable` before any read or write, and the order's own stop
+ * stands exactly as before. A round that is open is still followed to its end; nothing is deleted.
+ */
+export const RUNNER_ORDER_REROUTE_ENABLED = true;
+
+/** The gate's own words for the two ordering stops (a workflow body imports no value from a package); the order's code is one of them. */
+const ORDER_REROUTE_CODES: readonly string[] = ["overlap_unreviewed", "ordered_resource_out_of_order"];
+
+/**
+ * The order the gate blocked (the plane-merge go phase), for an item the cloud may re-route. The runner's facts are a HINT: a wrong claim costs at most one bounded round (`MAX_CONFLICT_ROUNDS`,
+ * the spend check and the 120-minute timeout, all in the start and the round's end) and never widens a read: the only read made here is the default branch's tip through the fence, and the
+ * stored paths are handed on only as the round's file list. They are never used to ask the runner repository for anything.
+ *
+ * Re-route only when the newest gate answer at or after the order lists reasons that are ALL ordering ones and include `overlap_unreviewed`, and the facts say the platform wrote every
+ * commit touching the files (C10). `not_applicable`: the order's stop stands (another reason, or a renumber; a foreign verdict is the start's own stop). `in_review`: the head moved since the order.
+ */
+export async function runnerOrderRerouteBody(worker: QueueWorker | null, who: StepWho, startEnabled: boolean = RUNNER_ORDER_REROUTE_ENABLED): Promise<ConflictStartOut> {
+  if (!worker?.withRunnerPool || !startEnabled) return { state: "not_applicable" };
+  return worker.withRunnerPool(async (pool) => {
+    if ((await haltState(pool, who)).stale) return { state: "halted" };
+    const order = await withTenant(pool, who.accountId, async (c) =>
+      (
+        await c.query<{ state: string; reviewed_head: string; created_at: Date; outcome_code: string | null; conflict_verdict: "conflict_platform" | "conflict_foreign" | null; conflict_base_sha: string | null; conflict_base_ref: string | null; conflict_files: string[] | null }>(
+          `SELECT state, reviewed_head, created_at, outcome_code, conflict_verdict, conflict_base_sha, conflict_base_ref, conflict_files FROM plane_merge_orders WHERE account_id = $1 AND work_item_id = $2 ORDER BY created_at DESC, id DESC LIMIT 1`,
+          [who.accountId, who.workItemId],
+        )
+      ).rows[0],
+    );
+    if (!order || order.state !== "blocked" || order.outcome_code === null || !ORDER_REROUTE_CODES.includes(order.outcome_code)) return { state: "not_applicable" };
+    // The order stores only the first reason; the gate's own event holds all of them (the F1 ruling: every reason must be an ordering one).
+    const gate = await withTenant(pool, who.accountId, async (c) =>
+      (await c.query<{ reasons: string[] }>(`SELECT reasons FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_gate' AND code = 'ready_human_merges' AND created_at >= $3 ORDER BY seq DESC LIMIT 1`, [who.accountId, who.workItemId, order.created_at])).rows[0],
+    );
+    if (!gate || gate.reasons.length === 0 || !gate.reasons.every((r) => ORDER_REROUTE_CODES.includes(r)) || !gate.reasons.includes("overlap_unreviewed")) return { state: "not_applicable" };
+    const base = { pool, worker, open: openInstallationHttp };
+    const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
+    if (!("id" in subject)) return { state: "not_applicable" };
+    // The order describes the private head it was reviewed at; a head that moved since is reviewed afresh.
+    if (subject.headSha !== order.reviewed_head) return { state: "in_review" };
+    if (order.conflict_verdict === null || order.conflict_base_sha === null || order.conflict_base_ref === null || order.conflict_files === null) {
+      await mergeQueue.recordStop(runnerStartPorts(base), subject, "overlap_facts_missing", subject.headSha, "overlap_unreviewed");
+      return { state: "stopped", reason: "overlap_unreviewed" };
+    }
+    const runner = await openRunnerRound(base, subject);
+    if (!runner) return { state: "not_applicable" };
+    // The round's base is the default branch's tip NOW (the runner's may be older); the runner's verdict and paths are kept as the hint they are.
+    const tip = await runner.fence.defaultBranchTip({ repoId: subject.repoId, prNumber: subject.prNumber });
+    const out = await mergeQueue.startEntrylessFromRunnerFacts(runnerStartPorts(base), subject, { verdict: order.conflict_verdict, baseSha: tip.sha, baseRef: tip.branch, files: order.conflict_files }, { eventCode: "overlap_unreviewed" });
+    return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
+  });
+}
+
 /** One look at the item's round with no queue entry, moving it on (see `completeEntrylessRound`). `in_review`: the review loop reads the head again. `passed`: the delta review passed. */
 export type ConflictWaitOut = { state: "passed"; headSha: string } | { state: "waiting" | "in_review" | "halted" | "none" | "merged" | "closed" } | { state: "stopped"; reason: string };
 
