@@ -198,7 +198,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1020` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`) and the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`) |
+| `0800`–`1023` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`) and the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`) |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -251,14 +251,18 @@ Migrations run under a non-superuser, Neon-shaped owner role;
 (opened, synchronize, reopened) and on merge-queue checks (`merge_group`). Its
 jobs are `pr-gates` (public pull requests only: what the body may cite and that
 the diff adds no overlay path), `check` (runs `scripts/check.sh`, 90-minute
-timeout), `workspace-e2e` (pull requests and merge groups) and `e2e-runner`.
+timeout, 175 in a merge-queue run while `ROLLUP_ENABLED` is `true`), `workspace-e2e` (pull requests and merge groups) and `e2e-runner`.
 Each job is skipped when the repository variable `CI_DISABLED` is `true`, and
 `runs-on` is `ubuntu-latest` on a public repository.
 
 A pull request run is scoped by `scripts/ci/affected.mjs`: `full`, `affected` or,
 on the private repository, `overlay`. The `ci:full` label forces a full run
 (`.github/workflows/ci-full-label.yml` re-runs the latest run when the label is
-added), and `scripts/ci/full-run-triggers.json` lists the paths that force one.
+added), and `scripts/ci/full-run-triggers.json` lists the paths that force one
+and the extra test edges and repository-wide scans that select more packages.
+A dormant `Rollup` step in the merge-queue run (`scripts/ci/rollup-position.mjs`,
+on only while the repository variable `ROLLUP_ENABLED` is `true`) lets an entry
+with another entry on top of it wait instead of running the suites.
 The workflow checks out with `persist-credentials: false` and a read-only
 `contents` token, since `check.sh` runs `pnpm install` (arbitrary lockfile
 lifecycle scripts). `.github/dependabot.yml` also exists.
@@ -291,6 +295,10 @@ Sources:
 - `packages/db/migrations/1018_run_checks_reason_no_change.sql`
 - `packages/db/migrations/1019_sitekit_preview.sql`
 - `packages/db/migrations/1020_verify_sign_in_expiry.sql`
+- `packages/db/migrations/1021_plane_merge_overlap_facts.sql`
+- `packages/db/migrations/1022_criteria_verifications.sql`
+- `packages/db/migrations/1023_merge_conflict_round_expected_signals.sql`
+- `scripts/ci/rollup-position.mjs`
 - `packages/pipeline/src/review/queueJump.ts`
 - `packages/core/src/verify/signIn.ts`
 - `packages/sitekit-pipeline/package.json`

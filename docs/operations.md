@@ -12,6 +12,7 @@ Sources:
 - `packages/db/scripts/check-migration-order.sh`
 - `scripts/ci/affected.mjs`
 - `scripts/ci/same-tree.mjs`
+- `scripts/ci/rollup-position.mjs`
 - `apps/web/env-manifest.ts`
 - `packages/github/src/handledEventNames.js`
 - `infra/sandbox-image/versions.lock.json`
@@ -35,9 +36,11 @@ The same script runs on a workstation, in CI and as the platform's own check ste
 `.github/workflows/ci.yml` runs on pushes to `main`, on pull requests (opened, synchronize, reopened) and on `merge_group` for GitHub's merge queue. Its jobs:
 
 - `pr-gates` (public pull requests only): the PR link policy and the publish denylist.
-- `check`: `nix develop .#ci --command bash scripts/check.sh`, in the scope `scripts/ci/affected.mjs` chose for the pull request. A push to `main` and a merge-queue run are always full, with one exception: a merge-queue run for a single pull request whose tree is byte-identical to a head that already carries the cloud's `fx-gate1` success skips the test steps (`scripts/ci/same-tree.mjs`, #923). The job's timeout is 90 minutes, because a full-scope run in the queue has passed 60 (#915).
+- `check`: `nix develop .#ci --command bash scripts/check.sh`, in the scope `scripts/ci/affected.mjs` chose for the pull request. A push to `main` and a merge-queue run are always full, with one exception: a merge-queue run for a single pull request whose tree is byte-identical to a head that already carries the cloud's `fx-gate1` success skips the test steps (`scripts/ci/same-tree.mjs`, #923). The job's timeout is 90 minutes, because a full-scope run in the queue has passed 60 (#915); it is 175 minutes in a merge-queue run while the repository variable `ROLLUP_ENABLED` is `true` (#939).
 - `workspace-e2e`: Playwright for `apps/workspace`, once per viewport project (`desktop`, `phone`, `tablet`). It is skipped on a private pull request that changes only overlay paths (#894) and, like `check`, in a queue run whose tree was already proven.
 - `e2e-runner`: `pnpm test:e2e-runner`.
+
+Merge-queue rollups (#939, dormant): a `Rollup` step in `check`, `e2e-runner` and `workspace-e2e` runs only in a `merge_group` run and only while the repository variable `ROLLUP_ENABLED` is `true`. It runs `scripts/ci/rollup-position.mjs`, which lets an entry that has another entry on top of it in the queue wait instead of running the suites, and ends that entry as a success only once its own pull request is merged; an entry that becomes the last one, hits the wait cap, or meets any doubt or API error runs in full. It waits only when the live merge-queue rule on the branch groups by `HEADGREEN` and gives a check response timeout of at least 150 minutes (#959); otherwise it runs in full at once. While `ROLLUP_ENABLED` is `true`, the merge-queue timeouts of `workspace-e2e` and `e2e-runner` grow from 40 and 30 to 125 and 115 minutes; with the variable unset the step does not run and the timeouts keep their old values (`.github/workflows/ci.yml`). The script's own tests run with the other CI script tests (`scripts/ci/rollup-position.test.mjs`).
 
 Runners: a public repository runs on GitHub-hosted `ubuntu-latest`; the private repository runs on a self-hosted runner (the `CI_RUNS_ON` repository variable can name another). Node, pnpm and PostgreSQL come from the same `flake.nix` dev shell a developer uses, so CI has no separate image. Every job has a timeout. A repository variable `CI_DISABLED=true` skips the jobs, and `CI_FORCE_FULL=true` forces every pull request run to full scope.
 
