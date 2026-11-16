@@ -1108,6 +1108,106 @@ describe("plane-merge routes [pg]", () => {
     });
   });
 
+  // D#483 S5-j2e-RUNNER: the overlap_facts_v1 capability and the storage of the facts on a blocked order. Nothing reads them yet; the order's behaviour for a runner that sends none is unchanged.
+  describe("overlap_facts_v1", () => {
+    const BASE = "d".repeat(40);
+    const ORDERED = { verdict: "ok", tip_sha: BASE, behind: true, overlap: true };
+    const FACTS = { verdict: "conflict_platform", paths: ["apps/web/openapi.json", "src/a.ts"], base_sha: BASE, base_ref: "main" };
+    const BOTH = ["plane_merge_v1", "ordered_facts_v1", "overlap_facts_v1"];
+    const setCaps = async (caps: string[]) => void (await admin.query("UPDATE runner_capabilities SET capabilities = $2::text[] WHERE runner_id = $1", [runner, caps]));
+    const send = async (over: Record<string, unknown>) => {
+      const { reply, order } = await claimed();
+      return { res: await verifyIt(attestation(reply as Claimed, over)), order };
+    };
+
+    it("a verify with facts from a runner without overlap_facts_v1 (even with ordered_facts_v1) is a 400: no gate, no credential, the order stays claimed", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      const { res, order } = await send({ ordered: ORDERED, overlap_facts: FACTS });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: { code: "invalid_message" } });
+      expect(goCalls).toEqual([]);
+      expect(mints.filter((m) => m.kind === "write")).toEqual([]);
+      expect(await row(order.id)).toMatchObject({ state: "claimed", conflict_verdict: null });
+    });
+
+    it("facts without an ordering fact that names an overlap are a 400 whatever the runner listed", async () => {
+      await setCaps(BOTH);
+      for (const over of [{ overlap_facts: FACTS }, { ordered: { ...ORDERED, overlap: false }, overlap_facts: FACTS }]) expect((await send(over)).res.status).toBe(400);
+      expect(goCalls).toEqual([]);
+    });
+
+    it("a strict parse still refuses facts with an unknown key, a free-text verdict, an unclean path or a missing base, and an unknown verdict that carries paths", async () => {
+      await setCaps(BOTH);
+      const bad = [{ ...FACTS, patch: "x" }, { ...FACTS, verdict: "fine" }, { ...FACTS, paths: ["../x"] }, { ...FACTS, base_sha: undefined }, { ...FACTS, paths: [] }, { verdict: "unknown", paths: ["a"] }];
+      for (const facts of bad) expect((await send({ ordered: ORDERED, overlap_facts: facts })).res.status, JSON.stringify(facts)).toBe(400);
+      expect(goCalls).toEqual([]);
+    });
+
+    it("a blocked order for the overlap keeps the facts, and the gate sees the same attestation as without them", async () => {
+      await setCaps(BOTH);
+      gate = { next: { kind: "blocked", reasons: ["overlap_unreviewed"] } };
+      const { res, order } = await send({ ordered: ORDERED, overlap_facts: FACTS });
+      expect(res.body).toMatchObject({ go: false, reasons: ["overlap_unreviewed"] });
+      expect(goCalls[0]!.attestation).toEqual({ reviewedHead: REVIEWED, publicHead: HEAD, same: true, incomplete: false, paths: ["src/a.ts"], orderedCapable: true, ordered: ORDERED });
+      expect(await row(order.id)).toMatchObject({ state: "blocked", outcome_code: "overlap_unreviewed", write_token_issued_at: null, conflict_verdict: "conflict_platform", conflict_base_sha: BASE, conflict_base_ref: "main", conflict_files: FACTS.paths });
+    });
+
+    it("a foreign verdict is kept the same way, with an out-of-order code that also names the overlap", async () => {
+      await setCaps(BOTH);
+      gate = { next: { kind: "blocked", reasons: ["ordered_resource_out_of_order", "overlap_unreviewed"] } };
+      const { order } = await send({ ordered: ORDERED, overlap_facts: { ...FACTS, verdict: "conflict_foreign" } });
+      expect(await row(order.id)).toMatchObject({ state: "blocked", outcome_code: "ordered_resource_out_of_order", conflict_verdict: "conflict_foreign" });
+    });
+
+    it("facts are not kept when the order is blocked for anything else, when the overlap is not among the reasons, or when the verdict is unknown; the order still ends blocked as before", async () => {
+      await setCaps(BOTH);
+      const cases: Array<[string[], Record<string, unknown>]> = [
+        [["ci_not_green", "overlap_unreviewed"], FACTS],
+        [["ordered_resource_out_of_order"], FACTS],
+        [["overlap_unreviewed"], { verdict: "unknown", paths: [] }],
+      ];
+      for (const [reasons, facts] of cases) {
+        gate = { next: { kind: "blocked", reasons } };
+        const { res, order } = await send({ ordered: ORDERED, overlap_facts: facts });
+        expect(res.status, reasons.join()).toBe(200);
+        expect(await row(order.id), reasons.join()).toMatchObject({ state: "blocked", outcome_code: reasons[0], conflict_verdict: null, conflict_files: null });
+      }
+    });
+
+    it("a go with facts stores none, and a blocked verify with none is today's: nothing stored", async () => {
+      await setCaps(BOTH);
+      const go = await send({ ordered: ORDERED, overlap_facts: FACTS });
+      expect(await row(go.order.id)).toMatchObject({ state: "authorized", conflict_verdict: null });
+      gate = { next: { kind: "blocked", reasons: ["overlap_unreviewed"] } };
+      const plain = await send({ ordered: ORDERED });
+      expect(await row(plain.order.id)).toMatchObject({ state: "blocked", outcome_code: "overlap_unreviewed", conflict_verdict: null });
+    });
+
+    it("the table: a blocked order takes the facts with an overlap code only, never with a credential, and the facts are written with the order's end and never change", async () => {
+      const set = "conflict_verdict = 'conflict_platform', conflict_base_sha = $3, conflict_base_ref = 'main', conflict_files = ARRAY['x']";
+      const end = (id: string, state: string, code: string) => admin.query(`UPDATE plane_merge_orders SET state = '${state}', outcome_code = $2, finished_at = now(), ${set} WHERE id = $1`, [id, code, BASE]);
+      const a = await claimed();
+      await expect(end(a.order.id, "blocked", "ci_not_green")).rejects.toThrow(/plane_merge_orders_conflict_shape/);
+      await expect(end(a.order.id, "blocked", "merge_conflict_runner")).rejects.toThrow(/plane_merge_orders_conflict_shape/);
+      await expect(admin.query("UPDATE plane_merge_orders SET conflict_verdict = 'conflict_platform', conflict_base_sha = $2, conflict_base_ref = 'main', conflict_files = ARRAY['x'] WHERE id = $1", [a.order.id, BASE])).rejects.toThrow(/written with the order's end/);
+      const issued = await authorized();
+      await expect(end(issued.order.id, "blocked", "overlap_unreviewed")).rejects.toThrow();
+      await end(a.order.id, "blocked", "overlap_unreviewed");
+      await expect(admin.query("UPDATE plane_merge_orders SET conflict_files = ARRAY['y'] WHERE id = $1", [a.order.id])).rejects.toThrow(/finished order does not change/);
+      // The old shape stands: a failed order carries its verdict only with the write credential and its own code.
+      const f = await authorized();
+      await expect(end(f.order.id, "failed", "overlap_unreviewed")).rejects.toThrow(/plane_merge_orders_conflict_shape/);
+    });
+
+    it("the store ends a blocked order with facts only under an overlap code", async () => {
+      const a = await claimed();
+      const conflict = { verdict: "conflict_platform" as const, baseSha: BASE, baseRef: "main", files: ["x"] };
+      await expect(store.finish({ accountId: A.accountId, orderId: a.order.id, to: "blocked", code: "ci_not_green", actor: { by: "cloud" }, conflict })).rejects.toThrow(/overlap code/);
+      expect((await row(a.order.id)).state).toBe("claimed");
+      expect((await store.finish({ accountId: A.accountId, orderId: a.order.id, to: "blocked", code: "overlap_unreviewed", actor: { by: "cloud" }, conflict })).kind).toBe("finished");
+    });
+  });
+
   describe("settleAuthorizedOrder (an authorized order whose lease ran out without a report)", () => {
     it("ends it from GitHub alone: merged at the head -> merged and recorded; open at the head -> failed runner_merge_failed; moved -> head_moved", async () => {
       const merged = await authorized();

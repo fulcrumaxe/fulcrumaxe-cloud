@@ -17,8 +17,8 @@ import {
   RUNNER_MESSAGES,
 } from "../src/messages.js";
 import { ClaimIdleReply, PlaneMergeClaimReply, PlaneMergeOrderedConfig, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyReply, RUNNER_REPLIES } from "../src/replies.js";
-import { HelloMessage } from "../src/messages.js";
-import { CONFLICT_FACTS_CAPABILITY, ORDERED_FACTS_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
+import { CURRENT_PROTOCOL_VERSION, HelloMessage } from "../src/messages.js";
+import { CONFLICT_FACTS_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
 import { fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 const ORDER = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -307,5 +307,49 @@ describe("the replies", () => {
     expect(ClaimIdleReply.safeParse({ retry_after: 60, merge_order: true }).success).toBe(true);
     expect(ClaimIdleReply.safeParse({ retry_after: 60 }).success).toBe(true);
     expect(ClaimIdleReply.safeParse({ retry_after: 60, merge_order: false }).success).toBe(false);
+  });
+});
+
+// D#483 S5-j2e-RUNNER: the overlap facts are an optional, strict, additive field on the verify, tied to an ordering fact that names an overlap.
+describe("the overlap facts (overlap_facts_v1)", () => {
+  const ordered = (over: Record<string, unknown> = {}) => ({ verdict: "ok", tip_sha: A, behind: true, overlap: true, ...over });
+  const facts = (over: Record<string, unknown> = {}) => ({ verdict: "conflict_platform", paths: ["src/a.ts"], base_sha: A, base_ref: "main", ...over });
+  const ok = (over: Record<string, unknown>) => PlaneMergeVerifyMessage.safeParse(verify(over)).success;
+  it("is a hello capability, once, and the protocol version does not move", () => {
+    expect(OVERLAP_FACTS_CAPABILITY).toBe("overlap_facts_v1");
+    expect(RUNNER_CAPABILITIES).toContain(OVERLAP_FACTS_CAPABILITY);
+    // This change adds no version bump: the value is whatever main already carries (18 after the verify sign-in claim).
+    expect(CURRENT_PROTOCOL_VERSION).toBe(18);
+    const hello = { protocol_version: 1, binary_version: "0.1.0", model_auth_present: true, isolation: "container" };
+    expect(HelloMessage.safeParse({ ...hello, capabilities: ["ordered_facts_v1", "overlap_facts_v1"] }).success).toBe(true);
+    expect(HelloMessage.safeParse({ ...hello, capabilities: ["overlap_facts_v1", "overlap_facts_v1"] }).success).toBe(false);
+  });
+  it("is optional: a verify without it parses, and each verdict parses with an ordering fact that names an overlap", () => {
+    expect(ok({})).toBe(true);
+    expect(ok({ ordered: ordered(), overlap_facts: facts() })).toBe(true);
+    expect(ok({ ordered: ordered(), overlap_facts: facts({ verdict: "conflict_foreign" }) })).toBe(true);
+    expect(ok({ ordered: ordered(), overlap_facts: { verdict: "unknown", paths: [] } })).toBe(true);
+  });
+  it("is refused without an ordering fact, or with one that names no overlap", () => {
+    expect(ok({ overlap_facts: facts() })).toBe(false);
+    expect(ok({ ordered: ordered({ overlap: false }), overlap_facts: facts() })).toBe(false);
+  });
+  it("is strict: an unknown key, a free-text verdict, an unclean path, a repeat, too many paths and a verdict without its base are all refused", () => {
+    const no = (overlap_facts: unknown, label: string) => expect(ok({ ordered: ordered(), overlap_facts }), label).toBe(false);
+    no(facts({ patch: "x" }), "extra key");
+    no(facts({ verdict: "clean" }), "a verdict outside the closed set");
+    no(facts({ paths: ["../x"] }), "a path that climbs");
+    no(facts({ paths: ["a", "a"] }), "a repeated path");
+    no(facts({ paths: Array.from({ length: MAX_CONFLICT_FACT_PATHS + 1 }, (_, i) => `f${i}`) }), "too many paths");
+    no(facts({ paths: [] }), "a verdict with no path");
+    no(facts({ base_sha: undefined }), "no base sha");
+    no(facts({ base_ref: "bad ref" }), "a ref that is not a branch name");
+    no({ verdict: "unknown", paths: ["a"] }, "unknown that carries a path");
+    no("conflict_platform", "a bare string");
+  });
+  it("holds no field that could carry content, and the schema walk finds it clear", () => {
+    expect(fieldPaths(PlaneMergeVerifyMessage).filter((n) => /^overlap_facts/.test(n)).sort()).toEqual(["overlap_facts", "overlap_facts.base_ref", "overlap_facts.base_sha", "overlap_facts.paths", "overlap_facts.verdict"]);
+    expect(nonStrictObjects(PlaneMergeVerifyMessage)).toEqual([]);
+    expect(g1Violations(PlaneMergeVerifyMessage)).toEqual([]);
   });
 });

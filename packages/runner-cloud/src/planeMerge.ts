@@ -2,6 +2,7 @@ import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS,
   CONFLICT_FACTS_CAPABILITY,
   ORDERED_FACTS_CAPABILITY,
+  OVERLAP_FACTS_CAPABILITY,
   PLANE_MERGE_CLAIM_PATH,
   PLANE_MERGE_QUEUE_CAPABILITY,
   PLANE_MERGE_REPORT_PATH,
@@ -134,6 +135,11 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
   // D#483 S5-j2c1: the ordering fact is accepted only from a runner whose latest hello listed `ordered_facts_v1`; from any other it is a forgery or a bug, refused before anything is read.
   const orderedCapable = await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: ORDERED_FACTS_CAPABILITY }));
   if (message.ordered !== undefined && !orderedCapable) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+  // D#483 S5-j2e-RUNNER: the overlap facts are accepted only from a runner that listed `overlap_facts_v1` as well (the message schema already ties them to an `ordered` fact that names an overlap).
+  if (message.overlap_facts !== undefined) {
+    const overlapCapable = orderedCapable && (await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: OVERLAP_FACTS_CAPABILITY })));
+    if (!overlapCapable) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+  }
   const fence = await asRunner(() => merge.store.fence(lease));
   if (fence.kind === "fenced") throw fenced(fence.reason);
   const order = fence.order;
@@ -209,7 +215,13 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
     }
     case "blocked": {
       const reasons = safeReasons(result.reasons, "runner_merge_failed");
-      await endOrder("blocked", reasons[0]!);
+      // The facts are kept only on an order the gate blocked for the overlap itself (its code is the order's code), and `unknown` carries nothing to keep. Nothing here starts anything: a later step reads them.
+      const facts = message.overlap_facts;
+      const overlap: PlaneMergeConflictRecord | undefined =
+        facts !== undefined && facts.verdict !== "unknown" && reasons.includes("overlap_unreviewed") && OVERLAP_ORDER_CODES.includes(reasons[0]!)
+          ? { verdict: facts.verdict, baseSha: facts.base_sha!, baseRef: facts.base_ref!, files: facts.paths }
+          : undefined;
+      await asRunner(() => merge.store.finish({ accountId: runner.accountId, orderId: order.id, to: "blocked", code: reasons[0]!, actor: { by: "cloud" }, ...(overlap !== undefined ? { conflict: overlap } : {}) }));
       return { status: 200, body: PlaneMergeVerifyReply.parse({ go: false, reasons }), headers: NO_STORE };
     }
     case "pr_not_open": {
@@ -231,6 +243,8 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
 /** What a runner (or the clock) says happened to an authorized order. Only ever a hint. */
 export type SettleHint = { result: "merged" | "enqueued" | "refused" | "aborted"; abortCode?: string; conflict?: PlaneMergeConflictRecord } | null;
 /** The order's code for each verdict the cloud stores (D#519 MQ4-e2-b); the store and the table's shape CHECK hold the same pairing. */
+/** D#483 S5-j2e-RUNNER: the codes of a blocked order that may keep overlap facts (packages/worker `OVERLAP_ORDER_CODES`, which this package cannot import; the table's shape CHECK holds the same pair). */
+const OVERLAP_ORDER_CODES: readonly string[] = ["overlap_unreviewed", "ordered_resource_out_of_order"];
 const CONFLICT_CODES = { conflict_platform: "merge_conflict_runner", conflict_foreign: "merge_conflict_foreign" } as const;
 export type SettleOutcome = { state: "merged" | "enqueued" | "head_moved" | "failed"; code: string; recorded: boolean } | { state: "unchanged" };
 

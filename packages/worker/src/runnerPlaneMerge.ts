@@ -131,6 +131,8 @@ const ENDS: Record<"pending" | "claimed" | "authorized", { cloud: readonly Plane
 
 /** The order's code for each stored verdict (the table's shape CHECK holds the same pairing). */
 export const CONFLICT_ORDER_CODES = { conflict_platform: "merge_conflict_runner", conflict_foreign: "merge_conflict_foreign" } as const;
+/** D#483 S5-j2e-RUNNER: the codes of a `blocked` order that may carry the runner's overlap facts (the table's shape CHECK holds the same pair). */
+export const OVERLAP_ORDER_CODES: readonly string[] = ["overlap_unreviewed", "ordered_resource_out_of_order"];
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -442,7 +444,10 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         if (!isOpen(order.state)) return { kind: "not_allowed", from: order.state };
         const allowed = ENDS[order.state as keyof typeof ENDS][input.actor.by];
         if (!allowed.includes(input.to)) return { kind: "not_allowed", from: order.state };
-        if (input.conflict && (input.to !== "failed" || input.code !== CONFLICT_ORDER_CODES[input.conflict.verdict])) throw new Error("finish: a conflict verdict ends a failed order with its own code");
+        // A refused merge call's verdict ends a failed order with its own code; the overlap facts of a verify (D#483 S5-j2e-RUNNER) end a blocked order with one of the overlap codes.
+        if (input.conflict && !(input.to === "failed" ? input.code === CONFLICT_ORDER_CODES[input.conflict.verdict] : input.to === "blocked" && OVERLAP_ORDER_CODES.includes(input.code))) {
+          throw new Error("finish: a conflict verdict ends a failed order with its own code, or a blocked one with an overlap code");
+        }
         return { kind: "finished", order: await end(client, order.id, input.accountId, input.to, input.code, at, input.conflict) };
       });
     },
