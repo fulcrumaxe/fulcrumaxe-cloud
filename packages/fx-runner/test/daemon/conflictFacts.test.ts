@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MAX_CONFLICT_FACT_PATHS, PlaneMergeConflictFacts } from "@fulcrumaxe/runner-protocol";
 import { planePushGit } from "@fulcrumaxe/runner-protocol/planePush";
-import { computeConflictFacts, type FactsGit } from "../../src/daemon/conflictFacts.js";
+import { computeConflictFacts, computeOverlapFacts, type FactsGit } from "../../src/daemon/conflictFacts.js";
 import { createPushLog, type PushLog, type PushRecord } from "../../src/daemon/pushLog.js";
 import { ledgerOptions } from "../helpers/ledgerOptions.js";
 
@@ -66,8 +66,8 @@ interface Fixture {
   main: string;
 }
 /** `f.txt` is changed on the default branch after the pull request branched; the pull request's commits are made by the caller on `fx/run`. */
-function branchPoint(): { base: string; toMain: (files: Record<string, string>) => Fixture } {
-  const base = commit({ "f.txt": "one\n", "g.txt": "keep\n" }, "base");
+function branchPoint(seed: Record<string, string> = { "f.txt": "one\n", "g.txt": "keep\n" }): { base: string; toMain: (files: Record<string, string>) => Fixture } {
+  const base = commit(seed, "base");
   sh(work, "switch", "-q", "-c", "fx/run");
   return {
     base,
@@ -308,5 +308,127 @@ describe("C15-14: unknown, with no paths, for each case the runner cannot establ
     expect(await computeConflictFacts({ privateDir: path.join(root, "nope"), reviewedHead: "f".repeat(40), scratch, pushLog: log })).toEqual(UNKNOWN);
     expect(await computeConflictFacts({ privateDir: mirror, reviewedHead: "not-a-sha", scratch, pushLog: log })).toEqual(UNKNOWN);
     expect(statSync(scratch).isDirectory()).toBe(true);
+  }, T);
+});
+
+// D#483 S5-j2e-RUNNER: the overlap facts, for a merge that is clean. Real git throughout, the real file-backed push log.
+const overlap = (reviewedHead: string, over: { git?: FactsGit; pushLog?: PushLog | undefined } = {}) =>
+  computeOverlapFacts({ privateDir: mirror, reviewedHead, scratch, pushLog: "pushLog" in over ? over.pushLog : log, ...(over.git === undefined ? {} : { git: over.git }) });
+
+const LONG = { "f.txt": "1\n2\n3\n4\n5\n6\n7\n8\n", "g.txt": "keep\n" };
+const PR_F = "ONE\n2\n3\n4\n5\n6\n7\n8\n";
+const DEF_F = "1\n2\n3\n4\n5\n6\n7\nEIGHT\n";
+describe("overlap facts: the files both sides changed since the merge base", () => {
+  const UNKNOWN = { verdict: "unknown", paths: [] };
+
+  it("a clean merge that shares a file, every commit pushed by the runner: conflict_platform with the shared paths, sorted, and the default tip it was computed against", async () => {
+    const { base, toMain } = branchPoint(LONG);
+    // Different regions of the same file merge cleanly, so merge-tree has nothing to report and the conflict facts are null.
+    commit({ "f.txt": PR_F, "g.txt": "pr\n" }, "pr");
+    const head = commit({ "z.txt": "only the pr\n" }, "pr 2");
+    const { main } = toMain({ "f.txt": DEF_F, "a.txt": "only the default\n" });
+    mirrorNow();
+    record({ new_sha: head, start: base });
+    mkdirSync(path.join(root, "s2"));
+    expect(await computeConflictFacts({ privateDir: mirror, reviewedHead: head, scratch: path.join(root, "s2"), pushLog: log })).toBeNull();
+    const answer = await overlap(head);
+    expect(answer).toEqual({ verdict: "conflict_platform", paths: ["f.txt"], base_sha: main, base_ref: "main" });
+    expect(PlaneMergeConflictFacts.safeParse(answer).success).toBe(true);
+  }, T);
+
+  it("a commit the log does not hold that touches a shared file: conflict_foreign; one that touches only other files does not change the verdict", async () => {
+    const { base, toMain } = branchPoint(LONG);
+    const ours = commit({ "f.txt": PR_F }, "ours");
+    const theirs = commit({ "g.txt": "a person\n" }, "person, other file");
+    toMain({ "f.txt": DEF_F });
+    mirrorNow();
+    record({ new_sha: ours, start: base });
+    expect((await overlap(theirs))?.verdict).toBe("conflict_platform");
+    // Now the uncovered commit touches the shared file.
+    sh(work, "switch", "-q", "fx/run");
+    const edited = commit({ "f.txt": "ONE\nTHREE\n2\n3\n4\n5\n6\n7\n8\n" }, "person, shared file");
+    sh(work, "switch", "-q", "main");
+    mirrorNow();
+    expect(await overlap(edited)).toMatchObject({ verdict: "conflict_foreign", paths: ["f.txt"] });
+  }, T);
+
+  it("a merge commit on the pull request (an update-branch merge of the default) is not the runner's: conflict_foreign", async () => {
+    const { base, toMain } = branchPoint(LONG);
+    const ours = commit({ "f.txt": PR_F }, "ours");
+    toMain({ "f.txt": DEF_F });
+    sh(work, "switch", "-q", "fx/run");
+    sh(work, "merge", "-q", "--no-edit", "main");
+    sh(work, "switch", "-q", "main");
+    toMain({ "f.txt": "1\n2\n3\n4\n5\n6\n7\nEIGHT\nmore\n" });
+    mirrorNow();
+    record({ new_sha: ours, start: base });
+    expect(await overlap(sh(work, "rev-parse", "fx/run"))).toMatchObject({ verdict: "conflict_foreign", paths: ["f.txt"] });
+  }, T);
+
+  it("no shared file, a head that already holds the default tip, and a default that has not moved: unknown, with nothing else", async () => {
+    const { base, toMain } = branchPoint(LONG);
+    const head = commit({ "g.txt": "pr\n" }, "pr");
+    toMain({ "f.txt": "default\n" });
+    mirrorNow();
+    record({ new_sha: head, start: base });
+    expect(await overlap(head)).toEqual(UNKNOWN);
+    sh(work, "switch", "-q", "fx/run");
+    sh(work, "merge", "-q", "--no-edit", "main");
+    const caught = sh(work, "rev-parse", "HEAD");
+    mirrorNow();
+    expect(await overlap(caught)).toEqual(UNKNOWN);
+    expect(await overlap(base)).toEqual(UNKNOWN);
+  }, T);
+
+  it("sends only names and ids, and writes nothing into the mirror", async () => {
+    const { base, toMain } = branchPoint(LONG);
+    const head = commit({ "f.txt": PR_F }, "pr");
+    toMain({ "f.txt": DEF_F });
+    mirrorNow();
+    record({ new_sha: head, start: base });
+    const listing = (): string => execFileSync("find", [path.join(mirror, "objects"), "-type", "f"], { encoding: "utf8" }).split("\n").sort().join("\n");
+    const before = listing();
+    const answer = await overlap(head);
+    expect(Object.keys(answer).sort()).toEqual(["base_ref", "base_sha", "paths", "verdict"]);
+    expect(JSON.stringify(answer)).not.toContain("zero");
+    expect(listing()).toBe(before);
+  }, T);
+
+  it(`more than ${MAX_CONFLICT_FACT_PATHS} shared paths, a path that is not UTF-8, a damaged or missing push log, and a head the mirror lacks: unknown`, async () => {
+    const { base, toMain } = branchPoint(LONG);
+    const many = Object.fromEntries(Array.from({ length: MAX_CONFLICT_FACT_PATHS + 1 }, (_, i) => [`d/n${i}.txt`, "pr\n"]));
+    const head = commit(many, "pr");
+    toMain(Object.fromEntries(Object.keys(many).map((p) => [p, "default\n"])));
+    mirrorNow();
+    record({ new_sha: head, start: base });
+    expect(await overlap(head)).toEqual(UNKNOWN);
+
+    const bad = Buffer.from([0x66, 0xff, 0x2e, 0x74]);
+    sh(work, "switch", "-q", "fx/run");
+    writeFileSync(Buffer.concat([Buffer.from(`${work}/`), bad]), "pr\n");
+    sh(work, "add", "-A");
+    sh(work, "commit", "-q", "-m", "pr, bad name");
+    const badPr = sh(work, "rev-parse", "HEAD");
+    sh(work, "switch", "-q", "main");
+    writeFileSync(Buffer.concat([Buffer.from(`${work}/`), bad]), "default\n");
+    sh(work, "add", "-A");
+    sh(work, "commit", "-q", "-m", "default, bad name");
+    mirrorNow();
+    expect(await overlap(badPr)).toEqual(UNKNOWN);
+
+    expect(await overlap("f".repeat(40))).toEqual(UNKNOWN);
+    expect(await overlap(head, { pushLog: undefined })).toEqual(UNKNOWN);
+    log.close();
+    expect(await overlap(head)).toEqual(UNKNOWN);
+  }, T);
+
+  it("never throws: a git that fails, and a private directory that is not there, are unknown", async () => {
+    commit({ "f.txt": "one\n" }, "base");
+    mirrorNow();
+    const broken: FactsGit = async () => {
+      throw new Error("boom");
+    };
+    expect(await overlap("f".repeat(40), { git: broken })).toEqual(UNKNOWN);
+    expect(await computeOverlapFacts({ privateDir: path.join(root, "nope"), reviewedHead: "f".repeat(40), scratch, pushLog: log })).toEqual(UNKNOWN);
   }, T);
 });

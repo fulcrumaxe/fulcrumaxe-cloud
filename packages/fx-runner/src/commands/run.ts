@@ -49,7 +49,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -143,6 +143,8 @@ export interface RunHooks {
   onConflictFactsAccepted?: (accepted: boolean) => void;
   /** A test seam: told, once the hello is answered, whether the ordering fact may be computed and sent on a merge order. */
   onOrderedFactsAccepted?: (accepted: boolean) => void;
+  /** A test seam: told, once the hello is answered, whether the overlap verdict may be sent on a verify message. */
+  onOverlapFactsAccepted?: (accepted: boolean) => void;
   /** A test seam: told, once the hello is answered, whether a fix round that added no commit may ask to publish the branch tip. */
   onTipPublishAccepted?: (accepted: boolean) => void;
   /** A test seam: told, once the hello is answered, whether a finished run's memory proposals may be offered to the person. */
@@ -336,6 +338,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let conflictFactsAccepted = false;
     /** D#483 S5-j2c2: set once the hello is answered; a merge order's verify carries an ordering fact only when the cloud kept `ordered_facts_v1`. */
     let orderedFactsAccepted = false;
+    /** D#483 S5-j2e-RUNNER: set once the hello is answered; a verify that names an overlap carries the overlap verdict only when the cloud kept `overlap_facts_v1`. */
+    let overlapFactsAccepted = false;
     /** D#598 P1g-3a-3: set once the hello is answered; a fix round that added no commit asks to publish the branch tip only when the cloud kept `tip_publish_v1`. */
     let tipPublishAccepted = false;
     /** What the plane-push hook reads before it asks for the branch tip. The test seam below reads this same function, so a hook given anything else is caught. */
@@ -400,6 +404,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       workRoot: path.join(stateDir, "plane-merge"),
       sendConflictFacts: () => conflictFactsAccepted,
       sendOrderedFacts: () => orderedFactsAccepted,
+      sendOverlapFacts: () => overlapFactsAccepted,
       ...(pushLog === undefined ? {} : { pushLog }),
       uid: host.uid,
       say: (line) => ctx.out(line),
@@ -518,6 +523,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         hooks.onConflictFactsAccepted?.(conflictFactsAccepted);
         orderedFactsAccepted = dropped !== undefined && !dropped.includes(ORDERED_FACTS_CAPABILITY);
         hooks.onOrderedFactsAccepted?.(orderedFactsAccepted);
+        overlapFactsAccepted = dropped !== undefined && !dropped.includes(OVERLAP_FACTS_CAPABILITY);
+        hooks.onOverlapFactsAccepted?.(overlapFactsAccepted);
         tipPublishAccepted = dropped !== undefined && !dropped.includes(TIP_PUBLISH_CAPABILITY);
         hooks.onTipPublishAccepted?.(tipPublish());
         memProposalAccepted = dropped !== undefined && !dropped.includes(MEM_PROPOSAL_CAPABILITY);
