@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
-import { checkBody, cleanCorrectionBody } from './body.js';
+import { privateOnlyEditsNotAllowed } from '@fulcrumaxe/runner-protocol';
+import { checkAddFiles, checkBody, cleanCorrectionBody, composeAmendBody, parseAmendBody } from './body.js';
 import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.js';
 import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
@@ -119,6 +120,22 @@ export interface CreateCorrectionInput {
   origin?: CorrectionOrigin;
   /** When given, a priority or new_item body is checked (after cleaning) as the accept step will read it, so one that could never be applied is refused here. */
   itemKinds?: readonly string[];
+  /** Spec amendments only: plain repo-relative file paths to add to the Spec's file list (at most 10). Any invalid or private-only path refuses the whole correction. */
+  addFiles?: readonly string[];
+}
+
+/**
+ * Of `files`, the ones on the work item's repo's private-only (overlay) list; none when the repo is not paired. A public file list may not name them, so a correction
+ * that adds one is refused here and again when the amendment is published. One read, on the caller's own tenant transaction.
+ */
+export async function privateOnlyAmendFiles(client: PoolClient, workItemId: string, files: readonly string[]): Promise<string[]> {
+  if (!UUID_RE.test(workItemId)) return [];
+  const { rows } = await client.query<{ overlay_globs: string[] }>(
+    'SELECT p.overlay_globs FROM work_items w JOIN repo_pairing p ON p.repo_id = w.repo_id AND p.account_id = w.account_id WHERE w.id = $1::uuid',
+    [workItemId],
+  );
+  if (rows[0] === undefined) return [];
+  return privateOnlyEditsNotAllowed(rows[0].overlay_globs, { kind: 'unknown' }, files);
 }
 
 /**
@@ -134,14 +151,25 @@ export async function createCorrection(ctx: CorrectionCtx, input: CreateCorrecti
   if (typeof input.body !== 'string' || input.body.trim() === '') throw new CorrectionInputError('a correction needs some text');
   // The raw text is bounded before anything is done to it, and the cleaned text again (folding can make it longer).
   if (Array.from(input.body).length > CORRECTION_BODY_MAX) throw new CorrectionInputError(`a correction is at most ${CORRECTION_BODY_MAX} characters`);
-  const body = cleanCorrectionBody(input.kind, input.body, origin);
+  // Files to add to the Spec's file list belong to a Spec amendment only. Each must be a plain path (the whole correction is refused otherwise); the stored body then carries them.
+  let raw = input.body;
+  if (input.addFiles !== undefined) {
+    if (input.kind !== 'spec_amend') throw new CorrectionInputError('only a Spec amendment can add files');
+    raw = composeAmendBody(input.body, checkAddFiles(input.addFiles));
+  }
+  const body = cleanCorrectionBody(input.kind, raw, origin);
   if (body.trim() === '') throw new CorrectionInputError('a correction needs some text');
   if (Array.from(body).length > CORRECTION_BODY_MAX) throw new CorrectionInputError(`a correction is at most ${CORRECTION_BODY_MAX} characters`);
-  if (input.itemKinds !== undefined) checkBody(input.kind, body, input.itemKinds);
+  if (input.itemKinds !== undefined || input.kind === 'spec_amend') checkBody(input.kind, body, input.itemKinds ?? []);
   if (!UUID_RE.test(input.workItemId)) throw new NotFoundError(`work item ${input.workItemId} not found`);
+  const files = input.kind === 'spec_amend' ? parseAmendBody(body).addFiles : [];
 
   return withTenant(ctx.pool, accountId, userId, async (client: PoolClient) => {
     await assertActiveMembership(client, accountId, userId);
+    // A public file list never gains a private-only path: the repo's paired overlay list is read here (the publish reads it again).
+    if (files.length > 0 && (await privateOnlyAmendFiles(client, input.workItemId, files)).length > 0) {
+      throw new CorrectionInputError('add_files holds a private-only path');
+    }
     try {
       const { rows } = await client.query<{ id: string }>(
         'SELECT work_item_correction_create($1::uuid, $2::text, $3::text, $4::text) AS id',

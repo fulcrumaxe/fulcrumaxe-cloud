@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { MAX_BODY_BYTES } from "@fx/discussions";
+import { composeAmendBody } from "@fx/core/src/corrections/body.js";
+import { MAX_SCOPE_ENTRIES } from "@fx/core/src/specs/acceptanceScope.js";
 import { amendedBody, amendmentSection, headingName, publishAmendment, type AmendmentItem } from "../src/advance/amend.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -21,14 +23,14 @@ async function acc(accountId: string, workItemId: string, over: Partial<Amendmen
   return it;
 }
 
-async function specItem(stage = "spec_ready", body = "1. The footer shows the year.\n") {
+async function specItem(stage = "spec_ready", body = "1. The footer shows the year.\n", list: unknown = LIST) {
   const accountId = randomUUID();
   const repoId = randomUUID();
   await seedAccount(h.admin, accountId);
   await seedRepo(h.admin, accountId, repoId);
   const workItemId = randomUUID();
   await h.admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', $4, 9100)", [workItemId, accountId, repoId, stage]);
-  await h.admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 1, $3, $4, 'system', $5::jsonb)", [accountId, workItemId, body, createHash("sha256").update(body).digest("hex"), JSON.stringify({ acceptance_files: LIST })]);
+  await h.admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 1, $3, $4, 'system', $5::jsonb)", [accountId, workItemId, body, createHash("sha256").update(body).digest("hex"), JSON.stringify({ acceptance_files: list })]);
   return { accountId, workItemId, body };
 }
 const versions = async (id: string) => (await h.admin.query<{ version: number; body: string; frontmatter: unknown }>("SELECT version, body, frontmatter FROM spec_versions WHERE work_item_id = $1 ORDER BY version", [id])).rows;
@@ -103,5 +105,62 @@ describe("publishAmendment [pg]", () => {
     expect(await publishAmendment(h.runWriterPool, frozen.accountId, frozen.workItemId, [await acc(frozen.accountId, frozen.workItemId)])).toEqual({ status: "refused", reason: "spec_frozen" });
     expect((await versions(frozen.workItemId)).map((r) => r.version)).toEqual([1]);
     expect((await versions(t.workItemId)).map((r) => r.version)).toEqual([1]);
+  });
+});
+
+describe("an amendment that adds files to the Spec's file list [pg]", () => {
+  const withFiles = (text: string, files: string[]) => composeAmendBody(text, files);
+
+  it("publishes a version whose file list is the old list then the new files, names them in the body as plain text, and changes nothing else in the frontmatter", async () => {
+    const t = await specItem();
+    const a = await acc(t.accountId, t.workItemId, { text: withFiles("The test imports the changed code.", ["packages/example/test/sample.pg.test.ts", "src/a.ts", "src/b.ts"]) });
+    expect(await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [a])).toEqual({ status: "published", version: 2 });
+    const v2 = (await versions(t.workItemId))[1]!;
+    expect(v2.frontmatter).toEqual({ acceptance_files: ["src/a.ts", "packages/example/test/sample.pg.test.ts", "src/b.ts"], amended_corrections: [a.id] });
+    expect(v2.body).toBe(`${t.body}\n## Amendment (Ana, 2026-10-10)\n\n> The test imports the changed code.\n\nFiles added to the Spec's file list:\n- packages/example/test/sample.pg.test.ts\n- src/a.ts\n- src/b.ts\n`);
+  });
+
+  it("unions the files of several amendments, once each", async () => {
+    const t = await specItem();
+    const a = await acc(t.accountId, t.workItemId, { text: withFiles("one", ["src/x.ts"]) });
+    const b = await acc(t.accountId, t.workItemId, { text: withFiles("two", ["src/x.ts", "src/y.ts"]), name: "Bo" });
+    await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [a, b]);
+    expect((await versions(t.workItemId))[1]!.frontmatter).toMatchObject({ acceptance_files: ["src/a.ts", "src/x.ts", "src/y.ts"] });
+  });
+
+  it("a plain amendment is byte for byte what it was: the same body and the same frontmatter", async () => {
+    const t = await specItem();
+    const a = await acc(t.accountId, t.workItemId, { text: "Plain words." });
+    await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [a]);
+    const v2 = (await versions(t.workItemId))[1]!;
+    expect(v2.body).toBe(`${t.body}\n## Amendment (Ana, 2026-10-10)\n\n> Plain words.\n`);
+    expect(v2.frontmatter).toEqual({ acceptance_files: LIST, amended_corrections: [a.id] });
+  });
+
+  it("refuses, writing nothing, when the Spec has no readable file list (Re-spec is the way there)", async () => {
+    const t = await specItem("spec_ready", "body\n", []);
+    const a = await acc(t.accountId, t.workItemId, { text: withFiles("x", ["src/x.ts"]) });
+    expect(await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [a])).toEqual({ status: "refused", reason: "add_files_no_file_list" });
+    expect((await versions(t.workItemId)).map((r) => r.version)).toEqual([1]);
+  });
+
+  it("refuses a private-only path of a paired repository, and a body whose files cannot be read", async () => {
+    const t = await specItem();
+    await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) SELECT repo_id, account_id, 'acme/public', ARRAY['private/**'] FROM work_items WHERE id = $1", [t.workItemId]);
+    const bad = await acc(t.accountId, t.workItemId, { text: withFiles("x", ["src/x.ts", "private/notes.md"]) });
+    expect(await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [bad])).toEqual({ status: "refused", reason: "add_files_private_only" });
+    const unreadable = await acc(t.accountId, t.workItemId, { text: JSON.stringify({ text: "x", add_files: ["../etc/passwd"] }) });
+    expect(await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [unreadable])).toEqual({ status: "refused", reason: "invalid_add_files" });
+    expect((await versions(t.workItemId)).map((r) => r.version)).toEqual([1]);
+  });
+
+  it("refuses when the new files would take the list over the entry limit, and takes a file the list already holds", async () => {
+    const full = Array.from({ length: MAX_SCOPE_ENTRIES }, (_, n) => `src/f${n}.ts`);
+    const t = await specItem("spec_ready", "body\n", full);
+    const over = await acc(t.accountId, t.workItemId, { text: withFiles("x", ["src/new.ts"]) });
+    expect(await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [over])).toEqual({ status: "refused", reason: "file_list_too_large" });
+    const already = await acc(t.accountId, t.workItemId, { text: withFiles("y", ["src/f3.ts"]) });
+    expect(await publishAmendment(h.runWriterPool, t.accountId, t.workItemId, [already])).toEqual({ status: "published", version: 2 });
+    expect(((await versions(t.workItemId))[1]!.frontmatter as { acceptance_files: string[] }).acceptance_files).toEqual(full);
   });
 });

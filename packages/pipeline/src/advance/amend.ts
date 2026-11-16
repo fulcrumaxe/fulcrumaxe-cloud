@@ -4,6 +4,10 @@ import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { MAX_BODY_BYTES, amendSpec, utf8ByteLength, type DiscussionsContext } from "@fx/discussions";
 import { systemPrincipal } from "@fx/discussions/server";
 import { stripControlTokens } from "@fx/trust";
+import { privateOnlyEditsNotAllowed } from "@fulcrumaxe/runner-protocol";
+import { CorrectionInputError } from "@fx/core/src/corrections/index.js";
+import { parseAmendBody } from "@fx/core/src/corrections/body.js";
+import { MAX_SCOPE_ENTRIES, parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 
 /**
  * D#597 CC-2b: delivers accepted Spec amendments. Each is a person's own text, accepted by a person's click. It is published as DATA: the next Spec version
@@ -15,7 +19,7 @@ import { stripControlTokens } from "@fx/trust";
 export interface AmendmentItem {
   /** The correction's id. */
   id: string;
-  /** The text as the person wrote it. Untrusted for the purposes of control tokens. */
+  /** The correction's stored body: the text as the person wrote it, or (an amendment that adds files) the JSON body `parseAmendBody` reads. Untrusted for the purposes of control tokens. */
   text: string;
   /** Who accepted it, as the history shows them. */
   name: string;
@@ -39,8 +43,11 @@ export function headingName(name: string): string {
 export function amendmentSection(item: AmendmentItem): string {
   const date = item.date.toISOString().slice(0, 10);
   // Every line is a block-quote line, so the text can neither open a heading nor leave a code fence open: where the amendment ends is where the quote ends.
-  const quoted = stripControlTokens(item.text).trim().split(/\r\n|\r|\n/).map((l) => (l === "" ? ">" : `> ${l}`)).join("\n");
-  return `## Amendment (${headingName(item.name)}, ${date})\n\n${quoted}\n`;
+  const { text, addFiles } = parseAmendBody(item.text);
+  const quoted = stripControlTokens(text).trim().split(/\r\n|\r|\n/).map((l) => (l === "" ? ">" : `> ${l}`)).join("\n");
+  // The files an amendment adds to the Spec's file list are named as plain text under it (each entry is a plain path, so there is nothing to strip).
+  const files = addFiles.length === 0 ? "" : `\nFiles added to the Spec's file list:\n${addFiles.map((f) => `- ${f}`).join("\n")}\n`;
+  return `## Amendment (${headingName(item.name)}, ${date})\n\n${quoted}\n${files}`;
 }
 
 /** Version N's body, then each section in the order given. A body that does not end in a newline gets one first. */
@@ -57,8 +64,8 @@ export function amendedBody(base: string, items: readonly AmendmentItem[]): stri
 export async function publishAmendment(pool: Pool, accountId: string, workItemId: string, items: readonly AmendmentItem[]): Promise<AmendOutcome> {
   if (items.length === 0) return { status: "refused", reason: "nothing_to_amend" };
   const latest = await withTenant(pool, accountId, async (client) => {
-    const { rows } = await client.query<{ version: number; body: string; amended: unknown }>(
-      `SELECT version, body, frontmatter -> 'amended_corrections' AS amended FROM spec_versions
+    const { rows } = await client.query<{ version: number; body: string; amended: unknown; files: unknown }>(
+      `SELECT version, body, frontmatter -> 'amended_corrections' AS amended, frontmatter -> 'acceptance_files' AS files FROM spec_versions
         WHERE account_id = $1 AND work_item_id = $2 AND erased_at IS NULL ORDER BY version DESC LIMIT 1`,
       [accountId, workItemId],
     );
@@ -68,12 +75,36 @@ export async function publishAmendment(pool: Pool, accountId: string, workItemId
   const done = Array.isArray(latest.amended) ? new Set(latest.amended.filter((x): x is string => typeof x === "string")) : new Set<string>();
   if (items.every((i) => done.has(i.id))) return { status: "already_published", version: Number(latest.version) };
 
+  // The files the amendments add (each body was checked when the correction was made and accepted; read again here, so a body that cannot be read refuses the publish).
+  let addFiles: string[];
+  try {
+    addFiles = [...new Set(items.flatMap((i) => parseAmendBody(i.text).addFiles))];
+  } catch (err) {
+    if (err instanceof CorrectionInputError) return { status: "refused", reason: "invalid_add_files" };
+    throw err;
+  }
+  if (addFiles.length > 0) {
+    // A Spec with no readable file list gets one by Re-spec, never by an amendment inventing it.
+    const held = parseAcceptanceScope(latest.files);
+    if (held.kind !== "known") return { status: "refused", reason: "add_files_no_file_list" };
+    const list = latest.files as string[];
+    if (list.length + addFiles.filter((f) => !list.includes(f)).length > MAX_SCOPE_ENTRIES) return { status: "refused", reason: "file_list_too_large" };
+    const overlay = await withTenant(pool, accountId, async (client) => {
+      const { rows } = await client.query<{ overlay_globs: string[] }>(
+        "SELECT p.overlay_globs FROM work_items w JOIN repo_pairing p ON p.repo_id = w.repo_id AND p.account_id = w.account_id WHERE w.id = $1 AND w.account_id = $2",
+        [workItemId, accountId],
+      );
+      return rows[0]?.overlay_globs ?? [];
+    });
+    if (privateOnlyEditsNotAllowed(overlay, { kind: "unknown" }, addFiles).length > 0) return { status: "refused", reason: "add_files_private_only" };
+  }
+
   const body = amendedBody(latest.body, items);
   if (utf8ByteLength(body) > MAX_BODY_BYTES) return { status: "refused", reason: "spec_too_large" };
 
   const ctx: DiscussionsContext = { pool, principal: systemPrincipal(accountId, "pipeline.amend") };
   try {
-    const published = await amendSpec(ctx, { workItemId, body, basedOnVersion: Number(latest.version), correctionIds: items.map((i) => i.id) });
+    const published = await amendSpec(ctx, { workItemId, body, basedOnVersion: Number(latest.version), correctionIds: items.map((i) => i.id), addFiles });
     return { status: "published", version: published.version };
   } catch (err) {
     if (err instanceof WorkItemHaltedError) return { status: "refused", reason: "item_halted" };

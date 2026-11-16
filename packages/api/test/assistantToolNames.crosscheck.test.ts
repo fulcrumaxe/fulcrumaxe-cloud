@@ -43,7 +43,7 @@ describe('the runner and hosted assistant tool lists (D#597 CC-6a-1, CC6A-NAME-R
 
   it('gives every runner tool an argument list, so the check above cannot pass on an empty read', () => {
     for (const name of ALLOWED_TOOLS) expect(runnerArgs(name).length, name).toBeGreaterThan(0);
-    expect(runnerArgs('draft_correction')).toEqual(['body', 'kind', 'work_item_id']);
-    expect(hostedArgs('draft_correction')).toEqual(['body', 'item_id', 'kind']);
+    expect(runnerArgs('draft_correction')).toEqual(['add_files', 'body', 'kind', 'work_item_id']);
+    expect(hostedArgs('draft_correction')).toEqual(['add_files', 'body', 'item_id', 'kind']);
   });
 });

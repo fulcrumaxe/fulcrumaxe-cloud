@@ -1586,7 +1586,24 @@ function repeatsKey(text) {
   return false;
 }
 /** The fields accepting a new_item or priority draft would use, parsed as the server parses them: [[label, value]...]; null when the server would refuse the body; undefined for any other kind. */
+export const AMEND_FILES_MAX = 10;
+/** One plain repo-relative file path, exactly as the server reads it (`isPlainScopeFile` in `@fulcrumaxe/runner-protocol`): at most 255 characters, letters, digits and `_ . @ + = -` in each segment (the first character a letter, digit or `_ @ +`), segments joined by single `/`, no `.` or `..` segment; no directory, glob, brace, bracket, parenthesis, colon, backslash or space. A parity test holds this and the server's function to the same answers. */
+export function isPlainFilePath(p) {
+  if (typeof p !== "string" || p.length === 0 || p.length > 255) return false;
+  if (!/^[A-Za-z0-9_@+][A-Za-z0-9_.@+=-]*(?:\/[A-Za-z0-9_.@+=-]+)*$/.test(p)) return false;
+  return p.split("/").every((seg) => seg !== "." && seg !== "..");
+}
 export function parseCorrectionFields(kind, body) {
+  if (kind === "spec_amend") {
+    // A plain amendment is its text and has no fields (undefined). One with files is one JSON object { text, add_files }: the files are listed apart so the person sees exactly what the Spec's file list gains.
+    if (typeof body !== "string" || !body.trimStart().startsWith("{")) return undefined;
+    let o;
+    try { o = JSON.parse(body); } catch { return undefined; }
+    if (!o || typeof o !== "object" || Array.isArray(o) || !Object.hasOwn(o, "add_files")) return undefined;
+    if (Object.keys(o).length !== 2 || !Object.hasOwn(o, "text") || repeatsKey(body) || typeof o.text !== "string" || o.text.trim() === "") return null;
+    if (!Array.isArray(o.add_files) || o.add_files.length < 1 || o.add_files.length > AMEND_FILES_MAX || !o.add_files.every(isPlainFilePath)) return null;
+    return [["Text", o.text], ["Files added to the Spec's file list", [...new Set(o.add_files)].join("\n")]];
+  }
   if (kind !== "new_item" && kind !== "priority") return undefined;
   let v;
   try { v = JSON.parse(body); } catch { return null; }
@@ -1720,7 +1737,7 @@ export const CORRECTION_EFFECTS = Object.freeze({
 });
 export const CORRECTION_COPY = Object.freeze({
   heading: "Drafts to decide", loading: "Loading drafts…", error: "Drafts aren't available right now.", none: "No drafts waiting for a decision.",
-  assistant: "Drafted by the assistant", person: "Proposed by ", new_item: "Accepting creates this", priority: "Accepting changes the priority to this",
+  assistant: "Drafted by the assistant", person: "Proposed by ", new_item: "Accepting creates this", priority: "Accepting changes the priority to this", spec_amend: "Accepting adds this text to the next Spec version and adds these files to the Spec's file list",
   hidden: "This text has hidden characters. They are shown as [U+XXXX] markers. Read it with care before you decide.", full: "Full text of the draft, shown as plain text:",
   member: "An owner or admin can accept or reject this.",
   accept: "Accept", reject: "Reject", withdraw: "Withdraw", why: "Ask why",

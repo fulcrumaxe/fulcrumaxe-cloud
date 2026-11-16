@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { sanitize, structuralValue } from '@fx/trust';
+import { AMEND_ADD_FILES_MAX } from '../corrections/body.js';
 import { CORRECTION_BODY_MAX, CORRECTION_KINDS, CorrectionInputError, createCorrection, listCorrections } from '../corrections/index.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { getWorkItemActivity } from '../work-items/activity.js';
@@ -51,13 +52,14 @@ export const TOOL_NONE = '(none)';
 const NOT_FOUND = 'not found';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type Field = { type: 'uuid' } | { type: 'text'; max: number } | { type: 'enum'; values: readonly string[] };
+/** `paths`: a list of at most `max` strings, each at most 512 characters; the tool itself says what a valid path is. */
+type Field = { type: 'uuid' } | { type: 'text'; max: number } | { type: 'enum'; values: readonly string[] } | { type: 'paths'; max: number };
 interface Tool {
   name: string;
   description: string;
   fields: Record<string, Field>;
   required: readonly string[];
-  run(ctx: AssistantToolCtx, st: AssistantTurnState, input: Record<string, string>): Promise<string[]>;
+  run(ctx: AssistantToolCtx, st: AssistantTurnState, input: Record<string, string>, lists: Record<string, string[]>): Promise<string[]>;
 }
 
 /** Fixed word for an empty value, so a result never shows a bare null or undefined. */
@@ -174,18 +176,21 @@ const TOOLS: readonly Tool[] = [
   },
   {
     name: 'draft_correction',
-    description: 'Propose a correction for the item. It is only a proposal: a person must accept it. Use it when the person asks you to write one down.',
-    fields: { item_id: { type: 'uuid' }, kind: { type: 'enum', values: CORRECTION_KINDS }, body: { type: 'text', max: CORRECTION_BODY_MAX } },
+    description:
+      'Propose a correction for the item. It is only a proposal: a person must accept it. Use it when the person asks you to write one down. ' +
+      "If a spec_amend needs a file the Spec's file list lacks, name it in add_files (plain file paths, at most 10).",
+    fields: { item_id: { type: 'uuid' }, kind: { type: 'enum', values: CORRECTION_KINDS }, body: { type: 'text', max: CORRECTION_BODY_MAX }, add_files: { type: 'paths', max: AMEND_ADD_FILES_MAX } },
     required: ['item_id', 'kind', 'body'],
-    async run(ctx, st, i) {
+    async run(ctx, st, i, l) {
       await loadItem(ctx, i.item_id!);
       // Model text goes as sent: `createCorrection` cleans it once, after any JSON in it is decoded (cleaning the raw text here would miss an escaped token).
       const body = i.body!;
       if (body.trim() === '') throw new CorrectionInputError('empty');
-      const key = createHash('sha256').update(`${i.item_id}\n${i.kind}\n${body}`).digest('hex');
+      const files = l.add_files !== undefined && l.add_files.length > 0 ? l.add_files : undefined; // an empty list is no list
+      const key = createHash('sha256').update(`${i.item_id}\n${i.kind}\n${body}${files === undefined ? '' : `\n${JSON.stringify(files)}`}`).digest('hex');
       let id = st.drafts.get(key);
       if (id === undefined) {
-        const c = await createCorrection(ctx, { workItemId: i.item_id!, kind: i.kind as (typeof CORRECTION_KINDS)[number], body, origin: 'agent', itemKinds: ctx.itemKinds });
+        const c = await createCorrection(ctx, { workItemId: i.item_id!, kind: i.kind as (typeof CORRECTION_KINDS)[number], body, origin: 'agent', itemKinds: ctx.itemKinds, ...(files === undefined ? {} : { addFiles: files }) });
         id = c.id;
         st.drafts.set(key, id);
       }
@@ -211,7 +216,7 @@ export function assistantToolDefs(): AssistantToolDef[] {
       properties: Object.fromEntries(
         Object.entries(t.fields).map(([k, f]) => [
           k,
-          f.type === 'uuid' ? { type: 'string', format: 'uuid' } : f.type === 'enum' ? { type: 'string', enum: [...f.values] } : { type: 'string', maxLength: f.max },
+          f.type === 'uuid' ? { type: 'string', format: 'uuid' } : f.type === 'enum' ? { type: 'string', enum: [...f.values] } : f.type === 'paths' ? { type: 'array', maxItems: f.max, items: { type: 'string', maxLength: 512 } } : { type: 'string', maxLength: f.max },
         ]),
       ),
     },
@@ -219,22 +224,28 @@ export function assistantToolDefs(): AssistantToolDef[] {
 }
 
 /** Strict check: only listed fields, all required present, every value a string of the right shape. Returns the first fault. */
-function validate(t: Tool, input: unknown): { ok: true; value: Record<string, string> } | { ok: false; fault: string } {
+function validate(t: Tool, input: unknown): { ok: true; value: Record<string, string>; lists: Record<string, string[]> } | { ok: false; fault: string } {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: false, fault: 'input must be an object' };
   const o = input as Record<string, unknown>;
   for (const k of Object.keys(o)) if (!Object.hasOwn(t.fields, k)) return { ok: false, fault: 'unknown field' };
   for (const k of t.required) if (!Object.hasOwn(o, k)) return { ok: false, fault: `missing field ${k}` };
   const value: Record<string, string> = {};
+  const lists: Record<string, string[]> = {};
   for (const [k, f] of Object.entries(t.fields)) {
     if (!Object.hasOwn(o, k)) continue;
     const v = o[k];
+    if (f.type === 'paths') {
+      if (!Array.isArray(v) || v.length > f.max || !v.every((x) => typeof x === 'string' && Array.from(x).length <= 512)) return { ok: false, fault: `${k} must be a list of at most ${f.max} paths` };
+      lists[k] = v as string[];
+      continue;
+    }
     if (typeof v !== 'string') return { ok: false, fault: `${k} must be text` };
     if (f.type === 'uuid' && !UUID_RE.test(v)) return { ok: false, fault: `${k} must be an id` };
     if (f.type === 'enum' && !f.values.includes(v)) return { ok: false, fault: `${k} is not one of the allowed values` };
     if (f.type === 'text' && Array.from(v).length > f.max) return { ok: false, fault: `${k} is too long` };
     value[k] = v;
   }
-  return { ok: true, value };
+  return { ok: true, value, lists };
 }
 
 function clip(lines: readonly string[]): string {
@@ -261,7 +272,7 @@ export async function runAssistantTool(ctx: AssistantToolCtx, st: AssistantTurnS
   const v = validate(t, input);
   if (!v.ok) return { text: `invalid input: ${v.fault}`, isError: true };
   try {
-    return { text: clip(await t.run(ctx, st, v.value)), isError: false };
+    return { text: clip(await t.run(ctx, st, v.value, v.lists)), isError: false };
   } catch (err) {
     if (err instanceof NotFoundError) return { text: NOT_FOUND, isError: true };
     if (err instanceof CorrectionInputError) return { text: 'invalid input: body', isError: true };

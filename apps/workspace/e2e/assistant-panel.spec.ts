@@ -471,6 +471,30 @@ test.describe("D#597 CC-6a-2: the assistant panel on a Pipeline item", () => {
     await clean(page, errors);
   });
 
+  test("a Spec amendment that adds files lists exactly those files as plain text under its text; one with a bad list has no Accept; a plain amendment shows as before", async ({ page }) => {
+    const w = newWorld();
+    const base = { ...DRAFTS[0]!, origin: "agent", kind: "spec_amend", created_by_name: "Ada" };
+    const evil = '{"text":"x","add_files":["<img src=x onerror=alert(1)>.ts"]}';
+    w.corrections.push(
+      { ...base, id: "3f2b8c1e-5a4d-4e2b-9c6a-1d7e8f9a0e01", body: '{"text":"The test imports the changed code.","add_files":["packages/example/test/sample.pg.test.ts","app/routes/page.tsx"]}', content_hash: "a".repeat(64) },
+      { ...base, id: "3f2b8c1e-5a4d-4e2b-9c6a-1d7e8f9a0e02", body: evil, content_hash: "b".repeat(64) },
+      { ...base, id: "3f2b8c1e-5a4d-4e2b-9c6a-1d7e8f9a0e03", body: "Add a rollback step.", content_hash: "c".repeat(64) },
+    );
+    const errors = await openItem(page, w);
+    const withFiles = P(page, "asst-card").nth(2);
+    await expect(withFiles.locator('[data-testid="asst-effect"]')).toContainText("adds these files to the Spec's file list");
+    await expect(withFiles.locator('[data-testid="asst-field"]')).toHaveText(["The test imports the changed code.", "packages/example/test/sample.pg.test.ts\napp/routes/page.tsx"]);
+    await expect(withFiles.locator('[data-testid="asst-accept"]')).toHaveCount(1);
+    const bad = P(page, "asst-card").nth(3);
+    await expect(bad.locator('[data-testid="asst-unparsed"]')).toHaveCount(1);
+    await expect(bad.locator('[data-testid="asst-accept"]')).toHaveCount(0);
+    await expect(bad.locator("img")).toHaveCount(0);
+    const plain = P(page, "asst-card").nth(4);
+    await expect(plain.locator('[data-testid="asst-effect"]')).toContainText("Accepting adds this to the next Spec version.");
+    await expect(plain.locator('[data-testid="asst-field"]')).toHaveCount(0);
+    await clean(page, errors);
+  });
+
   test("hidden characters show as markers with a warning, in the raw text and in parsed fields; the request still carries the stored hash", async ({ page }) => {
     const w = newWorld();
     const base = { ...DRAFTS[0]!, origin: "agent", created_by_name: "Ada" };

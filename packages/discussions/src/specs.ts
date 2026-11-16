@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
-import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
+import { MAX_SCOPE_ENTRIES, isPlainScopeFile, parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { parsePlannedPrs, type PlannedPr } from "./plannedPrs.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
@@ -124,6 +124,8 @@ export interface AmendSpecInput {
   body: string;
   basedOnVersion: number;
   correctionIds: readonly string[];
+  /** Plain file paths the accepted amendments add to the Spec's file list: the new list is version N's own, then each path it does not already hold. Absent or empty keeps N's list as it is. */
+  addFiles?: readonly string[];
 }
 
 export async function amendSpec(ctx: DiscussionsContext, input: AmendSpecInput): Promise<SpecVersion> {
@@ -132,13 +134,13 @@ export async function amendSpec(ctx: DiscussionsContext, input: AmendSpecInput):
     throw new DiscussionsError("invalid_input", "an amendment names the version its body was made from");
   }
   if (input.correctionIds.length === 0) throw new DiscussionsError("invalid_input", "an amendment names the corrections it delivers");
-  return writeSpecVersion(ctx, { workItemId: input.workItemId, body: input.body, acceptanceFiles: [] }, { basedOnVersion, correctionIds: input.correctionIds, amend: true });
+  return writeSpecVersion(ctx, { workItemId: input.workItemId, body: input.body, acceptanceFiles: [] }, { basedOnVersion, correctionIds: input.correctionIds, amend: true, addFiles: input.addFiles ?? [] });
 }
 
 async function writeSpecVersion(
   ctx: DiscussionsContext,
   input: PublishSpecInput,
-  respec: { basedOnVersion: number; amend?: true; correctionIds?: readonly string[] } | null,
+  respec: { basedOnVersion: number; amend?: true; correctionIds?: readonly string[]; addFiles?: readonly string[] } | null,
 ): Promise<SpecVersion> {
   rejectAccountIdInInput(input as unknown as Record<string, unknown>);
   const access = assertAllowed(ctx.principal, "spec.publish");
@@ -197,6 +199,15 @@ async function writeSpecVersion(
         // The list is N's own, carried forward; a Spec with no readable list is re-specced first.
         if (parseAcceptanceScope(latest[0]!.acceptance_files).kind !== "known") throw new DiscussionsError("invalid_file_scope", "a Spec needs a readable list of the files it allows");
         acceptanceFiles = latest[0]!.acceptance_files;
+        // The added files go onto the list read here, under the item's lock: N's own entries in their order, then each path N does not already hold.
+        const held = acceptanceFiles as string[];
+        const added = (respec.addFiles ?? []).filter((f, n, all) => !held.includes(f) && all.indexOf(f) === n);
+        if (added.length > 0) {
+          if (!added.every((f) => isPlainScopeFile(f))) throw new DiscussionsError("invalid_file_scope", "an added file is not a plain file path");
+          const merged = [...held, ...added];
+          if (merged.length > MAX_SCOPE_ENTRIES || parseAcceptanceScope(merged).kind !== "known") throw new DiscussionsError("file_list_too_large", "the added files would take the Spec's file list over its limit");
+          acceptanceFiles = merged;
+        }
         // The table is part of the Spec text N already shows, so an amendment carries it forward unchanged (re-read, not trusted).
         const carried = parsePlannedPrs(latest[0]!.planned_prs);
         if (carried.kind === "invalid" || carried.kind === "too_large") throw new DiscussionsError("invalid_planned_prs", "the Planned PRs table could not be read");

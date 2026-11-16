@@ -427,6 +427,13 @@ describe("the cards", () => {
     expect(parseCorrectionFields("priority", '{"priority":"high"}')).toEqual([["Priority", "high"]]);
     expect(parseCorrectionFields("new_item", '{"title":"Fix typo","kind":"task","body":"Small \\u00e9"}')).toEqual([["Title", "Fix typo"], ["Kind", "task"], ["Body", "Small é"]]);
     expect(parseCorrectionFields("question", "plain words")).toBeUndefined();
+    // a Spec amendment is its text with no fields, unless it adds files: then the files are listed apart, as the server will read them
+    expect(parseCorrectionFields("spec_amend", "Add a rollback step.")).toBeUndefined();
+    expect(parseCorrectionFields("spec_amend", '{"note":"just braces"}')).toBeUndefined();
+    expect(parseCorrectionFields("spec_amend", '{"text":"Edit the test.","add_files":["a/b.test.ts","a/b.test.ts","app/routes/p.tsx"]}')).toEqual([["Text", "Edit the test."], ["Files added to the Spec's file list", "a/b.test.ts\napp/routes/p.tsx"]]);
+    for (const body of ['{"text":"x","add_files":["../a"]}', '{"text":"x","add_files":["a/*.ts"]}', '{"text":"x","add_files":["app/[id]/p.tsx"]}', '{"text":"x","add_files":[]}', '{"text":"x","add_files":"a.ts"}', '{"text":"x","add_files":["a.ts"],"more":1}', '{"add_files":["a.ts"]}', '{"text":"x","add_files":["a.ts"],"add_files":["b.ts"]}', '{"text":"x","add_files":' + JSON.stringify(Array.from({ length: 11 }, (_, n) => "f" + n + ".ts")) + "}"]) {
+      expect(parseCorrectionFields("spec_amend", body), body).toBeNull();
+    }
     for (const [kind, body] of [
       ["new_item", '{"title":"Fix typo","kind":"task","body":"Small","body":"HOSTILE"}'],
       ["new_item", '{"title":"t","kind":"task","body":"a","\\u0062ody":"b"}'],

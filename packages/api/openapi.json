@@ -40947,7 +40947,7 @@
       "post": {
         "operationId": "createCorrection",
         "summary": "Propose a correction to a work item in flight",
-        "description": "Session, or a token with `corrections:write`. Records the correction as `proposed`; nothing changes until an owner or admin accepts it. A session's correction has origin `person`, a token's has origin `agent`. A `priority` body is `{\"priority\": \"urgent|high|normal|low\"}` and a `new_item` body is `{\"title\", \"kind\", \"body\"}`; both are checked now. The text is at most 4,000 characters.",
+        "description": "Session, or a token with `corrections:write`. Records the correction as `proposed`; nothing changes until an owner or admin accepts it. A session's correction has origin `person`, a token's has origin `agent`. A `priority` body is `{\"priority\": \"urgent|high|normal|low\"}` and a `new_item` body is `{\"title\", \"kind\", \"body\"}`; both are checked now. The text is at most 4,000 characters. A `spec_amend` may also carry `add_files`: up to 10 plain repo-relative file paths (no directories, wildcards or private-only paths) that accepting it adds to the Spec's file list; any invalid path refuses the whole correction with 422, and the stored `body` then holds the text and the paths as one JSON object. A Spec with no readable file list takes none (Re-spec it first).",
         "security": [
           {
             "session": []
@@ -40994,6 +40994,13 @@
                   },
                   "body": {
                     "type": "string"
+                  },
+                  "add_files": {
+                    "maxItems": 10,
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
