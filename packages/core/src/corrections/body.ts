@@ -1,5 +1,5 @@
 import { WORK_ITEM_PRIORITIES } from '../work-items/read.js';
-import { removeHiddenMemoryChars } from '@fulcrumaxe/runner-protocol';
+import { isPlainScopeFile, removeHiddenMemoryChars } from '@fulcrumaxe/runner-protocol';
 import { stripControlTokens, stripInvisible } from '@fx/trust';
 import { sanitizeMemoryText } from '../memory/index.js';
 import { CorrectionInputError } from './index.js';
@@ -76,6 +76,50 @@ export function parseNewItemBody(body: string, kinds: readonly string[]): NewIte
 export function checkBody(kind: string, body: string, itemKinds: readonly string[]): void {
   if (kind === 'priority') parsePriorityBody(body);
   if (kind === 'new_item') parseNewItemBody(body, itemKinds);
+  if (kind === 'spec_amend') parseAmendBody(body);
+}
+
+/** The most files one Spec amendment may add to the Spec's file list. */
+export const AMEND_ADD_FILES_MAX = 10;
+
+/** A Spec amendment's body: the text a person reads, and the plain file paths it adds to the Spec's file list (none for a plain amendment). */
+export interface AmendBody {
+  text: string;
+  addFiles: string[];
+}
+
+/**
+ * The stored body of a `spec_amend` correction with files. A plain amendment (no files) is its text, exactly as before. One with files is one JSON object with the two keys
+ * `text` and `add_files`, so the hash (which binds the stored body) binds the file list too. Any JSON object that holds an `add_files` key is read as this form and refused if it
+ * is not exactly right: a body cannot carry a file list the card would not show.
+ */
+export function composeAmendBody(text: string, addFiles: readonly string[]): string {
+  if (addFiles.length === 0) return text;
+  return JSON.stringify({ text, add_files: addFiles });
+}
+
+/** Throws CorrectionInputError unless every entry is a plain repo-relative file path; the list holds at most AMEND_ADD_FILES_MAX entries before repeats are dropped. Returns the list without repeats, in order. */
+export function checkAddFiles(files: unknown): string[] {
+  if (!Array.isArray(files) || files.length === 0) throw new CorrectionInputError('add_files must be a list of file paths');
+  if (files.length > AMEND_ADD_FILES_MAX) throw new CorrectionInputError(`add_files holds at most ${AMEND_ADD_FILES_MAX} paths`);
+  for (const f of files) if (!isPlainScopeFile(f)) throw new CorrectionInputError('add_files holds a path that is not a plain file path');
+  return [...new Set(files as string[])];
+}
+
+/** The text and added files of a `spec_amend` body, or CorrectionInputError when the body holds an `add_files` key in any shape but the exact one. A body with no such key is plain text. */
+export function parseAmendBody(body: string): AmendBody {
+  if (!body.trimStart().startsWith('{')) return { text: body, addFiles: [] };
+  let v: unknown;
+  try {
+    v = JSON.parse(body);
+  } catch {
+    // fx-swallow-ok: text that only starts with a brace is an ordinary amendment
+    return { text: body, addFiles: [] };
+  }
+  if (typeof v !== 'object' || v === null || Array.isArray(v) || !Object.hasOwn(v, 'add_files')) return { text: body, addFiles: [] };
+  const o = parseObject(body, ['text', 'add_files']);
+  if (typeof o.text !== 'string' || o.text.trim() === '') throw new CorrectionInputError('an amendment needs some text');
+  return { text: o.text, addFiles: checkAddFiles(o.add_files) };
 }
 
 /** Removes what a person cannot see (hidden characters, line and paragraph separators, control characters other than tab, line feed and carriage return), nothing else. */
@@ -102,6 +146,15 @@ function defang(text: string): string {
  */
 export function cleanCorrectionBody(kind: string, body: string, origin: 'person' | 'agent'): string {
   const clean = origin === 'agent' ? sanitizeMemoryText : hiddenOnly;
+  if (kind === 'spec_amend') {
+    // A body with files is JSON: its text is cleaned as the decoded text it is, then written back with the list as it came. Any other amendment is cleaned as prose, as before.
+    try {
+      const a = parseAmendBody(body);
+      if (a.addFiles.length > 0) return composeAmendBody(clean(a.text), a.addFiles);
+    } catch {
+      // fx-swallow-ok: an unreadable file list is cleaned as prose here and refused by checkBody
+    }
+  }
   if (kind === 'new_item' || kind === 'priority') {
     try {
       const v: unknown = JSON.parse(body);

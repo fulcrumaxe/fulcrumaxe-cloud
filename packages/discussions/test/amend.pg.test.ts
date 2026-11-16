@@ -47,6 +47,24 @@ describe("amendSpec [pg]", () => {
     expect(await stageOf(wi)).toBe("spec_ready");
   });
 
+  it("addFiles go onto the list read under the lock: N's entries (patterns kept as they are) in order, then each new plain path once; nothing else in the frontmatter changes", async () => {
+    const { t, wi, body, IDS } = await specAt("spec_ready");
+    const v2 = await amendSpec(ctx(t.system), { workItemId: wi, body: `${body}\nx\n`, basedOnVersion: 1, correctionIds: IDS, addFiles: ["src/a.ts", "packages/w/test/new.pg.test.ts", "packages/w/test/new.pg.test.ts"] });
+    expect(v2.version).toBe(2);
+    expect((await versions(wi))[1].frontmatter).toEqual({ acceptance_files: [...LIST, "packages/w/test/new.pg.test.ts"], amended_corrections: IDS });
+  });
+
+  it("an added path that is not a plain file, or that would pass the entry limit, is refused and nothing is written", async () => {
+    const { t, wi, body, IDS } = await specAt("spec_ready");
+    for (const bad of ["../a.ts", "src/*.ts", "src/**", "/abs.ts"]) {
+      await expect(amendSpec(ctx(t.system), { workItemId: wi, body: `${body}\nx\n`, basedOnVersion: 1, correctionIds: IDS, addFiles: [bad] })).rejects.toMatchObject({ code: "invalid_file_scope" });
+    }
+    await db.admin.query(`UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1`, [wi, JSON.stringify({ acceptance_files: Array.from({ length: 500 }, (_, n) => `src/f${n}.ts`) })]);
+    await expect(amendSpec(ctx(t.system), { workItemId: wi, body: `${body}\nx\n`, basedOnVersion: 1, correctionIds: IDS, addFiles: ["src/over.ts"] })).rejects.toMatchObject({ code: "file_list_too_large" });
+    expect((await versions(wi)).map((r) => r.version)).toEqual([1]);
+    expect(await statusOf(IDS[0]!)).toBe("accepted");
+  });
+
   it("from needs_human it ends at spec_ready (the person's act), in the same transaction as the insert", async () => {
     const { t, wi, body, IDS } = await specAt("needs_human");
     await amendSpec(ctx(t.system), { workItemId: wi, body: `${body}\nmore\n`, basedOnVersion: 1, correctionIds: IDS });

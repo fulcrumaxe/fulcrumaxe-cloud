@@ -305,6 +305,21 @@ describe("CC-7a-2 the proxy allowlist", () => {
     expect((await toolCall(p, "draft_correction", { work_item_id: ITEM, kind: "question" })).status).toBe(400);
     expect(cloud.seen).toHaveLength(2);
   });
+
+  itProxy("draft_correction passes a spec_amend's add_files to the cloud route as given and refuses a list that is not at most 10 strings; an empty list is no list", async () => {
+    await link(0);
+    cloud.seen.length = 0;
+    const p = await startP();
+    const args = { work_item_id: ITEM, kind: "spec_amend", body: "The test imports the changed code." };
+    expect((await toolCall(p, "draft_correction", { ...args, add_files: ["src/a.ts", "src/b.ts"] })).status).toBe(201);
+    expect(cloud.seen.find((s) => s.method === "POST")!.body).toBe(JSON.stringify({ kind: "spec_amend", body: args.body, add_files: ["src/a.ts", "src/b.ts"] }));
+    for (const add_files of ["src/a.ts", [1], Array.from({ length: 11 }, (_, n) => `src/f${n}.ts`), ["x".repeat(513)]]) {
+      expect((await toolCall(p, "draft_correction", { ...args, add_files })).status, JSON.stringify(add_files).slice(0, 40)).toBe(400);
+    }
+    cloud.seen.length = 0;
+    expect((await toolCall(p, "draft_correction", { ...args, add_files: [] })).status).toBe(201);
+    expect(cloud.seen.find((s) => s.method === "POST")!.body).toBe(JSON.stringify({ kind: "spec_amend", body: args.body }));
+  });
 });
 
 describe("CC-7a-6 a dead token", () => {

@@ -215,9 +215,10 @@ describe.skipIf(noUnixSockets)("the read tools through the proxy and the strict 
   it("takes exactly the arguments CORRECTION_TOOL_ARGS lists, and refuses with one missing", async () => {
     const values: Record<string, string> = { work_item_id: ITEM, kind: "question", body: "is this right?" };
     for (const [tool, names] of Object.entries(CORRECTION_TOOL_ARGS)) {
-      const args = (omit?: string): Record<string, string> => Object.fromEntries(names.filter((n) => n !== omit).map((n) => [n, values[n]!]));
+      const args = (omit?: string): Record<string, string> => Object.fromEntries(names.filter((n) => n !== omit && n !== "add_files").map((n) => [n, values[n]!]));
       expect([200, 201], tool).toContain((await call(tool, args())).status);
-      for (const missing of names) expect((await call(tool, args(missing))).status, `${tool} without ${missing}`).toBe(400);
+      // `add_files` is the one optional argument (a Spec amendment's files): leaving it out is the plain call above.
+      for (const missing of names.filter((n) => n !== "add_files")) expect((await call(tool, args(missing))).status, `${tool} without ${missing}`).toBe(400);
     }
   });
 

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
@@ -161,5 +161,42 @@ describe('corrections (D#597 CC-1)', () => {
     const two = await createCorrection(ctx, { workItemId: item, kind: 'pause', body: 'stop' });
     await createCorrection(ctx, { workItemId: itemA, kind: 'pause', body: 'elsewhere' });
     expect((await listCorrections(ctx, item)).map((c) => c.id)).toEqual([one.id, two.id]);
+  });
+
+  describe('a Spec amendment that adds files', () => {
+    const ctx = () => as(a.accountId, aMember);
+    const amend = (over: Record<string, unknown>) => createCorrection(ctx(), { workItemId: itemA, kind: 'spec_amend', body: 'The test imports the changed code.', ...over } as never);
+
+    it('stores the text and the files as one body, so the hash binds both; a plain amendment is stored exactly as typed', async () => {
+      const c = await amend({ addFiles: ['src/a.ts', 'src/b.ts', 'src/a.ts'] });
+      expect(JSON.parse(c.body)).toEqual({ text: 'The test imports the changed code.', add_files: ['src/a.ts', 'src/b.ts'] });
+      expect(c.contentHash).toBe(createHash('sha256').update(c.body, 'utf8').digest('hex'));
+      expect((await amend({})).body).toBe('The test imports the changed code.');
+    });
+
+    it('refuses the whole correction for an invalid path, too many paths, an empty list, a non-amendment, or a body that holds add_files in the wrong shape; nothing is stored', async () => {
+      const before = (await listCorrections(ctx(), itemA)).length;
+      for (const addFiles of [['../a.ts'], ['/a.ts'], ['a/*.ts'], ['a/**'], ['a/{b,c}.ts'], ['a b.ts'], ['a\u0000.ts'], ['é.ts'], ['dir/'], [''], [], Array.from({ length: 11 }, (_, n) => `src/f${n}.ts`)]) {
+        await expect(amend({ addFiles }), JSON.stringify(addFiles)).rejects.toBeInstanceOf(CorrectionInputError);
+      }
+      await expect(createCorrection(ctx(), { workItemId: itemA, kind: 'run_note', body: 'n', addFiles: ['a.ts'] })).rejects.toBeInstanceOf(CorrectionInputError);
+      for (const body of ['{"text":"x","add_files":"a.ts"}', '{"text":"x","add_files":["../a"]}', '{"add_files":["a.ts"]}', '{"text":"x","add_files":["a.ts"],"extra":1}', '{"text":"x","add_files":["a.ts"],"add_files":["b.ts"]}']) {
+        await expect(createCorrection(ctx(), { workItemId: itemA, kind: 'spec_amend', body }), body).rejects.toBeInstanceOf(CorrectionInputError);
+      }
+      expect((await listCorrections(ctx(), itemA)).length).toBe(before);
+      // JSON that has no add_files key is just prose
+      expect((await createCorrection(ctx(), { workItemId: itemA, kind: 'spec_amend', body: '{"note":"braces are fine"}' })).body).toBe('{"note":"braces are fine"}');
+    });
+
+    it('refuses a private-only path of a paired repository', async () => {
+      await admin.query(`INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/public', ARRAY['.autonomous-team/**', 'private/*.md'])`, [a.repoId, a.accountId]);
+      try {
+        await expect(amend({ addFiles: ['src/a.ts', '.autonomous-team/plan.md'] })).rejects.toBeInstanceOf(CorrectionInputError);
+        await expect(amend({ addFiles: ['private/n.md'] })).rejects.toBeInstanceOf(CorrectionInputError);
+        expect(JSON.parse((await amend({ addFiles: ['private/deep/n.txt'] })).body).add_files).toEqual(['private/deep/n.txt']);
+      } finally {
+        await admin.query(`DELETE FROM repo_pairing WHERE repo_id = $1`, [a.repoId]);
+      }
+    });
   });
 });

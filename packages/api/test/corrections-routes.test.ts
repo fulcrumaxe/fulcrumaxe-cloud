@@ -339,6 +339,22 @@ describe('D#597 CC-2a: correction routes', () => {
     expect(signal.sent).toHaveLength(1);
   });
 
+  it('spec_amend with add_files: the text and the paths are stored as one body (so the hash binds both); a bad path refuses the whole correction with 422; add_files on another kind is 422', async () => {
+    const o = await owner();
+    const item = await seedSpecItem(o.accountId);
+    const res = await call(o, 'POST', `/work-items/${item}/corrections`, { kind: 'spec_amend', body: 'The test imports the changed code.', add_files: ['packages/example/test/sample.pg.test.ts', 'src/a.ts'] });
+    expect(res.status).toBe(201);
+    const c = (await res.json()) as Corr & { body: string };
+    expect(JSON.parse(c.body)).toEqual({ text: 'The test imports the changed code.', add_files: ['packages/example/test/sample.pg.test.ts', 'src/a.ts'] });
+    for (const add_files of [['../a.ts'], ['src/*.ts'], Array.from({ length: 11 }, (_, n) => `src/f${n}.ts`)]) {
+      const bad = await call(o, 'POST', `/work-items/${item}/corrections`, { kind: 'spec_amend', body: 'x', add_files });
+      expect(bad.status, JSON.stringify(add_files)).toBe(422);
+      expect(await err(bad)).toBe('validation_failed');
+    }
+    expect((await call(o, 'POST', `/work-items/${item}/corrections`, { kind: 'run_note', body: 'x', add_files: ['src/a.ts'] })).status).toBe(422);
+    expect((await admin.query('SELECT count(*)::int AS n FROM work_item_corrections WHERE work_item_id = $1', [item])).rows[0].n).toBe(1);
+  });
+
   it('spec_amend while a run is live is 409 already_running, the same refusal as re-spec; nothing is decided or requested, and it goes through once the run ends', async () => {
     const o = await owner();
     const item = await seedSpecItem(o.accountId);

@@ -134,6 +134,7 @@ export type DiscussionsErrorCode =
   | "invalid_planned_prs" // 422 (D#483 S5-b2b): a Spec was offered with a Planned PRs table that cannot be read
   | "spec_has_file_list" // 409 (D#6 R4d-5b, C34): a Re-spec of a Spec whose newest version already has a readable file list
   | "spec_changed" // 409 (D#6 R4d-5b): the Spec's newest version is not the one a Re-spec was made from
+  | "file_list_too_large" // 409 (D#6): an amendment's added files would take the Spec's file list over its entry limit
   | "correction_not_accepted" // 409 (D#597 CC-2b): an amendment's correction was rejected or already delivered before the version was written
   | "kind_not_buildable" // 409 (D#2 H27a): a question or project never starts a build
   | "illegal_transition"; // 409 (DS-2 PR-b): not one of D#45 S1's legal stage edges

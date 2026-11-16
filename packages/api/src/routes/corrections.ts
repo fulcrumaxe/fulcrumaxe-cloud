@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DISCUSSION_KINDS, createDiscussion } from "@fx/discussions";
 import { CORRECTION_KINDS, CorrectionInputError, createCorrection, type Correction } from "@fx/core/src/corrections/index.js";
+import { AMEND_ADD_FILES_MAX } from "@fx/core/src/corrections/body.js";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
 import {
   AmendRefusedError,
@@ -27,7 +28,7 @@ import { UUID_RE, mapDbError, notFound, runActionDeps } from "./run-actions.js";
 const idParamsSchema = z.object({ id: z.string() });
 const hashSchema = z.string().regex(/^[0-9a-f]{64}$/);
 
-const createBodySchema = z.object({ kind: z.enum(CORRECTION_KINDS), body: z.string() }).strict();
+const createBodySchema = z.object({ kind: z.enum(CORRECTION_KINDS), body: z.string(), add_files: z.array(z.string()).max(AMEND_ADD_FILES_MAX).optional() }).strict();
 const decideBodySchema = z.object({ content_hash: hashSchema.optional() }).strict().optional();
 
 const correctionSchema = z.object({
@@ -137,7 +138,7 @@ export const correctionRoutes: RouteEntry[] = [
     operationId: "createCorrection",
     summary: "Propose a correction to a work item in flight",
     description:
-      "Session, or a token with `corrections:write`. Records the correction as `proposed`; nothing changes until an owner or admin accepts it. A session's correction has origin `person`, a token's has origin `agent`. A `priority` body is `{\"priority\": \"urgent|high|normal|low\"}` and a `new_item` body is `{\"title\", \"kind\", \"body\"}`; both are checked now. The text is at most 4,000 characters.",
+      "Session, or a token with `corrections:write`. Records the correction as `proposed`; nothing changes until an owner or admin accepts it. A session's correction has origin `person`, a token's has origin `agent`. A `priority` body is `{\"priority\": \"urgent|high|normal|low\"}` and a `new_item` body is `{\"title\", \"kind\", \"body\"}`; both are checked now. The text is at most 4,000 characters. A `spec_amend` may also carry `add_files`: up to 10 plain repo-relative file paths (no directories, wildcards or private-only paths) that accepting it adds to the Spec's file list; any invalid path refuses the whole correction with 422, and the stored `body` then holds the text and the paths as one JSON object. A Spec with no readable file list takes none (Re-spec it first).",
     principals: ["session", "token"],
     tokens: ["api", "delegation"],
     scope: "corrections:write",
@@ -157,6 +158,7 @@ export const correctionRoutes: RouteEntry[] = [
           workItemId,
           kind: body.kind,
           body: body.body,
+          ...(body.add_files === undefined ? {} : { addFiles: body.add_files }),
           itemKinds: DISCUSSION_KINDS,
           origin: ctx.principal.kind === "token" ? "agent" : "person",
         });

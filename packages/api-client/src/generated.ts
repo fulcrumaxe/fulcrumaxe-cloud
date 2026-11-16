@@ -4699,6 +4699,7 @@ export interface Operations {
     body: {
       kind: "question" | "run_note" | "spec_amend" | "new_item" | "pause" | "priority";
       body: string;
+      add_files?: Array<string>;
     };
     response: {
       id: string;

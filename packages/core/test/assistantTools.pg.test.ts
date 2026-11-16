@@ -129,10 +129,44 @@ describe('assistant tools (D#597 CC-5d)', () => {
     expect(await rows(target)).toHaveLength(0);
   });
 
-  it('draft_correction takes only item, kind and body; refusals write nothing', async () => {
+  it('draft_correction takes add_files for a spec_amend: stored with the text as one body, deduplicated; any bad entry refuses the whole draft and writes nothing', async () => {
+    const target = await newItem(a, 'add files');
+    const schema = assistantToolDefs().find((t) => t.name === 'draft_correction')!;
+    expect((schema.input_schema as { properties: Record<string, unknown> }).properties.add_files).toEqual({ type: 'array', maxItems: 10, items: { type: 'string', maxLength: 512 } });
+    expect(schema.description).toContain('add_files');
+    const draft = (input: Record<string, unknown>) => runAssistantTool(ctxOf(), newTurnState(), 'draft_correction', { item_id: target, kind: 'spec_amend', body: 'The test imports the changed code.', ...input });
+    const ok = await draft({ add_files: ['packages/example/test/sample.pg.test.ts', 'app/routes/page.tsx', 'packages/example/test/sample.pg.test.ts'] });
+    expect(ok?.isError).toBe(false);
+    const stored = await rows(target);
+    expect(stored).toHaveLength(1);
+    expect(JSON.parse(stored[0].body)).toEqual({ text: 'The test imports the changed code.', add_files: ['packages/example/test/sample.pg.test.ts', 'app/routes/page.tsx'] });
+    for (const bad of [['../x.ts'], ['/etc/passwd'], ['src/*.ts'], ['src/**'], ['src/{a,b}.ts'], ['src dir/a.ts'], ['src\\a.ts'], ['src/é.ts'], ['src/a\u0000.ts'], ['src/'], ['app/[id]/page.tsx'], ['app/(g)/p.tsx'], ['ok.ts', 'src/../b.ts'], Array.from({ length: 11 }, (_, n) => `src/f${n}.ts`), 'src/a.ts', [1]]) {
+      expect(await draft({ add_files: bad }), JSON.stringify(bad)).toMatchObject({ isError: true });
+    }
+    expect(await rows(target)).toHaveLength(1);
+    // only a spec_amend may add files
+    expect(await runAssistantTool(ctxOf(), newTurnState(), 'draft_correction', { item_id: target, kind: 'run_note', body: 'n', add_files: ['src/a.ts'] })).toEqual({ text: 'invalid input: body', isError: true });
+    // an empty list is no list: the draft is a plain amendment, stored as its text
+    expect((await draft({ body: 'plain', add_files: [] }))?.isError).toBe(false);
+    expect((await rows(target)).map((r) => r.body).sort()).toContain('plain');
+  });
+
+  it('draft_correction refuses a private-only path of a paired repository', async () => {
+    const target = await newItem(a, 'private path');
+    await admin.query(`INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/public', ARRAY['private/**'])`, [a.repoId, a.accountId]);
+    try {
+      const r = await runAssistantTool(ctxOf(), newTurnState(), 'draft_correction', { item_id: target, kind: 'spec_amend', body: 'x', add_files: ['src/a.ts', 'private/notes.md'] });
+      expect(r).toEqual({ text: 'invalid input: body', isError: true });
+      expect(await rows(target)).toHaveLength(0);
+    } finally {
+      await admin.query(`DELETE FROM repo_pairing WHERE repo_id = $1`, [a.repoId]);
+    }
+  });
+
+  it('draft_correction takes only item, kind, body and add_files; refusals write nothing', async () => {
     const target = await newItem(a, 'refusals');
     const props = Object.keys((assistantToolDefs().find((t) => t.name === 'draft_correction')!.input_schema as { properties: object }).properties);
-    expect(props.sort()).toEqual(['body', 'item_id', 'kind']);
+    expect(props.sort()).toEqual(['add_files', 'body', 'item_id', 'kind']);
     expect([...CORRECTION_KINDS]).toContain('question');
     for (const extra of [{ status: 'accepted' }, { origin: 'agent' }, { decided_by: user }, { kind: 'accept' }]) {
       const r = await runAssistantTool(ctxOf(), newTurnState(), 'draft_correction', { item_id: target, kind: 'question', body: 'x', ...extra });

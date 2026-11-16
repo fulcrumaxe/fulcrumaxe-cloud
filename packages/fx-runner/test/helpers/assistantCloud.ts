@@ -103,7 +103,10 @@ export async function startAssistantCloud(now: () => number): Promise<AssistantC
       if (m !== null) {
         if (token === undefined || req.headers.authorization !== `Bearer ${token.value}` || token.revoked || now() >= token.expires) return fail(401, "unauthorized");
         if (req.method === "GET") return send(200, served.get(url) ?? { data: [] });
-        if (!strict(["kind", "body"]) || !KINDS.includes(String(json.kind)) || typeof json.body !== "string" || json.body.length > 4000) return fail(400, "invalid_message");
+        // The real route's body: `kind`, `body`, and an optional `add_files` (at most 10 strings, a Spec amendment's only; the route checks each path itself).
+        const files = json.add_files;
+        const filesOk = files === undefined || (json.kind === "spec_amend" && Array.isArray(files) && files.length >= 1 && files.length <= 10 && files.every((f) => typeof f === "string"));
+        if (!strict(files === undefined ? ["kind", "body"] : ["kind", "body", "add_files"]) || !filesOk || !KINDS.includes(String(json.kind)) || typeof json.body !== "string" || json.body.length > 4000) return fail(400, "invalid_message");
         return send(201, { id: "33333333-3333-4333-8333-333333333333", work_item_id: m[1], status: "proposed", origin: "agent", kind: json.kind, body: json.body });
       }
       return fail(404, "not_found");
