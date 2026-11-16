@@ -432,6 +432,15 @@ describe('ask_routes (0836)', () => {
       'plan_writeback_setting.changed',
       'context_budget.changed',
       'verify_settings.changed',
+      'engine_bridge.settings_changed',
+      'engine_bridge.data_deleted',
+      'engine_command.issued',
+      'engine_command.acked',
+      'engine_command.cancelled',
+      'engine_decision.recorded',
+      'engine_decision.answered',
+      'engine_halt.set',
+      'engine_halt.cleared',
     ];
 
     it('audit_write accepts every expected action', async () => {
