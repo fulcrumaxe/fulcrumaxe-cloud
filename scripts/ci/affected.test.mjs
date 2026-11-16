@@ -978,7 +978,7 @@ test("documentation: LICENSE*, NOTICE*, THIRD-PARTY-NOTICES* and CONTRIBUTING* a
 });
 
 test("scripts: adding or editing a standalone scripts/ci/*.test.mjs is not a trigger and selects no package", () => {
-  for (const file of ["scripts/ci/licence.test.mjs", "scripts/ci/affected.test.mjs", "scripts/ci/ci-workflow.test.mjs", "scripts/ci/same-tree.test.mjs"]) {
+  for (const file of ["scripts/ci/licence.test.mjs", "scripts/ci/affected.test.mjs", "scripts/ci/ci-workflow.test.mjs", "scripts/ci/same-tree.test.mjs", "scripts/ci/rollup-position.test.mjs"]) {
     const r = change({ [file]: "// x\n" });
     assertShape(r);
     assert.equal(r.mode, "affected", file);
@@ -1059,7 +1059,7 @@ test("ci.yml fail-safe: the exemption ends the moment the edit leaves the run li
   assert.equal(other.trigger, ".github/workflows/**");
   assert.equal(run(REAL_CI.replace(NODE_TEST_LINE, "$1; true")).mode, "full");
   assert.equal(run(REAL_CI.replace(NODE_TEST_LINE, "        if: false\n$1")).mode, "full");
-  const both = REAL_CI.replace(NODE_TEST_LINE, "$1 scripts/ci/licence.test.mjs").replace("timeout-minutes: 90", "timeout-minutes: 91");
+  const both = REAL_CI.replace(NODE_TEST_LINE, "$1 scripts/ci/licence.test.mjs").replace("&& 175 || 90 }}", "&& 175 || 91 }}");
   assert.equal(run(both).mode, "full");
   assert.equal(run(REAL_CI.replace("name: Migration lint and secret scan tests", "name: Lint tests").replace(NODE_TEST_LINE, "$1 scripts/ci/licence.test.mjs")).mode, "full");
   assert.equal(changeFrom({}, { [CI]: REAL_CI }).mode, "full");
@@ -1068,11 +1068,11 @@ test("ci.yml fail-safe: the exemption ends the moment the edit leaves the run li
 
 test("ci.yml: an edit inside the check job is a full run without e2e; an edit that reaches the e2e job or lies outside the check job runs e2e", () => {
   const base = { [CI]: REAL_CI };
-  const inCheck = changeFrom(base, { [CI]: REAL_CI.replace("timeout-minutes: 90", "timeout-minutes: 91") });
+  const inCheck = changeFrom(base, { [CI]: REAL_CI.replace("&& 175 || 90 }}", "&& 175 || 91 }}") });
   assert.equal(inCheck.mode, "full");
   assert.equal(inCheck.trigger, ".github/workflows/**");
   assert.equal(inCheck.e2e, false);
-  const inE2e = changeFrom(base, { [CI]: REAL_CI.replace("timeout-minutes: 40", "timeout-minutes: 41") });
+  const inE2e = changeFrom(base, { [CI]: REAL_CI.replace("&& 125 || 40 }}", "&& 125 || 41 }}") });
   assert.equal(inE2e.mode, "full");
   assert.equal(inE2e.e2e, true);
   const env = changeFrom(base, { [CI]: REAL_CI.replace('FX_FORBID_MODEL_CALLS: "1"', 'FX_FORBID_MODEL_CALLS: "1"\n  OTHER: "x"') });

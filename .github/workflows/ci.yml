@@ -181,7 +181,7 @@ jobs:
       pull-requests: read
     # Backstop so a hung step cannot hold the single runner indefinitely. 90, not 60: a full-scope run in the merge queue
     # has passed 60 minutes and been dropped from the queue on a healthy head.
-    timeout-minutes: 90
+    timeout-minutes: ${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 175 || 90 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -328,7 +328,7 @@ jobs:
       # 3. The lint's own tests, and the wiring of the secret scan above. The same step runs the scope
       #    classifier's tests and the tests that read this workflow.
       - name: Migration lint and secret scan tests
-        run: nix develop .#ci --command node --test scripts/ci/check-migration-compat.test.mjs scripts/ci/affected.test.mjs scripts/ci/ci-workflow.test.mjs scripts/ci/licence.test.mjs scripts/ci/same-tree.test.mjs
+        run: nix develop .#ci --command node --test scripts/ci/check-migration-compat.test.mjs scripts/ci/affected.test.mjs scripts/ci/ci-workflow.test.mjs scripts/ci/licence.test.mjs scripts/ci/same-tree.test.mjs scripts/ci/rollup-position.test.mjs
 
       # 4. How much to run (pull requests only). Exports FX_CHECK_AFFECTED for "Run checks" when the answer
       #    is `affected`, and CI_SCOPE_RUNNER_PROTOCOL for the Node 22 step. CI_FORCE_FULL and the
@@ -380,6 +380,21 @@ jobs:
           # Written after the CI scope step, so it wins: the Node 22 step (which needs the install "Run checks" would have done) skips by its own scope condition.
           echo "CI_SCOPE_RUNNER_PROTOCOL=false" >> "$GITHUB_ENV"
           echo "CI scope: paired copy of a cloud-built item (the public pull request ran the full suite; only the secret scan, the migration lint and the CI script tests run here)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Merge queue only, DORMANT unless the repository variable ROLLUP_ENABLED is 'true' (rollups, scripts/ci/rollup-position.mjs). With HEADGREEN only the last entry of a
+      # batch has to pass. An entry with another entry on top of it waits here, and the suites are skipped only once its pull
+      # request is merged; otherwise it runs in full once it is last or after the cap. If anything
+      # is unknown, nothing is skipped. Read-only token. Off: this step does not run and the job timeouts keep their old values.
+      - name: Rollup
+        if: github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true'
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ROLLUP_SETTLE_SECONDS: ${{ vars.ROLLUP_SETTLE_SECONDS }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command node scripts/ci/rollup-position.mjs
 
       # Merge queue only: when this run's tree is byte-identical to a pull request head that already carries our
       # App's `fx-gate1` = success (a green full-scope run), "Run checks" and the Node 22 step are skipped and the job
@@ -457,7 +472,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    timeout-minutes: 40
+    timeout-minutes: ${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 125 || 40 }}
     # One job per Playwright project, kept so the required check names stay
     # `workspace-e2e (desktop|phone|tablet)` (owner-configured). The fixture-server
     # ports are picked per job at run time (see the "Pick free e2e ports" step), so
@@ -520,6 +535,22 @@ jobs:
           # Written after the scope step, so it wins: no e2e step below runs, and the job still ends `success`.
           echo "CI_SCOPE_E2E=false" >> "$GITHUB_ENV"
           echo "CI scope: paired copy of a cloud-built item (the public pull request ran the full suite; only the secret scan, the migration lint and the CI script tests run here)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Merge queue only, DORMANT unless the repository variable ROLLUP_ENABLED is 'true' (rollups, scripts/ci/rollup-position.mjs). With HEADGREEN only the last entry of a
+      # batch has to pass. An entry with another entry on top of it waits here, and the suites are skipped only once its pull
+      # request is merged; otherwise it runs in full once it is last or after the cap. If anything
+      # is unknown, nothing is skipped. Read-only token. Off: this step does not run and the job timeouts keep their old values.
+      - name: Rollup (${{ matrix.project }})
+        if: github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true'
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ROLLUP_SETTLE_SECONDS: ${{ vars.ROLLUP_SETTLE_SECONDS }}
+          GH_TOKEN: ${{ github.token }}
+          SAME_TREE_ALSO_SET: CI_SCOPE_E2E=false
+        run: nix develop .#ci --command node scripts/ci/rollup-position.mjs
 
       # Merge queue only, same proof as in `check` (scripts/ci/same-tree.mjs). When proven it switches the scope flag
       # off, so every step below skips and the job still ends `success` under its real name; otherwise it changes nothing.
@@ -606,7 +637,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    timeout-minutes: 30
+    timeout-minutes: ${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 115 || 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -669,6 +700,21 @@ jobs:
           CI_PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
+
+      # Merge queue only, DORMANT unless the repository variable ROLLUP_ENABLED is 'true' (rollups, scripts/ci/rollup-position.mjs). With HEADGREEN only the last entry of a
+      # batch has to pass. An entry with another entry on top of it waits here, and the suites are skipped only once its pull
+      # request is merged; otherwise it runs in full once it is last or after the cap. If anything
+      # is unknown, nothing is skipped. Read-only token. Off: this step does not run and the job timeouts keep their old values.
+      - name: Rollup
+        if: github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true'
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ROLLUP_SETTLE_SECONDS: ${{ vars.ROLLUP_SETTLE_SECONDS }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command node scripts/ci/rollup-position.mjs
 
       # Merge queue only: same proof and same effect as in `check` (scripts/ci/same-tree.mjs).
       - name: Same tree
