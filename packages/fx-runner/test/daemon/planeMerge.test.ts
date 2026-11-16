@@ -298,6 +298,8 @@ interface CloudScript {
   conflictCapable?: boolean;
   /** D#483 S5-j2c2: whether the runner's latest hello listed `ordered_facts_v1`, as the route reads it. An `ordered` fact from a runner without it is a 400. */
   orderedCapable?: boolean;
+  /** D#483 S5-j2e-RUNNER: whether the runner's latest hello listed `overlap_facts_v1` (and `ordered_facts_v1`), as the route reads it. An `overlap_facts` from a runner without both is a 400. */
+  overlapCapable?: boolean;
 }
 function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
   const log: string[] = [];
@@ -323,6 +325,7 @@ function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
       }
       if (authorized) return { kind: "fenced", code: "already_issued" };
       if (parsed.ordered !== undefined && script.orderedCapable !== true) return { kind: "error", status: 400, code: "invalid_message" };
+      if (parsed.overlap_facts !== undefined && (script.overlapCapable !== true || script.orderedCapable !== true)) return { kind: "error", status: 400, code: "invalid_message" };
       // As the gate reads a fact: only ok and none pass, and an overlap does not.
       const orderedOk = parsed.ordered === undefined || ((parsed.ordered.verdict === "ok" || parsed.ordered.verdict === "none") && !parsed.ordered.overlap);
       const answer = script.verify ? script.verify(parsed, verifyCalls) : parsed.same && !parsed.incomplete && orderedOk ? goWith(WRITE, script.mode) : { kind: "no_go" as const, reasons: ["public_head_not_reviewed"] };
@@ -353,7 +356,7 @@ interface Harness {
   lines: string[];
   cloud: ReturnType<typeof fakeCloud>;
 }
-function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncMirror?: () => Promise<{ dir: string }>; sleeps?: number[]; ordered?: boolean; facts?: { send: boolean; pushLog?: Pick<PushLog, "records">; git?: FactsGit } } = {}): Harness {
+function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncMirror?: () => Promise<{ dir: string }>; sleeps?: number[]; ordered?: boolean; overlap?: boolean; facts?: { send: boolean; pushLog?: Pick<PushLog, "records">; git?: FactsGit } } = {}): Harness {
   const cloud = fakeCloud(order, script);
   const lines: string[] = [];
   const handler = createPlaneMergeHandler({
@@ -363,6 +366,7 @@ function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncM
     syncMirror: over.syncMirror ?? (async () => ({ dir: world.mirror })),
     workRoot: world.workRoot,
     ...(over.ordered === undefined ? {} : { sendOrderedFacts: () => over.ordered! }),
+    ...(over.overlap === undefined ? {} : { sendOverlapFacts: () => over.overlap! }),
     ...(over.facts === undefined ? {} : { sendConflictFacts: () => over.facts!.send, ...(over.facts.pushLog === undefined ? {} : { pushLog: over.facts.pushLog }), ...(over.facts.git === undefined ? {} : { factsGit: over.facts.git }) }),
     sleep: async (ms) => void over.sleeps?.push(ms),
     say: (l) => lines.push(l),
@@ -1213,5 +1217,95 @@ describe("the ordering fact (ordered_facts_v1)", () => {
     const everything = JSON.stringify([h.lines, h.cloud.verifies, h.cloud.reports]);
     expect(everything).not.toContain(WRITE);
     expect(everything).not.toContain(READ);
+  }, T);
+});
+
+describe("the overlap facts (overlap_facts_v1)", () => {
+  const EDIT = { "src/a.ts": "export const a = 2;\n" };
+  let logRoot: string;
+  let pushLog: PushLog;
+  beforeEach(() => {
+    logRoot = mkdtempSync(path.join(tmpdir(), "pm-overlap-"));
+    pushLog = createPushLog(path.join(logRoot, "push-log", "pushes.json"), ledgerOptions());
+  });
+  afterEach(() => {
+    pushLog.close();
+    rmSync(logRoot, { recursive: true, force: true });
+  });
+  /** Both default branches gain an edit of `src/a.ts` after the item was built: the public one (the ordering fact's overlap) and the private mirror's (the pair the facts read). */
+  async function overlapOrder(opts: { covered?: boolean; privateMoves?: boolean; script?: CloudScript; harness?: { ordered?: boolean; overlap?: boolean; log?: boolean } } = {}) {
+    const head = publicPr(EDIT);
+    const reviewed = privateRun(EDIT);
+    advanceMain({ "src/a.ts": "export const a = 3;\n" });
+    let tip = world.base;
+    if (opts.privateMoves !== false) {
+      sh(world.priv, "checkout", "-q", "main");
+      put(world.priv, { "src/a.ts": "export const a = 3;\n" });
+      tip = commitAll(world.priv, "default moved");
+      sh(world.priv, "push", "-q", "-f", world.mirror, "HEAD:refs/heads/main");
+    }
+    if (opts.covered !== false) pushLog.append({ ref: "refs/heads/fx/run", old_sha: "0".repeat(40), new_sha: reviewed, started_at: new Date().toISOString(), job_id: randomUUID(), start: world.base });
+    gh = await startGithub(head);
+    const over = opts.harness ?? {};
+    const h = harness(orderFor(head, reviewed, CONFIG), { orderedCapable: true, overlapCapable: true, ...opts.script }, { ordered: over.ordered ?? true, overlap: over.overlap ?? true, facts: { send: false, ...(over.log === false ? {} : { pushLog }) } });
+    return { h, tip };
+  }
+
+  it("an overlap the runner pushed itself: the verify carries conflict_platform with the shared paths and the private default tip; no go, no merge call, nothing left behind", async () => {
+    const { h, tip } = await overlapOrder();
+    expect(await h.run()).toBe("blocked");
+    expect(h.cloud.verifies[0]).toMatchObject({ ordered: { overlap: true }, overlap_facts: { verdict: "conflict_platform", paths: ["src/a.ts"], base_sha: tip, base_ref: "main" } });
+    expect(mergeCalls(gh!)).toHaveLength(0);
+    expect(workDirsLeft()).toEqual([]);
+    bothRevoked();
+  }, T);
+
+  it("a commit the log does not hold on the shared file: conflict_foreign; no push log: unknown with no paths", async () => {
+    const foreign = await overlapOrder({ covered: false });
+    expect(await foreign.h.run()).toBe("blocked");
+    expect(foreign.h.cloud.verifies[0]!.overlap_facts).toMatchObject({ verdict: "conflict_foreign", paths: ["src/a.ts"] });
+  }, T);
+
+  it("no push log: unknown with no paths", async () => {
+    const none = await overlapOrder({ harness: { log: false } });
+    expect(await none.h.run()).toBe("blocked");
+    expect(none.h.cloud.verifies[0]!.overlap_facts).toEqual({ verdict: "unknown", paths: [] });
+  }, T);
+
+  it("a private default that has not taken the change: unknown, still sent, so the cloud can say why it cannot start", async () => {
+    const { h } = await overlapOrder({ privateMoves: false });
+    expect(await h.run()).toBe("blocked");
+    expect(h.cloud.verifies[0]!.overlap_facts).toEqual({ verdict: "unknown", paths: [] });
+  }, T);
+
+  it("no overlap in the ordering fact: nothing is computed and nothing is sent, and the pull request merges", async () => {
+    const head = publicPr(CHANGE);
+    const reviewed = privateRun(CHANGE);
+    advanceMain({ "src/a.ts": "export const a = 3;\n" });
+    gh = await startGithub(head);
+    const calls: string[][] = [];
+    const spy: FactsGit = async (dir, args, input, extra) => {
+      calls.push(args);
+      return planePushGit(dir, args, input, extra);
+    };
+    const h = harness(orderFor(head, reviewed, CONFIG), { orderedCapable: true, overlapCapable: true }, { ordered: true, overlap: true, facts: { send: false, pushLog, git: spy } });
+    expect(await h.run()).toBe("merged");
+    expect(h.cloud.verifies[0]!.ordered).toMatchObject({ behind: true, overlap: false });
+    expect(h.cloud.verifies[0]).not.toHaveProperty("overlap_facts");
+    expect(calls).toEqual([]);
+  }, T);
+
+  it.each([
+    ["the hello dropped overlap_facts_v1", { ordered: true, overlap: false }],
+    ["the hello dropped ordered_facts_v1 (no ordering fact at all)", { ordered: false, overlap: true }],
+  ])("%s: the field is never sent", async (_name, flags) => {
+    const { h } = await overlapOrder({ harness: flags, script: { overlapCapable: false, orderedCapable: flags.ordered } });
+    await h.run();
+    expect(h.cloud.verifies[0]).not.toHaveProperty("overlap_facts");
+  }, T);
+
+  it("the fake cloud enforces the capability as the route does: the field from a runner that did not list it is a 400, and the order ends as failed", async () => {
+    const { h } = await overlapOrder({ script: { overlapCapable: false } });
+    expect(await h.run()).toBe("failed");
   }, T);
 });

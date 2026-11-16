@@ -28,7 +28,7 @@ import path from "node:path";
 import { MAX_PLANE_MERGE_PATHS, type PlaneMergeAbortCode, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type PlaneMergeReportMessage, type PlaneMergeVerifyMessage } from "@fulcrumaxe/runner-protocol";
 import { PUBLIC_BASE_BRANCH, compileOverlay, diffTreeEntries, planePushGit, sameChangeKeys, treeFromLsTree, type PublicHeadsReader, type TreeEntry } from "@fulcrumaxe/runner-protocol/planePush";
 import type { PlaneMergeOrder, RunnerClient } from "./client.js";
-import { computeConflictFacts, type FactsGit } from "./conflictFacts.js";
+import { computeConflictFacts, computeOverlapFacts, type FactsGit } from "./conflictFacts.js";
 import { orderedFactOf, unknownFact } from "./orderedFacts.js";
 import type { PushLog } from "./pushLog.js";
 import type { PlanePushGithub } from "./planePushGithub.js";
@@ -180,6 +180,8 @@ export interface PlaneMergeDeps {
   sendConflictFacts?: () => boolean;
   /** D#483 S5-j2c2: whether the cloud's hello kept `ordered_facts_v1`. Absent is false: no ordering fact is computed or sent, and the default branch's tip is not re-read after the go. */
   sendOrderedFacts?: () => boolean;
+  /** D#483 S5-j2e-RUNNER: whether the cloud's hello kept `overlap_facts_v1` (the runner also needs `ordered_facts_v1`: the facts ride on the ordering fact). Absent is false: nothing is computed or sent. */
+  sendOverlapFacts?: () => boolean;
   /** The runner's push log (rule (a) of the conflict facts). Absent or closed: the verdict is "unknown". */
   pushLog?: Pick<PushLog, "records">;
   /** Replaceable so a test can watch the version-control calls the facts make. */
@@ -313,7 +315,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
   }
 
   /** The conflict verdict for a refused 405: computed in a throwaway directory of the work root, removed whatever happens. Never throws; no private mirror is "unknown". */
-  async function conflictFor(order: PlaneMergeOrder, privateDir: string | undefined): Promise<PlaneMergeReportMessage["conflict"]> {
+  async function conflictFor(order: PlaneMergeOrder, privateDir: string | undefined, compute: typeof computeConflictFacts = computeConflictFacts): Promise<PlaneMergeReportMessage["conflict"]> {
     const unknown: NonNullable<PlaneMergeReportMessage["conflict"]> = { verdict: "unknown", paths: [] };
     if (privateDir === undefined) return unknown;
     let scratch: string | undefined;
@@ -325,7 +327,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
       const late = new Promise<"late">((resolve) => {
         timer = setTimeout(() => resolve("late"), deps.factsTimeoutMs ?? FACTS_TIMEOUT_MS);
       });
-      const facts = await Promise.race([computeConflictFacts({ privateDir, reviewedHead: order.reviewed_head, scratch, pushLog: deps.pushLog, ...(deps.factsGit === undefined ? {} : { git: deps.factsGit }) }), late]).finally(() => clearTimeout(timer));
+      const facts = await Promise.race([compute({ privateDir, reviewedHead: order.reviewed_head, scratch, pushLog: deps.pushLog, ...(deps.factsGit === undefined ? {} : { git: deps.factsGit }) }), late]).finally(() => clearTimeout(timer));
       if (facts === "late") return unknown;
       return facts ?? undefined;
     } catch {
@@ -432,6 +434,11 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
       token_revoked: seen.readRevoked,
       ...(seen.ordered === undefined ? {} : { ordered: seen.ordered }),
     };
+    // D#483 S5-j2e-RUNNER: only when the ordering fact names an overlap and the cloud kept both capabilities. The verdict (unknown included) is always sent with it, so the cloud can say why it cannot start.
+    if (seen.ordered?.overlap === true && deps.sendOrderedFacts?.() === true && deps.sendOverlapFacts?.() === true) {
+      const overlap = await conflictFor(order, seen.privateDir, computeOverlapFacts);
+      if (overlap !== undefined) message.overlap_facts = overlap;
+    }
     let verdict = await deps.client.planeMergeVerify(message);
     for (let attempt = 1; verdict.kind === "error" && (verdict.status === 0 || verdict.status >= 500) && attempt < CALL_TRIES; attempt++) {
       await sleep(RETRY_MS * attempt);
