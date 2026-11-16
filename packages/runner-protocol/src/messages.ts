@@ -598,28 +598,6 @@ export const PlaneMergeOrderedFact = z
   .strict();
 export type PlaneMergeOrderedFact = z.infer<typeof PlaneMergeOrderedFact>;
 
-/**
- * The runner's content check, bound to both shas. `same` is the result of the shared change-set comparison (planePush/changeSet.ts); `incomplete`
- * means the runner could not know (a fetch failed, a tree was malformed, no merge base): it implies `same` false. `paths` are the public change set.
- */
-export const PlaneMergeVerifyMessage = z
-  .object({
-    order_id: uuid,
-    lease_generation: z.number().int().safe().min(1),
-    reviewed_head: gitSha,
-    public_head: gitSha,
-    same: z.boolean(),
-    incomplete: z.boolean(),
-    paths: z.array(repoPath).max(MAX_PLANE_MERGE_PATHS),
-    pairing_digest: z.string().regex(/^[0-9a-f]{64}$/),
-    token_revoked: z.boolean(),
-    /** D#483 S5-j2c1: only from a runner whose latest hello listed `ordered_facts_v1`; the cloud refuses it from any other (400). */
-    ordered: PlaneMergeOrderedFact.optional(),
-  })
-  .strict()
-  .refine((m) => !(m.same && m.incomplete), { message: "an incomplete check cannot be the same", path: ["same"] });
-export type PlaneMergeVerifyMessage = z.infer<typeof PlaneMergeVerifyMessage>;
-
 /** The most conflict paths a merge report carries; more than this is "unknown" (nothing is cut short and sent). */
 export const MAX_CONFLICT_FACT_PATHS = 100;
 /** D#519 MQ4-e2-a: what the runner attests about a refused merge call, a closed set. `clean` is never sent: a refusal with clean facts carries no field. */
@@ -644,6 +622,31 @@ export const PlaneMergeConflictFacts = z
     path: ["verdict"],
   });
 export type PlaneMergeConflictFacts = z.infer<typeof PlaneMergeConflictFacts>;
+
+/**
+ * The runner's content check, bound to both shas. `same` is the result of the shared change-set comparison (planePush/changeSet.ts); `incomplete`
+ * means the runner could not know (a fetch failed, a tree was malformed, no merge base): it implies `same` false. `paths` are the public change set.
+ */
+export const PlaneMergeVerifyMessage = z
+  .object({
+    order_id: uuid,
+    lease_generation: z.number().int().safe().min(1),
+    reviewed_head: gitSha,
+    public_head: gitSha,
+    same: z.boolean(),
+    incomplete: z.boolean(),
+    paths: z.array(repoPath).max(MAX_PLANE_MERGE_PATHS),
+    pairing_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    token_revoked: z.boolean(),
+    /** D#483 S5-j2c1: only from a runner whose latest hello listed `ordered_facts_v1`; the cloud refuses it from any other (400). */
+    ordered: PlaneMergeOrderedFact.optional(),
+    /** D#483 S5-j2e-RUNNER: the overlap verdict on the private pair, only with an `ordered` fact that names an overlap, and only from a runner whose latest hello listed `overlap_facts_v1` and `ordered_facts_v1` (the cloud refuses it from any other, 400). */
+    overlap_facts: PlaneMergeConflictFacts.optional(),
+  })
+  .strict()
+  .refine((m) => !(m.same && m.incomplete), { message: "an incomplete check cannot be the same", path: ["same"] })
+  .refine((m) => m.overlap_facts === undefined || m.ordered?.overlap === true, { message: "overlap facts are sent only with an ordering fact that names an overlap", path: ["overlap_facts"] });
+export type PlaneMergeVerifyMessage = z.infer<typeof PlaneMergeVerifyMessage>;
 
 /** What the runner did with the merge, as a HINT: the cloud reads GitHub itself before it records anything. */
 export const PlaneMergeReportMessage = z
