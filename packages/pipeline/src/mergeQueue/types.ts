@@ -123,6 +123,8 @@ export interface ConflictRound {
   outcome: string | null;
   createdAt: Date;
   endedAt: Date | null;
+  /** D#483 S5-j2e-RUNNER: the CI signal names the paired item's public pull request showed before the round republished it; null when none was recorded. */
+  expectedSignals?: readonly string[] | null;
 }
 
 /**

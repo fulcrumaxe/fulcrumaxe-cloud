@@ -12,6 +12,10 @@ import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
 import { LocalOnlyGithubError } from "@fx/runner-cloud";
 import { clearMergeQueueModeCache, type GitHubHttp, type LocalGitHubHttp } from "../../src/build/githubMergePort.js";
 import { LOCAL_REVIEW_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
+import type { PoolClient } from "pg";
+import { completeEntrylessRound, createRoundGitHub, listConflictRounds, startEntrylessFromRunnerFacts, type ConflictCompletionPorts, type ConflictSubject, type RoundFence } from "../../src/mergeQueue/index.js";
+import { expectedSignalNames } from "../../src/build/mergeGate.js";
+import { loadReviewContext } from "../../src/review/context.js";
 import { createReviewGitHubPort, runMergeGateForItem, type Gate1StatusCheck, type GoAttestation, type LocalReviewOptInPort, type MergeDelegate } from "../../src/review/mergeGateRun.js";
 import { ACTIONS_APP_ID, GATE1_DESCRIPTIONS, GATE1_WORKFLOW_CONTEXTS } from "../../src/review/gate1Attest.js";
 import { securityTriggers } from "../../src/review/securityTrigger.js";
@@ -1254,5 +1258,144 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
       for (const l of ["A14", "A15", "A16", "A17"]) expect(unlisted.labels().has(l), l).toBe(false);
       expect(unlisted.gate1Posts()).toEqual([]);
     });
+  });
+});
+
+// ---- D#483 S5-j2e-RUNNER PR 4: the whole hands-free path for a paired runner_local item ----
+
+describe("a paired runner_local item blocked for an overlap: round, delta review, public CI, go [pg]", () => {
+  const MERGE = "e".repeat(40);
+  const BASE = "d".repeat(40);
+  const PUB2 = "f".repeat(40);
+  const pass = { verdict: "pass", findings: [], summary: "ok" };
+  const tenant = <T>(accountId: string, fn: (c: PoolClient) => Promise<T>) => withTenant(h.pureAppUserPool, accountId, fn);
+  const overlapFact = { verdict: "none" as const, tip_sha: BASE, behind: true, overlap: true };
+  const ctxOf = async (w: World) => (await loadReviewContext(h.runWriterPool, w.accountId, w.workItemId)) as { ok: true; ctx: Parameters<typeof createReviewGitHubPort>[1] };
+
+  /** The gate asked for the paired item with the runner's fact (the go phase). `expected` is the CI the public pull request showed before the round. */
+  function ask(w: World, o: { reviewed: string; pub: string; fact: NonNullable<GoAttestation["ordered"]>; expected?: readonly string[] }) {
+    const calls: DelegateCall[] = [];
+    const run = () =>
+      runMergeGateForItem(
+        {
+          pool: h.runWriterPool,
+          authorTrust: BOT_TRUST,
+          http: w.privLocal.http,
+          localReviewOptIn: on,
+          publicPlane: { open: async () => w.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) },
+          mergeDelegate: async (a) => (calls.push(a), { delegated: true }),
+        },
+        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(o.expected !== undefined ? { expectedSignals: o.expected } : {}), goPhase: { attestation: attest({ reviewedHead: o.reviewed, publicHead: o.pub, orderedCapable: true, ordered: o.fact }) } },
+      );
+    return { run, calls };
+  }
+
+  /** The round's start and end over the real tables, with the private pull request read through the fence the cloud really has (the fence's documents only). */
+  async function round(w: World, verdict: "conflict_platform" | "conflict_foreign", expectedSignals?: readonly string[]) {
+    const merge = createReviewGitHubPort({ pool: h.runWriterPool, http: w.privLocal.http }, (await ctxOf(w)).ctx, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber });
+    const fence: RoundFence = { getMergeability: (pr, opts) => merge.getMergeability(pr, opts), defaultBranchTip: async () => ({ branch: "main", sha: BASE }), prFiles: async () => ["src/ui/button.tsx", "src/ui/theme.ts"] };
+    const subject: ConflictSubject = { id: w.workItemId, accountId: w.accountId, repoId: w.repoId, workItemId: w.workItemId, prNumber: w.priv.prNumber, headSha: HEAD, entryId: null, roundsUsed: 0 };
+    const startPorts = {
+      inTenant: tenant,
+      async startConflictRound({ round: r }: { round: { fromSha: string } }) {
+        const runId = randomUUID();
+        await h.admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, $3, 'executor', 'runner', 'running', $4)", [runId, w.accountId, w.workItemId, r.fromSha]);
+        return { ok: true as const, runId };
+      },
+    };
+    const facts = { verdict, baseSha: BASE, baseRef: "main", files: ["src/ui/theme.ts"] };
+    const shape = { eventCode: "overlap_unreviewed", ...(expectedSignals === undefined ? {} : { expectedSignals }) };
+    const roles: string[] = [];
+    const complete = async (stored: unknown) => {
+      const all = await tenant(w.accountId, (c) => listConflictRounds(c, w.accountId, w.workItemId));
+      const adapter = createRoundGitHub(fence, all[all.length - 1], stored as never, async () => false);
+      const ports: ConflictCompletionPorts<ConflictSubject> = {
+        github: adapter.github,
+        platformCommits: adapter.platformCommits,
+        runnerFed: adapter.runnerFed,
+        inTenant: tenant,
+        plan: async () => ({ ok: true, roles: ["code-reviewer", "acceptance-tester"] }),
+        runs: async (_e, sha) => (await h.admin.query("SELECT DISTINCT ON (role) id, role, status FROM agent_runs WHERE account_id = $1 AND head_sha = $2 AND role <> 'executor' ORDER BY role, created_at DESC", [w.accountId, sha])).rows.map((r) => ({ role: r.role as string, runId: r.id as string, attempt: 0, reusable: r.status !== "cancelled" })),
+        startRole: async ({ role, delta }) => {
+          roles.push(role);
+          const id = randomUUID();
+          await h.admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, head_sha, execution_mode, runner_id) VALUES ($1, $2, $3, $4, 'runner', 'running', $5, 'runner_local', (SELECT id FROM runners WHERE account_id = $2 LIMIT 1))", [id, w.accountId, w.workItemId, role, delta.mergeCommitSha]);
+          return { ok: true, runId: id };
+        },
+        cancelRun: async () => undefined,
+        recordEvent: async () => undefined,
+        outcome: async (_e, id) => {
+          const r = (await h.admin.query("SELECT status, envelope FROM agent_runs WHERE id = $1", [id])).rows[0];
+          return { done: r.status !== "running", verdict: typeof r.envelope?.verdict === "string" ? (r.envelope.verdict as string) : "fail", securityNeeded: false, noVerdict: false };
+        },
+        roundRunEnded: async (_e, id) => (await h.admin.query("SELECT status FROM agent_runs WHERE id = $1", [id])).rows[0].status !== "running",
+        startEntryless: async (s) => startEntrylessFromRunnerFacts(startPorts, s, facts, shape),
+      };
+      return completeEntrylessRound(ports, { ...subject, roundsUsed: all.length });
+    };
+    return { start: () => startEntrylessFromRunnerFacts(startPorts, subject, facts, shape), complete, roles };
+  }
+
+  it("blocked for the overlap, the round merges the base branch in, the delta review passes, the republished public head's CI is judged against what the public pull request showed before, and the gate goes", async () => {
+    const w = await world();
+    // The runner's fact blocks the order: the only reason is the overlap (the item is otherwise ready).
+    const first = ask(w, { reviewed: HEAD, pub: PUB_HEAD, fact: overlapFact });
+    expect(await first.run()).toMatchObject({ outcome: "ready_human_merges", reasons: ["overlap_unreviewed"] });
+    expect(first.calls).toEqual([]);
+    // What the paired gate reads later is the PUBLIC pull request's CI. The round's start reads the signals from that copy while the head the order was placed on is still its live head (the fence answers
+    // for the pull request's last commit only), and records them with the round; the private copy shows none.
+    const pubPort = createReviewGitHubPort({ pool: h.runWriterPool, http: w.pubLocal.http }, { ...(await ctxOf(w)).ctx, owner: "acme", name: "widgets-public" }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: PUB_PR, recordedBranch: w.pubBranch });
+    const atStart = await pubPort.getCiSnapshot({ repoId: w.repoId, prNumber: PUB_PR }, PUB_HEAD);
+    expect(atStart.headSha).toBe(PUB_HEAD);
+    const recorded = expectedSignalNames(atStart);
+    expect(recorded).toEqual(["build"]);
+    // The round starts from the runner's platform-authored facts, and the runner pushes the merge commit.
+    const r = await round(w, "conflict_platform", recorded);
+    expect(await r.start()).toEqual({ outcome: "started" });
+    expect((await tenant(w.accountId, (c) => listConflictRounds(c, w.accountId, w.workItemId)))[0]!.expectedSignals).toEqual(["build"]);
+    expect(await r.complete(null)).toEqual({ outcome: "waiting" });
+    w.priv.headSha = MERGE;
+    await h.admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE account_id = $1 AND role = 'executor' AND status = 'running'", [w.accountId]);
+    const att = { head: MERGE, parents: [HEAD, BASE], from_sha: HEAD, base_sha: BASE, history: "descendant", pushed_by_round: true, second_parent_on_default: true, still_conflicting: "no", touched_paths: ["src/ui/theme.ts"], truncated: false };
+    expect(await r.complete(att)).toEqual({ outcome: "delta_started" });
+    expect(r.roles).toEqual(["code-reviewer", "acceptance-tester"]);
+    await h.admin.query("UPDATE agent_runs SET status = 'succeeded', envelope = $2::jsonb WHERE account_id = $1 AND role IN ('code-reviewer', 'acceptance-tester') AND head_sha = $3 AND status = 'running'", [w.accountId, JSON.stringify(pass), MERGE]);
+    expect(await r.complete(att)).toEqual({ outcome: "passed" });
+    // The runner's plane push republishes the public copy as one commit on the new tip, and its CI is still running: the gate asks again on CI alone, a CI without the expected signal is not green, and the full one goes.
+    await h.admin.query("UPDATE plane_pushes SET head_sha = $2, tip_sha = $2, source_head = $3 WHERE work_item_id = $1", [w.workItemId, PUB2, MERGE]);
+    await h.admin.query("INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha, execution_mode, runner_id) VALUES ($1, $2, 'security-reviewer', 'runner', 'succeeded', '{\"verdict\":\"pass\"}'::jsonb, $3, 'runner_local', (SELECT id FROM runners WHERE account_id = $1 LIMIT 1))", [w.accountId, w.workItemId, MERGE]);
+    w.pub.headSha = PUB2;
+    // The expected set is what production's gate takes: the first round's record. It is NOT read from the public pull request now, whose last commit is the republished one: asked for the old head,
+    // the fence answers for the new one, and what it shows is only what has posted so far.
+    w.pub.checks[PUB2] = [{ name: "lint", status: "completed", conclusion: "success" }];
+    const nowRead = await pubPort.getCiSnapshot({ repoId: w.repoId, prNumber: PUB_PR }, PUB_HEAD);
+    expect(nowRead.headSha).toBe(PUB2);
+    expect(expectedSignalNames(nowRead)).toEqual(["lint"]);
+    const expected = [...((await tenant(w.accountId, (c) => listConflictRounds(c, w.accountId, w.workItemId)))[0]!.expectedSignals ?? [])];
+    expect(expected).toEqual(["build"]);
+    const second = () => ask(w, { reviewed: MERGE, pub: PUB2, expected, fact: { verdict: "none", tip_sha: BASE, behind: false, overlap: false } });
+    // Only the fast check has posted on the republished head: not green, the slow expected one has not registered.
+    expect(reasons(await second().run())).toContain("ci_not_green");
+    w.pub.checks[PUB2] = [{ name: "build", status: "in_progress", conclusion: null }];
+    expect(await second().run()).toMatchObject({ outcome: "ready_human_merges", reasons: ["ci_not_green"] });
+    w.pub.checks[PUB2] = [green];
+    const go = second();
+    expect(await go.run()).toMatchObject({ outcome: "merge_delegated", headSha: PUB2, reasons: [] });
+    expect(go.calls).toEqual([{ accountId: w.accountId, workItemId: w.workItemId, sha: PUB2, reviewedHead: MERGE }]);
+    expectNoMergeAnywhere(w);
+    expect(w.privLocal.denied).toEqual([]);
+    expect(w.pubLocal.denied).toEqual([]);
+  });
+
+  it("foreign facts end in a stop for a person: no round row, no run, and the card's code is the gate's own", async () => {
+    const w = await world();
+    expect(await ask(w, { reviewed: HEAD, pub: PUB_HEAD, fact: overlapFact }).run()).toMatchObject({ reasons: ["overlap_unreviewed"] });
+    const r = await round(w, "conflict_foreign");
+    expect(await r.start()).toEqual({ outcome: "stopped", reason: "overlap_unreviewed" });
+    expect(Number((await h.admin.query("SELECT count(*)::int AS n FROM merge_conflict_rounds WHERE work_item_id = $1", [w.workItemId])).rows[0].n)).toBe(0);
+    expect(Number((await h.admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE work_item_id = $1 AND role = 'executor' AND status = 'running'", [w.workItemId])).rows[0].n)).toBe(0);
+    const stop = (await events(w)).find((e) => e.kind === "stopped");
+    expect(stop).toMatchObject({ code: "overlap_unreviewed", reasons: ["foreign_commits"] });
+    expectNoMergeAnywhere(w);
   });
 });

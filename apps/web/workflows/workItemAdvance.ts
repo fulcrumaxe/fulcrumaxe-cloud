@@ -99,6 +99,8 @@ const MERGE_REPO_BUSY_POLL_MS = 30_000;
 const MERGE_REPO_BUSY_WAIT_MS = 60 * 60_000;
 /** D#519 MQ4-e1-a: how often a conflict round that cannot be followed is looked for again before the item goes to a person. */
 const CONFLICT_REENTRIES_MAX = 5;
+/** How many times the plane-order path has asked again after a block that time clears (a busy repository, an unreadable resource). */
+type OrderAsks = { busy: number; unreadable: number };
 /** D#483 S5-j2e: the only gate reasons a round is started for (a workflow body imports no value from a package; the gate's own words). */
 const ORDER_REROUTE_REASONS: readonly string[] = ["overlap_unreviewed", "ordered_resource_out_of_order"];
 
@@ -1832,7 +1834,7 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx, answered =
  * until it is over: merged (GitHub says so, read by the cloud), a head moved (review again), or a stop for a person with the order's fixed reason. An order past its
  * 60-minute deadline is expired by the step itself (`runner_merge_timeout`).
  */
-async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries = 0): Promise<{ next: "continue" } | { next: "end"; result: Result }> {
+async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries = 0, afterConflict = false, asks: OrderAsks = { busy: 0, unreadable: 0 }): Promise<{ next: "continue" } | { next: "end"; result: Result }> {
   const { accountId, userId, workItemId } = args;
   const stop = async (code: string, record: boolean): Promise<{ next: "end"; result: Result }> => {
     if (record) await advanceEventStep(accountId, userId, workItemId, { kind: "merge_gate", dedupeKey: `${pr.headSha}:order:${code}`, code: "ready_human_merges", reasons: [code], headSha: pr.headSha, prNumber: pr.number });
@@ -1854,13 +1856,21 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
       await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "head_moved", code: order.code ?? "" });
       return { next: "continue" };
     }
-    // The go phase already recorded the gate's own reasons for a block it found; a stop the gate never saw (a claim-time takeover or pairing change, a go phase
-    // that was refused or found the pull request closed) is recorded here, so the card says why.
+    // D#483 S5-j2e-RUNNER: the direct gate waits on a busy repository and asks again after an unreadable resource; so does this path, bounded the same way (the busy wait's hour, one more ask
+    // for an unreadable resource). The new ask places a new order. Past the bound the block is today's stop.
+    if (order.state === "blocked" && ((order.code === "merge_repo_busy" && asks.busy < MERGE_REPO_BUSY_WAIT_MS / MERGE_REPO_BUSY_POLL_MS) || (order.code === "ordered_resource_unreadable" && asks.unreadable < 1))) {
+      await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "reask", code: order.code });
+      await sleep(MERGE_REPO_BUSY_POLL_MS);
+      const again = await mergeAfterPass(args, pr, afterConflict, reentries, order.code === "merge_repo_busy" ? { ...asks, busy: asks.busy + 1 } : { ...asks, unreadable: asks.unreadable + 1 });
+      return again === null ? { next: "continue" } : { next: "end", result: again };
+    }
     // D#483 S5-j2e-RUNNER: a block for an overlap starts the round from the facts the runner sent (the step checks the gate's reasons); anything else about it is today's stop.
     if (order.state === "blocked" && (order.code === "overlap_unreviewed" || order.code === "ordered_resource_out_of_order")) {
       const round = await conflictRound(args, pr, reentries, advanceRunnerOrderRerouteStep);
       if (round !== "not_applicable") return round === null ? { next: "continue" } : { next: "end", result: round };
     }
+    // The go phase already recorded the gate's own reasons for a block it found; a stop the gate never saw (a claim-time takeover or pairing change, a go phase
+    // that was refused or found the pull request closed) is recorded here, so the card says why.
     if (order.state === "blocked") return stop(order.code ?? "runner_merge_failed", order.gateRecorded !== true);
     // D#519 MQ4-e2-b: a failed order that carries the runner's conflict verdict starts the round (or the foreign stop); anything else about it is today's stop.
     if (order.state === "failed" && (order.code === "merge_conflict_runner" || order.code === "merge_conflict_foreign")) {
@@ -1883,7 +1893,7 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
  * Every required reviewer passed on `pr`'s head. A hosted, unpaired repo's item goes into its repo's merge queue and this waits on the entry (D#519
  * MQ3-b-2b); every other item calls the gate itself, as before. Null: review the (new) head. Otherwise the workflow's result.
  */
-async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; headSha: string }, afterConflict = false, reentries = 0): Promise<Result | null> {
+async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; headSha: string }, afterConflict = false, reentries = 0, asks: OrderAsks = { busy: 0, unreadable: 0 }): Promise<Result | null> {
   const { accountId, userId, workItemId } = args;
   if ((await advanceMergeQueueEnqueueStep(accountId, userId, workItemId, args.haltEpoch, { prNumber: pr.number, headSha: pr.headSha })).queued) {
     // One line per change of state, not one per poll: every log line here is itself a step, and a long wait made as many of them as looks.
@@ -1927,7 +1937,7 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
   // The head moved while the gate ran: review the new head.
   if (gate.outcome === "head_moved") return null;
   if (gate.outcome === "merge_delegated") {
-    const waited = await waitForMergeOrder(args, pr, reentries);
+    const waited = await waitForMergeOrder(args, pr, reentries, afterConflict, asks);
     return waited.next === "continue" ? null : waited.result;
   }
   // D#519 MQ4-e1-a: the pull request does not merge cleanly. An item with no queue entry and no public copy gets a fix round; any other item stops as it always did.

@@ -276,6 +276,8 @@ export type StartDecision = { go: true; files: readonly string[]; baseSha: strin
 export interface EntrylessShape {
   eventCode?: string;
   kind?: RoundKind;
+  /** The paired item's public CI signal names, read before the round republishes; recorded with the round, once. */
+  expectedSignals?: readonly string[];
   startRun?(args: { entry: ConflictSubject; round: ConflictRound }): Promise<RoundStart>;
 }
 
@@ -291,7 +293,7 @@ export async function startEntrylessFromDecision(ports: Pick<RoundStartPorts, "i
   try {
     const started = await ports.inTenant(accountId, async (c) => {
       await c.query(`SET LOCAL idle_in_transaction_session_timeout = ${START_IDLE_TIMEOUT_MS}`);
-      const s = await startEntrylessConflictRound(c, { accountId, workItemId: subject.workItemId, fromSha: subject.headSha, baseSha: decision.baseSha, baseRef: decision.baseRef, conflictFiles: decision.files, ...(shape.kind === undefined ? {} : { kind: shape.kind }) });
+      const s = await startEntrylessConflictRound(c, { accountId, workItemId: subject.workItemId, fromSha: subject.headSha, baseSha: decision.baseSha, baseRef: decision.baseRef, conflictFiles: decision.files, ...(shape.kind === undefined ? {} : { kind: shape.kind }), ...(shape.expectedSignals === undefined ? {} : { expectedSignals: shape.expectedSignals }) });
       if (!s.ok) return s.reason;
       if (startRun === undefined) throw new Error("no round start bound");
       const run = await startRun({ entry: { ...subject, roundsUsed: s.round.round }, round: s.round });

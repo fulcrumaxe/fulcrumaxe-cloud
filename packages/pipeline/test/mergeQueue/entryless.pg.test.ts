@@ -424,6 +424,72 @@ describe("D#519 MQ4-e1-a conflict round for an item with no queue entry [pg]", (
     expect((await db.admin.query(`SELECT count(*)::int AS n FROM merge_conflict_rounds WHERE account_id = $1`, [s.accountId])).rows[0].n).toBe(2);
   });
 
+  describe("D#483 S5-j2e-RUNNER (migration 1023): the signals a round records at its start", () => {
+    const itemOf = async (s: { accountId: string; repoId: string }, n: number) => {
+      const id = randomUUID();
+      await seedWorkItem(db.admin, s.accountId, id, s.repoId, { ghNumber: PR + 10 + n });
+      return id;
+    };
+    const startWith = (s: { accountId: string }, workItemId: string, expectedSignals?: readonly string[]) =>
+      tenant(s.accountId, (c) => startEntrylessConflictRound(c, { accountId: s.accountId, workItemId, fromSha: FROM, baseSha: TIP, baseRef: "main", conflictFiles: ["src/a.ts"], ...(expectedSignals === undefined ? {} : { expectedSignals }) }));
+    const stored = async (id: string) => (await db.admin.query("SELECT expected_signals FROM merge_conflict_rounds WHERE work_item_id = $1", [id])).rows[0].expected_signals as string[] | null;
+
+    it("the start writes the names with the round, in the same statement, and they read back with it", async () => {
+      const s = await setup();
+      const id = await itemOf(s, 1);
+      const r = await startWith(s, id, ["ci/test", "ci/slow"]);
+      expect(r).toMatchObject({ ok: true, round: { expectedSignals: ["ci/test", "ci/slow"] } });
+      expect(await stored(id)).toEqual(["ci/test", "ci/slow"]);
+      expect((await tenant(s.accountId, (c) => listConflictRounds(c, s.accountId, id)))[0]!.expectedSignals).toEqual(["ci/test", "ci/slow"]);
+    });
+
+    it("no names given, or a list the table would refuse (empty, over 200, a name over 255 characters, an empty name, a control character): the round still starts and records nothing", async () => {
+      const s = await setup();
+      const bad: Array<readonly string[] | undefined> = [undefined, [], Array.from({ length: 201 }, (_, i) => `c${i}`), ["x".repeat(256)], [""], ["ci/te\nst"], ["ci\u2028x"]];
+      for (const [i, names] of bad.entries()) {
+        const id = await itemOf(s, 10 + i);
+        expect(await startWith(s, id, names), String(i)).toMatchObject({ ok: true, round: { round: 1 } });
+        expect(await stored(id), String(i)).toBeNull();
+      }
+      // The limits themselves are inside the table's rule.
+      const edge = await itemOf(s, 30);
+      await startWith(s, edge, [...Array.from({ length: 199 }, (_, i) => `c${i}`), "y".repeat(255)]);
+      expect((await stored(edge))?.length).toBe(200);
+    });
+
+    it("written once, in both directions: a recorded list never changes or goes null, and nothing recorded never gets a list later (the guard, as the superuser; app_user has no UPDATE grant either)", async () => {
+      const s = await setup();
+      const withNames = await itemOf(s, 40);
+      const without = await itemOf(s, 41);
+      await startWith(s, withNames, ["ci/test"]);
+      await startWith(s, without);
+      for (const set of [`expected_signals = '{other}'`, `expected_signals = NULL`, `expected_signals = '{ci/test,more}'`]) {
+        await expect(db.admin.query(`UPDATE merge_conflict_rounds SET ${set} WHERE work_item_id = $1`, [withNames]), set).rejects.toThrow(/written once/);
+      }
+      await expect(db.admin.query(`UPDATE merge_conflict_rounds SET expected_signals = '{late}' WHERE work_item_id = $1`, [without])).rejects.toThrow(/written once/);
+      expect(await stored(withNames)).toEqual(["ci/test"]);
+      expect(await stored(without)).toBeNull();
+      for (const id of [withNames, without]) {
+        await expect(tenant(s.accountId, (c) => c.query(`UPDATE merge_conflict_rounds SET expected_signals = '{x}' WHERE work_item_id = $1`, [id]))).rejects.toMatchObject({ code: "42501" });
+      }
+      // The old facts keep their own guard: a round's outcome is still set once and the new rule did not touch the end of a round.
+      await db.admin.query(`UPDATE merge_conflict_rounds SET outcome = 'resolved' WHERE work_item_id = $1`, [withNames]);
+      await expect(db.admin.query(`UPDATE merge_conflict_rounds SET outcome = 'other' WHERE work_item_id = $1`, [withNames])).rejects.toThrow(/written once/);
+      expect(await stored(withNames)).toEqual(["ci/test"]);
+    });
+
+    it("the table refuses a bad list whoever writes it (the CHECK)", async () => {
+      const s = await setup();
+      const id = await itemOf(s, 50);
+      for (const list of [`'{}'`, `'{""}'`, `ARRAY[repeat('z', 256)]`, `ARRAY[E'a\\tb']`]) {
+        await expect(
+          db.admin.query(`INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, round, from_sha, base_sha, base_ref, conflict_files, expected_signals) VALUES ($1, $2, $3, 1, $4, $5, 'main', '{}', ${list})`, [s.accountId, s.repoId, id, FROM, TIP]),
+          list,
+        ).rejects.toMatchObject({ code: "23514" });
+      }
+    });
+  });
+
   it("the decision's own bound: at MAX_CONFLICT_ROUNDS it answers rounds_exhausted before it asks for the proof or reads GitHub", async () => {
     const s = await setup();
     const asked: number[] = [];
