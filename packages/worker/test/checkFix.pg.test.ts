@@ -106,9 +106,10 @@ describe("check fix round [pg]", () => {
   });
 
   /** A finished executor run: `reason` is its failure reason (null: succeeded). `parent` makes it a fix round of that run. */
-  async function ended(o: { checkReason?: string; reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean; sandbox?: boolean; jobScope?: string[]; checkFix?: boolean; protocol?: number | null }): Promise<string> {
+  async function ended(o: { checkReason?: string; reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean; sandbox?: boolean; jobScope?: string[]; checkFix?: boolean; protocol?: number | null; laterProtocol?: number; unrecorded?: boolean }): Promise<string> {
     const id = randomUUID();
-    // The runner that ran the check, as the cloud recorded it at hello: protocol 19 (it writes the end-of-header line) unless a test says otherwise; null: no runner on record.
+    // The runner that ran the check, as the cloud recorded it at hello: protocol 19 (it writes the end-of-header line) unless a test says otherwise; null: no runner on record. The claim writes that protocol on the run (below);
+    // `laterProtocol` is a hello after the claim, `unrecorded` a run whose column the claim never set (claimed before the column existed).
     const runnerId = o.protocol === null || o.sandbox === true ? null : await insertRunner(admin, A.accountId, A.userId, { protocolVersion: o.protocol ?? 19 });
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "widgets", private: true }, role: "executor", mode: "local", spec: null,
@@ -120,9 +121,14 @@ describe("check fix round [pg]", () => {
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, parent_run_id, job_signed, cc_session_id, runner_id)
-       VALUES ($1, $2, $3, 'executor', CASE WHEN $10::boolean THEN 'production' ELSE 'runner' END, $4, CASE WHEN $9::boolean THEN NULL WHEN $10::boolean THEN 'sandbox' ELSE 'runner_local' END, $5, $6, CASE WHEN $10::boolean THEN NULL ELSE $7::jsonb END, $8, $11)`,
-      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`, o.noMode === true, o.sandbox === true, runnerId],
+       VALUES ($1, $2, $3, 'executor', CASE WHEN $10::boolean THEN 'production' ELSE 'runner' END, $4, CASE WHEN $9::boolean THEN NULL WHEN $10::boolean THEN 'sandbox' ELSE 'runner_local' END, $5, $6, CASE WHEN $10::boolean THEN NULL ELSE $7::jsonb END, $8, NULL)`,
+      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`, o.noMode === true, o.sandbox === true],
     );
+    if (runnerId) {
+      // What the claim does in one UPDATE: bind the runner and record its stored protocol (the column's guard refuses any other value).
+      await admin.query("UPDATE agent_runs SET runner_id = $3, runner_protocol_version = CASE WHEN $4::boolean THEN NULL ELSE (SELECT protocol_version FROM runners WHERE id = $3 AND account_id = $1) END WHERE account_id = $1 AND id = $2", [A.accountId, id, runnerId, o.unrecorded === true]);
+      if (o.laterProtocol !== undefined) await admin.query("UPDATE runners SET protocol_version = $3 WHERE account_id = $1 AND id = $2", [A.accountId, runnerId, o.laterProtocol]);
+    }
     await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)", [A.accountId, id, JSON.stringify({ from: "running", to: o.reason === null ? "succeeded" : "failed", ...(o.reason ? { failureReason: o.reason } : {}) })]);
     // The cloud's own record of the binding, written by the job issuer when it signed the job.
     if (o.onItemBranch?.bound) await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, $3, $4::jsonb)", [A.accountId, id, RUNNER_CONTINUES_BOUND_KIND, JSON.stringify({ branch: "fx/issue-42", pr_number: o.onItemBranch.pr })]);
@@ -296,6 +302,27 @@ describe("check fix round [pg]", () => {
       const real = await ended({ reason: "check_failed", protocol: 19, summary: graph([LINKED], [LINKED]) });
       expect((await startCheckFixRound(deps(), who(), real)).ok).toBe(true);
       expect(resumed[0]!.scopeExtra).toEqual([LINKED]);
+    });
+
+    it("a run claimed at protocol 18 by a runner that has since said hello at 19 grants nothing (the protocol at claim time is what counts)", async () => {
+      const forged = `failed test files (2): ${LINKED}, packages/spend/test/x.test.ts\nchanged files (1): packages/spend/src/usage.ts\nfailed test files that import changed code (1): ${LINKED}\n${CHECK_HEADER_END}\nFAIL x`;
+      const upgraded = await ended({ reason: "check_failed", protocol: 18, laterProtocol: 19, summary: forged });
+      expect((await admin.query("SELECT r.protocol_version AS p FROM runners r JOIN agent_runs a ON a.runner_id = r.id WHERE a.id = $1", [upgraded])).rows[0]!.p).toBe(19);
+      expect((await startCheckFixRound(deps(), who(), upgraded)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
+    });
+
+    it("a run claimed at protocol 19 grants, whatever the runner's later hello says", async () => {
+      const kept = await ended({ reason: "check_failed", protocol: 19, laterProtocol: 18, summary: graph([LINKED], [LINKED]) });
+      expect((await startCheckFixRound(deps(), who(), kept)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual([LINKED]);
+    });
+
+    it("a run with no recorded claim protocol (NULL: claimed before the column existed) grants nothing, though its runner now says 19", async () => {
+      const legacy = await ended({ reason: "check_failed", protocol: 19, unrecorded: true, summary: graph([LINKED], [LINKED]) });
+      expect((await admin.query("SELECT runner_protocol_version AS v FROM agent_runs WHERE id = $1", [legacy])).rows[0]!.v).toBeNull();
+      expect((await startCheckFixRound(deps(), who(), legacy)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
     });
 
     it("an unknown protocol (no runner on record for the run) grants nothing", async () => {

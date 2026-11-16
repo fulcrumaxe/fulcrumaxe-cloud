@@ -208,4 +208,58 @@ describe("the claim's protocol gate [pg]", () => {
       expect(await callDefiner(await running(null), await runnerAt(1))).toBe(1);
     });
   });
+
+  describe("the claim records the runner's protocol on the run (agent_run_runner_claim, migration 1025)", () => {
+    async function running(): Promise<string> {
+      const id = await pending(null);
+      await admin.query("UPDATE agent_runs SET status = 'running' WHERE id = $1", [id]);
+      return id;
+    }
+    const callDefiner = (runId: string, runnerId: string) =>
+      withTenant(writerPool, A.accountId, async (client) => (await client.query<{ g: number | null }>("SELECT agent_run_runner_claim($1::uuid, $2::uuid, $3::uuid, now(), 90) AS g", [A.accountId, runId, runnerId])).rows[0]!.g);
+    const recorded = async (runId: string) => (await admin.query<{ v: number | null }>("SELECT runner_protocol_version AS v FROM agent_runs WHERE id = $1", [runId])).rows[0]!.v;
+
+    it("stores the protocol the cloud holds for the claiming runner, and stays at it when the runner says hello again at a higher one", async () => {
+      const runner = await runnerAt(18);
+      const id = await running();
+      expect(await recorded(id)).toBeNull();
+      expect(await callDefiner(id, runner)).toBe(1);
+      expect(await recorded(id)).toBe(18);
+      await admin.query("UPDATE runners SET protocol_version = 19 WHERE id = $1", [runner]);
+      expect(await recorded(id)).toBe(18);
+    });
+
+    it("records NULL for a runner that has said no hello", async () => {
+      const id = await running();
+      expect(await callDefiner(id, await runnerAt(null))).toBe(1);
+      expect(await recorded(id)).toBeNull();
+    });
+
+    it("a claim that is refused records nothing", async () => {
+      const id = await pending(V);
+      await admin.query("UPDATE agent_runs SET status = 'running' WHERE id = $1", [id]);
+      expect(await callDefiner(id, await runnerAt(V - 1))).toBeNull();
+      expect(await recorded(id)).toBeNull();
+    });
+
+    it("the whole claim path (the facade) records it too", async () => {
+      const runner = await runnerAt(19);
+      const id = await pending(null);
+      expect(await claim(runner)).toMatchObject({ kind: "claimed", runId: id });
+      expect(await recorded(id)).toBe(19);
+    });
+
+    it("the column is written by nothing else: not on insert, not by a later update, not to a value other than the runner's, not twice", async () => {
+      const runner = await runnerAt(19);
+      const id = await running();
+      await expect(admin.query("INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, runner_protocol_version) VALUES ($1, $2, 'executor', 'runner', 'pending', 'runner_local', 19)", [randomUUID(), A.accountId])).rejects.toMatchObject({ code: "42501" });
+      await expect(admin.query("UPDATE agent_runs SET runner_protocol_version = 19 WHERE id = $1", [id])).rejects.toMatchObject({ code: "23514" });
+      await expect(withTenant(writerPool, A.accountId, (client) => client.query("UPDATE agent_runs SET runner_protocol_version = 19 WHERE id = $1", [id]))).rejects.toMatchObject({ code: "42501" });
+      expect(await callDefiner(id, runner)).toBe(1);
+      await expect(admin.query("UPDATE agent_runs SET runner_protocol_version = 25 WHERE id = $1", [id])).rejects.toMatchObject({ code: "23514" });
+      await expect(admin.query("UPDATE agent_runs SET runner_protocol_version = NULL WHERE id = $1", [id])).rejects.toMatchObject({ code: "23514" });
+      await expect(admin.query("UPDATE agent_runs SET runner_protocol_version = 0 WHERE id = $1", [randomUUID()])).resolves.toBeDefined();
+      expect(await recorded(id)).toBe(19);
+    });
+  });
 });
