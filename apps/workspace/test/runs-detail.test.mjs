@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { costRows, durationText, factRows, failureText, githubLinks, isReviewer, linkedRunText, readInsight, titleOf, verdictView } from "../apps/runs/runs-detail.js";
+import { costRows, durationText, factRows, failureText, githubLinks, isReviewer, linkedRunText, readInsight, ROLE_OPTIONS, titleOf, verdictView, workItemLineText } from "../apps/runs/runs-detail.js";
 import { STATUS_LABELS } from "../apps/runs/runs-storage.js";
 import { COPY } from "../../../packages/runner-protocol/src/copy.ts";
 
@@ -38,6 +38,33 @@ describe("titles and verdicts", () => {
   it("knows which roles review", () => {
     expect(isReviewer("code-reviewer")).toBe(true);
     expect(isReviewer("executor")).toBe(false);
+  });
+});
+
+// D#37 (issue #828) criterion 2: the Role picker's options are ROLE_WORDS' own keys, each named by titleOf.
+describe("ROLE_OPTIONS", () => {
+  it("is every role titleOf knows, in its own order, each named by titleOf", () => {
+    expect(ROLE_OPTIONS).toEqual([
+      "project-manager", "technical-architect", "product-owner", "performance-expert", "security-expert", "cost-analyst",
+      "executor", "code-reviewer", "acceptance-tester", "security-reviewer", "debater", "accessibility-reviewer",
+      "browser-tester", "deploy-verifier", "proposal-verifier", "discovery-analyst",
+    ]);
+    for (const role of ROLE_OPTIONS) expect(titleOf(role)).not.toBe(role);
+    expect(ROLE_OPTIONS).toContain("executor");
+    expect(titleOf("executor")).toBe("Build · Executor");
+  });
+});
+
+// D#37 (issue #828) criterion 1: the row's second line.
+describe("workItemLineText", () => {
+  it("is '#<issue_number> <title>', or just whichever one is present, or '' for neither", () => {
+    expect(workItemLineText({ issue_number: 912, title: "Show which work item each run is for" })).toBe("#912 Show which work item each run is for");
+    expect(workItemLineText({ issue_number: 912, title: null })).toBe("#912");
+    expect(workItemLineText({ issue_number: null, title: "No issue number" })).toBe("No issue number");
+    expect(workItemLineText({ issue_number: null, title: null })).toBe("");
+    expect(workItemLineText(null)).toBe("");
+    expect(workItemLineText(undefined)).toBe("");
+    expect(workItemLineText({ issue_number: 0, title: "" })).toBe("");
   });
 });
 

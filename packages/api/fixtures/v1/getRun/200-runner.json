@@ -21,5 +21,9 @@
     "cache_write_tokens": 300,
     "api_equivalent_usd": 0.0147,
     "price_table_version": "2026-10-01"
+  },
+  "work_item": {
+    "issue_number": 630,
+    "title": "Runner: surface the price table version in run detail"
   }
 }

@@ -540,6 +540,14 @@
             }
           },
           {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -733,6 +741,42 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "work_item": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "issue_number": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "title": {
+                                    "description": "Untrusted text (a GitHub issue title): show as text only, never as markup.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "issue_number",
+                                  "title"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -748,7 +792,8 @@
                           "created_at",
                           "updated_at",
                           "approved_by",
-                          "approval"
+                          "approval",
+                          "work_item"
                         ],
                         "additionalProperties": false
                       }
@@ -1041,6 +1086,42 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "work_item": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "issue_number": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "title": {
+                              "description": "Untrusted text (a GitHub issue title): show as text only, never as markup.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "issue_number",
+                            "title"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -1056,7 +1137,8 @@
                     "created_at",
                     "updated_at",
                     "approved_by",
-                    "approval"
+                    "approval",
+                    "work_item"
                   ],
                   "additionalProperties": false
                 }

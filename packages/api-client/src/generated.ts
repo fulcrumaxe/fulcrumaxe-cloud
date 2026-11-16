@@ -66,6 +66,7 @@ export interface Operations {
     query: {
       work_item_id?: string;
       status?: string;
+      role?: string;
       limit?: string;
       cursor?: string;
     };
@@ -99,6 +100,10 @@ export interface Operations {
           name: string;
         }) | (null);
         approval: ("auto" | "manual") | (null);
+        work_item: ({
+          issue_number: (number) | (null);
+          title: string | null;
+        }) | (null);
       }>;
       next_cursor: string | null;
     };
@@ -137,6 +142,10 @@ export interface Operations {
         name: string;
       }) | (null);
       approval: ("auto" | "manual") | (null);
+      work_item: ({
+        issue_number: (number) | (null);
+        title: string | null;
+      }) | (null);
     };
   };
   listWorkItems: {
@@ -5323,7 +5332,7 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: [],
-    queryParams: ["work_item_id","status","limit","cursor"],
+    queryParams: ["work_item_id","status","role","limit","cursor"],
     hasBody: false,
   },
   getRun: {

@@ -24,9 +24,9 @@
 .runs-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .runs-row {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
   box-sizing: border-box;
   width: 100%;
   min-height: 44px;
@@ -44,8 +44,25 @@
 .runs-back:focus-visible,
 .runs-approve:focus-visible,
 .runs-more:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.runs-row-main { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; width: 100%; }
 .runs-row-name { flex: 1 1 8em; font-weight: 600; overflow-wrap: anywhere; }
 .runs-row-time { color: var(--text-muted, rgba(26, 255, 128, 0.55)); font-size: 0.78rem; }
+/* D#37 (issue #828): the row's second line, the run's work item -- clipped to one line, never a blank gap when there is none. */
+.runs-row-item { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted, rgba(26, 255, 128, 0.55)); font-size: 0.8rem; }
+
+/* D#37 (issue #828): the Role/Status filter bar above the list, same shape as the Memory app's. */
+.runs-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0 0 8px; }
+.runs-input {
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 4px 8px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: inherit;
+  font: inherit;
+}
+.runs-input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 
 .runs-chip { padding: 0 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); font-size: 0.78rem; white-space: nowrap; }
 .runs-chip-running { color: var(--accent, #1aff80); border-color: var(--accent, #1aff80); }

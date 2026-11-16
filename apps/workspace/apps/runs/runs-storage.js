@@ -23,15 +23,32 @@ export const STATUS_LABELS = {
 
 export const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 
+/** D#37 (issue #828): the Status picker's options, in `STATUS_LABELS`' own order. */
+export const STATUS_OPTIONS = Object.keys(STATUS_LABELS);
+
+/** True when a filter is empty, or matches the run's own (string) value exactly; false when the filter is set but the run's field is missing or not a string. */
+export function matchesFilters(run, filters) {
+  const role = (filters && filters.role) || "";
+  const status = (filters && filters.status) || "";
+  if (role && (typeof run?.role !== "string" || run.role !== role)) return false;
+  if (status && (typeof run?.status !== "string" || run.status !== status)) return false;
+  return true;
+}
+
 /** "$1.25", or an em dash when the run has no cost yet. Small amounts keep 4 places so they don't read as free. */
 export function formatUsd(usd) {
   if (typeof usd !== "number" || !Number.isFinite(usd)) return "—";
   return "$" + (usd !== 0 && Math.abs(usd) < 0.01 ? usd.toFixed(4) : usd.toFixed(2));
 }
 
-/** One page of runs. `cursor` is the previous page's next_cursor, or empty for the first page. */
-export async function loadRunsPage(cursor, get = api, signal) {
-  const url = "/api/v1/runs?limit=" + LIST_LIMIT + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
+/** One page of runs. `cursor` is the previous page's next_cursor, or empty for the first page. `filters.role`/`filters.status` are sent only when chosen (empty means All). */
+export async function loadRunsPage(cursor, get = api, signal, filters = {}) {
+  const role = (filters && filters.role) || "";
+  const status = (filters && filters.status) || "";
+  const url = "/api/v1/runs?limit=" + LIST_LIMIT
+    + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "")
+    + (role ? "&role=" + encodeURIComponent(role) : "")
+    + (status ? "&status=" + encodeURIComponent(status) : "");
   const body = await get("GET", url, undefined, signal);
   const rows = body && Array.isArray(body.data) ? body.data.filter((r) => r && isUuid(r.id)).slice(0, LIST_LIMIT) : [];
   const next = body && typeof body.next_cursor === "string" && body.next_cursor !== "" && body.next_cursor !== cursor ? body.next_cursor : "";

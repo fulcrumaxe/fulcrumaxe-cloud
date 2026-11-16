@@ -11,5 +11,9 @@
   "created_at": "2026-09-18T12:00:00.000Z",
   "updated_at": "2026-09-18T12:00:00.000Z",
   "approved_by": null,
-  "approval": null
+  "approval": null,
+  "work_item": {
+    "issue_number": 745,
+    "title": "Add a dark theme toggle to the workspace shell"
+  }
 }

@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { RUNNER_USAGE_COLUMN, toRunnerUsage, type RunnerUsage } from './runnerUsage.js';
+import { cleanWorkItemTitle } from '../work-items/title.js';
 
 /**
  * D#31 comment 18494573 (C7): every domain module in this codebase keeps
@@ -51,6 +52,8 @@ export interface RunDTO {
    * move it. A run approved before the receipt existed reads `manual`.
    */
   approval: 'auto' | 'manual' | null;
+  /** The run's work item (issue number and cleaned title), or null when the run has none or row security hides the item. */
+  work_item: { issue_number: number | null; title: string | null } | null;
 }
 
 interface RunRow {
@@ -70,13 +73,19 @@ interface RunRow {
   created_at_cursor: string; // fix round 1: full-precision text cursor, cursor-only, never in the DTO
   approved_by: string | null;
   approved_by_name: string | null;
+  work_item_gh_number: string | null;
+  work_item_title: string | null;
+  work_item_found: boolean;
 }
 
 /** Shown where a member has no name on record. Never an email, an id or the word null (the same text the runner read model uses). */
 const UNNAMED_MEMBER = 'A team member';
 
 const RUN_COLUMNS = `id, work_item_id, parent_run_id, role, status, runtime, usd, tokens_in, tokens_out, ${RUNNER_USAGE_COLUMN}, ${REFUSAL_REASON_SQL}, created_at, updated_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor, approved_by,
-  (SELECT COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), '${UNNAMED_MEMBER}') FROM users u WHERE u.id = agent_runs.approved_by) AS approved_by_name`;
+  (SELECT COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), '${UNNAMED_MEMBER}') FROM users u WHERE u.id = agent_runs.approved_by) AS approved_by_name,
+  (SELECT w.gh_number FROM work_items w WHERE w.id = agent_runs.work_item_id) AS work_item_gh_number,
+  (SELECT w.title FROM work_items w WHERE w.id = agent_runs.work_item_id) AS work_item_title,
+  EXISTS (SELECT 1 FROM work_items w WHERE w.id = agent_runs.work_item_id) AS work_item_found`;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -116,6 +125,9 @@ function toRunDTO(row: RunRow, auto: Set<string>): RunDTO {
     updated_at: row.updated_at.toISOString(),
     approved_by: row.approved_by === null ? null : { id: row.approved_by, name: row.approved_by_name ?? UNNAMED_MEMBER },
     approval: row.approved_by === null ? null : auto.has(row.id) ? 'auto' : 'manual',
+    work_item: row.work_item_id === null || !row.work_item_found
+      ? null
+      : { issue_number: row.work_item_gh_number === null ? null : Number(row.work_item_gh_number), title: cleanWorkItemTitle(row.work_item_title) },
   };
 }
 
@@ -149,6 +161,7 @@ export interface ListRunsInput {
   /** Only runs of work items in this repo (a run with no work item has no repo and is left out). Applied in the query, so a page and its cursor never count another repo's rows. */
   repoId?: string;
   status?: string;
+  role?: string;
   /** Already validated (1..MAX_LIMIT) by `packages/api/src/pagination.ts`'s `parseLimit`. */
   limit: number;
   /** Already decoded by `packages/api/src/pagination.ts`'s `decodeCursor`. `createdAt` is the raw full-precision text (fix round 1) -- never a JS `Date`. */
@@ -169,7 +182,7 @@ export interface ListRunsResult {
  */
 export async function listRuns(ctx: RunsReadCtx, input: ListRunsInput): Promise<ListRunsResult> {
   const { accountId, userId } = ctx.principal;
-  const { workItemId, repoId, status, limit, cursor } = input;
+  const { workItemId, repoId, status, role, limit, cursor } = input;
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     const { rows } = await client.query<RunRow>(
       `SELECT ${RUN_COLUMNS} FROM agent_runs
@@ -177,9 +190,10 @@ export async function listRuns(ctx: RunsReadCtx, input: ListRunsInput): Promise<
           AND ($2::text IS NULL OR status = $2::text)
           AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::uuid))
           AND ($6::uuid IS NULL OR work_item_id IN (SELECT w.id FROM work_items w WHERE w.repo_id = $6::uuid))
+          AND ($7::text IS NULL OR role = $7::text)
         ORDER BY created_at DESC, id DESC
         LIMIT $5::int`,
-      [workItemId ?? null, status ?? null, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1, repoId ?? null],
+      [workItemId ?? null, status ?? null, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1, repoId ?? null, role ?? null],
     );
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
