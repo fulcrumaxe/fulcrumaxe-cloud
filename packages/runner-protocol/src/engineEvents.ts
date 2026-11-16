@@ -126,7 +126,15 @@ export function hasForbiddenEngineKey(value: unknown): boolean {
 export const PLAN_SNAPSHOT_MAX_BYTES = 65_536;
 /** One events request may not exceed this many bytes of JSON. */
 export const ENGINE_EVENTS_BODY_MAX_BYTES = 262_144;
-const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+/** The UTF-8 size of the value as JSON. A value too deeply nested to stringify (it throws RangeError) counts as infinitely large, so the size rules refuse it instead of the parse throwing. */
+const jsonBytes = (value: unknown): number => {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    // fx-swallow-ok: a value too deep to stringify is reported as over the size limit (Infinity), which refuses the message
+    return Number.POSITIVE_INFINITY;
+  }
+};
 
 const EventKinds = z.discriminatedUnion("kind", KIND_SCHEMAS);
 /**

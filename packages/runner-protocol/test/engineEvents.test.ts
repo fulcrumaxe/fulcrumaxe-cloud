@@ -371,4 +371,20 @@ describe("EngineEventsMessage", () => {
     for (const reply of [{ error: "engine_event_quota" }, { error: "engine_bridge_off", retry_after_s: 1 }, { error: "boom" }, { error: "seq_not_increasing" }])
       expect(EngineEventsErrorReply.safeParse(reply).success, JSON.stringify(reply)).toBe(false);
   });
+  it("fails cleanly, never throws, on a value nested too deep to stringify", () => {
+    const nested = (depth: number): unknown => {
+      let value: unknown = "leaf";
+      for (let i = 0; i < depth; i++) value = { a: value };
+      return value;
+    };
+    for (const depth of [2000, 3000, 5000, 20000]) {
+      const deepEvent = message([merged(1), { ...merged(2), deep: nested(depth) }]);
+      expect(() => EngineEventsMessage.safeParse(deepEvent), `depth ${depth}`).not.toThrow();
+      expect(EngineEventsMessage.safeParse(deepEvent).success).toBe(false);
+      expect(parseEngineEventsMessage(deepEvent)).toEqual({ ok: false, error: "invalid_message" });
+      const deepEnvelope = { ...(message([merged(1)]) as object), extra: nested(depth) };
+      expect(() => parseEngineEventsMessage(deepEnvelope), `envelope depth ${depth}`).not.toThrow();
+      expect(parseEngineEventsMessage(deepEnvelope)).toEqual({ ok: false, error: "invalid_message" });
+    }
+  });
 });
