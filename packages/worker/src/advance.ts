@@ -18,7 +18,7 @@ import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNot
 import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, recordBuildBranch, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, RUNNER_REPLACE_ROUND_KIND, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { assembleFixNotePrompt, recordRunFollowUps } from "@fx/pipeline";
-import { readExecutorNote, withNoteSection } from "./fixRoundNote.js";
+import { nearestExecutorNote, withNoteSection } from "./fixRoundNote.js";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
@@ -87,6 +87,8 @@ const PLACEMENT_CHANGED = "placement_changed";
 const PROVIDER_CAPACITY = "provider_capacity";
 /** D#599 PL-2: how many times one step restarts on the other side after its run was cancelled for a placement change. The key of restart n is `<step key>:p<n>`. */
 export const PLACEMENT_RESTARTS_MAX = 3;
+/** The longest chain of runner children `freeRunnerParent` walks; a longer one is refused as `parent_chain_too_long`. */
+export const RUNNER_CHAIN_HOPS_MAX = 50;
 /**
  * The first role each action starts: the seat the pre-flight in `performAdvanceWorkItem` resolves. `check_build` starts none
  * (a pull request is looked for first; with none open the item goes to Needs human and no model runs), so it has no seat to
@@ -1722,6 +1724,28 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
   }
 
+  /**
+   * A runner run has at most ONE runner child, whatever becomes of it (the database's runner follow-up key, migration 0754, which covers runner children of every role). A fix round that ended with no
+   * session (a refused push) is skipped by `newestExecutorRun`, so the run before it is the candidate and already has that round as its child: a new runner round under it is refused by the key, for
+   * ever. The round continues the pull request's branch it is handed, not the candidate's session, so the parent that is free is the end of the chain of runner children (of any role, as the key
+   * counts them). A live child is not skipped past: the live-executor check refuses the round before this is read. A round on the other side (a sandbox run) is not under the key and keeps the
+   * candidate. A chain longer than the cap has no end this can name, so it returns null (the round is refused with its own code) rather than a mid-chain run the key would refuse for ever.
+   */
+  async function freeRunnerParent(who: AdvanceStepWho, candidate: string): Promise<string | null> {
+    return withTenant(runnerPool, who.accountId, async (client) => {
+      let id = candidate;
+      for (let hops = 0; hops < RUNNER_CHAIN_HOPS_MAX; hops++) {
+        const child = await client.query<{ id: string }>(
+          "SELECT id FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND parent_run_id = $3 AND runtime = 'runner' ORDER BY created_at DESC LIMIT 1",
+          [who.accountId, who.workItemId, id],
+        );
+        if (child.rows[0] === undefined) return id;
+        id = child.rows[0].id;
+      }
+      return null;
+    });
+  }
+
   async function startCheckFix(who: AdvanceStepWho, failedRunId: string): Promise<AdvanceRunStart> {
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
@@ -1847,11 +1871,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const publicRefusal = await checkPublicBranch(runnerPool, deps.fixHeads, who);
     if (publicRefusal !== null) return refuse(publicRefusal);
     // The cheap refusals come before anything is written on GitHub: a base-sync merge must never land for a round that is then refused.
-    const parent = await newestExecutorRun(who);
-    if (parent === null) return refuse("no_session");
+    const candidate = await newestExecutorRun(who);
+    if (candidate === null) return refuse("no_session");
     const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}) });
     if (!seat.ok) return refuse(seat.reason);
     const effective = await readExecutionMode(runnerPool, who.accountId, state.repoId, who.workItemId);
+    const freeParent = isRunnerMode(effective) ? await freeRunnerParent(who, candidate) : candidate;
+    if (freeParent === null) return refuse("parent_chain_too_long");
+    const parent = freeParent;
     // D#600 CX-7 (owner ruling R-600-1): every fix round starts a fresh executor session on the pull request's branch, never a resume of the build's session (the resumed
     // transcript's prompt cache has long expired by the time a review ends). The refusals that need nothing from the base sync come here, before it: a merge must never land on
     // GitHub, nor the board move to Changes requested, for a round that is then refused.
@@ -1964,7 +1991,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
     // The fresh session carries the fix prompt WITH the Spec body (the pinned version: the new run inherits the parent's pin), the findings, the fenced run notes above, and the
     // previous executor run's closing note (at most 4 KiB, sanitised, between fences, ahead of the output block).
-    const buildNote = await withTenant(runnerPool, who.accountId, (client) => readExecutorNote(client, who.accountId, parent, who.workItemId));
+    const buildNote = await withTenant(runnerPool, who.accountId, (client) => nearestExecutorNote(client, who.accountId, who.workItemId, parent));
     // The caller's `fallbackPrompt` is the round with the Spec body; a caller that sends one prompt sent the body in it.
     const noted = assembleFixNotePrompt(req.fallbackPrompt ?? req.prompt, buildNote);
     const freshPrompt = dec.prompt(withNotes(noted.prompt));
@@ -2059,8 +2086,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // D#483 S5-k3b-2c: our servers are full: the round waits (no refusal fact), and asks again.
       if (err instanceof CapacityWaitingError) return refuse(CAPACITY_WAIT);
       // fx-swallow-ok: the error's NAME is logged below and the refusal is recorded as a fact; its message can carry text from the sandbox or the platform
-      const e = err as { name?: string };
-      console.warn(JSON.stringify({ event: "advance.resume_failed", work_item_id: who.workItemId, name: typeof e?.name === "string" ? e.name.slice(0, 60) : null }));
+      const e = err as { name?: string; code?: unknown; constraint?: unknown };
+      // The database's SQLSTATE and the name of the constraint are fixed identifiers (never the message, which carries row values), so they are logged to tell which rule refused the insert.
+      const fixedId = (v: unknown): string | null => (typeof v === "string" && /^[A-Za-z0-9_]{1,63}$/.test(v) ? v : null);
+      console.warn(JSON.stringify({ event: "advance.resume_failed", work_item_id: who.workItemId, name: typeof e?.name === "string" ? e.name.slice(0, 60) : null, pg_code: fixedId(e?.code), pg_constraint: fixedId(e?.constraint) }));
       if (err instanceof IdempotencyKeyTakenError) {
         const won = await claimedRun();
         if (won) return started(won);
@@ -2072,6 +2101,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // A reaper claim on the sandbox is transient: the step throws and is retried (the run is keyed, so a replay is safe).
       if (err instanceof SandboxReapingError) throw err;
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");
+      // A live round under the same run, or a run that already has its one runner child: a round exists that the person must wait for or look at, so the answer is a code with a sentence (never a dead end).
+      const pgConstraint = (err as { code?: unknown; constraint?: unknown } | null);
+      if (pgConstraint?.code === "23505" && (pgConstraint.constraint === "agent_runs_one_live_continuation_per_parent" || pgConstraint.constraint === "agent_runs_runner_follow_up_key")) return refuse("already_running");
       if (err instanceof WorkItemHaltedError) return refuse("item_halted");
       if (err instanceof ExecutionModeChangedError) return refuse("execution_mode_changed");
       // D#599 PL-2: the guards of the round's own side refused it before a row was written.

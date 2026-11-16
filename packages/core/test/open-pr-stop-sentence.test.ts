@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { loadPlanData } from '@fx/plan-data';
-import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE, REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST_SENTENCE, REPUBLISH_STACK_PARENT_OFF_MAIN_SENTENCE, REPUBLISH_STACK_PARENT_OPEN_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE, openPrStopSentence } from '../src/work-items/baseSync.js';
+import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_REFUSAL_FALLBACK_SENTENCE, FIX_ROUND_STOP_SENTENCE, fixRoundRefusalSentence, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE, REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST_SENTENCE, REPUBLISH_STACK_PARENT_OFF_MAIN_SENTENCE, REPUBLISH_STACK_PARENT_OPEN_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE, openPrStopSentence } from '../src/work-items/baseSync.js';
 import { operatorActionsFor, operatorVerdict, type OperatorFacts } from '../src/work-items/operatorActions.js';
 
 // A fix round only runs while the pull request is open, so Build again's rebuild would stop at it: these stops must name Request changes, as the card lists it for the viewer.
@@ -71,5 +71,19 @@ describe('every stop sentence names only a step the viewer can take', () => {
     expect(s).toMatch(/change this pull request's base to main on GitHub\. All of this pull request's fix rounds are used/);
     expect(s).toMatch(/If it was merged into a branch other than main/);
     expect(sentenceFor(REPUBLISH_STACK_PARENT_ENDED_SENTENCE, facts())).toMatch(/GitHub; then press Request changes to run another round\.$/);
+  });
+});
+
+describe('the sentence for a refused fix round', () => {
+  it.each(['no_spec_version', 'execution_mode_changed', 'starter_unavailable', 'pr_unbound', 'pr_branch_unsupported', 'continues_pr_closed', 'job_too_large', 'item_halted', 'resume_failed'])('%s has its own non-empty sentence that does not echo the code', (code) => {
+    const s = fixRoundRefusalSentence(code);
+    expect(s.length).toBeGreaterThan(20);
+    expect(s).not.toContain(code);
+    expect(s).not.toBe(FIX_ROUND_REFUSAL_FALLBACK_SENTENCE);
+  });
+  it('an unknown code gets the generic sentence, without the code', () => {
+    expect(fixRoundRefusalSentence('zzq_unknown')).toBe(FIX_ROUND_REFUSAL_FALLBACK_SENTENCE);
+    expect(fixRoundRefusalSentence('constructor')).toBe(FIX_ROUND_REFUSAL_FALLBACK_SENTENCE);
+    expect(FIX_ROUND_REFUSAL_FALLBACK_SENTENCE).not.toMatch(/_/);
   });
 });

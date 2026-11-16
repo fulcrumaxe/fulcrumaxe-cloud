@@ -16,7 +16,7 @@ import { readItemReceipts, type ItemReceipts } from './itemReceipts.js';
 import { readItemVerify, type ItemVerify } from './itemVerify.js';
 import { readVerifyAttempt, type VerifyAttemptDetail } from './verifyDetail.js';
 import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSentence } from './continuationStops.js';
-import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE, REPUBLISH_REPLACE_NO_CHANGE, REPUBLISH_REPLACE_FAILED, REPUBLISH_REPLACE_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN, REPUBLISH_STACK_PARENT_OFF_MAIN, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST, REPUBLISH_TIP_MOVED, republishFailedSentence } from './baseSync.js';
+import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_REFUSAL_FALLBACK_SENTENCE, FIX_ROUND_STOP_SENTENCE, fixRoundRefusalSentence, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE, REPUBLISH_REPLACE_NO_CHANGE, REPUBLISH_REPLACE_FAILED, REPUBLISH_REPLACE_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN, REPUBLISH_STACK_PARENT_OFF_MAIN, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST, REPUBLISH_TIP_MOVED, republishFailedSentence } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE, CHECK_NOT_RUN_OUT_OF_SCOPE, CHECK_NOT_RUN_OUT_OF_SCOPE_SENTENCE, checkFailureFiles, type CheckFailureFiles } from './checkFailure.js';
 import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalSentence } from './scopeRefusal.js';
@@ -1033,6 +1033,21 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           ? REVIEW_STOP_COPY_KEY[stop!.code as keyof typeof REVIEW_STOP_COPY_KEY]
           : stop?.code && item.stage === 'in_progress' && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
       if (sentence) notice = { kind: 'check_failed', reason: sentence };
+      else if (item.stage === 'changes_requested') {
+        // A fix round that was refused before a run existed leaves the item here with no run to explain it: the newest round record says why, as long as it is a refusal (a
+        // later start supersedes it) and no run of the item is live. Every refusal code shows a fixed sentence; a code without its own gets the generic one (never the code). The readers above only read `stopped` events, so none of them sees these.
+        const round = (
+          await client.query<{ kind: string; code: string | null }>(
+            `SELECT e.kind, e.code FROM work_item_driver_events e
+              WHERE e.work_item_id = $1::uuid AND e.kind IN ('fix_round_refused', 'fix_round_started')
+                AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled'))
+              ORDER BY e.seq DESC LIMIT 1`,
+            [workItemId],
+          )
+        ).rows[0];
+        if (round?.kind === 'fix_round_refused' && round.code !== null) notice = { kind: 'check_failed', reason: fixRoundRefusalSentence(round.code) };
+        else if (round?.kind === 'fix_round_refused') notice = { kind: 'check_failed', reason: FIX_ROUND_REFUSAL_FALLBACK_SENTENCE };
+      }
     }
 
     // D#598 P7c: the newest review round's record says whether it was a merge-only re-check (the code is written by the platform alone).
