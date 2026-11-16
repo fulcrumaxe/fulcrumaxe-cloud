@@ -121,6 +121,21 @@ function mustBeStringList(value, what) {
   }
 }
 
+function mustBeScanList(value, what) {
+  const bad = (e) =>
+    !e ||
+    typeof e.package !== "string" ||
+    typeof e.reason !== "string" ||
+    !e.package ||
+    !e.reason ||
+    !Array.isArray(e.watch) ||
+    e.watch.length === 0 ||
+    e.watch.some((g) => typeof g !== "string" || !g);
+  if (!Array.isArray(value) || value.some(bad)) {
+    throw new FailClosed(`trigger file: ${what} must be a list of {package, reason, watch: [globs]}`);
+  }
+}
+
 /** Reads and validates the trigger file. */
 export function loadTriggers(file = DEFAULT_TRIGGER_FILE) {
   let doc;
@@ -147,6 +162,7 @@ export function loadTriggers(file = DEFAULT_TRIGGER_FILE) {
   if (!Array.isArray(doc.active_edge_kinds) || doc.active_edge_kinds.some((k) => typeof k !== "string")) {
     throw new FailClosed("trigger file: active_edge_kinds must be a list of strings");
   }
+  mustBeScanList(doc.repo_wide_scans ?? [], "repo_wide_scans");
   return doc;
 }
 
@@ -171,9 +187,10 @@ function workspaceGlobs(yamlText) {
 }
 
 /**
- * The workspace graph at `head`: { packages: Map<dir, name>, deps: Map<dir, Set<dir>> } where deps maps a
- * package to the packages it depends on. Edges: any dependency whose name is a workspace package, in any of
- * the four dependency fields, whatever its version specifier, plus the extra edges from the trigger file.
+ * The workspace graph at `head`: { packages: Map<dir, name>, deps: Map<dir, Set<dir>>, testEdges } where deps
+ * maps a package to the packages it depends on. Edges: any dependency whose name is a workspace package, in
+ * any of the four dependency fields, whatever its version specifier, plus the extra edges of kind "src" from
+ * the trigger file. Extra edges of kind "test" are validated the same way but kept apart in `testEdges`.
  */
 export function readGraph(repoRoot, head, extraEdges = []) {
   let globs;
@@ -204,6 +221,7 @@ export function readGraph(repoRoot, head, extraEdges = []) {
     manifests.set(dir, pkg);
   }
   const deps = new Map(dirs.map((d) => [d, new Set()]));
+  const testEdges = [];
   for (const [dir, pkg] of manifests) {
     for (const key of EDGE_KEYS) {
       for (const dep of Object.keys(pkg[key] ?? {})) {
@@ -216,9 +234,13 @@ export function readGraph(repoRoot, head, extraEdges = []) {
     if (!deps.has(edge.from) || !deps.has(edge.to)) {
       throw new FailClosed(`trigger file: extra edge ${edge.from} -> ${edge.to} names a directory that is not a workspace package`);
     }
-    if (edge.from !== edge.to) deps.get(edge.from).add(edge.to);
+    if (edge.from === edge.to) continue;
+    // A test-only edge says "from's tests import to": it selects `from` when `to` is selected, but it is not a
+    // dependency for the walk, so it never drags in `from`'s own dependents (see classify).
+    if (edge.kind === "test") testEdges.push(edge);
+    else deps.get(edge.from).add(edge.to);
   }
-  return { packages: new Map(dirs.map((d) => [d, manifests.get(d).name])), deps };
+  return { packages: new Map(dirs.map((d) => [d, manifests.get(d).name])), deps, testEdges };
 }
 
 /** `changed` plus every package that depends on one of them, directly or transitively. Sorted. */
@@ -473,7 +495,24 @@ export function classify(input) {
     // A metadata-only edit to a workspace package's manifest still selects THAT package (a test may assert
     // the field: publicBoundary.test.ts reads manifest.license), but not its dependents.
     const own = [...metaOnly].map((f) => f.slice(0, -"/package.json".length)).filter((d) => graph.packages.has(d));
-    const packages = [...new Set([...withDependents(graph, touched), ...own])].sort();
+    // The walk follows declared and "src" edges. A "test" edge then adds its `from` when its `to` was reached,
+    // once: `from`'s own dependents are not added by it, and edges do not chain.
+    const reached = new Set(withDependents(graph, touched));
+    const viaTests = graph.testEdges.filter((e) => reached.has(e.to)).map((e) => e.from);
+    // A repo-wide scan's package is selected when any file it reads changed, however far from it.
+    const scans = rules.repo_wide_scans ?? [];
+    for (const s of scans) {
+      if (!graph.packages.has(s.package)) {
+        throw new FailClosed(`trigger file: repo_wide_scans names a directory that is not a workspace package: ${s.package}`);
+      }
+    }
+    const viaScans = scans
+      .filter((s) => {
+        const res = s.watch.map((g) => globToRegExp(g));
+        return relevant.some((f) => !standalone.some((re) => re.test(f)) && res.some((re) => re.test(f)));
+      })
+      .map((s) => s.package);
+    const packages = [...new Set([...reached, ...viaTests, ...viaScans, ...own])].sort();
     // check.sh lints only the affected packages in an affected run, and a standalone CI test is in none.
     const lint = relevant.some((f) => standalone.some((re) => re.test(f))) ? ["scripts/ci"] : [];
     const reason =
