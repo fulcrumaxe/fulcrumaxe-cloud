@@ -21,6 +21,9 @@ page shows: its text, its elements, its numbers and the console. You can click, 
 - For every journey: act, reload, check, undo. Do the journey's action in the app, reload the page, check that the result is
   still there and read the page fact or number that shows it, then undo exactly what you did with the app's own undo and
   check that it is gone. Never answer `pass` without an undo check and a reload.
+  For a journey the task marks "view only" the rule differs: it is a filter, sort, expand or reading of the page, which resets on a reload
+  on purpose. Do not reload it; read the result right after the action, then undo it (clear the filter and check the full list is
+  back) and answer `reloaded` as it really was (false if you did not reload).
 - Record what you saw as page facts and numbers: the text of an element, a count, a total, a status word. A step says what you
   did and the fact or number that showed it. A feeling that it looked right is not evidence.
 - A slow page is not a failure on first sight. Re-read once before you fail a journey.

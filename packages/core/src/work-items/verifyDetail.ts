@@ -80,7 +80,7 @@ interface Row {
   finished_at: Date | null;
   created_at: Date;
   result: JourneyResult[] | null;
-  journeys: { id?: unknown; source?: unknown }[];
+  journeys: { id?: unknown; source?: unknown; persistence?: unknown }[];
 }
 
 const FINISHED = ['verified', 'failed', 'unverified'];
@@ -94,16 +94,16 @@ function stepProves(s: unknown): boolean {
   return typeof o.did === 'string' && o.did.trim() !== '' && ((typeof o.dom_fact === 'string' && o.dom_fact.trim() !== '') || typeof o.number === 'number');
 }
 
-function evidenced(answered: JourneyResult): boolean {
+function evidenced(answered: JourneyResult, persistence?: unknown): boolean {
   try {
-    return isEvidencedPass(answered);
+    return isEvidencedPass(answered, persistence);
   } catch {
     // fx-swallow-ok: stored answer data may be malformed; a throw from the pass rule means "not evidenced", which the view shows as such
     return false;
   }
 }
 
-function viewJourney(held: { id?: unknown; source?: unknown }, answered: JourneyResult | undefined, finished: boolean, unjudged: VerifyReasonCode | null): VerifyJourneyView | null {
+function viewJourney(held: { id?: unknown; source?: unknown; persistence?: unknown }, answered: JourneyResult | undefined, finished: boolean, unjudged: VerifyReasonCode | null): VerifyJourneyView | null {
   if (typeof held.id !== 'string' || !JOURNEY_ID_RE.test(held.id)) return null;
   const source: JourneySource = (SOURCES as readonly unknown[]).includes(held.source) ? (held.source as JourneySource) : 'other';
   const m = source === 'criterion' || source === 'recheck' ? /^c(\d{1,2})$/.exec(held.id) : null;
@@ -111,7 +111,7 @@ function viewJourney(held: { id?: unknown; source?: unknown }, answered: Journey
   if (answered === undefined || !Array.isArray(answered.steps)) {
     return { ...base, status: 'skipped', reason: finished ? 'not_answered' : null, steps_done: 0, evidence: { page_fact: false, undo_checked: false, reloaded: false }, console_errors: 0, steps: [] };
   }
-  const status: JourneyStatus = unjudged !== null ? 'not_judged' : answered.result === 'pass' ? (evidenced(answered) ? 'passed' : 'unproven') : answered.result === 'fail' ? 'failed' : answered.result === 'blocked' ? 'blocked' : 'unproven';
+  const status: JourneyStatus = unjudged !== null ? 'not_judged' : answered.result === 'pass' ? (evidenced(answered, held.persistence) ? 'passed' : 'unproven') : answered.result === 'fail' ? 'failed' : answered.result === 'blocked' ? 'blocked' : 'unproven';
   const reason: JourneyReason | null = status === 'passed' ? null : status === 'not_judged' ? (unjudged as JourneyReason) : status === 'failed' ? 'defect_found' : status === 'blocked' ? 'blocked' : 'no_evidence';
   const raw = answered.steps.slice(0, 20);
   const steps: VerifyStepView[] = raw.map((s, i) => {

@@ -16,7 +16,7 @@ import { parseEnvelope, type EnvelopeRejection } from './envelope.js';
  *      app's side) INSTEAD of a `signed_in_as`, and the answer is otherwise valid (well formed, only journeys the row holds, every one answered), the row is parked (`park: 'needs_sign_in'`) instead of
  *      ending `wrong_account`. A `signed_in_as` that differs is still `wrong_account`, and so is an absent one with no marker (the model can never write either).
  *   2. Every journey of the row must be answered; a missing one ends the row `unverified: journeys_missing`. A row with no journeys can never be verified.
- *   3. The hollow-pass guard: a `pass` without a page fact or a number, or without an undo check, or without a reload, is not a pass. It is rewritten to `unverified`
+ *   3. The hollow-pass guard: a `pass` without a page fact or a number, or without an undo check, or (unless the journey is `view_only`) without a reload, is not a pass. It is rewritten to `unverified`
  *      and the row cannot be `verified` (`unverified: hollow_pass`).
  *   4. Any `fail` makes the row `failed` and names the failing journeys, each of which files one bug item, keyed so a replay files once.
  *      Otherwise any `blocked` journey makes the row `unverified: journey_blocked`; otherwise any rewritten pass makes it `unverified: hollow_pass`; otherwise it is `verified`.
@@ -72,7 +72,7 @@ export function outcomeFromAnswer(journeys: readonly Journey[], raw: unknown, co
   // In the row's own order, with a pass that shows nothing rewritten.
   const result: JourneyResult[] = journeys.map((j) => {
     const r = answered.get(j.id)!;
-    return r.result === 'pass' && !isEvidencedPass(r) ? { ...r, result: 'unverified' } : r;
+    return r.result === 'pass' && !isEvidencedPass(r, j.persistence) ? { ...r, result: 'unverified' } : r;
   });
   const failed = result.filter((r) => r.result === 'fail').map((r) => r.id);
   if (failed.length > 0) return { input: { status: 'failed', result, ...checked }, failedJourneyIds: failed };
