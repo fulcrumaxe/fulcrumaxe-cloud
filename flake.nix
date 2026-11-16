@@ -107,6 +107,9 @@
         postgresql  # initdb/pg_ctl for throwaway test databases (packages/db)
         git
         jq
+        # ps: the fx-runner browserProbe test reads the real process list. The
+        # NixOS runner's service PATH is minimal by design, so it comes from here.
+        procps
         # D#37 WS-B: browsers for apps/workspace/e2e and sitekit-checks,
         # from the binary cache (see playwrightBrowsers above).
         playwrightBrowsers
