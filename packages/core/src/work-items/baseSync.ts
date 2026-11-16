@@ -24,6 +24,8 @@ const OPEN_PR_LEADS = {
   unavailable: "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed.",
   noChange: "The fix round made no changes to publish, so the public pull request is unchanged. Look at the round.",
   tipMoved: "Public main moved, try again. The public repository changed twice while the cloud was preparing the update, so the public pull request still shows the earlier change.",
+  resumeFailed: "The fix round could not start because of a fault on our side. Nothing was changed on GitHub beyond bringing the branch up to date.",
+  alreadyRunning: "The fix round could not start because an earlier round's record was in the way. Nothing was changed.",
 } as const;
 /** The sentence a viewer sees for a stop above: `sentence` is its generic form; any other text is returned as it is. */
 export function openPrStopSentence(sentence: string, canRequestChanges: boolean, roundsUsed: boolean): string {
@@ -34,6 +36,12 @@ export function openPrStopSentence(sentence: string, canRequestChanges: boolean,
 }
 export const BASE_SYNC_CONFLICT_SENTENCE = `${OPEN_PR_LEADS.conflict} ${STEP_ANY}`;
 export const BASE_SYNC_UNAVAILABLE_SENTENCE = `${OPEN_PR_LEADS.unavailable} ${STEP_ANY}`;
+/** A fix round that stopped on a fault of ours before a run was created (the code the driver records is `resume_failed`). */
+export const RESUME_FAILED = 'resume_failed';
+export const RESUME_FAILED_SENTENCE = `${OPEN_PR_LEADS.resumeFailed} ${STEP_ANY}`;
+/** A fix round refused because a live round is already recorded under the same run (the code is `already_running`). */
+export const ROUND_ALREADY_RUNNING = 'already_running';
+export const ROUND_ALREADY_RUNNING_SENTENCE = `${OPEN_PR_LEADS.alreadyRunning} ${STEP_ANY}`;
 
 /**
  * FIXROUND-REPUBLISH (R2-c0): a fix round on an item whose public pull request is open must end by republishing that pull request from a base the cloud signed. A round that cannot be signed with one, or whose
@@ -121,10 +129,42 @@ export const REPLACE_ROUND_CODE_OF: Readonly<Record<string, string>> = {
 };
 export const REPLACE_ROUND_CODES: readonly string[] = Object.values(REPLACE_ROUND_CODE_OF);
 
+/**
+ * A fix round the driver refused before any run existed leaves the item at Changes requested. Each code `refuse()` can record there has a fixed plain sentence saying what to do;
+ * nothing the person did not write is echoed. A code that is not listed (and not a `continues_*` code) gets the generic sentence, which never names the code.
+ */
+export const FIX_ROUND_REFUSAL_FALLBACK_SENTENCE = "The fix round could not start, and nothing was changed on GitHub. Check the item's repository settings and its pull request, then ask for another round. If it stops again, ask for help.";
+const FIX_ROUND_REFUSAL_SENTENCE: Readonly<Record<string, string>> = {
+  no_spec_version: "The fix round could not start because the build this change continues has no approved Spec saved with it. Nothing was changed. Start a new build from the approved Spec instead of asking for another round.",
+  execution_mode_changed: "The fix round could not start because this repository's run setting changed while the round was being prepared. Nothing was changed. Ask for the round again.",
+  starter_unavailable: "The fix round could not start because the cloud could not begin a run just now. Nothing was changed. Ask for the round again in a few minutes.",
+  pr_unbound: "The fix round could not start because the pull request is no longer paired with this item. Nothing was changed. Check on GitHub that the pull request is still open and still this item's, then ask again.",
+  pr_branch_unsupported: "The fix round could not start because this pull request's branch is not one the cloud can update. Nothing was changed. Make the fixes on the branch yourself.",
+  parent_chain_too_long: "The fix round could not start because this change has had too many earlier rounds recorded to continue from. Nothing was changed. Update the branch yourself, or start a new build.",
+  job_too_large: "The fix round could not start because the work to hand over is too large for one run. Nothing was changed. Split the change into smaller pull requests.",
+  item_halted: "The fix round could not start because this item is halted. Nothing was changed. Resume the item first, then ask for another round.",
+  verified_consent_stale: "The fix round could not start because this repository's verified-copy consent is out of date. Nothing was changed. Review and confirm the consent in the repository settings, then ask again.",
+  no_repo: "The fix round could not start because this item has no repository. Nothing was changed. Connect a repository to the item, then ask again.",
+  no_session: "The fix round could not start because the build it continues has no saved session. Nothing was changed. Start a new build instead.",
+  max_fix_rounds: "The fix round could not start because this item has used all the fix rounds its plan allows. Nothing was changed. Update the branch yourself, or ask an owner about the plan.",
+  refused_spend: "The fix round could not start because a spending limit refused the run. Nothing was changed. Raise the limit, then ask for another round.",
+  conflict_public_copy: "The fix round could not start because the public copy of the branch conflicts with the cloud's. Nothing was changed. Update the branch on GitHub yourself.",
+  stage_changed: "The fix round could not start because the item moved to another stage while it was being prepared. Nothing was changed. Check where the item is now, then ask again if it still needs a round.",
+};
+/** The sentence for a refused fix round's code: always non-empty, and never the code itself. */
+export function fixRoundRefusalSentence(code: string): string {
+  if (Object.hasOwn(FIX_ROUND_STOP_SENTENCE, code)) return FIX_ROUND_STOP_SENTENCE[code]!;
+  if (Object.hasOwn(FIX_ROUND_REFUSAL_SENTENCE, code)) return FIX_ROUND_REFUSAL_SENTENCE[code]!;
+  if (code.startsWith("continues_")) return "The fix round could not start because the pull request it continues is closed, protected, or could not be read on GitHub. Nothing was changed. Check the pull request on GitHub, then ask again.";
+  return FIX_ROUND_REFUSAL_FALLBACK_SENTENCE;
+}
+
 /** Every code of this module that stops a fix round, with its fixed sentence (the item view reads this table). */
 export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
   [BASE_SYNC_CONFLICT]: BASE_SYNC_CONFLICT_SENTENCE,
   [BASE_SYNC_UNAVAILABLE]: BASE_SYNC_UNAVAILABLE_SENTENCE,
+  [RESUME_FAILED]: RESUME_FAILED_SENTENCE,
+  [ROUND_ALREADY_RUNNING]: ROUND_ALREADY_RUNNING_SENTENCE,
   [REPUBLISH_BASE_MISSING]: REPUBLISH_BASE_MISSING_SENTENCE,
   [REPUBLISH_STACKED_UNSUPPORTED]: REPUBLISH_STACKED_UNSUPPORTED_SENTENCE,
   [REPUBLISH_STACK_PARENT_ENDED]: REPUBLISH_STACK_PARENT_ENDED_SENTENCE,

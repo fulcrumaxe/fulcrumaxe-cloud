@@ -21,6 +21,23 @@ export async function readExecutorNote(client: PoolClient, accountId: string, ru
   return typeof text === "string" && text.trim() !== "" ? text : undefined;
 }
 
+/** How many runs up the chain `nearestExecutorNote` looks. */
+const NOTE_ANCESTOR_HOPS_MAX = 50;
+/**
+ * The closing note of the run, else of the nearest ancestor (of this item) that has one: a failed round that left no session is the parent of the next round and has no note of its
+ * own, but the build above it does.
+ */
+export async function nearestExecutorNote(client: PoolClient, accountId: string, workItemId: string, runId: string): Promise<string | undefined> {
+  let id: string | null = runId;
+  for (let hops = 0; id !== null && hops < NOTE_ANCESTOR_HOPS_MAX; hops++) {
+    const note = await readExecutorNote(client, accountId, id, workItemId);
+    if (note !== undefined) return note;
+    const up: { rows: Array<{ parent_run_id: string | null }> } = await client.query("SELECT parent_run_id FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND id = $3", [accountId, workItemId, id]);
+    id = up.rows[0]?.parent_run_id ?? null;
+  }
+  return undefined;
+}
+
 /**
  * The prompt's section list with the note's entry in, in the place the note holds in the prompt: before the closing output section. `noteSections` is the assembler's list for
  * the noted prompt; only its `note` entries are taken (the rest are the same prompt, already counted by the caller's own list). Absent sections stay absent.
