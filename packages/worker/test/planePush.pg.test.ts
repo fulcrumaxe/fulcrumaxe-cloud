@@ -12,7 +12,8 @@ import { keepBranch, replaceBranch } from "@fx/core/src/setup-requests/branchPus
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { listSetupRequests } from "@fx/core/src/setup-requests/store.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
-import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_REPLACE_NO_CHANGE_SENTENCE, REPUBLISH_REPLACE_FAILED_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { PUBLIC_CHANGE_REFUSAL_REASON } from "@fx/core/src/repos/publicChangeCopy.js";
+import { republishFailedSentence, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_REPLACE_NO_CHANGE_SENTENCE, REPUBLISH_REPLACE_FAILED_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
 import { mergeQueue } from "@fx/pipeline";
 import { RUNNER_REPLACE_ROUND_KIND, insertRunEvent } from "@fx/runner";
@@ -1811,6 +1812,100 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
         expect((await askToken(run)).status).toBe(200);
       });
 
+      // PUSH-REFUSAL-REASON-VISIBLE: a reviewed fix whose public update was refused stays pending. A later round that adds nothing may ask for the branch tip (the route's own content check still decides whether it differs).
+      describe("a round that adds nothing after a refused update of the public pull request", () => {
+        const noteCard = async () => (await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice;
+        /** The earlier round: it was granted an update and the public push was refused with `code`. */
+        const refusedRound = async (code: string) => {
+          await open();
+          await capable();
+          const earlier = await claimedRun({ continues: { baseSha: BASE } });
+          expect((await askToken(earlier)).status).toBe(200);
+          expect((await report(earlier, { phase: "refused", code })).status).toBe(200);
+          await finish(earlier.id);
+        };
+
+        it("is granted the branch tip, and the update that lands ends the pending state", async () => {
+          await refusedRound("base_diverged");
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          const res = await askTip(run);
+          expect(res.status).toBe(200);
+          expect(PlanePushTokenReply.parse(res.body).replaces_head).toBe(HEAD);
+          expect((await attempts()).map((a) => [a.run_id === run.id, a.kind, a.outcome])).toEqual([[false, "fix_round", "base_diverged"], [true, "fix_round", null]]);
+          expect((await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch })).status).toBe(200);
+          expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP });
+          // Public now carries the change: the next round that adds nothing is refused the tip, with nothing written.
+          await finish(run.id);
+          const next = await claimedRun({ continues: { baseSha: BASE } });
+          const again = await askTip(next);
+          expect(again.status).toBe(409);
+          expect(again.body).toMatchObject({ error: { code: "no_changes" } });
+          expect((await attempts()).length).toBe(2);
+        });
+
+        it("when public already matches, the route finds nothing to send and the pending state clears: the next round is not granted", async () => {
+          await refusedRound("public_unavailable");
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          expect((await askTip(run)).status).toBe(200);
+          expect((await report(run, { phase: "no_change" })).status).toBe(200);
+          expect((await attempts())[1]).toMatchObject({ outcome: "no_change" });
+          await finish(run.id);
+          const next = await claimedRun({ continues: { baseSha: BASE } });
+          expect((await askTip(next)).status).toBe(409);
+        });
+
+        it("a base that is still diverged is refused again, and the card says why in the closed words of the stored code", async () => {
+          await refusedRound("base_diverged");
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          expect((await askTip(run)).status).toBe(200);
+          expect((await report(run, { phase: "refused", code: "base_diverged" })).status).toBe(200);
+          expect((await attempts()).map((a) => a.outcome)).toEqual(["base_diverged", "base_diverged"]);
+          const reason = PUBLIC_CHANGE_REFUSAL_REASON.base_diverged!;
+          expect(reason).toBe("the public repository changed the same files since the build started");
+          expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }, { kind: "escalated", code: "republish_failed" }]);
+          expect(await stageOf()).toBe("needs_human");
+          expect(await noteCard()).toEqual({ kind: "needs_human", reason: republishFailedSentence(false, false, reason) });
+          expect((await noteCard())!.reason).toContain(`Refused: ${reason}.`);
+          expect((await noteCard())!.reason).not.toMatch(/base_diverged|republish_|null|undefined/);
+        });
+
+        it.each(["base_unavailable", "base_not_on_parent", "merge_in_change", "base_not_on_default"])("a terminal code (%s) ends the sentence on the reason: it never says both that retrying will not help and to press Request changes", async (code) => {
+          await refusedRound(code);
+          const reason = PUBLIC_CHANGE_REFUSAL_REASON[code]!;
+          expect(reason).toContain("retrying will not help");
+          const text = (await noteCard())!.reason;
+          expect(text).toBe(republishFailedSentence(false, false, reason, true));
+          expect(text).toContain(`Refused: ${reason}.`);
+          expect(text).not.toMatch(/Request changes/);
+        });
+
+        it.each(["private_path_change", "stack_base_unavailable"])("%s keeps the generic sentence: its own words are not spliced in", async (code) => {
+          await refusedRound("push_failed");
+          // The stored word is set directly: a runner's report can only carry the push route's codes, but the stored attempt outcome may hold others.
+          await admin.query("UPDATE plane_push_attempts SET outcome = $2 WHERE account_id = $1", [A.accountId, code]);
+          expect((await noteCard())!.reason).toBe(REPUBLISH_FAILED_SENTENCE);
+        });
+
+        it("a code the closed vocabulary does not know keeps the generic sentence", async () => {
+          await refusedRound("push_failed");
+          await admin.query("UPDATE plane_push_attempts SET outcome = 'something_new' WHERE account_id = $1", [A.accountId]);
+          expect((await noteCard())!.reason).toBe(REPUBLISH_FAILED_SENTENCE);
+        });
+
+        it("is refused the tip when the earlier attempt ended report_mismatch, or the runner did not list the capability", async () => {
+          await refusedRound("base_diverged");
+          await admin.query("UPDATE plane_push_attempts SET outcome = 'report_mismatch' WHERE account_id = $1", [A.accountId]);
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          const mintsBefore = github.mints.length;
+          expect((await askTip(run)).status).toBe(409);
+          await admin.query("UPDATE plane_push_attempts SET outcome = 'base_diverged' WHERE account_id = $1", [A.accountId]);
+          await capable([]);
+          expect((await askTip(run)).status).toBe(409);
+          expect(github.mints.length).toBe(mintsBefore);
+          expect(await eventsOf(run.id, "plane.update_lease")).toEqual([]);
+        });
+      });
+
       it("the marked round of a runner that did NOT list the capability (an older daemon, a lapsed hello) is refused the same way", async () => {
         await open();
         const run = await claimedRun({ continues: { baseSha: BASE } });
@@ -1948,7 +2043,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
           expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
           expect(await openRequests()).toEqual([]);
           expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
-          expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+          expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: republishFailedSentence(false, false, PUBLIC_CHANGE_REFUSAL_REASON.public_unavailable!) });
         });
       });
     });
@@ -1982,7 +2077,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP });
       expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
       expect(await stageOf()).toBe("needs_human");
-      expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+      expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: republishFailedSentence(false, false, PUBLIC_CHANGE_REFUSAL_REASON.report_mismatch!) });
     });
 
     it("a refusal because the public branch moved is recorded as republish_branch_moved and puts the item in Needs a person; the stamp stays", async () => {

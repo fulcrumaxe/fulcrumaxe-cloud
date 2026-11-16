@@ -14,7 +14,8 @@ import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { requestChanges } from "@fx/core/src/work-items/operatorMoves.js";
 import { loadPlanData } from "@fx/plan-data";
-import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_PRESS_SENTENCE, REPUBLISH_FAILED_ROUNDS_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_PR_CLOSED_SENTENCE, REPUBLISH_PR_MERGED_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { PUBLIC_CHANGE_REFUSAL_REASON as REASON } from "@fx/core/src/repos/publicChangeCopy.js";
+import { republishFailedSentence, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_PRESS_SENTENCE, REPUBLISH_FAILED_ROUNDS_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_PR_CLOSED_SENTENCE, REPUBLISH_PR_MERGED_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { generateKeyPairSync } from "node:crypto";
 import { createPlanePushApi, createHostedPlanePush, InstallationTokenCache } from "@fx/github";
 import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "../../github/test/helpers/localTlsServer.js";
@@ -380,17 +381,18 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       expect(await noticeOf()).toEqual({ kind: "needs_human", reason: REPUBLISH_NO_CHANGE_SENTENCE });
     });
 
+    // PUSH-REFUSAL-REASON-VISIBLE: the sentence carries the fixed words of the stored code of the attempt that failed.
     it.each([
-      ["a scan refusal", () => say({ phase: "refused", code: "scan_refused", refusals: [{ kind: "identifier_hit", place: "src/a.ts:2", rule_key: "identifier-rule#1" }] })],
-      ["a hook that crashed", () => ({ exitCode: 1, stdout: "" })],
-      ["a first-push line where an update was asked", () => say({ phase: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, pr_number: 11 })],
-    ])("%s: republish_failed", async (_label, hook) => {
+      ["a scan refusal", () => say({ phase: "refused", code: "scan_refused", refusals: [{ kind: "identifier_hit", place: "src/a.ts:2", rule_key: "identifier-rule#1" }] }), REASON.scan_refused!],
+      ["a hook that crashed", () => ({ exitCode: 1, stdout: "" }), REASON.hook_crashed!],
+      ["a first-push line where an update was asked", () => say({ phase: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, pr_number: 11 }), REASON.report_mismatch!],
+    ])("%s: republish_failed", async (_label, hook, reason) => {
       output = hook;
       expect((await settle(await fixRound())).publish).toMatchObject({ kind: "refused", code: "republish_failed" });
       await unchanged();
       expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
       expect(await stageOf()).toBe("needs_human");
-      expect(await noticeOf()).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+      expect(await noticeOf()).toEqual({ kind: "needs_human", reason: republishFailedSentence(false, false, reason) });
       expect(gh.opened).toBe(0);
     });
 
@@ -405,16 +407,17 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       // The card lists Request changes; Build again's rebuild would stop at the open pull request, so the sentence must not send the person there.
       const owner = await card("owner");
       expect(owner.actions).toContain("request_changes");
-      expect(owner.notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_PRESS_SENTENCE });
+      const why = REASON.hook_crashed!;
+      expect(owner.notice).toEqual({ kind: "needs_human", reason: republishFailedSentence(true, false, why) });
       // A viewer who cannot press it, and a card with no role, read the sentence that is true for anyone.
-      expect((await card("member")).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
-      expect((await card(null)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+      expect((await card("member")).notice).toEqual({ kind: "needs_human", reason: republishFailedSentence(false, false, why) });
+      expect((await card(null)).notice).toEqual({ kind: "needs_human", reason: republishFailedSentence(false, false, why) });
       for (const sentence of [REPUBLISH_FAILED_PRESS_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_FAILED_ROUNDS_SENTENCE]) expect(sentence).not.toMatch(/Build again|null|undefined|republish_/);
       // Every fix round used: the card no longer lists the step, and the sentence says so instead of naming it.
       for (let i = 0; i < loadPlanData().caps.maxFixRounds; i++) await withTenant(writerPool, A.accountId, (c) => recordDriverEvent(c, A.accountId, { workItemId: A.workItemId, kind: "fix_round_started", dedupeKey: `used:${i}` }));
       const spent = await card("owner");
       expect(spent.actions).not.toContain("request_changes");
-      expect(spent.notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_ROUNDS_SENTENCE });
+      expect(spent.notice).toEqual({ kind: "needs_human", reason: republishFailedSentence(false, true, why) });
       await admin.query("DELETE FROM work_item_driver_events WHERE work_item_id = $1 AND dedupe_key LIKE 'used:%'", [A.workItemId]);
       // The press itself: the item goes back to Changes requested, and the next fix round's republish goes through on the same pull request.
       await requestChanges({ pool: appPool, principal: { accountId: A.accountId, userId: A.userId, role: "owner" } }, A.workItemId, "Publish this again.");
