@@ -1,0 +1,1338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Engine event v1",
+  "description": "One event the engine writes to engine-events.jsonl. Closed: no extra key, no free text, no computed figure. Keys named text, message, content, output, prompt, description, title, body, branch, path, usd, cost, cost_usd, price or total_* never appear. Limits not expressible here (a plan_snapshot over 64 KiB, and a batch of 0 or over 100 events or one not strictly increasing in seq, or one whose events name an engine_instance_id other than the session's) are enforced by the cloud's own schema.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "spawn_id",
+        "role",
+        "background",
+        "isolation"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "agent_started"
+        },
+        "spawn_id": {
+          "$ref": "#/$defs/spawn_id"
+        },
+        "role": {
+          "$ref": "#/$defs/role_or_other"
+        },
+        "background": {
+          "type": "boolean"
+        },
+        "isolation": {
+          "enum": [
+            "worktree",
+            "none"
+          ]
+        },
+        "discussion": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "model": {
+          "$ref": "#/$defs/model_id"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "spawn_id",
+        "agent_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "agent_linked"
+        },
+        "spawn_id": {
+          "$ref": "#/$defs/spawn_id"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agent_id"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "agent_id",
+        "role",
+        "verdict",
+        "credential_mode"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "agent_stopped"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agent_id"
+        },
+        "role": {
+          "$ref": "#/$defs/role_or_other"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail",
+            "done",
+            "blocked",
+            "needs_fix",
+            "unknown"
+          ]
+        },
+        "credential_mode": {
+          "$ref": "#/$defs/credential_mode"
+        },
+        "discussion": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "pr": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        },
+        "model": {
+          "$ref": "#/$defs/model_id"
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "role",
+        "reason"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "spawn_blocked"
+        },
+        "role": {
+          "$ref": "#/$defs/role_or_other"
+        },
+        "reason": {
+          "enum": [
+            "circuit_breaker",
+            "budget",
+            "planned_prs",
+            "no_spec",
+            "halted",
+            "cloud_denied",
+            "cloud_unreachable",
+            "other"
+          ]
+        },
+        "discussion": {
+          "$ref": "#/$defs/gh_number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "pr",
+        "state"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "merge_lane"
+        },
+        "pr": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "testing",
+            "merged",
+            "failed",
+            "dequeued",
+            "refused"
+          ]
+        },
+        "discussion": {
+          "$ref": "#/$defs/gh_number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "pr",
+        "closes"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "merged"
+        },
+        "pr": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "closes": {
+          "type": "boolean"
+        },
+        "discussion": {
+          "$ref": "#/$defs/gh_number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "pr",
+        "gate",
+        "result",
+        "head_sha"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "gate_receipt"
+        },
+        "pr": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "gate": {
+          "enum": [
+            "gate1",
+            "code_review",
+            "security_review",
+            "acceptance",
+            "browser",
+            "ci_full"
+          ]
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "fail",
+            "error",
+            "skipped"
+          ]
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha40"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "line_id",
+        "actor_role",
+        "category"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "team_log_line"
+        },
+        "line_id": {
+          "$ref": "#/$defs/line_id"
+        },
+        "actor_role": {
+          "$ref": "#/$defs/actor_role"
+        },
+        "category": {
+          "enum": [
+            "activated",
+            "starting",
+            "spawning",
+            "merged",
+            "needs_boss",
+            "blocked",
+            "heartbeat",
+            "other"
+          ]
+        },
+        "discussion": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "pr": {
+          "$ref": "#/$defs/gh_number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "origin",
+        "duration_s"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "loop_tick"
+        },
+        "origin": {
+          "$ref": "#/$defs/origin"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "name",
+        "origin"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "checkin_tick"
+        },
+        "name": {
+          "$ref": "#/$defs/row_key"
+        },
+        "origin": {
+          "$ref": "#/$defs/origin"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "origin"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "engine_heartbeat"
+        },
+        "origin": {
+          "$ref": "#/$defs/origin"
+        },
+        "source_ages_s": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "loop": {
+              "$ref": "#/$defs/seconds"
+            },
+            "team_log": {
+              "$ref": "#/$defs/seconds"
+            },
+            "plan": {
+              "$ref": "#/$defs/seconds"
+            },
+            "merge_queue": {
+              "$ref": "#/$defs/seconds"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "snapshot_id",
+        "chunk_index",
+        "chunk_count",
+        "plan_date",
+        "items",
+        "roadmap"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "plan_snapshot"
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/agent_id"
+        },
+        "chunk_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        },
+        "chunk_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "plan_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "discussion",
+              "ordinal",
+              "state"
+            ],
+            "properties": {
+              "discussion": {
+                "$ref": "#/$defs/gh_number"
+              },
+              "ordinal": {
+                "$ref": "#/$defs/count"
+              },
+              "state": {
+                "enum": [
+                  "planned",
+                  "in_progress",
+                  "pr_open",
+                  "merged",
+                  "blocked",
+                  "dropped"
+                ]
+              }
+            }
+          }
+        },
+        "roadmap": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "row_key",
+              "status",
+              "planned_prs"
+            ],
+            "properties": {
+              "row_key": {
+                "$ref": "#/$defs/row_key_or_empty"
+              },
+              "discussion": {
+                "$ref": "#/$defs/gh_number"
+              },
+              "status": {
+                "enum": [
+                  "not_started",
+                  "in_progress",
+                  "done",
+                  "blocked",
+                  "deferred",
+                  "split",
+                  "removed",
+                  "superseded"
+                ]
+              },
+              "planned_prs": {
+                "$ref": "#/$defs/count"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "ask_id",
+        "ask_kind",
+        "source"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "ask_raised"
+        },
+        "ask_id": {
+          "$ref": "#/$defs/ask_id"
+        },
+        "ask_kind": {
+          "enum": [
+            "owner_decision",
+            "merge_blocked",
+            "credential",
+            "budget",
+            "review_blocked",
+            "other"
+          ]
+        },
+        "source": {
+          "enum": [
+            "team_log",
+            "discussion_label",
+            "issue_label"
+          ]
+        },
+        "discussion": {
+          "$ref": "#/$defs/gh_number"
+        },
+        "pr": {
+          "$ref": "#/$defs/gh_number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "ask_id",
+        "how"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "ask_cleared"
+        },
+        "ask_id": {
+          "$ref": "#/$defs/ask_id"
+        },
+        "how": {
+          "enum": [
+            "answered_cloud",
+            "answered_github",
+            "withdrawn",
+            "expired"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "host_started"
+        },
+        "reason": {
+          "$ref": "#/$defs/host_reason"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "host_stopped"
+        },
+        "reason": {
+          "$ref": "#/$defs/host_reason"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "host_heartbeat"
+        },
+        "reason": {
+          "$ref": "#/$defs/host_reason"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "tick_kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "tick_started"
+        },
+        "tick_kind": {
+          "$ref": "#/$defs/tick_kind"
+        },
+        "outcome": {
+          "$ref": "#/$defs/tick_outcome"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "tick_kind",
+        "credential_mode"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "tick_ended"
+        },
+        "tick_kind": {
+          "$ref": "#/$defs/tick_kind"
+        },
+        "credential_mode": {
+          "$ref": "#/$defs/credential_mode"
+        },
+        "outcome": {
+          "$ref": "#/$defs/tick_outcome"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        },
+        "model": {
+          "$ref": "#/$defs/model_id"
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "compaction_detected"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "halt_epoch",
+        "method",
+        "survivors"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "halt_applied"
+        },
+        "halt_epoch": {
+          "$ref": "#/$defs/count"
+        },
+        "method": {
+          "enum": [
+            "scope",
+            "group_only"
+          ]
+        },
+        "survivors": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "bridge_heartbeat"
+        },
+        "count": {
+          "$ref": "#/$defs/count"
+        },
+        "reason": {
+          "$ref": "#/$defs/bridge_reason"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "bridge_dropped"
+        },
+        "count": {
+          "$ref": "#/$defs/count"
+        },
+        "reason": {
+          "$ref": "#/$defs/bridge_reason"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "spawn_id": {
+      "type": "string",
+      "pattern": "^toolu_[A-Za-z0-9]{1,64}$"
+    },
+    "ask_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "line_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "sha40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "row_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$"
+    },
+    "row_key_or_empty": {
+      "type": "string",
+      "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]{0,47})?$"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{0,63}$"
+    },
+    "gh_number": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2678400
+    },
+    "tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000000000
+    },
+    "role": {
+      "enum": [
+        "executor",
+        "code-reviewer",
+        "security-reviewer",
+        "project-manager",
+        "acceptance-tester",
+        "browser-tester",
+        "technical-architect",
+        "product-owner",
+        "cost-analyst",
+        "performance-expert",
+        "security-expert",
+        "researcher",
+        "mission-analyst",
+        "docs-writer",
+        "debater"
+      ]
+    },
+    "role_or_other": {
+      "enum": [
+        "executor",
+        "code-reviewer",
+        "security-reviewer",
+        "project-manager",
+        "acceptance-tester",
+        "browser-tester",
+        "technical-architect",
+        "product-owner",
+        "cost-analyst",
+        "performance-expert",
+        "security-expert",
+        "researcher",
+        "mission-analyst",
+        "docs-writer",
+        "debater",
+        "other"
+      ]
+    },
+    "actor_role": {
+      "enum": [
+        "executor",
+        "code-reviewer",
+        "security-reviewer",
+        "project-manager",
+        "acceptance-tester",
+        "browser-tester",
+        "technical-architect",
+        "product-owner",
+        "cost-analyst",
+        "performance-expert",
+        "security-expert",
+        "researcher",
+        "mission-analyst",
+        "docs-writer",
+        "debater",
+        "team-lead",
+        "other"
+      ]
+    },
+    "origin": {
+      "enum": [
+        "interactive",
+        "cron",
+        "host"
+      ]
+    },
+    "credential_mode": {
+      "enum": [
+        "subscription",
+        "api_key"
+      ]
+    },
+    "host_reason": {
+      "enum": [
+        "stopped_by_person",
+        "halted",
+        "crash_loop",
+        "operate_off",
+        "machine_shutdown"
+      ]
+    },
+    "tick_kind": {
+      "enum": [
+        "loop",
+        "checkin",
+        "start_day",
+        "command",
+        "reorient"
+      ]
+    },
+    "tick_outcome": {
+      "enum": [
+        "ok",
+        "error",
+        "interrupted"
+      ]
+    },
+    "bridge_reason": {
+      "enum": [
+        "schema",
+        "oversize",
+        "redaction",
+        "partial_line"
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output",
+        "cache_read",
+        "cache_write"
+      ],
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/tokens"
+        },
+        "output": {
+          "$ref": "#/$defs/tokens"
+        },
+        "cache_read": {
+          "$ref": "#/$defs/tokens"
+        },
+        "cache_write": {
+          "$ref": "#/$defs/tokens"
+        }
+      }
+    }
+  }
+}

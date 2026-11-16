@@ -30,11 +30,11 @@ describe("hello facts and the register name: compatibility in both directions", 
   });
 
   it("neither message gained a required field, and no reply changed", () => {
-    expect(HelloMessage.shape.facts.isOptional()).toBe(true);
+    expect(HelloMessage.innerType().shape.facts.isOptional()).toBe(true);
     expect(RegisterMessage.shape.name.isOptional()).toBe(true);
     // D#483 S4-b2c: `capabilities` is optional too, so a runner that sends none still parses.
-    expect(HelloMessage.shape.capabilities.isOptional()).toBe(true);
-    expect(Object.keys(HelloMessage.shape).sort()).toEqual(["binary_version", "capabilities", "facts", "isolation", "model_auth_present", "protocol_version"]);
+    expect(HelloMessage.innerType().shape.capabilities.isOptional()).toBe(true);
+    expect(Object.keys(HelloMessage.innerType().shape).sort()).toEqual(["binary_version", "capabilities", "facts", "isolation", "model_auth_present", "protocol_version"]);
     expect(Object.keys(RegisterMessage.shape).sort()).toEqual(["code", "name", "public_key_jwk"]);
   });
 });
@@ -105,7 +105,7 @@ describe("the register name (criteria 2 and 3)", () => {
 
 describe("one protocol version", () => {
   it("is a single constant in the protocol package, which the cloud re-exports and the runner sends on hello", async () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(19);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(20);
     const { readFileSync: read } = await import("node:fs");
     const cloud = read(new URL("../../runner-cloud/src/http.ts", import.meta.url), "utf8");
     const runner = read(new URL("../../fx-runner/src/version.ts", import.meta.url), "utf8");

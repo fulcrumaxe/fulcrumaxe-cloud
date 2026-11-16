@@ -10,7 +10,7 @@ import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { DeployOrderClaimMessage, DeployOrderReportMessage } from "./deployOrder.js";
-import { RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
+import { ENGINE_BRIDGE_CAPABILITY, RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
 
 /** The isolation tiers a runner can report. Display only. There is no "none". */
 export const ISOLATION_TIERS = ["microvm", "vm_container", "container", "host_sandbox"] as const;
@@ -246,9 +246,11 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
  * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
- * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`).  Version 17 is the first whose runner accepts a fix job's `fix_round_kind` (`FIX_ROUND_KIND_JOB_MIN_PROTOCOL`). Version 18 is the first whose runner says on its claim whether the saved verify sign-in is still good (`VERIFY_SIGN_IN_MIN_PROTOCOL`). Version 19 is the first whose runner writes the check header end marker (`CHECK_HEADER_END_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`).  Version 17 is the first whose runner accepts a fix job's `fix_round_kind` (`FIX_ROUND_KIND_JOB_MIN_PROTOCOL`). Version 18 is the first whose runner says on its claim whether the saved verify sign-in is still good (`VERIFY_SIGN_IN_MIN_PROTOCOL`). Version 19 is the first whose runner writes the check header end marker (`CHECK_HEADER_END_MIN_PROTOCOL`). Version 20 is the first whose runner speaks the engine bridge (`ENGINE_BRIDGE_MIN_PROTOCOL`, capability `engine_bridge_v1`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 19;
+export const CURRENT_PROTOCOL_VERSION = 20;
+/** The engine bridge: a runner at this version or above sends engine events, pulls signed engine commands and asks for decisions. It is also gated by the `engine_bridge_v1` capability. */
+export const ENGINE_BRIDGE_MIN_PROTOCOL = 20;
 /** D#6 CHECK-FIX-SCOPE: the first protocol whose runner writes `CHECK_HEADER_END` after its check header. A summary from an older runner can have its tail read as header, so the cloud never widens a job's scope from one. */
 export const CHECK_HEADER_END_MIN_PROTOCOL = 19;
 /**
@@ -402,8 +404,17 @@ export const HelloMessage = z
       .refine((list) => new Set(list).size === list.length, { message: "a capability appears once" })
       .optional(),
   })
-  .strict();
+  .strict()
+  .refine((hello) => hello.capabilities === undefined || !hello.capabilities.includes(ENGINE_BRIDGE_CAPABILITY) || hello.protocol_version >= ENGINE_BRIDGE_MIN_PROTOCOL, {
+    message: "engine_bridge_v1 needs a protocol version that speaks the engine bridge",
+    path: ["capabilities"],
+  });
 export type HelloMessage = z.infer<typeof HelloMessage>;
+
+/** True when a hello lists `engine_bridge_v1` and its protocol version speaks the bridge. Routes use this one predicate and never test the capability or the version alone. */
+export function engineBridgeAllowed(hello: { protocol_version: number; capabilities?: readonly string[] | undefined }): boolean {
+  return hello.protocol_version >= ENGINE_BRIDGE_MIN_PROTOCOL && (hello.capabilities?.includes(ENGINE_BRIDGE_CAPABILITY) ?? false);
+}
 
 /**
  * D#6 R4a-6 (correction C16 section 1.3): why a runner's sandbox cannot start, a closed set and the only detail about it that leaves the
