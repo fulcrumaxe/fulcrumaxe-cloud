@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as core from "@fx/core/src/specs/acceptanceScope.js";
+import { widenForCheckFix } from "../src/done.js";
 import { loadAcceptanceScope, parseAcceptanceScope, pathInScope, pathsOutsideScope, type TenantQueryable } from "../src/acceptanceScope.js";
 
 /** D#6 R2b-3e (C21 section 5): the loader. The matcher's own cases moved to packages/core with the parser (R4d-5a, C34 section 1.4). */
@@ -37,5 +38,32 @@ describe("loadAcceptanceScope", () => {
     expect(await loadAcceptanceScope(queryable([{ acceptance_files: ["a/{b}"] }]).client, ids)).toEqual({ ...UNKNOWN, reason: "unreadable" });
     expect(await loadAcceptanceScope(queryable([{ acceptance_files: "src/a.ts" }]).client, ids)).toEqual({ ...UNKNOWN, reason: "unreadable" });
     expect(await loadAcceptanceScope(queryable([{ acceptance_files: ["a.ts"] }, { acceptance_files: ["b.ts"] }]).client, ids)).toEqual({ ...UNKNOWN, reason: "unreadable" });
+  });
+});
+
+describe("widenForCheckFix (D#6 CHECK-FIX-SCOPE): done holds a check-fix round to the Spec's list plus the files its signed job names", () => {
+  const spec = core.parseAcceptanceScope(["packages/spend/src/**", "docs/a.md"]);
+  const FILE = "packages/example/test/sample.pg.test.ts";
+  const job = (over: Record<string, unknown>) => ({ ...over }) as never;
+  const entriesOf = (s: { kind: string; entries?: readonly string[] }) => (s.kind === "known" ? s.entries : undefined);
+  it("adds the plain files of a check_fix job's scope that the Spec does not already hold", () => {
+    const out = widenForCheckFix(spec, job({ fix_round_kind: "check_fix", scope: ["packages/spend/src/**", "docs/a.md", FILE] }));
+    expect(entriesOf(out)).toEqual([...entriesOf(spec)!, FILE]);
+  });
+  it("a job of any other kind, with no scope, or no job, changes nothing", () => {
+    expect(widenForCheckFix(spec, job({ fix_round_kind: "review_fix", scope: [FILE] }))).toBe(spec);
+    expect(widenForCheckFix(spec, job({ scope: [FILE] }))).toBe(spec);
+    expect(widenForCheckFix(spec, job({ fix_round_kind: "check_fix" }))).toBe(spec);
+    expect(widenForCheckFix(spec, null)).toBe(spec);
+  });
+  it("an unread Spec list stays unread", () => {
+    const unknown = { kind: "unknown", reason: "absent" } as const;
+    expect(widenForCheckFix(unknown, job({ fix_round_kind: "check_fix", scope: [FILE] }))).toBe(unknown);
+  });
+  it("globs, dot segments and an absolute path in the job are not added, and at most 20 are", () => {
+    const out = widenForCheckFix(spec, job({ fix_round_kind: "check_fix", scope: ["other/**", "a/../b.ts", "/x.ts", "a/*.ts", FILE] }));
+    expect(entriesOf(out)!.slice(2)).toEqual([FILE]);
+    const many = Array.from({ length: 40 }, (_v, n) => `p/test/t${String(n).padStart(2, "0")}.ts`);
+    expect(entriesOf(widenForCheckFix(spec, job({ fix_round_kind: "check_fix", scope: many })))!.length).toBe(2 + 20);
   });
 });

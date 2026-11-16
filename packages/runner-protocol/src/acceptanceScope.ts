@@ -121,6 +121,42 @@ function segmentMatches(pattern: string, segment: string): boolean {
   return true;
 }
 
+/**
+ * D#6 CHECK-FIX-SCOPE: a plain repo-relative file path a check-fix round may add to its job's scope: letters, digits and `_ . @ + = -` in each segment, segments joined by single `/`, no `.` or `..`
+ * segment, no leading `/`, no glob, brace, bracket, parenthesis or space. It is the one test both the cloud's reader of a failed check's summary and the job issuer apply, so a path that
+ * passes is an exact entry the matcher reads as itself.
+ */
+export function isPlainScopeFile(path: unknown): path is string {
+  if (typeof path !== "string" || path.length === 0 || path.length > 255) return false;
+  if (!/^[A-Za-z0-9_@+][A-Za-z0-9_.@+=-]*(?:\/[A-Za-z0-9_.@+=-]+)*$/.test(path)) return false;
+  return path.split("/").every((seg) => seg !== "." && seg !== "..");
+}
+
+/**
+ * D#6 CHECK-FIX-SCOPE: a test-file shape: a `test`, `tests` or `__tests__` directory segment, or `.test.` / `.spec.` in the file name; and never a `*.config.*` file (a test runner's own config is
+ * not a test). Plain source files do not match.
+ */
+export function isTestShapedFile(path: string): boolean {
+  const segments = path.split("/");
+  const name = segments[segments.length - 1] ?? "";
+  if (/\.config\./.test(name)) return false;
+  return segments.slice(0, -1).some((s) => s === "test" || s === "tests" || s === "__tests__") || /\.(test|spec)\./.test(name);
+}
+
+/** The most files one check-fix round may add to its job's scope, over every round of its chain. Equal to the check's own failed-files cap. */
+export const CHECK_FIX_SCOPE_EXTRA_MAX = 20;
+
+/**
+ * D#6 CHECK-FIX-SCOPE: the one filter for files added beyond the Spec's list: plain repo-relative paths of test-file shape, not already held (`held`), without repeats, sorted, at most `max`
+ * (default the cap above). The cloud's reader, the job issuer and `done` all use this one function, so they agree on what a widening may hold.
+ */
+export function checkFixScopeExtra(candidates: Iterable<unknown>, held: ReadonlySet<string> | readonly string[] = [], max: number = CHECK_FIX_SCOPE_EXTRA_MAX): string[] {
+  const skip = held instanceof Set ? held : new Set(held);
+  const out = new Set<string>();
+  for (const c of candidates) if (isPlainScopeFile(c) && isTestShapedFile(c) && !skip.has(c)) out.add(c);
+  return [...out].sort().slice(0, Math.max(0, max));
+}
+
 /** The scope a `spec_versions.frontmatter.acceptance_files` value stands for. `value` is whatever the database held. */
 export function parseAcceptanceScope(value: unknown): AcceptanceScope {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SCOPE_ENTRIES) return UNKNOWN;

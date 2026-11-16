@@ -1,4 +1,4 @@
-import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, privateOnlyEditsNotAllowed, readDerivedFresh, pathsOutsideScopeFresh, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_DROPPED, CHECK_FIX_SCOPE_EXTRA_MAX, checkFixScopeExtra, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, privateOnlyEditsNotAllowed, readDerivedFresh, pathsOutsideScopeFresh, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { DERIVED_FILE_RULES } from "@fx/core/src/specs/derivedFileRules.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -153,6 +153,18 @@ interface DoneContext {
   updateLanded: boolean;
 }
 
+/**
+ * D#6 CHECK-FIX-SCOPE: the cloud's own signed job for a check-fix round may list, beside the Spec's patterns, the failed test files the cloud itself added when it issued the round. The pull request
+ * is held to the Spec's list plus exactly those: plain files in the job's `scope` that the Spec's list does not already hold, for a job that is a `check_fix` round only, at most the check's failed-files cap.
+ * A Spec list that was not read stays unread (nothing is added to `unknown`); the Spec's own rows are never changed.
+ */
+export function widenForCheckFix(scope: AcceptanceScope, job: Job | null): AcceptanceScope {
+  if (scope.kind !== "known" || job === null || job.fix_round_kind !== "check_fix" || job.scope === undefined) return scope;
+  const held = new Set(scope.entries);
+  const extra = checkFixScopeExtra(job.scope, held, CHECK_FIX_SCOPE_EXTRA_MAX);
+  return extra.length === 0 ? scope : { kind: "known", entries: Object.freeze([...scope.entries, ...extra]) };
+}
+
 async function loadContext(client: TenantQueryable, i: { accountId: string; runId: string }): Promise<DoneContext | null> {
   const { rows } = await client.query<{ role: string; runtime: string; execution_mode: string; job_signed: unknown; repo_id: string | null; gh_owner: string | null; gh_name: string | null }>(
     `SELECT ar.role, ar.runtime, ar.execution_mode, ar.job_signed, r.id AS repo_id, r.gh_owner, r.gh_name
@@ -181,7 +193,7 @@ async function loadContext(client: TenantQueryable, i: { accountId: string; runI
     repo: row.repo_id && row.gh_owner && row.gh_name ? { id: row.repo_id, owner: row.gh_owner, name: row.gh_name } : null,
     job: parsed.success ? parsed.data.job : null,
     dispatchBase: base.rows.length === 1 ? { oid: base.rows[0]!.head_oid } : null,
-    scope: await loadAcceptanceScope(client, i),
+    scope: widenForCheckFix(await loadAcceptanceScope(client, i), parsed.success ? parsed.data.job : null),
     privateOnly: await loadPrivateOnlyRule(client, i),
     text: await loadRunPullRequestText(client, i),
   };

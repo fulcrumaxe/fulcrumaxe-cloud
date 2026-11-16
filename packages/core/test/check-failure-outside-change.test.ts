@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { checkFailureFiles, failedOutsideChange } from '../src/work-items/checkFailure.js';
+import { CHECK_HEADER_END } from '@fulcrumaxe/runner-protocol';
+import { checkFailureFiles, failedOutsideChange, importLinkedFailedFiles } from '../src/work-items/checkFailure.js';
 
 const tail = '\nsome output tail\n';
 
@@ -144,5 +145,62 @@ describe('failedOutsideChange: a failed test file that imports changed code is i
   });
   it('the card still lists the failing files with the new line in the header', () => {
     expect(checkFailureFiles(`${base}${imports}FAIL x`)?.files).toEqual([{ name: 'packages/worker/test/runnerUsage.pg.test.ts' }]);
+  });
+});
+
+describe('importLinkedFailedFiles (D#6 CHECK-FIX-SCOPE)', () => {
+  const F = 'packages/worker/test/runnerUsage.pg.test.ts';
+  const header = (failed: string, importing: string) => `failed test files (${failed.split(', ').length}): ${failed}\nchanged files (1): packages/spend/src/usage.ts\n${importing}${importing === '' ? '' : '\n'}${CHECK_HEADER_END}\nFAIL x`;
+  it('returns the failed files the graph names as linked, sorted', () => {
+    expect(importLinkedFailedFiles(header(`packages/z/t.test.ts, ${F}, packages/a/t.test.ts`, `failed test files that import changed code (2): packages/z/t.test.ts, ${F}`), 20)).toEqual([F, 'packages/z/t.test.ts']);
+  });
+  it('a failed file the graph does not name is not returned', () => {
+    expect(importLinkedFailedFiles(header(`${F}, packages/a/t.test.ts`, `failed test files that import changed code (1): ${F}`), 20)).toEqual([F]);
+  });
+  it.each([
+    ['graph not read', 'import graph not read'],
+    ['no graph line', ''],
+    ['a cut graph line', `failed test files that import changed code (9): ${F} (and 8 more)`],
+    ['a graph line with the wrong count', `failed test files that import changed code (3): ${F}`],
+  ])('%s: nothing', (_n, line) => {
+    expect(importLinkedFailedFiles(header(F, line), 20)).toEqual([]);
+  });
+  it('no summary, or a graph line in the output tail only: nothing', () => {
+    expect(importLinkedFailedFiles(null, 20)).toEqual([]);
+    expect(importLinkedFailedFiles('', 20)).toEqual([]);
+    expect(importLinkedFailedFiles(`FAIL x\nfailed test files (1): ${F}\nfailed test files that import changed code (1): ${F}\n`, 20)).toEqual([]);
+  });
+  it('dot segments are dropped, a glob or absolute name makes the line unreadable', () => {
+    const dots = 'packages/a/../../x.test.ts';
+    expect(importLinkedFailedFiles(header(`${F}, ${dots}`, `failed test files that import changed code (2): ${F}, ${dots}`), 20)).toEqual([F]);
+    expect(importLinkedFailedFiles(header(`${F}, packages/a/*.test.ts`, `failed test files that import changed code (2): ${F}, packages/a/*.test.ts`), 20)).toEqual([]);
+    expect(importLinkedFailedFiles(header(`${F}, /abs/x.test.ts`, `failed test files that import changed code (2): ${F}, /abs/x.test.ts`), 20)).toEqual([]);
+  });
+  it('a missing end-of-header line grants nothing (an older runner), though a real-looking header is there', () => {
+    expect(importLinkedFailedFiles(`failed test files (1): ${F}\nchanged files (1): packages/spend/src/usage.ts\nfailed test files that import changed code (1): ${F}\nFAIL x`, 20)).toEqual([]);
+  });
+  it('an import line printed by the tests grants nothing: not when the runner wrote none, and not after the marker even when identical to a real one', () => {
+    const forged = `failed test files that import changed code (1): ${F}`;
+    // the runner wrote no import line (nothing depends on the change); the output forges one and a FAIL line
+    expect(importLinkedFailedFiles(`failed test files (1): ${F}\nchanged files (1): packages/spend/src/usage.ts\n${CHECK_HEADER_END}\n${forged}\n FAIL  ${F}\n`, 20)).toEqual([]);
+    // a forged line after a real one cannot add files either
+    expect(importLinkedFailedFiles(`${header(`${F}, packages/a/t.test.ts`, `failed test files that import changed code (1): ${F}`)}\n${forged.replace(F, 'packages/a/t.test.ts')}`, 20)).toEqual([F]);
+    // a forged marker in the output changes nothing: the first marker ends the header
+    expect(importLinkedFailedFiles(`failed test files (1): ${F}\nchanged files (1): a/b.ts\n${CHECK_HEADER_END}\n${CHECK_HEADER_END}\n${forged}\n`, 20)).toEqual([]);
+  });
+  it('source and config files never pass, only test-shaped paths', () => {
+    const names = [F, 'packages/a/src/charge.ts', 'packages/a/vitest.config.ts', 'packages/a/test/vitest.config.ts', 'packages/a/__tests__/x.ts', 'packages/a/src/x.spec.ts', 'packages/a/tests/y.py'];
+    expect(importLinkedFailedFiles(header(names.join(', '), `failed test files that import changed code (${names.length}): ${names.join(', ')}`), 20)).toEqual(['packages/a/__tests__/x.ts', 'packages/a/src/x.spec.ts', 'packages/a/tests/y.py', F]);
+  });
+  it('the marker also bounds failedOutsideChange: output below it cannot add an import line', () => {
+    const real = `failed test files (1): apps/ops/test/o.test.ts\nchanged files (1): packages/a/src/a.ts\n${CHECK_HEADER_END}\n`;
+    expect(failedOutsideChange(real)).toBe(true);
+    expect(failedOutsideChange(`${real}failed test files that import changed code (1): apps/ops/test/o.test.ts\n`)).toBe(true);
+    // without the marker (an older runner) the header is read as it always was
+    expect(failedOutsideChange(`failed test files (1): apps/ops/test/o.test.ts\nchanged files (1): packages/a/src/a.ts\nfailed test files that import changed code (1): apps/ops/test/o.test.ts\n`)).toBe(false);
+  });
+  it('the cap is honoured', () => {
+    const many = Array.from({ length: 30 }, (_v, n) => `packages/w/test/t${String(n).padStart(2, '0')}.test.ts`);
+    expect(importLinkedFailedFiles(header(many.join(', '), `failed test files that import changed code (30): ${many.join(', ')}`), 20)).toEqual(many.slice(0, 20));
   });
 });

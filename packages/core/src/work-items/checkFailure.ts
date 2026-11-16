@@ -16,6 +16,8 @@
  * or no failed file at all is "not decided here". Only the header at the very top of the summary is read, never the output tail below it. (A test script can print
  * those lines in the tail, but the tail is not read; and even if it were, the only effect of such text is to send the item to a person, never to hide a failure.)
  */
+import { CHECK_FIX_SCOPE_EXTRA_MAX, CHECK_HEADER_END, checkFixScopeExtra } from '@fulcrumaxe/runner-protocol';
+
 export const CHECK_FAILED_OUTSIDE_CHANGE = 'check_failed_outside_change';
 
 const PACKAGE_ROOTS = ['apps', 'packages', 'scripts'];
@@ -89,20 +91,30 @@ function readFileLine(line: string, prefix: string): FileLine | null {
   return { count, files, complete: !cut && plain && count > 0 && files.size === count && names.length === count };
 }
 
-function readHeader(summary: string | null | undefined): { failed: FileLine | null; changed: FileLine | null; importing: FileLine | null; importsNotRead: boolean } {
+/**
+ * CHECK-FIX-SCOPE: `marked` is true when the runner's end-of-header line was found; header lines are then read only above it (output below it is never header, however it looks). A summary without
+ * the line is from a runner that did not write one: its header is read as before (the classification below only chooses between a fix round and a person, so a forged line can at worst send an item to
+ * a person), but `marked` is false and nothing that widens a job's scope trusts it.
+ */
+function readHeader(summary: string | null | undefined): { failed: FileLine | null; changed: FileLine | null; importing: FileLine | null; importsNotRead: boolean; marked: boolean } {
   let failed: FileLine | null = null;
   let changed: FileLine | null = null;
   let importing: FileLine | null = null;
   let importsNotRead = false;
-  if (typeof summary !== 'string' || summary === '') return { failed, changed, importing, importsNotRead };
+  let marked = false;
+  if (typeof summary !== 'string' || summary === '') return { failed, changed, importing, importsNotRead, marked };
   for (const line of summary.split('\n')) {
+    if (line === CHECK_HEADER_END) {
+      marked = true;
+      break;
+    }
     if (!HEADER_PREFIXES.some((p) => line.startsWith(p))) break;
     failed ??= readFileLine(line, 'failed test files (');
     changed ??= readFileLine(line, 'changed files (');
     importing ??= readFileLine(line, IMPORT_LINE);
     if (line === IMPORT_NOT_READ) importsNotRead = true;
   }
-  return { failed, changed, importing, importsNotRead };
+  return { failed, changed, importing, importsNotRead, marked };
 }
 
 /**
@@ -140,6 +152,18 @@ export function failedOutsideChange(summary: string | null | undefined, chainRoo
   return true;
 }
 
+/**
+ * D#6 CHECK-FIX-SCOPE: the failed test files a check-fix round may add to its job's scope: exactly the files this summary names as failed that the same header says import changed code
+ * (the set `failedOutsideChange` counts as inside the change). Empty when the graph was not read, the importing line is missing or cut, no failed file is named, or a name is not a plain
+ * repo-relative path (`..`, absolute, glob characters). Sorted, at most `max` (the caller passes the check's own failed-files cap).
+ */
+export function importLinkedFailedFiles(summary: string | null | undefined, max: number): string[] {
+  const now = readHeader(summary);
+  if (!now.marked || now.importsNotRead || now.failed === null || now.importing === null || !now.importing.complete) return [];
+  const linked = [...now.failed.files].filter((f) => now.importing!.files.has(f));
+  return checkFixScopeExtra(linked, [], Math.min(max, CHECK_FIX_SCOPE_EXTRA_MAX));
+}
+
 /** The card shows at most this many failing test files; the rest are counted. */
 export const CHECK_FAILURE_FILES_MAX = 20;
 /** A hint is a test's own words, cut to this many characters. */
@@ -167,7 +191,7 @@ export function checkFailureFiles(summary: string | null | undefined): CheckFail
   let failed: FileLine | null = null;
   const hints = new Map<string, string>();
   for (const line of summary.split('\n')) {
-    if (!HEADER_PREFIXES.some((p) => line.startsWith(p))) break;
+    if (line === CHECK_HEADER_END || !HEADER_PREFIXES.some((p) => line.startsWith(p))) break;
     failed ??= readFileLine(line, 'failed test files (');
     const hint = line.match(/^hint for ([A-Za-z0-9_@+][A-Za-z0-9_./@+-]{0,255}): (\S[^\n]*)$/);
     if (hint !== null && !hints.has(hint[1]!)) {

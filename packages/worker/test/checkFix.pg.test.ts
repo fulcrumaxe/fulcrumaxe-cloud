@@ -1,8 +1,9 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ITEM_PR_BRANCH, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { CHECK_HEADER_END, ITEM_PR_BRANCH, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
+import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { DispatchFailedError, ExecutionModeChangedError, IdempotencyKeyTakenError, JobIssueError, RUNNER_CONTINUES_BOUND_KIND, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
@@ -105,18 +106,22 @@ describe("check fix round [pg]", () => {
   });
 
   /** A finished executor run: `reason` is its failure reason (null: succeeded). `parent` makes it a fix round of that run. */
-  async function ended(o: { checkReason?: string; reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean; sandbox?: boolean }): Promise<string> {
+  async function ended(o: { checkReason?: string; reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean; sandbox?: boolean; jobScope?: string[]; checkFix?: boolean; protocol?: number | null }): Promise<string> {
     const id = randomUUID();
+    // The runner that ran the check, as the cloud recorded it at hello: protocol 19 (it writes the end-of-header line) unless a test says otherwise; null: no runner on record.
+    const runnerId = o.protocol === null || o.sandbox === true ? null : await insertRunner(admin, A.accountId, A.userId, { protocolVersion: o.protocol ?? 19 });
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "widgets", private: true }, role: "executor", mode: "local", spec: null,
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") }, role_card: { text: "c", sha256: sha256Text("c") }, role_tools_sha256: "a".repeat(64), continues: o.onItemBranch ? { parent_run_id: randomUUID(), session_id: null, branch: "fx/issue-42", pr_number: o.onItemBranch.pr } : o.runBranch ? { parent_run_id: randomUUID(), session_id: "s-1", branch: o.runBranch } : null,
       branch_prefix: "fx/", model_hint: null, issued_at: "2026-10-10T12:00:00.000Z", expires_at: "2026-10-13T12:00:00.000Z", key_id: "k1",
       check: { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 },
+      ...(o.jobScope ? { scope: o.jobScope } : {}),
+      ...(o.checkFix ? { fix_round_kind: "check_fix" as const } : {}),
     };
     await admin.query(
-      `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, parent_run_id, job_signed, cc_session_id)
-       VALUES ($1, $2, $3, 'executor', CASE WHEN $10::boolean THEN 'production' ELSE 'runner' END, $4, CASE WHEN $9::boolean THEN NULL WHEN $10::boolean THEN 'sandbox' ELSE 'runner_local' END, $5, $6, CASE WHEN $10::boolean THEN NULL ELSE $7::jsonb END, $8)`,
-      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`, o.noMode === true, o.sandbox === true],
+      `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, parent_run_id, job_signed, cc_session_id, runner_id)
+       VALUES ($1, $2, $3, 'executor', CASE WHEN $10::boolean THEN 'production' ELSE 'runner' END, $4, CASE WHEN $9::boolean THEN NULL WHEN $10::boolean THEN 'sandbox' ELSE 'runner_local' END, $5, $6, CASE WHEN $10::boolean THEN NULL ELSE $7::jsonb END, $8, $11)`,
+      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`, o.noMode === true, o.sandbox === true, runnerId],
     );
     await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)", [A.accountId, id, JSON.stringify({ from: "running", to: o.reason === null ? "succeeded" : "failed", ...(o.reason ? { failureReason: o.reason } : {}) })]);
     // The cloud's own record of the binding, written by the job issuer when it signed the job.
@@ -226,6 +231,122 @@ describe("check fix round [pg]", () => {
       const first = await startCheckFixRound(deps(), who(), failed);
       await admin.query("UPDATE run_checks SET summary = $2 WHERE run_id = $1", [failed, outside]);
       expect(await startCheckFixRound(deps(), who(), failed)).toEqual(first);
+    });
+  });
+
+  describe("D#6 CHECK-FIX-SCOPE: the round's job may name the failed test files the import graph put inside the change", () => {
+    const LINKED = "packages/worker/test/runnerUsage.pg.test.ts";
+    const graph = (failed: string[], importing: string[], changed = "packages/spend/src/usage.ts") =>
+      `failed test files (${failed.length}): ${failed.join(", ")}\nchanged files (1): ${changed}\nfailed test files that import changed code (${importing.length}): ${importing.join(", ")}\n${CHECK_HEADER_END}\nFAIL x`;
+
+    it("a failure in an import-linked file outside the Spec's list: the round starts with exactly that file as its one-round scope addition", async () => {
+      const failed = await ended({ reason: "check_failed", summary: graph([LINKED], [LINKED]) });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed).toHaveLength(1);
+      expect(resumed[0]!.scopeExtra).toEqual([LINKED]);
+      expect(resumed[0]!.fixRoundKind).toBe("check_fix");
+    });
+
+    it("only the files the graph names as linked are added: a failed file that is in a touched package but not linked is not", async () => {
+      const failed = await ended({ reason: "check_failed", summary: graph(["packages/spend/test/other.test.ts", LINKED], [LINKED]) });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual([LINKED]);
+    });
+
+    it("a failure that is in the change but not import-linked adds nothing", async () => {
+      const failed = await ended({ reason: "check_failed", summary: "failed test files (1): packages/spend/test/other.test.ts\nchanged files (1): packages/spend/src/usage.ts\nFAIL x" });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
+    });
+
+    it("a failure outside the change that is not import-linked is the existing stop, and starts nothing", async () => {
+      const failed = await ended({ reason: "check_failed", summary: graph([LINKED], []).replace(/failed test files that import changed code.*\n/, "") });
+      expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+      expect(resumed).toHaveLength(0);
+    });
+
+    it.each([
+      ["the runner could not read the graph", `failed test files (1): ${LINKED}\nchanged files (1): packages/spend/src/usage.ts\nimport graph not read\n${CHECK_HEADER_END}\nFAIL x`],
+      ["no graph line at all (an older runner)", `failed test files (2): ${LINKED}, packages/spend/test/x.test.ts\nchanged files (1): packages/spend/src/usage.ts\nFAIL x`],
+      ["a real header with no end-of-header line (an older runner)", `failed test files (1): ${LINKED}\nchanged files (1): packages/spend/src/usage.ts\nfailed test files that import changed code (1): ${LINKED}\nFAIL x`],
+      ["an import line forged in the output after the marker, with no runner import line", `failed test files (2): ${LINKED}, packages/spend/test/x.test.ts\nchanged files (1): packages/spend/src/usage.ts\n${CHECK_HEADER_END}\nfailed test files that import changed code (1): ${LINKED}\nFAIL ${LINKED}`],
+      ["a graph line that was cut", `failed test files (1): ${LINKED}\nchanged files (1): packages/spend/src/usage.ts\nfailed test files that import changed code (9): ${LINKED} (and 8 more)\n${CHECK_HEADER_END}\nFAIL x`],
+      ["a graph line whose count disagrees with its names", `failed test files (1): ${LINKED}\nchanged files (1): packages/spend/src/usage.ts\nfailed test files that import changed code (2): ${LINKED}\n${CHECK_HEADER_END}\nFAIL x`],
+    ])("%s: nothing is added (the round is as it is today)", async (_name, summary) => {
+      const failed = await ended({ reason: "check_failed", summary });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
+    });
+
+    it("a check stopped at its time limit adds nothing", async () => {
+      const failed = await ended({ reason: "check_failed", summary: graph([LINKED], [LINKED]), exit: null, timedOut: true });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
+    });
+
+    it("a protocol-18 runner (it writes no marker) grants nothing even when its tail prints an import line and then its own marker", async () => {
+      // After a header that held no import line, this is indistinguishable from a real header when the runner wrote no marker of its own.
+      const forged = `failed test files (2): ${LINKED}, packages/spend/test/x.test.ts\nchanged files (1): packages/spend/src/usage.ts\nfailed test files that import changed code (1): ${LINKED}\n${CHECK_HEADER_END}\nFAIL x`;
+      const old = await ended({ reason: "check_failed", protocol: 18, summary: forged });
+      expect((await startCheckFixRound(deps(), who(), old)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
+    });
+
+    it("the same summary from a protocol-19 runner (its marker is the real one) grants the file", async () => {
+      const real = await ended({ reason: "check_failed", protocol: 19, summary: graph([LINKED], [LINKED]) });
+      expect((await startCheckFixRound(deps(), who(), real)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual([LINKED]);
+    });
+
+    it("an unknown protocol (no runner on record for the run) grants nothing", async () => {
+      const unknown = await ended({ reason: "check_failed", protocol: null, summary: graph([LINKED], [LINKED]) });
+      expect((await startCheckFixRound(deps(), who(), unknown)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
+    });
+
+    it("an earlier check-fix round's added files ride along: round 2 (failing on test B) keeps round 1's test A, filtered and capped as one set", async () => {
+      const A1 = "packages/worker/test/a.test.ts";
+      const B = "packages/worker/test/b.test.ts";
+      const round1 = await ended({ reason: "check_failed", checkFix: true, jobScope: ["packages/spend/src/**", A1, "packages/worker/src/not-a-test.ts", "packages/worker/vitest.config.ts"], summary: graph([A1], [A1]) });
+      const round2 = await ended({ reason: "check_failed", parent: round1, summary: graph([B], [B]) });
+      expect((await startCheckFixRound(deps(), who(), round2)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual([A1, B]);
+    });
+
+    it("a parent that was not a check-fix round carries nothing", async () => {
+      const B = "packages/worker/test/b.test.ts";
+      const build = await ended({ reason: "check_failed", jobScope: ["packages/spend/src/**", LINKED], summary: graph([LINKED], [LINKED]) });
+      const round = await ended({ reason: "check_failed", parent: build, summary: graph([B], [B]) });
+      expect((await startCheckFixRound(deps(), who(), round)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual([B]);
+    });
+
+    it("only test-shaped files are added: a linked source or config file is not", async () => {
+      const src = "packages/worker/src/usage.ts";
+      const cfg = "packages/worker/vitest.config.ts";
+      const failed = await ended({ reason: "check_failed", summary: graph([LINKED, src, cfg], [LINKED, src, cfg]) });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual([LINKED]);
+    });
+
+    it("at most the check's own failed-files cap is added", async () => {
+      const many = Array.from({ length: 30 }, (_v, n) => `packages/worker/test/t${String(n).padStart(2, "0")}.test.ts`);
+      const failed = await ended({ reason: "check_failed", summary: graph(many, many) });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual(many.slice(0, 20));
+    });
+
+    it("a crafted path (dot segments) is not added", async () => {
+      const dots = "packages/worker/../../../etc/x.test.ts";
+      const a = await ended({ reason: "check_failed", summary: graph([LINKED, dots], [LINKED, dots]) });
+      expect((await startCheckFixRound(deps(), who(), a)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toEqual([LINKED]);
+    });
+
+    it("a name with a glob character leaves the lines unreadable, so nothing is added", async () => {
+      const b = await ended({ reason: "check_failed", summary: graph([LINKED, "packages/worker/test/*.test.ts"], [LINKED, "packages/worker/test/*.test.ts"]) });
+      expect((await startCheckFixRound(deps(), who(), b)).ok).toBe(true);
+      expect(resumed[0]!.scopeExtra).toBeUndefined();
     });
   });
 

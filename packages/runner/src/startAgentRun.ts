@@ -131,6 +131,8 @@ export interface StartAgentRunInput {
   browserMethod?: BrowserMethod;
   /** D#6 RUNNER-CHECK-SKIP-NO-COMMIT: see `ExecutionRun.fixRoundKind`. Only a check-fix or review-fix round's start sets it. */
   fixRoundKind?: FixRoundKind;
+  /** D#6 CHECK-FIX-SCOPE: see `ExecutionRun.scopeExtra`. Only a check-fix round's start sets it. */
+  scopeExtra?: readonly string[];
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: see `ExecutionRun.cloneRepo` (`sha`: the proposal verifier's pinned checkout). */
   cloneRepo?: { owner: string; name: string; sha?: string };
@@ -214,6 +216,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     ...(input.conflictRound ? { conflictRound: input.conflictRound } : {}),
     ...(input.browserMethod ? { browserMethod: input.browserMethod } : {}),
     ...(input.fixRoundKind ? { fixRoundKind: input.fixRoundKind } : {}),
+    ...(input.scopeExtra && input.scopeExtra.length > 0 ? { scopeExtra: input.scopeExtra } : {}),
     workdir: input.workdir,
     ...(input.slice === true && { slice: true as const }),
     cloneRepo: input.cloneRepo,

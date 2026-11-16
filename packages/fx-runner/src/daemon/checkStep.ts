@@ -34,7 +34,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import path from "node:path";
-import { CHECK_FAILED_FILE_CHARS, CHECK_FAILED_FILES_MAX, CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReason, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILE_CHARS, CHECK_HEADER_END, CHECK_FAILED_FILES_MAX, CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReason, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 import type { InstallCapture } from "./engineKit.js";
 import { GitPathError, guardConfigEnv, type GitCapture } from "./git.js";
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
@@ -760,6 +760,8 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
       guard.changed.length === 0 ? "" : `the check changed paths it may not (put back where possible): ${guard.changed.join(", ")}\n`,
       guard.unrestored.length === 0 ? "" : `not put back: ${guard.unrestored.join(", ")}\n`,
       unpinned.length === 0 ? "" : `not pinned (a string with spaces is not a file name): ${unpinned.join(" | ")}\n`,
+      // D#6 CHECK-FIX-SCOPE: the header ends here, always, before any output: the cloud reads header lines only above this one. The header is built above from our own values, so test output cannot sit before it.
+      `${CHECK_HEADER_END}\n`,
     ].join("");
     const summary = `${header}${lastBytes(shown, CHECK_SUMMARY_MAX_BYTES - Buffer.byteLength(header))}`;
     // The check ran, but it touched protected paths or its files could not be given back: its result does not count, and the reason says so (a plain failing exit carries none).
