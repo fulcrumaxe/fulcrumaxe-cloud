@@ -15,6 +15,8 @@ Sources:
 - `vitest.workspace.ts`
 - `.github/workflows/ci.yml`
 - `scripts/ci/affected.mjs`
+- `scripts/ci/full-run-triggers.json`
+- `scripts/ci/rollup-position.mjs`
 - `scripts/ci/same-tree.mjs`
 - `scripts/ci/declared-imports.test.mjs`
 - `scripts/ci/check-migration-compat.mjs`
@@ -99,6 +101,12 @@ Postgres tests and static scans; hand-picked test files miss the ones you did no
 How CI scopes a pull request: `scripts/ci/affected.mjs` picks `full` or `affected` from the commit
 range, and `scripts/ci/full-run-triggers.json` lists the paths that force a full run. The `ci:full`
 label forces one too. A push to the default branch always runs full.
+The same file also lists `extra_edges` of kind `test` (a package whose tests read another package's
+files is selected with it, without its own dependents) and `repo_wide_scans` (a package whose test
+walks other packages' files is selected when a changed file matches its `watch` globs), so a
+change can select packages you did not edit (#974). In the merge queue a dormant `Rollup` step
+(`scripts/ci/rollup-position.mjs`, on only while the repository variable `ROLLUP_ENABLED` is
+`true`) can make an entry wait for the one on top of it instead of running the suites (#939).
 
 ## 4. Repository-wide guards
 

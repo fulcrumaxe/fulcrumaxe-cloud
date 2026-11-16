@@ -16,7 +16,7 @@ Sources:
 - [README](../README.md) — the pipeline from proposal to browser check in one page, repo layout, getting set up, commands, the database migration scheme, and CI.
 - [Architecture](architecture.md) — the two repository planes, workspace project dependency graph, how a request moves from browser to Postgres, the pipeline (merge gate, merge queue, post-merge verify, the cloud's own `fx-gate1`, where an agent runs, verdict envelopes) and the assistant.
 - [Status](status.md) — what the pipeline does today (including the post-merge browser check), what is built but off until configured, and every workspace project with its test evidence.
-- [Testing](testing.md) — what `scripts/check.sh` runs, how CI scopes a pull request, the repository-wide guard tests, e2e projects, and how test fakes stay as strict as the real services.
+- [Testing](testing.md) — what `scripts/check.sh` runs, how CI scopes a pull request (including the test edges and repository-wide scans that select extra packages), the repository-wide guard tests, e2e projects, and how test fakes stay as strict as the real services.
 - [Decisions](decisions.md) — a log of specific technical decisions, why they were made, and where they still hold at HEAD.
 - [Builder guide](agents/builder-guide.md) — the working checklist for anyone, human or agent, changing this repo: the check, the guard tests, migrations, database tests, fakes, UI work and the pull request. The root `AGENTS.md` points to it.
 - [Stats and KPIs](stats/README.md) — the work-item stage model, the KPI views and the `@fx/stats` formula registry.
@@ -52,5 +52,5 @@ Sources:
 
 - [Data model](data-model.md) — the tenant schema across all migrations.
 - [Security](security.md) — the tenancy, auth and RLS model.
-- [Operations](operations.md) — running and operating this repo.
+- [Operations](operations.md) — running and operating this repo, including the CI jobs and the dormant merge-queue rollup switch.
 - Operator runbooks (hosted Postgres, billing, staging) are not part of this public tree.

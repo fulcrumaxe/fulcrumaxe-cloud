@@ -107,7 +107,7 @@ limiter itself cannot run, the call fails; it is never served unlimited.
 `favicon.ico`): it first strips any client-sent `x-fx-user-id`,
 `x-fx-account-id`, `x-fx-token-id`, `x-fx-scopes`, and `x-fx-principal-*`
 headers so a caller cannot forge them, then runs `csrfStep`
-(`apps/web/lib/shell/csrf.ts`), then `sessionStep` (verifies the session
+(`apps/web/lib/shell/csrf.ts`), then `renderPathCaseStep`, which answers any other-case spelling of a site's preview render path (`/api/v1/sites/<id>/preview/render`) with a 404 carrying the shell security headers, because `apps/web/next.config.mjs` leaves the shell policy off that one path and Next matches header sources case-insensitively (#929), then `hostBrandStep` (`@fx/partners/host`), then `sessionStep` (verifies the session
 cookie and, if valid, sets `x-fx-user-id`/`x-fx-account-id` for downstream
 handlers — advisory only, since middleware runs on the Edge runtime with no
 Postgres access to re-check a session's epoch), then
@@ -124,7 +124,7 @@ start`, confirmed while building this).
 For CSRF classification and the exact security headers this app sends, see
 [security model](../security.md) rather than this page — `apps/web/lib/shell/csrf.ts`,
 `apps/web/lib/shell/headers.ts`, and `apps/web/next.config.mjs` are the source
-files that implement them.
+files that implement them. The shell CSP's `frame-src` is `'self'`, and the preview render path is the one `/api` path served without the shell CSP (`apps/web/next.config.mjs`).
 
 `apps/web/app/(team)/runs/_components/ModelBadge.tsx` exists at this HEAD but
 is not imported by any page — there is no `runs/page.tsx` under
