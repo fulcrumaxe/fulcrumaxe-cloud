@@ -23,6 +23,7 @@ export { RUNNER_CHECK_REPLY_MS, checkStatusOf, runnerReplyOf, type RunnerCheckSt
 export { CLAIM_PATH, claimRun } from "./claim.js";
 export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
 export { eventsPath, ingestEvents } from "./ingestEvents.js";
+export { ENGINE_EVENTS_PATH, engineSeqInOrder, ingestEngineEvents, parseEngineBatch, type EngineUsagePort, type EngineUsageSubject } from "./ingestEngineEvents.js";
 export { DISPATCH_BASE_KIND, branchOf, donePath, doneRun } from "./done.js";
 export { CHECK_BOUNDS, normaliseCheck } from "./checkResult.js";
 export { gitTicketRun } from "./gitTicket.js";

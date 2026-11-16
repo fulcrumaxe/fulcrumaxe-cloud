@@ -31,6 +31,7 @@ rum/route.ts
 runner/claim/route.ts
 runner/deploy-order-claim/route.ts
 runner/deploy-order-report/route.ts
+runner/engine/events/route.ts
 runner/git-ticket/route.ts
 runner/heartbeat/route.ts
 runner/hello/route.ts

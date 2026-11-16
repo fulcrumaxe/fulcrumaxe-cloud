@@ -17,7 +17,8 @@ import { computeUsd, pricingFetchedAt, priceFor } from "@fx/spend";
 /** The only backend a runner run uses (the Claude Code CLI). */
 const BACKEND = "claude-code" as const;
 
-interface Totals {
+/** The totals a price is computed from: the model and the four token sums (as the database prints them, for a bigint past 2^53). */
+export interface UsageTotals {
   model: string | null;
   input_tokens: string;
   output_tokens: string;
@@ -29,26 +30,17 @@ interface Totals {
 const planDataUnavailable = (error: unknown): boolean => typeof error === "object" && error !== null && (error as { code?: unknown }).code === "plan_data_unavailable";
 
 /**
- * Records the `usage` events among `stored` (the ones this batch newly stored, in order) on the caller's tenant client, in the caller's
- * transaction. Does nothing when there are none. The caller has already held the lease fence.
+ * The pricing step shared by every API-equivalent figure (a runner run's, and an engine agent's or tick's): the cloud's own price tables (`priceFor`,
+ * `computeUsd`, `pricingFetchedAt` in packages/spend) applied to the TOTALS. Nothing a runner or an engine sent as a dollar amount is read. Null for a
+ * model with no price row, no model at all, or no plan data (the tokens are kept and the figure stays empty).
  */
-export async function recordRunnerUsage(client: PoolClient, input: { accountId: string; runId: string; runnerId: string; stored: readonly LocalOnlyEvent[] }): Promise<void> {
-  let totals: Totals | undefined;
-  for (const event of input.stored) {
-    if (event.type !== "usage" || event.usage === undefined) continue;
-    const u = event.usage;
-    const { rows } = await client.query<Totals>(
-      "SELECT model, input_tokens::text, output_tokens::text, cache_read_tokens::text, cache_write_tokens::text FROM runner_usage_add($1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint, $6::bigint, $7::bigint)",
-      [input.accountId, input.runId, input.runnerId, u.input ?? 0, u.output ?? 0, u.cache_read ?? 0, u.cache_write ?? 0],
-    );
-    totals = rows[0];
-  }
-  if (totals === undefined || totals.model === null) return;
+export function priceUsageTotals(totals: UsageTotals): { usd: number; version: string } | null {
+  if (totals.model === null) return null;
   let usd: number;
   let version: string;
   try {
     const rate = priceFor(BACKEND, totals.model);
-    if (rate === undefined) return;
+    if (rate === undefined) return null;
     usd = computeUsd(rate, {
       inputTokens: Number(totals.input_tokens),
       outputTokens: Number(totals.output_tokens),
@@ -58,9 +50,31 @@ export async function recordRunnerUsage(client: PoolClient, input: { accountId: 
     version = pricingFetchedAt();
   } catch (error) {
     // Without plan data there is no price table: the tokens are kept and the figure stays empty ("no API price"), and the batch is still accepted.
-    if (planDataUnavailable(error)) return;
+    if (planDataUnavailable(error)) return null;
     throw error;
   }
+  return { usd, version };
+}
+
+/**
+ * Records the `usage` events among `stored` (the ones this batch newly stored, in order) on the caller's tenant client, in the caller's
+ * transaction. Does nothing when there are none. The caller has already held the lease fence.
+ */
+export async function recordRunnerUsage(client: PoolClient, input: { accountId: string; runId: string; runnerId: string; stored: readonly LocalOnlyEvent[] }): Promise<void> {
+  let totals: UsageTotals | undefined;
+  for (const event of input.stored) {
+    if (event.type !== "usage" || event.usage === undefined) continue;
+    const u = event.usage;
+    const { rows } = await client.query<UsageTotals>(
+      "SELECT model, input_tokens::text, output_tokens::text, cache_read_tokens::text, cache_write_tokens::text FROM runner_usage_add($1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint, $6::bigint, $7::bigint)",
+      [input.accountId, input.runId, input.runnerId, u.input ?? 0, u.output ?? 0, u.cache_read ?? 0, u.cache_write ?? 0],
+    );
+    totals = rows[0];
+  }
+  if (totals === undefined) return;
+  const priced = priceUsageTotals(totals);
+  if (priced === null) return;
+  const { usd, version } = priced;
   // Cross-check against the CLI's own total_cost_usd the runner reported. Never used as the figure; a large gap (a subagent on another model, a
   // price table out of date) is logged so it is seen, not silently resolved either way.
   const reported = input.stored.reduce((n, e) => n + (e.type === "usage" && typeof e.usage?.usd === "number" ? e.usage.usd : 0), 0);
