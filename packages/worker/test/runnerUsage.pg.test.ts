@@ -103,7 +103,7 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       ledger: await q("SELECT count(*)::int AS n, COALESCE(sum(usd), 0)::text AS usd FROM ledger WHERE account_id = $1"),
       reservations: await q("SELECT count(*)::int AS n, COALESCE(sum(usd_reserved), 0)::text AS usd FROM spend_reservations WHERE account_id = $1"),
       runs: await q("SELECT COALESCE(sum(usd), 0)::text AS usd, count(usd)::int AS n_with_usd, COALESCE(sum(tokens_in), 0)::text AS tin, COALESCE(sum(tokens_out), 0)::text AS tout FROM agent_runs WHERE account_id = $1"),
-      budgets: (({ own_plan_api_equivalent_usd: _own, ...rest }) => rest)(await getUsage({ pool: appPool, principal: principal() })),
+      budgets: (({ own_plan_api_equivalent_usd: _own, role_breakdown: _roles, ...rest }) => rest)(await getUsage({ pool: appPool, principal: principal() })),
     };
   }
 
@@ -441,7 +441,9 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       const other = await seedAccount(admin, randomUUID());
       expect((await stats({ accountId: other.accountId, userId: other.userId }, new Date(at.getTime() - 86_400_000), new Date(at.getTime() + 86_400_000), null)).runner_api_equivalent_usd).toBe(0);
       // ... and nothing else moved: every existing spend field is deep-equal to what it was.
-      const apart = <T extends { own_plan_api_equivalent_usd: number | null }>(v: T): Omit<T, "own_plan_api_equivalent_usd"> => ({ ...v, own_plan_api_equivalent_usd: undefined, own_plan_usage_state: undefined, own_plan_tokens: undefined }) as never;
+      // role_breakdown (D#31 API-7f) is excluded here too: this fixture's new runner run adds an executor-role row/count to it,
+      // which is the point of that field, not a drift in any of the spend fields this comparison is checking.
+      const apart = <T extends { own_plan_api_equivalent_usd: number | null }>(v: T): Omit<T, "own_plan_api_equivalent_usd"> => ({ ...v, own_plan_api_equivalent_usd: undefined, own_plan_usage_state: undefined, own_plan_tokens: undefined, role_breakdown: undefined }) as never;
       const [itemBefore, itemAfter] = [apart(before.item), apart(after.item)];
       expect(JSON.parse(JSON.stringify(itemAfter))).toEqual(JSON.parse(JSON.stringify(itemBefore)));
       expect(itemAfter.cost_usd).toBe(2.5);

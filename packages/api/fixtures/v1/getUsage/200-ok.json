@@ -4,5 +4,9 @@
   "foreground_compute": { "spent_usd": 3.25, "reserved_usd": 0, "limit_usd": 50 },
   "background_compute": { "spent_usd": 8, "reserved_usd": 1.75, "limit_usd": 120 },
   "own_plan_api_equivalent_usd": 4.2,
-  "compute_notice": null
+  "compute_notice": null,
+  "role_breakdown": [
+    { "role": "executor", "runs": 2, "spend_usd": 12.75, "own_plan_api_equivalent_usd": 0 },
+    { "role": "code-reviewer", "runs": 1, "spend_usd": 3.3456, "own_plan_api_equivalent_usd": 4.2 }
+  ]
 }

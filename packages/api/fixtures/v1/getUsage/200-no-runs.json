@@ -1,0 +1,9 @@
+{
+  "period_start": "2026-09-01T00:00:00.000Z",
+  "model": { "spent_usd": 0, "reserved_usd": 0, "limit_usd": 600 },
+  "foreground_compute": { "spent_usd": 0, "reserved_usd": 0, "limit_usd": 50 },
+  "background_compute": { "spent_usd": 0, "reserved_usd": 0, "limit_usd": 120 },
+  "own_plan_api_equivalent_usd": 0,
+  "compute_notice": null,
+  "role_breakdown": []
+}

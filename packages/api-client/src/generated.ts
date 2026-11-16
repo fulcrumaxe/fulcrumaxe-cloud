@@ -2939,6 +2939,12 @@ export interface Operations {
         code: "compute_allowance_80";
         message: string;
       }) | (null);
+      role_breakdown: Array<{
+        role: string;
+        runs: number;
+        spend_usd: number;
+        own_plan_api_equivalent_usd: number;
+      }>;
     };
   };
   getBudgets: {

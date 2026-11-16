@@ -25446,6 +25446,37 @@
                         }
                       ],
                       "description": "Set from 80% of a compute budget's cap until that budget reaches its cap, then null (the pause shows instead). A notice only: it never pauses work or denies a start. Computed from this month's usage on each read, so a higher cap or a new month removes it."
+                    },
+                    "role_breakdown": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "role": {
+                            "type": "string"
+                          },
+                          "runs": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "spend_usd": {
+                            "type": "number"
+                          },
+                          "own_plan_api_equivalent_usd": {
+                            "type": "number",
+                            "description": "What this role's runs on the person's own machine would have cost at API prices. Information, never spend: it is not part of this row's spend_usd or any budget."
+                          }
+                        },
+                        "required": [
+                          "role",
+                          "runs",
+                          "spend_usd",
+                          "own_plan_api_equivalent_usd"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "description": "This month's settled spend per role, biggest spend first, at most 50 rows. Spend not recorded against a run (a ledger row with no run_id) is in the totals above but not in this breakdown."
                     }
                   },
                   "required": [
@@ -25454,7 +25485,8 @@
                     "foreground_compute",
                     "background_compute",
                     "own_plan_api_equivalent_usd",
-                    "compute_notice"
+                    "compute_notice",
+                    "role_breakdown"
                   ],
                   "additionalProperties": false
                 }
