@@ -31,6 +31,9 @@ let base = "";
 let otherBase = "";
 let otherHits = 0;
 let counter = 0;
+// Bytes of the large body the test server has written out and had accepted (a write counts once the socket took it, so back-pressure from the browser shows), and whether it finished.
+let streamedBytes = 0;
+let streamEnded = false;
 let storage = "";
 const jobs: string[] = [];
 // Probe targets: another port of the base host, another loopback host, and a UDP listener on that host. Nothing may ever reach them.
@@ -72,17 +75,31 @@ function page(req: IncomingMessage, res: ServerResponse): void {
       </script>`);
   }
   if (url.pathname === "/subredir") return void res.writeHead(302, { location: `http://127.0.0.1:${sameHostPort}/subredir-landed` }).end();
+  if (url.pathname === "/streampage") {
+    // A tiny page that reads the 100 MB body as a sub-resource and throws every chunk away, so the browser's renderer never builds a DOM from it.
+    return html(`<h1>Streamer</h1><p id=s>reading</p><script>
+      fetch('/stream').then(async (r) => {
+        const reader = r.body.getReader();
+        let n = 0;
+        for (;;) { const { done, value } = await reader.read(); if (done) break; n += value.length; }
+        document.getElementById('s').textContent = 'read ' + n;
+      });
+    </script>`);
+  }
   if (url.pathname === "/stream") {
-    // 100 MB of text, streamed with back-pressure: a page this size must never be held in the runner's memory.
-    res.writeHead(200, { "content-type": "text/html" });
+    // 100 MB streamed with back-pressure: a body this size must never be held in the runner's memory. It is not text/html, so a fetch of it costs the renderer no DOM.
+    res.writeHead(200, { "content-type": "application/octet-stream" });
     const chunk = Buffer.alloc(1 << 20, 97);
     let sent = 0;
+    streamedBytes = 0;
+    streamEnded = false;
     const pump = (): void => {
       while (sent < 100) {
         sent++;
-        if (!res.write(chunk)) return void res.once("drain", pump);
+        const more = res.write(chunk, () => void (streamedBytes += chunk.length));
+        if (!more) return void res.once("drain", pump);
       }
-      res.end();
+      res.end(() => void (streamEnded = true));
     };
     pump();
     return;
@@ -376,16 +393,29 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     await j.server.stop();
   }, 60_000);
 
-  it("keeps the runner's memory flat while a 100 MB page streams through a navigation", async () => {
+  it("keeps the runner's memory flat while a 100 MB body streams through the page's own request", async () => {
     const j = job(false);
     await j.call("open", { path: "/" });
     const before = process.memoryUsage().rss;
     let peak = before;
     const timer = setInterval(() => void (peak = Math.max(peak, process.memoryUsage().rss)), 20);
-    const opened = await j.call("open", { path: "/stream" });
+    // The page is small; the 100 MB body is its own sub-resource, so every byte still goes through the driver's request route and its response-stage pause, and the renderer discards it.
+    const opened = await j.call("open", { path: "/streampage" });
+    // Keep sampling until the page itself reports it read every byte: a runner that held the body would only grow after the server finished writing.
+    // Half-second polls inside the job's call budget.
+    const deadline = Date.now() + 40_000;
+    let seen = "";
+    while (!seen.includes(`read ${100 * (1 << 20)}`) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      seen = await j.call("snapshot");
+    }
     clearInterval(timer);
-    expect(opened).toMatch(/opened|error:/);
     expect(peak - before).toBeLessThan(300 * 1024 * 1024);
+    expect(seen).toContain(`read ${100 * (1 << 20)}`);
+    expect(opened).toMatch(/opened|error:/);
+    // Proof the body really crossed the runner's path: the server wrote and finished all 100 MB (a browser that cancelled would leave this short).
+    expect(streamEnded).toBe(true);
+    expect(streamedBytes).toBe(100 * (1 << 20));
     await j.server.stop();
   }, 120_000);
 
