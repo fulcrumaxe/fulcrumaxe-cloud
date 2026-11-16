@@ -35,6 +35,12 @@ export const runResponseSchema = z.object({
   updated_at: z.string(),
   approved_by: z.object({ id: z.string().uuid(), name: z.string() }).nullable(),
   approval: z.enum(['auto', 'manual']).nullable(),
+  work_item: z
+    .object({
+      issue_number: z.number().int().nullable(),
+      title: z.string().nullable().describe('Untrusted text (a GitHub issue title): show as text only, never as markup.'),
+    })
+    .nullable(),
 });
 
 const listRunsResponseSchema = z.object({
@@ -46,6 +52,7 @@ const listRunsResponseSchema = z.object({
 const listRunsQuerySchema = z.object({
   work_item_id: z.string().uuid().optional(),
   status: z.string().optional(),
+  role: z.string().optional(),
   limit: z.string().optional(),
   cursor: z.string().optional(),
 });
@@ -81,6 +88,7 @@ export const runRoutes: RouteEntry[] = [
           workItemId: query.work_item_id,
           repoId,
           status: query.status,
+          role: query.role,
           limit,
           cursor: cursor ? { createdAt: cursor.created_at, id: cursor.id } : undefined, // fix round 1: no new Date(...)
         },

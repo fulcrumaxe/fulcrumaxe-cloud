@@ -189,11 +189,13 @@ describe('runs/read (D#31 API-3a)', () => {
         updated_at: createdAt.toISOString(),
         approved_by: null,
         approval: null,
+        // The seeded default work item (refsA.workItemId) carries no gh_number or title.
+        work_item: { issue_number: null, title: null },
       });
       const expectedKeys = [
         'id', 'work_item_id', 'parent_run_id', 'role', 'status', 'runtime',
         'usd', 'tokens_in', 'tokens_out', 'created_at', 'updated_at',
-        'approved_by', 'approval',
+        'approved_by', 'approval', 'work_item',
       ];
       expect(Object.keys(dto).sort()).toEqual(expectedKeys.sort());
     });
@@ -336,6 +338,102 @@ describe('runs/read (D#31 API-3a)', () => {
       }
       expect(seen.sort()).toEqual([...ids].sort());
       expect(new Set(seen).size).toBe(ids.length);
+    });
+
+    /** API-3b (issue #828) criterion 9: the role filter, alone, with status, across a cursor, and for a role nobody has. */
+    it('filters by role, together with status and work_item_id, pages with its cursor, and an unknown role answers an empty page with a null cursor', async () => {
+      const workItemId = randomUUID();
+      await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance) VALUES ($1, $2, $3, 'feature', 'internal')`, [
+        workItemId,
+        refsA.accountId,
+        refsA.repoId,
+      ]);
+      // `insertRun` always uses the account's seeded default work item, so every run here (and the
+      // account's own seeded run, also role `executor`/status `running`) is scoped out of this test's
+      // assertions by `workItemId`, a fresh item this test owns alone.
+      async function insertOwnRun(opts: { role: string; status: string; createdAt: Date }): Promise<string> {
+        const id = randomUUID();
+        await admin.query(
+          `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'local', $5, $6, $6)`,
+          [id, refsA.accountId, workItemId, opts.role, opts.status, opts.createdAt],
+        );
+        return id;
+      }
+      const now = Date.now();
+      const executorRunning = await insertOwnRun({ role: 'executor', status: 'running', createdAt: new Date(now) });
+      const executorSucceeded = await insertOwnRun({ role: 'executor', status: 'succeeded', createdAt: new Date(now - 1000) });
+      await insertOwnRun({ role: 'code-reviewer', status: 'running', createdAt: new Date(now - 2000) });
+      const olderExecutor1 = await insertOwnRun({ role: 'executor', status: 'running', createdAt: new Date(now - 3000) });
+      const olderExecutor2 = await insertOwnRun({ role: 'executor', status: 'running', createdAt: new Date(now - 4000) });
+
+      const byRole = await listRuns({ pool: appUserPool, principal: refsA }, { workItemId, role: 'executor', limit: 50 });
+      expect(byRole.data.every((r) => r.role === 'executor')).toBe(true);
+      expect(byRole.data.map((r) => r.id).sort()).toEqual([executorRunning, executorSucceeded, olderExecutor1, olderExecutor2].sort());
+
+      const byRoleAndStatus = await listRuns({ pool: appUserPool, principal: refsA }, { workItemId, role: 'executor', status: 'running', limit: 50 });
+      expect(byRoleAndStatus.data.every((r) => r.role === 'executor' && r.status === 'running')).toBe(true);
+      expect(byRoleAndStatus.data.map((r) => r.id).sort()).toEqual([executorRunning, olderExecutor1, olderExecutor2].sort());
+
+      // role with status and a different work_item_id all applied: this item's runs are excluded entirely.
+      const combined = await listRuns(
+        { pool: appUserPool, principal: refsA },
+        { role: 'executor', status: 'running', workItemId: refsA.workItemId, limit: 50 },
+      );
+      expect(combined.data.some((r) => [executorRunning, olderExecutor1, olderExecutor2].includes(r.id))).toBe(false);
+
+      // Paging a role filter: three pages of one, no row repeated or skipped.
+      const page1 = await listRuns({ pool: appUserPool, principal: refsA }, { workItemId, role: 'executor', status: 'running', limit: 1 });
+      expect(page1.data.map((r) => r.id)).toEqual([executorRunning]);
+      expect(page1.nextCursor).not.toBeNull();
+      const page2 = await listRuns({ pool: appUserPool, principal: refsA }, { workItemId, role: 'executor', status: 'running', limit: 1, cursor: page1.nextCursor! });
+      expect(page2.data.map((r) => r.id)).toEqual([olderExecutor1]);
+      const page3 = await listRuns({ pool: appUserPool, principal: refsA }, { workItemId, role: 'executor', status: 'running', limit: 1, cursor: page2.nextCursor! });
+      expect(page3.data.map((r) => r.id)).toEqual([olderExecutor2]);
+      expect(page3.nextCursor).toBeNull();
+
+      const unknown = await listRuns({ pool: appUserPool, principal: refsA }, { workItemId, role: 'not-a-real-role', limit: 50 });
+      expect(unknown).toEqual({ data: [], nextCursor: null });
+    });
+  });
+
+  /** API-3b (issue #828) criterion 10: the run DTO's `work_item` field, from `getRun` and `listRuns` alike. */
+  describe('work_item', () => {
+    it('a run with a work item that has an issue number and a title returns both, the title cleaned', async () => {
+      const workItemId = randomUUID();
+      await admin.query(
+        `INSERT INTO work_items (id, account_id, repo_id, kind, provenance, gh_number, title) VALUES ($1, $2, $3, 'feature', 'external', 912, $4)`,
+        [workItemId, refsA.accountId, refsA.repoId, '  Runs app:\tshow which   work item \n each run is for  '],
+      );
+      const id = await admin.query(
+        `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at, updated_at)
+         VALUES ($1, $2, $3, 'build', 'local', 'succeeded', now(), now()) RETURNING id`,
+        [randomUUID(), refsA.accountId, workItemId],
+      ).then((r) => r.rows[0].id as string);
+      const dto = await getRun({ pool: appUserPool, principal: refsA }, id);
+      expect(dto.work_item).toEqual({ issue_number: 912, title: 'Runs app: show which work item each run is for' });
+      const list = await listRuns({ pool: appUserPool, principal: refsA }, { workItemId, limit: 50 });
+      expect(list.data.find((r) => r.id === id)?.work_item).toEqual({ issue_number: 912, title: 'Runs app: show which work item each run is for' });
+    });
+
+    it('a run with no work item returns work_item: null; a work item with no printable title returns title: null', async () => {
+      const noTitle = await admin.query(
+        `INSERT INTO work_items (id, account_id, repo_id, kind, provenance, gh_number, title) VALUES ($1, $2, $3, 'feature', 'external', 42, $4) RETURNING id`,
+        [randomUUID(), refsA.accountId, refsA.repoId, '   '],
+      ).then((r) => r.rows[0].id as string);
+      const withNoTitleItem = await admin.query(
+        `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at, updated_at)
+         VALUES ($1, $2, $3, 'build', 'local', 'succeeded', now(), now()) RETURNING id`,
+        [randomUUID(), refsA.accountId, noTitle],
+      ).then((r) => r.rows[0].id as string);
+      const withNoItem = await admin.query(
+        `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at, updated_at)
+         VALUES ($1, $2, NULL, 'build', 'local', 'succeeded', now(), now()) RETURNING id`,
+        [randomUUID(), refsA.accountId],
+      ).then((r) => r.rows[0].id as string);
+
+      expect((await getRun({ pool: appUserPool, principal: refsA }, withNoTitleItem)).work_item).toEqual({ issue_number: 42, title: null });
+      expect((await getRun({ pool: appUserPool, principal: refsA }, withNoItem)).work_item).toBeNull();
     });
   });
 });

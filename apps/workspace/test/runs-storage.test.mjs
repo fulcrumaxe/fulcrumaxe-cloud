@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLive } from "../shell/core/cloud-live.js";
-import { EVENT_CAP, LIST_LIMIT, coalesce, formatUsd, isLiveStatus, isTruncated, isUuid, loadRun, loadRunDetail, loadRunEvent, loadRunEvents, loadRunsPage, mergeFirstPage, upsertRow, watchAccount } from "../apps/runs/runs-storage.js";
+import { EVENT_CAP, LIST_LIMIT, coalesce, formatUsd, isLiveStatus, isTruncated, isUuid, loadRun, loadRunDetail, loadRunEvent, loadRunEvents, loadRunsPage, matchesFilters, mergeFirstPage, upsertRow, watchAccount } from "../apps/runs/runs-storage.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1");
 const fx = (...p) => JSON.parse(readFileSync(join(V1, ...p), "utf8"));
@@ -61,6 +61,38 @@ describe("loadRunsPage", () => {
 
   it("rejects when the request fails", async () => {
     await expect(loadRunsPage("", async () => { throw new Error("x"); })).rejects.toThrow();
+  });
+
+  // D#37 (issue #828) criterion 7: role/status, URL-encoded, after limit and cursor; omitted when All.
+  it("sends role and status only when chosen, URL-encoded, after limit and cursor", async () => {
+    const get = fakeGet(() => LIST);
+    await loadRunsPage("", get);
+    expect(get.calls[0]).toBe("GET /api/v1/runs?limit=50"); // All/All: today's exact URL
+    await loadRunsPage("", get, undefined, { role: "code-reviewer" });
+    expect(get.calls[1]).toBe("GET /api/v1/runs?limit=50&role=code-reviewer");
+    await loadRunsPage("", get, undefined, { status: "killed_spend" });
+    expect(get.calls[2]).toBe("GET /api/v1/runs?limit=50&status=killed_spend");
+    await loadRunsPage("cur sor", get, undefined, { role: "code reviewer" });
+    expect(get.calls[3]).toBe("GET /api/v1/runs?limit=50&cursor=cur%20sor&role=code%20reviewer");
+    await loadRunsPage("", get, undefined, { role: "executor", status: "running" });
+    expect(get.calls[4]).toBe("GET /api/v1/runs?limit=50&role=executor&status=running");
+  });
+});
+
+describe("matchesFilters", () => {
+  // D#37 (issue #828) criterion 8.
+  it("is true when a filter is empty, true only on an exact match otherwise, and false when the run's field is missing or not a string", () => {
+    const run = { role: "executor", status: "running" };
+    expect(matchesFilters(run, { role: "", status: "" })).toBe(true);
+    expect(matchesFilters(run, { role: "executor", status: "" })).toBe(true);
+    expect(matchesFilters(run, { role: "", status: "running" })).toBe(true);
+    expect(matchesFilters(run, { role: "executor", status: "running" })).toBe(true);
+    expect(matchesFilters(run, { role: "code-reviewer", status: "" })).toBe(false);
+    expect(matchesFilters(run, { role: "", status: "failed" })).toBe(false);
+    expect(matchesFilters({ role: 5, status: "running" }, { role: "executor", status: "" })).toBe(false);
+    expect(matchesFilters({ status: "running" }, { role: "executor", status: "" })).toBe(false);
+    expect(matchesFilters({ role: "executor" }, { role: "", status: "running" })).toBe(false);
+    expect(matchesFilters({}, {})).toBe(true);
   });
 });
 

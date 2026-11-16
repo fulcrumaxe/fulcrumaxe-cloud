@@ -41,6 +41,17 @@ export function titleOf(role) {
   return typeof role === "string" && role ? word(role) : "Agent run";
 }
 
+/** D#37 (issue #828): the Role picker's options, in `ROLE_WORDS`' own order -- the roles this app has words for, never a raw role id. */
+export const ROLE_OPTIONS = Object.keys(ROLE_WORDS);
+
+/** "#<issue_number> <title>"; just the number or just the title when the other is missing; "" (no second line) when there is neither. */
+export function workItemLineText(workItem) {
+  if (!workItem || typeof workItem !== "object") return "";
+  const n = Number.isInteger(workItem.issue_number) && workItem.issue_number > 0 ? "#" + workItem.issue_number : "";
+  const t = typeof workItem.title === "string" && workItem.title !== "" ? workItem.title : "";
+  return n && t ? n + " " + t : n || t;
+}
+
 const VERDICTS = {
   pass: { label: "Pass", tone: "ok" },
   "needs-fix": { label: "Needs fix", tone: "warn" },

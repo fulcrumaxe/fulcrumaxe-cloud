@@ -12,9 +12,9 @@ import { openRunStream } from "../_lib/stream.js";
 // D#597 CC-6a-2: the assistant panel. The boot budget is full (130 of 130 files), so it lives with the Pipeline detail panels it sits beside.
 import { refusalLabel } from "../_lib/api.js";
 import { createAssistantPanel } from "../pipeline/pipeline-actions.js";
-import { contextBanner, exportLink, foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerHeadTotal, runnerNotes, titleOf } from "./runs-detail.js";
+import { contextBanner, exportLink, foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, ROLE_OPTIONS, runnerEventLine, runnerHeadTotal, runnerNotes, titleOf, workItemLineText } from "./runs-detail.js";
 import {
-  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, isUuid, launchRunId, loadRun, loadWorkItemRepoId, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
+  EVENT_CAP, matchesFilters, STATUS_LABELS, STATUS_OPTIONS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, isUuid, launchRunId, loadRun, loadWorkItemRepoId, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
 
 const FULC = window.FULC;
@@ -154,39 +154,72 @@ function mountApp(contentEl, launchArg) {
   let extended = false; // Show more ran: a refresh keeps its cursor
   let queued = false;
   const liveAc = new AbortController(); // every live GET
+  // D#37 (issue #828): "" means All; in-memory only, so a reopened window starts clear.
+  const filters = { role: "", status: "" };
 
   const status = h("p", { class: "runs-status", role: "status", "data-testid": "runs-status" });
   const list = h("ul", { class: "runs-list", "data-testid": "runs-list" });
+  const roleSel = h(
+    "select",
+    { id: "runs-f-role", class: "runs-input", "data-testid": "runs-filter-role", onChange: onFilterChange },
+    h("option", { value: "" }, "All"),
+    ROLE_OPTIONS.map((r) => h("option", { value: r }, titleOf(r)))
+  );
+  const statusSel = h(
+    "select",
+    { id: "runs-f-status", class: "runs-input", "data-testid": "runs-filter-status", onChange: onFilterChange },
+    h("option", { value: "" }, "All"),
+    STATUS_OPTIONS.map((s) => h("option", { value: s }, STATUS_LABELS[s]))
+  );
   const moreBtn = h("button", { type: "button", class: "runs-more", "data-testid": "runs-more", hidden: true, onClick: showMore }, "Show more");
   const moreErr = h("p", { class: "runs-muted", role: "status", "data-testid": "runs-more-error", hidden: true }, "Couldn't load more runs. Try again.");
   const pane = h("aside", { class: "runs-detail", "aria-label": "Run detail", "data-testid": "runs-detail", hidden: true });
   const root = h(
     "div",
     { class: "runs-app", "data-testid": "runs-app" },
-    h("div", { class: "runs-main" }, h("h2", { class: "runs-title" }, "Runs"), status, list, moreBtn, moreErr),
+    h(
+      "div",
+      { class: "runs-main" },
+      h("h2", { class: "runs-title" }, "Runs"),
+      h("div", { class: "runs-filters" }, h("label", { for: "runs-f-role" }, "Role"), roleSel, h("label", { for: "runs-f-status" }, "Status"), statusSel),
+      status,
+      list,
+      moreBtn,
+      moreErr
+    ),
     pane
   );
   contentEl.replaceChildren(root);
 
   function row(run) {
+    const itemText = workItemLineText(run.work_item);
     return h(
       "li",
       null,
       h(
         "button",
         { type: "button", class: "runs-row", "data-testid": "runs-row", "data-id": run.id, onClick: () => open(run.id) },
-        h("span", { class: "runs-row-name" }, roleName(run.role)),
-        statusChip(run.status, run.failure_reason),
-        h("span", { class: "runs-row-usd", "data-testid": "runs-usd" }, runUsd(run)),
-        validTime(run.created_at) ? h("span", { class: "runs-row-time" }, timeNode(run.created_at, true)) : null
+        h(
+          "span",
+          { class: "runs-row-main" },
+          h("span", { class: "runs-row-name" }, roleName(run.role)),
+          statusChip(run.status, run.failure_reason),
+          h("span", { class: "runs-row-usd", "data-testid": "runs-usd" }, runUsd(run)),
+          validTime(run.created_at) ? h("span", { class: "runs-row-time" }, timeNode(run.created_at, true)) : null
+        ),
+        itemText ? h("span", { class: "runs-row-item", "data-testid": "runs-row-item" }, displayText(itemText)) : null
       )
     );
   }
 
   function paintList() {
     const focusId = contentEl.contains(document.activeElement) && document.activeElement.dataset ? document.activeElement.dataset.id : null;
+    const filtered = filters.role !== "" || filters.status !== "";
     status.textContent =
-      listState === "loading" ? "Loading runs…" : listState === "error" ? "Runs aren't available right now." : rows.length === 0 ? "No runs yet." : "";
+      listState === "loading" ? "Loading runs…"
+      : listState === "error" ? "Runs aren't available right now."
+      : rows.length === 0 ? (filtered ? "No runs match these filters." : "No runs yet.")
+      : "";
     status.dataset.state = listState;
     list.replaceChildren(...rows.map(row));
     moreBtn.hidden = listState !== "ready" || next === "";
@@ -197,9 +230,23 @@ function mountApp(contentEl, launchArg) {
     }
   }
 
+  // Changing either picker: drop any list request in flight, clear the loaded rows and cursor, reset Show more, reload page 1.
+  function onFilterChange() {
+    filters.role = roleSel.value;
+    filters.status = statusSel.value;
+    if (listAc) listAc.abort();
+    if (more) { more.abort(); more = null; }
+    rows = [];
+    next = "";
+    extended = false;
+    listState = "loading";
+    paintList();
+    loadFirst();
+  }
+
   function loadFirst() {
     const ac = (listAc = new AbortController());
-    loadRunsPage("", undefined, ac.signal).then(
+    loadRunsPage("", undefined, ac.signal, filters).then(
       (page) => {
         if (ac.signal.aborted) return;
         rows = page.rows;
@@ -218,7 +265,7 @@ function mountApp(contentEl, launchArg) {
   function showMore() {
     if (more || next === "") return;
     const ac = (more = new AbortController());
-    loadRunsPage(next, undefined, ac.signal).then(
+    loadRunsPage(next, undefined, ac.signal, filters).then(
       (page) => {
         if (ac.signal.aborted) return;
         more = null;
@@ -313,7 +360,7 @@ function mountApp(contentEl, launchArg) {
     (again || pane.querySelector(".runs-back")).focus({ preventScroll: true });
   }
   const refresh = coalesce(() =>
-    loadRunsPage("", undefined, liveAc.signal).then((page) => {
+    loadRunsPage("", undefined, liveAc.signal, filters).then((page) => {
       rows = mergeFirstPage(rows, page.rows);
       if (!extended) next = page.next;
       listState = "ready";
@@ -322,7 +369,18 @@ function mountApp(contentEl, launchArg) {
   );
   const unwatch = watchAccount({
     onStatus: (id) => loadRun(id, undefined, liveAc.signal).then((run) => {
-      if (listState === "ready" && run && run.id === id) { rows = upsertRow(rows, run); paintList(); }
+      if (listState === "ready" && run && run.id === id) {
+        const hadFocus = contentEl.contains(document.activeElement) && document.activeElement.dataset && document.activeElement.dataset.id === id;
+        const wasListed = rows.some((r) => r.id === id);
+        if (matchesFilters(run, filters)) {
+          rows = upsertRow(rows, run);
+          paintList();
+        } else if (wasListed) {
+          rows = rows.filter((r) => r.id !== id);
+          paintList();
+          if (hadFocus) roleSel.focus(); // the row that had focus is gone: hand focus to the Role picker, not the document
+        }
+      }
       // The open run changed (claimed, cancelled ...): its approval is read again from the fresh run.
       if (run && run.id === id && id === openId && detail && detail.status === "ready") {
         const wasLive = isLiveStatus(detail.run.status);

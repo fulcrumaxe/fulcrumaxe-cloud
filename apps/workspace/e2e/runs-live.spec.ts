@@ -279,6 +279,31 @@ test.describe("D#37 WS-F2b: Runs app live (mocked API)", () => {
     await assertClean(page, w, "status change");
   });
 
+  // D#37 (issue #828) criterion 12: a live status change under a filter.
+  test("under a Status filter, a non-matching update adds nothing, a matching one is added, and a row that stops matching is dropped with focus on the Role picker", async ({ page }) => {
+    const { mock } = await setup(page);
+    await tid(page, "runs-filter-status").selectOption("running");
+    await expect.poll(() => mock.requests.filter((r) => r.startsWith("GET /api/v1/runs?")).at(-1)).toContain("status=running");
+    await expect(tid(page, "runs-row")).toHaveCount(1); // the one row (status overridden to "running" by the mock) still matches
+
+    mock.runStatus = "succeeded"; // does not match the Status=Running filter
+    await sendEvent(page, "run.status_changed", { runId: ID2 });
+    await page.waitForTimeout(300);
+    await expect(tid(page, "runs-row")).toHaveCount(1); // not added: it does not match
+
+    mock.runStatus = "running"; // matches
+    await sendEvent(page, "run.status_changed", { runId: ID2 });
+    await expect(tid(page, "runs-row")).toHaveCount(2); // added: it matches
+
+    await tid(page, "runs-row").first().focus();
+    await expect(tid(page, "runs-row").first()).toBeFocused();
+    const focusedId = await tid(page, "runs-row").first().getAttribute("data-id");
+    mock.runStatus = "succeeded"; // no longer matches
+    await sendEvent(page, "run.status_changed", { runId: focusedId! });
+    await expect(tid(page, "runs-row")).toHaveCount(1); // the focused row is dropped
+    await expect(tid(page, "runs-filter-role")).toBeFocused(); // focus moved to the Role picker, not lost to the document
+  });
+
   test("a refresh re-fetches the first page, keeps the open detail and the rows Show more added", async ({ page }) => {
     const { w, mock } = await setup(page, (m) => { m.hold = true; });
     await press(page, tid(page, "runs-more"));

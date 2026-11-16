@@ -189,6 +189,76 @@ test.describe("D#37 WS-F2a: Runs app (mocked API)", () => {
     expect(await w.tt()).toEqual([]);
   });
 
+  // D#37 (issue #828) criterion 1.
+  test("a row's work item shows as a second line under the role; a run with none shows no second line and no blank gap", async ({ page }) => {
+    await setup(page, (m) => {
+      m.list = { data: [LIST.data[0], { ...LIST.data[0], id: ID2, work_item: null }], next_cursor: "" };
+    });
+    await expect(tid(page, "runs-row")).toHaveCount(2);
+    await expect(tid(page, "runs-row").first()).toContainText("#912 Runs app: show which work item each run is for");
+    await expect(tid(page, "runs-row").first().locator('[data-testid="runs-row-item"]')).toHaveCount(1);
+    await expect(tid(page, "runs-row").nth(1).locator('[data-testid="runs-row-item"]')).toHaveCount(0);
+  });
+
+  // D#37 (issue #828) criterion 2.
+  test("Role and Status pickers: All first, then the roles the detail heading uses and the status words in order", async ({ page }) => {
+    await setup(page);
+    const roleOptions = await tid(page, "runs-filter-role").locator("option").allTextContents();
+    expect(roleOptions[0]).toBe("All");
+    expect(roleOptions).toContain("Build · Executor");
+    expect(roleOptions).toContain("Triage & Spec · Project manager");
+    expect(roleOptions).toContain("Review · Code reviewer");
+    const statusOptions = await tid(page, "runs-filter-status").locator("option").allTextContents();
+    expect(statusOptions).toEqual([
+      "All", "Waiting", "Running", "Succeeded", "Failed", "Timed out", "Stopped at the spend limit", "Not started: spend limit", "Cancelled",
+    ]);
+  });
+
+  // D#37 (issue #828) criteria 3, 4, 6, 7: the query string per choice, Show more keeping the filters, and All/All restoring today's exact URL.
+  test("choosing Role and Status sends them on every request; Show more keeps them; All/All restores the plain list", async ({ page }) => {
+    const { mock } = await setup(page);
+    expect(mock.requests).toEqual(["GET /api/v1/runs?limit=50"]);
+
+    await tid(page, "runs-filter-role").selectOption("executor");
+    await expect.poll(() => mock.requests.at(-1)).toBe("GET /api/v1/runs?limit=50&role=executor");
+
+    await tid(page, "runs-filter-status").selectOption("failed");
+    await expect.poll(() => mock.requests.at(-1)).toBe("GET /api/v1/runs?limit=50&role=executor&status=failed");
+
+    await press(page, tid(page, "runs-more"));
+    await expect.poll(() => mock.requests.at(-1)).toContain("role=executor&status=failed");
+    expect(mock.requests.at(-1)).toContain("cursor=");
+
+    await tid(page, "runs-filter-role").selectOption("");
+    await tid(page, "runs-filter-status").selectOption("");
+    await expect.poll(() => mock.requests.at(-1)).toBe("GET /api/v1/runs?limit=50");
+    await expect(tid(page, "runs-row")).toHaveCount(1);
+  });
+
+  // D#37 (issue #828) criterion 5.
+  test("a Role/Status combination with no runs shows 'No runs match these filters.' and no Show more", async ({ page }) => {
+    await setup(page);
+    await page.route((u) => u.pathname === "/api/v1/runs" && u.search.includes("role="), (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [], next_cursor: null }) })
+    );
+    await tid(page, "runs-filter-role").selectOption("security-expert");
+    await expect(tid(page, "runs-status")).toHaveText("No runs match these filters.");
+    await expect(tid(page, "runs-row")).toHaveCount(0);
+    await expect(tid(page, "runs-more")).toBeHidden();
+  });
+
+  // D#37 (issue #828) criterion 6: a reopened window starts at All/All (in-memory only, never remembered).
+  test("closing and reopening the Runs app starts with both pickers at All", async ({ page }) => {
+    await setup(page);
+    await tid(page, "runs-filter-role").selectOption("executor");
+    await expect(tid(page, "runs-filter-role")).toHaveValue("executor");
+    await page.evaluate(() => (window as unknown as { FULCWM: Record<string, (id: string) => void> }).FULCWM.close("runs"));
+    await expect(page.locator(WIN)).toHaveCount(0);
+    await openRuns(page);
+    await expect(tid(page, "runs-filter-role")).toHaveValue("");
+    await expect(tid(page, "runs-filter-status")).toHaveValue("");
+  });
+
   test("detail: one run request, JSON events, header, and each kind drawn as text", async ({ page }) => {
     const { w, mock } = await setup(page);
     await openFirstRun(page);
