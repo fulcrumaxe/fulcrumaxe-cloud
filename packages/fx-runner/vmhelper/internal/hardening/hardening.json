@@ -1,0 +1,35 @@
+{
+  "runtime_directory": "fx-vmhelper",
+  "runtime_directory_mode": "0750",
+  "socket_name": "helper.sock",
+  "state_directory": "fx-vmhelper",
+  "state_directory_mode": "0700",
+  "read_write_paths": ["/sys/fs/cgroup"],
+  "directives": {
+    "DeviceAllow": "/dev/kvm rw",
+    "DevicePolicy": "closed",
+    "IPAddressDeny": "any",
+    "LockPersonality": "yes",
+    "NoNewPrivileges": "yes",
+    "ProtectHome": "yes",
+    "ProtectKernelModules": "yes",
+    "ProtectSystem": "strict",
+    "RestrictAddressFamilies": "AF_UNIX",
+    "RestrictSUIDSGID": "yes",
+    "SystemCallArchitectures": "native",
+    "SystemCallFilter": "@system-service @mount",
+    "UMask": "0077"
+  },
+  "capabilities": [
+    { "name": "CAP_CHOWN", "number": 0, "reason": "give each jail's files to the sandbox's own uid and gid" },
+    { "name": "CAP_SETGID", "number": 6, "reason": "the jailer switches to the sandbox's gid before it execs Firecracker" },
+    { "name": "CAP_SETUID", "number": 7, "reason": "the jailer switches to the sandbox's uid before it execs Firecracker" },
+    { "name": "CAP_SYS_ADMIN", "number": 21, "reason": "the jailer's mount namespace, bind mounts and pivot_root" },
+    { "name": "CAP_MKNOD", "number": 27, "reason": "the jailer creates the device node for /dev/kvm inside the jail" }
+  ],
+  "notes": [
+    "CAP_SYS_CHROOT is absent on purpose: the jailer enters the jail with pivot_root (covered by CAP_SYS_ADMIN), not chroot(2). The real-root step (B-2a-1b) must confirm that; add it back only if that run proves it is used.",
+    "CAP_KILL, CAP_FOWNER and CAP_DAC_OVERRIDE are absent on purpose. B-2a-1b is designed to this set: it stops a sandbox by writing cgroup.kill (kernel 5.14 or later), sets a file's mode before it chowns it, and reaps a sandbox-owned tree by fchownat-ing each directory back to root (AT_SYMLINK_NOFOLLOW, which needs only CAP_CHOWN) before it descends.",
+    "Writes to cgroup files are ordinary permission checks for root on root-owned cgroupfs files and need no capability."
+  ]
+}

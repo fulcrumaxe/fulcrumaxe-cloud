@@ -110,6 +110,7 @@
         # ps: the fx-runner browserProbe test reads the real process list. The
         # NixOS runner's service PATH is minimal by design, so it comes from here.
         procps
+        go          # fx-vmhelper (packages/fx-runner/vmhelper): Go, standard library only (D#587 C7); same pinned nixpkgs, no flake.lock change
         # D#37 WS-B: browsers for apps/workspace/e2e and sitekit-checks,
         # from the binary cache (see playwrightBrowsers above).
         playwrightBrowsers

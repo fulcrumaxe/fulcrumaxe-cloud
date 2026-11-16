@@ -642,6 +642,7 @@ const TODAY = [
   "scripts/check-globalsetup-env.sh",
   "scripts/check-agent-run-columns.sh",
   "pnpm test",
+  "fx-vmhelper go vet and go test",
   "sitekit-checks browser tier",
   "packages/db neon-shape migrations",
   "packages/db migration order",
@@ -709,6 +710,29 @@ test("check.sh in affected mode runs the browser tier only when sitekit-checks i
   const withBoth = checkSh({ FX_CHECK_AFFECTED: "packages/sitekit-checks,packages/db" });
   assert.ok(withBoth.out.includes("(dry run) pnpm --filter @fx/sitekit-checks test:browser"));
   assert.ok(withBoth.headers.includes("==> packages/db neon-shape migrations"));
+});
+
+test("check.sh runs go vet and go test for fx-vmhelper when packages/fx-runner is affected, and says so when it is not", () => {
+  const cmd = "(dry run) env GOTOOLCHAIN=local bash -c cd packages/fx-runner/vmhelper && go vet ./... && go test -count=1 ./...";
+  assert.ok(checkSh({}).lines.includes(cmd), "full mode runs it");
+  const hit = checkSh({ FX_CHECK_AFFECTED: "packages/fx-runner" });
+  assert.ok(hit.lines.includes(cmd));
+  assert.ok(hit.headers.includes("==> fx-vmhelper go vet and go test"));
+  const miss = checkSh({ FX_CHECK_AFFECTED: "packages/env-spec" });
+  assert.ok(miss.headers.includes("==> fx-vmhelper go vet and go test -- skipped, packages/fx-runner not affected"));
+  assert.ok(!miss.out.includes("go vet ./..."));
+  assert.ok(checkSh({ FX_CHECK_AFFECTED: "none" }).headers.includes("==> fx-vmhelper go vet and go test -- skipped, packages/fx-runner not affected"));
+});
+
+test("flake.nix puts go in sharedPackages, so the default and the ci shell both get it, and flake.lock still has one nixpkgs input", () => {
+  const flake = readFileSync(path.join(repoRoot, "flake.nix"), "utf8");
+  const shared = /sharedPackages = with pkgs; \[([\s\S]*?)\n      \];/.exec(flake);
+  assert.ok(shared, "sharedPackages block");
+  assert.match(shared[1], /\n {8}go\s/);
+  assert.match(flake, /ci = pkgs\.mkShell \{[\s\S]*?packages = sharedPackages/);
+  assert.match(flake, /default = pkgs\.mkShell \{\s*packages = sharedPackages/);
+  const lock = JSON.parse(readFileSync(path.join(repoRoot, "flake.lock"), "utf8"));
+  assert.deepEqual(Object.keys(lock.nodes).sort(), ["nixpkgs", "root"]);
 });
 
 test("check.sh in affected mode still runs the cheap guards, always", () => {

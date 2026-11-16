@@ -121,6 +121,14 @@ else
   skipped "pnpm test" "no affected package"
 fi
 
+# fx-vmhelper is Go, standard library only (D#587 C7); GOTOOLCHAIN=local keeps go from fetching another toolchain.
+if has_pkg packages/fx-runner; then
+  echo "==> fx-vmhelper go vet and go test"
+  run env GOTOOLCHAIN=local bash -c 'cd packages/fx-runner/vmhelper && go vet ./... && go test -count=1 ./...'
+else
+  skipped "fx-vmhelper go vet and go test" "packages/fx-runner not affected"
+fi
+
 echo "==> sitekit-checks browser tier"
 if [ -n "${FX_BROWSER_TIER:-}" ] && [ "${FX_BROWSER_TIER:-}" != "skip" ]; then
   echo "FAILED browser tier: FX_BROWSER_TIER must be unset or 'skip'" >&2
