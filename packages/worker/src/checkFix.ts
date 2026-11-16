@@ -109,7 +109,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   const key = `advance:${who.workItemId}:checkfix:${failedRunId}`;
   const facts = await withTenant(deps.pool, who.accountId, async (client) => {
     const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; check_reason: string | null; failed_files: unknown; failed_files_more: unknown; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; runner_protocol: number | null; gh_owner: string | null; gh_name: string | null }>(
-      `SELECT w.repo_id, ar.spec_version_id, (SELECT r.protocol_version FROM runners r WHERE r.account_id = ar.account_id AND r.id = ar.runner_id) AS runner_protocol, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary, c.reason AS check_reason,
+      `SELECT w.repo_id, ar.spec_version_id, ar.runner_protocol_version AS runner_protocol, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary, c.reason AS check_reason,
               (SELECT e.payload->'failed_files' FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.check_ended' ORDER BY e.seq DESC LIMIT 1) AS failed_files,
               (SELECT e.payload->'failed_files_more' FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.check_ended' ORDER BY e.seq DESC LIMIT 1) AS failed_files_more,
               (SELECT run_id FROM agent_run_idempotency_keys k WHERE k.account_id = $1 AND k.idempotency_key = $4) AS prior
@@ -207,8 +207,9 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   // D#6 CHECK-FIX-SCOPE: the failed test files the check's import graph put inside the change (the same reading `failedOutsideChange` just used) ride on this round's job beside the Spec's list, so the
   // runner and `done` do not refuse the one-file fix such a failure needs. The files an earlier check-fix round of this chain was given ride along too (the pull request holds that round's edit, and `done`
   // judges the whole of it). One filter and one cap over the union; this round's job only, never written to the Spec; nothing new when the check timed out (partial output) or the graph was not read.
-  // The summary is read only when the cloud's own record says the runner that ran the check is new enough to have written the end-of-header line (`runners.protocol_version` of the run's runner, never anything
-  // in the summary text): an older runner's summary can have its output read as header. No record, or an older one: nothing is taken from the summary.
+  // The summary is read only when the cloud's own record says the runner that ran the check was new enough to have written the end-of-header line: `agent_runs.runner_protocol_version`, the protocol the
+  // cloud held for that runner when it claimed the run (written by the claim itself, never anything in the summary text and never the runner's later hello, which an upgrade after the check would raise).
+  // An older runner's summary can have its output read as header. No record (NULL: a run claimed before the column existed, or a runner with no hello), or an older one: nothing is taken from the summary.
   const markerRunner = typeof row.runner_protocol === "number" && row.runner_protocol >= CHECK_HEADER_END_MIN_PROTOCOL;
   const fromSummary = row.timed_out === true || !markerRunner ? [] : importLinkedFailedFiles(row.summary, CHECK_FIX_SCOPE_EXTRA_MAX);
   const carried = await withTenant(deps.pool, who.accountId, async (client) => {
