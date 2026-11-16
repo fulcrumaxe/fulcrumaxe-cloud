@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { recordDriverEvent, type DriverEventKind } from '../work-items/driverEvents.js';
 import { specOfItemSql } from '../work-items/stages.js';
 import { cancelOpenOrders } from './orders.js';
+import { readPersistence } from './criteria.js';
 import { planJourneys, VerifyInputError, type Journey } from './journeys.js';
 import { isEligible, readVerifySettings, writeVerifySettings, type VerifySettings, type VerifySettingsPatch } from './settings.js';
 
@@ -403,7 +404,7 @@ export async function finishVerifyRow(client: PoolClient, accountId: string, row
   } else {
     assertResultMatches(row.journeys, input.result);
     if (input.status === 'verified' && row.journeys.length === 0) throw bad('a row with no journeys cannot be verified');
-    if (input.status === 'verified' && !input.result.every(isEvidencedPass)) throw bad('a verified row needs every journey passed with evidence, an undo check and a reload');
+    if (input.status === 'verified' && !input.result.every((r) => isEvidencedPass(r, row.journeys.find((j) => j.id === r.id)?.persistence))) throw bad('a verified row needs every journey passed with evidence, an undo check and, for a persisted one, a reload');
     if (input.status === 'failed' && !input.result.some((r) => r.result === 'fail')) throw bad('a failed row needs a failed journey');
   }
   if (input.status === 'unverified' && input.result != null) assertResultMatches(row.journeys, input.result);
@@ -422,11 +423,12 @@ export async function finishVerifyRow(client: PoolClient, accountId: string, row
 }
 
 /**
- * A pass that shows its work: some step states what the tester did and either the page fact that showed it or a number, with an undo check and a reload.
+ * A pass that shows its work: some step states what the tester did and either the page fact that showed it or a number, with an undo check and, unless the journey is view-only, a reload.
  * A number or a page fact without a stated action is not evidence. The one definition; the answer rules and the store both use it.
  */
-export function isEvidencedPass(r: JourneyResult): boolean {
-  return r.result === 'pass' && r.undo_checked === true && r.reloaded === true
+export function isEvidencedPass(r: JourneyResult, persistence?: unknown): boolean {
+  // D#749: a view-only journey (a filter, a sort, a reading) cannot give reload evidence, so it needs none. Any other classification, or none, is persisted: a reload is required.
+  return r.result === 'pass' && r.undo_checked === true && (readPersistence(persistence) === 'view_only' || r.reloaded === true)
     && r.steps.some((s) => s.did.trim() !== '' && (s.dom_fact.trim() !== '' || typeof s.number === 'number'));
 }
 

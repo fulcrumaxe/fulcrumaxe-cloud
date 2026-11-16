@@ -1,4 +1,4 @@
-import { classifyCriteria } from './criteria.js';
+import { classifyCriteria, classifyPersistence, type PersistenceKind } from './criteria.js';
 import { extractStart, isStartApp } from './startApps.js';
 
 /**
@@ -16,6 +16,11 @@ export interface Journey {
   text: string;
   /** D#749: the app the tester opens first (an id from `VERIFY_START_APPS`); absent when the Spec named none. */
   start?: string;
+  /**
+   * D#749 VERIFY-RELOAD-ONLY-FOR-PERSISTED: `view_only` when the criterion is a filter, sort, expand or reading of the page (a reload cannot prove it); absent or any other value reads as
+   * `persisted`, which needs a reload to pass. Set only where the journeys are derived, never by the tester.
+   */
+  persistence?: PersistenceKind;
 }
 export interface StandingJourney {
   id: string;
@@ -216,7 +221,12 @@ export function planJourneys(input: DeriveJourneysInput): JourneyPlan {
   for (const c of classifyCriteria(extracted.map((e) => e.text))) {
     const start = extracted[c.n - 1]!.start;
     if (c.kind === 'code') checksOnly.push(c.n);
-    else if (c.text !== '') out.push(start === undefined ? { id: `c${c.n}`, source: 'criterion', text: c.text } : { id: `c${c.n}`, source: 'criterion', text: c.text, start });
+    else if (c.text !== '') {
+      const j: Journey = { id: `c${c.n}`, source: 'criterion', text: c.text };
+      if (start !== undefined) j.start = start;
+      if (classifyPersistence(c.text) === 'view_only') j.persistence = 'view_only';
+      out.push(j);
+    }
   }
   for (const s of input.standing.slice(0, MAX_STANDING)) {
     if (STANDING_ID_RE.test(s.id)) out.push({ id: `s_${s.id}`, source: 'standing', text: cleanVerifyText(s.text) });
@@ -227,7 +237,10 @@ export function planJourneys(input: DeriveJourneysInput): JourneyPlan {
     const at = out.findIndex((j) => j.id === c.id);
     // The current Spec wins either way: a journey it has (same id) keeps ITS start or none (a dropped marker drops the carried start); only a journey the Spec no longer has keeps the carried one.
     const start = at >= 0 ? out[at]!.start : isStartApp(c.start) ? c.start : undefined;
-    const withStart = (j: Journey): Journey => (start === undefined ? j : { ...j, start });
+    const withStart = (j: Journey): Journey => {
+      const s = start === undefined ? j : { ...j, start };
+      return classifyPersistence(s.text) === 'view_only' && c.id.startsWith('c') ? { ...s, persistence: 'view_only' } : s;
+    };
     if (at >= 0) out[at] = withStart({ id: c.id, source: 'recheck', text: text === '' ? out[at]!.text : text });
     else if (text !== '') out.push(withStart({ id: c.id, source: 'recheck', text }));
   }

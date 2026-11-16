@@ -57,7 +57,7 @@ export const DATA_LINE =
 
 export function buildVerifyPrompt(input: VerifyPromptInput): string {
   assertOurJourneys(input.journeys);
-  const journeys = input.journeys.flatMap((j) => [`JOURNEY ${j.id} (${j.source})${j.start === undefined ? '' : `, start in the ${startAppTitle(j.start)} app`}:`, sanitize(j.text)]);
+  const journeys = input.journeys.flatMap((j) => [`JOURNEY ${j.id} (${j.source}${j.persistence === 'view_only' ? ', view only' : ''})${j.start === undefined ? '' : `, start in the ${startAppTitle(j.start)} app`}:`, sanitize(j.text)]);
   return [
     'Check the deployed app against the journeys below, in the browser only: open the app, act on it and read what the page shows. You have no access to the code and do not need it; a collapsed section (a summary line) opens with a click. Your own check shows up in the app as a running run; never use it as the run under test.',
     `Stay on the origin of this base URL: ${input.baseUrl}. Do not open any other site, and do not follow a link that leaves it.`,
@@ -67,7 +67,7 @@ export function buildVerifyPrompt(input: VerifyPromptInput): string {
     ...journeys,
     '',
     'Answer with one JSON object and nothing else: {"journeys":[{"id","result":"pass"|"fail"|"blocked","steps":[{"did","dom_fact","number"?}],"console_errors":<integer>,"undo_checked":<boolean>,"reloaded":<boolean>}]}.',
-    `Answer every journey once, with its id. Give at most ${MAX_STEPS} steps per journey and at most ${MAX_STEP_TEXT} characters per "did" and "dom_fact". A "pass" needs a step stating what you did and the page fact or number that showed it, an undo check and a reload; otherwise answer "blocked" or "fail".`,
+    `Answer every journey once, with its id. Give at most ${MAX_STEPS} steps per journey and at most ${MAX_STEP_TEXT} characters per "did" and "dom_fact". A "pass" needs a step stating what you did and the page fact or number that showed it, an undo check and a reload; otherwise answer "blocked" or "fail". A journey marked "view only" is a filter, sort or reading that resets on a reload on purpose, so it needs no reload (answer "reloaded" truthfully, false if you did not reload); it still needs the page fact read after the action and the undo check: undo the view change (for a filter, clear it and confirm the full list is back) and answer \"undo_checked\" true only if you did.`,
     NO_FIXTURE_LINE,
     START_LINE,
     SUBMIT_LINE,
