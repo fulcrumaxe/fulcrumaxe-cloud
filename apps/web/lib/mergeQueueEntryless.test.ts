@@ -19,10 +19,14 @@ const h = vi.hoisted(() => ({
   runnerCi: null as null | { headSha: string; names: string[] },
   runnerOpen: true,
   ended: [] as unknown[],
+  /** D#483 S5-j2e-RUNNER: the newest plane-merge order (its expected public head); the public pull request's LIVE head and signals (the fence answers for that last commit only, whatever sha is asked), and the shas asked. */
+  orderHead: "1".repeat(40) as string | null,
+  publicLive: { head: "1".repeat(40), names: [] as string[] },
+  publicReads: [] as string[],
   cancelled: [] as unknown[],
 }));
 
-vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({ withTenant: async (_p: unknown, _a: string, fn: (c: unknown) => unknown) => fn({}) }));
+vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({ withTenant: async (_p: unknown, _a: string, fn: (c: unknown) => unknown) => fn({ query: async () => ({ rows: h.orderHead === null ? [] : [{ expected_public_head: h.orderHead }] }) }) }));
 vi.mock("@fx/pipeline", () => ({
   assembleConflictPrompt: () => ({}),
   isReservationPause: () => false,
@@ -31,7 +35,8 @@ vi.mock("@fx/pipeline", () => ({
   readPublicPullRequest: () => async () => h.publicCopy,
   readItemRecordedPullRequest: async () => h.recorded,
   expectedSignalNames: (s: string[] | { names: string[] }) => (Array.isArray(s) ? s : s.names),
-  loadReviewContext: async () => ({ ok: true, ctx: { repoId: "repo-1" } }),
+  loadReviewContext: async () => ({ ok: true, ctx: { repoId: "repo-1", executionMode: "runner_local" } }),
+  createReviewGitHubPort: () => ({ getCiSnapshot: async (_pr: unknown, sha: string) => (h.publicReads.push(sha), { headSha: h.publicLive.head, names: h.publicLive.names }) }),
   mergeQueue: { listConflictRounds: async () => h.rounds, endRound: async (_c: unknown, input: unknown) => void h.ended.push(input), bindPlatformCommitProof: () => undefined, createPlatformPushReader: () => undefined },
 }));
 vi.mock("./advanceReviewSteps", () => ({
@@ -42,6 +47,7 @@ vi.mock("./advanceReviewSteps", () => ({
 vi.mock("./mergeQueueDeltaReview", () => ({ readEntryContext: async () => ({}), readEntryWho: async () => ({ who: { accountId: "acct", userId: "u", workItemId: "item", haltEpoch: 0 }, actionId: "act" }), deltaReviewPorts: () => ({}) }));
 vi.mock("./github/installationReconcile", () => ({ appUserPool: () => ({}) }));
 vi.mock("./github/installationHttp", () => ({ readRepoAppLogin: async () => "bot", openInstallationHttp: async () => ({}) }));
+vi.mock("./github/localOnlyHttp", () => ({ openForRepo: async () => ({}) }));
 vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => (h.runnerRepo ? null : { getCiSnapshot: async (_pr: unknown, sha: string) => h.signals[sha] ?? [] }) }));
 vi.mock("@fx/core/src/pendingWork.js", () => ({ markWorkPending: async () => undefined }));
 vi.mock("@fx/core/src/work-items/stackParentPull.js", () => ({ readStackParentPull: async () => null }));
@@ -67,6 +73,9 @@ beforeEach(() => {
   h.gateCalls = [];
   h.ended = [];
   h.cancelled = [];
+  h.orderHead = "1".repeat(40);
+  h.publicLive = { head: "1".repeat(40), names: [] };
+  h.publicReads = [];
 });
 
 describe("readEntrylessSubject", () => {
@@ -172,5 +181,58 @@ describe("D#519 MQ4-e2-c3 conflictGateBody on a runner_local repository: CI thro
     h.runnerOpen = false;
     expect(await answer()).toMatchObject({ reasons: ["ci_not_green"] });
     expect(h.gateCalls).toEqual([]);
+  });
+});
+
+describe("D#483 S5-j2e-RUNNER conflictGateBody for a PAIRED runner_local item: the CI expected is the signals the FIRST round recorded at its start", () => {
+  const REPUBLISHED = "9".repeat(40);
+  const copy = { paired: true, pr: { owner: "o", name: "n", number: 9, branch: "fx/p-1", stampedHead: "b".repeat(40), pushState: "pr_opened", sourceHead: null, overlayGlobs: [], managedByPerson: false } };
+  const roundWith = (expectedSignals: string[] | null, o: Record<string, unknown> = {}) => round({ round: 1, fromSha: FROM, toSha: MID, outcome: "resolved", expectedSignals, ...o });
+  beforeEach(() => {
+    h.runnerRepo = true;
+    h.rounds = [roundWith(["ci/test", "ci/slow"])];
+    h.publicCopy = copy;
+  });
+
+  it("the signals are the ones recorded with the round, never the private copy's (which shows none) and never read again from the public pull request", async () => {
+    h.runnerCi = { headSha: MID, names: [] };
+    await conflictGateBody(worker, WHO, 7);
+    expect(h.publicReads).toEqual([]);
+    expect(h.gateCalls).toEqual([[7, ["ci/test", "ci/slow"]]]);
+  });
+
+  it("the round republished the public head and only the fast check has posted on it: the recorded set still names the slow one, so the gate demands it (never the live head's own signals)", async () => {
+    h.publicLive = { head: REPUBLISHED, names: ["ci/test"] };
+    await conflictGateBody(worker, WHO, 7);
+    expect(h.gateCalls).toEqual([[7, ["ci/test", "ci/slow"]]]);
+    expect(h.publicReads).toEqual([]);
+  });
+
+  it("nothing recorded, an empty record, a first round that recorded nothing before a later one that did, or no open public pull request never reads as green: ci_not_green, the gate is not run, and the public pull request is never read as a stand-in", async () => {
+    // The public pull request shows a GREEN signal at the order's own head: a fallback to a live read would find it and go, so the answer below can only come from the missing record.
+    h.publicLive = { head: h.orderHead as string, names: ["ci/test"] };
+    h.rounds = [roundWith(null)];
+    expect(await conflictGateBody(worker, WHO, 7)).toMatchObject({ outcome: "ready_human_merges", reasons: ["ci_not_green"] });
+    expect(h.publicReads).toEqual([]);
+    h.rounds = [roundWith([])];
+    expect(await conflictGateBody(worker, WHO, 7)).toMatchObject({ reasons: ["ci_not_green"] });
+    expect(h.publicReads).toEqual([]);
+    // The first round is the one taken before any republish; a later round's record (taken after one) is never a substitute.
+    h.rounds = [roundWith(null), round({ round: 2, fromSha: MID, toSha: "c".repeat(40), outcome: "resolved", expectedSignals: ["ci/test"] })];
+    expect(await conflictGateBody(worker, WHO, 7)).toMatchObject({ reasons: ["ci_not_green"] });
+    expect(h.publicReads).toEqual([]);
+    h.rounds = [roundWith(["ci/test"])];
+    h.publicCopy = { paired: true, pr: null };
+    expect(await conflictGateBody(worker, WHO, 7)).toMatchObject({ reasons: ["ci_not_green"] });
+    expect(h.publicReads).toEqual([]);
+    expect(h.gateCalls).toEqual([]);
+  });
+
+  it("an unpaired runner_local item is unchanged: the fence's signals of the judged merge commit, and no public read", async () => {
+    h.publicCopy = null;
+    h.runnerCi = { headSha: MID, names: ["ci/test"] };
+    await conflictGateBody(worker, WHO, 7);
+    expect(h.gateCalls).toEqual([[7, ["ci/test"]]]);
+    expect(h.publicReads).toEqual([]);
   });
 });

@@ -996,9 +996,10 @@ interface RoundRow {
   outcome: string | null;
   created_at: Date;
   ended_at: Date | null;
+  expected_signals: string[] | null;
 }
 
-const ROUND_COLUMNS = `id, account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind, run_id, to_sha, outcome, created_at, ended_at`;
+const ROUND_COLUMNS = `id, account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind, run_id, to_sha, outcome, created_at, ended_at, expected_signals`;
 
 const toRound = (r: RoundRow): ConflictRound => ({
   id: r.id,
@@ -1017,6 +1018,7 @@ const toRound = (r: RoundRow): ConflictRound => ({
   outcome: r.outcome,
   createdAt: r.created_at,
   endedAt: r.ended_at,
+  expectedSignals: r.expected_signals,
 });
 
 async function oneRound(client: Queryable, sql: string, params: unknown[]): Promise<ConflictRound | null> {
@@ -1143,6 +1145,11 @@ export async function listConflictRounds(client: Queryable, accountId: string, w
   return rows.map(toRound);
 }
 
+/** The table's rule for a round's expected CI signal names (1023): 1 to 200 names, each 1 to 255 characters, no control or line-separator character. */
+export function roundSignalsOk(names: readonly string[]): boolean {
+  return names.length >= 1 && names.length <= 200 && names.every((n) => typeof n === "string" && n.length >= 1 && n.length <= 255 && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(n));
+}
+
 export type StartEntrylessRoundResult = { ok: true; round: ConflictRound } | { ok: false; reason: "rounds_exhausted" | "not_startable" };
 
 /**
@@ -1153,23 +1160,25 @@ export type StartEntrylessRoundResult = { ok: true; round: ConflictRound } | { o
  */
 export async function startEntrylessConflictRound(
   client: Queryable,
-  input: { accountId: string; workItemId: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[]; kind?: RoundKind },
+  input: { accountId: string; workItemId: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[]; kind?: RoundKind; expectedSignals?: readonly string[] },
 ): Promise<StartEntrylessRoundResult> {
   const kind = input.kind ?? "conflict";
   if (kind !== "conflict" && kind !== "renumber") throw new MergeQueueError("bad_input");
   assertSha(input.fromSha);
   assertSha(input.baseSha);
+  // D#483 S5-j2e-RUNNER: a list the table would refuse is recorded as nothing (the gate then never reads the item's CI as green), so a round is never lost to a name.
+  const signals = input.expectedSignals !== undefined && roundSignalsOk(input.expectedSignals) ? [...input.expectedSignals] : null;
   const round = await oneRound(
     client,
-    `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind)
-     SELECT w.account_id, w.repo_id, w.id, NULL, r.used + 1, $3, $4, $5, $6::text[], $8::text
+    `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind, expected_signals)
+     SELECT w.account_id, w.repo_id, w.id, NULL, r.used + 1, $3, $4, $5, $6::text[], $8::text, $9::text[]
        FROM work_items w, LATERAL (SELECT count(*)::int AS used FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2) r
       WHERE w.account_id = $1 AND w.id = $2 AND w.repo_id IS NOT NULL AND r.used < $7
         AND NOT EXISTS (SELECT 1 FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 AND outcome IS NULL)
         AND NOT EXISTS (SELECT 1 FROM merge_queue_entries WHERE account_id = $1 AND work_item_id = $2 AND state NOT IN ('merged', 'closed', 'cancelled'))
      ON CONFLICT (account_id, work_item_id, round) DO NOTHING
      RETURNING ${ROUND_COLUMNS}`,
-    [input.accountId, input.workItemId, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles], MAX_CONFLICT_ROUNDS, kind],
+    [input.accountId, input.workItemId, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles], MAX_CONFLICT_ROUNDS, kind, signals],
   );
   if (round) return { ok: true, round };
   return { ok: false, reason: (await listConflictRounds(client, input.accountId, input.workItemId)).length >= MAX_CONFLICT_ROUNDS ? "rounds_exhausted" : "not_startable" };

@@ -2156,6 +2156,45 @@ describe("a runner_local order blocked for an overlap", () => {
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual(result);
   });
 
+  // D#483 S5-j2e-RUNNER PR 4: the direct gate waits on a busy repository and asks again after an unreadable resource; the plane-order path does the same, bounded the same way.
+  describe("a block that time clears: the order is asked for again, never a stop on the first answer", () => {
+    it("busy twice, then merged: two waits, three gate asks, and no round is started", async () => {
+      conflict.orderReroutes = 0;
+      const t = setup(fresh({ gates: [delegated], orders: [blocked("merge_repo_busy"), blocked("merge_repo_busy"), { state: "merged", code: null }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+      expect(world.sleeps).toBe(2);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+      expect(conflict.orderReroutes).toBe(0);
+    });
+
+    it("always busy: asked again for the same hour as the direct gate (120 waits), then today's stop with the order's code", async () => {
+      const t = setup(fresh({ gates: [delegated], orders: [blocked("merge_repo_busy")] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "merge_repo_busy" });
+      expect(world.sleeps).toBe(120);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(121);
+    });
+
+    it("an unreadable resource is asked about once more: then merged, or the stop on the second answer", async () => {
+      let t = setup(fresh({ gates: [delegated], orders: [blocked("ordered_resource_unreadable"), { state: "merged", code: null }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+      expect(world.sleeps).toBe(1);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(2);
+      world.sleeps = 0;
+      t = setup(fresh({ gates: [delegated], orders: [blocked("ordered_resource_unreadable")] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "ordered_resource_unreadable" });
+      expect(world.sleeps).toBe(1);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(2);
+    });
+
+    it("the re-ask after a round keeps asking the round's own gate (afterConflict), not the plain one", async () => {
+      conflict.orderReroute = [{ state: "started" }];
+      conflict.looks = [{ state: "passed", headSha: "b".repeat(40) }];
+      const t = setup(fresh({ gates: [delegated, delegated, delegated], orders: [blocked(), blocked("merge_repo_busy"), { state: "merged", code: null }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+    });
+  });
+
   it("a head that moved since the order goes back to review", async () => {
     conflict.orderReroute = [{ state: "in_review" }];
     setup(fresh({ gates: [delegated], orders: [blocked()] }));
@@ -2165,7 +2204,7 @@ describe("a runner_local order blocked for an overlap", () => {
   });
 
   it("a block for any other code never asks the start: today's stop, recorded with its code", async () => {
-    for (const code of ["ci_not_green", "runner_ordered_unsupported", "ordered_resource_unreadable"]) {
+    for (const code of ["ci_not_green", "runner_ordered_unsupported", "ordered_resource_path_too_long"]) {
       conflict.orderReroutes = 0;
       setup(fresh({ gates: [delegated], orders: [blocked(code)] }));
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: code });

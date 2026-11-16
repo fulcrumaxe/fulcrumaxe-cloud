@@ -1,13 +1,15 @@
 import type { Pool } from "pg";
+import { reportError } from "@fx/telemetry";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest } from "@fx/pipeline";
+import { createReviewGitHubPort, expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest, type GitHubHttp } from "@fx/pipeline";
 import { bindCompleteConflictRound, bindCompleteEntryless, completeRunnerEntryless, endRoundWithoutPr, endRunnerRoundIfTargetChanged, entrylessStartPorts, openRunnerRound, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
 import { bindCompleteDeltaReview } from "./mergeQueueDeltaReview";
 import { entrylessRenumberPorts } from "./mergeQueueRenumber";
 import { openQueueGitHub } from "./mergeQueue";
 import { openInstallationHttp } from "./github/installationHttp";
+import { openForRepo } from "./github/localOnlyHttp";
 import { mergeGateBody, type GateOut, type ReviewWorker } from "./advanceReviewSteps";
 import type { StepWho } from "./advanceStageSteps";
 
@@ -182,7 +184,7 @@ export async function runnerConflictBody(worker: QueueWorker | null, who: StepWh
       await mergeQueue.recordStop(runnerStartPorts(base), subject, "round_not_started", subject.headSha, "merge_conflict", { baseRef: order.conflict_base_ref, conflictFiles: order.conflict_files });
       return { state: "stopped", reason: "merge_conflict" };
     }
-    const out = await mergeQueue.startEntrylessFromRunnerFacts(runnerStartPorts(base), subject, { verdict: order.conflict_verdict, baseSha: order.conflict_base_sha, baseRef: order.conflict_base_ref, files: order.conflict_files });
+    const out = await mergeQueue.startEntrylessFromRunnerFacts(runnerStartPorts(base), subject, { verdict: order.conflict_verdict, baseSha: order.conflict_base_sha, baseRef: order.conflict_base_ref, files: order.conflict_files }, await pairedRoundShape(pool, who, subject));
     return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
   });
 }
@@ -236,7 +238,7 @@ export async function runnerOrderRerouteBody(worker: QueueWorker | null, who: St
     if (!runner) return { state: "not_applicable" };
     // The round's base is the default branch's tip NOW (the runner's may be older); the runner's verdict and paths are kept as the hint they are.
     const tip = await runner.fence.defaultBranchTip({ repoId: subject.repoId, prNumber: subject.prNumber });
-    const out = await mergeQueue.startEntrylessFromRunnerFacts(runnerStartPorts(base), subject, { verdict: order.conflict_verdict, baseSha: tip.sha, baseRef: tip.branch, files: order.conflict_files }, { eventCode: "overlap_unreviewed" });
+    const out = await mergeQueue.startEntrylessFromRunnerFacts(runnerStartPorts(base), subject, { verdict: order.conflict_verdict, baseSha: tip.sha, baseRef: tip.branch, files: order.conflict_files }, { eventCode: "overlap_unreviewed", ...(await pairedRoundShape(pool, who, subject)) });
     return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
   });
 }
@@ -277,6 +279,43 @@ export async function conflictWaitBody(worker: QueueWorker | null, who: StepWho)
 }
 
 /**
+ * D#483 S5-j2e-RUNNER: the CI signal names the paired item's public pull request shows NOW, read at the start of a round while the head its newest plane-merge order was placed on is still the
+ * live public head. The fence answers for the pull request's last commit whatever sha is asked, so the snapshot's own head is compared with the order's: a different one (the head moved since)
+ * reads as nothing, and nothing is never green. Null when nothing can be read.
+ */
+async function pairedExpectedSignals(pool: Pool, who: StepWho, copy: { owner: string; name: string; number: number; branch: string }): Promise<string[] | null> {
+  const loaded = await loadReviewContext(pool, who.accountId, who.workItemId);
+  if (!loaded.ok) return null;
+  const order = await withTenant(pool, who.accountId, async (c) =>
+    (await c.query<{ expected_public_head: string }>("SELECT expected_public_head FROM plane_merge_orders WHERE account_id = $1 AND work_item_id = $2 ORDER BY created_at DESC, id DESC LIMIT 1", [who.accountId, who.workItemId])).rows[0],
+  );
+  if (!order) return null;
+  // The code repository's fenced client without the merge call, as the go phase opens it.
+  const http = (await openForRepo(openInstallationHttp, loaded.ctx.executionMode, "merge_gate", { repoId: loaded.ctx.repoId, owner: copy.owner, name: copy.name }, { withoutMerge: true })) as GitHubHttp;
+  const port = createReviewGitHubPort({ pool, http }, { ...loaded.ctx, owner: copy.owner, name: copy.name }, { accountId: who.accountId, workItemId: who.workItemId, prNumber: copy.number, recordedBranch: copy.branch });
+  const snapshot = await port.getCiSnapshot({ repoId: loaded.ctx.repoId, prNumber: copy.number }, order.expected_public_head);
+  return snapshot.headSha === order.expected_public_head ? expectedSignalNames(snapshot) : null;
+}
+
+/**
+ * The names a round's start records for a PAIRED item: only the item's first round (a later round starts after a republish, so its public head is no longer the pre-round one), only when the
+ * public pull request is open and its signals can be read at the order's head. Anything else records nothing, and the gate then never reads that item's CI as green.
+ */
+async function pairedRoundShape(pool: Pool, who: StepWho, subject: { roundsUsed: number }): Promise<{ expectedSignals: readonly string[] } | undefined> {
+  if (subject.roundsUsed !== 0) return undefined;
+  try {
+    const copy = await readPublicPullRequest(pool)(who.accountId, who.workItemId);
+    if (copy === null || copy.pr === null) return undefined;
+    const names = await pairedExpectedSignals(pool, who, copy.pr);
+    return names !== null && names.length > 0 ? { expectedSignals: names } : undefined;
+  } catch (err) {
+    // Fail closed: no names are recorded, so the gate never reads this item's CI as green. The failure is still reported (the error only).
+    reportError(err, { stage: "merge_queue_wait.paired_round_shape" });
+    return undefined;
+  }
+}
+
+/**
  * D#519 MQ4-e1-a: the direct gate asked again for the merge commit a conflict round produced. Like the queue tick, it must show every CI signal the FIRST round's pre-round head
  * showed (the platform's own review status alone is no CI), and a head with nothing to compare against never reads as green: the answer is then `ci_not_green` without the gate
  * being run, and the workflow's bounded wait asks again.
@@ -293,6 +332,10 @@ export async function conflictGateBody(worker: QueueWorker | null, who: StepWho,
           // D#519 MQ4-e2-c3: a `runner_local` repository's checks are read through the fence (`CommitChecks`, A9), which answers for the pull request's LAST commit only. So the signals
           // expected are the ones the judged merge commit shows now, and only while that is still the head; the first round's pre-round head can no longer be read. The gate then
           // demands every one of them green plus the branch's required checks, and an empty list is never green (below).
+          // D#483 S5-j2e-RUNNER: a PAIRED item's merge gate reads CI on the PUBLIC pull request, so the signals expected are that copy's, as the FIRST round recorded them at its start (while the
+          // pre-round head was still the public head: the fence answers for the last commit only, so after the republish they can no longer be read). None recorded is never green. An unpaired item is unchanged.
+          const copy = await readPublicPullRequest(pool)(who.accountId, who.workItemId);
+          if (copy !== null) return copy.pr === null || !rounds[0]?.expectedSignals?.length ? null : [...rounds[0].expectedSignals];
           const runner = await openRunnerRound(base, subject);
           const judged = [...rounds].reverse().find((r) => r.toSha !== null)?.toSha;
           if (!runner || !judged) return null;

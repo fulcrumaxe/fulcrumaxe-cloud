@@ -9,6 +9,8 @@ const h = vi.hoisted(() => ({
   halt: { halted: false, halt_epoch: 0 },
   ctx: { ok: true, ctx: { repoId: "repo-1", executionMode: "sandbox" } } as { ok: boolean; ctx?: { repoId: string; executionMode: string } },
   paired: null as unknown,
+  pairedThrows: null as unknown,
+  reported: [] as unknown[][],
   stackParent: null as unknown,
   parentEntry: true,
   enqueue: [] as unknown[],
@@ -42,6 +44,9 @@ const h = vi.hoisted(() => ({
   gateEvent: null as Record<string, unknown> | null,
   fenceCalls: [] as string[],
   runnerOpen: true,
+  /** S5-j2e-RUNNER: what the fence reads of the public pull request: its LAST commit only, whatever sha is asked; the shas asked are kept. */
+  publicLive: { head: "1".repeat(40), names: [] as string[], fail: false } as { head: string; names: string[]; fail: boolean },
+  publicAsked: [] as string[],
 }));
 
 vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({
@@ -51,7 +56,19 @@ vi.mock("@fx/core/src/pendingWork.js", () => ({ markWorkPending: async (...a: un
 vi.mock("@fx/core/src/work-items/stackParentPull.js", () => ({ readStackParentPull: async () => h.stackParent }));
 vi.mock("@fx/pipeline", () => ({
   loadReviewContext: async () => h.ctx,
-  readPublicPullRequest: () => async () => h.paired,
+  expectedSignalNames: (s: { names: string[] }) => s.names,
+  createReviewGitHubPort: () => ({
+    // Like the fence: the answer is for the pull request's last commit, whatever sha is passed in.
+    getCiSnapshot: async (_pr: unknown, sha: string) => {
+      h.publicAsked.push(sha);
+      if (h.publicLive.fail) throw new Error("unreadable");
+      return { headSha: h.publicLive.head, names: h.publicLive.names };
+    },
+  }),
+  readPublicPullRequest: () => async () => {
+    if (h.pairedThrows) throw h.pairedThrows;
+    return h.paired;
+  },
   mergeQueue: {
     hasEntryForPr: async () => h.parentEntry,
     enqueueEntry: async (_c: unknown, input: unknown) => (h.enqueue.push(input), { entry: { id: "entry-1" }, outcome: h.enqueueOutcome }),
@@ -63,6 +80,7 @@ vi.mock("@fx/pipeline", () => ({
     startEntrylessFromRunnerFacts: async (_ports: unknown, subject: unknown, facts: unknown, shape?: unknown) => (h.runnerStarts.push(shape === undefined ? [subject, facts] : [subject, facts, shape]), h.startOut),
   },
 }));
+vi.mock("@fx/telemetry", () => ({ reportError: (...a: unknown[]) => void h.reported.push(a) }));
 vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => h.github }));
 vi.mock("./mergeQueueConflict", () => ({
   bindCompleteConflictRound: () => async () => void h.roundDone++,
@@ -90,6 +108,7 @@ vi.mock("./mergeQueueConflict", () => ({
 vi.mock("./mergeQueueRenumber", () => ({ entrylessRenumberPorts: () => ({}) }));
 vi.mock("./mergeQueueDeltaReview", () => ({ bindCompleteDeltaReview: () => async () => (h.completed++, h.completion) }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}) }));
+vi.mock("./github/localOnlyHttp", () => ({ openForRepo: async () => ({}) }));
 
 import { RUNNER_CONFLICT_START_ENABLED, RUNNER_ORDER_REROUTE_ENABLED, runnerOrderRerouteBody, conflictStartBody, conflictWaitBody, enqueueBody, rerouteStartBody, runnerConflictBody as runnerConflictBodyWith, waitBody, type QueueWorker } from "./mergeQueueWait";
 
@@ -621,6 +640,59 @@ describe("runnerOrderRerouteBody", () => {
     expect(h.fenceCalls).toEqual(["defaultBranchTip"]);
     expect(h.runnerStarts).toHaveLength(1);
     expect((h.runnerStarts[0]![1] as { files: string[] }).files).toEqual(lie);
+  });
+});
+
+describe("S5-j2e-RUNNER: the paired round records the public CI signal names at its start, once", () => {
+  const PRE = "1".repeat(40);
+  const ORDER = { state: "blocked", reviewed_head: "c".repeat(40), created_at: new Date(0), outcome_code: "overlap_unreviewed", conflict_verdict: "conflict_platform", conflict_base_sha: "d".repeat(40), conflict_base_ref: "main", conflict_files: ["src/a.ts"], expected_public_head: PRE };
+  const COPY = { paired: true, pr: { owner: "o", name: "n", number: 9, branch: "fx/p-1", stampedHead: "b".repeat(40), pushState: "pr_opened", sourceHead: null, overlayGlobs: [], managedByPerson: false } };
+  beforeEach(() => {
+    h.order = { ...ORDER };
+    h.gateEvent = { reasons: ["overlap_unreviewed"] };
+    h.github = null;
+    h.runnerOpen = true;
+    h.paired = COPY;
+    h.subject = { id: "item", headSha: "c".repeat(40), roundsUsed: 0 };
+    h.publicLive = { head: PRE, names: ["ci/test", "ci/slow"], fail: false };
+    h.publicAsked = [];
+    h.runnerStarts = [];
+    h.startOut = { outcome: "started" };
+    h.pairedThrows = null;
+    h.reported = [];
+  });
+
+  it("when the public pull request cannot be read at all, nothing is recorded (fail closed), the round still starts, and only the error is reported", async () => {
+    const boom = new Error("pull request read failed");
+    h.pairedThrows = boom;
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "started" });
+    expect(h.runnerStarts[0]![2]).toEqual({ eventCode: "overlap_unreviewed" });
+    expect(h.reported).toEqual([[boom, { stage: "merge_queue_wait.paired_round_shape" }]]);
+  });
+
+  it("the live public head is the order's head: the names go to the start with the shape, and nothing else is read", async () => {
+    await runnerOrderRerouteBody(worker, WHO);
+    expect(h.runnerStarts[0]![2]).toEqual({ eventCode: "overlap_unreviewed", expectedSignals: ["ci/test", "ci/slow"] });
+    expect(h.publicAsked).toEqual([PRE]);
+  });
+
+  it("the same for a round started from a failed order's verdict", async () => {
+    h.order = { ...ORDER, state: "failed" };
+    await runnerConflictBodyWith(worker, WHO);
+    expect(h.runnerStarts[0]![2]).toEqual({ expectedSignals: ["ci/test", "ci/slow"] });
+  });
+
+  it.each([
+    ["a public head that is not the order's (the fence answers for the last commit whatever is asked)", () => void (h.publicLive.head = "2".repeat(40))],
+    ["a read that fails", () => void (h.publicLive.fail = true)],
+    ["a head that shows no signal", () => void (h.publicLive.names = [])],
+    ["a later round (the head was republished by the first)", () => void (h.subject = { id: "item", headSha: "c".repeat(40), roundsUsed: 1 })],
+    ["no open public pull request", () => void (h.paired = { paired: true, pr: null })],
+    ["an unpaired item", () => void (h.paired = null)],
+  ])("records nothing for %s: the round still starts, and the gate then never reads CI as green", async (_name, arrange) => {
+    arrange();
+    expect(await runnerOrderRerouteBody(worker, WHO)).toEqual({ state: "started" });
+    expect(h.runnerStarts[0]![2]).toEqual({ eventCode: "overlap_unreviewed" });
   });
 });
 
