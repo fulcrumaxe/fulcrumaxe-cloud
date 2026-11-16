@@ -34,6 +34,9 @@ import {
   type AllowanceSet,
   type BrowserMethod,
   DEPLOY_VERIFIER_ROLE,
+  CHECK_FIX_SCOPE_EXTRA_MAX,
+  MAX_JOB_SCOPE_ENTRIES,
+  checkFixScopeExtra,
   type Job,
   type SignedJob,
 } from "@fulcrumaxe/runner-protocol";
@@ -464,7 +467,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       }
 
       // D#6 SCOPE-IN-JOB: the Spec's file patterns ride next to the check, for the same roles: the ones that push (a build, a check-fix round). A review or a read-only role changes nothing, so it carries none.
-      const scope = SPEC_PINNED_RUNNER_ROLES.has(role) && context.scope && context.scope.length > 0 ? [...context.scope] : undefined;
+      const specScope = SPEC_PINNED_RUNNER_ROLES.has(role) && context.scope && context.scope.length > 0 ? [...context.scope] : undefined;
 
       // D#600 CX-5c: the item's excludes as they stand now (its own rules over the repository's), read when the job is issued, so a fix round gets the rules of its own issue and not those of the
       // first start. Paths and globs only. A read that fails refuses the job (nothing is recorded): a job never goes out without the list it should have carried (fail closed).
@@ -518,6 +521,15 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       // A start that sets it where the job cannot carry it (no continued branch) is signed without it: no marker never skips a check, so this fails toward running it.
       // Only a job that carries a check can have one skipped, so only such a job names its kind: a round with no check is not gated to the newer protocol for nothing.
       const fixRoundKind = run.fixRoundKind !== undefined && role === "executor" && continues !== null && conflictRound === undefined && check !== undefined ? run.fixRoundKind : undefined;
+
+      // D#6 CHECK-FIX-SCOPE: a check-fix round's job may carry, beside the Spec's patterns, the failed test files the cloud counted as inside the change (from the failed run's stored check summary). Only
+      // for a job that is itself a `check_fix` round (so the check can be skipped for nothing else), only on top of a Spec scope that was read (no scope: nothing added), only plain test-shaped file paths (each
+      // re-tested here), at most the check's own failed-files cap, nothing already listed twice. Anything else is dropped, never a refusal: the job then carries the Spec's list alone, as before.
+      let scope = specScope;
+      if (specScope && fixRoundKind === "check_fix" && run.scopeExtra && run.scopeExtra.length > 0) {
+        const extra = checkFixScopeExtra(run.scopeExtra, specScope, Math.max(0, Math.min(CHECK_FIX_SCOPE_EXTRA_MAX, MAX_JOB_SCOPE_ENTRIES - specScope.length)));
+        if (extra.length > 0) scope = [...specScope, ...extra];
+      }
 
       // D#749 V2c-1: a deploy verifier job is issued with the method the starting code chose (the cloud's own pipeline, never a runner or model text), and no other job has one. Anything else is no job.
       if ((role === DEPLOY_VERIFIER_ROLE) !== (run.browserMethod !== undefined)) throw new JobIssueError("job_invalid");

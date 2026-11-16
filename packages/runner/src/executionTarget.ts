@@ -298,6 +298,11 @@ export interface ExecutionRun {
    */
   fixRoundKind?: FixRoundKind;
   /**
+   * D#6 CHECK-FIX-SCOPE: plain files a check-fix round adds to its job's `scope` for this one job: the failed test files the cloud counted as inside the change from the failed run's stored check summary.
+   * Set only by the cloud's own check-fix start, never taken from a runner. The issuer applies it only to a job that is a `check_fix` round and re-tests every path; it never touches the Spec.
+   */
+  scopeExtra?: readonly string[];
+  /**
    * D#599 PL-2b-2: set on a run that starts a round on a branch another side opened (not a follow-up): `RunnerTarget.dispatch` then issues a continuation
    * with no session (a foreign session is never claimed). A follow-up of a lost round sets `continuesBranch` alone and goes through `resume`.
    */

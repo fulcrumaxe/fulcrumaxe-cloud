@@ -132,6 +132,9 @@ describe("done route [pg]", () => {
     workItem?: false;
     /** D#6 R-CHK-3: the approved check the run's signed job carries. */
     check?: Check;
+    /** D#6 CHECK-FIX-SCOPE: the signed job's `scope` and round kind (a check-fix round carries the Spec's patterns plus the added files). */
+    jobScope?: string[];
+    fixKind?: "check_fix" | "review_fix";
   }
 
   const file = (path: string, changeType: FakeChangeType = "MODIFIED") => ({ path, changeType });
@@ -171,6 +174,8 @@ describe("done route [pg]", () => {
       expires_at: "2026-10-13T12:00:00.000Z",
       key_id: "k1",
       ...(o.check ? { check: o.check } : {}),
+      ...(o.jobScope ? { scope: o.jobScope } : {}),
+      ...(o.fixKind ? { fix_round_kind: o.fixKind } : {}),
     };
     await h.admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, runner_id, lease_generation, lease_expires_at, started_at, spec_version_id)
@@ -794,6 +799,39 @@ describe("done route [pg]", () => {
       expect(s.repo.branches.has(s.branch)).toBe(true);
       expect(labels(s.fake)).toEqual(["A2", "A1 RunBranchState", "A3", "A4", "A1 PullRequestFiles", "A5"]);
       expect(labels(s.fake)).not.toContain("A1 MarkReady");
+    });
+
+    describe("D#6 CHECK-FIX-SCOPE: a check-fix round is held to the Spec's list plus the files its own signed job names", () => {
+      const BR = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+      const A_TEST = "packages/worker/test/a.test.ts";
+      const B_TEST = "packages/worker/test/b.test.ts";
+      const round = (o: SceneOptions) => scene({ continues: { branch: BR }, dispatchBase: "c".repeat(40), branchOid: "d".repeat(40), aheadBy: 1, scope: ["src/**"], ...o });
+
+      it("a round whose job names the failed test file passes the scope test with that file in the pull request", async () => {
+        const s = await round({ fixKind: "check_fix", jobScope: ["src/**", B_TEST], files: [file("src/app.ts"), file(B_TEST)] });
+        expect(parsedDone(await s.call())).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+      });
+
+      it("round 2 is not closed for round 1's test edit: the pull request holds test A and test B, and the job carries both", async () => {
+        const s = await round({ fixKind: "check_fix", jobScope: ["src/**", A_TEST, B_TEST], files: [file(A_TEST), file(B_TEST)] });
+        expect(parsedDone(await s.call())).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+        // the same pull request under a job that lacks round 1's file is the refusal this guards against
+        const lacking = await round({ fixKind: "check_fix", jobScope: ["src/**", B_TEST], files: [file(A_TEST), file(B_TEST)] });
+        expect(parsedDone(await lacking.call())).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      });
+
+      it.each([
+        ["a review fix round", { fixKind: "review_fix" as const }],
+        ["a round with no kind", {}],
+      ])("%s is held to the Spec's list alone, whatever its job's scope says", async (_n, o) => {
+        const s = await round({ ...o, jobScope: ["src/**", B_TEST], files: [file(B_TEST)] });
+        expect(parsedDone(await s.call())).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      });
+
+      it("a source file or a config file named by the job is not lifted", async () => {
+        const s = await round({ fixKind: "check_fix", jobScope: ["src/**", "packages/worker/src/charge.ts", "packages/worker/test/vitest.config.ts"], files: [file("packages/worker/src/charge.ts")] });
+        expect(parsedDone(await s.call())).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+      });
     });
 
     describe("a paired repository's private-only paths", () => {

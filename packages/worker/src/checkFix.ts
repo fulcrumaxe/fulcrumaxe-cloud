@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { CHECK_FAILED_FILES_MAX, CHECK_FAILED_FILE_CHARS, ITEM_PR_BRANCH, readCheckFailedFiles } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_MAX, CHECK_FAILED_FILE_CHARS, CHECK_FIX_SCOPE_EXTRA_MAX, CHECK_HEADER_END_MIN_PROTOCOL, ITEM_PR_BRANCH, checkFixScopeExtra, parseAcceptanceScope, readCheckFailedFiles } from "@fulcrumaxe/runner-protocol";
 import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, insertRunEvent, readBoundItemBranch, readRecordedRunnerPullRequest, RUNNER_RUN_BRANCH, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { escapeFenceLookalikes } from "@fx/pipeline";
 import { decisionStartFor } from "./decisionStart.js";
-import { checkFixRound } from "@fx/spend";
+import { checkFixRound, maxFixRounds } from "@fx/spend";
 import { REPUBLISH_BASE_MISSING } from "@fx/core/src/work-items/baseSync.js";
-import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_NOT_RUN_OUT_OF_SCOPE, failedOutsideChange } from "@fx/core/src/work-items/checkFailure.js";
+import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_NOT_RUN_OUT_OF_SCOPE, failedOutsideChange, importLinkedFailedFiles } from "@fx/core/src/work-items/checkFailure.js";
 import { BASE_SYNCED_PROMPT_LINE, FIX_BASE_EVENT, hasPublicCopy } from "./fixRoundBase.js";
 import { PRIVATE_PR_MARKER } from "./planePublish.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
@@ -108,8 +108,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   if (!UUID.test(who.accountId) || !UUID.test(who.workItemId) || !UUID.test(failedRunId)) return { ok: false, reason: "invalid_input" };
   const key = `advance:${who.workItemId}:checkfix:${failedRunId}`;
   const facts = await withTenant(deps.pool, who.accountId, async (client) => {
-    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; check_reason: string | null; failed_files: unknown; failed_files_more: unknown; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; gh_owner: string | null; gh_name: string | null }>(
-      `SELECT w.repo_id, ar.spec_version_id, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary, c.reason AS check_reason,
+    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; check_reason: string | null; failed_files: unknown; failed_files_more: unknown; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; runner_protocol: number | null; gh_owner: string | null; gh_name: string | null }>(
+      `SELECT w.repo_id, ar.spec_version_id, (SELECT r.protocol_version FROM runners r WHERE r.account_id = ar.account_id AND r.id = ar.runner_id) AS runner_protocol, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary, c.reason AS check_reason,
               (SELECT e.payload->'failed_files' FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.check_ended' ORDER BY e.seq DESC LIMIT 1) AS failed_files,
               (SELECT e.payload->'failed_files_more' FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.check_ended' ORDER BY e.seq DESC LIMIT 1) AS failed_files_more,
               (SELECT run_id FROM agent_run_idempotency_keys k WHERE k.account_id = $1 AND k.idempotency_key = $4) AS prior
@@ -204,6 +204,28 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   // D#7 DP4b-3b: what this round may decide, resolved now and written with the run; the block is in the prompt the run reads.
   const dec = await decisionStartFor(deps.pool, who.accountId, who.workItemId);
   const prompt = dec.prompt(checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "", failedFiles: failedFilesOf(row) }) + (synced ? `\n\n${BASE_SYNCED_PROMPT_LINE}` : ""));
+  // D#6 CHECK-FIX-SCOPE: the failed test files the check's import graph put inside the change (the same reading `failedOutsideChange` just used) ride on this round's job beside the Spec's list, so the
+  // runner and `done` do not refuse the one-file fix such a failure needs. The files an earlier check-fix round of this chain was given ride along too (the pull request holds that round's edit, and `done`
+  // judges the whole of it). One filter and one cap over the union; this round's job only, never written to the Spec; nothing new when the check timed out (partial output) or the graph was not read.
+  // The summary is read only when the cloud's own record says the runner that ran the check is new enough to have written the end-of-header line (`runners.protocol_version` of the run's runner, never anything
+  // in the summary text): an older runner's summary can have its output read as header. No record, or an older one: nothing is taken from the summary.
+  const markerRunner = typeof row.runner_protocol === "number" && row.runner_protocol >= CHECK_HEADER_END_MIN_PROTOCOL;
+  const fromSummary = row.timed_out === true || !markerRunner ? [] : importLinkedFailedFiles(row.summary, CHECK_FIX_SCOPE_EXTRA_MAX);
+  const carried = await withTenant(deps.pool, who.accountId, async (client) => {
+    const jobs = await client.query<{ scope: unknown }>(
+      `WITH RECURSIVE chain AS (
+         SELECT id, parent_run_id, job_signed, 0 AS depth FROM agent_runs WHERE account_id = $1 AND id = $2
+         UNION ALL
+         SELECT a.id, a.parent_run_id, a.job_signed, c.depth + 1 FROM agent_runs a JOIN chain c ON a.id = c.parent_run_id WHERE a.account_id = $1 AND c.depth < $3
+       )
+       SELECT job_signed #> '{job,scope}' AS scope FROM chain WHERE job_signed #>> '{job,fix_round_kind}' = 'check_fix'`,
+      [who.accountId, failedRunId, maxFixRounds() + 1],
+    );
+    const spec = row.spec_version_id === null ? null : await client.query<{ files: unknown }>("SELECT frontmatter -> 'acceptance_files' AS files FROM spec_versions WHERE account_id = $1 AND id = $2", [who.accountId, row.spec_version_id]);
+    const parsed = parseAcceptanceScope(spec?.rows[0]?.files);
+    return { entries: jobs.rows.flatMap((j) => (Array.isArray(j.scope) ? (j.scope as unknown[]) : [])), held: parsed.kind === "known" ? parsed.entries : [] };
+  });
+  const scopeExtra = checkFixScopeExtra([...fromSummary, ...carried.entries], carried.held, CHECK_FIX_SCOPE_EXTRA_MAX);
   const idempotency = { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") };
   try {
     if (bound !== null) {
@@ -222,6 +244,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         prompt,
         // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: this round answers a failed check, so a runner never skips its check on an unmoved tip: a flaky check may pass on the unchanged head.
         fixRoundKind: "check_fix" as const,
+        ...(scopeExtra.length > 0 ? { scopeExtra } : {}),
         ...expectedExecutionMode,
         ...(row.spec_version_id === null ? {} : { specVersionId: row.spec_version_id }),
         continues: { branch: bound.branch, prNumber: bound.prNumber, ...(baseSha === null ? {} : { baseSha }) },
@@ -247,6 +270,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         parentRunId: failedRunId,
         prompt,
         fixRoundKind: "check_fix" as const,
+        ...(scopeExtra.length > 0 ? { scopeExtra } : {}),
         // The base of a round that republishes the public pull request: signed only for the branch it was synced on (the issuer compares).
         ...(needed === true && baseSha !== null && target !== null ? { base: { sha: baseSha, branch: target.pr.branch } } : {}),
         // A sandbox round has no signed job to carry the base: the cloud records it in the run's create transaction, as for a review fix round.
