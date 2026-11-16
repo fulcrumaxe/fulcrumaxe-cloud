@@ -585,6 +585,9 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   // The card's rows speak of the head the reviewers judged and the item's own pull request; a paired item's public head rides in the dedupe key.
   const headForRow = publicPr !== null ? (SHA_PATTERN.test(headSha) ? headSha : null) : SHA_PATTERN.test(outHead) ? outHead : null;
   const keyHead = publicPr !== null ? `${headForRow ?? "nohead"}:${SHA_PATTERN.test(outHead) ? outHead : "nopublic"}` : (headForRow ?? "nohead");
+  // A go phase's answer is one per ORDER, not one per head: a second order on the same head (the person asked again) must leave its own fact, or the reroute that reads "the gate's answer at or after this order" finds nothing. A go call
+  // with no order named (a caller outside the plane merge) keeps the head-only key.
+  const goKey = go === undefined ? "" : go.orderId !== undefined ? `go:${go.orderId}:` : "go:";
   // Migration 0990: the version the gate read is written on its own facts, so a receipt written later names it instead of re-reading the dial by time.
   const dialFact = dialRead ? { dialVersion: mergeDial.version } : {};
   await withTenant(pool, accountId, async (client) => {
@@ -592,7 +595,7 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       ...dialFact,
       workItemId,
       kind: "merge_gate",
-      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}${policyHold ? ":policy_hold" : ""}${busy ? (out.outcome === "ready_human_merges" && out.reasons.includes("ordered_resource_unreadable") ? ":merge_repo_busy_unreadable" : ":merge_repo_busy") : ""}`,
+      dedupeKey: `${keyHead}:${goKey}${out.outcome}${policyHold ? ":policy_hold" : ""}${busy ? (out.outcome === "ready_human_merges" && out.reasons.includes("ordered_resource_unreadable") ? ":merge_repo_busy_unreadable" : ":merge_repo_busy") : ""}`,
       code: toCode(out.outcome),
       reasons: reasons.map((r) => toCode(r)),
       headSha: headForRow,

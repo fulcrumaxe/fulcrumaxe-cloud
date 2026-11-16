@@ -8,7 +8,7 @@ vi.mock("../../src/review/securityTrigger.js", async (original) => {
   return { ...real, securityTriggers: (input: Parameters<typeof real.securityTriggers>[0]) => (triggerCalls.push({ files: input.files.map((f) => ({ path: f.path })), truncated: input.truncated }), real.securityTriggers(input)) };
 });
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
+import { listDriverEvents, readGateBlockReasonsSince } from "@fx/core/src/work-items/driverEvents.js";
 import { LocalOnlyGithubError } from "@fx/runner-cloud";
 import { clearMergeQueueModeCache, type GitHubHttp, type LocalGitHubHttp } from "../../src/build/githubMergePort.js";
 import { LOCAL_REVIEW_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
@@ -1273,7 +1273,7 @@ describe("a paired runner_local item blocked for an overlap: round, delta review
   const ctxOf = async (w: World) => (await loadReviewContext(h.runWriterPool, w.accountId, w.workItemId)) as { ok: true; ctx: Parameters<typeof createReviewGitHubPort>[1] };
 
   /** The gate asked for the paired item with the runner's fact (the go phase). `expected` is the CI the public pull request showed before the round. */
-  function ask(w: World, o: { reviewed: string; pub: string; fact: NonNullable<GoAttestation["ordered"]>; expected?: readonly string[] }) {
+  function ask(w: World, o: { reviewed: string; pub: string; fact: NonNullable<GoAttestation["ordered"]>; expected?: readonly string[]; orderId?: string }) {
     const calls: DelegateCall[] = [];
     const run = () =>
       runMergeGateForItem(
@@ -1285,7 +1285,7 @@ describe("a paired runner_local item blocked for an overlap: round, delta review
           publicPlane: { open: async () => w.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) },
           mergeDelegate: async (a) => (calls.push(a), { delegated: true }),
         },
-        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(o.expected !== undefined ? { expectedSignals: o.expected } : {}), goPhase: { attestation: attest({ reviewedHead: o.reviewed, publicHead: o.pub, orderedCapable: true, ordered: o.fact }) } },
+        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(o.expected !== undefined ? { expectedSignals: o.expected } : {}), goPhase: { attestation: attest({ reviewedHead: o.reviewed, publicHead: o.pub, orderedCapable: true, ordered: o.fact }), ...(o.orderId !== undefined ? { orderId: o.orderId } : {}) } },
       );
     return { run, calls };
   }
@@ -1385,6 +1385,30 @@ describe("a paired runner_local item blocked for an overlap: round, delta review
     expectNoMergeAnywhere(w);
     expect(w.privLocal.denied).toEqual([]);
     expect(w.pubLocal.denied).toEqual([]);
+  });
+
+  it("each blocked go-phase order on the SAME head leaves its own gate fact, and a replay of the same order is still one fact", async () => {
+    const w = await world();
+    const gateRows = async () => (await h.admin.query("SELECT dedupe_key, reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_gate' AND code = 'ready_human_merges' ORDER BY seq", [w.workItemId])).rows as Array<{ dedupe_key: string; reasons: string[] }>;
+    const o1 = randomUUID();
+    const o2 = randomUUID();
+    expect(await ask(w, { reviewed: HEAD, pub: PUB_HEAD, fact: overlapFact, orderId: o1 }).run()).toMatchObject({ reasons: ["overlap_unreviewed"] });
+    expect(await gateRows()).toHaveLength(1);
+    // The same order asked again (a retry of one request): the same fact, not a second.
+    await ask(w, { reviewed: HEAD, pub: PUB_HEAD, fact: overlapFact, orderId: o1 }).run();
+    expect(await gateRows()).toHaveLength(1);
+    // The second order is placed now: what the reroute asks is "the gate's answer at or after this order" (the real lookup the web reroute uses). Nothing yet.
+    const secondOrderAt = (await h.admin.query("SELECT clock_timestamp() AS t")).rows[0].t as Date;
+    const since = () => tenant(w.accountId, (c) => readGateBlockReasonsSince(c, w.accountId, w.workItemId, secondOrderAt));
+    expect(await since()).toBeNull();
+    // A new order on the unchanged head: its own fact.
+    await ask(w, { reviewed: HEAD, pub: PUB_HEAD, fact: overlapFact, orderId: o2 }).run();
+    expect(await since()).toEqual(["overlap_unreviewed"]);
+    const rows = await gateRows();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.dedupe_key).some((k) => k.includes(`:go:${o1}:`))).toBe(true);
+    expect(rows.map((r) => r.dedupe_key).some((k) => k.includes(`:go:${o2}:`))).toBe(true);
+    expect(rows.every((r) => r.reasons.length === 1 && r.reasons[0] === "overlap_unreviewed")).toBe(true);
   });
 
   it("foreign facts end in a stop for a person: no round row, no run, and the card's code is the gate's own", async () => {
