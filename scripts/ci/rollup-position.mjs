@@ -23,6 +23,11 @@
 // fit inside the queue's check_response_timeout (150 min; docs/ops/merge-queue-and-lanes.md). ci.yml runs the step
 // only when the repository variable ROLLUP_ENABLED is 'true', and grows the job timeouts only then.
 //
+// Before any wait it reads the live ruleset (GET /repos/{repo}/rules/branches/{branch}, the job token is enough). It only
+// waits when the merge_queue rule has grouping_strategy HEADGREEN and check_response_timeout_minutes >= 150; with ALLGREEN
+// or a shorter timeout a waiting entry would be timed out and dequeued, so it runs in full at once. If the rules cannot
+// be read it runs in full too.
+//
 // Inputs (environment, as data): CI_EVENT_NAME, MG_HEAD_REF, MG_HEAD_SHA, GITHUB_REPOSITORY, GH_TOKEN,
 // SAME_TREE_ALSO_SET (as in same-tree.mjs), and optional ROLLUP_SETTLE_SECONDS (default 120, max 600).
 // On skip it appends the same CI_SAME_TREE=true lines same-tree.mjs does, so every heavy step already guards on it.
@@ -35,6 +40,40 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 export const MAX_WAIT_SECONDS = 80 * 60;
 export const POLL_SECONDS = 30;
 export const MAX_API_ERRORS = 2;
+// Waiting is only safe when the live queue settings give the front entry room to sit out the cap and then run in full.
+export const REQUIRED_GROUPING = "HEADGREEN";
+export const MIN_TIMEOUT_MINUTES = 150;
+
+/**
+ * Reads the live rules of the base branch and says whether an entry may wait for the entry on top of it.
+ * Returns {mayWait, reason}. mayWait is true only when a merge_queue rule says grouping_strategy HEADGREEN and
+ * check_response_timeout_minutes >= 150. With ALLGREEN, or a shorter timeout, a waiting entry would be timed out and
+ * dequeued (a stall); a missing rule, an unreadable answer or an error also answers false (run in full at once).
+ */
+export async function checkRuleset({ env, getJson }) {
+  const no = (reason) => ({ mayWait: false, reason });
+  try {
+    const m = REF_RE.exec(env.MG_HEAD_REF ?? "");
+    const repo = env.GITHUB_REPOSITORY ?? "";
+    if (!m || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return no("merge group inputs missing or malformed");
+    const rules = await getJson(`/repos/${repo}/rules/branches/${encodeURIComponent(m[1])}`);
+    if (!Array.isArray(rules)) return no("branch rules unreadable");
+    const queues = rules.filter((r) => r && r.type === "merge_queue");
+    if (queues.length === 0) return no("no merge_queue rule on the branch");
+    for (const r of queues) {
+      const p = r.parameters;
+      if (!p || typeof p !== "object") return no("merge_queue rule unreadable");
+      if (p.grouping_strategy !== REQUIRED_GROUPING) return no(`grouping_strategy is ${String(p.grouping_strategy)}, not ${REQUIRED_GROUPING}`);
+      const t = p.check_response_timeout_minutes;
+      if (typeof t !== "number" || !Number.isFinite(t) || t < MIN_TIMEOUT_MINUTES) {
+        return no(`check_response_timeout_minutes is ${String(t)}, under ${MIN_TIMEOUT_MINUTES}`);
+      }
+    }
+    return { mayWait: true, reason: `grouping_strategy ${REQUIRED_GROUPING} and check_response_timeout_minutes >= ${MIN_TIMEOUT_MINUTES}` };
+  } catch (e) {
+    return no(`error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 /** A cloud-built pull request (a Bot author, or an `fx/` branch), or one we cannot read: never skip around one. */
 export function isCloud(pr) {
@@ -93,7 +132,10 @@ export async function classify({ env, getJson }) {
  * `now` must be monotonic (performance.now by default): the cap must not move with the wall clock.
  */
 export async function run({ env, getJson, now = () => performance.now(), sleep, settle = 0 }) {
-  const full = (reason) => ({ skip: false, reason });
+  // Before any waiting: read the live queue settings. Anything but HEADGREEN with a long enough timeout runs in full now.
+  const ruleset = await checkRuleset({ env, getJson });
+  const full = (reason) => ({ skip: false, reason, ruleset });
+  if (!ruleset.mayWait) return full(`ruleset: running in full at once, ${ruleset.reason}`);
   // Entries enqueued in a burst should all see each other before anyone decides it is last.
   if (settle > 0) await sleep(settle * 1000);
   const started = now();
@@ -108,7 +150,7 @@ export async function run({ env, getJson, now = () => performance.now(), sleep, 
     try {
       if (env.CI_EVENT_NAME === "merge_group" && Number.isInteger(myPr)) {
         const pr = await getJson(`/repos/${env.GITHUB_REPOSITORY}/pulls/${myPr}`);
-        if (pr && pr.merged === true) return { skip: true, reason: `pull request ${myPr} is merged (its group went through)` };
+        if (pr && pr.merged === true) return { skip: true, reason: `pull request ${myPr} is merged (its group went through)`, ruleset };
       }
     } catch (e) {
       if (sawCovered && errors < MAX_API_ERRORS) { errors++; retry = true; } else return full(`error: ${e instanceof Error ? e.message : String(e)}`);
@@ -142,7 +184,7 @@ async function main() {
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   const settleRaw = Number(process.env.ROLLUP_SETTLE_SECONDS || "120");
   const settle = Number.isFinite(settleRaw) && settleRaw >= 0 && settleRaw <= 600 ? settleRaw : 120;
-  const { skip, reason } = process.env.CI_EVENT_NAME === "merge_group"
+  const { skip, reason, ruleset } = process.env.CI_EVENT_NAME === "merge_group"
     ? await run({ env: process.env, getJson, sleep, settle })
     : { skip: false, reason: "not a merge group run" };
   const line = skip
@@ -150,8 +192,12 @@ async function main() {
     : `CI scope: rollup, running in full (${reason})`;
   console.log(`rollup_skip=${skip}`);
   console.log(line);
-  // A silent no-op must be visible: say so when the queue or a pull request could not be read.
-  if (!skip && /error:|unreadable|malformed/.test(reason)) console.log(`::warning::rollup: could not read the merge queue, so nothing is covered (${reason})`);
+  // One warning says which ruleset case applied. A silent no-op must be visible: say so too when the queue could not be read.
+  if (ruleset) {
+    console.log(ruleset.mayWait
+      ? `::warning::rollup: the live queue rules allow waiting (${ruleset.reason})`
+      : `::warning::rollup: not waiting, the suites run in full at once (${ruleset.reason})`);
+  } else if (!skip && /error:|unreadable|malformed/.test(reason)) console.log(`::warning::rollup: could not read the merge queue, so nothing is covered (${reason})`);
   try {
     if (skip && process.env.GITHUB_ENV) appendFileSync(process.env.GITHUB_ENV, envLines(process.env.SAME_TREE_ALSO_SET));
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");

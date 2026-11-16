@@ -6,7 +6,7 @@
 // queue refs are DELETED.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MAX_WAIT_SECONDS, MAX_API_ERRORS, POLL_SECONDS, classify, isCloud, run } from "./rollup-position.mjs";
+import { MAX_WAIT_SECONDS, MAX_API_ERRORS, POLL_SECONDS, checkRuleset, classify, isCloud, run } from "./rollup-position.mjs";
 
 const sha = (c) => c.repeat(40);
 const BASE = sha("b");
@@ -26,6 +26,11 @@ const greenRuns = ["check", "e2e-runner", "workspace-e2e (desktop)", "workspace-
   name, status: "completed", conclusion: "success", completed_at: "2026-01-01T00:00:00Z", app: { id: 15368 },
 }));
 
+// The live ruleset as the rules API answers it. The default is the settings rollups need: HEADGREEN and 150 minutes.
+const mqRule = (grouping = "HEADGREEN", timeout = 150) => ({
+  type: "merge_queue", parameters: { grouping_strategy: grouping, check_response_timeout_minutes: timeout, max_entries_to_build: 5 },
+});
+
 /**
  * A mutable queue fake. `order` lists [pr, sha] first to last; entry i contains every entry before it.
  *   q.merge(prs)   the group merged: those pull requests become merged and ALL queue refs are deleted (as GitHub does)
@@ -41,6 +46,10 @@ function queue(order, over = {}) {
   q.getJson = async (path) => {
     q.calls.push(path);
     if (q.broken && path.startsWith(q.broken)) throw new Error("boom");
+    if (path.includes("/rules/branches/")) {
+      if (over.rulesError) throw new Error("rules boom");
+      return over.rules ?? [mqRule()];
+    }
     if (path.includes("/git/matching-refs/")) return q.refsGone ? [] : (over.refs ?? q.order.map(([pr, s]) => ref(pr, s)));
     const cmp = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path);
     if (cmp) {
@@ -124,7 +133,7 @@ test("the cap runs in full, with nothing else but the cap to end the wait", asyn
   const q = queue([[10, A], [11, B]]);
   const c = clock();
   const r = await run({ env: env(10, A), getJson: q.getJson, ...c });
-  assert.deepEqual(r, { skip: false, reason: "waited the cap for the entries on top" });
+  assert.deepEqual({ skip: r.skip, reason: r.reason }, { skip: false, reason: "waited the cap for the entries on top" });
   assert.ok(c.elapsed() >= CAP && c.elapsed() < CAP + 2 * POLL);
 });
 
@@ -268,4 +277,65 @@ test("the script never reads check runs (nothing it reports depends on them)", a
 
 test("timing budget: the longest settle (10 min) + the cap + a 50 minute full run fits well inside the 150 minute queue timeout", () => {
   assert.ok(10 + MAX_WAIT_SECONDS / 60 + 50 <= 140);
+});
+
+// ---- the live ruleset decides whether waiting is allowed at all -------------------------------------------------
+async function viaRun(over) {
+  const q = queue([[10, A], [11, B]], over);
+  const c = clock(() => q.merge([10, 11]));
+  const r = await run({ env: env(10, A), getJson: q.getJson, ...c });
+  return { r, q, c };
+}
+
+test("ruleset ALLGREEN: run in full at once, no wait, no queue read", async () => {
+  const { r, q, c } = await viaRun({ rules: [mqRule("ALLGREEN", 150)] });
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /ALLGREEN/);
+  assert.equal(c.elapsed(), 0);
+  assert.equal(q.calls.some((p) => p.includes("/pulls/") || p.includes("/matching-refs/")), false);
+});
+
+test("ruleset HEADGREEN with a 90 minute timeout: run in full at once", async () => {
+  const { r, c } = await viaRun({ rules: [mqRule("HEADGREEN", 90)] });
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /90/);
+  assert.equal(c.elapsed(), 0);
+});
+
+test("ruleset HEADGREEN with a 150 minute timeout: the entry may wait, and skips once its pull request is merged", async () => {
+  const { r, c } = await viaRun({ rules: [mqRule("HEADGREEN", 150)] });
+  assert.equal(r.skip, true);
+  assert.equal(r.ruleset.mayWait, true);
+  assert.ok(c.elapsed() > 0);
+});
+
+test("ruleset read error: run in full at once", async () => {
+  const { r, c } = await viaRun({ rulesError: true });
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /error:/);
+  assert.equal(c.elapsed(), 0);
+});
+
+test("ruleset answers that cannot be trusted never allow waiting", async () => {
+  const bad = [
+    "not an array",
+    [],
+    [{ type: "pull_request", parameters: {} }],
+    [{ type: "merge_queue" }],
+    [{ type: "merge_queue", parameters: { grouping_strategy: "HEADGREEN" } }],
+    [{ type: "merge_queue", parameters: { grouping_strategy: "HEADGREEN", check_response_timeout_minutes: "150" } }],
+    [mqRule("HEADGREEN", 150), mqRule("ALLGREEN", 150)],
+    [mqRule("HEADGREEN", 150), mqRule("HEADGREEN", 149)],
+  ];
+  for (const rules of bad) {
+    const out = await checkRuleset({ env: env(10, A), getJson: queue([], { rules }).getJson });
+    assert.equal(out.mayWait, false, JSON.stringify(rules));
+  }
+  assert.equal((await checkRuleset({ env: { ...env(10, A), MG_HEAD_REF: "refs/heads/main" }, getJson: queue([]).getJson })).mayWait, false);
+});
+
+test("the ruleset is read for the queue's base branch", async () => {
+  const q = queue([]);
+  await checkRuleset({ env: env(10, A), getJson: q.getJson });
+  assert.deepEqual(q.calls, ["/repos/acme/widgets/rules/branches/main"]);
 });
