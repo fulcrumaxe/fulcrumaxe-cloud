@@ -1,12 +1,13 @@
 import type { ReconcileJob } from './runner.js';
 import { errorEventsPrune } from './jobs/errorEventsPrune.js';
 import { memorySweep } from './jobs/memorySweep.js';
+import { engineEventsPrune } from './jobs/engineEventsPrune.js';
 
 /**
  * Every job, in the order a tick takes them. Each name needs a reconcile_jobs row seeded by a migration; a job with no
  * row is never due, so it is never run.
  */
-export const RECONCILE_JOBS: readonly ReconcileJob[] = [errorEventsPrune, memorySweep];
+export const RECONCILE_JOBS: readonly ReconcileJob[] = [errorEventsPrune, memorySweep, engineEventsPrune];
 
 /**
  * Every job for one tick: the fixed ones plus the jobs that need an outside client, which the route builds from its

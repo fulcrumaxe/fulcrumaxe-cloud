@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
+import type { EngineUsagePort } from "./ingestEngineEvents.js";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
 
@@ -90,6 +91,8 @@ export interface RunnerCloudDeps {
    * and nothing is written. A reviewer's `done` needs no GitHub call and works without it.
    */
   pullRequests?: RunPullRequestPort | null;
+  /** Engine bridge EB-4: prices the tokens an engine batch reports (the worker's `recordEngineUsage`). Absent: the tokens are kept and no figure is recorded. */
+  engineUsage?: EngineUsagePort | null;
   /** D#6 PUBLIC-MERGE PR2b: the merge-order routes' gate, store and GitHub reads. Null while it is not configured; those routes then answer 503 `not_configured`. */
   planeMerge?: PlaneMergePort | null;
   /** D#598 P1f-2: the GitHub access of the public-push routes. Null while it is not configured; those routes then answer 503 `not_configured`. */

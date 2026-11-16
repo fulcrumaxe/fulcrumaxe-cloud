@@ -41,6 +41,9 @@ export { operatorMode } from "@fx/runner";
 export { createGithubRepoVisibility, type RepoReadHttp } from "@fx/runner";
 // D#6 R2b: the runner tier's limits, read from the plan data (a pure read, no pool or secret); apps/web passes the register limit from it.
 export { runnerLimitsFor } from "@fx/spend";
+// Engine bridge EB-4: the pricing of an engine batch's tokens, handed to the runner routes as a port; and the one pricing step it shares with runner runs.
+export { recordEngineUsage, type EngineUsageSubject } from "./engineUsage.js";
+export { priceUsageTotals, type UsageTotals } from "./runnerUsage.js";
 export { createVercelKeepAlive } from "./keepAlive.js";
 export type { ParkedStageEntryInput, StageResumeCounts } from "./stageResume.js";
 export type { GateWake } from "./gateReask.js";
