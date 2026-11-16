@@ -64,6 +64,67 @@ function money(n) {
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 }
 
+// D#31 API-7f: "Spend by role". A copy of the Runs app's own role-word map (apps/workspace/apps/runs/runs-detail.js),
+// not an import of it: each first-party app has its own boot-file ceiling, and there is no apps/_lib/ room left for a
+// shared one. apps/workspace/test/budget-billing-roles.test.mjs holds the two in step by comparing roleWords() here
+// against that file's titleOf() for every role either knows.
+const ROLE_WORDS = {
+  "project-manager": ["Triage & Spec", "Project manager"],
+  "technical-architect": ["Panel", "Technical architect"],
+  "product-owner": ["Panel", "Product owner"],
+  "performance-expert": ["Panel", "Performance expert"],
+  "security-expert": ["Panel", "Security expert"],
+  "cost-analyst": ["Panel", "Cost analyst"],
+  executor: ["Build", "Executor"],
+  "code-reviewer": ["Review", "Code reviewer"],
+  "acceptance-tester": ["Review", "Acceptance tester"],
+  "security-reviewer": ["Review", "Security reviewer"],
+  debater: ["Review", "Debater"],
+  "accessibility-reviewer": ["Review", "Accessibility reviewer"],
+  "browser-tester": ["Review", "Browser tester"],
+  "deploy-verifier": ["Verify", "Deploy verifier"],
+  "proposal-verifier": ["Verify", "Proposal verifier"],
+  "discovery-analyst": ["Discovery", "Discovery analyst"],
+};
+
+/** "Review · Code reviewer"; a role this file does not know is shown as its own words, "_"/"-" turned into spaces. */
+export function roleWords(role) {
+  const known = ROLE_WORDS[role];
+  if (known) return known[0] + " · " + known[1];
+  return typeof role === "string" && role ? String(role).replace(/[_-]+/g, " ") : "Agent run";
+}
+
+const ROLE_EMPTY_TEXT = "No runs this month yet.";
+const ROLE_ERROR_TEXT = "Spend by role couldn't be loaded.";
+const ROLE_NOTE_TEXT = "Runs only. Spend not recorded against a run is in the totals above but not here.";
+
+/** "1 run · $4.00", with an API-equivalent tail only when that figure is finite and above 0; null for a malformed entry. */
+function roleRowText(e) {
+  if (!e || typeof e.role !== "string" || e.role === "" || !Number.isFinite(e.runs) || !Number.isFinite(e.spend_usd)) return null;
+  let text = e.runs + (e.runs === 1 ? " run" : " runs") + " · " + money(e.spend_usd);
+  if (Number.isFinite(e.own_plan_api_equivalent_usd) && e.own_plan_api_equivalent_usd > 0) {
+    text += " · API-equivalent " + money(e.own_plan_api_equivalent_usd) + " on your own plan";
+  }
+  return text;
+}
+
+/**
+ * The usage read's `role_breakdown` turned into what the view shows, numbers never touched beyond `money()` and
+ * never re-sorted (the API's order is kept as sent): `{ error }` when the field is missing or not an array,
+ * `{ empty }` when it is an array but nothing in it survives (a malformed entry is skipped, not shown broken), or
+ * `{ rows, note }` with one `{ role, label, text }` per surviving entry, in the API's order.
+ */
+export function roleBreakdownRows(roleBreakdown) {
+  if (!Array.isArray(roleBreakdown)) return { error: ROLE_ERROR_TEXT };
+  const rows = roleBreakdown
+    .map((e) => {
+      const text = roleRowText(e);
+      return text === null ? null : { role: e.role, label: roleWords(e.role), text };
+    })
+    .filter((r) => r !== null);
+  return rows.length === 0 ? { empty: ROLE_EMPTY_TEXT } : { rows, note: ROLE_NOTE_TEXT };
+}
+
 function failureSentence(e) {
   if (!(e instanceof ApiFailure)) return GENERIC;
   if (e.status === 0) return NETWORK;
@@ -524,7 +585,35 @@ export function mountBudgetBilling(host) {
       // D#6 R2b-5b: what this month's runs on the person's own machine would have cost at API prices. Information, apart from the budgets.
       Number.isFinite(state.usage.own_plan_api_equivalent_usd) && state.usage.own_plan_api_equivalent_usd > 0
         ? h("p", { class: "bb-muted", "data-testid": "bb-own-plan" }, "On your own plan (API-equivalent): " + money(state.usage.own_plan_api_equivalent_usd))
-        : null
+        : null,
+      roleBreakdownView(state.usage.role_breakdown)
+    );
+  }
+
+  // D#31 API-7f: "Spend by role", under the budget cards. Every number is `state.usage.role_breakdown`'s own,
+  // run through roleBreakdownRows() only -- nothing here adds, subtracts or re-sorts a figure.
+  function roleBreakdownView(roleBreakdown) {
+    const rb = roleBreakdownRows(roleBreakdown);
+    return h(
+      "section",
+      { class: "bb-card bb-role", "data-testid": "bb-role-breakdown", "aria-labelledby": uid + "-role" },
+      h("h3", { class: "bb-title", id: uid + "-role" }, "Spend by role"),
+      rb.error
+        ? h("p", { class: "bb-muted", role: "alert", "data-testid": "bb-role-error" }, rb.error)
+        : rb.empty
+          ? h("p", { class: "bb-muted", "data-testid": "bb-role-empty" }, rb.empty)
+          : [
+              // The row's own testid carries both cells (unlike row(), whose testid lands on the dd alone): a role
+              // row is read as one line ("Build · Executor" plus "2 runs · $12.75"), not as a bare value.
+              h(
+                "dl",
+                { class: "bb-facts" },
+                rb.rows.map((r) =>
+                  h("div", { class: "bb-row", "data-testid": "bb-role-row" }, h("dt", { class: "bb-label" }, r.label), h("dd", { class: "bb-value" }, r.text))
+                )
+              ),
+              h("p", { class: "bb-muted", "data-testid": "bb-role-note" }, rb.note),
+            ]
     );
   }
 

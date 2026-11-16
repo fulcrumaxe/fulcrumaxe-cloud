@@ -187,6 +187,39 @@ test.describe("D#37 WS-F6: Budget & Billing (mocked API)", () => {
     await expect(tid(page, "bb-compute-notice")).toHaveCount(0);
   });
 
+  test("D#31 API-7f: Spend by role renders from the fixture, in its order, with the role words and amounts", async ({ page }) => {
+    await boot(page);
+    const rows = tid(page, "bb-role-row");
+    await expect(rows).toHaveCount(USAGE.role_breakdown.length);
+    await expect(rows.nth(0)).toContainText("Build · Executor");
+    await expect(rows.nth(0)).toContainText("2 runs · $12.75");
+    await expect(rows.nth(1)).toContainText("Review · Code reviewer");
+    await expect(rows.nth(1)).toContainText("1 run · $3.3456");
+    await expect(rows.nth(1)).toContainText("API-equivalent $4.20 on your own plan");
+    await expect(tid(page, "bb-role-note")).toHaveText("Runs only. Spend not recorded against a run is in the totals above but not here.");
+    await expect(tid(page, "bb-role-empty")).toHaveCount(0);
+    await expect(tid(page, "bb-role-error")).toHaveCount(0);
+  });
+
+  test("D#31 API-7f: an empty breakdown shows the no-runs line, with no row and no caption", async ({ page }) => {
+    await boot(page, { usage: { ...USAGE, role_breakdown: [] } });
+    await expect(tid(page, "bb-role-empty")).toHaveText("No runs this month yet.");
+    await expect(tid(page, "bb-role-row")).toHaveCount(0);
+    await expect(tid(page, "bb-role-note")).toHaveCount(0);
+  });
+
+  test("D#31 API-7f: a usage body missing role_breakdown shows the error line, with the budget cards and own-plan line untouched", async ({ page }) => {
+    const { role_breakdown: _omit, ...usageWithoutBreakdown } = USAGE;
+    await boot(page, { usage: usageWithoutBreakdown });
+    await expect(tid(page, "bb-role-error")).toHaveText("Spend by role couldn't be loaded.");
+    await expect(tid(page, "bb-role-row")).toHaveCount(0);
+    await expect(tid(page, "bb-role-empty")).toHaveCount(0);
+    await expect(tid(page, "bb-load-error")).toHaveCount(0);
+    const cell = (b: string, k: string) => tid(page, `bb-budget-${b}`).locator(`[data-testid="bb-${k}"]`);
+    await expect(cell("model", "spent")).toHaveText("$12.3456");
+    await expect(tid(page, "bb-own-plan")).toHaveText("On your own plan (API-equivalent): $4.20");
+  });
+
   test("criterion 1: every number is the API's, unchanged, and none is computed", async ({ page }) => {
     const usage = {
       period_start: "2026-09-01T00:00:00.000Z",

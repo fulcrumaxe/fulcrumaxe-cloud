@@ -75,6 +75,15 @@ const budgetUsageSchema = z.object({
   limit_usd: z.number(),
 });
 
+const roleSpendSchema = z.object({
+  role: z.string(),
+  runs: z.number().int(),
+  spend_usd: z.number(),
+  own_plan_api_equivalent_usd: z
+    .number()
+    .describe("What this role's runs on the person's own machine would have cost at API prices. Information, never spend: it is not part of this row's spend_usd or any budget."),
+});
+
 /** D#31 API-7a: the month so far per budget. `spent_usd` is settled only, `reserved_usd` is open reservations only. */
 export const usageResponseSchema = z.object({
   period_start: z.string(),
@@ -88,6 +97,9 @@ export const usageResponseSchema = z.object({
     .object({ code: z.enum(["compute_allowance_80"]), message: z.string() })
     .nullable()
     .describe("Set from 80% of a compute budget's cap until that budget reaches its cap, then null (the pause shows instead). A notice only: it never pauses work or denies a start. Computed from this month's usage on each read, so a higher cap or a new month removes it."),
+  role_breakdown: z
+    .array(roleSpendSchema)
+    .describe("This month's settled spend per role, biggest spend first, at most 50 rows. Spend not recorded against a run (a ledger row with no run_id) is in the totals above but not in this breakdown."),
 });
 
 /** `model_usd_month` of 0 means "not set" (the column default). */

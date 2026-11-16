@@ -19,6 +19,14 @@ export interface BudgetUsage {
   limit_usd: number;
 }
 
+/** This UTC month's settled spend and own-plan value for one role, derived on every read (never stored). */
+export interface RoleSpend {
+  role: string;
+  runs: number;
+  spend_usd: number;
+  own_plan_api_equivalent_usd: number;
+}
+
 export interface Usage {
   period_start: string;
   model: BudgetUsage;
@@ -34,6 +42,12 @@ export interface Usage {
    * null. It is information: it pauses nothing and denies no reservation.
    */
   compute_notice: ComputeNotice | null;
+  /**
+   * This month's settled spend and own-plan value per role (`agent_runs.role`), biggest spend first, at most 50 rows. A `ledger` row with
+   * no `run_id` is in the budget totals above but in no role here; an open `spend_reservations` row is in neither. Never read by any
+   * metering, cap or refusal query.
+   */
+  role_breakdown: RoleSpend[];
 }
 
 export interface AccountBudgets {
@@ -83,13 +97,14 @@ export async function getBudgets(ctx: UsageCtx): Promise<AccountBudgets> {
  */
 export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promise<Usage> {
   const periodStart = utcMonthStart(opts.now ?? new Date());
+  const periodEnd = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1));
   const budgets = await getBudgets(ctx);
   const { accountId, userId } = ctx.principal;
   const sums = await withTenant(ctx.pool, accountId, userId, async (client) => {
     const ledger = await client.query<{ budget: Budget; sum: string }>(
       `SELECT budget, SUM(usd)::text AS sum FROM ledger
         WHERE account_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY budget`,
-      [accountId, periodStart, new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1))],
+      [accountId, periodStart, periodEnd],
     );
     const open = await client.query<{ budget: Budget; sum: string }>(
       `SELECT budget, SUM(usd_reserved)::text AS sum FROM spend_reservations
@@ -101,10 +116,54 @@ export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promis
     const ownPlan = await client.query<{ sum: string }>(
       `SELECT COALESCE(SUM(api_equivalent_usd), 0)::text AS sum FROM runner_run_usage
         WHERE account_id = $1 AND recorded_at >= $2 AND recorded_at < $3`,
-      [accountId, periodStart, new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1))],
+      [accountId, periodStart, periodEnd],
     );
     const ownPlanUsd = Number(ownPlan.rows[0]?.sum ?? 0);
-    return { at: (b: Budget) => ({ spent: pick(ledger.rows, b), reserved: pick(open.rows, b) }), ownPlanUsd };
+    // Role breakdown: `ledger_rows`/`usage_rows` are this role's settled ledger rows and runner-usage rows this
+    // period (a ledger row with no run_id, or a run of a role with neither row kind, is in no role's totals).
+    // `runs` is the role's distinct run_id count across both kinds; spend and own-plan are summed separately so
+    // the own-plan figure never reaches spend_usd.
+    const roleBreakdown = await client.query<{ role: string; spend: string; own_plan: string; runs: string }>(
+      `WITH ledger_rows AS (
+         SELECT ar.role, l.run_id, l.usd
+           FROM ledger l
+           JOIN agent_runs ar ON ar.account_id = l.account_id AND ar.id = l.run_id
+          WHERE l.account_id = $1 AND l.run_id IS NOT NULL AND l.created_at >= $2 AND l.created_at < $3
+       ),
+       usage_rows AS (
+         SELECT ar.role, u.run_id, u.api_equivalent_usd
+           FROM runner_run_usage u
+           JOIN agent_runs ar ON ar.account_id = u.account_id AND ar.id = u.run_id
+          WHERE u.account_id = $1 AND u.recorded_at >= $2 AND u.recorded_at < $3
+       ),
+       roles AS (
+         SELECT role, count(*)::int AS runs FROM (
+           SELECT DISTINCT role, run_id FROM ledger_rows
+           UNION
+           SELECT DISTINCT role, run_id FROM usage_rows
+         ) r GROUP BY role
+       )
+       SELECT roles.role,
+              COALESCE(role_spend.sum, 0)::text AS spend,
+              COALESCE(role_own_plan.sum, 0)::text AS own_plan,
+              roles.runs::text AS runs
+         FROM roles
+         LEFT JOIN (SELECT role, SUM(usd) AS sum FROM ledger_rows GROUP BY role) role_spend ON role_spend.role = roles.role
+         LEFT JOIN (SELECT role, SUM(api_equivalent_usd) AS sum FROM usage_rows GROUP BY role) role_own_plan ON role_own_plan.role = roles.role
+        ORDER BY COALESCE(role_spend.sum, 0) DESC, COALESCE(role_own_plan.sum, 0) DESC, roles.role ASC
+        LIMIT 50`,
+      [accountId, periodStart, periodEnd],
+    );
+    return {
+      at: (b: Budget) => ({ spent: pick(ledger.rows, b), reserved: pick(open.rows, b) }),
+      ownPlanUsd,
+      roleBreakdown: roleBreakdown.rows.map((r) => ({
+        role: r.role,
+        runs: Number(r.runs),
+        spend_usd: round4(Number(r.spend)),
+        own_plan_api_equivalent_usd: round4(Number(r.own_plan)),
+      })),
+    };
   });
   const usage = (b: Budget, limit: number): BudgetUsage => ({
     spent_usd: round4(sums.at(b).spent),
@@ -119,6 +178,7 @@ export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promis
     foreground_compute: foreground,
     background_compute: background,
     own_plan_api_equivalent_usd: round4(sums.ownPlanUsd),
+    role_breakdown: sums.roleBreakdown,
     compute_notice: computeNoticeFor({ foreground_compute: foreground, background_compute: background }),
   };
 }
