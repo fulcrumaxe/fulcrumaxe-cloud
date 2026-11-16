@@ -5,7 +5,7 @@ The guest side of the Firecracker microVM engine: what runs inside the VM, and t
 | Path | What it is |
 |---|---|
 | `lock.json` | Every download (guest kernel, Firecracker, the agent CLI, node, pnpm, and the build tools), by URL and sha256, for amd64 and arm64. |
-| `Dockerfile` | The template image: the sandbox image's user and home, plus pnpm, Postgres, Python, jq, bubblewrap and iproute2. It reads `lock.json`; it holds no URL of its own. |
+| `Dockerfile` | The template image: the sandbox image's user and home, plus pnpm, Postgres 18, Chromium (Playwright, with its own sandbox on), Python, jq, bubblewrap and iproute2. It reads `lock.json`; it holds no URL of its own. |
 | `guest/init` | PID 1 of the guest. Mounts the pseudo file systems, writes `/etc/hosts`, brings up loopback, starts the agent. The guest has no network device. |
 | `guest/agent.py` | The in-guest agent: ping, exec, put, get and counters over vsock, for the host only. |
 
@@ -44,3 +44,10 @@ keeping their disks around.
 
 The release notes of each image record the template image digest and the commit that built it. The apt layer of the template is not
 pinned, so rebuilding the same commit does not give the same root disk; the digest in the release is the only trace of what was built.
+
+## Staying in step with the sandbox image
+
+node, pnpm and claude come from the same pins as `infra/sandbox-image/versions.lock.json`, and Postgres 18 and the Playwright
+Chromium are installed the same way. `packages/fx-runner/test/vm/sandboxImageParity.test.ts` fails when the versions (or, for amd64,
+the downloads) differ, or when `PLAYWRIGHT_VERSION` differs from the sandbox image or `pnpm-lock.yaml`. When the sandbox lock moves,
+move `lock.json` with it, URL and sha256 together, for both architectures.
