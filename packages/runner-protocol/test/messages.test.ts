@@ -90,7 +90,7 @@ describe("G1: no credential channel", () => {
 
 describe("hello", () => {
   it("carries model_auth_present as a boolean and has no email, organisation or account name", () => {
-    const keys = Object.keys(RUNNER_MESSAGES.hello.shape).sort();
+    const keys = Object.keys(RUNNER_MESSAGES.hello.innerType().shape).sort();
     expect(keys).toEqual(["binary_version", "capabilities", "facts", "isolation", "model_auth_present", "protocol_version"]);
     expect(RUNNER_MESSAGES.hello.safeParse({ ...(VALID.hello as object), model_auth_present: "yes" }).success).toBe(false);
     for (const extra of ["email", "org", "organization", "account_name", "account"]) {
@@ -225,7 +225,10 @@ describe("LocalOnlyEvent", () => {
     expect(names.sort()).toEqual(["claim", "deploy_order_claim", "deploy_order_report", "done", "events", "git_ticket", "heartbeat", "hello", "memory_proposals", "plane_merge_claim", "plane_merge_report", "plane_merge_verify", "plane_push_pairing", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
     expect(names.filter((n) => /attach|session|tmux|terminal|input|keys|takeover|take_over|start|exec|command/i.test(n))).toEqual([]);
     // And no message has a field that could carry something to type or run.
-    const fields = Object.values(RUNNER_MESSAGES).flatMap((schema) => Object.keys((schema as unknown as { shape?: Record<string, unknown> }).shape ?? {}));
+    const fields = Object.values(RUNNER_MESSAGES).flatMap((schema) => fieldPaths(schema as z.ZodTypeAny).filter((path) => !path.includes(".")));
+    // Top-level fields only, as before; the walk unwraps refined schemas, so hello (a ZodEffects) is checked and not silently skipped.
+    expect(fieldPaths(RUNNER_MESSAGES.hello)).toContain("protocol_version");
+    expect(fieldPaths(RUNNER_MESSAGES.hello).length).toBeGreaterThan(0);
     expect(fields.filter((f) => /command|keys|stdin|input|attach|tmux|exec|script/i.test(f))).toEqual([]);
   });
 

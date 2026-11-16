@@ -318,8 +318,8 @@ describe("the overlap facts (overlap_facts_v1)", () => {
   it("is a hello capability, once, and the protocol version does not move", () => {
     expect(OVERLAP_FACTS_CAPABILITY).toBe("overlap_facts_v1");
     expect(RUNNER_CAPABILITIES).toContain(OVERLAP_FACTS_CAPABILITY);
-    // 19 after the check header end marker.
-    expect(CURRENT_PROTOCOL_VERSION).toBe(19);
+    // 20 after the engine bridge.
+    expect(CURRENT_PROTOCOL_VERSION).toBe(20);
     const hello = { protocol_version: 1, binary_version: "0.1.0", model_auth_present: true, isolation: "container" };
     expect(HelloMessage.safeParse({ ...hello, capabilities: ["ordered_facts_v1", "overlap_facts_v1"] }).success).toBe(true);
     expect(HelloMessage.safeParse({ ...hello, capabilities: ["overlap_facts_v1", "overlap_facts_v1"] }).success).toBe(false);
