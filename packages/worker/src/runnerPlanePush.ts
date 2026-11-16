@@ -3,6 +3,7 @@ import { TIP_PUBLISH_CAPABILITY, type StopReason } from "@fulcrumaxe/runner-prot
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RESTAMPABLE, pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
 import { RUNNER_REPLACE_ROUND_KIND, insertRunEvent, recordChildCodePullRequest } from "@fx/runner";
+import { PLANE_PUSH_REPORT_CODES } from "@fx/runner-cloud";
 import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
@@ -236,11 +237,26 @@ export const UPDATE_LEASE_CHANGED = "update_lease_changed";
 /** The fixed refusal of an `at_tip` request for a run that is not the round of a confirmed Replace (or a runner that did not list `tip_publish_v1`): no attempt, no grant, no token. */
 export const NO_TIP_ROUND = "no_changes";
 
-/** True only for the fix round a person's confirmed Replace started (the marker event the round's create transaction wrote) on a runner whose latest hello listed `tip_publish_v1`. Never from anything a runner sent. */
-const isTipRound = async (client: PoolClient, input: PlanePushLeaseInput, continues: boolean): Promise<boolean> =>
+/**
+ * The attempt outcomes (the push route's refusal codes) that mean the newest update of a public pull request did NOT land: the reviewed change is on the private branch and the public one is behind it.
+ * `no_changes` is not one (nothing to send), and neither is `report_mismatch` (the cloud could not confirm what the runner reported, so it is left to a person).
+ */
+const UNPUBLISHED_OUTCOMES: readonly string[] = PLANE_PUSH_REPORT_CODES.filter((c) => c !== "no_changes");
+
+/**
+ * True for a fix round that may ask to publish the branch tip because it added no commit of its own: on a runner whose latest hello listed `tip_publish_v1`, and either (a) the round a person's confirmed
+ * Replace started (the marker event the round's create transaction wrote), or (b) the push record's newest finished attempt ended refused, so the public pull request is behind a change that already passed
+ * review on the private side. The route's own content check still decides whether the tip differs from the public branch.
+ * The Replace marker and the capability are the cloud's own rows. Branch (b) reads the outcome of an earlier attempt, which is a refusal code the runner reported (checked against the fixed list; the cloud cannot verify it
+ * against anything else). That grants no new capability: the runner already held a push token for the round it claimed, the scans run either way, a lease has one attempt, and fix rounds are capped.
+ */
+const isTipRound = async (client: PoolClient, input: PlanePushLeaseInput, continues: boolean, planePushId: string): Promise<boolean> =>
   continues &&
-  (await client.query("SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [input.accountId, input.runId, RUNNER_REPLACE_ROUND_KIND])).rows.length > 0 &&
-  (await client.query("SELECT 1 FROM runner_capabilities WHERE account_id = $1 AND runner_id = $2 AND $3::text = ANY(capabilities)", [input.accountId, input.runnerId, TIP_PUBLISH_CAPABILITY])).rows.length > 0;
+  (await client.query("SELECT 1 FROM runner_capabilities WHERE account_id = $1 AND runner_id = $2 AND $3::text = ANY(capabilities)", [input.accountId, input.runnerId, TIP_PUBLISH_CAPABILITY])).rows.length > 0 &&
+  ((await client.query("SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [input.accountId, input.runId, RUNNER_REPLACE_ROUND_KIND])).rows.length > 0 ||
+    UNPUBLISHED_OUTCOMES.includes(
+      (await client.query<{ outcome: string | null }>("SELECT outcome FROM plane_push_attempts WHERE account_id = $1 AND plane_push_id = $2 AND finished_at IS NOT NULL ORDER BY created_at DESC, attempt_no DESC LIMIT 1", [input.accountId, planePushId])).rows[0]?.outcome ?? "",
+    ));
 
 const isPlannedChild = async (client: PoolClient, accountId: string, workItemId: string): Promise<boolean> =>
   (await client.query("SELECT 1 FROM work_items WHERE account_id = $1 AND id = $2 AND planned_pr_key IS NOT NULL", [accountId, workItemId])).rows.length > 0;
@@ -362,7 +378,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const found = await runFacts(client, input);
           if (!found) return { kind: "not_paired" };
           // D#598 P1g-3a-3: before anything else is read or written, so an ordinary round that asked for the tip leaves no trace.
-          if (input.atTip === true && !(await isTipRound(client, input, found.continues))) return { kind: "refused", code: NO_TIP_ROUND };
+          if (input.atTip === true && !(await isTipRound(client, input, found.continues, found.row.id))) return { kind: "refused", code: NO_TIP_ROUND };
           const { row } = found;
           // D#598 P1g-1: a pull request closed or merged on GitHub (the item records it), or a pairing that is gone, is said in words and pauses the item; nothing is pushed.
           if (found.continues && row.managedByPersonAt === null && row.headSha !== null && ["pr_opened", "pr_closed", "pr_merged"].includes(row.state)) {

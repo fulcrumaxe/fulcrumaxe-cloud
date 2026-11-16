@@ -429,6 +429,8 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     expect(existsSync(world.workRoot)).toBe(false);
     expect(h.state.pairing).toBe(1);
     expect(last(h.reports)).toMatchObject({ phase: "refused", code: "public_unavailable", token_revoked: true });
+    // The log line names the closed refusal code and the seconds, and nothing else.
+    expect(h.lines).toEqual([expect.stringMatching(/^fx-runner: public push: refused \(public_unavailable\) in \d+(\.\d)?s$/)]);
   });
 
   it("a read that fails on the network or a 5xx is tried again (it has no side effect), and then goes on", { timeout: REAL_GIT_TEST_TIMEOUT }, async () => {

@@ -223,7 +223,9 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
     const started = now().getTime();
     const seconds = (): number => Math.round((now().getTime() - started) / 100) / 10;
     const done = (outcome: PlanePushOutcome): PlanePushOutcome => {
-      deps.say?.(`fx-runner: public push: ${outcome.kind}${"seconds" in outcome ? ` in ${outcome.seconds}s` : ""}`);
+      // A refusal names its closed code (never a path, a token or text from the change), so the reason is in the log and not only in the cloud.
+      const word = outcome.kind === "refused" ? `refused (${outcome.code})` : outcome.kind;
+      deps.say?.(`fx-runner: public push: ${word}${"seconds" in outcome ? ` in ${outcome.seconds}s` : ""}`);
       return outcome;
     };
     const { runId, leaseGeneration } = input;

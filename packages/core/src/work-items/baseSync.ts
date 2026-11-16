@@ -71,9 +71,15 @@ const REPUBLISH_FAILED_LEAD = "The fix round finished, but the cloud couldn't up
 export const REPUBLISH_FAILED_SENTENCE = `${REPUBLISH_FAILED_LEAD} An owner or admin can press Request changes, once no agents are working, to run another round that tries to update it again.`;
 export const REPUBLISH_FAILED_PRESS_SENTENCE = `${REPUBLISH_FAILED_LEAD} Press Request changes to run another round that tries to update it again.`;
 export const REPUBLISH_FAILED_ROUNDS_SENTENCE = `${REPUBLISH_FAILED_LEAD} All of this pull request's fix rounds are used, so the cloud can't run another. Update the public branch yourself, or close this item.`;
-/** The `republish_failed` sentence for a viewer: the step it names is the one that viewer's card lists (`request_changes` offered, or refused because the rounds are used). */
-export function republishFailedSentence(canRequestChanges: boolean, roundsUsed: boolean): string {
-  return canRequestChanges ? REPUBLISH_FAILED_PRESS_SENTENCE : roundsUsed ? REPUBLISH_FAILED_ROUNDS_SENTENCE : REPUBLISH_FAILED_SENTENCE;
+/**
+ * The `republish_failed` sentence for a viewer: the step it names is the one that viewer's card lists (`request_changes` offered, or refused because the rounds are used).
+ * `reason` is the fixed words of the stored refusal code of the failed update (`PUBLIC_CHANGE_REFUSAL_REASON`, a closed vocabulary), already looked up by the caller; null keeps the generic sentence.
+ */
+export function republishFailedSentence(canRequestChanges: boolean, roundsUsed: boolean, reason: string | null = null, terminal = false): string {
+  // A terminal reason already says to close the item and start again; no round can help, so no step is added after it.
+  if (reason !== null && terminal) return `${REPUBLISH_FAILED_LEAD} Refused: ${reason}.`;
+  const generic = canRequestChanges ? REPUBLISH_FAILED_PRESS_SENTENCE : roundsUsed ? REPUBLISH_FAILED_ROUNDS_SENTENCE : REPUBLISH_FAILED_SENTENCE;
+  return reason === null ? generic : generic.replace(`${REPUBLISH_FAILED_LEAD} `, `${REPUBLISH_FAILED_LEAD} Refused: ${reason}. `);
 }
 /** The fix round ended with nothing to publish (it added no commit, or its change is already in the public tip), so the public pull request is unchanged. Recorded as `escalated`. */
 export const REPUBLISH_NO_CHANGE = 'republish_no_change';

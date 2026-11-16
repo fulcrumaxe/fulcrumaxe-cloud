@@ -21,6 +21,7 @@ import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILA
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE, CHECK_NOT_RUN_OUT_OF_SCOPE, CHECK_NOT_RUN_OUT_OF_SCOPE_SENTENCE, checkFailureFiles, type CheckFailureFiles } from './checkFailure.js';
 import { SCOPE_REFUSAL_EVENT, parseScopeRefusal, scopeRefusalSentence } from './scopeRefusal.js';
 import { openPrStopSentence } from './baseSync.js';
+import { republishFailedReason } from '../repos/publicChangeCopy.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
 import { SPEC_LIST_UNREADABLE_CODE } from './driverEvents.js';
 import { buildStartsByItself } from './stageApprovalGate.js';
@@ -848,6 +849,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     let resumeCode: string | null = null;
     let refusalCode: string | null = null;
     let publicPrStop: string | null = null;
+    /** The fixed words of the stored refusal code behind a `republish_failed` stop; null keeps the generic sentence. */
+    let republishReason: { text: string; terminal: boolean } | null = null;
     const pm = (
       await client.query<{ reason: string | null }>(
         `SELECT left(envelope->>'reason', $2::int) AS reason FROM agent_runs
@@ -896,6 +899,17 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_STACK_PARENT_ENDED, REPUBLISH_STACK_PARENT_CLOSED, REPUBLISH_STACK_PARENT_OPEN, REPUBLISH_STACK_PARENT_OFF_MAIN, REPUBLISH_STACK_PARENT_NO_PULL_REQUEST, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_REPLACE_NO_CHANGE, REPUBLISH_REPLACE_FAILED, REPUBLISH_REPLACE_TIP_MOVED, REPUBLISH_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, CHECK_FAILED_OUTSIDE_CHANGE, CHECK_NOT_RUN_OUT_OF_SCOPE, RUN_LIMIT_PARKED_STOP, MONTHLY_BUDGET_PARKED_STOP]],
         )
       ).rows[0];
+      // The update of the public pull request was refused or failed: the newest finished attempt on the item's push record stored why, as a closed code. Only a code with fixed words is shown.
+      if (rebuildStop?.code === REPUBLISH_FAILED) {
+        const stored = (
+          await client.query<{ outcome: string | null }>(
+            `SELECT a.outcome FROM plane_push_attempts a JOIN plane_pushes p ON p.account_id = a.account_id AND p.id = a.plane_push_id
+              WHERE p.work_item_id = $1::uuid AND a.finished_at IS NOT NULL ORDER BY a.created_at DESC, a.attempt_no DESC LIMIT 1`,
+            [workItemId],
+          )
+        ).rows[0]?.outcome;
+        republishReason = republishFailedReason(stored);
+      }
       // C88 section 3: a build parked at a run limit shows the fixed sentence of its refused_by (or "Needs your attention" for one this code does not know).
       const contStopSentence = continuationStopSentence(rebuildStop?.code, rebuildStop?.reasons);
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
@@ -1085,7 +1099,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         }))
         .reverse(),
       // D#6 REPUBLISH-FAILED-DEADEND: Build again stops at an open pull request, so these sentences name the step the viewer's card really lists (any kind of notice that carries one).
-      notice: notice ? { ...notice, reason: notice.reason === REPUBLISH_FAILED_SENTENCE ? republishFailedSentence(changeVerdict?.ok === true, requestChangesBlocked === 'rounds') : openPrStopSentence(notice.reason, changeVerdict?.ok === true, requestChangesBlocked === 'rounds') } : notice,
+      notice: notice ? { ...notice, reason: notice.reason === REPUBLISH_FAILED_SENTENCE ? republishFailedSentence(changeVerdict?.ok === true, requestChangesBlocked === 'rounds', republishReason?.text ?? null, republishReason?.terminal === true) : openPrStopSentence(notice.reason, changeVerdict?.ok === true, requestChangesBlocked === 'rounds') } : notice,
       review_recheck: reviewRecheck,
       public_change: await readPublicChange(client, accountId, workItemId, facts),
       branch_cleanup: await readBranchCleanup(client, workItemId, item.stage),

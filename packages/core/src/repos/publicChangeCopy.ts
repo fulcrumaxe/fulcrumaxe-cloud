@@ -91,6 +91,19 @@ export function privatePathChangeSentence(paths: readonly string[]): string {
   return `Refused: the change edits private-only paths${which}, which the public repository never receives. Take them out of the Spec's file list and build the change without them, or make that edit in the private repository by hand. The other checks run once the private paths are gone.`;
 }
 
+/**
+ * Codes whose reason says retrying will not help (close the item and start the change again). A card that adds "press Request changes" after one of these would contradict itself,
+ * so the republish-failed sentence ends on the reason alone for them.
+ */
+export const PUBLIC_CHANGE_TERMINAL_CODES: readonly string[] = ['base_unavailable', 'base_not_on_parent', 'merge_in_change', 'base_not_on_default'];
+/** Codes left out of the republish-failed lookup: `private_path_change` has its own sentence naming paths, and `stack_base_unavailable` says both "close" and "try again", so it keeps the generic sentence. */
+const REPUBLISH_REASON_EXCLUDED: readonly string[] = ['private_path_change', 'stack_base_unavailable'];
+/** The fixed reason words for a stored attempt code on the republish-failed card, or null (unknown or excluded code: the generic sentence stays). */
+export function republishFailedReason(code: string | null | undefined): { text: string; terminal: boolean } | null {
+  if (code == null || !Object.hasOwn(PUBLIC_CHANGE_REFUSAL_REASON, code) || REPUBLISH_REASON_EXCLUDED.includes(code)) return null;
+  return { text: PUBLIC_CHANGE_REFUSAL_REASON[code]!, terminal: PUBLIC_CHANGE_TERMINAL_CODES.includes(code) };
+}
+
 export function publicChangeSentence(state: PublicChangeState, code: string | null, runtime: string | null = null, paths: readonly string[] = []): string {
   if (state !== 'refused') return PUBLIC_CHANGE_STATE_SENTENCE[state];
   if (code === 'private_path_change') return privatePathChangeSentence(paths);
