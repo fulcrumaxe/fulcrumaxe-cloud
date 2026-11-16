@@ -14,6 +14,10 @@ import { createWorld, stageOf, type World } from "./world.js";
  * gate fact (a replay of one order leaves one), the reroute's own lookup ("the gate's answer at or after this order") finds the SECOND order's fact, and the
  * second order reroutes into a merge-update round on the paired runner_local item. The gate is the real `runMergeGateForItem` (go phase) over the strict
  * local-only fakes of the pipeline's tests behind the real fence; the round start is the real queue code. Nothing is merged in either repository.
+ *
+ * What this does NOT cover: the reroute glue in apps/web (the step that reads the gate's reasons, decides they are all ordering ones and calls the round start) cannot be imported by a
+ * worker test, so the "every reason is an ordering one" check and the call into the round start below restate it by hand. The shared lookup and the gate's per-order facts are proven here;
+ * a regression in that glue itself would not fail this test.
  */
 describe("scenario: a second blocked merge order on the same head is rerouted [pg]", { timeout: 90_000 }, () => {
   let w: World;

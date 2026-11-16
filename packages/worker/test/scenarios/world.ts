@@ -1,13 +1,14 @@
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { CURRENT_PROTOCOL_VERSION, type DoneCheck } from "@fulcrumaxe/runner-protocol";
-import { RunnerTarget, SandboxTarget, createJobIssuer, createJobSigner, createPgJobContext, type ExecutionTargetRegistry } from "@fx/runner";
+import { CURRENT_PROTOCOL_VERSION, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { PREVIEW_WORKDIR, RunnerTarget, SandboxTarget, acceptQueuedRunnerRun, createJobIssuer, createJobSigner, createPgJobContext, type ExecutionTargetRegistry } from "@fx/runner";
+import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { markBuildNeedsHuman, resumeAgentRun } from "@fx/pipeline";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
-import { CLAIM_PATH, claimRun, createRunPullRequestPort, donePath, doneRun, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
+import { CLAIM_PATH, claimRun, createRunPullRequestPort, donePath, doneRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { startBuildForItem } from "../../../pipeline/src/advance/buildTesting.js";
 import { publishLightSpec } from "../../../pipeline/src/advance/lightSpec.js";
 import type { AdvanceRunPorts } from "../../../pipeline/src/advance/runPorts.js";
@@ -21,6 +22,7 @@ import { createAdvanceModule } from "../../src/advance.js";
 import { createRunnerClaimFacade } from "../../src/runnerClaims.js";
 import { createRunnerDoneFacade } from "../../src/runnerDone.js";
 import { createRunnerGitTicketFacade } from "../../src/runnerGitTicket.js";
+import { createRunnerPlanePushFacade } from "../../src/runnerPlanePush.js";
 import { createSeatResolver } from "../../src/seat.js";
 import { createRunStarter } from "../../src/starter.js";
 import type { CheckFixDeps } from "../../src/checkFix.js";
@@ -46,6 +48,64 @@ export interface World {
   ports(accountId: string, workItemId: string): AdvanceRunPorts;
   registry(): ExecutionTargetRegistry;
   checkFixDeps(accountId: string): CheckFixDeps;
+  /** Pairs the account's repository with the public one (`PUBLIC_REPO`), with the overlay paths private. */
+  pairRepo(a: SeedRefs): Promise<void>;
+  /** The build-start stamp of an item's public-push record, through the product's own module, as the build step writes it. */
+  stampPush(a: SeedRefs, workItemId: string): Promise<void>;
+  /**
+   * The runner's hello listed `tip_publish_v1` (it may ask to publish the branch tip) and `ordered_facts_v1` (the merge check can hold order on its repository, so the repository's one-build
+   * limit lifts and a second item of the paired repository can build while the first is still open).
+   */
+  allowTipPublish(a: SeedRefs, runner: Runner): Promise<void>;
+  /**
+   * A fix round on a published item, started with the product's own run start (`resumeAgentRun` over the real issuer, as `startCheckFixRound` and the review fix start make it), signed with
+   * `base` as its diff base on the branch the parent run left. The review driver that normally starts such a round (`startFix`) needs the review stage's ports, which this harness does not run.
+   */
+  startUpdateRound(a: SeedRefs, workItemId: string, parentRunId: string, base: { sha: string; branch: string }, tag: string): Promise<string>;
+}
+
+export const PUBLIC_REPO = "acme/widgets-public";
+
+/**
+ * The hosted side's view of the paired public repository, as a strict stand-in (the real one is exercised over TLS in packages/github): a token is minted only for the paired repository,
+ * a pushed branch counts only if the runner's side put exactly that head and parent on it, a pull request exists only on a branch that was pushed, and every minted token is accounted
+ * for (handed out or revoked). It cannot fake what GitHub's own rate limits and permissions do; those are the real adapter's tests.
+ */
+export class FakePublicPlane implements PlanePushHostedPort {
+  mints: string[] = [];
+  revoked: string[] = [];
+  mainTip = "9".repeat(40);
+  private readonly branches = new Map<string, { head: string; tip: string }>();
+  async mintToken(codeRepo: string): Promise<{ token: string; expiresAt: Date }> {
+    if (codeRepo !== PUBLIC_REPO) throw Object.assign(new Error("not the paired repository"), { code: "public_unavailable" });
+    this.mints.push(codeRepo);
+    return { token: ["g", "hs", String(this.mints.length).padStart(36, "w")].join("_"), expiresAt: new Date(Date.now() + 55 * 60_000) };
+  }
+  /** The runner's push of `branch` to the public repository: its head, on the parent `tip`. */
+  push(branch: string, head: string, tip: string): void {
+    this.branches.set(branch, { head, tip });
+  }
+  async verifyPushed(i: { codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean> {
+    const b = this.branches.get(i.branch);
+    return i.codeRepo === PUBLIC_REPO && b?.head === i.headSha && b.tip === i.tipSha;
+  }
+  async branchHead(i: { codeRepo: string; branch: string }): Promise<string | null> {
+    if (i.codeRepo !== PUBLIC_REPO) return null;
+    return i.branch === "main" ? this.mainTip : (this.branches.get(i.branch)?.head ?? null);
+  }
+  async verifyPullRequest(i: { codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null> {
+    return i.codeRepo === PUBLIC_REPO && this.branches.has(i.branch) ? { url: `https://github.com/${PUBLIC_REPO}/pull/${i.number}` } : null;
+  }
+  async revokeToken(token: string): Promise<boolean> {
+    this.revoked.push(token);
+    return true;
+  }
+}
+
+/** A claimed run: its id and lease generation. */
+export interface Held {
+  runId: string;
+  g: number;
 }
 
 export interface Runner {
@@ -57,6 +117,14 @@ export interface Runner {
   claim(expectRunId: string): Promise<{ runId: string; g: number }>;
   /** The runner pushed `files` on the run's branch and reports done with `check`. */
   finish(c: { runId: string; g: number }, o: { files: string[]; check?: DoneCheck; branch?: string }): Promise<{ status: number; body: unknown }>;
+  /** The public-push routes, signed with this runner's key. */
+  plane: {
+    publicRepo: FakePublicPlane;
+    /** The runner asks for a token (`atTip`: for the branch tip, a round that added nothing). */
+    token(c: Held, o?: { atTip?: boolean }): Promise<{ status: number; body: unknown }>;
+    /** The runner's report of its push, echoing the pairing digest it read, as the hook does. */
+    report(c: Held, body: Record<string, unknown>): Promise<{ status: number; body: unknown }>;
+  };
 }
 
 export const HEADER_END = "--- end of check header ---";
@@ -100,7 +168,7 @@ export async function createWorld(): Promise<World> {
       await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE runtime = 'runner' AND status IN ('running', 'pending')`);
       const a = await seedAccount(admin, randomUUID());
       await admin.query("UPDATE model_connections SET status = 'ok' WHERE account_id = $1", [a.accountId]);
-      await admin.query("UPDATE accounts SET model_budget_usd_month = 500 WHERE id = $1", [a.accountId]);
+      await admin.query("UPDATE accounts SET model_budget_usd_month = 437 WHERE id = $1", [a.accountId]);
       await admin.query("UPDATE repos SET execution_mode = 'runner_local', gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [a.repoId]);
       // The repository's approved check: its jobs carry it and the runner reports it on done.
       await admin.query(
@@ -129,12 +197,16 @@ export async function createWorld(): Promise<World> {
       const repo = fake.addRepo("acme", "widgets");
       const claims = createRunnerClaimFacade(writerPool, { visibility, randomBetween: (min) => min });
       const done = createRunnerDoneFacade(writerPool);
+      const publicRepo = new FakePublicPlane();
+      const planeFacade = createRunnerPlanePushFacade(writerPool, { publicHead: (i) => publicRepo.branchHead(i), pullRequestState: async () => "open" });
       const deps: RunnerCloudDeps = {
         appUserPool: appPool,
         origin: ORIGIN,
         failRunnerLeases: null,
-        leases: { ...claims, ...done, ...gitTickets },
+        leases: { ...claims, ...done, ...gitTickets, ...planeFacade } as unknown as RunnerCloudDeps["leases"],
         pullRequests: createRunPullRequestPort({ open: async () => fake, appLogin: async () => FAKE_APP_LOGIN }),
+        planePush: publicRepo,
+        planePushIdentity: () => ({ name: "Fulcrumaxe Bot", email: "bot@example.com" }),
       };
       return {
         id,
@@ -158,6 +230,14 @@ export async function createWorld(): Promise<World> {
           const body = { run_id: c.runId, lease_generation: c.g, session_id: `sess-${c.runId.slice(0, 8)}`, ...(o.check ? { check: o.check } : {}) };
           return toResponse(() => doneRun(deps, signed(key, donePath(c.runId), body), c.runId));
         },
+        plane: {
+          publicRepo,
+          token: (c, o = {}) => toResponse(() => planePushTokenRun(deps, signed(key, PLANE_PUSH_TOKEN_PATH, { run_id: c.runId, lease_generation: c.g, ...(o.atTip === true ? { at_tip: true } : {}) }))),
+          async report(c, body) {
+            const row = (await admin.query<{ digest: string }>("SELECT p.pairing_digest AS digest FROM plane_pushes p JOIN agent_runs r ON r.work_item_id = p.work_item_id AND r.account_id = p.account_id WHERE r.id = $1 ORDER BY p.created_at DESC LIMIT 1", [c.runId])).rows[0];
+            return toResponse(() => planePushReportRun(deps, signed(key, PLANE_PUSH_REPORT_PATH, { run_id: c.runId, lease_generation: c.g, ...(row ? { pairing_digest: row.digest } : {}), ...body })));
+          },
+        },
       };
     },
     ports(accountId, workItemId) {
@@ -169,6 +249,39 @@ export async function createWorld(): Promise<World> {
         outcome: (runId) => m.advanceRunOutcome(accountId, runId),
         cancel: async () => undefined,
       };
+    },
+    async pairRepo(a) {
+      await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4) ON CONFLICT (repo_id) DO UPDATE SET code_repo = EXCLUDED.code_repo, overlay_globs = EXCLUDED.overlay_globs", [a.repoId, a.accountId, PUBLIC_REPO, ["docs/ops/"]]);
+    },
+    async stampPush(a, workItemId) {
+      await withTenant(appPool, a.accountId, (c) => stampPlanePush(c, { accountId: a.accountId, workItemId, repoId: a.repoId }));
+    },
+    async allowTipPublish(a, r) {
+      await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3::text[]) ON CONFLICT (runner_id) DO UPDATE SET capabilities = EXCLUDED.capabilities", [r.id, a.accountId, [TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY]]);
+    },
+    async startUpdateRound(a, workItemId, parentRunId, base, tag) {
+      const reg = registry();
+      const seatFor = createSeatResolver({ pool: writerPool });
+      const seat = await seatFor({ accountId: a.accountId, role: "executor", workItemId });
+      if (!seat.ok) throw new Error(`fixture seat: ${seat.reason}`);
+      const issue = (await admin.query<{ n: number }>("SELECT gh_number AS n FROM work_items WHERE id = $1", [workItemId])).rows[0]!.n;
+      const key = `advance:${workItemId}:scenario-round:${tag}`;
+      const run = await resumeAgentRun(writerPool, reg, {
+        ...seat.seat,
+        accountId: a.accountId,
+        repoId: a.repoId,
+        workItemId,
+        role: "executor",
+        product: "team",
+        pr: issue,
+        parentRunId,
+        prompt: "Address the review findings.",
+        fixRoundKind: "review_fix" as const,
+        base,
+        workdir: PREVIEW_WORKDIR,
+        idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
+      });
+      return (await acceptQueuedRunnerRun(writerPool, a.accountId, run)).id;
     },
     checkFixDeps() {
       const reg = registry();

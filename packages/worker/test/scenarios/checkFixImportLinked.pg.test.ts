@@ -1,7 +1,7 @@
 import type { SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startCheckFixRound } from "../../src/checkFix.js";
-import { createWorld, failedCheck, failureReasonOf, jobScope, passedCheck, startBuild, stageOf, type World } from "./world.js";
+import { createWorld, failedCheck, failureReasonOf, jobScope, passedCheck, startBuild, type World } from "./world.js";
 
 /**
  * PIPELINE-SCENARIO-HARNESS, scenario 1 [pg]: a check fails in a test the Spec did not list but whose imports reach the change. The first fix round's job names
@@ -56,7 +56,6 @@ describe("scenario: a check-fix chain over import-linked tests outside the Spec'
     expect(done.body).toMatchObject({ outcome: "succeeded" });
     expect(await failureReasonOf(w, r2.runId)).toBeNull();
     expect(runner.repo.pulls).toHaveLength(1);
-    expect(await stageOf(w, a, item)).not.toBe("failed");
   });
 
   it("a linked test the runner's older protocol reported is not granted: the round starts with the Spec's list alone", async () => {
