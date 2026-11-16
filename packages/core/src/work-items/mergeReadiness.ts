@@ -143,8 +143,11 @@ export async function readMergeQueueState(client: Pick<PoolClient, 'query'>, acc
 
 export interface ConflictRoundView {
   running: true;
-  /** `renumber` for a round that renumbers the pull request's new numbered files; `conflict` for a merge-conflict fix round. */
-  kind: 'conflict' | 'renumber';
+  /**
+   * `renumber` for a round that renumbers the pull request's new numbered files; `conflict` for a merge-conflict fix round. D#483 S5-j2e-RUNNER: `overlap` is the round of a runner's plane-merge order held
+   * for an overlap while the agent merges the base branch in; `overlap_review` is the same round once that merge is judged and its delta review runs.
+   */
+  kind: 'conflict' | 'renumber' | 'overlap' | 'overlap_review';
   attempt: number;
   of: number;
   base_ref: string | null;
@@ -156,6 +159,15 @@ export interface ConflictStopView {
   attempts: number;
   files: string[];
   base_ref: string | null;
+}
+
+/** D#483 S5-j2e-RUNNER: an open round with no queue entry whose item's latest plane-merge order was blocked for an overlap. Derived on this read; null for any other item. */
+async function readOverlapRound(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string, of: number): Promise<{ conflict_round: ConflictRoundView } | null> {
+  const r = (await client.query<{ round: number; base_ref: string | null; to_sha: string | null }>(`SELECT round, base_ref, to_sha FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 AND entry_id IS NULL AND outcome IS NULL ORDER BY round DESC LIMIT 1`, [accountId, workItemId])).rows[0];
+  if (!r) return null;
+  const o = (await client.query<{ state: string; outcome_code: string | null }>(`SELECT state, outcome_code FROM plane_merge_orders WHERE account_id = $1 AND work_item_id = $2 ORDER BY created_at DESC, id DESC LIMIT 1`, [accountId, workItemId])).rows[0];
+  if (o?.state !== 'blocked' || o.outcome_code !== 'overlap_unreviewed') return null;
+  return { conflict_round: { running: true, kind: r.to_sha === null ? 'overlap' : 'overlap_review', attempt: r.round, of, base_ref: r.base_ref } };
 }
 
 /**
@@ -170,7 +182,7 @@ export async function readConflictState(client: Pick<PoolClient, 'query'>, accou
     [accountId, workItemId],
   );
   const e = rows[0];
-  if (!e) return null;
+  if (!e) return readOverlapRound(client, accountId, workItemId, of);
   if (e.state === 'awaiting_work' && (e.work_kind === 'conflict' || e.work_kind === 'renumber')) {
     const r = (await client.query<{ round: number; base_ref: string | null }>(`SELECT round, base_ref FROM merge_conflict_rounds WHERE account_id = $1 AND entry_id = $2 ORDER BY round DESC LIMIT 1`, [accountId, e.id])).rows[0];
     return r ? { conflict_round: { running: true, kind: e.work_kind === 'renumber' ? 'renumber' : 'conflict', attempt: r.round, of, base_ref: r.base_ref } } : null;

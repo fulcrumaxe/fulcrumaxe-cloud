@@ -170,7 +170,7 @@ describe("recorded pipeline steps", () => {
 
     it("the order check's stops have a sentence on the reason line and on the blocking line, never the raw code, null or undefined", () => {
       expect(reasonWord("ordered_resource_out_of_order")).toBe(BLOCKING_SENTENCES.ordered_resource_out_of_order);
-      for (const code of ["ordered_resource_unreadable", "ordered_resource_path_too_long", "overlap_unreviewed", "runner_ordered_unsupported"]) {
+      for (const code of ["ordered_resource_unreadable", "ordered_resource_path_too_long", "overlap_unreviewed", "runner_ordered_unsupported", "overlap_facts_missing"]) {
         for (const text of [reasonWord(code), blockingSentence(code), stepView({ kind: "merge_gate", state: "done", result: "ready_human_merges", reasons: [code] }).reasons[0]]) {
           expect(text, code).not.toMatch(/[_<>]|undefined|null/);
           expect(text.length, code).toBeGreaterThan(20);
@@ -1390,6 +1390,12 @@ describe("D#519 MQ4-d: the merge-conflict fix round lines", () => {
     expect(renumber).toEqual({ kind: "running", text: "Renumbering its new files to follow main: attempt 1 of 2 is running." });
     expect(renumber.text).not.toMatch(/conflict/i);
     expect(conflictLine(withConflict({ conflict_round: { ...RUNNING.conflict_round, kind: "conflict" } })).text).toBe("Resolving a conflict with main: fix attempt 1 of 2 is running.");
+    // D#483 S5-j2e-RUNNER: a runner's merge held for an overlap is not a conflict: the two states say what is happening, and never use the conflict words.
+    const updating = conflictLine(withConflict({ conflict_round: { ...RUNNING.conflict_round, kind: "overlap" } }));
+    expect(updating).toEqual({ kind: "running", text: "Updating from main: round 1 of 2 is running. Files this change shares with it changed after the last review." });
+    const reviewing = conflictLine(withConflict({ conflict_round: { ...RUNNING.conflict_round, kind: "overlap_review" } }));
+    expect(reviewing).toEqual({ kind: "running", text: "Reviewing the merge of main: round 1 of 2." });
+    for (const line of [updating, reviewing]) expect(line.text).not.toMatch(/conflict|[_<>]|undefined|null/i);
     expect(conflictLine(withConflict(FOREIGN)).text).toBe("It conflicts with main in src/a.ts, and these files have commits we didn't write, so a person needs to resolve it.");
     expect(conflictLine(withConflict(DIRECT)).text).toBe("It conflicts with main. Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.");
     // history_rewritten names nothing, so it is the section 5 sentence every time; the old sentence stays as the table's fallback.

@@ -265,8 +265,8 @@ export function decideFromRunnerFacts(facts: RunnerConflictFacts, roundsUsed: nu
 export type RoundStartPorts = Pick<ConflictPorts<ConflictSubject>, "inTenant" | "startConflictRound">;
 
 /** The item's round from the runner's stored facts: the same start and stops as `startEntrylessConflict`, with `decideFromRunnerFacts` as the decision. */
-export async function startEntrylessFromRunnerFacts(ports: RoundStartPorts, subject: ConflictSubject, facts: RunnerConflictFacts): Promise<EntrylessStart> {
-  return startEntrylessFromDecision(ports, subject, decideFromRunnerFacts(facts, subject.roundsUsed));
+export async function startEntrylessFromRunnerFacts(ports: RoundStartPorts, subject: ConflictSubject, facts: RunnerConflictFacts, shape: EntrylessShape = {}): Promise<EntrylessStart> {
+  return startEntrylessFromDecision(ports, subject, decideFromRunnerFacts(facts, subject.roundsUsed), shape);
 }
 
 /** What a start decided, in the one shape both kinds of round use: the files to hand the agent, or a fixed code for why no round starts. */

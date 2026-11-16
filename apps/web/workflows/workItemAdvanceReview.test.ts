@@ -21,7 +21,7 @@ vi.mock("workflow/api", () => ({ resumeHook: vi.fn(), start: vi.fn() }));
 // so every test below keeps the direct gate it always had.
 const queue = vi.hoisted(() => ({ queued: false, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, enqueues: [] as unknown[], waits: 0 }));
 // D#519 MQ4-e1-a: the two steps of a merge-conflict round for an item with no queue entry are scripted the same way (bodies: lib/mergeQueueWait.test.ts).
-const conflict = vi.hoisted(() => ({ start: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, starts: 0, waits: 0, runner: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, runnerStarts: 0, reroute: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, reroutes: [] as string[], pins: [] as unknown[] }));
+const conflict = vi.hoisted(() => ({ start: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, starts: 0, waits: 0, runner: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, runnerStarts: 0, reroute: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, reroutes: [] as string[], pins: [] as unknown[], orderReroute: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, orderReroutes: 0 }));
 vi.mock("../lib/mergeQueueWait", async (orig) => ({
   ...(await orig<typeof import("../lib/mergeQueueWait")>()),
   // The gate asked again for a round's merge commit: its CI rule (the round's first head's signals) is tested in lib/mergeQueueEntryless.test.ts; here it is the worker's gate.
@@ -30,6 +30,8 @@ vi.mock("../lib/mergeQueueWait", async (orig) => ({
   // D#519 MQ4-e2-b: the start from a runner_local order's stored verdict (body: lib/mergeQueueWait.test.ts).
   runnerConflictBody: async () => (conflict.runnerStarts++, conflict.runner.length > 1 ? conflict.runner.shift()! : conflict.runner[0]!),
   // D#483 S5-j2e: the start of the round an overlap or an out-of-order number is re-routed into (body: lib/mergeQueueWait.test.ts).
+  // D#483 S5-j2e-RUNNER: the start from a runner_local order blocked for an overlap (body: lib/mergeQueueWait.test.ts).
+  runnerOrderRerouteBody: async () => (conflict.orderReroutes++, conflict.orderReroute.length > 1 ? conflict.orderReroute.shift()! : conflict.orderReroute[0]!),
   rerouteStartBody: async (_w: unknown, _who: unknown, kind: string, expectedHead: unknown) => (conflict.reroutes.push(kind), conflict.pins.push(expectedHead), conflict.reroute.length > 1 ? conflict.reroute.shift()! : conflict.reroute[0]!),
   conflictWaitBody: async () => (conflict.waits++, conflict.looks.length > 1 ? conflict.looks.shift()! : conflict.looks[0]!),
   enqueueBody: async (_w: unknown, _who: unknown, input: unknown) => (queue.enqueues.push(input), { queued: queue.queued }),
@@ -246,7 +248,7 @@ let logs: Array<Record<string, unknown>>;
 beforeEach(() => {
   world.sleeps = 0;
   Object.assign(queue, { queued: false, looks: [{ state: "waiting" }], enqueues: [], waits: 0 });
-  Object.assign(conflict, { start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], starts: 0, waits: 0, runner: [{ state: "not_applicable" }], runnerStarts: 0, reroute: [{ state: "not_applicable" }], reroutes: [], pins: [] });
+  Object.assign(conflict, { orderReroute: [{ state: "not_applicable" }], orderReroutes: 0, start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], starts: 0, waits: 0, runner: [{ state: "not_applicable" }], runnerStarts: 0, reroute: [{ state: "not_applicable" }], reroutes: [], pins: [] });
   logs = [];
   vi.spyOn(console, "info").mockImplementation((line: unknown) => void logs.push(JSON.parse(String(line))));
 });
@@ -2126,6 +2128,56 @@ describe("a runner_local order that ended with a conflict verdict", () => {
     setup(fresh({ gates: [delegated], orders: [{ state: "failed", code: "merge_conflict_runner" }] }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "conflict_round_unreadable" });
     expect(conflict.waits).toBe(6);
+  });
+});
+
+// D#483 S5-j2e-RUNNER: the plane-merge order was blocked for an overlap (the step reads the gate's reasons and the stored facts; its body is tested in lib/mergeQueueWait.test.ts).
+describe("a runner_local order blocked for an overlap", () => {
+  const delegated = { outcome: "merge_delegated", reasons: [] as string[], status: "posted" };
+  const blocked = (code = "overlap_unreviewed") => ({ state: "blocked", code, gateRecorded: true });
+
+  it("starts the round and follows it: the delta review passing asks the gate again (afterConflict), and the new order merges", async () => {
+    conflict.orderReroute = [{ state: "started" }];
+    conflict.looks = [{ state: "waiting" }, { state: "passed", headSha: "b".repeat(40) }];
+    const t = setup(fresh({ gates: [delegated, delegated], orders: [blocked(), { state: "merged", code: null }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(conflict.orderReroutes).toBe(1);
+    expect(conflict.runnerStarts).toBe(0);
+    expect(logs.find((l) => l.event === "advance.merge_conflict")).toMatchObject({ state: "started" });
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["not applicable (another reason, a renumber, an old runner's block)", { state: "not_applicable" }, { status: "ready_human_merges", detail: "overlap_unreviewed" }],
+    ["a stop for a person (no facts, a foreign commit, the bound)", { state: "stopped", reason: "overlap_unreviewed" }, { status: "needs_human", detail: "overlap_unreviewed" }],
+  ])("%s: the stop is the order's, recorded under overlap_unreviewed", async (_name, start, result) => {
+    conflict.orderReroute = [start];
+    setup(fresh({ gates: [delegated], orders: [blocked()] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(result);
+  });
+
+  it("a head that moved since the order goes back to review", async () => {
+    conflict.orderReroute = [{ state: "in_review" }];
+    setup(fresh({ gates: [delegated], orders: [blocked()] }));
+    await workItemAdvanceWorkflow(ARGS);
+    // The review loop reads the head again (as the hosted path's `in_review` does) and asks the gate again, so the start is asked once per pass.
+    expect(conflict.orderReroutes).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a block for any other code never asks the start: today's stop, recorded with its code", async () => {
+    for (const code of ["ci_not_green", "runner_ordered_unsupported", "ordered_resource_unreadable"]) {
+      conflict.orderReroutes = 0;
+      setup(fresh({ gates: [delegated], orders: [blocked(code)] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: code });
+      expect(conflict.orderReroutes, code).toBe(0);
+    }
+  });
+
+  it("a round that cannot be followed ends at the same bound as the others", async () => {
+    conflict.orderReroute = [{ state: "running" }];
+    conflict.looks = [{ state: "none" }];
+    setup(fresh({ gates: [delegated], orders: [blocked()] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "conflict_round_unreadable" });
   });
 });
 

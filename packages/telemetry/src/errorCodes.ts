@@ -551,6 +551,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ordered_resource_path_too_long",
   // The merge gate's order check (D#483 S5-j2a2): a pull request that changes files the base branch changed since its review, and a runner_local item that cannot attest migration order.
   "overlap_unreviewed",
+  // A runner_local order held for an overlap that carries no verdict to start a round from (D#483 S5-j2e-RUNNER).
+  "overlap_facts_missing",
   "ordered_resource_waiting",
   "merge_hold_expired",
   // The receipt behind a merge by policy (D#7 DW-R4): the write failed, or no review run is on the merged head. The merge itself stands.

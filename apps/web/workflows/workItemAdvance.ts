@@ -1,7 +1,7 @@
 import { sleep } from "workflow";
 import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, FixGateStepInput, FixGateStepOut, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
-import { conflictGateBody, conflictStartBody, conflictWaitBody, enqueueBody, rerouteStartBody, runnerConflictBody, waitBody, type ConflictStartOut, type ConflictWaitOut, type QueueWaitOut } from "../lib/mergeQueueWait";
+import { conflictGateBody, conflictStartBody, conflictWaitBody, enqueueBody, rerouteStartBody, runnerConflictBody, runnerOrderRerouteBody, waitBody, type ConflictStartOut, type ConflictWaitOut, type QueueWaitOut } from "../lib/mergeQueueWait";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
@@ -534,6 +534,12 @@ export async function advanceRerouteStartStep(accountId: string, userId: string,
 export async function advanceRunnerConflictStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<ConflictStartOut> {
   "use step";
   return runnerConflictBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
+}
+
+/** D#483 S5-j2e-RUNNER: starts the round of a `runner_local` item whose plane-merge order the gate blocked for an overlap, from the facts its runner sent. */
+export async function advanceRunnerOrderRerouteStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<ConflictStartOut> {
+  "use step";
+  return runnerOrderRerouteBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
 }
 
 /** D#519 MQ4-e1-a: the gate asked again for the merge commit a conflict round produced (it must show the CI signals the round's first pre-round head showed). */
@@ -1850,6 +1856,11 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
     }
     // The go phase already recorded the gate's own reasons for a block it found; a stop the gate never saw (a claim-time takeover or pairing change, a go phase
     // that was refused or found the pull request closed) is recorded here, so the card says why.
+    // D#483 S5-j2e-RUNNER: a block for an overlap starts the round from the facts the runner sent (the step checks the gate's reasons); anything else about it is today's stop.
+    if (order.state === "blocked" && (order.code === "overlap_unreviewed" || order.code === "ordered_resource_out_of_order")) {
+      const round = await conflictRound(args, pr, reentries, advanceRunnerOrderRerouteStep);
+      if (round !== "not_applicable") return round === null ? { next: "continue" } : { next: "end", result: round };
+    }
     if (order.state === "blocked") return stop(order.code ?? "runner_merge_failed", order.gateRecorded !== true);
     // D#519 MQ4-e2-b: a failed order that carries the runner's conflict verdict starts the round (or the foreign stop); anything else about it is today's stop.
     if (order.state === "failed" && (order.code === "merge_conflict_runner" || order.code === "merge_conflict_foreign")) {
