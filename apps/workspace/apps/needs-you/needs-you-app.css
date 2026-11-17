@@ -16,6 +16,7 @@
 .ny-error { margin: 6px 0; padding-left: 8px; border-left: 3px solid var(--accent, #1aff80); font-weight: 600; } /* a theme token, never a fixed colour: the bar and the weight carry it, the text keeps the theme's own contrast */
 .ny-error:empty { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 /* visually hidden, never display:none: a live region that is removed from the accessibility tree while empty is not announced when it fills */
+.ny-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 .ny-live { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 .ny-rows { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
 .ny-row { padding: 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
@@ -46,6 +47,12 @@
 .ny-btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; border-style: dashed; }
 .ny-btn:focus-visible, .ny-link:focus-visible, .ny-row-title:focus-visible, .ny-title:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .ny-link { color: inherit; text-decoration: underline; }
+/* EB-6c: engine asks. A warning is a bar and a weight on the theme's own text colour, like .ny-error; the links of a row sit on one wrapping line with room to press. */
+.ny-warn { margin: 6px 0; padding-left: 8px; border-left: 3px solid var(--accent, #1aff80); font-weight: 600; overflow-wrap: anywhere; }
+.ny-refs { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.ny-refs .ny-link { display: inline-block; min-height: 24px; }
+/* A 3px ring in the theme's text colour, the one colour every theme already keeps readable on its surface (the accent of modern-flat is 2.8:1 on it); the engine e2e measures it against the row in every theme. */
+.ny-row[data-kind="engine"] :focus-visible { outline: 3px solid var(--text-primary, #1aff80); outline-offset: 2px; }
 
 /* Phones and narrow windows: the buttons are full-width. */
 @container (max-width: 520px) {

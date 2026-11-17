@@ -7,7 +7,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ASKS_FIRST_URL, LIST_URL, MERGE_URL, ME_URL, NEEDS_HUMAN_URL, STALLED_URL, createNeedsYou, entryLabel, readNeedsYouCount } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_FIRST_URL, ENGINE_MAX_REPOS, ENGINE_REPOS_URL, engineAsksUrl, LIST_URL, MERGE_URL, ME_URL, NEEDS_HUMAN_URL, STALLED_URL, createNeedsYou, entryLabel, readNeedsYouCount } from "../apps/needs-you/needs-you-model.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGES = join(HERE, "..", "..", "..", "packages");
@@ -63,6 +63,18 @@ describe("the board's Needs you count", () => {
     expect(capped.more).toBe(true);
     const empty = await readNeedsYouCount(fake({ ["GET " + LIST_URL]: { requests: [], truncated: false }, ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ["GET " + NEEDS_HUMAN_URL]: { data: [], next_cursor: null } }));
     expect(entryLabel(empty)).toBe("Nothing needs you");
+  });
+
+  it("EB-6c: a failed engine read is more, never Nothing needs you; an engine page cap is more too", async () => {
+    const quiet = { ["GET " + LIST_URL]: { requests: [], truncated: false }, ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ["GET " + NEEDS_HUMAN_URL]: { data: [], next_cursor: null } };
+    const down = await readNeedsYouCount(fake({ ...quiet, ["GET " + ENGINE_REPOS_URL]: Object.assign(new Error("x"), { status: 500 }) }));
+    expect(down).toEqual({ count: 0, more: true });
+    expect(entryLabel(down)).toBe("Needs you (0+)");
+    const repos = Array.from({ length: ENGINE_MAX_REPOS + 1 }, (_, i) => ({ repo_id: "id-" + i, full_name: "a/r" + i, watch_enabled: true }));
+    const page = (items) => ({ items, next_cursor: null, as_of: "2026-11-16T09:59:30.000Z", heard_age_s: 30, source_ages_s: {}, gaps: [], missing_events: 0 });
+    const many = await readNeedsYouCount(fake({ ...quiet, ["GET " + ENGINE_REPOS_URL]: page(repos), ...Object.fromEntries(repos.map((r) => ["GET " + engineAsksUrl(r.repo_id), page([])])) }));
+    expect(many).toEqual({ count: 0, more: true });
+    expect(entryLabel(many)).toBe("Needs you (0+)");
   });
 
   it("D2: no Needs you URL or row rule is repeated under apps/pipeline", () => {
