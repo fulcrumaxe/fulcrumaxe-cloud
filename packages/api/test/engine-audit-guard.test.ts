@@ -270,6 +270,7 @@ export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
 /** Exports of engine*.ts route files that change nothing, each with the reason. A later row that adds a read-only export lists it here. */
 export const READ_ONLY_EXPORTS: Record<string, string> = {
   'engine.ts#engineSettingsDeps': 'the GitHub visibility seam the settings routes read; it is not a route and changes nothing',
+  'enginePlan.ts#enginePlanRoutes': 'one GET (the plan snapshot read); it changes nothing, so it writes no audit row',
 };
 
 const ROUTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes');

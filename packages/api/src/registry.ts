@@ -33,6 +33,12 @@ export class RawBody {
   ) {}
 }
 
+/**
+ * EB-7: what a JSON route's handler returns to answer 204 with no body for "there is nothing to show" (a route whose entry declares `noContent`). The
+ * dispatcher turns it into the status; the entry's own `successStatus` is the answer for every other return.
+ */
+export const NO_CONTENT: { readonly noContent: true } = Object.freeze({ noContent: true as const });
+
 export interface RouteContext {
   pool: Pool;
   principal: Principal;
@@ -120,6 +126,8 @@ export interface RouteEntry<
   responseSchema: ZodTypeAny;
   /** HTTP status the handler's return value is served with. Default 200. */
   successStatus?: number;
+  /** The route also answers 204 with no body, when its handler returns `NO_CONTENT`. The text is how openapi.json describes that answer. */
+  noContent?: string;
   /**
    * Set on a route that also has a `text/event-stream` variant (D#31
    * API-5b, served by the dedicated route files under `apps/web/app/api/v1/`

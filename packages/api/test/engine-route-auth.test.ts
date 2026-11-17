@@ -17,11 +17,12 @@ import * as engineModule from '../src/routes/engine.js';
 import { engineCommandRoutes } from '../src/routes/engine-commands.js';
 import { engineDecisionRoutes } from '../src/routes/engine-decisions.js';
 import { engineHaltRoutes } from '../src/routes/engine-halt.js';
+import { enginePlanRoutes } from '../src/routes/enginePlan.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const ROUTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes');
-// Every engine route, from all four files. The command routes are session-only by default (no `principals` key), so the probes read `principalsOf`.
-const engineRoutes: RouteEntry[] = [...engineModule.engineRoutes, ...engineCommandRoutes, ...engineDecisionRoutes, ...engineHaltRoutes];
+// Every engine route, from all five files. The command routes are session-only by default (no `principals` key), so the probes read `principalsOf`.
+const engineRoutes: RouteEntry[] = [...engineModule.engineRoutes, ...engineCommandRoutes, ...engineDecisionRoutes, ...engineHaltRoutes, ...enginePlanRoutes];
 const principalsOf = (r: RouteEntry): readonly string[] => r.principals ?? ['session'];
 
 /**
@@ -47,6 +48,7 @@ const EXPECTED_ROLES: Record<string, 'member' | 'admin' | 'owner'> = {
   listEngineCommands: 'member',
   haltEngineRepo: 'admin',
   clearEngineRepoHalt: 'admin',
+  getEngineRepoPlan: 'member',
 };
 const roleOf = (r: RouteEntry) => EXPECTED_ROLES[r.operationId]!;
 
@@ -59,7 +61,7 @@ const exportsOf = (): string[] =>
  * `routes/engine*.ts` that is neither a route array nor named below as a helper fails, and every route it registers must declare its principals and
  * role itself and pass the four probes.
  */
-const ROUTE_ARRAYS = ['engine.ts#engineRoutes', 'engine-commands.ts#engineCommandRoutes', 'engine-decisions.ts#engineDecisionRoutes', 'engine-halt.ts#engineHaltRoutes'];
+const ROUTE_ARRAYS = ['engine.ts#engineRoutes', 'engine-commands.ts#engineCommandRoutes', 'engine-decisions.ts#engineDecisionRoutes', 'engine-halt.ts#engineHaltRoutes', 'enginePlan.ts#enginePlanRoutes'];
 const HELPER_EXPORTS: Record<string, string> = {
   'engine.ts#engineSettingsDeps': 'the GitHub visibility seam, not a route',
 };
@@ -143,6 +145,7 @@ describe('engine route auth meta-test [pg]', () => {
     expect(ROUTES.filter((r) => r.path.startsWith('/api/v1/engine/')).map((r) => r.operationId).sort()).toEqual(Object.keys(EXPECTED_ROLES).sort());
     expect(engineDecisionRoutes.map((r) => r.operationId)).toEqual(['answerEngineDecision']);
     expect(engineHaltRoutes.map((r) => r.operationId)).toEqual(['haltEngineRepo', 'clearEngineRepoHalt']);
+    expect(enginePlanRoutes.map((r) => r.operationId)).toEqual(['getEngineRepoPlan']);
     expect(engineCommandRoutes.map((r) => r.operationId)).toEqual(['issueEngineCommand', 'cancelEngineCommand', 'listEngineCommands']);
     for (const r of engineRoutes) {
       expect(ROUTES.includes(r), `${r.operationId} is registered in ROUTES`).toBe(true);
@@ -166,7 +169,7 @@ describe('engine route auth meta-test [pg]', () => {
   });
 
   it('a member reads every GET route', async () => {
-    for (const r of engineRoutes.filter((x) => x.method === 'GET')) expect(await call('GET', urlOf(r.path), member), `${r.path}`).toBe(200);
+    for (const r of engineRoutes.filter((x) => x.method === 'GET')) expect(await call('GET', urlOf(r.path), member), `${r.path}`).toBe(r.noContent ? 204 : 200);
   });
   it('an admin may change the settings but not delete the data; only the owner deletes', async () => {
     const put = engineRoutes.find((r) => r.operationId === 'setEngineSettings')!;
@@ -191,7 +194,7 @@ describe('engine route auth meta-test [pg]', () => {
   it('a token that holds every scope is still 403 on both settings writes: they are session only', async () => {
     for (const r of engineRoutes.filter((x) => x.method === 'PUT')) expect(await call(r.method, urlOf(r.path), 'none', everyScopeToken), `${r.method} ${r.path}`).toBe(403);
     // A GET that is session only (the command list) is refused to a token too; every other GET answers.
-    for (const r of engineRoutes.filter((x) => x.method === 'GET')) expect(await call('GET', urlOf(r.path), 'none', everyScopeToken), `${r.path}`).toBe(principalsOf(r).includes('token') ? 200 : 403);
+    for (const r of engineRoutes.filter((x) => x.method === 'GET')) expect(await call('GET', urlOf(r.path), 'none', everyScopeToken), `${r.path}`).toBe(principalsOf(r).includes('token') ? (r.noContent ? 204 : 200) : 403);
   });
 
   it('a user of another account sees none of this account on the account-level routes', async () => {

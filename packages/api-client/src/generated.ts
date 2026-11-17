@@ -5749,6 +5749,46 @@ export interface Operations {
       halted: false;
     };
   };
+  getEngineRepoPlan: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      plan_date: string;
+      snapshot_at: string;
+      received_at: string;
+      age_s: number;
+      items: Array<{
+        discussion: number;
+        ordinal: number;
+        state: "planned" | "in_progress" | "pr_open" | "merged" | "blocked" | "dropped";
+      }>;
+      roadmap: Array<{
+        row_key: string;
+        discussion: (number) | (null);
+        status: "not_started" | "in_progress" | "done" | "blocked" | "deferred" | "split" | "removed" | "superseded";
+        planned_prs: (number) | (null);
+      }>;
+      newer_partial: ({
+        chunks_received: number;
+        chunk_count: number;
+        last_chunk_at: string;
+      }) | (null);
+      as_of: string | null;
+      heard_age_s: (number) | (null);
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+    } | unknown;
+  };
 }
 
 /** Every operation by operationId. scope is the scope a token needs (null when it needs none or cannot be used). */
@@ -8194,6 +8234,17 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  getEngineRepoPlan: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/plan",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
 } as const;
 

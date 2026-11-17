@@ -153,6 +153,7 @@ export function buildOpenApiDocument(routes: readonly RouteEntry[]): OpenApiDocu
         },
       };
     }
+    if (route.noContent) responses["204"] = { description: route.noContent };
     for (const status of COMMON_ERROR_STATUSES) {
       responses[status] = errorResponse();
     }

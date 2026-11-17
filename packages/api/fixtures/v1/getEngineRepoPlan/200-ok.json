@@ -1,0 +1,17 @@
+{
+  "plan_date": "2026-11-16",
+  "snapshot_at": "2026-11-16T10:00:00.000Z",
+  "received_at": "2026-11-16T10:00:01.000Z",
+  "age_s": 90,
+  "items": [{ "discussion": 842, "ordinal": 1, "state": "in_progress" }],
+  "roadmap": [
+    { "row_key": "", "discussion": 842, "status": "in_progress", "planned_prs": null },
+    { "row_key": "EB-7", "discussion": null, "status": "done", "planned_prs": 1 }
+  ],
+  "newer_partial": null,
+  "as_of": "2026-11-16T10:00:00.000Z",
+  "heard_age_s": 12,
+  "source_ages_s": { "plan": 40 },
+  "gaps": [],
+  "missing_events": 0
+}
