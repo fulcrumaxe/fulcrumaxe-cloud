@@ -142,11 +142,11 @@ test.describe("D#483 P5: the run detail (mocked API)", () => {
     await expect(tid(page, "runs-finding")).toHaveText(["The verdict chip is not announced to screen readers.", "A run with no findings shows an empty list."]);
     // cost: two separate lines, each with whose bill
     await expect(tid(page, "runs-cost-model")).toContainText("Model usage");
-    await expect(tid(page, "runs-cost-model")).toContainText("$1.23");
+    await expect(tid(page, "runs-cost-model")).toContainText(/\$1\.2345(?!\d)/);
     await expect(tid(page, "runs-cost-model")).toContainText("On your Anthropic key");
     await expect(tid(page, "runs-cost-model")).toContainText("182,000 in, 9,400 out");
     await expect(tid(page, "runs-cost-compute")).toContainText("Sandbox compute");
-    await expect(tid(page, "runs-cost-compute")).toContainText("$0.04");
+    await expect(tid(page, "runs-cost-compute")).toContainText(/\$0\.0412(?!\d)/);
     // the timeline: the same lines as the Pipeline app, with times
     await expect(tid(page, "runs-act")).toHaveCount(3);
     await expect(tid(page, "runs-act").nth(1)).toContainText("Ran tests: pnpm --filter @fx/workspace test");
@@ -186,7 +186,7 @@ test.describe("D#483 P5: the run detail (mocked API)", () => {
     await expect(tid(page, "runs-findings")).toHaveCount(0); // findings belong to reviewers
     await expect(tid(page, "runs-cost-model")).toContainText("No per-token charge");
     await expect(tid(page, "runs-cost-model")).toContainText("On the operator's subscription");
-    await expect(tid(page, "runs-cost-compute")).toContainText("$0.04");
+    await expect(tid(page, "runs-cost-compute")).toContainText(/\$0\.0412(?!\d)/);
     await press(page, tid(page, "runs-facts").locator("summary"));
     await expect(tid(page, "runs-linked")).toHaveText("Continued by: Review · Code reviewer, Running");
     await expectNoOverflow(page);

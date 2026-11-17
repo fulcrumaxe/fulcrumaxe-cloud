@@ -5,11 +5,14 @@ import { api } from "../_lib/api.js";
 export const REPOS_URL = "/api/v1/engine/repos";
 export const SETTINGS_URL = "/api/v1/engine/settings";
 export const DELETE_URL = "/api/v1/engine/settings/delete-data";
-/** The three per-repo panels this app reads. Gates are read without a PR so one call covers every PR in a lane. */
-export const PANELS = ["agents", "lanes", "gates"];
-const PANEL_PATH = { agents: "/agents?state=running", lanes: "/lanes", gates: "/gates" };
+/** The per-repo panels this app reads. Gates are read without a PR so one call covers every PR in a lane. */
+export const PANELS = ["agents", "lanes", "gates", "log", "plan", "stats", "usage"];
+export const LOG_LIMIT = 100;
+const PANEL_PATH = { agents: "/agents?state=running", lanes: "/lanes", gates: "/gates", log: "/log?limit=" + LOG_LIMIT, plan: "/plan", stats: "/stats", usage: "/usage" };
 const enc = (v) => encodeURIComponent(String(v));
 export const panelUrl = (kind, repoId) => REPOS_URL + "/" + enc(repoId) + PANEL_PATH[kind];
+export const logUrl = (repoId, cursor) => panelUrl("log", repoId) + "&cursor=" + enc(cursor);
+export const lanesUrl = (repoId, cursor) => panelUrl("lanes", repoId) + "?cursor=" + enc(cursor);
 export const commandsUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/commands";
 export const commandUrl = (id) => "/api/v1/engine/commands/" + enc(id);
 export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
@@ -23,6 +26,8 @@ export function createTeamApi(call = api) {
     repos: (signal) => call("GET", REPOS_URL, undefined, signal),
     settings: (signal) => call("GET", SETTINGS_URL, undefined, signal),
     panel: (kind, repoId, signal) => call("GET", panelUrl(kind, repoId), undefined, signal),
+    older: (repoId, cursor, signal) => call("GET", logUrl(repoId, cursor), undefined, signal),
+    lanesPage: (repoId, cursor, signal) => call("GET", lanesUrl(repoId, cursor), undefined, signal),
     saveSettings: (body, signal) => call("PUT", SETTINGS_URL, body, signal),
     deleteData: (signal) => call("PUT", DELETE_URL, undefined, signal),
     commands: (repoId, signal) => call("GET", commandsUrl(repoId) + "?limit=50", undefined, signal),

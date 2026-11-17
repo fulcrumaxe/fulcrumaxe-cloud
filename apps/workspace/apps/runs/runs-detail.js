@@ -6,7 +6,7 @@
 // h() as a string child, which makes a text node: nothing here builds markup from it.
 //
 // One file for both halves because the Runs app has a per-app boot-file ceiling (build/budget.mjs).
-import { clockText, h, timeNode } from "../_lib/dom.js";
+import { clockText, h, timeNode, usd as dollars } from "../_lib/dom.js";
 import { REFUSAL } from "../_lib/api.js";
 import { crossesBoundary, displayText, nextCarry } from "./runs-display-filter.js";
 import { STATUS_LABELS } from "./runs-storage.js";
@@ -75,7 +75,7 @@ export function durationText(run, serverTime) {
   return Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m";
 }
 
-const usd = (n) => (Number.isFinite(n) ? "$" + (n !== 0 && Math.abs(n) < 0.01 ? n.toFixed(4) : n.toFixed(2)) : null);
+const usd = (n) => (Number.isFinite(n) ? dollars(n) : null);
 const tokens = (n) => (Number.isFinite(n) ? n.toLocaleString("en-US") : null);
 
 const MODEL_BILL = {

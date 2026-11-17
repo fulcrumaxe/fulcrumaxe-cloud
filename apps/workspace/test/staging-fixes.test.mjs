@@ -69,7 +69,7 @@ describe("item 5: the Runners account line is bound to the API's account.capacit
 describe("item 4: the runner run header total", () => {
   const ins = (usage, runtime = "runner") => ({ run: { runtime }, runner_usage: usage });
   it("a subscription run: API-equivalent total, on the customer's Claude plan", () => {
-    expect(runnerHeadTotal(ins({ credential_mode: "subscription", api_equivalent_usd: 1.2345 }))).toBe("API-equivalent $1.23 · on your Claude plan");
+    expect(runnerHeadTotal(ins({ credential_mode: "subscription", api_equivalent_usd: 1.2345 }))).toBe("API-equivalent $1.2345 · on your Claude plan");
   });
   it("an own-key run says so; no price or no usage never reads as $0", () => {
     expect(runnerHeadTotal(ins({ credential_mode: "api_key", api_equivalent_usd: 0.5 }))).toBe("$0.50 at API prices · on your own API key");

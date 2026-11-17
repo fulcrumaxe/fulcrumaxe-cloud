@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { test, expect, type Page, type Route } from "@playwright/test";
 import { bootToDesktop } from "./helpers/boot";
+import { makeFixtures } from "../test/fixtures/team/fixtures.mjs";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const V1 = join(DIR, "..", "..", "..", "packages", "api", "fixtures", "v1");
@@ -153,6 +154,46 @@ test.describe("D#37 WS-F6: Budget & Billing (mocked API)", () => {
     await boot(page, { usage: { ...usage, own_plan_api_equivalent_usd: 12.5 } });
     await expect(tid(page, "bb-own-plan")).toHaveText("On your own plan (API-equivalent): $12.50");
     await expect(tid(page, "bb-spent").first()).toHaveText("$7.10");
+  });
+
+  test("EB-6b: the engine's API-equivalent is its own line, drawn by the shared formatter, and absent when zero or not sent", async ({ page }) => {
+    const usage = { ...USAGE, own_plan_api_equivalent_usd: 0 };
+    await boot(page, { usage: { ...usage, engine_api_equivalent_usd: 0.0042 } });
+    await expect(tid(page, "bb-engine")).toHaveText("On your own engine (API-equivalent): $0.0042");
+    await expect(tid(page, "bb-own-plan")).toHaveCount(0); // a separate figure, never merged into the own-plan line
+  });
+
+  test("EB-6b: no engine line when the figure is zero or the server does not send it", async ({ page }) => {
+    await boot(page, { usage: { ...USAGE, engine_api_equivalent_usd: 0 } });
+    await expect(tid(page, "bb-engine")).toHaveCount(0);
+    expect(await page.locator(WIN).innerText()).not.toMatch(JUNK);
+  });
+
+  test("EB-6b: the Team Cost panel and the Budget & billing engine line show the same figure as the same string", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const SENT = 1234.5678; // grouping and four decimals: a rounding or a second formatter on either side would show here
+    const BASE = "/api/v1/engine";
+    const env = (items: unknown[]) => F.envelope(items);
+    const answers: Record<string, unknown> = {
+      settings: F.settings(), repos: { items: [F.repo()] },
+      agents: env([F.agent()]), lanes: env([F.lane()]), gates: env([F.gate()]), log: env([F.logLine()]), plan: F.plan(), stats: F.stats(),
+      usage: F.usage({ totals: { api_equivalent_usd: SENT, tokens: { input: 1, output: 1, cache_read: 0, cache_write: 0 } }, items: [F.usageItem({ api_equivalent_usd: SENT })] }),
+    };
+    await page.route((u) => u.pathname.startsWith(BASE), (route) => {
+      const path = new URL(route.request().url()).pathname.slice(BASE.length + 1);
+      const key = path.startsWith("repos/") ? path.split("/")[2] : path;
+      return key in answers ? json(route, 200, answers[key]) : json(route, 404, err("not_found"));
+    });
+    await boot(page, { usage: { ...USAGE, engine_api_equivalent_usd: SENT } });
+    const bb = await tid(page, "bb-engine-value").innerText();
+    await page.evaluate(() => (window as unknown as { FULCWM: Record<string, (id: string) => void> }).FULCWM.open("team"));
+    const TEAM = `#windows-container .fulc-window[data-app-id="team"]`;
+    await expect(page.locator(`${TEAM} [data-testid="tm-usage-headline"]`)).toBeVisible();
+    const team = await page.locator(`${TEAM} [data-testid="tm-usage-headline"]`).innerText();
+    const row = await page.locator(`${TEAM} [data-testid="tm-usage-value"]`).first().innerText();
+    expect(bb).toBe("$1,234.5678");
+    expect(team).toBe(bb); // the repo total (from the route) and the account-month line
+    expect(row).toBe(bb); // and the row's own figure, as sent
   });
 
   test("D#6 R2b-5b: no own-plan line when it is zero or the server does not send it", async ({ page }) => {

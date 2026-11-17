@@ -12,7 +12,7 @@
 //    from a server code or message.
 //  - No new live subscription: the app hands run.status_changed and refresh
 //    to live() from the subscriptions the board already holds.
-import { h, timeNode } from "../_lib/dom.js";
+import { h, timeNode, usd as apiUsd } from "../_lib/dom.js";
 import { OFFLINE_MESSAGE, refusalLabel, SERVER_ERROR_MESSAGE, TIMEOUT_MESSAGE, api, createRetryGate, isRateLimited, parseRetryAfter, retryWords, waitSeconds } from "../_lib/api.js";
 import { STAGE_LABELS } from "./pipeline-storage.js";
 import { apiFetch, createSseParser } from "../../core/cloud-live.js";
@@ -59,7 +59,6 @@ export const sentenceFor = (code) => (Object.prototype.hasOwnProperty.call(SENTE
 
 const money = (n) => "$" + Number(n).toFixed(2);
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-const apiUsd = (n) => "$" + (n !== 0 && Math.abs(n) < 0.01 ? n.toFixed(4) : n.toFixed(2));
 const tok = (n) => (Number.isFinite(n) ? n.toLocaleString("en-US") : "0");
 
 /**

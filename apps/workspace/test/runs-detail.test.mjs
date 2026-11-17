@@ -84,8 +84,8 @@ describe("duration", () => {
 describe("cost: model and compute are separate, each with whose bill it is on", () => {
   it("shows a customer-key run's model usage with its tokens and key, and compute apart", () => {
     const [model, compute] = costRows(REVIEW.cost, "succeeded");
-    expect(model).toMatchObject({ key: "model", label: "Model usage", value: "$1.23", bill: "On your Anthropic key", detail: "182,000 in, 9,400 out" });
-    expect(compute).toMatchObject({ key: "compute", label: "Sandbox compute", value: "$0.04", bill: "Sandbox compute, billed to the workspace" });
+    expect(model).toMatchObject({ key: "model", label: "Model usage", value: "$1.2345", bill: "On your Anthropic key", detail: "182,000 in, 9,400 out" });
+    expect(compute).toMatchObject({ key: "compute", label: "Sandbox compute", value: "$0.0412", bill: "Sandbox compute, billed to the workspace" });
   });
   it("shows an operator-subscription run as no per-token charge, on the operator's subscription", () => {
     const [model] = costRows(EXEC.cost, "succeeded");

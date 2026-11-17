@@ -53,6 +53,16 @@ export function clockText(iso) {
   return Number.isFinite(t) ? new Date(t).toISOString().slice(11, 19) + " UTC" : null;
 }
 
+/**
+ * The one currency formatter of the workspace apps (here because a new _lib file would cost a boot request). A dollar figure the server sends is drawn exactly
+ * as sent, up to the four decimals the cloud keeps: 600 -> $600.00, 12.3456 -> $12.3456, 0.0042 -> $0.0042. Budget & Billing, the Pipeline and Runs API-equivalent
+ * lines and the Team app's Cost panel all use it, so one figure never reads two ways. A value that is not a finite number reads "Unavailable", never $0 or NaN.
+ */
+export function usd(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "Unavailable";
+  return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
+
 // ───────── D#600 CX-9b: the context rules panel ─────────
 // D#600 CX-9b: the context rules panel, shared by the Repos app (a repository's rules and its budget) and the Pipeline item pane (one item's rules).
 // Lives in this file because each new app file costs a boot request and the boot budget is full. A pin keeps a file in the run's prompt; an exclude keeps a path out of what the

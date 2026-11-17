@@ -39,5 +39,30 @@ export function makeFixtures(nowMs) {
   const dials = (over = {}) => ({ repo_id: REPO_A, can_change: true, catalogue_version: 11, active_preset: null, presets: [], invariants: [], dials: [dial("start_small_item"), dial("engine_spawn"), dial("engine_merge", { disposition: "announce" }), dial("engine_spec_ready", { allowed_dispositions: ["act", "ask"] })], ...over });
   /** Operate on, for the account and the repo: what an owner sees once the switch is on. */
   const operateOn = () => ({ settings: settings({ operate_enabled: true }), repos: list([repo({ operate_enabled: true })]) });
-  return { iso, envelope, repo, settingsRepo, settings, agent, lane, gate, list, command, commands, dial, dials, operateOn };
+  const logLine = (over = {}) => ({ line_id: "0123456789abcdef", actor_role: "team-lead", category: "merged", discussion: 42, pr: 7, ts: iso(180), ...over });
+  /** `n` distinct log lines, newest first, the first one `start` lines in. */
+  const logLines = (n, start = 0) => Array.from({ length: n }, (_, i) => logLine({ line_id: "l" + String(start + i).padStart(15, "0"), ts: iso(60 + (start + i) * 2), pr: 1 + ((start + i) % 50) }));
+  const plan = (over = {}) => ({
+    plan_date: new Date(nowMs).toISOString().slice(0, 10), snapshot_at: iso(90), received_at: iso(89), age_s: 90,
+    items: [{ discussion: 42, ordinal: 1, state: "in_progress" }, { discussion: 43, ordinal: 2, state: "planned" }],
+    roadmap: [{ row_key: "EB-6b", discussion: 42, status: "in_progress", planned_prs: 3 }, { row_key: "", discussion: 44, status: "done", planned_prs: null }],
+    newer_partial: null, as_of: iso(30), heard_age_s: 20, source_ages_s: { plan: 40 }, gaps: [], missing_events: 0, ...over,
+  });
+  const prov = (count) => ({ kinds: ["agent_stopped"], count, seqs: [] });
+  const usageItem = (over = {}) => ({
+    subject_kind: "agent", subject_id: "a1b2c3d4e5f60718", model: "sonnet-5", credential_mode: "subscription", tokens: { input: 1200, output: 300, cache_read: 5000, cache_write: 100 },
+    api_equivalent_usd: 1.2345, state: "recorded", note: null, provenance: { session_id: SESSION, seqs: [4, 5] }, ...over,
+  });
+  const usage = (over = {}) => ({
+    items: [usageItem(), usageItem({ subject_id: "t1", subject_kind: "tick", model: null, credential_mode: null, tokens: null, api_equivalent_usd: null, state: "not_priced", note: "No API price for this model. That is not the same as $0." })],
+    next_cursor: null, as_of: iso(30), heard_age_s: 20, source_ages_s: { loop: 60, team_log: 120, plan: 3600, merge_queue: 300 }, gaps: [], missing_events: 0,
+    window: { from: iso(30 * 86400), to: iso(0) }, totals: { api_equivalent_usd: 12.3456, tokens: { input: 1200, output: 300, cache_read: 5000, cache_write: 100 } }, ...over,
+  });
+  const stats = (over = {}) => ({
+    next_cursor: null, as_of: iso(30), heard_age_s: 20, source_ages_s: { loop: 60, team_log: 120, plan: 3600, merge_queue: 300 }, gaps: [], missing_events: 0,
+    window: { from: iso(30 * 86400), to: iso(0) },
+    agents_by_role: { value: { executor: 2, "code-reviewer": 1 }, provenance: prov(6) }, duration_s: { n: 3, median: 120.5, p90: 300, provenance: prov(3) },
+    merges: { value: 4, provenance: prov(4) }, gate_pass_rate: { value: 0.75, numerator: 3, denominator: 4, provenance: prov(1) }, ...over,
+  });
+  return { iso, envelope, repo, settingsRepo, settings, agent, lane, gate, list, command, commands, dial, dials, operateOn, logLine, logLines, plan, stats, usage, usageItem, prov };
 }
