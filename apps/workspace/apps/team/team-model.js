@@ -313,7 +313,7 @@ export function describe(st, nowMs) {
   const repo = st.repos.find((r) => r.id === st.selectedId);
   const shown = st.draft && st.draft.operate !== undefined ? { ...st, settings: { ...st.settings, operate: st.draft.operate } } : st; // the operate switch the person just chose, while its save is out
   const asOf = (iso) => asOfWords({ as_of: iso }, nowMs);
-  const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", operate: describeOperate(shown, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
+  const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", failedKeys: st.failedKeys, operate: describeOperate(shown, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
   if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   if (!repo) return { kind: "norepos", text: WORDS.noRepos, ...base };
   const { agents, lanes, gates, log, plan, stats, usage } = st.panels;
@@ -348,7 +348,7 @@ const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, fa
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
 export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval } = {}) {
-  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, op: NO_OP, draft: null };
+  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null };
   let busy = false, again = false, pick = 0, debounce = null, stopFn = null, saveVer = 0, hiddenFn = () => false;
   // A save starting or ending moves saveVer. A read remembers it when it starts; if it has moved, or a save is out, by the time the answer lands
   // the answer was asked before the save changed things and is dropped (the read that follows the save shows the server's answer).
@@ -385,17 +385,18 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     await opRead;
     if (stale()) return;
     const next = { ...st.panels };
-    let failed = false, first = null;
+    let failedKeys = [], first = null;
     for (const [i, k] of PANELS.entries()) {
       const v = results[i].status === "fulfilled" ? results[i].value : undefined;
       let env = k === "plan" ? (v === null ? "none" : readPlan(v)) : k === "stats" ? readStats(v) : k === "usage" ? readUsage(v) : readEnvelope(v);
       if (k === "lanes" && env) env = await moreLanes(env, selectedId);
       if (env) next[k] = env;
-      else failed = true;
+      else failedKeys.push(k);
       if (k === "log" && env && st.log.pages <= 1) first = { ...NO_LOG, rows: env.items, cursor: env.cursor, pages: 1 }; // once older pages are open, a refresh leaves the list where the person is
     }
     if (token !== pick || (signal && signal.aborted)) return;
-    set({ panels: next, refreshFailed: failed, ...(first ? { log: first } : {}) });
+    // One panel that cannot be read marks that panel only (its own failed note, said aloud). The view-wide note is for the reads the whole view stands on: settings and the repo list fail it in read() above, and every panel failing at once fails it here.
+    set({ panels: next, failedKeys, refreshFailed: failedKeys.length === PANELS.length, ...(first ? { log: first } : {}) });
   }
   /** The merged count needs every lane the server has, so up to LANE_PAGES pages are read, following the cursor. A page that cannot be read leaves its cursor in place, so the count still says "at least". */
   async function moreLanes(env, id) {
@@ -430,7 +431,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
   function select(id) {
     if (id === st.selectedId || !st.repos.some((r) => r.id === id)) return;
     pick += 1;
-    set({ selectedId: id, panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], refreshFailed: false, op: NO_OP });
+    set({ selectedId: id, panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], refreshFailed: false, failedKeys: [], op: NO_OP });
     refresh();
   }
   /** `draft` is what the person just chose: it stays on screen while the save is out, and is dropped if the save fails (the last server value comes back). */
