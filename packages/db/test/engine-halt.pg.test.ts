@@ -322,6 +322,53 @@ describe('engine halt (1031)', () => {
       expect(rows.map((x) => x.e)).toEqual([2]);
     });
 
+    describe('1034: a tenant session gets the exact epoch, whatever it passes; no tenant keeps the higher stamp', () => {
+      async function runner(): Promise<string> {
+        return (
+          await admin.query<{ id: string }>(
+            `INSERT INTO runners (account_id, registered_by, public_key_jwk, jkt, credential_mode) VALUES ($1, $2, '{"kty":"OKP","crv":"Ed25519","x":"x"}', $3, 'api_key') RETURNING id`,
+            [a.accountId, a.userId, Buffer.from(randomUUID() + randomUUID()).toString('base64url').slice(0, 43)],
+          )
+        ).rows[0]!.id;
+      }
+      const insertReal = (c: PoolClient, runnerId: string, repoId: string, stamp: number, seq: number, issuer: string = a.userId) =>
+        c.query(
+          `INSERT INTO engine_commands (account_id, runner_id, repo_id, command_seq, kind, args, issued_by, expires_at, halt_epoch_at_issue)
+           VALUES ($1, $2, $3, $4, 'pause_loop', '{}'::jsonb, $5, now() + interval '5 minutes', $6)`,
+          [a.accountId, runnerId, repoId, seq, issuer, stamp],
+        );
+      const stored = async (repoId: string) => (await admin.query(`SELECT halt_epoch_at_issue AS e FROM engine_commands WHERE repo_id = $1 ORDER BY command_seq`, [repoId])).rows.map((x) => x.e);
+
+      it('an owner session that stamps current + 5 and one that stamps low both store the current epoch', async () => {
+        const r = await repo();
+        const runnerId = await runner();
+        await asOwner(async (c) => { await setEngineHalt(c, r); await clearEngineHalt(c, r); await setEngineHalt(c, r); await clearEngineHalt(c, r); });
+        const current = (await control(r))!.halt_epoch as number;
+        expect(current).toBe(2);
+        await asOwner((c) => insertReal(c, runnerId, r, current + 5, 1));
+        await asOwner((c) => insertReal(c, runnerId, r, 0, 2));
+        expect(await stored(r)).toEqual([current, current]);
+      });
+
+      it('an admin session is held to the same rule as the owner', async () => {
+        const r = await repo();
+        const runnerId = await runner();
+        const adminId = await member(a, 'admin');
+        await asOwner((c) => setEngineHalt(c, r));
+        await asOwner((c) => clearEngineHalt(c, r));
+        await withTenant(appUserPool, a.accountId, adminId, (c) => insertReal(c, runnerId, r, 9, 1, adminId));
+        expect(await stored(r)).toEqual([1]);
+      });
+
+      it('the owner connection with no tenant (the fixture path) keeps the higher stamp, and is still raised when it stamps low', async () => {
+        const r = await repo();
+        await asOwner(async (c) => { await setEngineHalt(c, r); await clearEngineHalt(c, r); });
+        await insertCmd(r, 'pause_loop');
+        await admin.query(`INSERT INTO ${CMD} (account_id, repo_id, kind, halt_epoch_at_issue) VALUES ($1, $2, 'pause_loop', 7)`, [a.accountId, r]);
+        expect((await admin.query(`SELECT halt_epoch_at_issue AS e FROM ${CMD} WHERE repo_id = $1 ORDER BY halt_epoch_at_issue`, [r])).rows.map((x) => x.e)).toEqual([1, 7]);
+      });
+    });
+
     it('every kind is stamped, the allowed ones included, and a command with no marker row yet is stamped 0', async () => {
       const r = await repo();
       for (const kind of ['pause_loop', 'start_day']) await insertCmd(r, kind);
