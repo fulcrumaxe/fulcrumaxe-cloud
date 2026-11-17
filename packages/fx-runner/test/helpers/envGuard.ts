@@ -52,6 +52,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engineBridge/loop.ts": ["crypto"], // a random id for the bridge's own session
   "src/engineBridge/inbox.ts": ["crypto", "fs", "path"], // the engine inbox: lstat on the directories, no-follow opens judged by the handle, a random temp-file name, an exclusive 0600 create, one rename
   "src/engineBridge/decideSocket.ts": ["fs", "http", "path"], // the decide socket: lstat on its 0700 directory, an http server on that Unix socket only, chmod 0600
+  "src/engineBridge/engineVersion.ts": ["fs", "path"], // EB-3c: the engine's manifest version: lstat on its directory, a no-follow open judged by the handle, one positioned read
+  "src/engineBridge/settings.ts": ["fs", "path"], // EB-3c: the bridged repos' file, through config.ts's private-file helpers; realpath and stat of the state directories, to tell one directory from another by identity
+  "src/engineBridge/daemon.ts": ["path"], // EB-3c: the cursor's and the events file's names below the state directories
+  "src/commands/engineBridge.ts": ["path"], // EB-3c: the default engine state directory's name below the home directory
   "src/credentials.ts": ["crypto", "fs", "path"], // D#6 R5b-3: the API key file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   // D#597 CC-7a-1, the assistant link and its local tool proxy.
   "src/assistant/tokenFile.ts": ["crypto", "fs", "path"], // the token file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename

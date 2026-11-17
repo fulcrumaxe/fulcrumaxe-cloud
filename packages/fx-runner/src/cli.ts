@@ -23,6 +23,7 @@ import { logsCommand } from "./commands/logs.js";
 import { runCommand, type RunHost } from "./commands/run.js";
 import { serviceCommand, type ServiceHost } from "./commands/service.js";
 import { statusCommand } from "./commands/status.js";
+import { engineBridgeCommand } from "./commands/engineBridge.js";
 import { verifyBrowserServerCommand, type VerifyServerHost } from "./commands/verifyBrowserServer.js";
 import { verifyLoginCommand, type VerifyLoginHost } from "./commands/verifyLogin.js";
 import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
@@ -39,6 +40,8 @@ export interface CliIo {
   stateDirOverride?: string | undefined;
   /** `FX_RUNNER_PROTECTION_BYPASS_FILE`, looked up by name by the caller: a file holding the Vercel protection bypass secret (staging only). */
   protectionBypassFile?: string | undefined;
+  /** `AUTONOMOUS_TEAM_STATE_DIR`, looked up by name by the caller: the engine's state directory, where `engine-bridge enable` binds a repo when `--state-dir` is not given. */
+  engineStateDirOverride?: string | undefined;
   /** The user id the process runs as, for the owner check on that file. */
   uid?: number | undefined;
   /** The machine's host name, looked up by the caller (`os.hostname()`); tests set it. */
@@ -119,6 +122,9 @@ Commands:
   assistant link     Connect this machine's assistant to a workspace: prints a code a signed-in person approves, then stores the short-lived token (mode 0600) here.
   drain [--no-wait]  The upgrade path. The running runner finishes the jobs it holds, claims nothing more and exits 0; this returns once it has, so replacing the program
                      loses no run (a plain restart can kill a job claimed a second earlier). With a service manager it stays down until you start it again. --no-wait only asks.
+  engine-bridge enable --repo <owner/name> --repo-root <dir> [--state-dir <dir>] | disable [--repo <owner/name>] | status
+                     Bridge an engine repo to the workspace's team app. enable asks the cloud whether this runner is paired with the repo and refuses one that is not; the engine's state
+                     directory belongs to that one repo. status shows what the running daemon last said, per repo, with no event content. A running fx-runner picks changes up within seconds.
   pause | resume     Stop claiming new jobs (running ones finish), or start again. The runner stays registered and keeps its place.
 `;
 
@@ -142,6 +148,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   pause: { flags: [], switches: [] },
   drain: { flags: [], switches: ["no-wait"] },
   resume: { flags: [], switches: [] },
+  "engine-bridge": { flags: ["repo", "repo-root", "state-dir"], switches: [], positionals: 1 },
   credentials: { flags: [], switches: [] },
   assistant: { flags: [], switches: [], positionals: 1 },
   "verify-login": { flags: ["base-url"], switches: ["forget"] },
@@ -151,6 +158,9 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   // Its own words, parsed in src/vm/command.ts.
   vm: { flags: [], switches: [] },
 };
+
+/** The first positional of a parsed command line, if any. */
+const positionals0 = (parsed: { positionals: string[] } | undefined): string | undefined => parsed?.positionals[0];
 
 function parseFlags(command: string, rest: readonly string[]): { flags: Flags; positionals: string[] } {
   const spec = COMMANDS[command]!;
@@ -216,7 +226,7 @@ export async function runCli(io: CliIo): Promise<number> {
       sleep: io.sleep,
     };
     // A bypass file that cannot be used stops a command that calls the cloud before any request; `doctor` reports it instead.
-    if (command === "register" || command === "revoke" || command === "run" || command === "assistant") requireUsable(ctx.bypass);
+    if (command === "register" || command === "revoke" || command === "run" || command === "assistant" || (command === "engine-bridge" && positionals0(parsed) === "enable")) requireUsable(ctx.bypass);
     // Its words are never echoed or parsed as options: one of them could be a key typed in the wrong place.
     if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret);
     if (command === "vm") {
@@ -247,6 +257,7 @@ export async function runCli(io: CliIo): Promise<number> {
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
     }
     if (command === "assistant") return await assistantCommand(positionals, ctx);
+    if (command === "engine-bridge") return await engineBridgeCommand(positionals, flags, ctx, { home: io.home, engineStateDirOverride: io.engineStateDirOverride });
     if (command === "pause" || command === "resume") return claimingCommand(command, ctx);
     if (command === "drain") {
       if (io.host === undefined) throw new CliError("drain is only available from the fx-runner program");

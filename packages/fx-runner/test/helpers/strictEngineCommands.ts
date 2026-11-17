@@ -30,6 +30,8 @@ export interface FakeCommands {
   /** Commands waiting for a pull, unsigned. */
   queue: EngineCommand[];
   controls: Map<number, { halt_epoch: number; halted: boolean; operate_enabled: boolean }>;
+  /** The repos a pull's `allowed_repos` lists (the runner's paired repos, whatever the request named); undefined: the field is left out, as an older cloud does. */
+  allowedRepos: Array<{ repo_gh_id: number; full_name: string }> | undefined;
   delivered: Set<string>;
   acks: Array<{ id: string; ack: EngineCommandAck }>;
   pulls: Array<{ repo_gh_ids: number[]; after_seq: Record<string, number> }>;
@@ -39,6 +41,12 @@ export interface FakeCommands {
   faults: Array<{ status: number; body?: unknown } | "drop">;
   /** Replaces what a pull's `commands` holds (to send garbage). */
   pullOverride: (() => unknown[]) | undefined;
+  /** Real milliseconds a pull's answer waits after it is made (its list read), before it is sent: an answer still on the wire. */
+  pullDelayMs: number;
+  /** When set, picks the wait per pull from the repos it asks about, instead of `pullDelayMs`. */
+  pullDelayFor: ((repoGhIds: number[]) => number) | undefined;
+  /** How many delayed answers have gone out; a test waits on it to know a held answer has landed. */
+  lateAnswered: number;
   now: () => Date;
   trust(jwk: Ed25519Jwk): void;
   command(repoGhId: number, seq: number, over?: Partial<EngineCommand>): EngineCommand;
@@ -60,6 +68,7 @@ export async function startFakeCommands(): Promise<FakeCommands> {
     runnerId: randomUUID(),
     queue: [],
     controls: new Map(),
+    allowedRepos: undefined,
     delivered: new Set(),
     acks: [],
     pulls: [],
@@ -67,6 +76,9 @@ export async function startFakeCommands(): Promise<FakeCommands> {
     decideAnswer: { status: 200, body: { disposition: "act", receipt_id: null, ask_id: null, answered: null, halted: false } },
     faults: [],
     pullOverride: undefined,
+    pullDelayMs: 0,
+    pullDelayFor: undefined,
+    lateAnswered: 0,
     now: () => new Date(),
     trust: (jwk) => void keys.set(jwkThumbprint(jwk), jwk),
     command: (repoGhId, seq, over = {}) => {
@@ -130,7 +142,11 @@ export async function startFakeCommands(): Promise<FakeCommands> {
       fake.queue = fake.queue.filter((c) => !due.includes(c));
       for (const c of due) fake.delivered.add(c.command_id);
       const controls = body.data.repo_gh_ids.flatMap((id) => (fake.controls.has(id) ? [{ repo_gh_id: id, ...fake.controls.get(id)! }] : []));
-      return reply(res, 200, { commands: fake.pullOverride?.() ?? due.map((c) => fake.sign(c)), controls });
+      const answer = { commands: fake.pullOverride?.() ?? due.map((c) => fake.sign(c)), controls, ...(fake.allowedRepos === undefined ? {} : { allowed_repos: fake.allowedRepos }) };
+      const wait = fake.pullDelayFor?.(body.data.repo_gh_ids) ?? fake.pullDelayMs;
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      if (wait > 0) fake.lateAnswered++;
+      return reply(res, 200, answer);
     }
     if (ack !== null) {
       const body = EngineCommandAck.safeParse(json);

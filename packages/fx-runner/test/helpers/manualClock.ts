@@ -5,6 +5,8 @@ export interface ManualClock extends Clock {
   slept: number[];
   /** Moves time on in steps of `step` ms, letting every woken loop run before the next step. */
   advance(ms: number, step?: number): Promise<void>;
+  /** Steps the wall clock by `ms` (negative: back) without disturbing waits already asked of `sleep`: they still end after their own duration, as a monotonic timer's would. */
+  jump(ms: number): void;
 }
 
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
@@ -31,6 +33,10 @@ export function manualClock(startMs = Date.parse("2026-10-08T12:00:00.000Z")): M
         sleepers.add(sleeper);
         signal.addEventListener("abort", sleeper.wake, { once: true });
       });
+    },
+    jump(ms) {
+      t += ms;
+      for (const sleeper of sleepers) sleeper.at += ms;
     },
     async advance(ms, step = 1000) {
       for (let done = 0; done < ms; done += step) {
