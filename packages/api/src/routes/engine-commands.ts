@@ -100,9 +100,9 @@ export const engineCommandRoutes: RouteEntry[] = [
           if (target.status === "no_repo") throw new ApiError(404, "not_found", "no such repo");
           if (target.status === "operate_off") throw new ApiError(409, "operate_off", "operate is not switched on");
           if (target.status === "not_connected") throw new ApiError(409, "engine_not_connected", "no engine is connected for this repo");
-          // This is a plain read, so a halt committing between it and the insert leaves the stamp one epoch behind. The halt trigger of migration 1031
-          // overrides it: it stamps `halt_epoch_at_issue` from the controls row it locks, so the stored value is exact. Behind, a stamp only fails closed
-          // (the pull holds the command back), never open.
+          // This is a plain read, so a halt committing between it and the insert leaves the value one epoch behind. For a tenant session (this one) the
+          // trigger of migration 1034 overrides `haltEpoch` with the current epoch it reads under the controls row's lock, whatever is passed here, so
+          // the stored `halt_epoch_at_issue` is exact. The value below is only the insert's placeholder.
           const halt = (await readHaltStates(client, [repoId])).get(repoId)!;
           const row = await insertEngineCommand(client, { accountId, runnerId: target.runnerId, repoId, kind: parsed.kind, args: parsed.args, issuedBy: userId, haltEpoch: halt.halt_epoch });
           await writeEngineAudit(client, "engine_command.issued", { repo_id: repoId, command_id: row.id, kind: parsed.kind });
