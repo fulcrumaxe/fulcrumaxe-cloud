@@ -11,6 +11,7 @@
 // Every word that reaches the page is a string made here; nothing is null, undefined or NaN.
 import { isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { PANELS, createTeamApi } from "./team-api.js";
+import { NO_OP, agentWords, createOperate, describeOperate, isAgentId, stopOf } from "./team-operate.js";
 
 export const LIVE_EVENT = "engine.changed";
 export const REFRESH_MS = 15000;
@@ -97,7 +98,7 @@ export function readRepos(raw) {
   if (!list) return null;
   return list.filter((r) => isObj(r) && idKey(r.repo_id) !== "" && typeof r.full_name === "string" && r.full_name !== "").map((r) => ({
     id: idKey(r.repo_id), name: r.full_name, runner: typeof r.runner_name === "string" ? r.runner_name : "", liveness: typeof r.liveness === "string" ? r.liveness : "never",
-    lastHeard: typeof r.last_heard_at === "string" ? r.last_heard_at : "",
+    lastHeard: typeof r.last_heard_at === "string" ? r.last_heard_at : "", operate: r.operate_enabled === true, halted: r.halted === true, haltPending: r.halt_pending === true,
   }));
 }
 export function readSettings(raw) {
@@ -105,7 +106,7 @@ export function readSettings(raw) {
   const repos = raw.repos.filter((r) => isObj(r) && idKey(r.repo_id) !== "" && typeof r.full_name === "string" && r.full_name !== "").map((r) => ({
     sendId: r.repo_id, id: idKey(r.repo_id), name: r.full_name, enabled: r.enabled === true, eligible: r.eligible === true, refusal: typeof r.refusal === "string" ? r.refusal : r.eligible === true ? "" : "other",
   }));
-  return { watch: raw.watch_enabled, canEdit: raw.can_edit, repos };
+  return { watch: raw.watch_enabled, operate: raw.operate_enabled === true, canEdit: raw.can_edit, repos };
 }
 
 // ── what the page draws ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -130,7 +131,7 @@ export function agentRow(a, live, nowMs, repoName) {
   const state = claimed === "running" && (!live || started === null || nowMs - started >= UNKNOWN_AFTER_MS) ? "unknown" : claimed;
   const role = typeof a.role === "string" && a.role !== "" ? a.role : "other";
   return {
-    id: idKey(a.agent_id) || role + since, role, state, since, discussion: Number.isInteger(a.discussion) && a.discussion >= 1 ? a.discussion : 0,
+    id: idKey(a.agent_id) || role + since, stopId: isAgentId(a.agent_id) ? a.agent_id : "", role, state, since, discussion: Number.isInteger(a.discussion) && a.discussion >= 1 ? a.discussion : 0,
     link: githubLink(repoName, "discussions", a.discussion), mode: a.background === true ? "background" : "foreground",
     text: state === "unknown" ? "unknown: started " + (since || "at an unknown time") + ", no stop seen" : "since " + since,
   };
@@ -194,20 +195,22 @@ export function describe(st, nowMs) {
     open: st.sheetOpen, canEdit: st.settings.canEdit, watch: st.settings.watch, saving: st.saving, confirmDelete: st.confirmDelete, notice: st.notice, readOnly: st.settings.canEdit ? "" : WORDS.readOnly,
     repos: st.settings.repos.map((r) => ({ id: r.id, name: r.name, checked: r.enabled, refused: !r.eligible && !r.enabled, reason: r.eligible || r.enabled ? "" : WORDS.refusals[r.refusal] || WORDS.refusalOther })),
   };
-  const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "" };
-  if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   const repo = st.repos.find((r) => r.id === st.selectedId);
+  const asOf = (iso) => asOfWords({ as_of: iso }, nowMs);
+  const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", operate: describeOperate(st, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
+  if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   if (!repo) return { kind: "norepos", text: WORDS.noRepos, ...base };
   const { agents, lanes, gates } = st.panels;
   const stale = (env) => isStale(repo, env);
   const head = (env) => ({ asOf: asOfWords(env, nowMs), warn: stale(env) ? lastSeenWords(env) : "" });
   const live = !stale(agents);
   const lane = lanes ? laneRows(lanes, gates, nowMs, repo.name) : null;
+  const rows = agents ? agents.items.map((a) => agentRow(a, live, nowMs, repo.name)).filter((r) => r.state !== "stopped").map((r) => ({ ...r, stop: r.state === "running" ? stopOf(st, r.stopId) : null, who: agentWords(r) })) : [];
   return {
-    kind: "ready", ...base,
+    kind: "ready", ...base, operate: describeOperate(st, nowMs, repo, asOf, rows),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
     chip: chipOf(repo), runner: repo.runner, banner: gapBanner([agents, lanes, gates]), notices: sourceNotices([agents, lanes, gates], lanes),
-    agents: { ...head(agents), failed: !agents, rows: agents ? agents.items.map((a) => agentRow(a, live, nowMs, repo.name)).filter((r) => r.state !== "stopped") : [], empty: WORDS.noAgents },
+    agents: { ...head(agents), failed: !agents, rows, empty: WORDS.noAgents },
     lanes: { ...head(lanes), failed: !lanes, open: lane ? lane.open : [], merged: lane ? lane.merged : [], empty: WORDS.noLanes },
   };
 }
@@ -217,9 +220,10 @@ const NO_PANELS = { agents: null, lanes: null, gates: null };
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
 export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval } = {}) {
-  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false };
+  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, op: NO_OP };
   let busy = false, again = false, pick = 0, debounce = null, stopFn = null;
   const set = (patch) => { st = { ...st, ...patch }; onChange(); };
+  const operate = createOperate({ client, signal, get: () => st, set, refresh: () => refresh(), aborted: (e) => aborted(e, signal) });
 
   async function read() {
     let settings, repos = [];
@@ -237,11 +241,14 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     }
     const selectedId = repos.some((r) => r.id === st.selectedId) ? st.selectedId : repos.length ? repos[0].id : "";
     const changed = selectedId !== st.selectedId;
-    set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
+    set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
     if (!selectedId) return;
     const token = pick;
+    const stale = () => token !== pick || (signal && signal.aborted); // another repo was chosen, or the window closed, while a read was out
+    const opRead = settings.canEdit ? operate.read(selectedId, stale) : Promise.resolve();
     const results = await Promise.allSettled(PANELS.map((k) => client.panel(k, selectedId, signal)));
-    if (token !== pick || (signal && signal.aborted)) return; // another repo was chosen, or the window closed, while this read was out
+    await opRead;
+    if (stale()) return;
     const next = { ...st.panels };
     let failed = false;
     PANELS.forEach((k, i) => {
@@ -260,7 +267,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
   function select(id) {
     if (id === st.selectedId || !st.repos.some((r) => r.id === id)) return;
     pick += 1;
-    set({ selectedId: id, panels: NO_PANELS, refreshFailed: false });
+    set({ selectedId: id, panels: NO_PANELS, refreshFailed: false, op: NO_OP });
     refresh();
   }
   async function put(call, ok, forbidden) {
@@ -300,6 +307,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     setRepo: (id, on) => put(() => client.saveSettings({ repo_ids: enabledIds(id, on) }, signal), WORDS.saved),
     askDelete: () => set({ confirmDelete: true }),
     cancelDelete: () => set({ confirmDelete: false }),
+    operate,
     deleteData: () => put(() => client.deleteData(signal), WORDS.deleted, WORDS.deleteForbidden),
     get state() { return st; },
   };

@@ -29,5 +29,15 @@ export function makeFixtures(nowMs) {
   const lane = (over = {}) => ({ pr: 7, discussion: 42, state: "testing", updated_at: iso(300), ...over });
   const gate = (over = {}) => ({ pr: 7, gate: "gate1", result: "pass", head_sha: "a".repeat(40), at: iso(200), ...over });
   const list = (items) => ({ items });
-  return { iso, envelope, repo, settingsRepo, settings, agent, lane, gate, list };
+  // The command channel and the decision dials, in the shapes engine-commands.ts and decision-settings.ts document.
+  const command = (over = {}) => ({
+    id: "c0000000-0000-4000-8000-000000000001", command_seq: 1, kind: "pause_loop", args: {}, state: "pending", refusal: null, issued_by: "u0000000-0000-4000-8000-000000000009",
+    issued_at: iso(60), expires_at: new Date(nowMs + 540000).toISOString(), delivered_at: null, acked_at: null, halt_epoch_at_issue: 0, ...over,
+  });
+  const commands = (items) => ({ commands: items });
+  const dial = (type, over = {}) => ({ decision_type: type, label: "Server label for " + type, class: "human_over_the_loop", adjustable: true, disposition: "ask", allowed_dispositions: ["act", "announce", "ask"], source: "default", preset: null, version: null, ...over });
+  const dials = (over = {}) => ({ repo_id: REPO_A, can_change: true, catalogue_version: 11, active_preset: null, presets: [], invariants: [], dials: [dial("start_small_item"), dial("engine_spawn"), dial("engine_merge", { disposition: "announce" }), dial("engine_spec_ready", { allowed_dispositions: ["act", "ask"] })], ...over });
+  /** Operate on, for the account and the repo: what an owner sees once the switch is on. */
+  const operateOn = () => ({ settings: settings({ operate_enabled: true }), repos: list([repo({ operate_enabled: true })]) });
+  return { iso, envelope, repo, settingsRepo, settings, agent, lane, gate, list, command, commands, dial, dials, operateOn };
 }
