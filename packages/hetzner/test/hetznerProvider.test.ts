@@ -74,7 +74,7 @@ describe("the Hetzner implementation of the provider interface", () => {
 describe("the neutral error", () => {
   const table: Array<[HetznerCode, MachineErrorCode, HetznerError["extra"]?]> = [
     ["unauthorized", "unauthorized"], ["forbidden", "unauthorized"], ["resource_limit_exceeded", "unavailable"], ["resource_unavailable", "unavailable"], ["placement_error", "unavailable"],
-    ["rate_limit_exceeded", "rate_limited"], ["uniqueness_error", "conflict"], ["invalid_input", "invalid_input"], ["server_error", "unavailable"], ["unavailable", "unavailable"], ["not_found", "not_found"],
+    ["rate_limit_exceeded", "rate_limited"], ["uniqueness_error", "conflict"], ["invalid_input", "invalid_input"], ["server_error", "unavailable"], ["unavailable", "unavailable"], ["not_found", "not_found"], ["locked", "conflict"],
     ["uniqueness_error", "mismatch", { reason: "create_key_mismatch" }], ["uniqueness_error", "mismatch", { reason: "create_key_ambiguous" }],
     ["unavailable", "in_use", { hetznerCode: "resource_in_use", status: 422 }],
   ];
@@ -84,7 +84,7 @@ describe("the neutral error", () => {
     expect(out).toMatchObject({ code: neutral, extra: { providerCode: extra?.hetznerCode ?? code } });
   });
   it("covers every code the client can throw, and keeps retry hints and status", () => {
-    const all: HetznerCode[] = ["unauthorized", "forbidden", "resource_limit_exceeded", "resource_unavailable", "placement_error", "rate_limit_exceeded", "uniqueness_error", "invalid_input", "server_error", "unavailable", "not_found"];
+    const all: HetznerCode[] = ["unauthorized", "forbidden", "resource_limit_exceeded", "resource_unavailable", "placement_error", "rate_limit_exceeded", "uniqueness_error", "invalid_input", "server_error", "unavailable", "not_found", "locked"];
     for (const c of all) expect(table.some(([h]) => h === c), c).toBe(true);
     expect(toMachineProviderError(new HetznerError("rate_limit_exceeded", "m", { status: 429, retryAfter: 7, ambiguous: false }))).toMatchObject({ code: "rate_limited", extra: { status: 429, retryAfter: 7 } });
     expect(toMachineProviderError(new HetznerError("unavailable", "m", { ambiguous: true }))).toMatchObject({ extra: { ambiguous: true } });
