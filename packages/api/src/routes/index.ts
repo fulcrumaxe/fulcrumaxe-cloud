@@ -56,6 +56,7 @@ import { assistantRoutes } from "./assistant.js";
 import { runHandoffRoutes } from "./run-handoff.js";
 import { memoryRoutes } from "./memory.js";
 import { engineRoutes } from "./engine.js";
+import { engineHaltRoutes } from "./engine-halt.js";
 
 /**
  * The one array every other piece of API-1 reads from: the catch-all's
@@ -136,6 +137,7 @@ export const ROUTES: RouteEntry[] = [
   ...memoryRoutes,
   ...engineCommandRoutes,
   ...engineRoutes,
+  ...engineHaltRoutes,
 ];
 
 // Fails fast (at import time, so both the test suite and `next start`

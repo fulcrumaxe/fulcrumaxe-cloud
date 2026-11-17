@@ -9,17 +9,46 @@ import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { generateToken } from '../src/tokens/format.js';
-import { SCOPES } from '../src/registry.js';
+import { SCOPES, type RouteEntry } from '../src/registry.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import * as engineModule from '../src/routes/engine.js';
+import { engineCommandRoutes } from '../src/routes/engine-commands.js';
 import { engineDecisionRoutes } from '../src/routes/engine-decisions.js';
+import { engineHaltRoutes } from '../src/routes/engine-halt.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const ROUTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes');
-// This file's list is the routes of engine.ts (the read API and settings) and the decision answer route (engine-decisions.ts); the command routes (engine-commands.ts) are session-only by default and are guarded in their own test.
-const engineRoutes = ROUTES.filter((r) => engineModule.engineRoutes.includes(r) || engineDecisionRoutes.includes(r));
+// Every engine route, from all four files. The command routes are session-only by default (no `principals` key), so the probes read `principalsOf`.
+const engineRoutes: RouteEntry[] = [...engineModule.engineRoutes, ...engineCommandRoutes, ...engineDecisionRoutes, ...engineHaltRoutes];
+const principalsOf = (r: RouteEntry): readonly string[] => r.principals ?? ['session'];
+
+/**
+ * The pinned role of EVERY engine route, `operationId -> minRole`. The probes below take the role to test from THIS table, never from the route, so a
+ * route lowered (or raised) in its own file is a failure here and not a quiet pass. A new engine route fails the first test until it is added with its
+ * role, and a role change is a deliberate edit to this table.
+ */
+const EXPECTED_ROLES: Record<string, 'member' | 'admin' | 'owner'> = {
+  listEngineRepos: 'member',
+  listEngineAgents: 'member',
+  listEngineLanes: 'member',
+  listEngineGates: 'member',
+  listEngineAsks: 'member',
+  listEngineLog: 'member',
+  getEngineUsage: 'member',
+  getEngineStats: 'member',
+  getEngineSettings: 'member',
+  setEngineSettings: 'admin',
+  deleteEngineData: 'owner',
+  answerEngineDecision: 'admin',
+  issueEngineCommand: 'admin',
+  cancelEngineCommand: 'admin',
+  listEngineCommands: 'member',
+  haltEngineRepo: 'admin',
+  clearEngineRepoHalt: 'admin',
+};
+const roleOf = (r: RouteEntry) => EXPECTED_ROLES[r.operationId]!;
 
 /** The exports of every `packages/api/src/routes/engine*.ts`, as `<file>#<name>`. */
 const exportsOf = (): string[] =>
@@ -30,9 +59,9 @@ const exportsOf = (): string[] =>
  * `routes/engine*.ts` that is neither a route array nor named below as a helper fails, and every route it registers must declare its principals and
  * role itself and pass the four probes.
  */
+const ROUTE_ARRAYS = ['engine.ts#engineRoutes', 'engine-commands.ts#engineCommandRoutes', 'engine-decisions.ts#engineDecisionRoutes', 'engine-halt.ts#engineHaltRoutes'];
 const HELPER_EXPORTS: Record<string, string> = {
   'engine.ts#engineSettingsDeps': 'the GitHub visibility seam, not a route',
-  'engine-commands.ts#engineCommandRoutes': 'the command routes: owner/admin, session only, audited, and tested in engine-commands.pg.test.ts and engine-audit-guard.test.ts',
 };
 
 describe('engine route auth meta-test [pg]', () => {
@@ -48,12 +77,19 @@ describe('engine route auth meta-test [pg]', () => {
   let readToken: string;
   let everyScopeToken: string;
 
+  // The body each write route accepts: the decision answer, a command that is valid for any repo, nothing for the routes that take none, `{}` otherwise.
+  const bodyOf2 = (method: string, urlPath: string): string | undefined => {
+    if (method === 'GET' || method === 'DELETE' || urlPath.endsWith('/delete-data')) return undefined;
+    if (urlPath.includes('/decisions/')) return JSON.stringify({ choice: 'approve' });
+    if (urlPath.endsWith('/commands')) return JSON.stringify({ kind: 'pause_loop', args: {} });
+    return '{}';
+  };
   const call = async (method: string, urlPath: string, who: { accountId: string; userId: string } | 'none', bearer?: string) => {
     const headers = new Headers({ accept: 'application/json' });
     if (bearer) headers.set('authorization', `Bearer ${bearer}`);
     else if (who !== 'none') headers.set('cookie', `${SESSION_COOKIE_NAME}=${await signSession(who)}`);
-    if (method !== 'GET') headers.set('content-type', 'application/json');
-    return (await handleApiRequest(new Request(`http://localhost${urlPath}`, { method, headers, body: method === 'GET' ? undefined : method === 'POST' ? JSON.stringify({ choice: 'approve' }) : '{}' }), appUserPool, platformOpsPool, ROUTES)).status;
+    if (bodyOf2(method, urlPath) !== undefined) headers.set('content-type', 'application/json');
+    return (await handleApiRequest(new Request(`http://localhost${urlPath}`, { method, headers, body: bodyOf2(method, urlPath) }), appUserPool, platformOpsPool, ROUTES)).status;
   };
   const bodyOf = async (urlPath: string, who: { accountId: string; userId: string }) => {
     const headers = new Headers({ accept: 'application/json', cookie: `${SESSION_COOKIE_NAME}=${await signSession(who)}` });
@@ -95,19 +131,24 @@ describe('engine route auth meta-test [pg]', () => {
     await Promise.all([adminPool.end(), appUserPool.end(), platformOpsPool.end()]);
   });
 
-  it('lists every engine route and every export of routes/engine*.ts, and none is left unnamed', () => {
-    expect(engineRoutes.length).toBeGreaterThanOrEqual(11);
-    const unknown = exportsOf().filter((x) => !(x in HELPER_EXPORTS) && x !== 'engine.ts#engineRoutes' && x !== 'engine-decisions.ts#engineDecisionRoutes');
+  it('pins the role of every engine route, and every export of routes/engine*.ts is a named route array or helper', () => {
+    const unknown = exportsOf().filter((x) => !(x in HELPER_EXPORTS) && !ROUTE_ARRAYS.includes(x));
     expect(unknown).toEqual([]);
     expect(Object.keys(engineModule).sort()).toEqual(['engineRoutes', 'engineSettingsDeps']);
-    // A route added to engine-decisions.ts is noticed here and must come with its own review of the probes below.
+    // The live routes and the pinned table agree exactly: the same ids, no duplicate, and the same role on each.
+    const live = Object.fromEntries(engineRoutes.map((r) => [r.operationId, r.minRole]));
+    expect(engineRoutes.length).toBe(Object.keys(live).length);
+    expect(live).toEqual(EXPECTED_ROLES);
+    // A route registered under the engine path prefix that is in none of the four arrays is not left unprobed.
+    expect(ROUTES.filter((r) => r.path.startsWith('/api/v1/engine/')).map((r) => r.operationId).sort()).toEqual(Object.keys(EXPECTED_ROLES).sort());
     expect(engineDecisionRoutes.map((r) => r.operationId)).toEqual(['answerEngineDecision']);
-    for (const id of ['answerEngineDecision']) expect(engineRoutes.some((r) => r.operationId === id), id).toBe(true);
+    expect(engineHaltRoutes.map((r) => r.operationId)).toEqual(['haltEngineRepo', 'clearEngineRepoHalt']);
+    expect(engineCommandRoutes.map((r) => r.operationId)).toEqual(['issueEngineCommand', 'cancelEngineCommand', 'listEngineCommands']);
     for (const r of engineRoutes) {
-      expect(Object.hasOwn(r, 'principals'), `${r.method} ${r.path}: principals`).toBe(true);
+      expect(ROUTES.includes(r), `${r.operationId} is registered in ROUTES`).toBe(true);
       expect(['member', 'admin', 'owner']).toContain(r.minRole);
-      if (r.principals!.includes('token')) expect(r.scope, `${r.path}: a token route names its scope`).toBe('read');
-      if (r.method !== 'GET') expect(r.principals, `${r.method} ${r.path}: writes are session only`).toEqual(['session']);
+      if (principalsOf(r).includes('token')) expect(r.scope, `${r.path}: a token route names its scope`).toBe('read');
+      if (r.method !== 'GET') expect(principalsOf(r), `${r.method} ${r.path}: writes are session only`).toEqual(['session']);
     }
   });
 
@@ -120,8 +161,8 @@ describe('engine route auth meta-test [pg]', () => {
   });
 
   it('a member is 403 on every owner or admin route, and a read token is 403 on every session-only route', async () => {
-    for (const r of engineRoutes.filter((x) => x.minRole !== 'member')) expect(await call(r.method, urlOf(r.path), member), `${r.method} ${r.path}`).toBe(403);
-    for (const r of engineRoutes.filter((x) => !x.principals!.includes('token'))) expect(await call(r.method, urlOf(r.path), 'none', readToken), `${r.method} ${r.path}`).toBe(403);
+    for (const r of engineRoutes.filter((x) => roleOf(x) !== 'member')) expect(await call(r.method, urlOf(r.path), member), `${r.method} ${r.path}`).toBe(403);
+    for (const r of engineRoutes.filter((x) => !principalsOf(x).includes('token'))) expect(await call(r.method, urlOf(r.path), 'none', readToken), `${r.method} ${r.path}`).toBe(403);
   });
 
   it('a member reads every GET route', async () => {
@@ -136,9 +177,21 @@ describe('engine route auth meta-test [pg]', () => {
     expect(await call(put.method, urlOf(put.path), admin2), `${put.method} ${put.path}`).toBe(200);
   });
 
+  it('an admin is 2xx on the halt and on the halt clear; the clear is not a member route', async () => {
+    const halt = engineRoutes.find((r) => r.operationId === 'haltEngineRepo')!;
+    const clear = engineRoutes.find((r) => r.operationId === 'clearEngineRepoHalt')!;
+    expect(roleOf(halt)).toBe('admin');
+    expect(roleOf(clear)).toBe('admin');
+    expect(await call(clear.method, urlOf(clear.path), member), 'member clear').toBe(403);
+    expect(await call(halt.method, urlOf(halt.path), member), 'member halt').toBe(403);
+    expect(await call(halt.method, urlOf(halt.path), admin2), 'admin halt').toBe(200);
+    expect(await call(clear.method, urlOf(clear.path), admin2), 'admin clear').toBe(200);
+  });
+
   it('a token that holds every scope is still 403 on both settings writes: they are session only', async () => {
     for (const r of engineRoutes.filter((x) => x.method === 'PUT')) expect(await call(r.method, urlOf(r.path), 'none', everyScopeToken), `${r.method} ${r.path}`).toBe(403);
-    for (const r of engineRoutes.filter((x) => x.method === 'GET')) expect(await call('GET', urlOf(r.path), 'none', everyScopeToken), `${r.path}`).toBe(200);
+    // A GET that is session only (the command list) is refused to a token too; every other GET answers.
+    for (const r of engineRoutes.filter((x) => x.method === 'GET')) expect(await call('GET', urlOf(r.path), 'none', everyScopeToken), `${r.path}`).toBe(principalsOf(r).includes('token') ? 200 : 403);
   });
 
   it('a user of another account sees none of this account on the account-level routes', async () => {
@@ -149,5 +202,17 @@ describe('engine route auth meta-test [pg]', () => {
     expect(settings.repos!.map((x) => x.repo_id)).not.toContain(A.repoId);
     // The same read as this account's own member does show them, so the stranger's empty answer is the isolation and not an empty fixture.
     expect(((await bodyOf('/api/v1/engine/repos', member)).items ?? []).length).toBe(1);
+  });
+
+  // Last: it deletes this account's engine data, so nothing after it may rely on the fixtures.
+  it('the owner is 2xx on the owner route, and a member and an admin are not', async () => {
+    const del = engineRoutes.find((r) => r.operationId === 'deleteEngineData')!;
+    expect(roleOf(del)).toBe('owner');
+    const owner = { accountId: A.accountId, userId: A.userId };
+    expect(await call(del.method, urlOf(del.path), member)).toBe(403);
+    expect(await call(del.method, urlOf(del.path), admin2)).toBe(403);
+    const status = await call(del.method, urlOf(del.path), owner);
+    expect(status, 'owner delete').toBeGreaterThanOrEqual(200);
+    expect(status, 'owner delete').toBeLessThan(300);
   });
 });

@@ -59,6 +59,20 @@ async function callEngineRoute(ctx: GuardContext, method: string, urlPath: strin
   }
 }
 
+/** One repo per (account, label), made on first use: the halt entries need a repo whose marker they own. */
+const guardRepos = new Map<string, string>();
+async function guardRepo(ctx: GuardContext, label: string): Promise<string> {
+  const key = `${ctx.accountId}:${label}`;
+  const known = guardRepos.get(key);
+  if (known) return known;
+  const { rows } = await ctx.admin.query<{ id: string }>(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, NULL, $2, 'web') RETURNING id`, [
+    ctx.accountId,
+    Math.floor(Math.random() * 1e12),
+  ]);
+  guardRepos.set(key, rows[0]!.id);
+  return rows[0]!.id;
+}
+
 /**
  * The bridge tables the command route reads (EB-4's settings and sessions) when that row has not merged yet: tables of the Spec's shape, made here and
  * dropped after. Where the real tables exist these are not made.
@@ -216,6 +230,40 @@ export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
       }
     },
     effects: async (ctx) => Number((await ctx.admin.query(`SELECT count(*) AS n FROM engine_decision_answers WHERE account_id = $1`, [ctx.accountId])).rows[0].n),
+  },
+  {
+    // EB-11a. The epoch is the change: 0 before, 1 after, and a rolled-back halt leaves it at 1. Each run starts from "not halted" so a repeat does not short-circuit.
+    id: 'POST /api/v1/engine/repos/{id}/halt',
+    action: 'engine_halt.set',
+    covers: ['engine-halt.ts#engineHaltRoutes'],
+    run: async (ctx) => {
+      const repo = await guardRepo(ctx, 'halt');
+      await ctx.admin.query(`UPDATE engine_repo_controls SET halted_at = NULL, halt_action_id = NULL WHERE repo_id = $1`, [repo]);
+      await callEngineRoute(ctx, 'POST', `/engine/repos/${repo}/halt`, {});
+    },
+    effects: async (ctx) => {
+      const repo = await guardRepo(ctx, 'halt');
+      return Number((await ctx.admin.query(`SELECT COALESCE(sum(halt_epoch), 0) AS n FROM engine_repo_controls WHERE repo_id = $1`, [repo])).rows[0].n);
+    },
+  },
+  {
+    // EB-11a. The clear stamps cleared_at: none before, one after, and a rolled-back clear leaves the first stamp. Each run starts halted.
+    id: 'POST /api/v1/engine/repos/{id}/halt/clear',
+    action: 'engine_halt.cleared',
+    covers: [],
+    run: async (ctx) => {
+      const repo = await guardRepo(ctx, 'clear');
+      await ctx.admin.query(
+        `INSERT INTO engine_repo_controls (account_id, repo_id, halted_at, halt_action_id, halt_epoch) VALUES ($1, $2, now(), gen_random_uuid(), 1)
+         ON CONFLICT (account_id, repo_id) DO UPDATE SET halted_at = now(), halt_action_id = gen_random_uuid()`,
+        [ctx.accountId, repo],
+      );
+      await callEngineRoute(ctx, 'POST', `/engine/repos/${repo}/halt/clear`, {});
+    },
+    effects: async (ctx) => {
+      const repo = await guardRepo(ctx, 'clear');
+      return Number((await ctx.admin.query(`SELECT count(*) AS n FROM engine_repo_controls WHERE repo_id = $1 AND cleared_at IS NOT NULL`, [repo])).rows[0].n);
+    },
   },
 ];
 
