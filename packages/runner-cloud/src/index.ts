@@ -106,3 +106,5 @@ export { getRepoMode } from "./repoMode.js";
 export { CLOUD_VERIFIED_COPY_SHA256, LOCAL_AUTO_MERGE_COPY_SHA256, SETTABLE_MODES, setExecutionMode, type RepoVisibilityAnswer } from "./executionMode.js";
 export { CHECK_UNREADABLE_MESSAGE, getSandboxAllowances, setAsideSandboxAllowances, setSandboxAllowances, suggestCheckFromFile, type SuggestedCheck } from "./sandboxAllowances.js";
 export { CONFLICT_ATTESTATION_EVENT } from "./conflictAttest.js";
+export { ENGINE_DIALS_PATH, engineDials, parseDialsQuery, pgEngineDialsPorts, type DialResolver, type EngineDialsPorts } from "./engineDials.js";
+export { catalogueResolver, defaultEngineDialsPorts } from "./engineDialsDefaults.js";
