@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { reportError } from "@fx/telemetry";
-import { matchRoute, RawBody, type RouteEntry } from "./registry.js";
+import { matchRoute, NO_CONTENT, RawBody, type RouteEntry } from "./registry.js";
 import { assertRouteAccess } from "./access.js";
 import { ROUTES } from "./routes/index.js";
 import { principalIdOf, resolvePrincipal } from "./principal.js";
@@ -344,6 +344,10 @@ export async function handleApiRequest(
           },
           { params: parsedParams, query, body },
         );
+        if (responseBody === NO_CONTENT) {
+          if (!entry.noContent) throw new Error(`${entry.operationId} returned NO_CONTENT without declaring noContent`);
+          return { status: 204, body: null };
+        }
         return { status: entry.successStatus ?? 200, body: responseBody };
       },
     );
