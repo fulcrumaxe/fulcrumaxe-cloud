@@ -135,6 +135,11 @@ export class WakeTracker {
     return false;
   }
 
+  /** The epoch the wake route last answered with; null before the first answer. The engine command pull starts when it moves. */
+  seenEpoch(): number | null {
+    return this.seen?.epoch ?? null;
+  }
+
   mode(): WakeMode {
     if (this.tier === "claim") return { kind: "fallback" };
     if (this.grant === null) return { kind: "none" };

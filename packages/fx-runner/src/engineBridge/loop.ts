@@ -25,6 +25,7 @@ export const HEARTBEAT_MS = 60_000;
 export const OFF_RETRY_S = 300;
 export const BACKOFF_START_S = 2;
 export const BACKOFF_MAX_S = 300;
+export const HALT_REPORTS_MAX = 20;
 
 /** What `status` shows for a repo. */
 export type BridgeState = "uploading" | "off" | "backoff" | "quota";
@@ -100,6 +101,8 @@ export class BridgeLoop {
   private lastHeartbeatAt: number | null = null;
   private heartbeatInFlight = false;
   private bridgeSeq = 0;
+  /** `halt_applied` reports waiting to go out in the bridge session (the kill path's answer); at most `HALT_REPORTS_MAX` are kept, the oldest dropped first. */
+  private pendingHalts: Array<{ halt_epoch: number; method: "scope" | "group_only"; survivors: number }> = [];
   private readonly bridgeInstance: string;
 
   constructor(private readonly deps: BridgeLoopDeps) {
@@ -112,6 +115,13 @@ export class BridgeLoop {
 
   status(): BridgeStatus {
     return { state: this.state, lastAckedSeq: this.lastAcked, lastSuccessAt: this.lastSuccess, reason: this.state === "backoff" ? this.reason : null };
+  }
+
+  /** Queues a `halt_applied` event for the bridge session. A survivors count that is not a whole number counts as 1, never 0. */
+  reportHalt(report: { halt_epoch: number; method: "scope" | "group_only"; survivors: number }): void {
+    const survivors = Number.isSafeInteger(report.survivors) && report.survivors >= 0 ? Math.min(report.survivors, ENGINE_COUNT_MAX) : 1;
+    this.pendingHalts.push({ ...report, survivors });
+    if (this.pendingHalts.length > HALT_REPORTS_MAX) this.pendingHalts.shift();
   }
 
   /** Runs until `signal` aborts. A pass that throws is one failure and a wait, never the end of the loop. */
@@ -187,6 +197,7 @@ export class BridgeLoop {
         if (this.pendingDrops[reason] > 0) events.push(own({ kind: "bridge_dropped", count: Math.min(this.pendingDrops[reason], ENGINE_COUNT_MAX), reason }));
       }
       this.pendingDrops = emptyDrops();
+      for (const halt of this.pendingHalts.splice(0)) events.push(own({ kind: "halt_applied", ...halt }));
       this.heartbeatInFlight = this.lastHeartbeatAt === null || nowMs - this.lastHeartbeatAt >= HEARTBEAT_MS;
       if (this.heartbeatInFlight) events.push(own({ kind: "bridge_heartbeat" }));
       if (events.length === 0) return null;

@@ -37,6 +37,8 @@ import { createVerifyLocal } from "../daemon/verifyLocal.js";
 import { readSignInState } from "../daemon/signInState.js";
 import { readHostFacts } from "../hostFacts.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
+import { startEngineBridge, type EngineBridge, type EngineBridgePorts } from "../engineBridge/daemon.js";
+import { createEventsUploader } from "../engineBridge/upload.js";
 import { createRunnerClient } from "../daemon/client.js";
 import { createSandboxGate } from "../daemon/sandboxGate.js";
 import type { EngineKit } from "../daemon/engineKit.js";
@@ -49,7 +51,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -122,6 +124,8 @@ export interface RunHost {
   /** D#749 V2b: the user name the machine's Chrome bridge directory is named for, and the daemon's environment, of which a deploy command gets a short allowlist (deployOrder.ts). Absent: no browser job and no deploy order is served. */
   username?: string | undefined;
   env?: Readonly<Record<string, string | undefined>> | undefined;
+  /** D#842 EB-3c: the engine bridge's halt path and ceiling keeper, bound by the entry point (`engineBridge/ports.ts`). Absent: the bridge never starts. */
+  engineBridge?: EngineBridgePorts | undefined;
 }
 
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
@@ -346,6 +350,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const tipPublish = (): boolean => tipPublishAccepted;
     /** D#601 MEM-6: set once the hello is answered; a finished run's memory proposals are offered at a terminal only when the cloud kept `mem_proposal_v1`. */
     let memProposalAccepted = false;
+    /** D#842 EB-3c: set once the hello is answered; the engine bridge starts only when the cloud kept `engine_bridge_v1`. */
+    let engineBridgeAccepted = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
@@ -467,6 +473,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const updater = updateHost === undefined ? undefined : createUpdater(ctx, updateHost, hooks.updateTuf === undefined ? {} : { tuf: hooks.updateTuf });
     const autoUpdate = updater === undefined ? undefined : createAutoUpdate({ updater, hasLease: () => jobs.any(), now: ctx.now });
     const detach = abortOnSignals(stopped, host.signals);
+    let bridge: EngineBridge | undefined;
     // macOS only: libuv's free-memory figure counts free pages alone, so the latest `vm_stat` (run through the engine's process start) gives the usable memory.
     let vmStat: string | undefined;
     const refreshVmStat = async (): Promise<void> => {
@@ -529,6 +536,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         hooks.onTipPublishAccepted?.(tipPublish());
         memProposalAccepted = dropped !== undefined && !dropped.includes(MEM_PROPOSAL_CAPABILITY);
         hooks.onMemProposalAccepted?.(memProposalAccepted);
+        engineBridgeAccepted = dropped !== undefined && !dropped.includes(ENGINE_BRIDGE_CAPABILITY);
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
@@ -555,6 +563,26 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         takeHello(again);
       };
       const deployOrder = verifyLocal.deployOrderHandler(client);
+      // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
+      if (host.engineBridge !== undefined) {
+        const cloud = { origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) };
+        bridge = startEngineBridge({
+          runnerStateDir: stateDir,
+          uid: host.uid,
+          clock,
+          runnerVersion: RUNNER_VERSION,
+          cloud,
+          keyring,
+          runnerId: registration.runner_id,
+          send: createEventsUploader(cloud),
+          wakeEpoch: () => wake.seenEpoch(),
+          accepted: () => engineBridgeAccepted,
+          xdgRuntimeDir: host.xdgRuntimeDir,
+          secrets: () => (credentials.mode === "api_key" ? [credentials.apiKey] : []),
+          ports: host.engineBridge,
+          log: (line) => ctx.out(`fx-runner: ${line}`),
+        });
+      }
       const end = await pollLoop({
         client,
         wake,
@@ -622,6 +650,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       if (end === "protected") throw new CliError(`Vercel Deployment Protection refused the request before it reached the runner API, so the runner's key was not judged and must not be revoked: ${ctx.bypass?.kind === "ok" ? `the secret in the file ${BYPASS_ENV_NAME} names was not accepted` : `${BYPASS_ENV_NAME} is not set`}. Set it to a file holding the project's Protection Bypass for Automation secret, then start fx-runner again (run: fx-runner doctor)`);
       return 0;
     } finally {
+      await bridge?.stop();
       if (vmStatTimer !== undefined) clearInterval(vmStatTimer);
       detach();
     }

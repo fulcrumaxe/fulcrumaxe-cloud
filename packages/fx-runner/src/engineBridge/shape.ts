@@ -29,6 +29,8 @@ export function judgeLine(line: Uint8Array, secrets: readonly (string | undefine
   }
   const parsed = EngineEvent.safeParse(value);
   if (!parsed.success) return { ok: false, reason: "schema" };
+  // `bridge_*` events are the runner's own, sent in its own session: a line of the engine's file that claims to be one is a forgery (or a seq-space mix-up) and is never sent.
+  if (parsed.data.kind.startsWith("bridge_")) return { ok: false, reason: "schema" };
   const redacted = redactDeep(parsed.data, secrets);
   if (JSON.stringify(redacted) !== JSON.stringify(parsed.data)) return { ok: false, reason: "redaction" };
   return { ok: true, event: parsed.data };
