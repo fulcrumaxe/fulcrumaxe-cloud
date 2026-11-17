@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "repo_id": "6f1c2f5e-3d8f-4f43-8d6e-8f2f6a9b1c22",
+      "full_name": "acme-labs/widgets",
+      "runner_id": "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66",
+      "runner_name": "Unnamed runner (9d2c7b1e)",
+      "session_id": "0a8d1c52-7a0e-4c1a-9a53-0b1d2e3f4a55",
+      "last_event_at": "2026-11-16T10:00:30.000Z",
+      "last_heard_at": "2026-11-16T10:00:40.000Z",
+      "liveness": "live",
+      "watch_enabled": true,
+      "operate_enabled": false,
+      "halted": false,
+      "halt_pending": false
+    }
+  ],
+  "next_cursor": null,
+  "as_of": "2026-11-16T10:00:30.000Z",
+  "heard_age_s": 20,
+  "source_ages_s": {
+    "loop": 60,
+    "team_log": 120,
+    "plan": 3600,
+    "merge_queue": 300
+  },
+  "gaps": [],
+  "missing_events": 0
+}

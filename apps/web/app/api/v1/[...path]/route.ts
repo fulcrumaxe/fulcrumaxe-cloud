@@ -27,6 +27,8 @@ import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../.
 import { dequeueQueuedItem } from "../../../../lib/mergeQueue";
 import { createAppPrStateReader } from "../../../../lib/github/revertPrState";
 import { getAuthorCheck } from "../../../../lib/github/authorCheck";
+import { engineSettingsDeps } from "@fx/api/src/routes/engine.js";
+import { createAppRepoVisibility } from "../../../../lib/github/repoVisibility";
 import { getPairingInspector } from "../../../../lib/github/pairingInspector";
 
 /**
@@ -63,6 +65,9 @@ publicChangeDeps.startRetryPush = (args) => (workerConfigured() ? createStartRet
 publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
 // D#694 B6-5: Remove from queue asks the host to take the pull request out, with the repository's merge-gate token.
 queueActionDeps.dequeue = (args) => dequeueQueuedItem(appUserPool(), args);
+// Engine bridge EB-5: ticking a repo for the engine asks GitHub whether it is private, now, through the same live read the runner's public-repo guard uses.
+let engineVisibility: ReturnType<typeof createAppRepoVisibility> | undefined;
+engineSettingsDeps.getVisibility = () => (accountId, repoId) => (engineVisibility ??= createAppRepoVisibility()).visibility({ accountId, repoId });
 // D#598 PAIR-PICKER-API: the pairing routes ask GitHub (public, default branch, App installed) through this reader.
 repoPairingDeps.getInspector = () => getPairingInspector();
 // D#694 B7-2: the Repos screen's merge queue line, read through the hosted `read` client (one reader per process, so its five-minute cache is shared).

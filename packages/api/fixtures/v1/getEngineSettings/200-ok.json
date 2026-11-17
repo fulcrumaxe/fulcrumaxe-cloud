@@ -1,0 +1,14 @@
+{
+  "watch_enabled": true,
+  "operate_enabled": false,
+  "can_edit": true,
+  "repos": [
+    {
+      "repo_id": "6f1c2f5e-3d8f-4f43-8d6e-8f2f6a9b1c22",
+      "full_name": "acme-labs/widgets",
+      "enabled": true,
+      "eligible": true,
+      "refusal": null
+    }
+  ]
+}

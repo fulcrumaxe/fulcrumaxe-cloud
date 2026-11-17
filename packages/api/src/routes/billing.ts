@@ -83,6 +83,7 @@ export const usageResponseSchema = z.object({
   background_compute: budgetUsageSchema,
   // D#6 R2b-5a: the API-equivalent of this month's runs on the person's own machine. Information; never part of any budget above.
   own_plan_api_equivalent_usd: z.number().describe("What this month's runs on the person's own machine would have cost at API prices. Information, never spend, and not part of any budget above. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."),
+  engine_api_equivalent_usd: z.number().describe("What this month's usage of the person's own engine (the tokens it reported, priced by the cloud) would have cost at API prices. Information, never spend, and not part of any budget above."),
   // D#483 S5-k3: derived on every read, never stored; it pauses nothing.
   compute_notice: z
     .object({ code: z.enum(["compute_allowance_80"]), message: z.string() })

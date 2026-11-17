@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "line_id": "0123456789abcdef",
+      "actor_role": "team-lead",
+      "category": "merged",
+      "discussion": 42,
+      "pr": 7,
+      "ts": "2026-11-16T09:57:00.000Z"
+    }
+  ],
+  "next_cursor": null,
+  "as_of": "2026-11-16T10:00:30.000Z",
+  "heard_age_s": 20,
+  "source_ages_s": {
+    "loop": 60,
+    "team_log": 120,
+    "plan": 3600,
+    "merge_queue": 300
+  },
+  "gaps": [],
+  "missing_events": 0
+}

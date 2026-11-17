@@ -3414,13 +3414,18 @@
                     "runner_api_equivalent_usd": {
                       "type": "number",
                       "description": "What the runs on the person's own machine recorded in this window (and repo, when repo_id is given) would have cost at API prices. Information, never spend: no cost KPI includes it. The same figure that work items and /usage call own_plan_api_equivalent_usd (named differently here because this endpoint's key guard refuses keys containing plan)."
+                    },
+                    "engine_api_equivalent_usd": {
+                      "type": "number",
+                      "description": "What the usage of the person's own engine recorded in this window (and repo, when repo_id is given) would have cost at API prices, priced by the cloud. Information, never spend: no cost KPI includes it."
                     }
                   },
                   "required": [
                     "window",
                     "generated_at",
                     "metrics",
-                    "runner_api_equivalent_usd"
+                    "runner_api_equivalent_usd",
+                    "engine_api_equivalent_usd"
                   ],
                   "additionalProperties": false
                 }
@@ -25420,6 +25425,10 @@
                       "type": "number",
                       "description": "What this month's runs on the person's own machine would have cost at API prices. Information, never spend, and not part of any budget above. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
                     },
+                    "engine_api_equivalent_usd": {
+                      "type": "number",
+                      "description": "What this month's usage of the person's own engine (the tokens it reported, priced by the cloud) would have cost at API prices. Information, never spend, and not part of any budget above."
+                    },
                     "compute_notice": {
                       "anyOf": [
                         {
@@ -25454,6 +25463,7 @@
                     "foreground_compute",
                     "background_compute",
                     "own_plan_api_equivalent_usd",
+                    "engine_api_equivalent_usd",
                     "compute_notice"
                   ],
                   "additionalProperties": false
@@ -47053,6 +47063,2724 @@
           },
           "409": {
             "description": "`already_delivered`, `expired` or `already_cancelled`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos": {
+      "get": {
+        "operationId": "listEngineRepos",
+        "summary": "The repos ticked for the engine bridge, with the runner that serves each and whether it is live, stale, removed or never connected",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The repos ticked for the engine bridge, with the runner that serves each and whether it is live, stale, removed or never connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repo_id": {
+                            "type": "string"
+                          },
+                          "full_name": {
+                            "type": "string"
+                          },
+                          "runner_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "runner_name": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "session_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "last_event_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "last_heard_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "liveness": {
+                            "type": "string",
+                            "enum": [
+                              "live",
+                              "stale",
+                              "runner_removed",
+                              "never"
+                            ]
+                          },
+                          "watch_enabled": {
+                            "type": "boolean"
+                          },
+                          "operate_enabled": {
+                            "type": "boolean"
+                          },
+                          "halted": {
+                            "type": "boolean"
+                          },
+                          "halt_pending": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "repo_id",
+                          "full_name",
+                          "runner_id",
+                          "runner_name",
+                          "session_id",
+                          "last_event_at",
+                          "last_heard_at",
+                          "liveness",
+                          "watch_enabled",
+                          "operate_enabled",
+                          "halted",
+                          "halt_pending"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos/{id}/agents": {
+      "get": {
+        "operationId": "listEngineAgents",
+        "summary": "The repo's agents: `state=running` (running or unknown, never stopped) or `state=recent` (stopped in the last 24 hours)",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "running",
+                "recent"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The repo's agents: `state=running` (running or unknown, never stopped) or `state=recent` (stopped in the last 24 hours)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "agent_id": {
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string"
+                          },
+                          "discussion": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "background": {
+                            "type": [
+                              "boolean",
+                              "null"
+                            ]
+                          },
+                          "started_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "stopped_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "verdict": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "running",
+                              "unknown",
+                              "stopped"
+                            ]
+                          },
+                          "model": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "credential_mode": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "agent_id",
+                          "role",
+                          "discussion",
+                          "background",
+                          "started_at",
+                          "stopped_at",
+                          "verdict",
+                          "state",
+                          "model",
+                          "credential_mode"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos/{id}/lanes": {
+      "get": {
+        "operationId": "listEngineLanes",
+        "summary": "The merge lane: each PR with its newest state",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The merge lane: each PR with its newest state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "pr": {
+                            "type": "number"
+                          },
+                          "discussion": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "state": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "pr",
+                          "discussion",
+                          "state",
+                          "updated_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos/{id}/gates": {
+      "get": {
+        "operationId": "listEngineGates",
+        "summary": "Gate results: with no `pr`, the latest per (PR, gate) for PRs in a lane or changed in the last 24 hours; with `pr=N`, that PR's latest per gate",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pr",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,14}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Gate results: with no `pr`, the latest per (PR, gate) for PRs in a lane or changed in the last 24 hours; with `pr=N`, that PR's latest per gate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "pr": {
+                            "type": "number"
+                          },
+                          "gate": {
+                            "type": "string"
+                          },
+                          "result": {
+                            "type": "string"
+                          },
+                          "head_sha": {
+                            "type": "string"
+                          },
+                          "at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "pr",
+                          "gate",
+                          "result",
+                          "head_sha",
+                          "at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos/{id}/asks": {
+      "get": {
+        "operationId": "listEngineAsks",
+        "summary": "The engine's open questions (`state=open`, the default) or all of them",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "all"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The engine's open questions (`state=open`, the default) or all of them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "ask_id": {
+                            "type": "string"
+                          },
+                          "ask_kind": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "discussion": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "pr": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "raised_at": {
+                            "type": "string"
+                          },
+                          "cleared_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "how": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "ask_id",
+                          "ask_kind",
+                          "source",
+                          "discussion",
+                          "pr",
+                          "raised_at",
+                          "cleared_at",
+                          "how"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos/{id}/log": {
+      "get": {
+        "operationId": "listEngineLog",
+        "summary": "The team log by kind of line, newest first, 200 lines at most a page (the text of a line never leaves the person's machine)",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The team log by kind of line, newest first, 200 lines at most a page (the text of a line never leaves the person's machine)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "line_id": {
+                            "type": "string"
+                          },
+                          "actor_role": {
+                            "type": "string"
+                          },
+                          "category": {
+                            "type": "string"
+                          },
+                          "discussion": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "pr": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "ts": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "line_id",
+                          "actor_role",
+                          "category",
+                          "discussion",
+                          "pr",
+                          "ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos/{id}/usage": {
+      "get": {
+        "operationId": "getEngineUsage",
+        "summary": "Tokens and the cloud's own API-equivalent dollar figure for each agent and tick in a window, with a state and note where a figure is missing",
+        "description": "Information, never spend. A figure that is missing is shown with its state (`not_priced`, `not_recorded`), never as 0.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tokens and the cloud's own API-equivalent dollar figure for each agent and tick in a window, with a state and note where a figure is missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "subject_kind": {
+                            "type": "string",
+                            "enum": [
+                              "agent",
+                              "tick"
+                            ]
+                          },
+                          "subject_id": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "credential_mode": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "tokens": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "input": {
+                                    "type": "number"
+                                  },
+                                  "output": {
+                                    "type": "number"
+                                  },
+                                  "cache_read": {
+                                    "type": "number"
+                                  },
+                                  "cache_write": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "input",
+                                  "output",
+                                  "cache_read",
+                                  "cache_write"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "api_equivalent_usd": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "state": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "recorded",
+                                  "not_priced",
+                                  "not_recorded"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "note": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "provenance": {
+                            "type": "object",
+                            "properties": {
+                              "session_id": {
+                                "type": "string"
+                              },
+                              "seqs": {
+                                "type": "array",
+                                "items": {
+                                  "type": "number"
+                                }
+                              }
+                            },
+                            "required": [
+                              "session_id",
+                              "seqs"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "subject_kind",
+                          "subject_id",
+                          "model",
+                          "credential_mode",
+                          "tokens",
+                          "api_equivalent_usd",
+                          "state",
+                          "note",
+                          "provenance"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    },
+                    "window": {
+                      "type": "object",
+                      "properties": {
+                        "from": {
+                          "type": "string"
+                        },
+                        "to": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "from",
+                        "to"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "totals": {
+                      "type": "object",
+                      "properties": {
+                        "api_equivalent_usd": {
+                          "type": "number"
+                        },
+                        "tokens": {
+                          "type": "object",
+                          "properties": {
+                            "input": {
+                              "type": "number"
+                            },
+                            "output": {
+                              "type": "number"
+                            },
+                            "cache_read": {
+                              "type": "number"
+                            },
+                            "cache_write": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "input",
+                            "output",
+                            "cache_read",
+                            "cache_write"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "api_equivalent_usd",
+                        "tokens"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events",
+                    "window",
+                    "totals"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/repos/{id}/stats": {
+      "get": {
+        "operationId": "getEngineStats",
+        "summary": "Agents by role, median and p90 duration, merges and gate pass rate for a window, each with the events it counted",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agents by role, median and p90 duration, merges and gate pass rate for a window, each with the events it counted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "heard_age_s": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "source_ages_s": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "number"
+                      }
+                    },
+                    "gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_seq": {
+                            "type": "number"
+                          },
+                          "to_seq": {
+                            "type": "number"
+                          },
+                          "before_ts": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "from_seq",
+                          "to_seq",
+                          "before_ts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missing_events": {
+                      "type": "number"
+                    },
+                    "window": {
+                      "type": "object",
+                      "properties": {
+                        "from": {
+                          "type": "string"
+                        },
+                        "to": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "from",
+                        "to"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "agents_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "value": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {
+                            "type": "number"
+                          }
+                        },
+                        "provenance": {
+                          "type": "object",
+                          "properties": {
+                            "kinds": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "count": {
+                              "type": "number"
+                            },
+                            "seqs": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "session_id": {
+                                    "type": "string"
+                                  },
+                                  "seq": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "session_id",
+                                  "seq"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "kinds",
+                            "count",
+                            "seqs"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "value",
+                        "provenance"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "duration_s": {
+                      "type": "object",
+                      "properties": {
+                        "n": {
+                          "type": "number"
+                        },
+                        "median": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "p90": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "provenance": {
+                          "type": "object",
+                          "properties": {
+                            "kinds": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "count": {
+                              "type": "number"
+                            },
+                            "seqs": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "session_id": {
+                                    "type": "string"
+                                  },
+                                  "seq": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "session_id",
+                                  "seq"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "kinds",
+                            "count",
+                            "seqs"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "n",
+                        "median",
+                        "p90",
+                        "provenance"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "merges": {
+                      "type": "object",
+                      "properties": {
+                        "value": {
+                          "type": "number"
+                        },
+                        "provenance": {
+                          "type": "object",
+                          "properties": {
+                            "kinds": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "count": {
+                              "type": "number"
+                            },
+                            "seqs": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "session_id": {
+                                    "type": "string"
+                                  },
+                                  "seq": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "session_id",
+                                  "seq"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "kinds",
+                            "count",
+                            "seqs"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "value",
+                        "provenance"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "gate_pass_rate": {
+                      "type": "object",
+                      "properties": {
+                        "value": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "numerator": {
+                          "type": "number"
+                        },
+                        "denominator": {
+                          "type": "number"
+                        },
+                        "provenance": {
+                          "type": "object",
+                          "properties": {
+                            "kinds": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "count": {
+                              "type": "number"
+                            },
+                            "seqs": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "session_id": {
+                                    "type": "string"
+                                  },
+                                  "seq": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "session_id",
+                                  "seq"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "kinds",
+                            "count",
+                            "seqs"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "value",
+                        "numerator",
+                        "denominator",
+                        "provenance"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "next_cursor",
+                    "as_of",
+                    "heard_age_s",
+                    "source_ages_s",
+                    "gaps",
+                    "missing_events",
+                    "window",
+                    "agents_by_role",
+                    "duration_s",
+                    "merges",
+                    "gate_pass_rate"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/settings": {
+      "get": {
+        "operationId": "getEngineSettings",
+        "summary": "The watch and operate switches and each repo's tick, with why a repo cannot be ticked",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The watch and operate switches and each repo's tick, with why a repo cannot be ticked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "watch_enabled": {
+                      "type": "boolean"
+                    },
+                    "operate_enabled": {
+                      "type": "boolean"
+                    },
+                    "can_edit": {
+                      "type": "boolean"
+                    },
+                    "repos": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repo_id": {
+                            "type": "string"
+                          },
+                          "full_name": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "eligible": {
+                            "type": "boolean"
+                          },
+                          "refusal": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "repo_not_runner_local",
+                                  "public_repo"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "repo_id",
+                          "full_name",
+                          "enabled",
+                          "eligible",
+                          "refusal"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "watch_enabled",
+                    "operate_enabled",
+                    "can_edit",
+                    "repos"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "setEngineSettings",
+        "summary": "Turn the engine watch or operate switch on or off and tick repos (an owner or admin, on a session)",
+        "description": "A repo that is not on one of the person's runners, or is not private, is refused with 409 (`repo_not_runner_local`, `public_repo`). Operate needs watch, so turn operate off before watch.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "watch_enabled": {
+                    "type": "boolean"
+                  },
+                  "operate_enabled": {
+                    "type": "boolean"
+                  },
+                  "repo_ids": {
+                    "maxItems": 500,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turn the engine watch or operate switch on or off and tick repos (an owner or admin, on a session)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "watch_enabled": {
+                      "type": "boolean"
+                    },
+                    "operate_enabled": {
+                      "type": "boolean"
+                    },
+                    "can_edit": {
+                      "type": "boolean"
+                    },
+                    "repos": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repo_id": {
+                            "type": "string"
+                          },
+                          "full_name": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "eligible": {
+                            "type": "boolean"
+                          },
+                          "refusal": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "repo_not_runner_local",
+                                  "public_repo"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "repo_id",
+                          "full_name",
+                          "enabled",
+                          "eligible",
+                          "refusal"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "watch_enabled",
+                    "operate_enabled",
+                    "can_edit",
+                    "repos"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A repo cannot be ticked (`repo_not_runner_local`, `public_repo`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/settings/delete-data": {
+      "put": {
+        "operationId": "deleteEngineData",
+        "summary": "Delete every engine event and read-model row of the account (an owner, on a session); the switches stay",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delete every engine event and read-model row of the account (an owner, on a session); the switches stay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "deleted_sessions": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "deleted_sessions"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
             "content": {
               "application/json": {
                 "schema": {

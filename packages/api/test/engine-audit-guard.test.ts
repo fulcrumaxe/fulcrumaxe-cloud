@@ -12,6 +12,7 @@ import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
+import { engineSettingsDeps } from '../src/routes/engine.js';
 
 /**
  * [pg] Engine bridge EB-14: every engine operate route and every runner decide path writes exactly one audit row of its action, in the same
@@ -21,11 +22,12 @@ import { ROUTES } from '../src/routes/index.js';
  *   1. adds one entry to ENGINE_AUDIT_GUARD below: the route's id, its audit action, a `run` that makes the real call as the tenant's member,
  *      and an `effects` that counts the rows the change leaves (it must read 1 after a good run and 0 after a rolled-back one);
  *   2. names the route's export in `covers` as `<file>#<export>` (for example `engine-commands.ts#registerEngineCommandRoutes`).
- * An export of `packages/api/src/routes/engine-*.ts` that is neither covered nor listed in READ_ONLY_EXPORTS fails the meta-test.
+ * An export of `packages/api/src/routes/engine*.ts` (`engine.ts` and every `engine-*.ts`) that is neither covered nor listed in READ_ONLY_EXPORTS fails the meta-test.
  */
 
 interface GuardContext {
   appUserPool: Pool;
+  platformOpsPool: Pool;
   admin: PoolClient;
   accountId: string;
   userId: string;
@@ -98,6 +100,18 @@ async function bridgeRepo(ctx: GuardContext, label: string): Promise<string> {
 const commandRows = async (ctx: GuardContext, label: string, where = 'true'): Promise<number> =>
   Number((await ctx.admin.query(`SELECT count(*) AS n FROM engine_commands WHERE repo_id = $1 AND ${where}`, [await bridgeRepo(ctx, label)])).rows[0].n);
 
+/** What the settings entries below need that the account does not already have: a runner to hang a seeded session on, set up in `beforeAll`. */
+const seeded: { runnerId: string } = { runnerId: '' };
+const SEEDED_TABLE = 'engine_audit_guard_seeded';
+
+/** Makes a real request to the API as the account's owner on a session, and rejects unless it answers 200 (so a rolled-back write rejects the run). */
+async function callEngine(c: GuardContext, method: 'PUT', urlPath: string, body?: unknown): Promise<void> {
+  const headers = new Headers({ cookie: `${SESSION_COOKIE_NAME}=${await signSession({ accountId: c.accountId, userId: c.userId })}`, accept: 'application/json' });
+  if (body !== undefined) headers.set('content-type', 'application/json');
+  const res = await handleApiRequest(new Request(`http://localhost${urlPath}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), c.appUserPool, c.platformOpsPool, ROUTES);
+  if (res.status !== 200) throw new Error(`${method} ${urlPath} answered ${res.status}`);
+}
+
 /** Later rows add their routes here. */
 export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
   {
@@ -127,17 +141,52 @@ export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
     },
     effects: (ctx) => commandRows(ctx, 'cancel', "state = 'cancelled'"),
   },
+  {
+    id: 'PUT /api/v1/engine/settings',
+    action: 'engine_bridge.settings_changed',
+    covers: ['engine.ts#engineRoutes'],
+    run: async (c) => {
+      const repoId = randomUUID();
+      await c.admin.query(
+        `INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode)
+         SELECT $1, account_id, installation_id, $3, 'team', 'acme', $4, 'runner_local' FROM repos WHERE account_id = $2 LIMIT 1`,
+        [repoId, c.accountId, 1_000_000 + Math.floor(Math.random() * 1_000_000_000), `guard-${repoId.slice(0, 8)}`],
+      );
+      const ticked = (await c.admin.query<{ repo_id: string }>(`SELECT repo_id FROM engine_bridge_repos WHERE account_id = $1`, [c.accountId])).rows.map((r) => r.repo_id);
+      await callEngine(c, 'PUT', '/api/v1/engine/settings', { repo_ids: [...ticked, repoId] });
+    },
+    effects: async (c) => Number((await c.admin.query(`SELECT count(*) AS n FROM engine_bridge_repos WHERE account_id = $1`, [c.accountId])).rows[0].n),
+  },
+  {
+    id: 'PUT /api/v1/engine/settings/delete-data',
+    action: 'engine_bridge.data_deleted',
+    covers: ['engine.ts#engineRoutes'],
+    run: async (c) => {
+      const sessionId = randomUUID();
+      await c.admin.query(
+        `INSERT INTO engine_sessions (id, account_id, runner_id, repo_id, engine_instance_id, engine_version)
+         SELECT $1, $2, $3, (SELECT id FROM repos WHERE account_id = $2 ORDER BY id LIMIT 1), $4, '1.0.0'`,
+        [sessionId, c.accountId, seeded.runnerId, randomUUID()],
+      );
+      await c.admin.query(`INSERT INTO ${SEEDED_TABLE} (session_id) VALUES ($1)`, [sessionId]);
+      await callEngine(c, 'PUT', '/api/v1/engine/settings/delete-data');
+    },
+    effects: async (c) =>
+      Number((await c.admin.query(`SELECT count(*) AS n FROM ${SEEDED_TABLE} s WHERE NOT EXISTS (SELECT 1 FROM engine_sessions e WHERE e.id = s.session_id)`)).rows[0].n),
+  },
 ];
 
-/** Exports of engine-*.ts route files that change nothing, each with the reason. A later row that adds a read-only export lists it here. */
-export const READ_ONLY_EXPORTS: Record<string, string> = {};
+/** Exports of engine*.ts route files that change nothing, each with the reason. A later row that adds a read-only export lists it here. */
+export const READ_ONLY_EXPORTS: Record<string, string> = {
+  'engine.ts#engineSettingsDeps': 'the GitHub visibility seam the settings routes read; it is not a route and changes nothing',
+};
 
 const ROUTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes');
 
-/** The exported names of every `engine-*.ts` route file, as `<file>#<name>`. */
+/** The exported names of every `engine*.ts` route file (`engine.ts` and each `engine-*.ts`), as `<file>#<name>`. */
 export function engineRouteExports(dir: string = ROUTES_DIR): string[] {
   const out: string[] = [];
-  for (const file of readdirSync(dir).filter((f) => /^engine-.*\.ts$/.test(f)).sort()) {
+  for (const file of readdirSync(dir).filter((f) => /^engine.*\.ts$/.test(f)).sort()) {
     const src = readFileSync(path.join(dir, file), 'utf8');
     for (const m of src.matchAll(/^export\s+(?:async\s+)?(?:function\*?|const|let|class)\s+([A-Za-z0-9_$]+)/gm)) out.push(`${file}#${m[1]}`);
     for (const m of src.matchAll(/^export\s*\{([^}]*)\}/gm)) {
@@ -164,9 +213,10 @@ describe('engine audit guard', { timeout: 60_000 }, () => {
   let adminPool: Pool;
   let admin: PoolClient;
   let appUserPool: Pool;
+  let platformOpsPool: Pool;
   let a: SeedRefs;
 
-  const ctx = (): GuardContext => ({ appUserPool, admin, accountId: a.accountId, userId: a.userId });
+  const ctx = (): GuardContext => ({ appUserPool, platformOpsPool, admin, accountId: a.accountId, userId: a.userId });
   const auditRows = async () =>
     (await admin.query<{ action: string }>(`SELECT action FROM audit_log WHERE account_id = $1 ORDER BY created_at`, [a.accountId])).rows.map((r) => r.action);
 
@@ -201,6 +251,10 @@ describe('engine audit guard', { timeout: 60_000 }, () => {
     adminPool = createPool(process.env.API_DATABASE_URL!);
     admin = await adminPool.connect();
     appUserPool = createPool(process.env.API_DATABASE_URL_APP_USER!);
+    platformOpsPool = createPool(process.env.API_DATABASE_URL_PLATFORM_OPS!);
+    process.env.FX_SESSION_SECRET = 's'.repeat(32);
+    engineSettingsDeps.getVisibility = () => async () => 'private';
+    await admin.query(`CREATE TABLE IF NOT EXISTS ${SEEDED_TABLE} (session_id uuid PRIMARY KEY)`);
     await admin.query(`CREATE TABLE IF NOT EXISTS ${FAIL_TABLE} (account_id uuid PRIMARY KEY)`);
     await admin.query(
       `CREATE OR REPLACE FUNCTION ${FAIL_FN}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
@@ -214,14 +268,23 @@ describe('engine audit guard', { timeout: 60_000 }, () => {
     await admin.query(`DROP TRIGGER IF EXISTS ${FAIL_TRIGGER} ON audit_log`);
     await admin.query(`CREATE TRIGGER ${FAIL_TRIGGER} BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION ${FAIL_FN}()`);
     a = await seedAccount(admin, randomUUID());
+    seeded.runnerId = randomUUID();
+    await admin.query(
+      `INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode) VALUES ($1, $2, $3, '{"kty":"OKP","crv":"Ed25519","x":"AAAA"}', $4, 'subscription')`,
+      [seeded.runnerId, a.accountId, a.userId, randomUUID().replace(/-/g, '').padEnd(43, 'k')],
+    );
+    await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [a.repoId]);
   });
   afterAll(async () => {
     for (const name of standIns) await admin.query(`DROP TABLE IF EXISTS ${name}`);
+    delete process.env.FX_SESSION_SECRET;
+    engineSettingsDeps.getVisibility = null;
+    await admin.query(`DROP TABLE IF EXISTS ${SEEDED_TABLE}`);
     await admin.query(`DROP TRIGGER IF EXISTS ${FAIL_TRIGGER} ON audit_log`);
     await admin.query(`DROP FUNCTION IF EXISTS ${FAIL_FN}()`);
     await admin.query(`DROP TABLE IF EXISTS ${FAIL_TABLE}`);
     admin.release();
-    await Promise.all([adminPool.end(), appUserPool.end()]);
+    await Promise.all([adminPool.end(), appUserPool.end(), platformOpsPool.end()]);
   });
 
   describe('every engine operate route and runner decide path', () => {
@@ -229,7 +292,7 @@ describe('engine audit guard', { timeout: 60_000 }, () => {
       for (const entry of ENGINE_AUDIT_GUARD) await checkEntry(entry);
     });
 
-    it('lists every export of packages/api/src/routes/engine-*.ts (meta-test)', () => {
+    it('lists every export of packages/api/src/routes/engine*.ts (meta-test)', () => {
       expect(uncoveredExports(engineRouteExports(), ENGINE_AUDIT_GUARD, READ_ONLY_EXPORTS)).toEqual([]);
     });
 
@@ -295,7 +358,7 @@ describe('engine audit guard', { timeout: 60_000 }, () => {
   describe('the meta-test scan', () => {
     const entry = (covers: string[]): GuardEntry => ({ id: 'x', action: 'engine_halt.set', covers, run: async () => {}, effects: async () => 0 });
 
-    it('finds the exports of engine-*.ts files only, in every export form', async () => {
+    it('finds the exports of engine*.ts files only, in every export form', async () => {
       const fs = await import('node:fs/promises');
       const os = await import('node:os');
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fx-engine-routes-'));
