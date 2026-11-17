@@ -12,9 +12,9 @@
 import path from "node:path";
 import { CliError } from "../cliError.js";
 import { loadRegistration } from "../config.js";
-import { signedPost } from "../cloud.js";
+import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { CommandContext, Flags } from "../context.js";
-import { requireUsable } from "../protectionBypass.js";
+import { BYPASS_ENV_NAME, requireUsable } from "../protectionBypass.js";
 import { loadRunnerKey } from "../keys.js";
 import { PULL_PATH } from "../engineBridge/commands.js";
 import { PROBE_REPO_ID, parseAllowedRepos, readDaemonStatus } from "../engineBridge/daemon.js";
@@ -38,6 +38,35 @@ export function engineStateDirFor(flag: string | undefined, override: string | u
   const chosen = flag ?? (override !== undefined && override !== "" ? override : home === undefined ? undefined : path.join(home, ".autonomous-forever-state"));
   if (chosen === undefined || !isPlainAbsolute(chosen)) throw refusal("the engine's state directory must be an absolute path (give --state-dir)");
   return chosen;
+}
+
+/** A short code for a failed request (`ECONNREFUSED`, `TimeoutError`, ...), or "unknown". Never the error's text, which can carry an address. */
+function networkCodeOf(error: unknown): string {
+  const e = error as { code?: unknown; name?: unknown; cause?: { code?: unknown } } | null;
+  for (const v of [e?.cause?.code, e?.code, e?.name]) if (typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(v)) return v;
+  return "unknown";
+}
+
+const OWN_KEY_REFUSED = "the runner's key was refused; run: fx-runner doctor, and if it says the key is revoked or too old, run: fx-runner revoke --local, then register again";
+
+/**
+ * What a non-200 answer to the repo check means, in plain words: the HTTP status, and the next step. Only the status and the short `error.code`
+ * word are shown; nothing else the cloud said, and never the protection bypass file's content (only its variable name).
+ */
+export function probeRefusal(reply: CloudReply, origin: string): string {
+  const code = errorCodeOf(reply.body);
+  const tag = `HTTP ${reply.status}${code === undefined ? "" : ` ${code}`}`;
+  const end = "; nothing was changed";
+  if (reply.protectedDeployment) {
+    return `engine-bridge: the cloud's deployment protection refused the request (HTTP ${reply.status}). Set ${BYPASS_ENV_NAME} as the runner service does: \`systemctl --user show fx-runner -p Environment\` shows the path${end}`;
+  }
+  if (reply.status === 401 || reply.status === 403) return `engine-bridge: ${OWN_KEY_REFUSED} (${tag})${end}`;
+  if (reply.status === 404) return `engine-bridge: the cloud at ${origin} does not have the engine bridge route (${tag}); it is probably an older version, so update the cloud${end}`;
+  if (reply.status === 429) return `engine-bridge: the cloud asked for fewer requests (${tag}); wait ${reply.retryAfter ?? 60} seconds and try again${end}`;
+  if (reply.status === 400 || reply.status === 409 || reply.status === 422) return `engine-bridge: the cloud did not accept the repo check (${tag}); update fx-runner and try again${end}`;
+  if (reply.status === 503 && code === "not_configured") return `engine-bridge: the cloud cannot sign engine commands yet (${tag}); the engine bridge is not switched on in that deployment${end}`;
+  if (reply.status >= 500) return `engine-bridge: the cloud had an error (${tag}); try again in a minute${end}`;
+  return `engine-bridge: the cloud answered the repo check with an unexpected status (${tag})${end}`;
 }
 
 const str = (flags: Flags, name: string): string | undefined => {
@@ -69,14 +98,22 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
   const key = loadRunnerKey(ctx.stateDir);
   if (!registration || !key || key.jkt !== registration.jkt) throw new CliError("not registered, or the runner key does not match; run: fx-runner status", 1);
   // The cloud's own list of this runner's repos: a pull for an id no repo has returns it and delivers nothing.
+  const secret = requireUsable(ctx.bypass);
+  let failure: string | undefined;
+  const watchedFetch = ((input, init) =>
+    ctx.fetchFn(input, init).catch((error: unknown) => {
+      failure = networkCodeOf(error);
+      throw error;
+    })) as typeof fetch;
   let reply: Awaited<ReturnType<typeof signedPost>>;
   try {
-    reply = await signedPost({ origin: registration.cloud_origin, path: PULL_PATH, body: { repo_gh_ids: [PROBE_REPO_ID], after_seq: {} }, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
-  } catch {
-    // fx-swallow-ok: the error text could name an address; one fixed sentence
-    throw new CliError("engine-bridge: the cloud could not be reached, so the repo could not be checked; nothing was changed", 1);
+    reply = await signedPost({ origin: registration.cloud_origin, path: PULL_PATH, body: { repo_gh_ids: [PROBE_REPO_ID], after_seq: {} }, key, now: ctx.now(), fetchFn: watchedFetch, bypass: secret });
+  } catch (error) {
+    // fx-swallow-ok: the error text could name an address; only a short code is shown
+    if (failure === undefined) throw error;
+    throw new CliError(`engine-bridge: could not reach ${registration.cloud_origin} (${failure}); check your network and the cloud address, then try again; nothing was changed`, 1);
   }
-  if (reply.status !== 200) throw new CliError("engine-bridge: the cloud did not answer the repo check; nothing was changed", 1);
+  if (reply.status !== 200) throw new CliError(probeRefusal(reply, registration.cloud_origin), 1);
   const list = parseAllowedRepos(reply.body);
   if (list === undefined) throw refusal("the cloud did not list this runner's repos (it may not support the engine bridge yet); nothing was changed");
   const found = list.find((r) => r.full_name === repo);
