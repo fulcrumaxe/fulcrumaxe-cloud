@@ -20,6 +20,7 @@ import { CliError } from "../src/cliError.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { terminateGroup } from "../src/engines/claude/processGroup.js";
 import { haltDepsFrom } from "../src/engineBridge/halt.js";
+import { createEngineBridgePorts } from "../src/engineBridge/ports.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
 import { openLaunchDir } from "../src/launchDir.js";
@@ -201,6 +202,8 @@ runCli({
     term: process.env.TERM,
     uid: process.getuid?.(),
     xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
+    // D#842 EB-3c: the engine bridge's halt path and dial ceiling keeper, bound to the machine through the same kill-path dependencies `engine-host stop` uses. Without them `run` never starts the bridge.
+    engineBridge: createEngineBridgePorts(engineHaltDeps),
     // D#749 V2b: the Chrome bridge directory is named for the user; a deploy command is given a short allowlist of this environment (src/daemon/deployOrder.ts).
     username: userInfo().username,
     env: { PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, TMPDIR: process.env.TMPDIR, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME },
