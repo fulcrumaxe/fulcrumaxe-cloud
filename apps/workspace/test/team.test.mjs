@@ -820,7 +820,7 @@ describe("operate: who sees controls and when they are locked", () => {
     expect(await t.operate.pause()).toBe(false);
     expect(sends(f)).toEqual([]);
   });
-  it("the reason names the first thing that is off: watch, then no repo, then operate, then a halt, then a halt being applied", () => {
+  it("the reason names the first thing that is off: a halt being applied, then watch, then no repo, then operate, then a halt", () => {
     const repo = { operate: true, halted: false, haltPending: false };
     expect(lockReason({ watch: false, operate: true }, repo)).toBe("Engine watch is off.");
     expect(lockReason({ watch: true, operate: true }, undefined)).toBe(OP_WORDS.noRepo);
@@ -828,6 +828,10 @@ describe("operate: who sees controls and when they are locked", () => {
     expect(lockReason({ watch: true, operate: true }, { ...repo, operate: false })).toBe("Operate is off."); // either switch off locks it
     expect(lockReason({ watch: true, operate: true }, { ...repo, halted: true })).toBe("The engine is halted.");
     expect(lockReason({ watch: true, operate: true }, { ...repo, haltPending: true })).toBe("A halt is being applied.");
+    // a pending halt wins over every other reason
+    expect(lockReason({ watch: false, operate: true }, { ...repo, haltPending: true })).toBe("A halt is being applied.");
+    expect(lockReason({ watch: true, operate: false }, { ...repo, haltPending: true })).toBe("A halt is being applied.");
+    expect(lockReason({ watch: true, operate: true }, { ...repo, operate: false, haltPending: true })).toBe("A halt is being applied.");
     expect(lockReason({ watch: true, operate: true }, repo)).toBe("");
   });
   for (const [name, routes, reason] of [
@@ -1233,6 +1237,20 @@ describe("halt: the state, who sees controls, the questions and the requests", (
     expect(sends(f)).toEqual([["POST", haltUrl(REPO_A), {}]]);
     expect(t.state.op.confirmHalt).toBeNull();
     expect(f.log.at(-1)[0]).toBe("GET"); // the repos are read again
+  });
+  it("Cancel on the halt question and on the clear question sends nothing", async () => {
+    const live = await halting();
+    live.t.operate.askHalt("halt");
+    expect(live.t.view().halt.confirm).toMatchObject({ kind: "halt" });
+    live.t.operate.cancelHalt();
+    expect(live.t.view().halt.confirm).toBeNull();
+    expect(sends(live.f)).toEqual([]);
+    const halted = await halting({ halted: true });
+    halted.t.operate.askHalt("clear");
+    expect(halted.t.view().halt.confirm).toMatchObject({ kind: "clear" });
+    halted.t.operate.cancelHalt();
+    expect(halted.t.view().halt.confirm).toBeNull();
+    expect(sends(halted.f)).toEqual([]);
   });
   it("a runner with no name reads your machine, and a hostile name stays a text part", async () => {
     const a = await halting({ runner_name: "" });
