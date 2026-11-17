@@ -39,12 +39,23 @@ describe("typed calls", () => {
     expect(pricing.primaryIps.find((p) => p.type === "ipv4")!.prices[0]).toMatchObject({ location: "fsn1", monthlyNet: "0.5000" });
   });
 
-  it("covers servers and actions, and reads every page of a list", async () => {
+  it("covers servers, firewalls, SSH keys and actions, and reads every page of a list", async () => {
     const c = make();
-    const made = await c.createServer({ ...create("k1"), sshKeys: ["my-key"], firewalls: [11], userData: "#cloud-config\n", labels: { team: "a" } });
+    const key = await c.createSshKey({ name: "k", publicKey: "ssh-ed25519 AAAAC3Nza-example-key-0001" });
+    const fw = await c.createFirewall({ name: "fw", rules: [{ direction: "in", protocol: "tcp", port: "22", sourceIps: ["198.51.100.1/32"] }] });
+    expect(fw.rules[0]).toMatchObject({ direction: "in", port: "22", sourceIps: ["198.51.100.1/32"] });
+    const made = await c.createServer({ ...create("k1"), sshKeys: [String(key.id)], firewalls: [fw.id], userData: "#cloud-config\n", labels: { team: "a" } });
     expect(made).toMatchObject({ reused: false, server: { name: "srv-k1", status: "initializing", ipv4: "203.0.113.7", labels: { team: "a", [CREATE_KEY_LABEL]: "k1" } }, action: { status: "success" } });
     expect((await c.getServer(made.server.id)).id).toBe(made.server.id);
+    expect((await c.listFirewalls({ name: "fw" }))).toHaveLength(1);
+    expect((await c.listSshKeys({ fingerprint: key.fingerprint }))).toHaveLength(1);
+    expect((await c.getFirewall(fw.id)).name).toBe("fw");
+    expect((await c.getActions([7, 8])).map((a) => a.id)).toEqual([7, 8]);
     expect((await c.getAction(5)).command).toBe("x");
+    expect((await c.rebootServer(made.server.id)).command).toBe("reboot_server");
+    expect((await c.powerOffServer(made.server.id)).command).toBe("poweroff_server");
+    expect((await c.powerOnServer(made.server.id)).command).toBe("poweron_server");
+    expect((await c.renameServer(made.server.id, "renamed")).name).toBe("renamed");
     for (let i = 0; i < 59; i++) world.servers.push({ ...world.servers[0]!, id: 5000 + i, name: `bulk-${i}`, labels: {} });
     expect(await c.listServers()).toHaveLength(60);
     expect(world.requests.filter((r) => r.path.startsWith("/v1/servers?")).length).toBeGreaterThanOrEqual(2);
@@ -56,18 +67,26 @@ describe("typed calls", () => {
     const made = await c.createServer(create("d1"));
     expect((await c.deleteServer(made.server.id))!.command).toBe("delete_server");
     expect(await c.deleteServer(made.server.id)).toBeNull();
+    expect(await c.deleteFirewall(99)).toBe(false);
+    expect(await c.deleteSshKey(99)).toBe(false);
     const n = world.requests.length;
     expect((await thrown(c.getServer(-1))).code).toBe("invalid_input");
     expect(world.requests.length).toBe(n);
   });
 
-  it("turns a malformed action reply to a delete into unavailable, not a raw parse error", async () => {
+  it("turns a malformed action reply into unavailable, not a raw parse error, for delete, reboot, power on and power off", async () => {
     const c = make();
     const made = await c.createServer(create("d3"));
     world.malformedAction = true;
-    const e = await thrown(c.deleteServer(made.server.id));
-    expect(e.code).toBe("unavailable");
-    expect(e.message).toMatch(/shape we do not understand/);
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ["reboot", () => c.rebootServer(made.server.id)], ["power on", () => c.powerOnServer(made.server.id)],
+      ["power off", () => c.powerOffServer(made.server.id)], ["delete", () => c.deleteServer(made.server.id)], // last: the fake removes the server on delete
+    ];
+    for (const [name, call] of calls) {
+      const e = await thrown(call());
+      expect(e, name).toMatchObject({ code: "unavailable" });
+      expect(e.message, name).toMatch(/shape we do not understand/);
+    }
   });
 
   it("accepts a successful delete that carries no action", async () => {
@@ -76,6 +95,26 @@ describe("typed calls", () => {
     world.deleteOmitsAction = true;
     expect(await c.deleteServer(made.server.id)).toBeNull();
     expect(world.servers).toHaveLength(0);
+  });
+
+  it("reads a firewall with no labels as having none", async () => {
+    const c = make();
+    const fw = await c.createFirewall({ name: "nolabels", rules: [] });
+    delete world.firewalls[0]!.labels;
+    expect((await c.getFirewall(fw.id)).labels).toEqual({});
+    expect((await c.listFirewalls())[0]!.labels).toEqual({});
+  });
+
+  it("refuses to delete a firewall that is still applied to a server (422 resource_in_use), and deletes it once the server is gone", async () => {
+    const c = make();
+    const fw = await c.createFirewall({ name: "applied", rules: [] });
+    const made = await c.createServer({ ...create("fw1"), firewalls: [fw.id] });
+    const e = await thrown(c.deleteFirewall(fw.id));
+    expect(e).toMatchObject({ code: "unavailable", status: 422, extra: { hetznerCode: "resource_in_use" } });
+    expect(world.firewalls).toHaveLength(1);
+    await c.deleteServer(made.server.id);
+    expect(await c.deleteFirewall(fw.id)).toBe(true);
+    expect(world.firewalls).toHaveLength(0);
   });
 
   it("checks the placement before a create, and verifies the token", async () => {
@@ -211,6 +250,17 @@ describe("timeouts and retries", () => {
     expect(world.servers).toHaveLength(1);
     expect(sleeps.length).toBeGreaterThan(0);
   });
+
+  it("does not repeat a write after an ambiguous failure, but does after a 429", async () => {
+    const c = make();
+    world.failNext.push({ status: 500 });
+    expect((await thrown(c.createFirewall({ name: "f1", rules: [] }))).code).toBe("server_error");
+    expect(world.firewalls).toHaveLength(0);
+    world.remaining = 1;
+    await c.createFirewall({ name: "f2", rules: [] }); // 1 left -> 0: the next write waits
+    await c.createFirewall({ name: "f3", rules: [] });
+    expect(world.firewalls.map((f) => f.name)).toEqual(["f2", "f3"]);
+  });
 });
 
 describe("an idempotent create", () => {
@@ -309,6 +359,10 @@ describe("the token never leaves", () => {
     world.servers.push({ id: "bad" });
     await run(c.listServers()); // shape error
     world.servers.length = 0;
+    for (const call of [() => c.createFirewall({ name: "f", rules: [] }), () => c.listFirewalls(), () => c.getFirewall(1), () => c.deleteFirewall(1), () => c.createSshKey({ name: "k", publicKey: "ssh-ed25519 AAAA-example" }), () => c.listSshKeys(), () => c.deleteSshKey(1), () => c.getActions([1]), () => c.rebootServer(1), () => c.powerOnServer(1), () => c.powerOffServer(1), () => c.renameServer(1, "n")]) {
+      world.failNext.push({ status: 500, message: `echo ${TOKEN}` });
+      await run(call());
+    }
     world.failNext.push({ hang: true });
     await run(make({ timeoutMs: 50, maxRetries: 0 }).listLocations());
     world.failNext.push({ drop: true });
@@ -320,7 +374,7 @@ describe("the token never leaves", () => {
     spies.forEach((s) => s.mockRestore());
     w1.mockRestore();
     w2.mockRestore();
-    expect(errors.length).toBeGreaterThanOrEqual(15);
+    expect(errors.length).toBeGreaterThanOrEqual(27);
     for (const e of errors) {
       expect(e).toBeInstanceOf(HetznerError);
       const text = [String((e as Error).message), String((e as Error).stack), String(e), inspect(e, { depth: 6, showHidden: true }), JSON.stringify(e, Object.getOwnPropertyNames(e))].join("\n");

@@ -65,6 +65,8 @@ export interface CreateServerInput {
   /** A double click, a retry or a crash between create and stamp makes one server: the same key finds the first one by its label. */
   idempotencyKey: string;
 }
+export interface FirewallRuleInput { direction: "in" | "out"; protocol: "tcp" | "udp" | "icmp" | "esp" | "gre"; port?: string; sourceIps?: readonly string[]; destinationIps?: readonly string[]; description?: string }
+
 const LABEL_VALUE = /^[A-Za-z0-9]([-_.A-Za-z0-9]{0,61}[A-Za-z0-9])?$/;
 const sanitize = (s: string, token: string): string => {
   let out = s.replace(/[\u0000-\u001f\u007f]/g, " ");
@@ -225,6 +227,12 @@ export function createHetznerClient(options: HetznerOptions) {
     throw fail("unavailable", "Hetzner's list was longer than we read.");
   };
   const sel = (labelSelector?: string): Query => (labelSelector ? { label_selector: labelSelector } : {});
+  const gone = async (call: () => Promise<unknown>): Promise<boolean> => {
+    try { await call(); return true; } catch (e) {
+      if (e instanceof HetznerError && e.code === "not_found") return false;
+      throw e;
+    }
+  };
   const action = (v: unknown): P.Action => P.field(v, "action", P.parseAction);
 
   const api = {
@@ -242,7 +250,23 @@ export function createHetznerClient(options: HetznerOptions) {
         throw e;
       }
     },
+    rebootServer: async (id: number): Promise<P.Action> => parsed(await send("POST", `/servers/${int(id)}/actions/reboot`, undefined, {}, false), action),
+    powerOnServer: async (id: number): Promise<P.Action> => parsed(await send("POST", `/servers/${int(id)}/actions/poweron`, undefined, {}, false), action),
+    powerOffServer: async (id: number): Promise<P.Action> => parsed(await send("POST", `/servers/${int(id)}/actions/poweroff`, undefined, {}, false), action),
+    renameServer: async (id: number, name: string): Promise<P.Server> => parsed(await send("PUT", `/servers/${int(id)}`, undefined, { name }, false), (v) => P.field(v, "server", P.parseServer)),
+    listFirewalls: (f: { labelSelector?: string; name?: string } = {}) => listAll("/firewalls", "firewalls", P.parseFirewall, { ...sel(f.labelSelector), ...(f.name ? { name: f.name } : {}) }),
+    getFirewall: async (id: number) => get(`/firewalls/${int(id)}`, (v) => P.field(v, "firewall", P.parseFirewall)),
+    createFirewall: async (i: { name: string; labels?: Record<string, string>; rules: readonly FirewallRuleInput[] }): Promise<P.Firewall> => {
+      const body = { name: i.name, labels: i.labels ?? {}, rules: i.rules.map((r) => ({ direction: r.direction, protocol: r.protocol, ...(r.port === undefined ? {} : { port: r.port }), source_ips: r.sourceIps ?? [], destination_ips: r.destinationIps ?? [], ...(r.description === undefined ? {} : { description: r.description }) })) };
+      return parsed(await send("POST", "/firewalls", undefined, body, false), (v) => P.field(v, "firewall", P.parseFirewall));
+    },
+    deleteFirewall: (id: number) => gone(() => send("DELETE", `/firewalls/${int(id)}`, undefined, undefined, true)),
+    listSshKeys: (f: { labelSelector?: string; name?: string; fingerprint?: string } = {}) => listAll("/ssh_keys", "ssh_keys", P.parseSshKey, { ...sel(f.labelSelector), ...(f.name ? { name: f.name } : {}), ...(f.fingerprint ? { fingerprint: f.fingerprint } : {}) }),
+    createSshKey: async (i: { name: string; publicKey: string; labels?: Record<string, string> }): Promise<P.SshKey> =>
+      parsed(await send("POST", "/ssh_keys", undefined, { name: i.name, public_key: i.publicKey, labels: i.labels ?? {} }, false), (v) => P.field(v, "ssh_key", P.parseSshKey)),
+    deleteSshKey: (id: number) => gone(() => send("DELETE", `/ssh_keys/${int(id)}`, undefined, undefined, true)),
     getAction: async (id: number) => get(`/actions/${int(id)}`, action),
+    getActions: (ids: readonly number[]) => get("/actions", (v) => P.field(v, "actions", (x, at) => P.list(x, at, P.parseAction)), { id: ids.map((i) => String(int(i))) }),
 
     /**
      * Refuses before any create what the real API would refuse after one: an unknown server type or location, or a type not offered in that location.
