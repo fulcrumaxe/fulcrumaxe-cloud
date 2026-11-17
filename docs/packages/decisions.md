@@ -27,6 +27,7 @@ Sources:
 - `packages/decisions/src/platformAskFacts.ts`
 - `packages/decisions/src/reversalWindow.ts`
 - `packages/decisions/src/labels.ts`
+- `packages/decisions/src/engineDecision.ts`
 - `packages/roles/cards/executor.md`
 - `packages/decisions/test/`
 
@@ -50,6 +51,7 @@ which re-exports:
 - `catalogue.ts`: `CATALOGUE`, `CATALOGUE_IDS`, `CATALOGUE_VERSION`, `DEFAULT_REVERSAL_WINDOW_HOURS`, `getCatalogueEntry(id)`
 - `reversalWindow.ts`: `reversalWindowFor`
 - `labels.ts`: `DECISION_LABELS`, `decisionLabel`
+- `engineDecision.ts`: `ENGINE_DECISION_TYPES`, `ENGINE_SPEC_TAGS`, `isEngineDecisionType`, `resolveEngineDecision` (types `EngineDecisionType`, `EngineSpecTag`, `EngineResolution`)
 - `presets.ts`: `CAUTIOUS_PRESET`, `BALANCED_PRESET`, `AUTONOMOUS_PRESET`, `PRESETS`, `UnknownPresetError`, `getPreset(name)`
 - `decide.ts`: `DecisionRequestClassFieldRejectedError`, `decide(entry, settings, request)`
 - `declared.ts`: `PLATFORM_DECLARATIONS`, `UndeclaredCatalogueEntryError`, `assertDeclarationsResolve`, `findUnresolvedDeclarations`, `resolveDeclaredEntry` (`DeclaredEntry` type)
@@ -61,13 +63,24 @@ which re-exports:
 
 ## How it works
 
-`catalogue.ts`'s `CATALOGUE` is a fixed array of 21 entries at `CATALOGUE_VERSION` 10 (2 in
-`automated_with_monitoring`, 13 in `human_over_the_loop`, 6 in
+`catalogue.ts`'s `CATALOGUE` is a fixed array of 24 entries at `CATALOGUE_VERSION` 11 (2 in
+`automated_with_monitoring`, 16 in `human_over_the_loop`, 6 in
 `human_in_the_loop`). `test/catalogue-version.test.ts` pins a hash of the catalogue and the presets next to that number, so changing either without bumping it fails. The receipt writer stamps the version on every receipt. The entries added after the first fifteen include seven for starting work: `start_work_small`,
 `start_work_bug`, `start_work_doc` and `launch_sub_item` (class 2, default
 `ask`), and `start_parent_item`, `spend_past_envelope` and
 `start_after_reclassify` (class 3, ask only). The pure resolvers that read them,
 `resolveStart` and `resolveSubItemLaunch`, live in `packages/core/src/autonomy/`.
+Version 11 added the engine's three decisions (#993): `engine_spawn`,
+`engine_merge` and `engine_spec_ready`, all class 2, default `ask`, internal
+only. `engine_merge` is marked not reversible (a merge cannot be undone from
+the cloud). `engine_spec_ready` allows only `act` or `ask`. `engineDecision.ts`
+resolves them, purely: `resolveEngineDecision` takes the decision type, the
+repo's stored dial and, for a Spec, the tag the engine read from the title. A
+stored value the entry does not allow fails closed to `ask`. A `feature` or
+`critical` Spec is resolved through `start_parent_item` instead of the dial,
+so it asks at every preset; `small`, `bug`, `doc` and `process` follow the
+dial; any other or missing tag asks. `labels.ts` has a plain-words label for
+each of the three.
 Each entry declares an id, its class, a default
 disposition, the set of dispositions that entry is allowed to resolve to,
 the timeout outcomes an unanswered ask may take (`timeoutOutcomes`: empty for class 1, otherwise `stop_and_flag`, plus `proceed_recommended` for only a few class-2 entries),

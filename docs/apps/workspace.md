@@ -17,6 +17,11 @@ Sources:
 - `apps/workspace/shell/core/theme-manager.js`
 - `apps/workspace/apps/README.md`
 - `apps/workspace/profiles/cloud.json`
+- `apps/workspace/apps/team/`
+- `apps/workspace/apps/needs-you/needs-you-model.js`
+- `apps/workspace/e2e/engine-watch-journeys.spec.ts`
+- `apps/workspace/e2e/journey-engine-operate.spec.ts`
+- `apps/workspace/playwright.journeys.config.ts`
 - `apps/workspace/shell/core/features.js`
 - `apps/workspace/package.json`
 - `.gitignore`
@@ -72,9 +77,9 @@ reachable set into `dist/`, and re-runs the ship-time checks against `dist/`.
 ## The cloud profile
 
 `apps/workspace/profiles/cloud.json` is the one profile shipped at this HEAD:
-`app_modules` lists 15 apps: the imported `themes` and `heritage` (the
+`app_modules` lists 16 apps: the imported `themes` and `heritage` (the
 Cupertino+/Fluent+ adapter set, renamed Orchard/Crystal — `#172`, `#176`), and
-thirteen first-party apps (below). `activation` was dropped
+fourteen first-party apps (below). `activation` was dropped
 (`#162`, D#37 WS-L1 owner ruling: a subscription unlocks the workspace
 instead of a licence-activation flow; see [`../security.md`](../security.md)'s
 "Workspace subscription gate" section). `dock_order` in the same file sets the
@@ -101,7 +106,8 @@ reads `false`) if that fetch fails.
 
 - `onboarding`: the six setup steps, with progress read from the server.
 - `pipeline`: the board of work items by stage, with the approve, cancel, retry and verify-again controls the server offers.
-- `needs-you`: the list of setup requests people must act on.
+- `needs-you`: the list of setup requests people must act on, plus decision asks, stalled items and pull requests waiting for a merge. It also lists the engine's open asks (read through `/api/v1/engine/repos/{id}/asks`, refreshed on the `engine.changed` live event, #1006) and can answer one: an `answer_ask` command goes through the engine command channel, and a decision the engine asked about is approved or declined through `/api/v1/engine/decisions/{id}/answer` (#1013).
+- `team`: the engine team of a repository, watched from the workspace (`apps/workspace/apps/team/`, #999). It has a repository picker, a settings sheet (the watch and operate switches, and an owner-only delete of all engine data) and six panels, each redrawn only when its own data changes: Agents, Merge lane, Plan, Stats, Cost and Log (#1005). An owner or admin can also send the engine a command (start the day, pause or resume the loop, request an agent, stop an agent, set a dial), set the three engine decision dials, and halt or clear a halt (#1007, #1012, #1019). Every control is locked, with a sentence saying why, while operate is off, watch is off or the repo is halted; a command reads "Applied" only after the runner reports back. Every sentence is picked from a closed code the cloud sends, never from server text.
 - `runs`: the account's runs and one run's events.
 - `memory`: the memory review queue and all memory by scope.
 - `repos`: installed repositories and their auto-merge settings.
@@ -113,7 +119,7 @@ reads `false`) if that fetch fails.
 - `budget-billing`: the plan, the three monthly budgets and billing standing.
 - `developer`: API tokens, webhooks and the API reference.
 
-The build also strips comments from the shipped JS and CSS (`apps/workspace/build/strip-comments.mjs`, #118); source files on disk keep theirs, and `node build/build.mjs --keep-comments` turns it off. `apps/workspace/build/budget.mjs` holds the boot budget (a cap on static requests and on total brotli bytes at boot) that a unit test and a Playwright spec both import. The static-request cap counts anything the shell fetches by itself at boot as well as the files the build can see (`apps/workspace/build/budget.mjs`), and the cold-start request count test in `apps/workspace/e2e/boot-budget.spec.ts` counts it live in `pnpm --filter workspace e2e` (the rest of that file is opt-in and skipped unless `BOOT_BUDGET_BASE_URL` is set) (#955). To stay under it, the build embeds the profile's default theme JSON into the shipped `apps/workspace/shell/core/theme-manager.js` (`substituteDefaultThemeData` in `apps/workspace/build/profile.mjs`, called from `apps/workspace/build/build.mjs`), and that file now fetches only the theme in use, not all of them, at boot.
+The build also strips comments from the shipped JS and CSS (`apps/workspace/build/strip-comments.mjs`, #118); source files on disk keep theirs, and `node build/build.mjs --keep-comments` turns it off. `apps/workspace/build/budget.mjs` holds the boot budget (a cap on static requests, 135 since #1020, and on total brotli bytes at boot) that a unit test and a Playwright spec both import. The static-request cap counts anything the shell fetches by itself at boot as well as the files the build can see (`apps/workspace/build/budget.mjs`), and the cold-start request count test in `apps/workspace/e2e/boot-budget.spec.ts` counts it live in `pnpm --filter workspace e2e` (the rest of that file is opt-in and skipped unless `BOOT_BUDGET_BASE_URL` is set) (#955). To stay under it, the build embeds the profile's default theme JSON into the shipped `apps/workspace/shell/core/theme-manager.js` (`substituteDefaultThemeData` in `apps/workspace/build/profile.mjs`, called from `apps/workspace/build/build.mjs`), and that file now fetches only the theme in use, not all of them, at boot.
 
 ## Tests
 
@@ -128,6 +134,8 @@ covers `core/features.js`'s fail-closed behavior. Most first-party apps have a u
 is a Playwright spec (`apps/workspace/playwright.config.ts`), run via
 `pnpm --filter workspace e2e` (`node build/build.mjs && playwright test`). Agents running e2e locally must set
 `E2E_PORT` and `E2E_FIRST_PARTY_PORT` to free ports (the 4319/4320 defaults collide with other runs).
+
+Two journey files drive the Team app by real clicks, with a dry run against the fixture server by default and a live mode on a deployed staging host: `apps/workspace/e2e/engine-watch-journeys.spec.ts` (watching an engine team, #1014, with its steps in `apps/workspace/e2e/journeys/engine-watch.md`) and `apps/workspace/e2e/journey-engine-operate.spec.ts` (the operate controls, #1015, run live through `apps/workspace/playwright.journeys.config.ts`). A live run refuses to start unless the origin is named twice and is a staging host and a saved sign-in file exists; the operate run's steps that nothing takes back (a halt, a stop, operate off) also need the repository's name confirmed. The saved sign-in holds a real session, so keep it outside the repository: `.gitignore` ignores `*.storage-state.json` and `storage-state*.json` as a second line of defence.
 
 ## Known gaps
 

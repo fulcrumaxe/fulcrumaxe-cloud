@@ -14,6 +14,11 @@ Sources:
 - `apps/web/lib/shell/headers.ts`
 - `apps/web/lib/shell/shell-paths.ts`
 - `apps/web/app/api/ROUTES.allowlist`
+- `apps/web/app/api/runner/engine/events/route.ts`
+- `apps/web/app/api/runner/engine/commands/pull/route.ts`
+- `apps/web/app/api/runner/engine/decide/route.ts`
+- `apps/web/app/api/runner/engine/dials/route.ts`
+- `apps/web/app/api/v1/[...path]/route.ts`
 - `apps/web/app/api/cron/proposal-verify-sweep/handler.ts`
 - `apps/web/app/api/cron/proposal-verify-sweep/route.ts`
 - `apps/web/vercel.json`
@@ -60,6 +65,11 @@ API routes under `apps/web/app/api/` (also enumerated in
 | `/api/health` | GET | Liveness plus a check of the settings this deployment needs (`apps/web/env-manifest.ts`; see [staging.md](../ops/staging.md)). Answers `200 {ok: true, config: "ok"}`, or `503 {ok: false, config: "incomplete"}` when a required setting is missing or invalid; anonymous callers see no variable names. With `Authorization: Bearer <CRON_SECRET>` it also lists `missing`, `invalid` (name and reason code, never a value), `invalid_optional` and `disabled` (optional features that are off). Features whose settings are not there yet (pipeline worker, GitHub proxy forwarding) show as `disabled`, not as incomplete. On a staging deployment the body also carries `commit`: `FX_DEPLOY_COMMIT` when it is a commit id (a command-line deploy stamps it), else the platform's own commit, else `null`. |
 | `/api/mode` | GET | Static `{mode: "cloud", profile: "cloud", features: {...all false}}` — the feature flags `apps/workspace`'s `core/features.js` reads. |
 | `/api/rum` (`#172`) | POST | Receives beaconed boot-performance marks (`boot:signin-visible`/`boot:desktop-ready`), rate-limited per IP. |
+| `/api/runner/engine/events` | POST | Engine bridge ingest (#1001): a runner's signed batch of engine events, stored through `@fx/runner-cloud`. No session, cookie or token is read; the runner's own signature is the credential. |
+| `/api/runner/engine/commands/pull` | POST | The runner asks for its pending signed engine commands (#998). Signed by the runner like the others. |
+| `/api/runner/engine/commands/{id}/ack` | POST | The runner reports what became of one command: applied, refused, expired or not confirmed (#998). |
+| `/api/runner/engine/decide` | POST | The engine's decision request, forwarded by the runner (#993). The cloud answers from the repo's dial and the halt marker, and refuses when the bridge or operate is off. |
+| `/api/runner/engine/dials` | GET | The runner reads what the repo's engine decisions currently resolve to, to write the engine's ceiling file (#1002). |
 | `/api/shell/session` | GET, POST | The one route module every rewritten shell-session path lands on — see How it works. |
 | `/api/stripe/webhook` | POST | Stripe webhook receiver; signature verification and event handling live in `@fx/billing`. |
 | `/api/system/mode` | GET | Static `{cloud: true}`. |
@@ -148,7 +158,7 @@ security-header set, and session/principal-header handling.
 `apps/web/middleware.test.ts`, `apps/web/test/csrf.test.ts`, and
 `apps/web/test/headers.test.ts` cover the middleware steps, CSRF
 classification, and the security-header values respectively.
-`apps/web/test/route-inventory.test.ts` checks the route set against
+The `/api/v1` catch-all route file also gives the engine settings route a live GitHub privacy check (`createAppRepoVisibility`), so ticking a repository for the engine bridge asks GitHub whether it is private at that moment (#1003). `apps/web/test/route-inventory.test.ts` checks the route set against
 `apps/web/app/api/ROUTES.allowlist`. `apps/web/test/shell-routes.test.ts`
 covers the shell-session rewrite/dispatch. Each route also has a colocated
 `handler.test.ts` — including `app/api/gh-proxy/[...path]/handler.test.ts`
