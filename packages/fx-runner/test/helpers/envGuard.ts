@@ -61,6 +61,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#597 CC-7a-1, the assistant link and its local tool proxy.
   "src/assistant/tokenFile.ts": ["crypto", "fs", "path"], // the token file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   "src/engineBridge/stateFiles.ts": ["crypto", "fs", "path"], // EB-11b: the engine bridge's local files (halt file, host handle): lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
+  "src/engineHost/hostFiles.ts": ["fs", "path", "crypto"], // EB-12a: the host stream log (O_NOFOLLOW append at 0600, rotated at 20 MB) and the read of the bridge state file; no process is started
   "src/assistant/cloudCall.ts": [], // the one cloud call: the injected fetch, a fixed User-Agent, no redirect
   "src/assistant/fence.ts": [], // pure text work: the untrusted-content fence over a reply
   "src/assistant/readTools.ts": [], // pure: the read tools' argument checks and route paths

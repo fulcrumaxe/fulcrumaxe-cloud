@@ -46,7 +46,16 @@ export interface EngineHaltFile {
 export interface EngineHostHandle {
   pid: number;
   unit?: string;
+  /**
+   * When the host process started (Linux: field 22 of its stat file; elsewhere `ps -o lstart=`), written by the supervisor. The kill path signals a pid's group only
+   * while the process now holding that pid still started at this time, so a pid reused by an unrelated group leader is never signalled. Absent in a handle written
+   * by anything older: then the other checks (group leader, cgroup) apply alone.
+   */
+  start_time?: string;
 }
+
+/** What a start time may look like on file: digits (Linux ticks) or a `ps` date line. Anything else is refused. */
+const START_TIME = /^[A-Za-z0-9 :._-]{1,64}$/;
 
 /** `none`: nothing could be checked (survivors is 1). The wire event knows only the other two; `haltAppliedPayload` maps it. */
 export type HaltMethod = "scope" | "group_only" | "none";
@@ -105,6 +114,8 @@ export interface HaltDeps {
   readText: (path: string) => string | undefined;
   /** The cgroup file of a process (Linux), or undefined when it cannot be read. Supplied by bin/fx-runner.mjs: src/ never names the process table's paths. */
   readPidCgroup: (pid: number) => string | undefined;
+  /** A process's start time on Linux (field 22 of its stat file), or undefined when it is gone or unreadable. Supplied by bin/fx-runner.mjs. Off Linux `ps -o lstart=` is used. */
+  readPidStart?: ((pid: number) => string | undefined) | undefined;
   /** The `cgroup.procs` file of a control group (a path below the cgroup root, as systemd reports it). Supplied by bin/fx-runner.mjs, which names the cgroup mount. */
   cgroupProcsFile: (controlGroup: string) => string;
   /** SIGTERM to the process group, SIGKILL to what is left after `graceMs`; resolves when the group is empty (processGroup.ts's `terminateGroup`). */
@@ -120,6 +131,7 @@ export interface HaltHost {
   runFile: FileRunner;
   readFile: (path: string, encoding: "utf8") => string;
   readPidCgroup: (pid: number) => string | undefined;
+  readPidStart?: ((pid: number) => string | undefined) | undefined;
   cgroupProcsFile: (controlGroup: string) => string;
   terminateGroup: (pgid: number, graceMs: number) => Promise<void>;
   /** The few variables `ps` and `systemctl --user` need, already looked up by name by the caller. Undefined ones are left out. */
@@ -151,6 +163,7 @@ export function haltDepsFrom(host: HaltHost): HaltDeps {
       }
     },
     readPidCgroup: host.readPidCgroup,
+    readPidStart: host.readPidStart,
     cgroupProcsFile: host.cgroupProcsFile,
     terminateGroup: host.terminateGroup,
     termGraceMs: HALT_TERM_GRACE_MS,
@@ -195,10 +208,19 @@ export function readHostHandle(stateDir: string, uid: number): EngineHostHandle 
   if (raw === undefined) return undefined;
   const o = raw as Record<string, unknown> | null;
   if (o === null || typeof o !== "object" || Array.isArray(o)) throw new EngineStateError("engine-host.json is not an object");
-  const extra = Object.keys(o).filter((k) => k !== "pid" && k !== "unit");
+  const extra = Object.keys(o).filter((k) => k !== "pid" && k !== "unit" && k !== "start_time");
   if (extra.length > 0 || !Number.isSafeInteger(o.pid) || (o.pid as number) <= 1) throw new EngineStateError("engine-host.json has an unexpected shape");
   if (o.unit !== undefined && (typeof o.unit !== "string" || !UNIT.test(o.unit))) throw new EngineStateError("engine-host.json names a unit that is not an engine host scope");
-  return o.unit === undefined ? { pid: o.pid as number } : { pid: o.pid as number, unit: o.unit };
+  if (o.start_time !== undefined && (typeof o.start_time !== "string" || !START_TIME.test(o.start_time))) throw new EngineStateError("engine-host.json has an unexpected start time");
+  return { pid: o.pid as number, ...(o.unit === undefined ? {} : { unit: o.unit as string }), ...(o.start_time === undefined ? {} : { start_time: o.start_time as string }) };
+}
+
+/** When the process now holding `pid` started, or undefined when there is none or it cannot be read. Linux: the injected stat reader; elsewhere: `ps -o lstart=`. */
+export async function startTimeOf(pid: number, deps: Pick<HaltDeps, "platform" | "capture" | "readPidStart">): Promise<string | undefined> {
+  if (deps.platform === "linux") return deps.readPidStart?.(pid);
+  const r = await deps.capture("ps", ["-o", "lstart=", "-p", String(pid)]);
+  const text = r.stdout.trim().replace(/\s+/g, " ");
+  return r.code === 0 && text !== "" ? text : undefined;
 }
 
 // ---- the kill path ------------------------------------------------------------------------------------------------------------------------
@@ -280,10 +302,12 @@ async function killScope(unit: string, deps: HaltDeps): Promise<KillOutcome | un
  *  - a leader that has exited leaves a group that is still the host's while it has members, which (with a unit) must all be inside that unit.
  * `signal: false` with no refusal means the group is empty: nothing to signal.
  */
-async function groupVerdict(pid: number, unit: string | undefined, deps: HaltDeps): Promise<{ signal: boolean; refusal?: string }> {
+async function groupVerdict(pid: number, unit: string | undefined, startTime: string | undefined, deps: HaltDeps): Promise<{ signal: boolean; refusal?: string }> {
   if (pid === deps.ownPid || (await pgidOf(deps.ownPid, deps)) === pid) return { signal: false, refusal: "the recorded pid is this runner's own process group" };
   const leaderPgid = await pgidOf(pid, deps);
   if (leaderPgid !== undefined) {
+    // The handle names when its host started: a live process at that pid that started at another time (or whose start cannot be read) is a reused pid.
+    if (startTime !== undefined && (await startTimeOf(pid, deps)) !== startTime) return { signal: false, refusal: "the recorded pid belongs to a process that started at a different time (a reused pid), so it was not signalled" };
     if (leaderPgid !== pid) return { signal: false, refusal: "the recorded pid is not the leader of its own process group, so it was not signalled" };
     if (unit !== undefined && !inUnit(deps.readPidCgroup(pid), unit)) return { signal: false, refusal: "the recorded pid is not inside the engine host's scope (a stale pid?), so its group was not signalled" };
     return { signal: true };
@@ -314,7 +338,7 @@ export async function killEngineHost(handle: EngineHostHandle, deps: HaltDeps): 
   }
 
   // 1. The host's own process group: TERM, then KILL after the grace.
-  const verdict = await groupVerdict(handle.pid, unit, deps);
+  const verdict = await groupVerdict(handle.pid, unit, handle.start_time, deps);
   if (verdict.refusal !== undefined) refused.push(verdict.refusal);
   if (verdict.signal) await deps.terminateGroup(handle.pid, deps.termGraceMs);
 

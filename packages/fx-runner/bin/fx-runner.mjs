@@ -19,7 +19,9 @@ import { CODE_MAX_BYTES } from "../src/codeSource.js";
 import { CliError } from "../src/cliError.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { terminateGroup } from "../src/engines/claude/processGroup.js";
-import { haltDepsFrom } from "../src/engineBridge/halt.js";
+import { resolveClaudePath } from "../src/engines/claude/pin.js";
+import { cleanEnv } from "../src/job/cleanEnv.js";
+import { haltDepsFrom, killEngineHost } from "../src/engineBridge/halt.js";
 import { createEngineBridgePorts } from "../src/engineBridge/ports.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
@@ -129,12 +131,23 @@ const scriptPath = () => realpathSync(fileURLToPath(import.meta.url));
 
 // Engine bridge EB-11b: what the engine kill path (`engine-host stop`, and the cloud halt) needs from the machine. The process group kill is the runner's
 // existing one (processGroup.ts); `ps` and `systemctl --user` get only these three variables.
+// When a process started, so a handle can name its host and the kill path can tell a reused pid from it: field 22 of the stat file (Linux; off Linux the kill path asks `ps`).
+// The name (field 2) may hold spaces and brackets, so the fields are counted after its closing bracket.
+const processStartTime = (pid) => {
+  try {
+    const stat = readFileSync(`/proc/${Number(pid)}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  } catch {
+    return undefined;
+  }
+};
 const engineHaltDeps = haltDepsFrom({
   platform: process.platform,
   uid: process.getuid?.(),
   ownPid: process.pid,
   runFile: execFile,
   readFile: readFileSync,
+  readPidStart: processStartTime,
   // A process's cgroup file, so the kill path can confirm a pid belongs to the engine host's scope before it signals the pid's group. The path is named here only.
   readPidCgroup: (pid) => {
     try {
@@ -164,6 +177,76 @@ const engineHaltDeps = haltDepsFrom({
   env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS },
 });
 
+// Engine bridge EB-12a: what `engine-host start` needs. The host is started as the leader of its own process group, with a fixed allowlist of six variables (no
+// credential among them: the CLI reads its own login), and every pipe is handed over as text. Ctrl-C and SIGTERM are caught only once `start` asks for them.
+const engineHostEnv = Object.fromEntries(
+  Object.entries({
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+    AUTONOMOUS_TEAM_STATE_DIR: process.env.AUTONOMOUS_TEAM_STATE_DIR,
+    LANG: process.env.LANG,
+  }).filter(([, v]) => v !== undefined),
+);
+const engineHostRuntime = {
+  platform: process.platform,
+  // The path the job runner resolves (its clean search path, as `doctor` and `run` use), never the PATH of whatever shell or service started this; then the same version and flag check every job gets.
+  locateClaude: () => resolveClaudePath(cleanEnv({ mode: "subscription" }).PATH ?? ""),
+  inspectClaude: async (binaryPath, stateDir) => {
+    const report = await engine.inspect({ binaryPath, envOptions: {}, stateDir, loginMode: undefined });
+    return report.versionSupported && report.missingFlags !== undefined && report.missingFlags.length === 0;
+  },
+  ownPid: process.pid,
+  // Field 22 of the stat file is the start time; the name (field 2) may hold spaces and brackets, so the fields are counted after its closing bracket.
+  processStart: processStartTime,
+  readCgroup: (pid) => {
+    try {
+      return readFileSync(`/proc/${pid}/cgroup`, "utf8");
+    } catch {
+      return undefined;
+    }
+  },
+  onProcessExit: (fn) => process.once("exit", fn),
+  launch: (spec) => {
+    const child = spawn(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdin.on("error", () => undefined); // the host may exit before it has read everything
+    child.on("error", () => undefined); // a start that failed has no pid; the supervisor counts it as a crash
+    return {
+      pid: child.pid,
+      write: (text) => void child.stdin.write(text),
+      closeStdin: () => child.stdin.end(),
+      onStdout: (cb) => child.stdout.on("data", cb),
+      onStderr: (cb) => child.stderr.on("data", cb),
+      onExit: (cb) => child.on("exit", () => cb()),
+    };
+  },
+  env: engineHostEnv,
+  isAlive: (pid) => {
+    try {
+      return process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+  },
+  scopeAvailable: async () => (await engineHaltDeps.capture("systemd-run", ["--user", "--scope", "--quiet", "--", "true"])).code === 0,
+  killHost: (handle) => killEngineHost(handle, engineHaltDeps),
+  killScope: async (unit) => void (await engineHaltDeps.capture("systemctl", ["--user", "kill", "--signal=SIGKILL", "--", unit])),
+  now: () => Date.now(),
+  after: (ms, fn) => {
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
+  },
+  shutdown: () =>
+    new Promise((resolve) => {
+      process.once("SIGINT", () => resolve("stopped_by_person"));
+      process.once("SIGTERM", () => resolve("machine_shutdown"));
+      process.once("SIGHUP", () => resolve("machine_shutdown")); // the terminal was closed
+    }),
+};
+
 runCli({
   updateHost,
   argv: process.argv.slice(2),
@@ -171,6 +254,7 @@ runCli({
   stateDirOverride: process.env.FX_RUNNER_HOME,
   engineStateDirOverride: process.env.AUTONOMOUS_TEAM_STATE_DIR,
   engineHaltDeps,
+  engineHostRuntime,
   // A file holding the Vercel protection bypass secret, for a staging or protected-preview cloud. Only the path is read here; src/protectionBypass.ts reads the file.
   protectionBypassFile: process.env.FX_RUNNER_PROTECTION_BYPASS_FILE,
   uid: process.getuid?.(),
