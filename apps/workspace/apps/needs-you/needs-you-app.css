@@ -53,6 +53,18 @@
 .ny-refs .ny-link { display: inline-block; min-height: 24px; }
 /* A 3px ring in the theme's text colour, the one colour every theme already keeps readable on its surface (the accent of modern-flat is 2.8:1 on it); the engine e2e measures it against the row in every theme. */
 .ny-row[data-kind="engine"] :focus-visible { outline: 3px solid var(--text-primary, #1aff80); outline-offset: 2px; }
+/* EB-13b: answering an engine ask. The note is one line of plain text; the field, its hint and its count sit under its label and wrap on a narrow window. */
+.ny-answer { margin-top: 8px; }
+.ny-note-field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.ny-note-label { font-weight: 600; }
+.ny-note { box-sizing: border-box; width: 100%; min-height: 44px; padding: 4px 8px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); border-radius: var(--border-radius-sm, 0); color: inherit; font: inherit; }
+.ny-note[aria-disabled="true"] { border-style: dashed; }
+.ny-count { font-size: 0.8rem; }
+/* A note that was sent is quoted back as text: line breaks and long words wrap. */
+.ny-reason q { overflow-wrap: anywhere; }
+
+/* The two heritage themes (crystal, orchard) remove the outline of every field and give it a border change instead; a ring of the theme's own text colour is put back with !important, by id, so it wins over them. */
+#windows-container .ny-row[data-kind="engine"] :is(.ny-note, .ny-btn):focus-visible { outline: 3px solid var(--text-primary, #1aff80) !important; outline-offset: 2px !important; }
 
 /* Phones and narrow windows: the buttons are full-width. */
 @container (max-width: 520px) {

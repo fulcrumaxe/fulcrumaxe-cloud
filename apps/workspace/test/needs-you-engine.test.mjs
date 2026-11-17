@@ -421,7 +421,7 @@ describe("engine.changed", () => {
     t.timers[0].fn();
     await flush();
     const paths = t.call.mock.calls.map((c) => c[1]);
-    expect(paths).toEqual([ENGINE_REPOS_URL, engineAsksUrl(R1)]);
+    expect(paths).toEqual([ENGINE_REPOS_URL, engineAsksUrl(R1), "/api/v1/engine/repos/" + R1 + "/commands"]); // the new ask is looked up once for an answer that is already waiting
     expect(t.list.state.rows).toHaveLength(1);
     expect(t.list.state.announce).toBe("1 new engine ask.");
     // a second burst starts a new wait

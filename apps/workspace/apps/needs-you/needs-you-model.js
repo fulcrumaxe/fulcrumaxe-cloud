@@ -56,6 +56,159 @@ export const REFRESH_MS = 30000;
 export const PROVIDER_HOSTS = ["github.com", "vercel.com"];
 const STATES = ["open", "done", "withdrawn"];
 
+// EB-13b (answering an engine ask; kept in this file so the boot file count does not grow): answering an engine ask from Needs you. Pure words and rules, with no DOM and no network (the list's model, needs-you-model.js, sends and tracks).
+//
+// An answer is one signed command, `answer_ask`, sent through the engine command channel: POST /api/v1/engine/repos/{id}/commands with a closed choice
+// (approve, decline or defer) and an optional note. The note is the one piece of free text a person types; it is length-checked here, refused when it holds a
+// control, invisible or direction-changing character (the same rule the command's own schema applies, so a refusal is said before anything is sent), and it
+// only ever reaches the page as a text node. A decision ask (the engine asks before it spawns, merges or marks a Spec ready) is answered through the decision
+// answer route instead, with approve or decline only.
+export const NOTE_MAX = 500;
+// The same characters the command schema refuses: C0 and C1 controls (so no line break or tab), line and paragraph separators, direction marks and isolates,
+// unpaired surrogates and every format character (zero width, byte order mark, tag characters).
+const NOTE_REFUSED = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]|\p{Cs}|\p{Cf}/u;
+export const ASK_ID = /^[0-9a-f]{16}$/;
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** How often a sent command is looked at again while it waits, in ms. */
+export const COMMAND_POLL_MS = 3000;
+
+export const commandsUrl = (repoId) => "/api/v1/engine/repos/" + encodeURIComponent(repoId) + "/commands";
+export const decisionAnswerUrl = (decisionId) => "/api/v1/engine/decisions/" + encodeURIComponent(decisionId) + "/answer";
+
+export const CHOICE_LABELS = { approve: "Approve", decline: "Decline", defer: "Defer" };
+
+/** The words this part of the screen adds. Nothing from the server is ever shown: every sentence here is fixed. */
+export const ANSWER_WORDS = {
+  note: "Note for the engine (optional)",
+  noteHint: "A single line, up to 500 characters. The engine reads it with your answer.",
+  // Past the cap the counter says so: a long paste is never cut silently.
+  count: (n) => n + " / " + NOTE_MAX + (n > NOTE_MAX ? ", too long" : ""),
+  noteBad: "The note can't hold line breaks or hidden characters. Edit it and send again.",
+  noteLong: "The note is longer than 500 characters. Shorten it and send again.",
+  noteBrackets: "The note can't hold square or angle brackets, or characters that look like them. Take them out and send again.",
+  noteSymbols: "The note can't hold math symbols or other bracket-like marks. Use plain words and the usual punctuation, then send again.",
+  noteMarker: "The note can't hold the engine's own marker words. Reword it and send again.",
+  noteControl: "The note can't hold the engine's control words (STATUS:, SPAWN_REQUEST, TERMINATE_REQUEST, AGENT_OUTPUT or an HTML comment opener). Reword it and send again.",
+  // The command list could not be read (or came back full without this ask in it), so a waiting answer for the ask cannot be ruled out: the controls stay locked.
+  cantCheck: "Can't check whether an answer is already waiting. Try again.",
+  tryAgain: "Try again",
+  lockWatch: "Watching is off for this repository, so answers can't be sent from here.",
+  lockOperate: "Operate is off for this repository, so answers can't be sent from here. An owner or admin can switch it on in Team.",
+  halted: "The engine is halted. An answer is still delivered, but nothing new starts until the halt is cleared.",
+  waitingAdmin: "Waiting for an owner or admin to answer.",
+  sendAgain: "Send again",
+  noteSent: "Your note",
+  // The states of a sent answer.
+  sent: (choice) => "Sent: " + (CHOICE_LABELS[choice] ?? "your answer") + ". Waiting for the engine to confirm.",
+  applied: (choice) => "The engine took your answer: " + CHOICE_LABELS[choice] + ". This ask leaves the list once the engine clears it.",
+  answered: (choice) => "Answered: " + CHOICE_LABELS[choice] + ". This ask leaves the list once the engine clears it.",
+  expired: "The engine did not pick the answer up within 10 minutes, so it was dropped. Send it again.",
+  notConfirmed: "The engine may have taken the answer, but it never confirmed. Check the ask before you send it again.",
+  // Why the engine refused an answer it received (the closed list of refusals).
+  refusals: {
+    signature_invalid: "The engine could not trust that answer, so it was refused. Send it again.",
+    wrong_runner: "That answer reached the wrong machine, so it was refused. Send it again.",
+    wrong_repo: "That answer was for a different repository than the engine is running, so it was refused.",
+    expired: "The answer arrived too late and was refused. Send it again.",
+    seq_not_increasing: "The engine had already seen a newer command, so it refused this one. Send it again.",
+    halted: "The engine is halted and refused the answer.",
+    operate_off: "Operate is off on the engine's own machine, so it refused the answer. Switch it on there, then send it again.",
+    host_not_running: "The engine's host is not running, so nothing could take the answer. Start it, then send it again.",
+    unknown_ask: "The engine no longer has this ask. It may already be answered.",
+    already_answered: "This question already has an answer.",
+    unknown_agent: "The engine did not know the agent that answer was for.",
+    ceiling: "The engine's own limits do not allow that answer.",
+  },
+  refusalOther: "The engine refused the answer. Send it again.",
+  // What the cloud says when it will not take the answer at all (409 by code; any other failure falls back to the common sentences).
+  failures: {
+    operate_off: "Operate is off for this repository, so the answer was not sent.",
+    engine_not_connected: "No engine is connected for this repository right now, so the answer was not sent. It can be sent once the machine is back.",
+    halted: "The engine is halted, so the cloud did not take that answer.",
+    too_many_pending: "Too many answers and commands are already waiting for this engine. Wait for some to finish, then send it again.",
+    already_answered: "That was already answered.",
+    not_asked: "That decision is not waiting for an answer any more.",
+  },
+  notFound: "This repository is no longer set up for the engine, so the answer was not sent.",
+};
+
+// The host's own rule is the source of truth: `cleanNote` in packages/fx-runner/src/engineHost/prompts.ts. The patterns below, the confusables table, the symbol rule and
+// the letter fold are copies of its BRACKETS, ANGLES, MARKED_ANGLE, MARKER_FOLDS, CONFUSABLES, SYMBOLS and letterFold, and `noteProblem` refuses everything `cleanNote` refuses. It also refuses what `cleanNote` would rewrite
+// (the engine's control tokens), so the owner never sees an answer applied with other words than the ones typed. Change the host's rule and this one together.
+const NOTE_BRACKETS = /[\[\]\u2045\u2046\u2308-\u230b\u23b4\u23b5\u2772-\u2775\u27e6-\u27ef\u2983-\u2998\u29d8-\u29db\u29fc\u29fd\u2e22-\u2e25\u2e26-\u2e29\u3008-\u3011\u3014-\u301b\ufe47\ufe48\uff3b\uff3d\uff5f\uff60\uff62\uff63]/u;
+const NOTE_ANGLES = /[<>«»‹›≪≫≮≯⋘⋙˂˃ᐸᐳᚲ❬-❱]/u;
+const NOTE_MARK = "\\p{M}\\ufe00-\\ufe0f\\u{e0100}-\\u{e01ef}";
+const NOTE_MARKED_ANGLE = new RegExp("[<>][" + NOTE_MARK + "]|[" + NOTE_MARK + "][<>]", "u");
+const NOTE_MARKER_FOLDS = ["enduntrusted", "untrustedexternalcontent"];
+// Cyrillic and Greek letters that look like a Latin one, both cases, folded to that letter before the marker-name test (the host's table, pair by pair: letter then Latin).
+const NOTE_CONFUSABLES = Object.fromEntries(
+  [
+    "Аa", "аa", "Вb", "вb", "Еe", "еe", "Кk", "кk", "Мm", "мm", "Нh", "нh", "Оo", "оo", "Рp", "рp", "Сc", "сc", "Тt", "тt", "Хx", "хx", "Уy", "уy",
+    "Іi", "іi", "Јj", "јj", "Ѕs", "ѕs", "ԁd", "ԍg", "гr", "пn",
+    "Αa", "αa", "Βb", "βb", "Εe", "εe", "Ζz", "ζz", "Ηh", "ηn", "Ιi", "ιi", "Κk", "κk", "Μm", "μm", "Νn", "νv", "Οo", "οo", "Ρp", "ρp", "Τt", "τt", "Υy", "υu", "Χx", "χx",
+  ].map((pair) => [pair[0], pair[1]])
+);
+const noteLetterFold = (text) =>
+  [...text.normalize("NFKD").replace(/\p{M}/gu, "")].map((c) => NOTE_CONFUSABLES[c] ?? c).join("").toLowerCase().replace(/[^a-z]/g, "");
+// Symbols, math operators and bracket-like punctuation are refused, except the few a plain-English note needs (the curly quotes are what a phone keyboard inserts).
+const NOTE_SYMBOLS = /[\p{Sm}\p{Ps}\p{Pe}\p{Pi}\p{Pf}]/u;
+const NOTE_SYMBOLS_ALLOWED = new Set(["(", ")", "+", "-", "=", "%", "/", "*", "'", '"', "\u2018", "\u2019", "\u201c", "\u201d"]);
+const noteHasSymbol = (text) => [...text].some((c) => NOTE_SYMBOLS.test(c) && !NOTE_SYMBOLS_ALLOWED.has(c));
+/** The engine's control tokens (what the host would turn into "(removed)"), found without regard to case in the NFKC form. */
+const NOTE_CONTROL = /<!--|status\s*:|spawn_request|terminate_request|agent_output/i;
+
+/** The reason a note cannot be sent, or "" when it can. A note is checked as it will be sent (trimmed), and as the host will see it (NFKC). */
+export function noteProblem(note) {
+  if (typeof note !== "string") return ANSWER_WORDS.noteBad;
+  if (note.length > NOTE_MAX) return ANSWER_WORDS.noteLong;
+  if (NOTE_REFUSED.test(note)) return ANSWER_WORDS.noteBad;
+  const folded = note.normalize("NFKC").replace(/\s+/g, " ").trim();
+  // NFKC can make text longer, so the length is judged again on what is sent.
+  if (folded.length > NOTE_MAX) return ANSWER_WORDS.noteLong;
+  // The host reads both forms: a bracket with a mark on it composes into another character that would hide it from a test of the folded text.
+  for (const text of [note, folded]) if (NOTE_CONTROL.test(text)) return ANSWER_WORDS.noteControl;
+  for (const text of [note, folded]) if (NOTE_BRACKETS.test(text) || NOTE_ANGLES.test(text) || NOTE_MARKED_ANGLE.test(text) || text.includes("<<") || text.includes(">>")) return ANSWER_WORDS.noteBrackets;
+  for (const text of [note, folded]) if (noteHasSymbol(text)) return ANSWER_WORDS.noteSymbols;
+  const fold = noteLetterFold(note);
+  if (NOTE_MARKER_FOLDS.some((m) => fold.includes(m))) return ANSWER_WORDS.noteMarker;
+  return "";
+}
+
+/** The choices an engine ask offers: a decision ask is approve or decline; every other kind may also be deferred. */
+export const choicesFor = (row) => (row.askKind === "decision" ? ["approve", "decline"] : ["approve", "decline", "defer"]);
+
+/** Whether the row can be answered at all: a usable ask id (or the decision's id), on a repo the page knows. */
+export const answerable = (row) => row.repoId !== "" && (row.decisionId !== "" || ASK_ID.test(row.askId));
+
+/**
+ * Why the controls are locked, or "" when they are not. Halted is not a lock: an answer is allowed while the engine is halted (it is the way to decide what
+ * the engine was waiting on), so it only says so.
+ */
+export function lockReason(row) {
+  if (!row.watchEnabled) return ANSWER_WORDS.lockWatch;
+  if (!row.operateEnabled) return ANSWER_WORDS.lockOperate;
+  return "";
+}
+
+/** The sentence for a sent answer's state, and for a refused one the engine's own reason (by the closed list). */
+export function stateWords(sent) {
+  if (sent.state === "pending") return ANSWER_WORDS.sent(sent.choice);
+  if (sent.state === "applied") return sent.viaDecision ? ANSWER_WORDS.answered(sent.choice) : ANSWER_WORDS.applied(sent.choice);
+  if (sent.state === "expired") return ANSWER_WORDS.expired;
+  if (sent.state === "not_confirmed") return ANSWER_WORDS.notConfirmed;
+  return Object.hasOwn(ANSWER_WORDS.refusals, sent.refusal) ? ANSWER_WORDS.refusals[sent.refusal] : ANSWER_WORDS.refusalOther;
+}
+
+/** A sent answer that has not settled, or settled well: the controls stay still. A refused, expired or unconfirmed one can be sent again. */
+export const sentIsFinal = (sent) => sent.state === "pending" || sent.state === "applied";
+
+/** The sentence for a refused send, by status and code; the server's own message is never shown. `common` is the page's fallback for the rest. */
+export function sendFailure(e, common) {
+  if (e && e.status === 409 && Object.hasOwn(ANSWER_WORDS.failures, e.code)) return ANSWER_WORDS.failures[e.code];
+  if (e && e.status === 404) return ANSWER_WORDS.notFound;
+  return common(e);
+}
+
 /** The words this screen adds around the API's own sentences. */
 export const WORDS = {
   title: "Needs you",
@@ -412,6 +565,14 @@ export function readEngineAsk(repo, env, a, readAt) {
     state: "open",
     sentence: engineKindWords(a.ask_kind),
     links: [engineLink(repo.full_name, "discussions", a.discussion), engineLink(repo.full_name, "pull", a.pr)].filter(Boolean),
+    // EB-13b: what answering needs. The switches and the halt are the repo's, read with the list; `decisionId` is the id of the decision receipt when the ask carries one.
+    repoId: repo.repo_id,
+    askId: a.ask_id,
+    askKind: typeof a.ask_kind === "string" ? a.ask_kind : "",
+    decisionId: a.ask_kind === "decision" && typeof a.decision_id === "string" && UUID.test(a.decision_id) ? a.decision_id : "",
+    watchEnabled: repo.watch_enabled !== false,
+    operateEnabled: repo.operate_enabled === true,
+    halted: repo.halted === true,
     raisedMs,
     asOfMs: Number.isFinite(asOfMs) ? asOfMs : readAt,
     heardAgeS: Number.isFinite(env.heard_age_s) ? env.heard_age_s : null,
@@ -472,7 +633,7 @@ export async function readEngine(call, signal, cache, now = Date.now()) {
   try {
     const res = await call("GET", ENGINE_REPOS_URL, undefined, signal);
     if (!res || !Array.isArray(res.items)) throw new Error("shape");
-    repos = res.items.filter((r) => r && typeof r.repo_id === "string" && r.repo_id !== "" && typeof r.full_name === "string" && r.watch_enabled !== false).map((r) => ({ repo_id: r.repo_id, full_name: r.full_name }));
+    repos = res.items.filter((r) => r && typeof r.repo_id === "string" && r.repo_id !== "" && typeof r.full_name === "string" && r.watch_enabled !== false).map((r) => ({ repo_id: r.repo_id, full_name: r.full_name, watch_enabled: r.watch_enabled !== false, operate_enabled: r.operate_enabled === true, halted: r.halted === true }));
   } catch (e) {
     if (cancelled(e)) throw e;
     if (e && e.status === 404) {
@@ -560,12 +721,29 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
   // EB-6c: the engine asks' last good read per repo, and the ids heard about last (null until the first read, so the first draw says nothing).
   const engineCache = new Map();
   let engineSeen = null;
+  // EB-13b: answers to engine asks. `sent` (row id -> the answer's own state) and `notes` (row id -> the draft note, kept across redraws) are forgotten when the ask leaves.
+  const sent = new Map();
+  const notes = new Map();
+  const checked = new Set(); // row ids whose waiting answers were looked up in the command list (a reload must not forget one)
+  const unknown = new Set(); // row ids whose lookup failed, or came back full without the ask: an answer may be waiting, so the controls stay locked
+  const forgetEngine = (id) => {
+    sent.delete(id);
+    notes.delete(id);
+    keys.delete(id);
+    checked.delete(id);
+    unknown.delete(id);
+  };
+  const say = (words) => {
+    st = { ...st, announce: st.announce === "" ? words : st.announce + " " + words };
+  };
   /** The engine part of a read, added to the state: what changed is said once, and the first read says nothing. */
   const takeEngine = (rows, failed, more) => {
     const ids = rows.map((r) => r.id);
     // The first read says nothing about the asks (they are just there), but a failed first read is said: the line it leaves is easy to miss.
     const said = engineSeen === null ? (failed ? WORDS.engineError + "." : "") : engineChangeWords(engineSeen, ids, st.engineFailed, failed);
     engineSeen = ids;
+    // An ask that left the list takes its draft note and its sent answer with it.
+    for (const id of [...sent.keys(), ...notes.keys()]) if (!ids.includes(id)) forgetEngine(id);
     st = { ...st, engineFailed: failed, engineMore: more, announce: said === "" ? st.announce : st.announce === "" ? said : st.announce + " " + said };
   };
   // Who may answer is read once per window open, beside the first list read. A failed read means "not an admin", never the list's error.
@@ -599,11 +777,91 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
       }
       st = { ...st, status: "ready", isAdmin, truncated: all.truncated, moreAsks: all.moreAsks, moreItems: all.moreItems, notShown: all.notShown };
       takeEngine(all.rows.filter((r) => r.kind === "engine"), all.engineFailed, all.engineMore);
+      await rememberSent(open, mine);
+      if (mine !== gen) return;
       merge();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;
       if (st.status !== "ready") st = { ...st, status: "error" };
     }
+    onChange();
+  }
+
+  /** The cloud's own cap on one command list (newest first); a list this long may have cut off the ask's command, and the route cannot be filtered by ask. */
+  const COMMAND_LIST_CAP = 50;
+  /**
+   * A reload forgets what was sent, but the engine still lists the ask until it clears it, so the controls would be live again. For each engine ask not looked up yet,
+   * the repo's command list is read once and the newest `answer_ask` for that ask that is waiting (pending or delivered) or taken (applied) becomes its sent answer:
+   * "Sent" or "The engine took it", no buttons. Only an owner or admin sees controls, so only they read. Fail closed: when the list cannot be read, or came back at the
+   * cap without this ask in it, an answer may be waiting that is not seen, so the ask is marked unknown and its controls stay locked until `recheck` (or the next
+   * engine read) finds out.
+   */
+  async function rememberSent(rows, mine) {
+    if (!st.isAdmin) return;
+    const todo = rows.filter((r) => r.kind === "engine" && r.decisionId === "" && ASK_ID.test(r.askId) && r.repoId !== "" && !checked.has(r.id));
+    let found = false;
+    for (const repoId of new Set(todo.map((r) => r.repoId))) {
+      let list;
+      try {
+        const res = await call("GET", commandsUrl(repoId), undefined, signal);
+        list = res && Array.isArray(res.commands) ? res.commands : null;
+      } catch (e) {
+        if (cancelled(e)) throw e;
+        // fx-swallow-ok: a failed look locks the asks as unknown (below), and the next engine read or "Try again" looks again
+        list = null;
+      }
+      if (mine !== gen) continue;
+      for (const row of todo.filter((r) => r.repoId === repoId)) {
+        if (list === null) {
+          unknown.add(row.id);
+          continue;
+        }
+        if (sent.has(row.id) || busy.get(row.id) === "answer") {
+          checked.add(row.id);
+          unknown.delete(row.id);
+          continue;
+        }
+        const c = list.find((x) => x && typeof x.id === "string" && (x.kind === undefined || x.kind === "answer_ask") && x.args && x.args.ask_id === row.askId && (x.state === "pending" || x.state === "delivered" || x.state === "applied"));
+        // A full list is conclusive when it reaches back past the ask: an answer can only be issued after the ask was raised (`raised_at`), so an older row means nothing was cut off.
+        const oldest = Math.min(...list.map((x) => (x && typeof x.issued_at === "string" ? Date.parse(x.issued_at) : NaN)).filter(Number.isFinite));
+        if (!c && list.length >= COMMAND_LIST_CAP && !(Number.isFinite(row.raisedMs) && oldest < row.raisedMs)) {
+          unknown.add(row.id);
+          continue;
+        }
+        checked.add(row.id);
+        unknown.delete(row.id);
+        if (!c) continue;
+        const choice = Object.hasOwn(CHOICE_LABELS, c.args.choice) ? c.args.choice : "";
+        const note = typeof c.note === "string" ? c.note : "";
+        const base = { choice, note, commandId: c.id, repoId, refusal: "", viaDecision: false, expiresMs: dueMs(c.expires_at) };
+        const at = typeof c.acked_at === "string" ? Date.parse(c.acked_at) : NaN;
+        sent.set(row.id, c.state === "applied" ? { ...base, state: "applied", appliedAt: Number.isFinite(at) ? at : Date.now() } : { ...base, state: "pending" });
+        found = true;
+      }
+    }
+    if (found) scheduleWatch();
+  }
+
+  /** "Try again" on an ask whose waiting answers could not be checked: reads the repo's command list once more for it. */
+  async function recheck(id) {
+    const row = open.find((r) => r.id === id && r.kind === "engine");
+    if (!row || !unknown.has(id) || busy.has(id)) return;
+    const mine = gen;
+    busy.set(id, "recheck");
+    onChange();
+    try {
+      await rememberSent([row], mine);
+    } catch (e) {
+      if (!cancelled(e)) throw e;
+    } finally {
+      busy.delete(id);
+    }
+    if (mine !== gen) return;
+    if (!unknown.has(id)) {
+      const s = sent.get(id);
+      if (s) say(stateWords(s));
+    }
+    merge();
     onChange();
   }
 
@@ -615,6 +873,8 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
       if (mine !== gen || st.status !== "ready") return;
       open = insertEngine(open, eng.rows);
       takeEngine(eng.rows, eng.failed, eng.more);
+      await rememberSent(eng.rows, mine);
+      if (mine !== gen) return;
       merge();
     } catch (e) {
       if (cancelled(e)) return;
@@ -732,7 +992,8 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
     } catch (e) {
       busy.delete(id);
       if (cancelled(e)) return;
-      if (e && e.status >= 400 && e.status < 500) keys.delete(id); // a refusal settles the key
+      // A final refusal settles the key. A 409 "still running" does not: the first request may yet commit, so a press again must replay the same key.
+      if (e && e.status >= 400 && e.status < 500 && !(e.status === 409 && e.code === "idempotency_in_progress")) keys.delete(id);
       st = { ...st, error: failureSentence(e) };
       await load(); // a refused answer may mean the ask changed under the person: show what is true now
       return;
@@ -764,6 +1025,127 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
     }
     busy.delete(id);
     await load();
+  }
+
+  /** EB-13b: the draft note of an engine row. It changes nothing on screen, so it does not redraw (a redraw would take the caret from the field being typed in). */
+  const setNote = (id, value) => {
+    if (typeof value === "string") notes.set(id, value);
+  };
+  const noteOf = (id) => notes.get(id) ?? "";
+  const engineSent = (id) => sent.get(id) ?? null;
+  /** Whether a waiting answer for the ask could not be ruled out (its lookup failed): the controls are locked and "Try again" is offered. */
+  const engineUnchecked = (id) => unknown.has(id);
+
+  /**
+   * EB-13b: answers an engine ask: `answer_ask` through the command channel (or the decision route, for a decision ask that carries its receipt id). Not sent when the
+   * viewer is not an owner or admin, the controls are locked, the choice is not one of the ask's, the note is not sendable, or an answer is already in flight or settled.
+   * A refused or expired answer can be sent again; the second send is a new command.
+   */
+  async function answerEngine(id, choice) {
+    const row = open.find((r) => r.id === id && r.kind === "engine");
+    if (!row || busy.has(id) || !st.isAdmin || !answerable(row) || lockReason(row) !== "" || unknown.has(id) || !choicesFor(row).includes(choice)) return;
+    const before = sent.get(id);
+    if (before && sentIsFinal(before)) return;
+    const viaDecision = row.decisionId !== "";
+    const note = viaDecision ? "" : noteOf(id).trim();
+    const problem = noteProblem(note);
+    if (problem !== "") {
+      st = { ...st, error: problem, announce: "", focusAct: { id, act: "note" } };
+      onChange();
+      return;
+    }
+    // One key per ask, choice and note, kept until the send settles: a press again after a network error or a 5xx replays the same command.
+    const want = choice + "\n" + note;
+    let k = keys.get(id);
+    if (!k || k.choice !== want) keys.set(id, (k = { choice: want, key: crypto.randomUUID() }));
+    busy.set(id, "answer");
+    sent.delete(id);
+    st = { ...st, error: "", announce: "" };
+    onChange();
+    try {
+      if (viaDecision) {
+        const res = await call("POST", decisionAnswerUrl(row.decisionId), { choice }, signal, { idempotencyKey: k.key });
+        if (!res || typeof res.choice !== "string") throw new Error("shape");
+        sent.set(id, { choice, note: "", state: "applied", viaDecision: true, appliedAt: Date.now() });
+      } else {
+        const res = await call("POST", commandsUrl(row.repoId), { kind: "answer_ask", args: { ask_id: row.askId, choice, ...(note === "" ? {} : { note }) } }, signal, { idempotencyKey: k.key });
+        if (!res || typeof res.command_id !== "string" || res.state !== "pending") throw new Error("shape");
+        sent.set(id, { choice, note, commandId: res.command_id, repoId: row.repoId, state: "pending", refusal: "", viaDecision: false, expiresMs: dueMs(res.expires_at) });
+      }
+      keys.delete(id);
+      say(stateWords(sent.get(id)));
+      st = { ...st, focusAct: { id, act: "choice-" + choice } };
+    } catch (e) {
+      busy.delete(id);
+      if (cancelled(e)) return;
+      // A final refusal settles the key. A 409 "still running" does not: the first request may yet commit, so a press again must replay the same key.
+      if (e && e.status >= 400 && e.status < 500 && !(e.status === 409 && e.code === "idempotency_in_progress")) keys.delete(id);
+      st = { ...st, error: sendFailure(e, failureSentence), focusAct: { id, act: "choice-" + choice } };
+      await load(); // a refused answer may mean the repo changed under the person (operate switched off, halted): show what is true now
+      return;
+    }
+    busy.delete(id);
+    onChange();
+    scheduleWatch();
+  }
+
+  /** "Send again" after a refused, expired or unconfirmed answer: the same choice, as a new command. */
+  const sendAgain = (id) => {
+    const prev = sent.get(id);
+    return prev && !sentIsFinal(prev) ? answerEngine(id, prev.choice) : Promise.resolve();
+  };
+
+  const WATCH_APPLIED_MS = 120000;
+  const NOT_CONFIRMED_AFTER_MS = 15 * 60000;
+  const watching = () => [...sent.values()].some((s) => s.state === "pending" || (s.state === "applied" && Date.now() - s.appliedAt < WATCH_APPLIED_MS));
+  /**
+   * Looks at the commands that wait for the engine's report, and (for answers the engine took) at the asks until they clear. A change of state is said once, in
+   * its fixed sentence. The state is the engine's own report: nothing here guesses that an answer was applied.
+   */
+  async function watchSent() {
+    const waiting = [...sent].filter(([, s]) => s.state === "pending");
+    const repos = [...new Set(waiting.map(([, s]) => s.repoId))];
+    let changed = false;
+    for (const repoId of repos) {
+      let list;
+      try {
+        const res = await call("GET", commandsUrl(repoId), undefined, signal);
+        list = res && Array.isArray(res.commands) ? res.commands : null;
+      } catch (e) {
+        if (cancelled(e)) throw e;
+        // fx-swallow-ok: a failed look is tried again at the next tick; the row keeps saying "waiting"
+        list = null;
+      }
+      for (const [id, s] of waiting.filter(([, w]) => w.repoId === repoId)) {
+        if (sent.get(id) !== s || s.state !== "pending") continue;
+        const c = list === null ? undefined : list.find((x) => x && x.id === s.commandId);
+        const next = c ? c.state : Number.isFinite(s.expiresMs) && Date.now() > s.expiresMs + NOT_CONFIRMED_AFTER_MS ? "not_confirmed" : "pending";
+        if (next === "cancelled") {
+          sent.delete(id); // not cancellable from this screen; if it was cancelled elsewhere the controls come back
+        } else if (["applied", "refused", "expired", "not_confirmed"].includes(next)) {
+          Object.assign(s, { state: next, refusal: typeof c?.refusal === "string" ? c.refusal : "", appliedAt: Date.now() });
+          say(stateWords(s));
+        } else continue;
+        changed = true;
+      }
+    }
+    if (changed) onChange();
+    // An answer the engine took clears the ask a moment later: the asks are read again until it has (for a couple of minutes at most).
+    if ([...sent.values()].some((s) => s.state === "applied" && Date.now() - s.appliedAt < WATCH_APPLIED_MS)) await refreshEngine();
+  }
+  let watchTimer = null;
+  let setWatch = setTimeout; // a bare function: calling it as a property of another object is an illegal invocation on window.setTimeout
+  function scheduleWatch() {
+    if (!running || watchTimer !== null || !watching()) return;
+    watchTimer = setWatch(async () => {
+      watchTimer = null;
+      try {
+        await watchSent();
+      } catch (e) {
+        if (!cancelled(e)) throw e;
+      }
+      scheduleWatch();
+    }, COMMAND_POLL_MS);
   }
 
   /** The app has put the announcement on the page: it is said once, so it is not kept for the next draw. Does not redraw. */
@@ -809,6 +1191,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
   function start({ subscribe, listen, setTimer = setInterval, clearTimer = clearInterval, setDelay = setTimeout, clearDelay = clearTimeout, hidden = () => false } = {}) {
     stop();
     running = true;
+    setWatch = setDelay;
     const offs = [typeof subscribe === "function" ? subscribe(() => refresh()) : () => {}];
     if (typeof listen === "function") for (const type of LIVE_EVENTS) offs.push(listen(type, () => refresh()));
     // `engine.changed`: the first event of a burst starts a 1 s wait, the rest join it, and one engine read follows.
@@ -831,6 +1214,8 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
       clearTimer(timer);
       if (pending !== null) clearDelay(pending);
       pending = null;
+      if (watchTimer !== null) clearDelay(watchTimer);
+      watchTimer = null;
     };
   }
   function stop() {
@@ -841,5 +1226,5 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
     stopFn = null;
   }
 
-  return { load, loadEngine, act, keep, askReplace, cancelReplace, replace, release, confirmingHead: (id) => confirming.get(id) ?? "", answer, unstick, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
+  return { load, loadEngine, answerEngine, sendAgain, recheck, engineUnchecked, setNote, noteOf, engineSent, watchSent, act, keep, askReplace, cancelReplace, replace, release, confirmingHead: (id) => confirming.get(id) ?? "", answer, unstick, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
 }
