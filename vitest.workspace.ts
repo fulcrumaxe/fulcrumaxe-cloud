@@ -76,6 +76,7 @@ export default defineWorkspace([
   "packages/fx-runner",
   "packages/gh-policy",
   "packages/github",
+  "packages/hetzner",
   "packages/model-call",
   "packages/model-connection",
   "packages/model-router",
