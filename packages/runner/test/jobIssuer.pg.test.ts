@@ -745,7 +745,7 @@ describe("JobIssuer [pg]", () => {
   it("a signer that throws is a refusal, not a run queued without a job", async () => {
     const w = await world();
     const run = await runnerRun(w);
-    const broken = { keyId: "job-key-1", sign: () => { throw new Error("no key"); } };
+    const broken = { keyId: "job-key-1", sign: () => { throw new Error("no key"); }, signEngineCommand: () => { throw new Error("no key"); } };
     const i = createJobIssuer({ pool: db.runWriterPool, signer: broken, visibility: createFakeVisibility("private"), context: createPgJobContext(db.runWriterPool) });
     expect(await codeOf(i.issue({ run }))).toBe("job_invalid");
     expect(await stored(run.id)).toBeNull();

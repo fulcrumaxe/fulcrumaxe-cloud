@@ -114,7 +114,11 @@ export const EngineCommandsPullRequest = strict({
   if (Object.keys(body.after_seq).some((key) => !wanted.has(key))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "after_seq names a repo that was not asked for", path: ["after_seq"] });
 });
 export type EngineCommandsPullRequest = z.infer<typeof EngineCommandsPullRequest>;
-export const EngineCommandsPullReply = strict({ commands: z.array(SignedEngineCommand).max(20), controls: z.array(EngineControl).max(10) });
+/** One repo the runner may bridge, with its GitHub id and cloud-side name (`owner/name`). `enable --repo owner/name` resolves against these and refuses anything not listed. */
+export const EngineAllowedRepo = strict({ repo_gh_id: safeInt.min(1), full_name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/) });
+export type EngineAllowedRepo = z.infer<typeof EngineAllowedRepo>;
+/** `allowed_repos` is every repo the runner is paired with, whatever the request named (at most 100): a runner with none enabled yet can ask with any one id and read this. */
+export const EngineCommandsPullReply = strict({ commands: z.array(SignedEngineCommand).max(20), controls: z.array(EngineControl).max(10), allowed_repos: z.array(EngineAllowedRepo).max(100).optional() });
 export type EngineCommandsPullReply = z.infer<typeof EngineCommandsPullReply>;
 
 /** POST /api/runner/engine/commands/:id/ack. A refusal reason goes with `refused` and with nothing that was applied. */

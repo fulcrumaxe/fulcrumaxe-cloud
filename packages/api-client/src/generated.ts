@@ -5276,6 +5276,62 @@ export interface Operations {
       omitted: number;
     };
   };
+  listEngineCommands: {
+    path: {
+      id: string;
+    };
+    query: {
+      limit?: string;
+    };
+    body: undefined;
+    response: {
+      commands: Array<{
+        id: string;
+        command_seq: number;
+        kind: "start_day" | "pause_loop" | "resume_loop" | "answer_ask" | "set_dial" | "request_spawn" | "stop_agent";
+        args: {
+          [key: string]: unknown;
+        };
+        note?: string;
+        state: "pending" | "delivered" | "applied" | "refused" | "expired" | "cancelled" | "not_confirmed";
+        refusal: string | null;
+        issued_by: string;
+        issued_at: string;
+        expires_at: string;
+        delivered_at: string | null;
+        acked_at: string | null;
+        halt_epoch_at_issue: number;
+      }>;
+    };
+  };
+  issueEngineCommand: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      kind: "start_day" | "pause_loop" | "resume_loop" | "answer_ask" | "set_dial" | "request_spawn" | "stop_agent";
+      args: {
+        [key: string]: unknown;
+      };
+    };
+    response: {
+      command_id: string;
+      state: "pending";
+      expires_at: string;
+    };
+  };
+  cancelEngineCommand: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      command_id: string;
+      state: "cancelled";
+    };
+  };
 }
 
 /** Every operation by operationId. scope is the scope a token needs (null when it needs none or cannot be used). */
@@ -7533,6 +7589,39 @@ export const operations = {
     idempotency: "never",
     pathParams: [],
     queryParams: ["repo_id","format"],
+    hasBody: false,
+  },
+  listEngineCommands: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/commands",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["limit"],
+    hasBody: false,
+  },
+  issueEngineCommand: {
+    method: "POST",
+    path: "/api/v1/engine/repos/{id}/commands",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  cancelEngineCommand: {
+    method: "DELETE",
+    path: "/api/v1/engine/commands/{id}",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
     hasBody: false,
   },
 } as const;

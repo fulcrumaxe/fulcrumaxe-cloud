@@ -571,6 +571,16 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "writeback_pr_mismatch",
   "writeback_check_unfinished",
   "writeback_merge_dial_ask",
+  // Engine bridge commands: why a command to a connected engine is refused or cannot be changed.
+  "operate_off",
+  "engine_not_connected",
+  "halted",
+  "too_many_pending",
+  "already_cancelled",
+  "expired",
+  "already_delivered",
+  // Engine bridge decisions: an answer to a decision that was not asked. (already_answered is listed above.)
+  "not_asked",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.
   "confirmation_required",
 ];

@@ -29,6 +29,7 @@ import {
   canonicalJson,
   sha256Text,
   signJob,
+  signEngineCommand,
   HOSTED_CLAIM_REPLY_BUDGET_BYTES,
   worstCaseClaimReplyBytes,
   type AllowanceSet,
@@ -39,6 +40,8 @@ import {
   checkFixScopeExtra,
   type Job,
   type SignedJob,
+  type EngineCommand,
+  type SignedEngineCommand,
 } from "@fulcrumaxe/runner-protocol";
 import { resolveRunContextBudget } from "@fx/core/src/context/contextBudget.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
@@ -116,6 +119,8 @@ export interface JobSigner {
   /** The `key_id` a runner uses to find the public key. */
   readonly keyId: string;
   sign(job: Job): SignedJob;
+  /** Signs an engine bridge command (`purpose: engine_command_v1`) with the same key and `key_id`; the runner trusts both for jobs and for commands. */
+  signEngineCommand(command: EngineCommand): SignedEngineCommand;
 }
 
 /** A signer over an Ed25519 key the caller already holds. The key never leaves this closure. */
@@ -124,7 +129,7 @@ export function createJobSigner(input: { keyId: string; privateKey: KeyObject })
     throw new TypeError("createJobSigner: the key must be an Ed25519 private key");
   }
   const { keyId, privateKey } = input;
-  return { keyId, sign: (job) => signJob({ ...job, key_id: keyId }, privateKey) };
+  return { keyId, sign: (job) => signJob({ ...job, key_id: keyId }, privateKey), signEngineCommand: (command) => signEngineCommand(command, keyId, privateKey) };
 }
 
 /** The branch prefix of every run branch the executor works on. */
