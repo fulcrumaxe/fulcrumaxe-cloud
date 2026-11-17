@@ -5502,6 +5502,8 @@ export interface Operations {
         raised_at: string;
         cleared_at: string | null;
         how: string | null;
+        decision_id: (string) | (null);
+        decision_type: ("engine_spawn" | "engine_merge" | "engine_spec_ready") | (null);
       }>;
       next_cursor: string | null;
       as_of: string;

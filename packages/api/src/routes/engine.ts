@@ -67,7 +67,9 @@ const agentItem = z.object({
 });
 const laneItem = z.object({ pr: num, discussion: nnum, state: z.string(), updated_at: z.string() });
 const gateItem = z.object({ pr: num, gate: z.string(), result: z.string(), head_sha: z.string(), at: z.string() });
-const askItem = z.object({ ask_id: z.string(), ask_kind: z.string(), source: z.string(), discussion: nnum, pr: nnum, raised_at: z.string(), cleared_at: nstr, how: nstr });
+const askItem = z.object({ ask_id: z.string(), ask_kind: z.string(), source: z.string(), discussion: nnum, pr: nnum, raised_at: z.string(), cleared_at: nstr, how: nstr,
+  decision_id: z.string().uuid().nullable(), decision_type: z.enum(["engine_spawn", "engine_merge", "engine_spec_ready"]).nullable(),
+});
 const logItem = z.object({ line_id: z.string(), actor_role: z.string(), category: z.string(), discussion: nnum, pr: nnum, ts: z.string() });
 const provenance = z.object({ kinds: z.array(z.string()), count: num, seqs: z.array(z.object({ session_id: z.string(), seq: num })) });
 const usageItem = z.object({
@@ -190,10 +192,11 @@ export const engineRoutes: RouteEntry[] = [
   {
     method: "GET", path: "/api/v1/engine/repos/{id}/asks", operationId: "listEngineAsks", ...READ,
     summary: "The engine's open questions (`state=open`, the default) or all of them",
+    description: "Team-log asks and decision asks in one list. A decision ask (`source: decide`, `ask_kind: owner_decision`) carries `decision_id` and `decision_type`, and is answered with `POST /engine/decisions/{id}/answer`; its answer clears it. A team-log ask has both fields null.",
     paramsSchema: idParams, querySchema: listQuery.extend({ state: z.enum(["open", "all"]).optional() }), responseSchema: envelope(askItem),
     handler: (ctx, input) => {
       const query = q<typeof listQuery>(input) as z.infer<typeof listQuery> & { state?: "open" | "all" };
-      return listOf(ctx, input.params.id!, (c) => readAsks(c, input.params.id!, query.state ?? "open", parseLimit(query.limit), query.cursor));
+      return listOf(ctx, input.params.id!, (c) => readAsks(c, input.params.id!, query.state ?? "open", parseLimit(query.limit), query.cursor, ctx.principal.accountId));
     },
   },
   {
