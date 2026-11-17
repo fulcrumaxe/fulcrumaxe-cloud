@@ -263,7 +263,17 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
       }
     };
     return {
-      go: (url) => guard(async () => void (await page.goto(url, { waitUntil: "domcontentloaded" }))),
+      go: (url) =>
+        guard(async () => {
+          try {
+            await page.goto(url, { waitUntil: "domcontentloaded" });
+          } catch (error) {
+            // Parking on about:blank after a refused navigation: Chromium commits its error page for the refused load first, which interrupts this load and makes goto throw, but the load
+            // is still queued and lands afterwards, where it would cancel whatever page the next call opens. Wait for it to land, so no navigation of ours is pending when the call ends.
+            if (url !== "about:blank") throw error;
+            await page.waitForURL("about:blank", { timeout: ACTION_MS });
+          }
+        }),
       url: () => page.url(),
       scan: () => guard(() => page.evaluate(SNAPSHOT_SCRIPT) as Promise<{ elements: RawElement[]; text: string }>),
       click: (ref, count) =>
