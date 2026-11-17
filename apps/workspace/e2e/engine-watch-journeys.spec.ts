@@ -42,6 +42,11 @@ async function ready(page: Page) {
 async function reload(page: Page, app = "team") {
   await page.reload();
   await waitForDesktop(page);
+  // The desktop is "up" 200 ms before the shell puts the windows from the saved layout back (script.js showDesktop sets a 200 ms timer in the same task
+  // that sets currentStep). A person sees the windows return before tapping anything, so wait for that too: a timer of our own with the same delay is
+  // queued behind it, so when it fires the restore has run, however loaded the machine is. Otherwise the late restore re-focuses the restored window,
+  // which on a phone (one window shown at a time) hides whatever the journey opened in the meantime.
+  await page.evaluate(() => new Promise<void>((done) => setTimeout(done, 200)));
   await page.evaluate((id) => (window as unknown as { FULCWM: { open: (a: string) => void } }).FULCWM.open(id), app);
   await expect(page.locator(WIN(app))).toBeVisible();
   if (app === "team") await ready(page);
