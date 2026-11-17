@@ -87,7 +87,8 @@ describe("what an engine row offers", () => {
     expect(answerable(row())).toBe(true);
     for (const id of ["one", "0123456789ABCDEF", "0123456789abcde", "0123456789abcdef0"]) expect(answerable(row({ ask_id: id })), id).toBe(false);
     expect(answerable(row({ ask_id: "short", ask_kind: "decision", decision_id: DEC }))).toBe(true);
-    expect(answerable(row({ ask_id: "short", ask_kind: "owner_decision", decision_id: DEC }))).toBe(false);
+    // any kind of ask that carries a receipt id is a decision (recognised by the id, not by its kind)
+    expect(answerable(row({ ask_id: "short", ask_kind: "owner_decision", decision_id: DEC }))).toBe(true);
     expect(row({ ask_kind: "decision", decision_id: "not-a-uuid" }).decisionId).toBe("");
   });
   it("is locked, with a reason, while operate or watch is off, and not while the engine is halted", () => {
@@ -541,5 +542,86 @@ describe("a 409 for a request still running", () => {
     await list.answerEngine(ROW, "approve");
     await list.answerEngine(ROW, "approve");
     expect(posts[3].key).not.toBe(posts[2].key);
+  });
+});
+
+// Decision asks from the engine read (source "decide", a decision id and a decision type).
+describe("decision asks of the engine read", () => {
+  const dask = (over = {}) => ask({ ask_id: "fedcba9876543210", ask_kind: "owner_decision", source: "decide", decision_id: DEC, decision_type: "engine_merge", pr: 77, discussion: null, ...over });
+  const DROW = "engine-" + R1 + "-fedcba9876543210";
+  const row = (over = {}) => readEngineAsk(repo(), listOf([]), dask(over), 0);
+
+  it("recognises a decision by its source or by a non-null decision id, and a team-log ask is not one", () => {
+    expect(row().decisionId).toBe(DEC);
+    expect(row({ source: "team_log" }).decisionId).toBe(DEC); // the id alone is enough
+    expect(row({ source: "team_log" }).decision).toBe(true);
+    expect(row({ decision_id: null })).toMatchObject({ decision: true, decisionId: "" }); // the source alone: a decision with no usable id
+    expect(row({ source: "team_log", decision_id: null })).toMatchObject({ decision: false, decisionId: "" });
+    expect(row({ source: "team_log", decision_id: undefined })).toMatchObject({ decision: false, decisionId: "" });
+  });
+  it("a decision without a usable id is not answerable, and not by the command path either", () => {
+    expect(answerable(row({ decision_id: null, ask_id: "0123456789abcdef" }))).toBe(false);
+    expect(answerable(row({ decision_id: "not-a-uuid" }))).toBe(false);
+    expect(choicesFor(row())).toEqual(["approve", "decline"]);
+  });
+  it("Approve and Decline post { choice } to the decision route, and nothing goes to the command route", async () => {
+    for (const choice of ["approve", "decline"]) {
+      const { list, posts } = await ready({ asks: [dask()] });
+      await list.answerEngine(DROW, choice);
+      expect(posts).toHaveLength(1);
+      expect(posts[0].path).toBe("/api/v1/engine/decisions/" + DEC + "/answer");
+      expect(posts[0].body).toEqual({ choice });
+      expect(posts[0].key).toMatch(/^[0-9a-f-]{36}$/);
+    }
+  });
+  it("an ask with a null decision id keeps the answer_ask command path", async () => {
+    const { list, posts } = await ready({ asks: [ask({ decision_id: null })] });
+    await list.answerEngine(ROW, "approve");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].path).toBe(commandsUrl(R1));
+    expect(posts[0].body).toEqual({ kind: "answer_ask", args: { ask_id: ASK, choice: "approve" } });
+  });
+  it("409 already_answered says so and drops the item, and it stays dropped on the next read", async () => {
+    const { list, ctl } = await ready({ asks: [dask()], post: { ["POST " + decisionAnswerUrl(DEC)]: fail(409, "already_answered") } });
+    await list.answerEngine(DROW, "approve");
+    expect(list.state.rows.filter((r) => r.kind === "engine")).toHaveLength(0);
+    expect(list.state.announce).toBe("That was already answered.");
+    expect(list.state.error).toBe("");
+    await list.load(); // the engine's read still lists it for a moment
+    expect(ctl.asks).toHaveLength(1);
+    expect(list.state.rows.filter((r) => r.kind === "engine")).toHaveLength(0);
+  });
+  it("403 for a viewer the page took for an admin says only owners and admins can, keeps the item, and uses the fixed sentence", async () => {
+    const { list } = await ready({ asks: [dask()], post: { ["POST " + decisionAnswerUrl(DEC)]: fail(403, "forbidden") } });
+    await list.answerEngine(DROW, "approve");
+    expect(list.state.error).toBe("Only owners and admins can do this.");
+    expect(list.state.error).not.toContain(SERVER_TEXT);
+    expect(list.state.rows.filter((r) => r.kind === "engine")).toHaveLength(1);
+  });
+  it("a member keeps the item, and nothing is sent", async () => {
+    const { list, posts } = await ready({ asks: [dask()], admin: false });
+    expect(list.state.rows.filter((r) => r.kind === "engine")).toHaveLength(1);
+    await list.answerEngine(DROW, "approve");
+    expect(posts).toHaveLength(0);
+  });
+  it("says what the decision is, and leaves out a missing pull request or Discussion rather than printing null", () => {
+    expect(row({ decision_type: "engine_spawn", pr: null, discussion: null }).sentence).toBe("The engine wants to start an agent.");
+    expect(row({ decision_type: "engine_merge", pr: 77 }).sentence).toBe("The engine wants to merge PR #77.");
+    expect(row({ decision_type: "engine_merge", pr: null }).sentence).toBe("The engine wants to merge a pull request.");
+    expect(row({ decision_type: "engine_spec_ready", discussion: 842, pr: null }).sentence).toBe("The engine wants to mark Discussion #842 ready.");
+    expect(row({ decision_type: "engine_spec_ready", discussion: null, pr: null }).sentence).toBe("The engine wants to mark a Discussion ready.");
+    for (const t of ["engine_spawn", "engine_merge", "engine_spec_ready", "engine_new_type"]) {
+      const s = row({ decision_type: t, pr: null, discussion: null }).sentence;
+      expect(s).not.toMatch(/null|undefined|NaN|engine_/);
+    }
+    // an unknown type keeps the kind's own sentence
+    expect(row({ decision_type: "engine_new_type" }).sentence).toBe("The engine is waiting for you to decide something.");
+  });
+  it("links leave out a null pr or discussion", () => {
+    expect(row({ pr: null, discussion: null }).links).toEqual([]);
+    expect(row({ pr: 77 }).links.map((l) => l.text)).toEqual(["PR #77"]);
+  });
+  it("a team-log ask keeps its kind words", () => {
+    expect(readEngineAsk(repo(), listOf([]), ask(), 0).sentence).toBe("The engine is waiting for you to decide something.");
   });
 });

@@ -76,6 +76,14 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   await page.route((u) => u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events", async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
+    // A decision answer: refused as set by postFail; otherwise the decision is recorded and the engine read stops listing its ask (what a reload reads).
+    const dec = p.match(/^\/api\/v1\/engine\/decisions\/([^/]+)\/answer$/);
+    if (req.method() === "POST" && dec) {
+      mock.posts.push({ path: p, body: req.postDataJSON(), key: req.headers()["idempotency-key"] });
+      if (mock.postFail) return json(route, mock.postFail.status, { error: { code: mock.postFail.code, message: SERVER_TEXT, request_id: "r" } });
+      for (const k of Object.keys(mock.asks)) mock.asks[k] = mock.asks[k]!.filter((a) => a.decision_id !== dec[1]);
+      return json(route, 200, { decision_id: dec[1], choice: (req.postDataJSON() as { choice: string }).choice });
+    }
     if (req.method() === "POST" && /^\/api\/v1\/engine\/repos\/[^/]+\/commands$/.test(p)) {
       mock.posts.push({ path: p, body: req.postDataJSON(), key: req.headers()["idempotency-key"] });
       if (!mock.postFail) {
@@ -738,6 +746,59 @@ test.describe("EB-13b: answering an engine ask", () => {
     }, `${WIN} .ny-app`);
     expect(widths[0]).toBeLessThanOrEqual(widths[1]);
     await expect(t(page, "ny-count").first()).toHaveText("500 / 500");
+    await clean(page, errors);
+  });
+});
+
+// A decision ask (the engine asks before it starts an agent, merges a pull request or marks a Discussion ready): answered through the cloud's decision route.
+const DEC = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const DEC_ROW = `engine-${R1}-fedcba9876543210`;
+const decisionAsk = (over: Obj = {}): Obj => ask({ ask_id: "fedcba9876543210", ask_kind: "owner_decision", source: "decide", decision_id: DEC, decision_type: "engine_merge", discussion: null, pr: 77, ...over });
+
+test.describe("a decision ask", () => {
+  test("Approve posts to the decision route, the item clears, and after a reload it stays cleared", async ({ page }) => {
+    const { mock, errors } = await setup(page, { asks: { [R1]: [decisionAsk()] } });
+    await open(page);
+    await countIs(page, 1);
+    await expect(t(page, "ny-sentence")).toHaveText("The engine wants to merge PR #77.");
+    await expect(page.locator(`${WIN} [data-testid^="ny-choice-${DEC_ROW}-"]`)).toHaveCount(2); // approve and decline, no defer
+    await btn(page, DEC_ROW, "approve").click();
+    await waitForPost(mock, 1);
+    expect(mock.posts[0]!.path).toBe(`/api/v1/engine/decisions/${DEC}/answer`);
+    expect(mock.posts[0]!.body).toEqual({ choice: "approve" });
+    await expect(t(page, "ny-live")).toHaveText(/^Answered: Approve\./);
+    await expect(page.locator(`${WIN} [data-testid="ny-row"]`)).toHaveCount(0, { timeout: 15_000 });
+    await countIs(page, 0);
+    await page.reload();
+    await waitForDesktop(page);
+    await open(page);
+    await countIs(page, 0);
+    expect(mock.posts).toHaveLength(1);
+    await clean(page, errors);
+  });
+
+  test("answered somewhere else: the item says so and is dropped, and does not come back", async ({ page }) => {
+    const { mock, errors } = await setup(page, { asks: { [R1]: [decisionAsk({ decision_type: "engine_spawn", pr: null })] }, postFail: { status: 409, code: "already_answered" } });
+    await open(page);
+    await expect(t(page, "ny-sentence")).toHaveText("The engine wants to start an agent.");
+    await btn(page, DEC_ROW, "decline").click();
+    await waitForPost(mock, 1);
+    expect(mock.posts[0]!.body).toEqual({ choice: "decline" });
+    await expect(t(page, "ny-live")).toHaveText("That was already answered.");
+    await expect(page.locator(`${WIN} [data-testid="ny-row"]`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("a member sees the item with its controls locked and the reason beside them, and nothing is sent", async ({ page }) => {
+    const { mock, errors } = await setup(page, { admin: false, asks: { [R1]: [decisionAsk({ decision_type: "engine_spec_ready", pr: null, discussion: 842 })] } });
+    await open(page);
+    await countIs(page, 1);
+    await expect(t(page, "ny-sentence")).toHaveText("The engine wants to mark Discussion #842 ready.");
+    await expect(t(page, "ny-lock")).toHaveText("Only owners and admins can answer this. Ask one of them to approve or decline it.");
+    for (const c of ["approve", "decline"]) await expect(btn(page, DEC_ROW, c)).toHaveAttribute("aria-disabled", "true");
+    await btn(page, DEC_ROW, "approve").click({ force: true });
+    await page.waitForTimeout(300);
+    expect(mock.posts).toHaveLength(0);
     await clean(page, errors);
   });
 });
