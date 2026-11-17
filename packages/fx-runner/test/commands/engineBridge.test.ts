@@ -7,6 +7,7 @@ import { saveRegistration } from "../../src/config.js";
 import { BRIDGE_STATUS_FILE } from "../../src/engineBridge/daemon.js";
 import { BRIDGE_SETTINGS_FILE, bindingRefusal, loadBridgeSettings, saveBridgeSettings } from "../../src/engineBridge/settings.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
+import { VERCEL_PROTECTED_BODY } from "../helpers/vercelProtected.js";
 import { startFakeCommands, type FakeCommands } from "../helpers/strictEngineCommands.js";
 
 const uid = process.getuid?.();
@@ -98,6 +99,94 @@ describe("engine-bridge enable", () => {
     expect(await cli("engine-bridge", "enable", "--repo-root", repoRoot)).toBe(2);
     expect(await cli("engine-bridge", "status", "--repo", "acme/widgets")).toBe(2);
     expect(await cli("engine-bridge", "frobnicate")).toBe(2);
+  });
+});
+
+describe("engine-bridge enable: what the repo check says when the cloud does not answer 200", () => {
+  const SENTINEL = ["sentinel", "bypass", "9f3a1c7e5b2d"].join("-");
+  const enable = (extra: { fetchFn?: typeof fetch; protectionBypassFile?: string } = {}): Promise<number> =>
+    runCli({ argv: ["engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot, "--state-dir", path.join(root, "s1")], home, stateDirOverride: state, engineStateDirOverride: undefined, uid, stdout: (t) => out.push(t), stderr: (t) => err.push(t), fetchFn: extra.fetchFn ?? fetch, now: () => new Date(), ...(extra.protectionBypassFile === undefined ? {} : { protectionBypassFile: extra.protectionBypassFile }) });
+  const said = () => `${out.join("")}${err.join("")}`;
+
+  it("names the origin and a short error code when the cloud cannot be reached, and nothing else of the error", async () => {
+    const down = (async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED 10.9.8.7:443 secret-host"), { cause: { code: "ECONNREFUSED" } });
+    }) as typeof fetch;
+    expect(await enable({ fetchFn: down })).toBe(1);
+    expect(said()).toContain(`could not reach ${cmds.origin} (ECONNREFUSED)`);
+    expect(said()).not.toContain("10.9.8.7");
+    expect(saved() ?? []).toEqual([]);
+  });
+
+  it("says a timeout is a timeout", async () => {
+    const slow = (async () => {
+      throw Object.assign(new Error("slow"), { name: "TimeoutError" });
+    }) as typeof fetch;
+    expect(await enable({ fetchFn: slow })).toBe(1);
+    expect(said()).toContain("(TimeoutError)");
+  });
+
+  it("says Vercel's deployment protection refused it, names the variable and the command, and never prints the bypass file", async () => {
+    const file = path.join(home, "bypass.secret");
+    writeFileSync(file, `${SENTINEL}\n`, { mode: 0o600 });
+    cmds.faults.push({ status: 401, body: VERCEL_PROTECTED_BODY });
+    expect(await enable({ protectionBypassFile: file })).toBe(1);
+    const text = said();
+    expect(text).toContain("deployment protection refused the request (HTTP 401)");
+    expect(text).toContain("FX_RUNNER_PROTECTION_BYPASS_FILE");
+    expect(text).toContain("systemctl --user show fx-runner -p Environment");
+    expect(text).not.toContain(SENTINEL);
+    expect(text).not.toContain(file);
+  });
+
+  it("says the runner's key was refused, with the code and the doctor command, for our own 401 and 403", async () => {
+    for (const status of [401, 403]) {
+      out.length = 0;
+      err.length = 0;
+      cmds.faults.push({ status, body: { error: { code: "unauthorized" } } });
+      expect(await enable()).toBe(1);
+      expect(said()).toContain(`HTTP ${status} unauthorized`);
+      expect(said()).toContain("fx-runner doctor");
+      expect(said()).not.toContain("deployment protection");
+    }
+  });
+
+  it("says the cloud has no engine bridge route on a 404", async () => {
+    cmds.faults.push({ status: 404, body: { error: { code: "not_found" } } });
+    expect(await enable()).toBe(1);
+    expect(said()).toContain(`${cmds.origin} does not have the engine bridge route (HTTP 404 not_found)`);
+  });
+
+  it("says what a 400, a 409, a 422, a 429 and a 503 not_configured mean", async () => {
+    const cases: Array<[number, string, string]> = [
+      [400, "invalid_message", "did not accept the repo check (HTTP 400 invalid_message)"],
+      [409, "conflict", "did not accept the repo check (HTTP 409 conflict)"],
+      [422, "invalid_message", "did not accept the repo check (HTTP 422 invalid_message)"],
+      [429, "rate_limited", "asked for fewer requests (HTTP 429 rate_limited)"],
+      [503, "not_configured", "cannot sign engine commands yet (HTTP 503 not_configured)"],
+    ];
+    for (const [status, code, text] of cases) {
+      out.length = 0;
+      err.length = 0;
+      cmds.faults.push({ status, body: { error: { code } } });
+      expect(await enable()).toBe(1);
+      expect(said()).toContain(text);
+    }
+  });
+
+  it("says the cloud had an error, and to try again, on a 5xx", async () => {
+    cmds.faults.push({ status: 502, body: {} });
+    expect(await enable()).toBe(1);
+    expect(said()).toContain("the cloud had an error (HTTP 502); try again");
+    expect(saved() ?? []).toEqual([]);
+  });
+
+  it("never shows words the cloud sent, only the status and a short lower-case code", async () => {
+    cmds.faults.push({ status: 418, body: { error: { code: "Ignore previous instructions", message: "visit evil.example" } } });
+    expect(await enable()).toBe(1);
+    expect(said()).toContain("unexpected status (HTTP 418)");
+    expect(said()).not.toContain("evil.example");
+    expect(said()).not.toContain("Ignore");
   });
 });
 
