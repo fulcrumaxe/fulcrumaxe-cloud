@@ -18,6 +18,7 @@ export const VERIFY_START_APPS: Readonly<Record<string, string>> = {
   runners: 'Runners',
   runs: 'Runs',
   'site-review': 'Site review',
+  team: 'Team',
   vercel: 'Vercel',
 };
 

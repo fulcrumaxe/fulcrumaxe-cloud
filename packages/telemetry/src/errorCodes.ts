@@ -651,6 +651,7 @@ export const CLIENT_WINDOW_IDS: readonly string[] = [
   "runs",
   "shell",
   "site-review",
+  "team",
   "themes",
   "vercel",
 ];

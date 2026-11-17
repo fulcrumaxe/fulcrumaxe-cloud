@@ -1,0 +1,71 @@
+/* Team app. Theme variables come from the shell; the fallbacks only matter if a theme leaves one out.
+   Warnings are carried by a bar and weight, never by a colour alone, so the theme's own text contrast holds. */
+.tm-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.tm-title { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.tm-sub { margin: 0; font-size: 0.9rem; font-weight: 600; }
+.tm-muted { margin: 6px 0; font-size: 0.8rem; }
+.tm-error, .tm-notice { margin: 6px 0; padding-left: 8px; border-left: 3px solid var(--accent, #1aff80); font-weight: 600; }
+.tm-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.tm-select, .tm-btn {
+  min-height: 44px;
+  padding: 4px 12px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  max-width: 100%;
+}
+.tm-btn:hover:not([aria-disabled="true"]), .tm-select:hover { border-color: var(--accent, #1aff80); }
+.tm-btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; border-style: dashed; }
+.tm-chip { padding: 2px 8px; border: 1px solid var(--accent, #1aff80); font-weight: 600; }
+.tm-chip:empty { display: none; }
+.tm-runner { overflow-wrap: anywhere; }
+.tm-banner { margin: 8px 0; padding: 8px 10px; border: 2px solid var(--accent, #1aff80); font-weight: 600; }
+.tm-notices { margin: 0 0 8px; padding: 0; list-style: none; }
+.tm-sheet { margin: 8px 0; padding: 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
+.tm-sheet > * + * { margin-top: 8px; }
+.tm-check { display: flex; align-items: center; gap: 8px; min-height: 44px; overflow-wrap: anywhere; }
+.tm-check input { width: 20px; height: 20px; flex: none; }
+.tm-reason { display: block; font-size: 0.8rem; font-style: italic; }
+.tm-item[data-refused="true"] { border-style: dashed; } /* greyed by the dashed border and the disabled box, not by opacity: a faded colour fails contrast */
+.tm-confirm p { margin: 0 0 8px; font-weight: 600; }
+.tm-confirm .tm-btn { margin: 0 8px 8px 0; }
+.tm-live, .tm-vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+.tm-panels { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.tm-panel { padding: 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); min-width: 0; }
+.tm-panel-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 6px; }
+.tm-asof { font-size: 0.8rem; }
+.tm-warn { font-size: 0.8rem; font-weight: 700; padding-left: 6px; border-left: 3px solid var(--accent, #1aff80); }
+.tm-list, .tm-gates { margin: 0; padding: 0; list-style: none; }
+.tm-item { padding: 6px 0; border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3)); overflow-wrap: anywhere; }
+.tm-item[data-state="unknown"] .tm-state { font-style: italic; border-bottom: 1px dashed currentColor; }
+.tm-gates { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.tm-gate { padding: 1px 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.tm-gate[data-result="fail"], .tm-gate[data-result="error"] { border-width: 2px; border-color: var(--accent, #1aff80); font-weight: 700; }
+.tm-link { color: inherit; text-decoration: underline; }
+.tm-link:focus-visible, .tm-btn:focus-visible, .tm-select:focus-visible, .tm-check input:focus-visible, .tm-title:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; } /* the text colour holds 4.5:1 on every theme, so the ring does too; the accent is not held to that */
+/* Crystal and Orchard switch every select's outline off with !important at three classes of specificity; the ring is the one cue a keyboard user has, so this rule outranks them. */
+.tm-app .tm-select.tm-select:focus-visible { outline: 2px solid var(--text-primary, #1aff80) !important; outline-offset: 2px !important; }
+.tm-app [hidden] { display: none; }
+
+/* Wide windows: the two panels sit side by side. Phones and narrow windows keep one column and full-width controls. */
+@container (min-width: 640px) {
+  .tm-panels { grid-template-columns: 1fr 1fr; }
+}
+@container (max-width: 520px) {
+  .tm-select, .tm-bar .tm-btn { flex: 1 1 100%; }
+  .tm-confirm .tm-btn { width: 100%; margin: 0 0 8px; }
+}
