@@ -37,7 +37,7 @@ function mountApp(contentEl) {
     }
     if (hadFocus && !parent.contains(document.activeElement)) heading.focus();
   };
-  const said = { n: "", b: "", r: "", o: "", w: "" };
+  const said = { n: "", b: "", r: "", l: "", f: "", o: "", w: "", g: "" };
   const hear = (k, v) => (said[k] === v ? "" : (said[k] = v));
   const setText = (el, value) => { if (el.textContent !== value) el.textContent = value; };
 
@@ -119,30 +119,83 @@ function mountApp(contentEl) {
     ];
   }
 
-  const head = (title, p, testid, key) => h("div", { class: "tm-panel-head" }, h("h3", { class: "tm-sub", tabindex: key ? "-1" : null, "data-focus": key || null }, title), h("span", { class: "tm-asof", "data-testid": testid + "-asof" }, p.asOf), p.warn ? h("span", { class: "tm-warn", "data-testid": testid + "-warn" }, p.warn) : null);
+  // Each panel is built once: a header and a body, each redrawn only when its own data changes, so a refresh never resets the log's scroll position or takes focus from a button.
+  const panel = (key, testid) => { const hd = h("div", { class: "tm-panel-head" }), body = h("div", { class: "tm-panel-body" }); return { hd, body, el: h("section", { class: "tm-panel tm-panel-" + key, "data-testid": testid }, hd, body) }; };
+  const P = { agents: panel("agents", "tm-agents"), lanes: panel("lanes", "tm-lanes"), plan: panel("plan", "tm-plan"), stats: panel("stats", "tm-stats"), usage: panel("usage", "tm-usage"), log: panel("log", "tm-log") };
+  const TITLE = { agents: "Agents", lanes: "Merge lane", plan: "Plan", stats: "Stats", usage: "Cost", log: "Log" };
+  // The agents heading can take focus: the stop question hands it back there when the agent it asked about goes away.
+  const headNodes = (k, p) => [h("h3", { class: "tm-sub", tabindex: k === "agents" ? "-1" : null, "data-focus": k === "agents" ? "agents-head" : null }, TITLE[k]), h("span", { class: "tm-asof", "data-testid": "tm-" + k + "-asof" }, p.asOf), p.warn ? h("span", { class: "tm-warn", "data-testid": "tm-" + k + "-warn" }, p.warn) : null];
+  const failedP = (k) => h("p", { class: "tm-muted", "data-testid": "tm-" + k + "-failed" }, WORDS.panelFailed);
   const dLink = (n, href) => (n ? link(href, "D#" + n, { "data-testid": "tm-d" }) : null);
+  const list = (rows, build, extra) => h("ul", { class: "tm-list", role: "list", ...extra }, rows.map(build));
   const closeStop = (id) => { want = "stop-" + id; ops.cancelStop(); };
   const stopButton = (a) => a.stop.pending
     ? h("button", { type: "button", class: "tm-btn tm-stop", "aria-disabled": "true", "data-testid": "tm-stop", "data-focus": "stop-" + a.stopId, "aria-label": "Stop requested for " + a.who + ". " + OP_WORDS.stopPending }, "Stop requested")
     : gated({ class: "tm-btn tm-stop", "data-testid": "tm-stop", "data-focus": "stop-" + a.stopId, "aria-label": OP_WORDS.stop + " " + a.who }, () => { want = "stop-cancel"; ops.askStop(a.stopId); if (!team.state.op.confirmStop) want = null; }, OP_WORDS.stop);
-  function agentsPanel(p) {
-    return h("section", { class: "tm-panel", "data-testid": "tm-agents" }, head("Agents", p, "tm-agents", "agents-head"),
-      p.failed ? h("p", { class: "tm-muted", "data-testid": "tm-agents-failed" }, WORDS.panelFailed)
-      : p.rows.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-agents-empty" }, p.empty)
-      : h("ul", { class: "tm-list", role: "list" }, p.rows.map((a) =>
-          h("li", { class: "tm-item", "data-testid": "tm-agent", "data-state": a.state },
-            h("strong", { class: "tm-role" }, h("bdi", null, a.role)), " ", dLink(a.discussion, a.link), a.discussion ? " " : null, h("span", { class: "tm-mode" }, a.mode), " ", h("span", { class: "tm-state", "data-testid": "tm-agent-text" }, a.text), a.stop ? stopButton(a) : null))));
-  }
+  const agentsBody = (p) => (p.failed ? failedP("agents")
+    : p.rows.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-agents-empty" }, p.empty)
+    : list(p.rows, (a) => h("li", { class: "tm-item", "data-testid": "tm-agent", "data-state": a.state },
+        h("strong", { class: "tm-role" }, h("bdi", null, a.role)), " ", dLink(a.discussion, a.link), a.discussion ? " " : null, h("span", { class: "tm-mode" }, a.mode), " ", h("span", { class: "tm-state", "data-testid": "tm-agent-text" }, a.text), a.stop ? stopButton(a) : null)));
   const laneItem = (l) =>
     h("li", { class: "tm-item", "data-testid": "tm-lane", "data-pr": String(l.pr) },
       link(l.prLink, "PR #" + l.pr, { "data-testid": "tm-pr" }), " ", dLink(l.discussion, l.discussionLink), l.discussion ? " " : null, h("span", { class: "tm-state", "data-testid": "tm-lane-state" }, l.state),
       l.gates.length ? h("ul", { class: "tm-gates", role: "list" }, l.gates.map((g) => h("li", { class: "tm-gate", "data-testid": "tm-gate", "data-result": g.result }, g.gate + ": " + g.result))) : null);
-  function lanesPanel(p) {
-    return h("section", { class: "tm-panel", "data-testid": "tm-lanes" }, head("Merge lane", p, "tm-lanes"),
-      p.failed ? h("p", { class: "tm-muted", "data-testid": "tm-lanes-failed" }, WORDS.panelFailed)
-      : [p.open.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-lanes-empty" }, p.empty) : h("ul", { class: "tm-list", role: "list" }, p.open.map(laneItem)),
-         p.merged.length ? h("div", { "data-testid": "tm-merged" }, h("h4", { class: "tm-sub" }, WORDS.mergedToday), h("ul", { class: "tm-list", role: "list" }, p.merged.map(laneItem))) : null]);
+  const lanesBody = (p) => (p.failed ? failedP("lanes")
+    : [p.open.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-lanes-empty" }, p.empty) : list(p.open, laneItem),
+       p.merged.length ? h("div", { "data-testid": "tm-merged" }, h("h4", { class: "tm-sub" }, WORDS.mergedToday), list(p.merged, laneItem)) : null]);
+  // A control that has nothing to do keeps its place and says so (aria-disabled), so focus never lands on a button that vanished.
+  const pageBtn = (testid, focus, label, enabled, run) => h("button", { type: "button", class: "tm-btn", "data-testid": testid, "data-focus": focus, "aria-disabled": enabled ? "false" : "true", onClick: () => { if (enabled) { want = focus; run(); } } }, label);
+  function planBody(p) {
+    if (p.failed) return failedP("plan");
+    if (p.none) return h("p", { class: "tm-muted", "data-testid": "tm-plan-none" }, p.notSynced);
+    const v = p.view;
+    return [
+      v.title ? h("p", { class: "tm-muted", "data-testid": "tm-plan-date" }, v.title) : null,
+      v.items.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-plan-empty" }, v.empty) : list(v.items, (i) => h("li", { class: "tm-item", "data-testid": "tm-plan-item" }, i.ordinal ? i.ordinal + ". " : null, dLink(i.discussion, i.link), " ", h("span", { class: "tm-state" }, i.state))),
+      v.hasRows ? h("h4", { class: "tm-sub" }, WORDS.roadmap) : null,
+      v.hasRows ? list(v.rows, (r) => h("li", { class: "tm-item", "data-testid": "tm-roadmap-row" }, h("strong", { class: "tm-role" }, h("bdi", null, r.key)), " ", dLink(r.discussion, r.link), r.discussion ? " " : null, h("span", { class: "tm-state" }, r.status), r.counts ? " · " : null, r.counts ? h("span", { "data-testid": "tm-roadmap-counts" }, r.counts) : null), { class: "tm-list tm-roadmap" }) : null,
+      v.span ? h("div", { class: "tm-pager" }, pageBtn("tm-plan-prev", "plan-prev", WORDS.prev, v.hasPrev, () => team.planPage(-1)), h("span", { class: "tm-muted", "data-testid": "tm-plan-span" }, v.span), pageBtn("tm-plan-next", "plan-next", WORDS.next, v.hasNext, () => team.planPage(1))) : null,
+    ];
   }
+  // A figure's "(from N events)" is a button that opens what the server knows of those events (kinds, count, event numbers per session); focus stays on it when the list opens.
+  const fromBtn = (r) => h("button", { type: "button", class: "tm-btn", "data-testid": "tm-stat-from", "data-focus": "prov-" + r.id, "aria-expanded": r.open ? "true" : "false", "aria-controls": "tm-prov-" + r.id, onClick: () => { want = "prov-" + r.id; team.toggleProv(r.id); } }, r.from.trim());
+  function statsBody(p) {
+    if (p.failed) return failedP("stats");
+    return [list(p.view.rows, (r) => h("li", { class: "tm-item", "data-testid": "tm-stat" }, h("strong", { class: "tm-role" }, r.label), ": ", h("bdi", null, r.value), r.prov ? [" ", fromBtn(r), h("ul", { class: "tm-list tm-prov", role: "list", id: "tm-prov-" + r.id, hidden: !r.open, "data-testid": "tm-stat-prov" }, r.prov.map((line) => h("li", null, line)))] : r.from)), p.view.window ? h("p", { class: "tm-muted", "data-testid": "tm-stats-window" }, p.view.window) : null];
+  }
+  // The cost panel draws the server's figures as sent (the shared formatter made the strings); a row with no figure says why in words.
+  function usageBody(p) {
+    if (p.failed) return failedP("usage");
+    const v = p.view;
+    return [h("p", { "data-testid": "tm-usage-headrow" }, h("strong", { class: "tm-role" }, v.headlineLabel), ": ", h("span", { "data-testid": "tm-usage-headline" }, v.headline)),
+      v.window ? h("p", { class: "tm-muted", "data-testid": "tm-usage-window" }, v.window) : null,
+      v.rows.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-usage-empty" }, v.empty) : list(v.rows, (r) => h("li", { class: "tm-item", "data-testid": "tm-usage-row" }, h("bdi", null, r.label), ": ", h("span", { "data-testid": "tm-usage-value" }, r.value))),
+      v.more ? h("p", { class: "tm-muted", "data-testid": "tm-usage-more" }, v.more) : null];
+  }
+  // The log: one scrolling list kept for good (its rows are swapped in place), with the note, the failure line and the two buttons around it.
+  const logList = h("ul", { class: "tm-list tm-scroll", role: "list", tabindex: "0", "data-testid": "tm-log-list" });
+  const logTop = h("div"), logBar = h("div", { class: "tm-pager" });
+  P.log.body.replaceChildren(logTop, logList, logBar);
+  const logItem = (l) => h("li", { class: "tm-item", "data-testid": "tm-log-line", "data-id": l.id },
+    h("span", { class: "tm-time" }, l.time), " ", h("strong", { class: "tm-role" }, h("bdi", null, l.role)), " ", h("span", { class: "tm-cat" }, l.category),
+    l.discussion ? " " : null, dLink(l.discussion, l.discussionLink), l.pr ? " " : null, l.pr ? link(l.prLink, "PR #" + l.pr, { "data-testid": "tm-log-pr" }) : null);
+  function paintLog(p) {
+    swap("p:log-top", logTop, [p.failed, p.rows.length, p.empty, p.note], () => [h("p", { class: "tm-muted", "data-testid": "tm-log-note" }, p.note), p.failed ? failedP("log") : p.rows.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-log-empty" }, p.empty) : null]);
+    logList.hidden = p.failed || p.rows.length === 0;
+    logList.setAttribute("aria-label", p.label);
+    // The rows are swapped in place; the row the person was reading stays where it was, however many rows left the top.
+    const rows = [...logList.children];
+    const top = rows.find((r) => r.offsetTop + r.offsetHeight > logList.scrollTop);
+    const kept = top ? { id: top.getAttribute("data-id"), at: top.offsetTop - logList.scrollTop } : null;
+    swap("p:log-rows", logList, p.rows, () => p.rows.map(logItem));
+    const again = kept && [...logList.children].find((r) => r.getAttribute("data-id") === kept.id);
+    if (again) logList.scrollTop = again.offsetTop - kept.at;
+    swap("p:log-bar", logBar, [p.older, p.canOlder, p.olderFailed, p.newest], () => [
+      pageBtn("tm-log-older", "log-older", p.older, p.canOlder, () => team.loadOlder()),
+      p.newest ? pageBtn("tm-log-newest", "log-newest", p.newest, true, () => team.newest()) : null,
+      p.olderFailed ? h("span", { class: "tm-muted", "data-testid": "tm-log-older-failed" }, p.olderFailed) : null]);
+  }
+  logList.addEventListener("scroll", () => { if (logList.scrollTop + logList.clientHeight >= logList.scrollHeight - 48) team.loadOlder(); });
 
   // The halt: shown to everyone (a member reads the state, nothing more); an owner or admin also gets Halt or Clear halt behind a question of its own.
   // Focus stays on the one control that stands for the action (data-focus "halt-primary"), whichever of Halt and Clear halt is drawn.
@@ -209,13 +262,27 @@ function mountApp(contentEl) {
     if (d.sheet) swap("sheet", sheet, d.sheet, () => sheetNodes(d.sheet));
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
-    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || "")].filter(Boolean).join(" ");
+    const broken = hasRepos && d.refreshFailed ? Object.keys(TITLE).filter((k) => d[k].failed).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not
+    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
     if (msg) live.replaceChildren(h("span", null, msg));
-    swap("body", body, d.kind === "ready" ? { a: d.agents, l: d.lanes } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving }, () => {
-      if (d.kind === "ready") return h("div", { class: "tm-panels" }, agentsPanel(d.agents), lanesPanel(d.lanes));
+    swap("body", body, d.kind === "ready" ? { k: "ready" } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving }, () => {
+      if (d.kind === "ready") {
+        for (const k of [...sig.keys()]) if (k.startsWith("p:")) sig.delete(k); // the panels are drawn into a fresh page, so every part draws again
+        return h("div", { class: "tm-panels" }, ...Object.values(P).map((x) => x.el));
+      }
       if (d.kind === "off") return [h("p", { class: "tm-muted", "data-testid": "tm-off" }, d.text), d.sheet.canEdit ? switchRow("tm-watch-off", WORDS.watch, false, !d.sheet.saving) : null];
       return h("p", { class: d.kind === "error" ? "tm-error" : "tm-muted", role: d.kind === "error" ? "alert" : "status", "data-testid": "tm-" + d.kind }, d.text);
     });
+    if (d.kind === "ready") {
+      const bodies = { agents: agentsBody, lanes: lanesBody, plan: planBody, stats: statsBody, usage: usageBody };
+      for (const k of Object.keys(bodies)) {
+        const { asOf, warn, ...data } = d[k]; // the header has its own signature: a new "as of" time alone must not rebuild the body and drop focus from a link in it
+        swap("p:" + k + "-h", P[k].hd, [asOf, warn], () => headNodes(k, d[k]));
+        swap("p:" + k, P[k].body, data, () => bodies[k](d[k]));
+      }
+      swap("p:log-h", P.log.hd, [d.log.asOf, d.log.warn], () => headNodes("log", d.log));
+      paintLog(d.log);
+    }
     paintOperate(o);
     paintHalt(d.halt || null);
     if (want) { // a control that closed a part asks for focus on one that lives in another part

@@ -120,7 +120,7 @@ test.describe("D#6 R2b-5b: a run on the person's own machine (mocked API)", () =
 
   test("the cost block: priced plan run, with the compute row", async ({ page }) => {
     await setup(page, runnerInsight({ runner_usage: usage() }), EVENTS);
-    await expect(tid(page, "runs-cost-model")).toContainText("On your Claude plan · API-equivalent $1.23 · 182,000 in / 9,400 out tokens");
+    await expect(tid(page, "runs-cost-model")).toContainText("On your Claude plan · API-equivalent $1.2345 · 182,000 in / 9,400 out tokens");
     await expect(tid(page, "runs-cost-compute")).toContainText("Ran on your machine: no sandbox compute");
     const cost = (await tid(page, "runs-cost").innerText()).toLowerCase();
     expect(cost).not.toMatch(/spend|spent|charge|fulfil/);
@@ -133,7 +133,7 @@ test.describe("D#6 R2b-5b: a run on the person's own machine (mocked API)", () =
 
   test("API-key mode", async ({ page }) => {
     await setup(page, runnerInsight({ runner_usage: usage({ credential_mode: "api_key" }) }), EVENTS);
-    await expect(tid(page, "runs-cost-model")).toContainText("On your own API key · $1.23 at API prices · 182,000 in / 9,400 out tokens");
+    await expect(tid(page, "runs-cost-model")).toContainText("On your own API key · $1.2345 at API prices · 182,000 in / 9,400 out tokens");
   });
 
   test("a run with no usage recorded", async ({ page }) => {
@@ -154,7 +154,7 @@ test.describe("D#6 R2b-5b: a run on the person's own machine (mocked API)", () =
 const STATES = readdirSync(join(V1, "getRunInsight")).filter((f) => f.startsWith("200-runner-")).map((f) => f.slice(4, -5));
 const insightOf = (name: string) => readFixture("getRunInsight", `200-${name}.json`);
 const COST: Record<string, [string, string | RegExp]> = {
-  "runner-succeeded-with-pr": ["On your Claude plan · API-equivalent $0.01 · 6,300 in (5,300 cached) / 200 out tokens", "Estimate, priced at this run's model"],
+  "runner-succeeded-with-pr": ["On your Claude plan · API-equivalent $0.0147 · 6,300 in (5,300 cached) / 200 out tokens", "Estimate, priced at this run's model"],
   "runner-usage-not-priced": ["On your Claude plan · no API price for this model · 5,800 in (5,300 cached) / 100 out tokens", /not the same as \$0/],
   "runner-usage-not-recorded": ["Not recorded", /not the same as \$0/],
   "runner-running-activity": ["Counting…", ""],
@@ -275,7 +275,7 @@ test.describe("D#6 C42-4: pixel check, runner run against sandbox run (Activity 
 test.describe("runner run header total and the export control (mocked API)", () => {
   test("a subscription runner run's header shows the API-equivalent total as the customer's Claude plan, and offers the export", async ({ page }) => {
     const { errors } = await setup(page, runnerInsight({ runner_usage: usage() }), EVENTS);
-    await expect(tid(page, "runs-head-usd")).toHaveText("API-equivalent $1.23 · on your Claude plan");
+    await expect(tid(page, "runs-head-usd")).toHaveText("API-equivalent $1.2345 · on your Claude plan");
     const link = tid(page, "runs-export");
     await expect(link).toHaveText("Export events");
     await expect(link).toHaveAttribute("href", `/api/v1/runs/${ID}/events/export`);
@@ -285,7 +285,7 @@ test.describe("runner run header total and the export control (mocked API)", () 
 
   test("an own-API-key runner run says so", async ({ page }) => {
     await setup(page, runnerInsight({ runner_usage: usage({ credential_mode: "api_key" }) }), EVENTS);
-    await expect(tid(page, "runs-head-usd")).toHaveText("$1.23 at API prices · on your own API key");
+    await expect(tid(page, "runs-head-usd")).toHaveText("$1.2345 at API prices · on your own API key");
   });
 
   test("a run with no usage yet reads 'On your Claude plan', never $0", async ({ page }) => {

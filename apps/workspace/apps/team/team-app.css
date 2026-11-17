@@ -56,11 +56,15 @@
 .tm-gate { padding: 1px 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
 .tm-gate[data-result="fail"], .tm-gate[data-result="error"] { border-width: 2px; border-color: var(--accent, #1aff80); font-weight: 700; }
 .tm-link { color: inherit; text-decoration: underline; }
-.tm-link:focus-visible, .tm-btn:focus-visible, .tm-input:focus-visible, .tm-op h4:focus-visible, .tm-select:focus-visible, .tm-check input:focus-visible, .tm-title:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; } /* the text colour holds 4.5:1 on every theme, so the ring does too; the accent is not held to that */
+.tm-link:focus-visible, .tm-scroll:focus-visible, .tm-btn:focus-visible, .tm-input:focus-visible, .tm-op h4:focus-visible, .tm-select:focus-visible, .tm-check input:focus-visible, .tm-title:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; } /* the text colour holds 4.5:1 on every theme, so the ring does too; the accent is not held to that */
 /* Crystal and Orchard switch every select's and text field's outline off with !important at three classes of specificity; the ring is the one cue a keyboard user has, so this rule outranks them. */
 .tm-app .tm-select.tm-select:focus-visible { outline: 2px solid var(--text-primary, #1aff80) !important; outline-offset: 2px !important; }
 /* The same for the number field: those two themes style a text field with a longer selector than a select's, so this one is repeated to outrank it. */
 .tm-app.tm-app .tm-input.tm-input.tm-input:focus-visible { outline: 2px solid var(--text-primary, #1aff80) !important; outline-offset: 2px !important; }
+.tm-scroll { position: relative; max-height: 24rem; overflow: auto; }
+.tm-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.tm-time { font-variant-numeric: tabular-nums; }
+.tm-prov { margin: 4px 0 0 12px; font-size: 0.85rem; }
 .tm-app [hidden] { display: none; }
 
 /* Operate: rows of controls that wrap, labelled fields, and a reason line that is as plain as the banner. */
@@ -76,9 +80,10 @@
 /* Wide windows: the two panels sit side by side. Phones and narrow windows keep one column and full-width controls. */
 @container (min-width: 640px) {
   .tm-panels { grid-template-columns: 1fr 1fr; }
+  .tm-panel-log, .tm-panel-usage { grid-column: 1 / -1; }
 }
 @container (max-width: 520px) {
-  .tm-select, .tm-bar .tm-btn { flex: 1 1 100%; }
+  .tm-select, .tm-bar .tm-btn, .tm-pager .tm-btn { flex: 1 1 100%; }
   .tm-confirm .tm-btn { width: 100%; margin: 0 0 8px; }
 }
 

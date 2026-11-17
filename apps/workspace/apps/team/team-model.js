@@ -7,9 +7,11 @@
 //    otherwise it reads "unknown", whatever the server said. Both the bridge session and the engine session count: the list's liveness chip
 //    is the bridge's view, heard_age_s is the engine's own last word.
 //  - A reply that does not have the documented shape is a failed read, never an empty list (fail closed).
-//  - The cloud sends facts; this file does no cost, rate or total maths. The only arithmetic is ages and counts of rows on screen.
+//  - The cloud sends facts; this file does no cost, rate or total maths: a dollar figure is drawn as sent, through the one shared formatter, and never added up here.
+//    The only arithmetic is ages, counts of rows on screen, and joining consecutive event numbers into ranges.
 // Every word that reaches the page is a string made here; nothing is null, undefined or NaN.
 import { isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
+import { usd as dollars } from "../_lib/dom.js";
 import { PANELS, createTeamApi } from "./team-api.js";
 import { NO_OP, agentWords, createOperate, describeHalt, describeOperate, isAgentId, stopOf } from "./team-operate.js";
 
@@ -22,6 +24,11 @@ export const SOURCE_ORDER = ["loop", "team_log", "plan", "merge_queue"];
 export const SOURCE_LIMIT_S = { loop: 3600, team_log: 7200, plan: 26 * 3600, merge_queue: 6 * 3600 };
 const SOURCE_NAME = { loop: "loop", team_log: "team log", plan: "plan", merge_queue: "merge queue" };
 export const FINAL_LANE_STATES = ["merged", "failed", "dequeued", "refused"];
+export const LOG_WINDOW = 400; // log rows held (and drawn) at any time; older pages push the newest out
+export const ROADMAP_PAGE = 100;
+export const PLAN_STALE_S = 26 * 3600;
+export const LANE_PAGES = 5; // the merged count reads this many lane pages at most
+export const MERGED_WINDOW_MS = 30 * 24 * 3600 * 1000;
 
 export const WORDS = {
   title: "Team",
@@ -53,12 +60,23 @@ export const WORDS = {
   saveFailed: "That didn't save. Try again.",
   refusals: { repo_not_runner_local: "Not on one of your runners", public_repo: "Public repository" },
   refusalOther: "Not available",
+  noLog: "No log lines yet", logNote: "Log text stays on your machine; the cloud receives only what kind of line it was.", logLabel: "Log lines",
+  older: "Load older", olderLoading: "Loading older lines…", olderNone: "No older lines", olderFailed: "Older lines couldn't be loaded.", newest: "Back to newest",
+  noPlan: "Plan not synced yet", noPlanItems: "No items in this plan", noKey: "(no key)", roadmap: "Roadmap", prev: "Previous rows", next: "Next rows", noFigures: "no figures yet",
+  mergedWindow: "merged in the last 30 days",
+  noFigure: "no figure", noUsage: "No usage reported yet", usageMore: "More rows exist than are shown.", usageWindow: "Window: ",
+  allUsage: "API-equivalent for the window",
   sendRefusals: { repo_not_runner_local: "That repository isn't on one of your runners.", public_repo: "A public repository can't be watched." },
 };
 
 const LANE_STATE = { queued: "Queued", testing: "Testing", merged: "Merged", failed: "Failed", dequeued: "Removed from the queue", refused: "Refused" };
 const GATE_NAME = { gate1: "Gate 1", code_review: "Code review", security_review: "Security review", acceptance: "Acceptance", browser: "Browser", ci_full: "CI full" };
 const RESULT = { pass: "pass", fail: "fail", error: "error", skipped: "skipped" };
+// A plan item has its own states (the plan route's enum); the roadmap's STATUS words below are a different list.
+const ITEM_STATE = { planned: "Planned", in_progress: "In progress", pr_open: "Pull request open", merged: "Merged", blocked: "Blocked", dropped: "Dropped" };
+const USAGE_STATE = { recorded: "Recorded", not_priced: "No API price for this model", not_recorded: "Usage was not recorded" };
+const CREDENTIAL = { subscription: "your Claude plan", api_key: "your API key" };
+const STATUS = { not_started: "Not started", in_progress: "In progress", done: "Done", blocked: "Blocked", deferred: "Deferred", split: "Split", removed: "Removed", superseded: "Superseded" };
 const CHIP = { live: "Live", runner_removed: "Runner removed", never: "Never connected" };
 
 // ── small readers ───────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -84,12 +102,34 @@ export function githubLink(fullName, kind, n) {
 }
 
 /** The per-repo list envelope. Missing the list, the gap list or the missing count is a failed read: a gap must never be hidden by a default. */
-export function readEnvelope(raw) {
-  if (!isObj(raw) || !Array.isArray(raw.items) || !Array.isArray(raw.gaps) || !isInt(raw.missing_events)) return null;
+export function readEnvelope(raw, listed = true) {
+  if (!isObj(raw) || (listed && !Array.isArray(raw.items)) || !Array.isArray(raw.gaps) || !isInt(raw.missing_events)) return null;
   const ages = {};
   if (isObj(raw.source_ages_s)) for (const k of SOURCE_ORDER) if (Number.isFinite(raw.source_ages_s[k]) && raw.source_ages_s[k] >= 0) ages[k] = raw.source_ages_s[k];
   const gaps = raw.gaps.filter((g) => isObj(g) && stamp(g.before_ts) !== null).map((g) => ({ before_ts: g.before_ts }));
-  return { items: raw.items.filter(isObj), as_of: stamp(raw.as_of) === null ? "" : raw.as_of, heard_age_s: isInt(raw.heard_age_s) ? raw.heard_age_s : null, source_ages_s: ages, gaps, missing_events: raw.missing_events };
+  return { items: listed ? raw.items.filter(isObj) : [], cursor: typeof raw.next_cursor === "string" ? raw.next_cursor : "", as_of: stamp(raw.as_of) === null ? "" : raw.as_of, heard_age_s: isInt(raw.heard_age_s) ? raw.heard_age_s : null, source_ages_s: ages, gaps, missing_events: raw.missing_events };
+}
+
+/** The plan route's body (a 204 never gets here: the caller treats null as "not synced"). The roadmap list is part of the shape. */
+export function readPlan(raw) {
+  const env = readEnvelope(raw);
+  if (!env || !Array.isArray(raw.roadmap)) return null;
+  return { ...env, date: typeof raw.plan_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.plan_date) ? raw.plan_date : "", age_s: isInt(raw.age_s) ? raw.age_s : null, roadmap: raw.roadmap.filter(isObj) };
+}
+/** The stats route's body: the envelope fields plus figures, each kept exactly as sent with the count of events behind it. */
+export function readStats(raw) {
+  const env = readEnvelope(raw, false);
+  if (!env) return null;
+  const events = (o) => (isObj(o) && isObj(o.provenance) && isInt(o.provenance.count) ? { count: o.provenance.count, kinds: (Array.isArray(o.provenance.kinds) ? o.provenance.kinds : []).filter((k) => typeof k === "string" && k !== "").map(word), seqs: seqRanges(o.provenance.seqs) } : null);
+  const num = (v) => (Number.isFinite(v) ? String(v) : "");
+  const roles = isObj(raw.agents_by_role) && isObj(raw.agents_by_role.value) ? Object.entries(raw.agents_by_role.value).filter(([, n]) => isInt(n)) : null;
+  const dur = raw.duration_s, gate = raw.gate_pass_rate;
+  return {
+    ...env, from: isObj(raw.window) && stamp(raw.window.from) !== null ? raw.window.from.slice(0, 10) : "", to: isObj(raw.window) && stamp(raw.window.to) !== null ? raw.window.to.slice(0, 10) : "",
+    roles, rolesEvents: events(raw.agents_by_role), dur: isObj(dur) ? { n: isInt(dur.n) ? String(dur.n) : "", median: num(dur.median), p90: num(dur.p90) } : null, durEvents: events(dur),
+    merges: isObj(raw.merges) && isInt(raw.merges.value) ? String(raw.merges.value) : "", mergeEvents: events(raw.merges),
+    gates: isObj(gate) && isInt(gate.numerator) && isInt(gate.denominator) ? { passed: String(gate.numerator), of: String(gate.denominator) } : null, gateEvents: events(gate),
+  };
 }
 
 const idKey = (v) => (typeof v === "string" || Number.isInteger(v) ? String(v) : "");
@@ -159,6 +199,81 @@ export function laneRows(lanes, gates, nowMs, repoName) {
 }
 const hasOpenLane = (lanes) => !!lanes && lanes.items.some((l) => !FINAL_LANE_STATES.includes(l.state));
 
+
+/** The event numbers a figure was drawn from, per session: consecutive numbers join into one range ("3–7, 9"); sessions are named by order, never by id. */
+function seqRanges(list) {
+  const by = new Map();
+  for (const s of Array.isArray(list) ? list : []) if (isObj(s) && typeof s.session_id === "string" && isInt(s.seq)) by.set(s.session_id, (by.get(s.session_id) || []).concat(s.seq));
+  return [...by.values()].map((q, i) => {
+    const out = [];
+    for (const n of q.sort((a, b) => a - b)) { const last = out[out.length - 1]; if (last && n <= last[1] + 1) last[1] = Math.max(last[1], n); else out.push([n, n]); }
+    return "Session " + (i + 1) + ": seq " + out.map(([a, b]) => (a === b ? String(a) : a + "–" + b)).join(", ");
+  });
+}
+const word = (v) => (typeof v === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(v) ? v.replace(/_/g, " ") : "other");
+const numberOf = (v) => (Number.isInteger(v) && v >= 1 ? v : 0);
+/** One log line: its time (with the day when it is not today), who, the kind of line, and D# / PR links. The cloud never holds a line's text. */
+export function logRow(l, i, repoName, nowMs) {
+  const t = stamp(l.ts);
+  const d = t === null ? null : new Date(t);
+  const day = d && d.toDateString() !== new Date(nowMs).toDateString() ? pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " : "";
+  return {
+    id: idKey(l.line_id) || "row" + i, time: day + (hm(l.ts) || "unknown time"), role: typeof l.actor_role === "string" && l.actor_role !== "" ? l.actor_role : "other", category: word(l.category),
+    discussion: numberOf(l.discussion), discussionLink: githubLink(repoName, "discussions", l.discussion), pr: numberOf(l.pr), prLink: githubLink(repoName, "pull", l.pr),
+  };
+}
+/** Today's plan and the roadmap rows. The merged count is the PRs the lane list shows merged for that row's Discussion in the last 30 days (no lifetime figure exists). */
+export function planView(plan, lanes, nowMs, repoName, page) {
+  const merged = new Map();
+  for (const l of lanes ? lanes.items : []) {
+    const at = stamp(l.updated_at);
+    if (l.state === "merged" && numberOf(l.discussion) && at !== null && nowMs - at <= MERGED_WINDOW_MS) merged.set(l.discussion, (merged.get(l.discussion) || 0) + 1);
+  }
+  const pages = Math.max(1, Math.ceil(plan.roadmap.length / ROADMAP_PAGE));
+  const at = Math.min(Math.max(0, page), pages - 1);
+  const rows = plan.roadmap.slice(at * ROADMAP_PAGE, (at + 1) * ROADMAP_PAGE).map((r) => {
+    const d = numberOf(r.discussion);
+    const done = d && lanes ? (lanes.cursor ? "at least " : "") + (merged.get(d) || 0) + " " + WORDS.mergedWindow : "";
+    const planned = isInt(r.planned_prs) ? r.planned_prs + " planned" : "";
+    return { key: typeof r.row_key === "string" && r.row_key !== "" ? r.row_key : WORDS.noKey, discussion: d, link: githubLink(repoName, "discussions", r.discussion), status: Object.hasOwn(STATUS, r.status) ? STATUS[r.status] : "Unknown", counts: [done, planned].filter(Boolean).join(" · ") };
+  });
+  const items = plan.items.filter((i) => numberOf(i.discussion)).map((i) => ({ discussion: i.discussion, link: githubLink(repoName, "discussions", i.discussion), ordinal: isInt(i.ordinal) ? String(i.ordinal) : "", state: Object.hasOwn(ITEM_STATE, i.state) ? ITEM_STATE[i.state] : "Unknown" }));
+  const stale = plan.age_s !== null && plan.age_s > PLAN_STALE_S;
+  return {
+    title: plan.date ? (stale ? "Plan from " : "Plan for ") + plan.date : stale ? "Plan is out of date" : "", items, rows, empty: WORDS.noPlanItems, hasRows: plan.roadmap.length > 0, hasPrev: at > 0, hasNext: at < pages - 1,
+    span: plan.roadmap.length > ROADMAP_PAGE ? "Rows " + (at * ROADMAP_PAGE + 1) + "–" + (at * ROADMAP_PAGE + rows.length) + " of " + plan.roadmap.length : "",
+  };
+}
+/** The figures as the server sent them, each with the number of events behind it (a disclosure listing what the server knows of them); one that did not come reads "no figures yet". */
+export function statsView(s, open = []) {
+  const from = (n) => (n === null ? "" : " (from " + n.count + (n.count === 1 ? " event)" : " events)"));
+  const prov = (n) => (n === null ? null : [n.kinds.length ? "Event kinds: " + n.kinds.join(", ") : "Event kinds: none listed", "Events: " + n.count].concat(n.seqs));
+  const rows = [
+    ["roles", "Agents by role", s.roles === null ? "" : s.roles.map(([k, n]) => k + " " + n).join(", "), s.rolesEvents],
+    ["duration", "Duration", s.dur && s.dur.median !== "" ? "median " + s.dur.median + " s, p90 " + s.dur.p90 + " s" : "", s.durEvents],
+    ["merges", "Merges", s.merges, s.mergeEvents],
+    ["gates", "Gates passed", s.gates && s.gates.of !== "0" ? s.gates.passed + " of " + s.gates.of : "", s.gateEvents],
+  ].map(([id, label, value, n]) => ({ id, label, value: value === "" ? WORDS.noFigures : value, from: value === "" ? "" : from(n), prov: value === "" ? null : prov(n), open: open.includes(id) }));
+  return { rows, window: s.from && s.to ? "Window: " + s.from + " to " + s.to : "" };
+}
+
+/** The cost route's body: the envelope, the window and the one total the server worked out. A total that is not a number is an unreadable reply, never $0. */
+export function readUsage(raw) {
+  const env = readEnvelope(raw);
+  if (!env || !isObj(raw.totals) || !Number.isFinite(raw.totals.api_equivalent_usd)) return null;
+  return { ...env, from: isObj(raw.window) && stamp(raw.window.from) !== null ? raw.window.from.slice(0, 10) : "", to: isObj(raw.window) && stamp(raw.window.to) !== null ? raw.window.to.slice(0, 10) : "", sent: raw.totals.api_equivalent_usd };
+}
+/** Each figure is drawn as sent; a row without one says why in the server's note or the state's words, and never reads $0. */
+export function usageView(u) {
+  const rows = u.items.map((i, n) => {
+    const model = typeof i.model === "string" && i.model !== "" ? i.model : "unknown model";
+    const mode = Object.hasOwn(CREDENTIAL, i.credential_mode) ? " · on " + CREDENTIAL[i.credential_mode] : "";
+    const note = typeof i.note === "string" && i.note !== "" ? i.note : "";
+    return { id: "u" + n, label: (i.subject_kind === "tick" ? "Tick" : "Agent") + " · " + model + mode, value: Number.isFinite(i.api_equivalent_usd) ? dollars(i.api_equivalent_usd) : note || (Object.hasOwn(USAGE_STATE, i.state) ? USAGE_STATE[i.state] : "") || WORDS.noFigure };
+  });
+  return { headline: dollars(u.sent), headlineLabel: WORDS.allUsage, rows, empty: WORDS.noUsage, more: u.cursor ? WORDS.usageMore : "", window: u.from && u.to ? WORDS.usageWindow + u.from + " to " + u.to : "" };
+}
+
 /** The banner for the worst gap any panel reports, or "" when none. */
 export function gapBanner(envs) {
   let worst = null;
@@ -200,27 +315,39 @@ export function describe(st, nowMs) {
   const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", operate: describeOperate(st, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
   if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   if (!repo) return { kind: "norepos", text: WORDS.noRepos, ...base };
-  const { agents, lanes, gates } = st.panels;
+  const { agents, lanes, gates, log, plan, stats, usage } = st.panels;
   const stale = (env) => isStale(repo, env);
   const head = (env) => ({ asOf: asOfWords(env, nowMs), warn: stale(env) ? lastSeenWords(env) : "" });
   const live = !stale(agents);
+  const envs = [agents, lanes, gates, log, plan, stats, usage].filter(isObj); // plan is the word "none" when the route answered 204
+  const lg = st.log;
+  const planned = isObj(plan) ? planView(plan, lanes, nowMs, repo.name, st.planPage) : null;
   const lane = lanes ? laneRows(lanes, gates, nowMs, repo.name) : null;
   const rows = agents ? agents.items.map((a) => agentRow(a, live, nowMs, repo.name)).filter((r) => r.state !== "stopped").map((r) => ({ ...r, stop: r.state === "running" ? stopOf(st, r.stopId) : null, who: agentWords(r) })) : [];
   return {
     kind: "ready", ...base, operate: describeOperate(st, nowMs, repo, asOf, rows), halt: describeHalt(st, repo),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
-    chip: chipOf(repo), runner: repo.runner, banner: gapBanner([agents, lanes, gates]), notices: sourceNotices([agents, lanes, gates], lanes),
+    chip: chipOf(repo), runner: repo.runner, banner: gapBanner(envs), notices: sourceNotices(envs, lanes),
     agents: { ...head(agents), failed: !agents, rows, empty: WORDS.noAgents },
     lanes: { ...head(lanes), failed: !lanes, open: lane ? lane.open : [], merged: lane ? lane.merged : [], empty: WORDS.noLanes },
+    plan: { ...(plan === "none" ? { asOf: WORDS.noData, warn: "" } : head(plan)), failed: !plan, none: plan === "none", view: planned, notSynced: WORDS.noPlan },
+    stats: { ...head(stats), failed: !stats, view: isObj(stats) ? statsView(stats, st.provOpen) : null },
+    usage: { ...head(usage), failed: !usage, view: isObj(usage) ? usageView(usage) : null },
+    log: {
+      ...head(log), failed: !log, rows: lg.rows.map((l, i) => logRow(l, i, repo.name, nowMs)), empty: WORDS.noLog, note: WORDS.logNote, label: WORDS.logLabel,
+      older: lg.loading ? WORDS.olderLoading : lg.cursor ? WORDS.older : WORDS.olderNone, canOlder: !!lg.cursor && !lg.loading, olderFailed: lg.failed ? WORDS.olderFailed : "",
+      newest: lg.released > 0 ? WORDS.newest + " (" + lg.released + " newer lines not shown)" : "", said: lg.said,
+    },
   };
 }
 
 // ── the controller ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-const NO_PANELS = { agents: null, lanes: null, gates: null };
+const NO_PANELS = { agents: null, lanes: null, gates: null, log: null, plan: null, stats: null, usage: null };
+const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, failed: false, said: "" };
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
 export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval } = {}) {
-  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, op: NO_OP };
+  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, op: NO_OP };
   let busy = false, again = false, pick = 0, debounce = null, stopFn = null;
   const set = (patch) => { st = { ...st, ...patch }; onChange(); };
   const operate = createOperate({ client, signal, get: () => st, set, refresh: () => refresh(), aborted: (e) => aborted(e, signal) });
@@ -241,7 +368,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     }
     const selectedId = repos.some((r) => r.id === st.selectedId) ? st.selectedId : repos.length ? repos[0].id : "";
     const changed = selectedId !== st.selectedId;
-    set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
+    set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op, ...(changed ? { log: NO_LOG, planPage: 0, provOpen: [] } : {}) }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
     if (!selectedId) return;
     const token = pick;
     const stale = () => token !== pick || (signal && signal.aborted); // another repo was chosen, or the window closed, while a read was out
@@ -250,13 +377,41 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     await opRead;
     if (stale()) return;
     const next = { ...st.panels };
-    let failed = false;
-    PANELS.forEach((k, i) => {
-      const env = results[i].status === "fulfilled" ? readEnvelope(results[i].value) : null;
+    let failed = false, first = null;
+    for (const [i, k] of PANELS.entries()) {
+      const v = results[i].status === "fulfilled" ? results[i].value : undefined;
+      let env = k === "plan" ? (v === null ? "none" : readPlan(v)) : k === "stats" ? readStats(v) : k === "usage" ? readUsage(v) : readEnvelope(v);
+      if (k === "lanes" && env) env = await moreLanes(env, selectedId);
       if (env) next[k] = env;
       else failed = true;
-    });
-    set({ panels: next, refreshFailed: failed });
+      if (k === "log" && env && st.log.pages <= 1) first = { ...NO_LOG, rows: env.items, cursor: env.cursor, pages: 1 }; // once older pages are open, a refresh leaves the list where the person is
+    }
+    if (token !== pick || (signal && signal.aborted)) return;
+    set({ panels: next, refreshFailed: failed, ...(first ? { log: first } : {}) });
+  }
+  /** The merged count needs every lane the server has, so up to LANE_PAGES pages are read, following the cursor. A page that cannot be read leaves its cursor in place, so the count still says "at least". */
+  async function moreLanes(env, id) {
+    let all = env;
+    for (let n = 1; n < LANE_PAGES && all.cursor; n++) {
+      let page = null;
+      try { page = readEnvelope(await client.lanesPage(id, all.cursor, signal)); } catch (e) { if (aborted(e, signal)) return all; }
+      if (!page) break;
+      all = { ...all, items: all.items.concat(page.items), cursor: page.cursor };
+    }
+    return all;
+  }
+  async function loadOlder() {
+    const l = st.log, id = st.selectedId;
+    if (l.loading || !l.cursor || !id) return;
+    const token = pick;
+    set({ log: { ...l, loading: true, failed: false } });
+    let env = null;
+    try { env = readEnvelope(await client.older(id, l.cursor, signal)); } catch (e) { if (aborted(e, signal)) return; }
+    if (token !== pick || (signal && signal.aborted)) return;
+    if (!env) { set({ log: { ...st.log, loading: false, failed: true } }); return; }
+    const all = st.log.rows.concat(env.items);
+    const over = Math.max(0, all.length - LOG_WINDOW); // the newest rows leave the window, so the list never holds more than LOG_WINDOW
+    set({ log: { rows: all.slice(over), cursor: env.cursor, pages: st.log.pages + 1, released: st.log.released + over, loading: false, failed: false, said: "Older log lines loaded (page " + (st.log.pages + 1) + ")." } });
   }
   async function refresh() {
     if (busy) { again = true; return; }
@@ -267,7 +422,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
   function select(id) {
     if (id === st.selectedId || !st.repos.some((r) => r.id === id)) return;
     pick += 1;
-    set({ selectedId: id, panels: NO_PANELS, refreshFailed: false, op: NO_OP });
+    set({ selectedId: id, panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], refreshFailed: false, op: NO_OP });
     refresh();
   }
   async function put(call, ok, forbidden) {
@@ -301,7 +456,10 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     again = false;
   }
   return {
-    load: refresh, refresh, select, start, stop,
+    load: refresh, refresh, select, start, stop, loadOlder,
+    newest: () => { set({ log: NO_LOG }); refresh(); },
+    toggleProv: (id) => set({ provOpen: st.provOpen.includes(id) ? st.provOpen.filter((k) => k !== id) : st.provOpen.concat(id) }),
+    planPage: (by) => set({ planPage: Math.max(0, st.planPage + by) }),
     toggleSheet: () => set({ sheetOpen: !st.sheetOpen, confirmDelete: false, notice: "" }),
     setWatch: (on) => put(() => client.saveSettings({ watch_enabled: on }, signal), WORDS.saved),
     setRepo: (id, on) => put(() => client.saveSettings({ repo_ids: enabledIds(id, on) }, signal), WORDS.saved),

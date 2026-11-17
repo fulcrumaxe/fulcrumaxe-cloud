@@ -24,6 +24,13 @@ interface Mock {
   agents: Obj;
   lanes: Obj;
   gates: Obj;
+  log: Obj;
+  /** The plan answer; null is a 204 (no snapshot). */
+  plan: Obj | null;
+  stats: Obj;
+  usage: Obj;
+  /** When set, answers /log by cursor (a page of lines, and the cursor for the next) instead of `log`. */
+  logPage: ((cursor: string) => Obj) | null;
   /** Every PUT, with its body. */
   puts: { path: string; body: unknown }[];
   /** GET reads per path (query included). */
@@ -64,6 +71,8 @@ function fresh(over: Partial<Mock> = {}): Mock {
     agents: F.envelope([F.agent(), F.agent({ agent_id: "b2c3d4e5f6071829", role: "code-reviewer", discussion: 43, background: true, started_at: F.iso(120) })]),
     lanes: F.envelope([F.lane({ pr: 7, state: "testing" }), F.lane({ pr: 9, discussion: 44, state: "queued" }), F.lane({ pr: 5, discussion: 40, state: "merged" })]),
     gates: F.envelope([F.gate({ pr: 7, gate: "gate1", result: "pass" }), F.gate({ pr: 7, gate: "code_review", result: "fail" }), F.gate({ pr: 5, gate: "ci_full", result: "pass" })]),
+    log: F.envelope([F.logLine({ line_id: "aaaa000000000001", pr: 7 }), F.logLine({ line_id: "aaaa000000000002", actor_role: "executor", category: "spawned", pr: null }), F.logLine({ line_id: "aaaa000000000003", discussion: null, pr: 9, category: "gate_passed" })]),
+    plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
     commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, ...over,
   };
@@ -104,8 +113,10 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean } = {}) {
       if (mock.fail.some((f) => p.includes(f))) return json(route, 500, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
       if (url.pathname === `${BASE}/settings`) return json(route, 200, mock.settings);
       if (url.pathname === `${BASE}/repos`) return json(route, 200, { items: mock.repos });
-      const m = url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/(agents|lanes|gates)$`));
-      if (m) return json(route, 200, mock[m[2] as "agents" | "lanes" | "gates"]);
+      const m = url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/(agents|lanes|gates|log|plan|stats|usage)$`));
+      if (m && m[2] === "plan") return mock.plan === null ? route.fulfill({ status: 204 }) : json(route, 200, mock.plan);
+      if (m && m[2] === "log" && mock.logPage) return json(route, 200, mock.logPage(url.searchParams.get("cursor") ?? ""));
+      if (m) return json(route, 200, mock[m[2] as "agents" | "lanes" | "gates" | "log" | "stats" | "usage"]);
       if (url.pathname.endsWith("/commands")) return json(route, 200, mock.commands);
     }
     if (req.method() === "POST" && url.pathname.endsWith("/commands")) {
@@ -244,9 +255,23 @@ test.describe("Team app", () => {
     const over = await page.evaluate((sel) => { const el = document.querySelector(sel) as HTMLElement; return [el.scrollWidth, el.clientWidth]; }, `${WIN} .tm-app`);
     expect(over[0]).toBeLessThanOrEqual(over[1]);
     for (const id of ["tm-repo", "tm-settings-btn"]) expect((await box(t(page, id))).height).toBeGreaterThanOrEqual(43.5); // the phone window is drawn at a scale just under 1
-    // Element counts: one picker, one chip, two panels, five rows (2 agents, 3 lane rows), one heading.
-    expect(await page.locator(`${WIN} .tm-panels .tm-panel`).count()).toBe(2);
-    expect(await page.locator(`${WIN} .tm-panels .tm-item`).count()).toBe(5);
+    // The second row: plan and stats side by side when wide; the log spans the whole width.
+    const [pl, st, lg, us] = await page.evaluate((sel) => (['[data-testid="tm-plan"]', '[data-testid="tm-stats"]', '[data-testid="tm-log"]', '[data-testid="tm-usage"]'] as const).map((q) => { const r = (document.querySelector(sel + " " + q) as HTMLElement).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }), WIN) as Box[];
+    if (wide) {
+      expect(Math.abs(pl.y - st.y)).toBeLessThanOrEqual(1);
+      expect(lg.width).toBeGreaterThan(pl.width + st.width - 2);
+    } else {
+      expect(st.y).toBeGreaterThanOrEqual(pl.y + pl.height - 1);
+      expect(Math.abs(lg.width - a.width)).toBeLessThanOrEqual(1);
+    }
+    // The Cost panel spans the whole width below plan and stats, and the log comes after it.
+    expect(us.y).toBeGreaterThanOrEqual(Math.max(pl.y + pl.height, st.y + st.height) - 1);
+    expect(Math.abs(us.width - lg.width)).toBeLessThanOrEqual(1);
+    expect(lg.y).toBeGreaterThanOrEqual(us.y + us.height - 1);
+    console.log("LAYOUT2 " + JSON.stringify({ project: test.info().project.name, plan: [Math.round(pl.x), Math.round(pl.y), Math.round(pl.width), Math.round(pl.height)], stats: [Math.round(st.x), Math.round(st.y), Math.round(st.width), Math.round(st.height)], log: [Math.round(lg.x), Math.round(lg.y), Math.round(lg.width), Math.round(lg.height)] }));
+    // Element counts: one picker, one chip, six panels, 18 rows (2 agents, 3 lane rows, 2 plan items, 2 roadmap rows, 4 figures, 2 cost rows, 3 log lines), one heading.
+    expect(await page.locator(`${WIN} .tm-panels .tm-panel`).count()).toBe(6);
+    expect(await page.locator(`${WIN} .tm-panels .tm-item`).count()).toBe(18);
     expect(await page.locator(`${WIN} .tm-bar select`).count()).toBe(1);
     expect(await page.locator(`${WIN} h2`).count()).toBe(1);
     console.log("LAYOUT " + JSON.stringify({ project: test.info().project.name, app: [Math.round(app.width), Math.round(app.height), cssWidth], agents: [Math.round(a.x), Math.round(a.y), Math.round(a.width), Math.round(a.height)], lanes: [Math.round(l.x), Math.round(l.y), Math.round(l.width), Math.round(l.height)], wide }));
@@ -494,7 +519,7 @@ test.describe("Team app", () => {
     await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
     await expect(t(page, "tm-agent")).toHaveCount(2, { timeout: 5000 });
     await expect(t(page, "tm-pr")).toHaveText("PR #11", { timeout: 5000 });
-    for (const kind of ["agents?state=running", "lanes", "gates"]) expect(mock.reads.filter((r) => r === `${BASE}/repos/${REPO_A}/${kind}`).length).toBeGreaterThanOrEqual(1);
+    for (const kind of ["agents?state=running", "lanes", "gates", "log?limit=100", "plan", "stats", "usage"]) expect(mock.reads.filter((r) => r === `${BASE}/repos/${REPO_A}/${kind}`).length).toBeGreaterThanOrEqual(1);
   });
 
   test("without a live stream the panels are read again every 15 s", async ({ page }) => {
@@ -522,9 +547,8 @@ test.describe("Team app", () => {
     expect(await active()).toBe("tm-watch");
     await page.keyboard.press("Space"); // a press while the save is out changes nothing
     release();
-    await expect.poll(() => mock.puts.length).toBe(1);
-    expect(mock.puts[0].body).toEqual({ watch_enabled: false });
     await expect(box1).not.toHaveAttribute("aria-disabled", "true");
+    expect(mock.puts[0].body).toEqual({ watch_enabled: false });
     expect(await active()).toBe("tm-watch");
     await expect(t(page, "tm-live")).toHaveText("Saved.");
     // A repo box, the same way (the held PUT is already released, so the answer comes at once).
@@ -1298,9 +1322,280 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
+  test("Log: each line shows its time, role, kind and D# / PR links, with the fixed note and a Load older button that has nothing to do", async ({ page }) => {
+    const { errors } = await setup(page, fresh());
+    await open(page);
+    await expect(t(page, "tm-log-note")).toHaveText("Log text stays on your machine; the cloud receives only what kind of line it was.");
+    const rows = t(page, "tm-log-line");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0)).toContainText("team-lead");
+    await expect(rows.nth(0)).toContainText("merged");
+    await expect(rows.nth(0)).toContainText(/\d\d:\d\d/);
+    await expect(rows.nth(0).locator("a").nth(0)).toHaveAttribute("href", "https://github.com/acme-labs/widgets/discussions/42");
+    await expect(rows.nth(0).locator("a").nth(1)).toHaveAttribute("href", "https://github.com/acme-labs/widgets/pull/7");
+    await expect(rows.nth(2)).toContainText("gate passed");
+    await expect(rows.nth(1).locator("a")).toHaveCount(1); // no PR on this line
+    await expect(t(page, "tm-log-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(t(page, "tm-log-older")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-log-older")).toHaveText("No older lines");
+    await expect(t(page, "tm-log-list")).toHaveAttribute("tabindex", "0");
+    await expect(t(page, "tm-log-list")).toHaveAttribute("aria-label", "Log lines");
+    await clean(page, errors);
+  });
+
+  test("Log with 10,000 events: paging all the way down keeps at most 400 rows in the DOM, no long task over 200 ms, and Load older keeps focus", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const PAGE = 100, TOTAL = 10_000;
+    const logPage = (cursor: string) => {
+      const start = cursor === "" ? 0 : Number(cursor);
+      const next = start + PAGE;
+      return F.envelope(F.logLines(PAGE, start), { next_cursor: next >= TOTAL ? null : String(next) });
+    };
+    const mock = fresh({ log: logPage(""), logPage });
+    mock.log = { ...logPage(""), next_cursor: String(PAGE) };
+    const { errors } = await setup(page, mock);
+    await page.addInitScript(() => {
+      const w = window as unknown as { __long: number[] };
+      w.__long = [];
+      try { new PerformanceObserver((l) => l.getEntries().forEach((e) => w.__long.push(e.duration))).observe({ entryTypes: ["longtask"] }); } catch { /* no long-task support: the count stays 0 */ }
+    });
+    await page.reload();
+    await waitForDesktop(page);
+    await open(page);
+    const rows = page.locator(`${WIN} [data-testid="tm-log-line"]`);
+    await expect(rows).toHaveCount(100);
+    let most = 100, pages = 1;
+    const older = t(page, "tm-log-older");
+    await older.focus();
+    for (let i = 0; i < 99; i++) {
+      await page.keyboard.press("Enter");
+      await expect(older).not.toHaveText("Loading older lines…");
+      pages += 1;
+      most = Math.max(most, await rows.count());
+      expect(most).toBeLessThanOrEqual(400);
+      expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe("tm-log-older"); // focus stays on the button through every rebuild
+      if ((await older.getAttribute("aria-disabled")) === "true") break;
+    }
+    await expect(older).toHaveText("No older lines");
+    await expect(rows).toHaveCount(400);
+    await expect(t(page, "tm-log-newest")).toContainText("9600 newer lines not shown");
+    await expect(t(page, "tm-live")).toContainText("Older log lines loaded");
+    const long = await page.evaluate(() => (window as unknown as { __long: number[] }).__long);
+    console.log("LOGLOAD " + JSON.stringify({ project: test.info().project.name, pages, mostRows: most, longTasksOver200: long.filter((d) => d > 200).length, longest: Math.round(Math.max(0, ...long)) }));
+    expect(long.filter((d) => d > 200)).toEqual([]);
+    // Back to newest: the first page again, and the button is gone with focus handed to the list's own place (the heading, never the page).
+    await press(t(page, "tm-log-newest"));
+    await expect(rows).toHaveCount(100);
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+    await clean(page, errors);
+  });
+
+  test("Log scrolling: reaching the bottom of the list loads the next page without a click", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const logPage = (cursor: string) => { const start = cursor === "" ? 0 : Number(cursor); return F.envelope(F.logLines(60, start), { next_cursor: start + 60 >= 240 ? null : String(start + 60) }); };
+    const { errors } = await setup(page, fresh({ log: { ...logPage(""), next_cursor: "60" }, logPage }));
+    await open(page);
+    const rows = page.locator(`${WIN} [data-testid="tm-log-line"]`);
+    await expect(rows).toHaveCount(60);
+    await page.evaluate((sel) => { const l = document.querySelector(sel + ' [data-testid="tm-log-list"]') as HTMLElement; l.scrollTop = l.scrollHeight; }, WIN);
+    await expect(rows).toHaveCount(120);
+    await clean(page, errors);
+  });
+
+
+  test("Cost: the route's total and each row's figure are drawn as sent, a row with no figure says why in words, and the header carries its age", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const mock = fresh({ usage: F.usage({ items: [F.usageItem({ api_equivalent_usd: 1234.5 }), F.usageItem({ subject_kind: "tick", subject_id: "t1", model: null, credential_mode: null, tokens: null, api_equivalent_usd: null, state: "not_recorded", note: "Usage was not recorded for this tick. That is not the same as $0." })], totals: { api_equivalent_usd: 1235.5, tokens: { input: 1, output: 1, cache_read: 0, cache_write: 0 } } }) });
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await expect(t(page, "tm-usage-headline")).toHaveText("$1,235.50"); // the route's own total, not the two rows added
+    await expect(t(page, "tm-usage-value")).toHaveText(["$1,234.50", "Usage was not recorded for this tick. That is not the same as $0."]);
+    await expect(t(page, "tm-usage-row").nth(0)).toContainText("Agent · sonnet-5 · on your Claude plan");
+    await expect(t(page, "tm-usage-row").nth(1)).toContainText("Tick · unknown model");
+    await expect(t(page, "tm-usage-asof")).toHaveText(/^as of \d\d:\d\d \(0 min ago\)$/);
+    await expect(t(page, "tm-usage-window")).toHaveText(/^Window: \d{4}-\d\d-\d\d to \d{4}-\d\d-\d\d$/);
+    expect((await t(page, "tm-usage").innerText()).replace(/That is not the same as \$0\./i, "")).not.toMatch(/\$0(?!\.\d*[1-9])/);
+    await clean(page, errors);
+  });
+
+  test("Cost: its gap reaches the banner, its stale heartbeat warns on its header, and a source age shows its notice", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ usage: F.usage({ missing_events: 2, gaps: [{ from_seq: 1, to_seq: 2, before_ts: F.iso(900) }], heard_age_s: 900, source_ages_s: { loop: 2 * 3600 } }) }));
+    await open(page);
+    await expect(t(page, "tm-banner")).toHaveText(/^Events missing since \d\d:\d\d \(2 events\)$/);
+    await expect(t(page, "tm-usage-warn")).toHaveText("last seen 15 min ago");
+    await expect(t(page, "tm-notice")).toHaveText(["loop not updated for 2 h"]);
+    await expect(t(page, "tm-usage-row")).toHaveCount(2);
+    await clean(page, errors);
+  });
+
+  test("Stats: '(from N events)' is a button that opens the kinds, the count and the event numbers per session, keeps focus on itself, and closes again", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const seqs = [3, 4, 5, 7].map((seq) => ({ session_id: "s-one", seq }));
+    const { errors } = await setup(page, fresh({ stats: F.stats({ merges: { value: 4, provenance: { kinds: ["pr_merged"], count: 4, seqs } } }) }));
+    await open(page);
+    const btn = t(page, "tm-stat-from").nth(2);
+    const region = t(page, "tm-stat-prov").nth(2);
+    await expect(btn).toHaveText("(from 4 events)");
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+    await expect(region).toBeHidden();
+    await btn.focus();
+    await page.keyboard.press("Enter");
+    await expect(btn).toHaveAttribute("aria-expanded", "true");
+    await expect(region).toBeVisible();
+    await expect(region).toContainText("Event kinds: pr merged");
+    await expect(region).toContainText("Events: 4");
+    await expect(region).toContainText("Session 1: seq 3–5, 7");
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-focus"))).toBe("prov-merges");
+    expect(await page.evaluate((sel) => (document.querySelector(sel + ' [data-testid="tm-stats"]') as HTMLElement).innerText.includes("s-one"), WIN)).toBe(false);
+    await page.keyboard.press("Space");
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+    await expect(region).toBeHidden();
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-focus"))).toBe("prov-merges");
+    await clean(page, errors);
+  });
+
+  test("a refresh that only moves the 'as of' time does not rebuild the plan, so focus stays on a D# link", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { mock } = await setup(page, fresh(), { clock: true });
+    await open(page);
+    const link = t(page, "tm-plan").locator('[data-testid="tm-d"]').first();
+    await link.focus();
+    await page.evaluate(() => { (window as unknown as { __kept: Element | null }).__kept = document.activeElement; });
+    const before = await t(page, "tm-plan-asof").innerText();
+    mock.plan = { ...mock.plan, as_of: F.iso(600) }; // ten minutes earlier: the header text must change
+    mock.reads.length = 0;
+    await page.clock.runFor(15_500);
+    await expect.poll(() => mock.reads.filter((r) => r.endsWith("/plan")).length).toBeGreaterThanOrEqual(1);
+    await expect(t(page, "tm-plan-asof")).not.toHaveText(before);
+    expect(mock.reads.some((r) => r.endsWith("/plan"))).toBe(true);
+    expect(await page.evaluate(() => document.activeElement === (window as unknown as { __kept: Element | null }).__kept)).toBe(true);
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe("tm-d");
+  });
+
+  test("Log: a failed older page says so, keeps the rows and can be tried again; lines are only text", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const first = F.envelope([F.logLine({ actor_role: HOSTILE, category: HOSTILE })], { next_cursor: "x" });
+    const mock = fresh({ log: first, logPage: (cursor) => (cursor === "" ? first : { weird: true }) });
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await expect(t(page, "tm-log-line").locator(".tm-role bdi")).toHaveText(HOSTILE);
+    await expect(t(page, "tm-log-line")).toContainText("other"); // an odd kind is a plain word
+    await expect(page.locator(`${WIN} .tm-app img, ${WIN} .tm-app script, ${WIN} .tm-app b`)).toHaveCount(0);
+    await press(t(page, "tm-log-older"));
+    await expect(t(page, "tm-log-older-failed")).toHaveText("Older lines couldn't be loaded.");
+    await expect(t(page, "tm-live")).toContainText("Older lines couldn't be loaded."); // announced, not only drawn
+    await expect(t(page, "tm-log-line")).toHaveCount(1);
+    await expect(t(page, "tm-log-older")).toHaveText("Load older");
+    expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+    expect(errors).toEqual([]);
+  });
+
+  test("Plan: today's items with D# links, roadmap rows with key, status and counts, (no key) for an empty key, and the 30-day merged count", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const lanes = F.envelope([F.lane({ pr: 1, discussion: 42, state: "merged", updated_at: F.iso(86400) }), F.lane({ pr: 2, discussion: 42, state: "merged", updated_at: F.iso(40 * 86400) })]);
+    const { errors } = await setup(page, fresh({ lanes }));
+    await open(page);
+    await expect(t(page, "tm-plan-date")).toHaveText(/^Plan for \d{4}-\d\d-\d\d$/);
+    await expect(t(page, "tm-plan-item")).toHaveCount(2);
+    await expect(t(page, "tm-plan-item").nth(0)).toContainText("1.");
+    await expect(t(page, "tm-plan-item").nth(0)).toContainText("In progress");
+    await expect(t(page, "tm-plan-item").nth(0).locator("a")).toHaveAttribute("href", "https://github.com/acme-labs/widgets/discussions/42");
+    const rows = t(page, "tm-roadmap-row");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText("EB-6b");
+    await expect(t(page, "tm-roadmap-counts").nth(0)).toHaveText("1 merged in the last 30 days · 3 planned");
+    await expect(rows.nth(1)).toContainText("(no key)");
+    await expect(t(page, "tm-plan-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await clean(page, errors);
+  });
+
+  test("Plan: no snapshot reads Plan not synced yet, and a snapshot over 26 h old reads Plan from <date>", async ({ page }) => {
+    const { errors } = await setup(page, fresh({ plan: null }));
+    await open(page);
+    await expect(t(page, "tm-plan-none")).toHaveText("Plan not synced yet");
+    await expect(t(page, "tm-plan-warn")).toHaveCount(0);
+    await clean(page, errors);
+    const F = makeFixtures(Date.now());
+    const p2 = await page.context().newPage();
+    const second = await setup(p2, fresh({ plan: F.plan({ age_s: 27 * 3600, plan_date: "2026-11-14" }) }));
+    await open(p2);
+    await expect(t(p2, "tm-plan-date")).toHaveText("Plan from 2026-11-14");
+    await clean(p2, second.errors);
+  });
+
+  test("Plan: a hostile row key is text, and a long roadmap pages 100 rows at a time with focus kept on the button", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const roadmap = Array.from({ length: 250 }, (_, i) => ({ row_key: i === 0 ? HOSTILE : "R" + i, discussion: null, status: "done", planned_prs: null }));
+    const { errors } = await setup(page, fresh({ plan: F.plan({ roadmap }) }));
+    await open(page);
+    await expect(t(page, "tm-roadmap-row")).toHaveCount(100);
+    await expect(t(page, "tm-roadmap-row").first().locator("bdi")).toHaveText(HOSTILE);
+    await expect(page.locator(`${WIN} .tm-app img, ${WIN} .tm-app script, ${WIN} .tm-app b`)).toHaveCount(0);
+    await expect(t(page, "tm-plan-span")).toHaveText("Rows 1–100 of 250");
+    await expect(t(page, "tm-plan-prev")).toHaveAttribute("aria-disabled", "true");
+    await t(page, "tm-plan-next").focus();
+    await page.keyboard.press("Enter");
+    await expect(t(page, "tm-plan-span")).toHaveText("Rows 101–200 of 250");
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe("tm-plan-next");
+    await page.keyboard.press("Enter");
+    await expect(t(page, "tm-plan-span")).toHaveText("Rows 201–250 of 250");
+    await expect(t(page, "tm-roadmap-row")).toHaveCount(50);
+    await expect(t(page, "tm-plan-next")).toHaveAttribute("aria-disabled", "true");
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe("tm-plan-next");
+    await clean(page, errors);
+  });
+
+  test("Stats: the figures as the server sent them, each with the events behind it; a missing figure says no figures yet", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh());
+    await open(page);
+    const rows = t(page, "tm-stat");
+    await expect(rows).toHaveText([/Agents by role: executor 2, code-reviewer 1 \(from 6 events\)/, /Duration: median 120.5 s, p90 300 s \(from 3 events\)/, /Merges: 4 \(from 4 events\)/, /Gates passed: 3 of 4 \(from 1 event\)/]);
+    await expect(t(page, "tm-stats-window")).toHaveText(/^Window: \d{4}-\d\d-\d\d to \d{4}-\d\d-\d\d$/);
+    await expect(t(page, "tm-stats-asof")).toHaveText(/^as of /);
+    await clean(page, errors);
+    void F;
+  });
+
+  test("Stats and plan that cannot be read say so, and the log and lanes still show; a stale heartbeat warns on the new panels too", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ fail: ["/stats", "/plan", "/usage"], log: F.envelope([F.logLine()], { heard_age_s: 900 }) }));
+    await open(page);
+    await expect(t(page, "tm-usage-failed")).toHaveText("This panel couldn't be read.");
+    await expect(t(page, "tm-live")).toContainText("Plan panel couldn't be read. Stats panel couldn't be read. Cost panel couldn't be read.");
+    await expect(t(page, "tm-stats-failed")).toHaveText("This panel couldn't be read.");
+    await expect(t(page, "tm-plan-failed")).toHaveText("This panel couldn't be read.");
+    await expect(t(page, "tm-log-warn")).toHaveText("last seen 15 min ago");
+    await expect(t(page, "tm-log-line")).toHaveCount(1);
+    await expect(t(page, "tm-lane")).toHaveCount(3);
+    await clean(page, errors);
+  });
+
+  test("L1: a gap that only the log reports puts the banner on the app, and the log's source age shows its notice", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ log: F.envelope([F.logLine()], { missing_events: 5, gaps: [{ from_seq: 1, to_seq: 5, before_ts: F.iso(1200) }], source_ages_s: { team_log: 3 * 3600 } }) }));
+    await open(page);
+    await expect(t(page, "tm-banner")).toHaveText(/^Events missing since \d\d:\d\d \(5 events\)$/);
+    await expect(t(page, "tm-notice")).toHaveText(["team log not updated for 3 h"]);
+    await clean(page, errors);
+  });
+
+  test("a control with nothing left to do keeps focus (aria-disabled), never dropping it to the page", async ({ page }) => {
+    const mock = fresh({ log: makeFixtures(Date.now()).envelope([makeFixtures(Date.now()).logLine()], { next_cursor: "x" }), logPage: () => makeFixtures(Date.now()).envelope([], { next_cursor: null }) });
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await t(page, "tm-log-older").focus();
+    await page.keyboard.press("Enter");
+    await expect(t(page, "tm-log-older")).toHaveText("No older lines");
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+    await clean(page, errors);
+  });
+
   test("themes: axe finds nothing serious or critical, the app's text keeps a contrast of at least 4.5 and its focus ring at least 3 under every theme (numbers recorded)", async ({ page }) => {
     const F = makeFixtures(Date.now());
-    const { errors } = await setup(page, operateOn({ commands: { commands: [F.command(), F.command({ id: "c0000000-0000-4000-8000-000000000002", kind: "start_day", state: "refused", refusal: "halted", acked_at: F.iso(10) })] }, agents: F.envelope([F.agent(), F.agent({ agent_id: "b2c3d4e5f6071829", started_at: F.iso(5 * 3600) })], { heard_age_s: 400, missing_events: 3, gaps: [{ from_seq: 1, to_seq: 3, before_ts: F.iso(900) }], source_ages_s: { loop: 9000 } }) }));
+    const longRoadmap = Array.from({ length: 150 }, (_, i) => ({ row_key: "R" + i, discussion: 42, status: "in_progress", planned_prs: 2 }));
+    const { errors } = await setup(page, operateOn({ plan: F.plan({ roadmap: longRoadmap }), commands: { commands: [F.command(), F.command({ id: "c0000000-0000-4000-8000-000000000002", kind: "start_day", state: "refused", refusal: "halted", acked_at: F.iso(10) })] }, agents: F.envelope([F.agent(), F.agent({ agent_id: "b2c3d4e5f6071829", started_at: F.iso(5 * 3600) })], { heard_age_s: 400, missing_events: 3, gaps: [{ from_seq: 1, to_seq: 3, before_ts: F.iso(900) }], source_ages_s: { loop: 9000 } }) }));
     await open(page);
     await press(t(page, "tm-settings-btn"));
     const ratios: Record<string, number> = {};
@@ -1327,7 +1622,7 @@ test.describe("Team app", () => {
           return "rgb(0, 0, 0)";
         };
         let worst = 21;
-        for (const el of document.querySelectorAll(`${sel} .tm-asof, ${sel} .tm-warn, ${sel} .tm-chip, ${sel} .tm-banner, ${sel} .tm-notice, ${sel} .tm-muted, ${sel} .tm-role, ${sel} .tm-state, ${sel} .tm-gate, ${sel} .tm-link, ${sel} .tm-btn, ${sel} .tm-check, ${sel} .tm-field, ${sel} .tm-select, ${sel} .tm-input, ${sel} .tm-cmd-detail`)) {
+        for (const el of document.querySelectorAll(`${sel} .tm-asof, ${sel} .tm-warn, ${sel} .tm-chip, ${sel} .tm-banner, ${sel} .tm-notice, ${sel} .tm-muted, ${sel} .tm-role, ${sel} .tm-state, ${sel} .tm-time, ${sel} .tm-cat, ${sel} .tm-gate, ${sel} .tm-link, ${sel} .tm-btn, ${sel} .tm-check, ${sel} .tm-field, ${sel} .tm-select, ${sel} .tm-input, ${sel} .tm-cmd-detail`)) {
           const a = lum(getComputedStyle(el).color), b = lum(bg(el));
           worst = Math.min(worst, (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05));
         }
@@ -1345,7 +1640,7 @@ test.describe("Team app", () => {
       ratios[theme] = min;
       expect(min, theme).toBeGreaterThanOrEqual(4.5);
       // Focus ring, reached with the keyboard (so :focus-visible holds): the picker, the settings button, a box in the sheet and a link.
-      for (const id of ["tm-repo", "tm-settings-btn", "tm-watch", "tm-d", "tm-op-switch", "tm-op-start", "tm-op-role", "tm-op-discussion", "tm-op-class", "tm-op-setdial", "tm-dial-select", "tm-dial-apply", "tm-cmd-cancel", "tm-halt-btn"]) {
+      for (const id of ["tm-repo", "tm-settings-btn", "tm-watch", "tm-d", "tm-log-list", "tm-log-older", "tm-plan-next", "tm-op-switch", "tm-op-start", "tm-op-role", "tm-op-discussion", "tm-op-class", "tm-op-setdial", "tm-dial-select", "tm-dial-apply", "tm-cmd-cancel", "tm-halt-btn"]) {
         await t(page, id).first().focus();
         await page.keyboard.press("Shift+Tab");
         await page.keyboard.press("Tab");

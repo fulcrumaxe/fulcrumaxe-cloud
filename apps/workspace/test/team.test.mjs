@@ -7,9 +7,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { DELETE_URL, REPOS_URL, SETTINGS_URL, clearHaltUrl, commandUrl, commandsUrl, createTeamApi, dialUrl, dialsUrl, haltUrl, panelUrl } from "../apps/team/team-api.js";
+import { DELETE_URL, LOG_LIMIT, REPOS_URL, SETTINGS_URL, clearHaltUrl, commandUrl, commandsUrl, createTeamApi, dialUrl, dialsUrl, haltUrl, lanesUrl, logUrl, panelUrl } from "../apps/team/team-api.js";
 import { DIAL_CLASSES, ENGINE_DIALS, HALT_WORDS, OP_WORDS, REFUSALS, ROLES, TTL, agentWords, cancelFailure, commandRow, dialFailure, haltFailure, lockReason, readCommands, readDials, sendFailure } from "../apps/team/team-operate.js";
-import { DEBOUNCE_MS, REFRESH_MS, SOURCE_LIMIT_S, WORDS, agentRow, asOfWords, chipOf, createTeam, describe as describeState, failureSentence, gapBanner, githubLink, hm, isStale, laneRows, readEnvelope, readRepos, readSettings, sourceNotices } from "../apps/team/team-model.js";
+import { DEBOUNCE_MS, LANE_PAGES, LOG_WINDOW, REFRESH_MS, ROADMAP_PAGE, SOURCE_LIMIT_S, WORDS, agentRow, asOfWords, chipOf, createTeam, describe as describeState, failureSentence, gapBanner, githubLink, hm, isStale, laneRows, logRow, planView, readEnvelope, readPlan, readRepos, readSettings, readStats, readUsage, sourceNotices, statsView, usageView } from "../apps/team/team-model.js";
 import { HOSTILE, REPO_A, REPO_B, makeFixtures } from "./fixtures/team/fixtures.mjs";
 
 const NOW = Date.parse("2026-11-16T15:00:00.000Z");
@@ -26,6 +26,10 @@ function fakeCall(over = {}) {
     ["GET " + panelUrl("agents", REPO_A)]: F.envelope([F.agent()]),
     ["GET " + panelUrl("lanes", REPO_A)]: F.envelope([F.lane()]),
     ["GET " + panelUrl("gates", REPO_A)]: F.envelope([F.gate()]),
+    ["GET " + panelUrl("log", REPO_A)]: F.envelope([F.logLine()]),
+    ["GET " + panelUrl("plan", REPO_A)]: F.plan(),
+    ["GET " + panelUrl("stats", REPO_A)]: F.stats(),
+    ["GET " + panelUrl("usage", REPO_A)]: F.usage(),
     ["GET " + panelUrl("agents", REPO_B)]: F.envelope([]),
     ["GET " + panelUrl("lanes", REPO_B)]: F.envelope([]),
     ["GET " + panelUrl("gates", REPO_B)]: F.envelope([]),
@@ -33,6 +37,10 @@ function fakeCall(over = {}) {
     ["GET " + commandsUrl(REPO_B) + "?limit=50"]: F.commands([]),
     ["GET " + dialsUrl(REPO_A)]: F.dials(),
     ["GET " + dialsUrl(REPO_B)]: F.dials(),
+    ["GET " + panelUrl("log", REPO_B)]: F.envelope([]),
+    ["GET " + panelUrl("plan", REPO_B)]: null, // 204: no snapshot
+    ["GET " + panelUrl("stats", REPO_B)]: F.stats(),
+    ["GET " + panelUrl("usage", REPO_B)]: F.usage(),
     ["PUT " + SETTINGS_URL]: { ok: true },
     ["PUT " + DELETE_URL]: { ok: true },
     ...over,
@@ -74,7 +82,7 @@ const strings = (v) => (typeof v === "string" ? [v] : v && typeof v === "object"
 const bad = /\bnull\b|undefined|NaN|Invalid Date/;
 
 describe("requests", () => {
-  it("reads the settings, the repos, then the three panels of the first repo, at exactly these paths", async () => {
+  it("reads the settings, the repos, then the seven panels of the first repo, at exactly these paths", async () => {
     const { t, f } = team();
     await t.load();
     expect(f.log.map(([m, p]) => m + " " + p)).toEqual([
@@ -85,7 +93,12 @@ describe("requests", () => {
       `GET /api/v1/engine/repos/${REPO_A}/agents?state=running`,
       `GET /api/v1/engine/repos/${REPO_A}/lanes`,
       `GET /api/v1/engine/repos/${REPO_A}/gates`,
+      `GET /api/v1/engine/repos/${REPO_A}/log?limit=100`,
+      `GET /api/v1/engine/repos/${REPO_A}/plan`,
+      `GET /api/v1/engine/repos/${REPO_A}/stats`,
+      `GET /api/v1/engine/repos/${REPO_A}/usage`,
     ]);
+    expect(LOG_LIMIT).toBe(100);
     expect(f.log.some(([, p]) => p.includes("pr="))).toBe(false); // gates are read without a pr; the client groups by PR
   });
   it("reads no repo and no panel while watch is off", async () => {
@@ -331,7 +344,7 @@ describe("refresh", () => {
     expect(f.log).toHaveLength(0);
     clk.fire((x) => x.ms === DEBOUNCE_MS);
     await flush(); await flush();
-    expect(f.log.map(([, p]) => p).filter((p) => p.includes(REPO_A + "/") && !p.includes("/commands") && !p.includes("decision-settings"))).toEqual([panelUrl("agents", REPO_A), panelUrl("lanes", REPO_A), panelUrl("gates", REPO_A)]);
+    expect(f.log.map(([, p]) => p).filter((p) => p.includes(REPO_A + "/") && !p.includes("/commands") && !p.includes("decision-settings"))).toEqual(["agents", "lanes", "gates", "log", "plan", "stats", "usage"].map((k) => panelUrl(k, REPO_A)));
     expect(DEBOUNCE_MS).toBe(1000);
   });
   it("an event for another repo reads nothing", async () => {
@@ -356,7 +369,7 @@ describe("refresh", () => {
     hidden = false;
     clk.fire((x) => x.ms === REFRESH_MS);
     await flush(); await flush();
-    expect(f.log.length).toBeGreaterThanOrEqual(5);
+    expect(f.log.length).toBeGreaterThanOrEqual(8);
     expect(REFRESH_MS).toBe(15000);
     t.stop();
     expect(clk.count()).toBe(0);
@@ -421,6 +434,13 @@ describe("what a screen may show", () => {
       gap: { ["GET " + panelUrl("agents", REPO_A)]: F.envelope([F.agent()], { missing_events: 4, gaps: [{ from_seq: 1, to_seq: 4, before_ts: "bad" }] }) },
       sources: { ["GET " + panelUrl("agents", REPO_A)]: F.envelope([F.agent()], { source_ages_s: { loop: 99999, team_log: 99999, plan: 99999, merge_queue: 99999 } }) },
       failed: { ["GET " + panelUrl("lanes", REPO_A)]: fail(500, "server_error"), ["GET " + panelUrl("agents", REPO_A)]: { weird: true } },
+      planNone: { ["GET " + panelUrl("plan", REPO_A)]: null },
+      planStale: { ["GET " + panelUrl("plan", REPO_A)]: F.plan({ age_s: 30 * 3600, plan_date: "2026-11-14" }) },
+      planSparse: { ["GET " + panelUrl("plan", REPO_A)]: F.plan({ plan_date: null, age_s: null, items: [{}, { discussion: 5 }], roadmap: [{}, { row_key: null, discussion: 0 }, { row_key: HOSTILE, status: HOSTILE, planned_prs: "x" }] }) },
+      planBroken: { ["GET " + panelUrl("plan", REPO_A)]: { items: [] }, ["GET " + panelUrl("stats", REPO_A)]: { agents_by_role: 1 } },
+      logSparse: { ["GET " + panelUrl("log", REPO_A)]: F.envelope([{}, { line_id: 1, ts: "later", category: HOSTILE, actor_role: HOSTILE, pr: "7", discussion: null }]) },
+      statsSparse: { ["GET " + panelUrl("stats", REPO_A)]: { gaps: [], missing_events: 0 } },
+      statsOdd: { ["GET " + panelUrl("stats", REPO_A)]: F.stats({ agents_by_role: { value: { x: "y" } }, duration_s: { n: 0, median: null, p90: null }, merges: { value: -1 }, gate_pass_rate: { value: null, numerator: 0, denominator: 0, provenance: {} }, window: null }) },
     };
     for (const [name, routes] of Object.entries(states)) {
       const { t } = team({}, routes);
@@ -432,12 +452,338 @@ describe("what a screen may show", () => {
   });
   it("the model does no cost or statistics maths", () => {
     const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "apps", "team");
-    for (const file of ["team-model.js", "team-app.js", "team-api.js", "team-operate.js"]) {
-      // The cost analyst is one of the protocol's spawnable roles, so its name is a role id here and not a figure.
-      const src = readFileSync(join(dir, file), "utf8").replace(/\/\/.*$/gm, "").replace(/cost-analyst|Cost analyst/g, "");
-      expect(src, file).not.toMatch(/\b(usd|cost|price|spend|median|percentile|average|mean|sum|total|rate)\b/i);
-      expect(src, file).not.toMatch(/\.reduce\(|toFixed|innerHTML|outerHTML|insertAdjacentHTML|eval\(|new Function/);
+    // The only words let through are the server's exact field names (read, never computed) and the labels that name its figures; each must really be in the source,
+    // so the list cannot go stale and a computed median or total anywhere else still matches the ban below.
+    const READS = ["raw.gate_pass_rate", "median: num(", "dur.median", '"median "', "api_equivalent_usd", "raw.totals", "usd as dollars", "dollars(", '"No API price for this model"', 'usage: "Cost"'];
+    // The cost analyst is one of the protocol's spawnable roles, so its name is a role id here and not a figure.
+    const src = Object.fromEntries(["team-model.js", "team-app.js", "team-api.js", "team-operate.js"].map((f) => [f, readFileSync(join(dir, f), "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/cost-analyst|Cost analyst/g, "")]));
+    expect(READS.filter((r) => Object.values(src).some((t) => t.includes(r)))).toEqual(READS);
+    for (const [file, text] of Object.entries(src)) {
+      const stripped = READS.reduce((t, r) => t.split(r).join(" "), text);
+      expect(stripped, file).not.toMatch(/\b(usd|cost|price|spend|median|percentile|average|mean|sum|total|rate)\b/i);
+      expect(stripped, file).not.toMatch(/\.reduce\(|toFixed|innerHTML|outerHTML|insertAdjacentHTML|eval\(|new Function/);
     }
+  });
+});
+
+
+describe("log (EB-6b)", () => {
+  const lines = (n, start) => F.envelope(F.logLines(n, start), { next_cursor: "c" + (start + n) });
+  it("shows each line's time, role, kind and D# / PR links, built from the repo's own name", async () => {
+    const { t } = team();
+    await t.load();
+    const v = t.view().log;
+    expect(v.rows).toEqual([{ id: "0123456789abcdef", time: hm(F.iso(180)), role: "team-lead", category: "merged", discussion: 42, discussionLink: "https://github.com/acme-labs/widgets/discussions/42", pr: 7, prLink: "https://github.com/acme-labs/widgets/pull/7" }]);
+    expect(v.note).toBe("Log text stays on your machine; the cloud receives only what kind of line it was.");
+    expect(v.asOf).toMatch(/^as of \d\d:\d\d \(0 min ago\)$/);
+  });
+  it("a line from an earlier day carries its date; an odd kind reads other, a hostile role stays text", () => {
+    expect(logRow(F.logLine({ ts: F.iso(2 * 86400) }), 0, "a/b", NOW).time).toMatch(/^\d\d-\d\d \d\d:\d\d$/);
+    const r = logRow(F.logLine({ category: HOSTILE, actor_role: HOSTILE, discussion: null, pr: null, line_id: null, ts: "never" }), 3, "a/b", NOW);
+    expect(r).toMatchObject({ category: "other", role: HOSTILE, discussion: 0, pr: 0, id: "row3", time: "unknown time" });
+  });
+  it("Load older asks for the page named by the cursor and appends it", async () => {
+    const { t, f } = team({}, { ["GET " + panelUrl("log", REPO_A)]: lines(100, 0), ["GET " + logUrl(REPO_A, "c100")]: lines(100, 100) });
+    await t.load();
+    expect(t.view().log).toMatchObject({ older: "Load older", canOlder: true });
+    await t.loadOlder();
+    expect(f.log.at(-1)[1]).toBe(`/api/v1/engine/repos/${REPO_A}/log?limit=100&cursor=c100`);
+    expect(t.view().log.rows).toHaveLength(200);
+    expect(t.view().log.said).toBe("Older log lines loaded (page 2).");
+  });
+  it("never holds more than 400 rows: older pages push the newest out, and Back to newest says how many are not shown", async () => {
+    const pages = {};
+    for (let p = 1; p < 100; p++) pages["GET " + logUrl(REPO_A, "c" + p * 100)] = F.envelope(F.logLines(100, p * 100), { next_cursor: p === 99 ? null : "c" + (p + 1) * 100 });
+    const { t } = team({}, { ["GET " + panelUrl("log", REPO_A)]: lines(100, 0), ...pages });
+    await t.load();
+    for (let i = 0; i < 99; i++) {
+      await t.loadOlder();
+      expect(t.view().log.rows.length).toBeLessThanOrEqual(LOG_WINDOW);
+    }
+    const v = t.view().log;
+    expect(LOG_WINDOW).toBe(400);
+    expect(v.rows).toHaveLength(400);
+    expect(v.rows[0].id).toBe("l" + String(9600).padStart(15, "0")); // the oldest 400 of 10,000
+    expect(v.canOlder).toBe(false);
+    expect(v.older).toBe("No older lines");
+    expect(v.newest).toBe("Back to newest (9600 newer lines not shown)");
+  });
+  it("Back to newest reads the first page again and forgets the older ones", async () => {
+    const { t, f } = team({}, { ["GET " + panelUrl("log", REPO_A)]: lines(100, 0), ["GET " + logUrl(REPO_A, "c100")]: lines(100, 100) });
+    await t.load();
+    await t.loadOlder();
+    f.log.length = 0;
+    t.newest();
+    await flush(); await flush();
+    expect(t.view().log.rows).toHaveLength(100);
+    expect(f.log.some(([, p]) => p === panelUrl("log", REPO_A))).toBe(true);
+  });
+  it("a refresh refills the list while only the first page is open, and leaves it alone once older pages are", async () => {
+    let n = 0;
+    const { t } = team({}, { ["GET " + panelUrl("log", REPO_A)]: () => (++n === 1 ? lines(100, 0) : lines(100, 1000)), ["GET " + logUrl(REPO_A, "c1100")]: lines(100, 1100) });
+    await t.load();
+    await t.refresh();
+    expect(t.view().log.rows[0].id).toBe("l" + String(1000).padStart(15, "0"));
+    await t.loadOlder();
+    await t.refresh();
+    expect(t.view().log.rows).toHaveLength(200);
+    expect(t.view().log.rows[0].id).toBe("l" + String(1000).padStart(15, "0")); // the list the person is reading did not jump
+  });
+  it("one page at a time; a page that cannot be read says so and keeps the rows", async () => {
+    let release;
+    const { t, f } = team({}, { ["GET " + panelUrl("log", REPO_A)]: lines(100, 0), ["GET " + logUrl(REPO_A, "c100")]: () => new Promise((r) => { release = r; }) });
+    await t.load();
+    const first = t.loadOlder();
+    await t.loadOlder();
+    expect(t.view().log.older).toBe(WORDS.olderLoading);
+    expect(f.log.filter(([, p]) => p.includes("cursor=")).length).toBe(1);
+    release({ weird: true });
+    await first;
+    expect(t.view().log).toMatchObject({ olderFailed: WORDS.olderFailed, canOlder: true });
+    expect(t.view().log.rows).toHaveLength(100);
+  });
+  it("the log's gap and age travel with the rest: its gap reaches the banner and its source age the notices", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("log", REPO_A)]: F.envelope([F.logLine()], { missing_events: 2, gaps: [{ from_seq: 1, to_seq: 2, before_ts: F.iso(300) }], source_ages_s: { team_log: 3 * 3600 } }) });
+    await t.load();
+    expect(t.view().banner).toBe("Events missing since " + hm(F.iso(300)) + " (2 events)");
+    expect(t.view().notices).toEqual(["team log not updated for 3 h"]);
+  });
+  it("a stale heartbeat adds last seen to the log header and keeps its rows", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("log", REPO_A)]: F.envelope([F.logLine()], { heard_age_s: 900 }) });
+    await t.load();
+    expect(t.view().log.warn).toBe("last seen 15 min ago");
+    expect(t.view().log.rows).toHaveLength(1);
+  });
+});
+
+describe("plan (EB-6b)", () => {
+  const view = (over, lanes = F.envelope([]), page = 0) => planView(readPlan(F.plan(over)), readEnvelope(lanes), NOW, "acme-labs/widgets", page);
+  it("a state or status word named like an Object.prototype key reads as Unknown, in the plan and in the usage rows", () => {
+    for (const word of ["constructor", "__proto__"]) {
+      const v = view({ items: [{ discussion: 42, ordinal: 1, state: word }], roadmap: [{ row_key: "EB-6b", discussion: 42, status: word, planned_prs: 1 }] });
+      expect(v.items[0].state, word).toBe("Unknown");
+      expect(v.rows[0].status, word).toBe("Unknown");
+      expect(usageView(readUsage(F.usage({ items: [F.usageItem({ api_equivalent_usd: null, note: null, state: word })] }))).rows[0].value, word).toBe("no figure");
+    }
+  });
+  it("lists today's items with a D# link, the ordinal and the state, and the roadmap rows with key, D#, status and counts", async () => {
+    const { t } = team();
+    await t.load();
+    const p = t.view().plan;
+    expect(p).toMatchObject({ none: false, failed: false, notSynced: "Plan not synced yet" });
+    expect(p.view.title).toBe("Plan for " + new Date(NOW).toISOString().slice(0, 10));
+    expect(p.view.items).toEqual([
+      { discussion: 42, link: "https://github.com/acme-labs/widgets/discussions/42", ordinal: "1", state: "In progress" },
+      { discussion: 43, link: "https://github.com/acme-labs/widgets/discussions/43", ordinal: "2", state: "Planned" },
+    ]);
+    expect(p.view.rows.map((r) => [r.key, r.discussion, r.status])).toEqual([["EB-6b", 42, "In progress"], ["(no key)", 44, "Done"]]);
+    expect(p.asOf).toMatch(/^as of \d\d:\d\d \(0 min ago\)$/);
+  });
+  it("each of the six item states has its own words; one it does not know reads Unknown, and the roadmap's own words are a different list", () => {
+    const words = { planned: "Planned", in_progress: "In progress", pr_open: "Pull request open", merged: "Merged", blocked: "Blocked", dropped: "Dropped" };
+    const items = Object.keys(words).concat("not_started").map((state, i) => ({ discussion: 10 + i, ordinal: i + 1, state }));
+    expect(view({ items }).items.map((i) => i.state)).toEqual([...Object.values(words), "Unknown"]);
+    expect(view({ roadmap: [{ row_key: "R", discussion: 1, status: "done", planned_prs: null }] }).rows[0].status).toBe("Done");
+  });
+  it("no snapshot (204) reads Plan not synced yet, with no stale warning and no gap invented", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("plan", REPO_A)]: null });
+    await t.load();
+    const p = t.view().plan;
+    expect(p).toMatchObject({ none: true, failed: false, warn: "", asOf: WORDS.noData });
+    expect(t.view().banner).toBe("");
+  });
+  it("a snapshot older than 26 h reads Plan from <date>; at 26 h it is still today's", () => {
+    expect(view({ age_s: 26 * 3600 + 1, plan_date: "2026-11-14" }).title).toBe("Plan from 2026-11-14");
+    expect(view({ age_s: 26 * 3600, plan_date: "2026-11-14" }).title).toBe("Plan for 2026-11-14");
+    expect(view({ age_s: 99999, plan_date: "soon" }).title).toBe("Plan is out of date");
+  });
+  it("counts the PRs merged for the row's Discussion in the last 30 days, from the lane list; never a lifetime figure", () => {
+    const lanes = F.envelope([
+      F.lane({ pr: 1, discussion: 42, state: "merged", updated_at: F.iso(86400) }), F.lane({ pr: 2, discussion: 42, state: "merged", updated_at: F.iso(29 * 86400) }),
+      F.lane({ pr: 3, discussion: 42, state: "merged", updated_at: F.iso(31 * 86400) }), F.lane({ pr: 4, discussion: 42, state: "queued" }), F.lane({ pr: 5, discussion: 44, state: "merged", updated_at: F.iso(60) }),
+    ]);
+    const rows = view({}, lanes).rows;
+    expect(rows[0].counts).toBe("2 merged in the last 30 days · 3 planned");
+    expect(rows[1].counts).toBe("1 merged in the last 30 days");
+    expect(view({}, F.envelope([])).rows[0].counts).toBe("0 merged in the last 30 days · 3 planned");
+    expect(view({}, F.envelope([F.lane({ discussion: 42, state: "merged", updated_at: F.iso(60) })], { next_cursor: "more" })).rows[0].counts).toBe("at least 1 merged in the last 30 days · 3 planned");
+    expect(planView(readPlan(F.plan()), null, NOW, "acme-labs/widgets", 0).rows[0].counts).toBe("3 planned"); // lanes unreadable: no count is invented
+    expect(JSON.stringify(view({}, lanes))).not.toMatch(/lifetime|all time/i);
+  });
+  it("the merged count follows the lane list's cursor for up to five pages, and says at least only when pages remain after that", async () => {
+    const page = (n, over = {}) => F.envelope([F.lane({ pr: 100 + n, discussion: 42, state: "merged", updated_at: F.iso(60) })], { next_cursor: "p" + (n + 1), ...over });
+    const routes = { ["GET " + panelUrl("lanes", REPO_A)]: page(0) };
+    for (let n = 1; n < 9; n++) routes["GET " + lanesUrl(REPO_A, "p" + n)] = page(n, n === 3 ? { next_cursor: null } : {});
+    const { t, f } = team({}, routes);
+    await t.load();
+    expect(f.log.filter(([, p]) => p.includes("/lanes")).map(([, p]) => p.split("/lanes")[1])).toEqual(["", "?cursor=p1", "?cursor=p2", "?cursor=p3"]);
+    expect(t.view().plan.view.rows[0].counts).toBe("4 merged in the last 30 days · 3 planned"); // the last page had no cursor: nothing is hidden
+    const long = {};
+    for (let n = 1; n < 9; n++) long["GET " + lanesUrl(REPO_A, "p" + n)] = page(n);
+    const more = team({}, { ["GET " + panelUrl("lanes", REPO_A)]: page(0), ...long });
+    await more.t.load();
+    expect(LANE_PAGES).toBe(5);
+    expect(more.f.log.filter(([, p]) => p.includes("/lanes")).length).toBe(5);
+    expect(more.t.view().plan.view.rows[0].counts).toBe("at least 5 merged in the last 30 days · 3 planned");
+  });
+  it("a lane page that cannot be read keeps what was read and still says at least", async () => {
+    const first = F.envelope([F.lane({ pr: 1, discussion: 42, state: "merged", updated_at: F.iso(60) })], { next_cursor: "p1" });
+    const { t } = team({}, { ["GET " + panelUrl("lanes", REPO_A)]: first, ["GET " + lanesUrl(REPO_A, "p1")]: { weird: true } });
+    await t.load();
+    expect(t.view().plan.view.rows[0].counts).toBe("at least 1 merged in the last 30 days · 3 planned");
+    expect(t.view().lanes.failed).toBe(false);
+  });
+  it("a row with no key shows (no key); a hostile key stays text; an unknown status reads Unknown", () => {
+    const rows = view({ roadmap: [{ row_key: "", discussion: null, status: "weird", planned_prs: null }, { row_key: HOSTILE, discussion: 5, status: HOSTILE, planned_prs: 1 }] }).rows;
+    expect(rows[0]).toMatchObject({ key: "(no key)", status: "Unknown", counts: "", discussion: 0 });
+    expect(rows[1]).toMatchObject({ key: HOSTILE, status: "Unknown" });
+  });
+  it("the roadmap is paged at 100 rows so the page never holds the whole of a long roadmap", () => {
+    const roadmap = Array.from({ length: 250 }, (_, i) => ({ row_key: "R" + i, discussion: null, status: "done", planned_prs: null }));
+    expect(ROADMAP_PAGE).toBe(100);
+    const first = view({ roadmap });
+    expect(first.rows).toHaveLength(100);
+    expect(first).toMatchObject({ hasPrev: false, hasNext: true, span: "Rows 1–100 of 250" });
+    const last = view({ roadmap }, F.envelope([]), 2);
+    expect(last.rows.map((r) => r.key)[0]).toBe("R200");
+    expect(last).toMatchObject({ hasPrev: true, hasNext: false, span: "Rows 201–250 of 250" });
+    expect(view({ roadmap }, F.envelope([]), 99).rows).toHaveLength(50); // a page past the end lands on the last
+    expect(view({}).span).toBe("");
+  });
+  it("planPage moves the page and a repo change puts it back to the first", async () => {
+    const { t } = team();
+    await t.load();
+    t.planPage(1);
+    expect(t.state.planPage).toBe(1);
+    t.planPage(-5);
+    expect(t.state.planPage).toBe(0);
+    t.planPage(1);
+    t.select(REPO_B);
+    expect(t.state.planPage).toBe(0);
+  });
+  it("the plan body must carry its list and gap fields: a reply without the roadmap is unreadable, not empty", () => {
+    for (const drop of ["roadmap", "items", "gaps", "missing_events"]) {
+      const raw = F.plan();
+      delete raw[drop];
+      expect(readPlan(raw), drop).toBeNull();
+    }
+    expect(readPlan(F.plan({ plan_date: "tomorrow" })).date).toBe("");
+  });
+  it("the plan's own gap and age feed the banner and the plan source notice", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("plan", REPO_A)]: F.plan({ missing_events: 4, gaps: [{ from_seq: 1, to_seq: 4, before_ts: F.iso(600) }], source_ages_s: { plan: 30 * 3600 } }) });
+    await t.load();
+    expect(t.view().banner).toBe("Events missing since " + hm(F.iso(600)) + " (4 events)");
+    expect(t.view().notices).toEqual(["plan not updated for 30 h"]);
+  });
+});
+
+describe("stats (EB-6b): the server's figures, as sent", () => {
+  it("shows each figure exactly as the server sent it, with the number of events behind it, and the window", async () => {
+    const { t } = team();
+    await t.load();
+    const v = t.view().stats.view;
+    expect(v.rows.map(({ id, label, value, from }) => ({ id, label, value, from }))).toEqual([
+      { id: "roles", label: "Agents by role", value: "executor 2, code-reviewer 1", from: " (from 6 events)" },
+      { id: "duration", label: "Duration", value: "median 120.5 s, p90 300 s", from: " (from 3 events)" },
+      { id: "merges", label: "Merges", value: "4", from: " (from 4 events)" },
+      { id: "gates", label: "Gates passed", value: "3 of 4", from: " (from 1 event)" },
+    ]);
+    expect(v.window).toBe("Window: " + F.iso(30 * 86400).slice(0, 10) + " to " + F.iso(0).slice(0, 10));
+  });
+  it("the events behind a figure are a disclosure: closed until toggled, listing the kinds, the count and the event numbers per session, never a session id", async () => {
+    const seqs = [...[3, 4, 5, 7].map((seq) => ({ session_id: "s-one", seq })), { session_id: "s-two", seq: 12 }, { session_id: "s-one", seq: 6 }];
+    const { t } = team({}, { ["GET " + panelUrl("stats", REPO_A)]: F.stats({ merges: { value: 4, provenance: { kinds: ["pr_merged", "gate_passed"], count: 6, seqs } } }) });
+    await t.load();
+    const row = () => t.view().stats.view.rows.find((r) => r.id === "merges");
+    expect(row()).toMatchObject({ open: false, prov: ["Event kinds: pr merged, gate passed", "Events: 6", "Session 1: seq 3–7", "Session 2: seq 12"] });
+    expect(JSON.stringify(row())).not.toMatch(/s-one|s-two/);
+    t.toggleProv("merges");
+    expect(row().open).toBe(true);
+    expect(t.view().stats.view.rows.filter((r) => r.open)).toHaveLength(1);
+    t.toggleProv("merges");
+    expect(row().open).toBe(false);
+    t.toggleProv("merges");
+    t.select(REPO_B);
+    expect(t.state.provOpen).toEqual([]); // another repo starts closed
+  });
+  it("a figure with nothing behind it has no disclosure", () => {
+    const v = statsView(readStats(F.stats({ merges: { value: 0, provenance: { count: 0 } }, agents_by_role: undefined })));
+    expect(v.rows[0]).toMatchObject({ value: "no figures yet", prov: null, from: "" });
+  });
+  it("a figure the server could not give reads no figures yet, never 0 or blank", () => {
+    const v = statsView(readStats(F.stats({ duration_s: { n: 0, median: null, p90: null, provenance: { count: 0 } }, gate_pass_rate: { value: null, numerator: 0, denominator: 0, provenance: { count: 0 } }, merges: { value: 0, provenance: { count: 0 } }, agents_by_role: undefined })));
+    expect(v.rows.map((r) => r.value)).toEqual(["no figures yet", "no figures yet", "0", "no figures yet"]);
+    expect(v.rows[0].from).toBe("");
+  });
+  it("a reply without the envelope fields is unreadable", () => {
+    const raw = F.stats();
+    delete raw.gaps;
+    expect(readStats(raw)).toBeNull();
+    expect(readStats(null)).toBeNull();
+  });
+  it("the stats panel echoes the server's number: a changed fixture changes the text one for one", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("stats", REPO_A)]: F.stats({ merges: { value: 17, provenance: { count: 21 } } }) });
+    await t.load();
+    expect(t.view().stats.view.rows[2]).toMatchObject({ label: "Merges", value: "17", from: " (from 21 events)" });
+  });
+});
+
+describe("cost (EB-6b.6): the server's figures, as sent, through the one formatter", () => {
+  it("shows the route's total as sent, then each row's own figure, with the window", async () => {
+    const { t } = team();
+    await t.load();
+    const u = t.view().usage;
+    expect(u).toMatchObject({ failed: false, asOf: expect.stringMatching(/^as of \d\d:\d\d \(0 min ago\)$/) });
+    expect(u.view.headline).toBe("$12.3456");
+    expect(u.view.rows.map((r) => [r.label, r.value])).toEqual([
+      ["Agent · sonnet-5 · on your Claude plan", "$1.2345"],
+      ["Tick · unknown model", "No API price for this model. That is not the same as $0."],
+    ]);
+    expect(u.view.window).toBe("Window: " + F.iso(30 * 86400).slice(0, 10) + " to " + F.iso(0).slice(0, 10));
+  });
+  it("a row with no figure says its note or its state's words, and is never $0", () => {
+    const rows = (over) => usageView(readUsage(F.usage({ items: [F.usageItem({ api_equivalent_usd: null, ...over })] }))).rows[0].value;
+    expect(rows({ state: "not_recorded", note: "Not recorded for this run." })).toBe("Not recorded for this run.");
+    expect(rows({ state: "not_priced", note: null })).toBe("No API price for this model");
+    expect(rows({ state: "not_recorded", note: "" })).toBe("Usage was not recorded");
+    expect(rows({ state: null, note: null })).toBe("no figure");
+    expect(rows({ state: "weird", note: null })).toBe("no figure");
+    expect(rows({ state: "recorded", note: null })).not.toMatch(/^\$0/);
+  });
+  it("echoes the server's numbers one for one through the shared formatter", async () => {
+    for (const [sent, shown] of [[0, "$0.00"], [0.0042, "$0.0042"], [1234.5, "$1,234.50"], [12.3456, "$12.3456"], [7, "$7.00"]]) {
+      const { t } = team({}, { ["GET " + panelUrl("usage", REPO_A)]: F.usage({ totals: { api_equivalent_usd: sent, tokens: {} }, items: [F.usageItem({ api_equivalent_usd: sent })] }) });
+      await t.load();
+      expect(t.view().usage.view.headline, String(sent)).toBe(shown);
+      expect(t.view().usage.view.rows[0].value, String(sent)).toBe(shown);
+    }
+  });
+  it("an empty list says so; a cursor says more rows exist; no total is added up from rows", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("usage", REPO_A)]: F.usage({ items: [], next_cursor: "more", totals: { api_equivalent_usd: 3.25, tokens: {} } }) });
+    await t.load();
+    expect(t.view().usage.view).toMatchObject({ headline: "$3.25", rows: [], empty: "No usage reported yet", more: "More rows exist than are shown." });
+    const two = team({}, { ["GET " + panelUrl("usage", REPO_A)]: F.usage({ items: [F.usageItem({ api_equivalent_usd: 1 }), F.usageItem({ api_equivalent_usd: 2 })], totals: { api_equivalent_usd: 99, tokens: {} } }) });
+    await two.t.load();
+    expect(two.t.view().usage.view.headline).toBe("$99.00");
+  });
+  it("a reply without a numeric total, or without the envelope fields, is unreadable and the panel says so", async () => {
+    for (const bad of [{ totals: null }, { totals: { api_equivalent_usd: "12" } }, { totals: {} }, { gaps: undefined }]) {
+      expect(readUsage(F.usage(bad)), JSON.stringify(bad)).toBeNull();
+    }
+    expect(readUsage(null)).toBeNull();
+    const { t } = team({}, { ["GET " + panelUrl("usage", REPO_A)]: { weird: true } });
+    await t.load();
+    expect(t.view().usage).toMatchObject({ failed: true, view: null });
+    expect(t.view().agents.failed).toBe(false);
+    expect(t.view().refreshFailed).toBe(WORDS.refreshFailed);
+  });
+  it("its gap, its age and its source ages reach the banner, the notices and the header like every other panel's", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("usage", REPO_A)]: F.usage({ missing_events: 3, gaps: [{ from_seq: 1, to_seq: 3, before_ts: F.iso(400) }], source_ages_s: { loop: 2 * 3600 }, heard_age_s: 900 }) });
+    await t.load();
+    expect(t.view().banner).toBe("Events missing since " + hm(F.iso(400)) + " (3 events)");
+    expect(t.view().notices).toEqual(["loop not updated for 2 h"]);
+    expect(t.view().usage.warn).toBe("last seen 15 min ago");
+    expect(t.view().usage.asOf).toMatch(/^as of /);
   });
 });
 

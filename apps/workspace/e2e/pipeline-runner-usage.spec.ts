@@ -67,9 +67,9 @@ test.describe("D#6 R2b-5b: usage in the Pipeline Runs section (mocked API)", () 
     ];
     const errors = await start(page, runs, 3.5);
     const rowOf = (i: number) => tid(page, "pl-run").nth(i);
-    await expect(rowOf(0).locator('[data-testid="pl-run-usage"]')).toHaveText("On your Claude plan · API-equivalent $1.23 · 182,000 in / 9,400 out tokens");
+    await expect(rowOf(0).locator('[data-testid="pl-run-usage"]')).toHaveText("On your Claude plan · API-equivalent $1.2345 · 182,000 in / 9,400 out tokens");
     await expect(rowOf(1).locator('[data-testid="pl-run-usage"]')).toHaveText("On your Claude plan · no API price for this model · 182,000 in / 9,400 out tokens");
-    await expect(rowOf(2).locator('[data-testid="pl-run-usage"]')).toHaveText("On your own API key · $1.23 at API prices · 182,000 in / 9,400 out tokens");
+    await expect(rowOf(2).locator('[data-testid="pl-run-usage"]')).toHaveText("On your own API key · $1.2345 at API prices · 182,000 in / 9,400 out tokens");
     await expect(rowOf(3).locator('[data-testid="pl-run-usage"]')).toHaveCount(0);
     await expect(rowOf(4).locator('[data-testid="pl-run-usage"]')).toHaveCount(0);
     await expect(rowOf(4)).toContainText("$0.50");
@@ -149,7 +149,7 @@ async function openRunSection(page: Page) {
 }
 
 const HEAD_COST: Record<string, string> = {
-  "runner-succeeded-with-pr": "≈ $0.01 at API prices · on your plan",
+  "runner-succeeded-with-pr": "≈ $0.0147 at API prices · on your plan",
   "runner-usage-not-priced": "usage not priced",
 };
 

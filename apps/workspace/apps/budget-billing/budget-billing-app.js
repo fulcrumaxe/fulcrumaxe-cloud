@@ -14,7 +14,7 @@
 //     stays the enforcement.
 //   * Every node is built with the shared h(); nothing here parses markup.
 import { on, onRefresh } from "../../core/cloud-live.js";
-import { h } from "../_lib/dom.js";
+import { h, usd as money } from "../_lib/dom.js"; // money: 600 -> $600.00, 12.3456 -> $12.3456; the one currency formatter every screen shares
 import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 
 const USAGE = "/api/v1/usage";
@@ -58,11 +58,6 @@ const BUDGET_VIEWS = [
   ["background_compute", "Background compute"],
 ];
 
-/** Formatting only: 600 -> $600.00, 12.3456 -> $12.3456. */
-function money(n) {
-  if (typeof n !== "number" || !Number.isFinite(n)) return "Unavailable";
-  return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
-}
 
 function failureSentence(e) {
   if (!(e instanceof ApiFailure)) return GENERIC;
@@ -524,6 +519,10 @@ export function mountBudgetBilling(host) {
       // D#6 R2b-5b: what this month's runs on the person's own machine would have cost at API prices. Information, apart from the budgets.
       Number.isFinite(state.usage.own_plan_api_equivalent_usd) && state.usage.own_plan_api_equivalent_usd > 0
         ? h("p", { class: "bb-muted", "data-testid": "bb-own-plan" }, "On your own plan (API-equivalent): " + money(state.usage.own_plan_api_equivalent_usd))
+        : null,
+      // EB-6b: what this month's usage reported by the person's own engine would have cost at API prices; the Team app's Cost panel draws the same figure through the same formatter.
+      Number.isFinite(state.usage.engine_api_equivalent_usd) && state.usage.engine_api_equivalent_usd > 0
+        ? h("p", { class: "bb-muted", "data-testid": "bb-engine" }, "On your own engine (API-equivalent): ", h("span", { "data-testid": "bb-engine-value" }, money(state.usage.engine_api_equivalent_usd)))
         : null
     );
   }

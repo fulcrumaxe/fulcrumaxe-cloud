@@ -10,7 +10,7 @@
 //
 // The file has two halves: the pure model (no DOM, no network) and, below the divider, the panel that draws it. They
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
-import { clockText, h, timeNode } from "../_lib/dom.js";
+import { clockText, h, timeNode, usd as apiUsd } from "../_lib/dom.js";
 import { api, createRetryGate, refusalLabel, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { APPROVE_SENTENCES, approveSentenceFor, refusalSentence, sayLive, stageWords } from "./pipeline-actions.js";
 
@@ -102,7 +102,6 @@ export function usdText(usd) {
 }
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-const apiUsd = (n) => "$" + (n !== 0 && Math.abs(n) < 0.01 ? n.toFixed(4) : n.toFixed(2));
 
 /**
  * C42-4: a run on the person's machine has no spend of its own, so its cost is the estimate at API prices and its state, never a bare "$0".
