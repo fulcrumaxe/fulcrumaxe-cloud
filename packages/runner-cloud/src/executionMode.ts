@@ -211,8 +211,9 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
         await client.query("SELECT repo_execution_mode_switch_audit($1, $2, $3, $4, $5)", [repoId, repo.execution_mode, parsed.mode, autoMergeOff, cancelled]);
         return { repo: { ...repo, execution_mode: parsed.mode }, autoMerge: false, changed: true, cancelledRuns: cancelled };
       });
-    // The placement changed and has committed: a repository that now runs on a runner may have claimable work for the account's runners.
-    if (switched.changed && isRunnerMode(parsed.mode)) void markRunnerWork(principal.accountId);
+    // The placement changed and has committed: a repository that now runs on a runner may have claimable work for the account's runners, and one that has left
+    // the runner modes must stop being bridged (the runner learns of it through the wake path, not a pull every 20 seconds as it once did).
+    if (switched.changed) void markRunnerWork(principal.accountId);
     return respond(switched);
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;

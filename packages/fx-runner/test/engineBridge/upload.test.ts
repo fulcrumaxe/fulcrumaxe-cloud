@@ -48,7 +48,7 @@ afterEach(async () => {
 function make(over: { secrets?: string[]; send?: BridgeLoopDeps["send"] } = {}) {
   const tail = new EngineTail({ eventsPath: eventsFile, cursorPath: cursorFile, uid: process.getuid?.(), secrets: () => over.secrets ?? [], log: (l) => logs.push(l) });
   const send = over.send ?? createEventsUploader({ origin: cloud.origin, key, now: () => clock.now(), fetchFn: fetch });
-  const loop = new BridgeLoop({ tail, send, clock, repoGhId: 77, engineVersion: "1.2.3", bridgeVersion: "0.1.1", log: (l) => logs.push(l), newInstanceId: () => BRIDGE });
+  const loop = new BridgeLoop({ tail, send, clock, repoGhId: 77, engineVersion: "1.2.3", bridgeVersion: "0.1.1", log: (l) => logs.push(l), newInstanceId: () => BRIDGE, coalesceMs: () => 0 });
   return { tail, loop };
 }
 const acked = (): number | null => loadCursor(cursorFile, undefined, process.getuid?.())?.last_acked_seq ?? null;
@@ -330,7 +330,7 @@ describe("bridge_dropped and the key", () => {
     expect(cloud.seqsOf(A)).toEqual([0]);
     const own = cloud.sessions.get(BRIDGE)!.stored;
     expect(own.filter((e) => e.kind === "bridge_dropped").map((e) => [e.kind === "bridge_dropped" && e.reason, e.kind === "bridge_dropped" && e.count])).toEqual([["schema", 2], ["oversize", 1], ["redaction", 1]]);
-    expect(own.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
+    expect(own.map((e) => e.seq)).toEqual([0, 1, 2]);
     // The cursor is past every drop: the next passes send no notice again.
     const before = cloud.seen.length;
     await loop.cycle();
@@ -340,7 +340,7 @@ describe("bridge_dropped and the key", () => {
     await loop.cycle();
     const notices = cloud.sessions.get(BRIDGE)!.stored.filter((e) => e.kind === "bridge_dropped");
     expect(notices).toHaveLength(4);
-    expect(cloud.sessions.get(BRIDGE)!.stored.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4]);
+    expect(cloud.sessions.get(BRIDGE)!.stored.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
     expect(acked()).toBe(0);
     expect(logs.join("\n")).not.toContain("not json");
   });

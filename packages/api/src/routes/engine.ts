@@ -3,9 +3,11 @@ import type { PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { deleteEngineData, readEngineRepoFreshness, readEngineSettingsView, setEngineBridgeSettings } from "@fx/db/src/engineBridge.js";
 import { readEngineUsage } from "@fx/core/src/engine/read.js";
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import {
   CursorError,
   engineRepoEnabled,
+  freshnessWithSeen,
   readAgents,
   readAsks,
   readEngineRepos,
@@ -108,8 +110,13 @@ async function onRepo<T>(ctx: Parameters<RouteEntry["handler"]>[0], id: string, 
   }
 }
 
+/** The envelope's age and holes, with the runner's wake stamp folded into `heard_age_s` (the account's own runner only). */
+async function freshOf(ctx: Parameters<RouteEntry["handler"]>[0], client: PoolClient, id: string) {
+  return toFreshness(await freshnessWithSeen(client, ctx.principal.accountId, id, await readEngineRepoFreshness(client, id)));
+}
+
 async function listOf<T>(ctx: Parameters<RouteEntry["handler"]>[0], id: string, read: (client: PoolClient) => Promise<{ items: T[]; next_cursor: string | null }>): Promise<Envelope<T>> {
-  return onRepo(ctx, id, async (client) => ({ ...(await read(client)), ...(toFreshness(await readEngineRepoFreshness(client, id))) }));
+  return onRepo(ctx, id, async (client) => ({ ...(await read(client)), ...(await freshOf(ctx, client, id)) }));
 }
 
 const q = <S extends z.ZodTypeAny>(input: { query: unknown }) => (input.query ?? {}) as z.infer<S>;
@@ -154,7 +161,7 @@ export const engineRoutes: RouteEntry[] = [
     async handler(ctx) {
       const { accountId, userId } = ctx.principal;
       return withTenant(ctx.pool, accountId, userId, async (client) => {
-        const items = await readEngineRepos(client);
+        const items = await readEngineRepos(client, accountId);
         const newest = items.map((i) => i.last_heard_at).filter((x): x is string => x !== null).sort().pop() ?? null;
         const heard = newest === null ? null : Math.max(0, Math.round((Date.now() - Date.parse(newest)) / 1000));
         return { items, next_cursor: null, as_of: newest ?? new Date().toISOString(), heard_age_s: heard, source_ages_s: {}, gaps: [], missing_events: 0 };
@@ -168,7 +175,7 @@ export const engineRoutes: RouteEntry[] = [
     handler: (ctx, input) => {
       const query = q<typeof listQuery>(input) as z.infer<typeof listQuery> & { state?: "running" | "recent" };
       const limit = parseLimit(query.limit);
-      return listOf(ctx, input.params.id!, (c) => readAgents(c, input.params.id!, query.state ?? "running", limit, query.cursor));
+      return listOf(ctx, input.params.id!, (c) => readAgents(c, input.params.id!, query.state ?? "running", limit, query.cursor, ctx.principal.accountId));
     },
   },
   {
@@ -218,7 +225,7 @@ export const engineRoutes: RouteEntry[] = [
       return onRepo(ctx, input.params.id!, async (client) => {
         const u = await readEngineUsage(client, { ...w, repoId: input.params.id! });
         return {
-          items: u.rows, next_cursor: null, ...(toFreshness(await readEngineRepoFreshness(client, input.params.id!))),
+          items: u.rows, next_cursor: null, ...(await freshOf(ctx, client, input.params.id!)),
           window: { from: w.from.toISOString(), to: w.to.toISOString() }, totals: { api_equivalent_usd: u.total_api_equivalent_usd, tokens: sum(u.rows) },
         };
       });
@@ -232,7 +239,7 @@ export const engineRoutes: RouteEntry[] = [
       const w = resolveWindow(q<typeof windowQuery>(input), new Date());
       return onRepo(ctx, input.params.id!, async (client) => ({
         ...(await readRepoStats(client, input.params.id!, w.from, w.to)),
-        ...(toFreshness(await readEngineRepoFreshness(client, input.params.id!))),
+        ...(await freshOf(ctx, client, input.params.id!)),
         window: { from: w.from.toISOString(), to: w.to.toISOString() },
       }));
     },
@@ -269,6 +276,10 @@ export const engineRoutes: RouteEntry[] = [
         if (!r.eligible) throw new ApiError(409, r.refusal ?? "repo_not_runner_local", r.refusal === "public_repo" ? "a public repository cannot use the engine bridge" : "that repository does not run on one of your runners");
       }
       await withTenant(ctx.pool, accountId, userId, (client) => setEngineBridgeSettings(client, userId, { watch_enabled: body.watch_enabled, operate_enabled: body.operate_enabled, repo_ids: body.repo_ids }));
+      // The runner learns of a change to the switches or the ticked set through the wake path (its command pull is a 10-minute safety net now): without this,
+      // turning a repo or the whole bridge off would stop the runner only at its next pull.
+      const tickedChanged = body.repo_ids !== undefined && (wanted.size !== ticked.size || [...wanted].some((id) => !ticked.has(id)));
+      if (watch !== before.watch_enabled || operate !== before.operate_enabled || tickedChanged) void markRunnerWork(accountId);
       return settingsView(ctx, true);
     },
   },

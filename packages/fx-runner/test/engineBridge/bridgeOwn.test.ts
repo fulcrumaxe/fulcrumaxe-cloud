@@ -56,7 +56,7 @@ describe("halt reports in the bridge session", () => {
     const key = generateRunnerKey();
     ingest.trust(key.publicJwk);
     const tail = new EngineTail({ eventsPath: path.join(dir, "e.jsonl"), cursorPath: path.join(dir, "c.json"), uid: process.getuid?.(), secrets: () => [], log: () => undefined });
-    return new BridgeLoop({ tail, send: createEventsUploader({ origin: ingest.origin, key, now: () => clock.now(), fetchFn: fetch }), clock, repoGhId: 77, engineVersion: "1.2.3", bridgeVersion: "0.1.1", log: () => undefined, newInstanceId: () => BRIDGE });
+    return new BridgeLoop({ tail, send: createEventsUploader({ origin: ingest.origin, key, now: () => clock.now(), fetchFn: fetch }), clock, repoGhId: 77, engineVersion: "1.2.3", bridgeVersion: "0.1.1", log: () => undefined, newInstanceId: () => BRIDGE, coalesceMs: () => 0 });
   }
   const stored = () => ingest.sessions.get(BRIDGE)?.stored ?? [];
 

@@ -28,6 +28,8 @@ import { dequeueQueuedItem } from "../../../../lib/mergeQueue";
 import { createAppPrStateReader } from "../../../../lib/github/revertPrState";
 import { getAuthorCheck } from "../../../../lib/github/authorCheck";
 import { engineSettingsDeps } from "@fx/api/src/routes/engine.js";
+import { engineSeen } from "@fx/core/src/engine/panels.js";
+import { runnerSeenFromCache } from "../../../../lib/runnerSeenCache";
 import { createAppRepoVisibility } from "../../../../lib/github/repoVisibility";
 import { getPairingInspector } from "../../../../lib/github/pairingInspector";
 
@@ -68,6 +70,8 @@ queueActionDeps.dequeue = (args) => dequeueQueuedItem(appUserPool(), args);
 // Engine bridge EB-5: ticking a repo for the engine asks GitHub whether it is private, now, through the same live read the runner's public-repo guard uses.
 let engineVisibility: ReturnType<typeof createAppRepoVisibility> | undefined;
 engineSettingsDeps.getVisibility = () => (accountId, repoId) => (engineVisibility ??= createAppRepoVisibility()).visibility({ accountId, repoId });
+// The engine panels count the runner's wake check (`seen:<rid>`) as hearing from it, so a quiet runner that uploads every 5 minutes still reads live.
+engineSeen.reader = () => runnerSeenFromCache();
 // D#598 PAIR-PICKER-API: the pairing routes ask GitHub (public, default branch, App installed) through this reader.
 repoPairingDeps.getInspector = () => getPairingInspector();
 // D#694 B7-2: the Repos screen's merge queue line, read through the hosted `read` client (one reader per process, so its five-minute cache is shared).
