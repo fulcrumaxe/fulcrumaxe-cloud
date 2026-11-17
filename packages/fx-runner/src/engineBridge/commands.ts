@@ -1,6 +1,6 @@
 /**
  * The runner's command pull: it asks the cloud for the engine commands signed for this runner, judges each one, and hands the valid ones to the engine
- * through the inbox. It pulls when the wake epoch moves and, as a safety net, every 20 seconds.
+ * through the inbox. It pulls at start, when the wake epoch moves, and as a safety net every 10 minutes (every 20 seconds while no wake answer has ever been seen).
  *
  * Each command is judged in this order, and the first failure acks `refused` with that reason and writes nothing to the inbox:
  * signature (`signature_invalid`), `runner_id` is this runner (`wrong_runner`), `repo_gh_id` is a bridged repo (`wrong_repo`), the repo's controls say operate is
@@ -21,8 +21,16 @@ import { Inbox, InboxRefused, notConfirmedDueMs } from "./inbox.js";
 
 export const PULL_PATH = "/api/runner/engine/commands/pull";
 export const ackPath = (commandId: string): string => `/api/runner/engine/commands/${commandId}/ack`;
-export const SAFETY_PULL_MS = 20_000;
+/**
+ * The pull that does not wait for a wake: commands arrive on the wake path (the cloud marks the account's epoch, and the runner's wake check, 20 s by default, moves
+ * `wakeEpoch`), so this only catches what a lost wake missed. It still runs once at start and again after every wake. A failed pull is retried on its own back-off, not on this.
+ */
+export const SAFETY_PULL_MS = 600_000;
+/** The pull interval of a runner the wake path has told nothing yet (no grant, a cloud without a wake key): without a wake there is nothing else to be woken by. */
+export const NO_WAKE_PULL_MS = 20_000;
 export const WAKE_CHECK_MS = 1_000;
+/** How often the inbox's own folders are looked at for outcomes the engine wrote (a local read; a request is made only when an ack is owed). */
+export const ACK_CHECK_MS = 5_000;
 export const PERMANENT_400_BACKOFF_S = 300;
 export const BACKOFF_START_S = 2;
 export const BACKOFF_MAX_S = 300;
@@ -158,7 +166,7 @@ export class CommandPuller {
     return this.controls.get(repoGhId)?.operate_enabled;
   }
 
-  /** Pulls on a wake or every 20 s, until `signal` aborts. A pass that throws is a failure and a wait, never the end of the loop. */
+  /** Pulls at start, on a wake, and every `SAFETY_PULL_MS` (`NO_WAKE_PULL_MS` before the wake path has answered); after a failure, as soon as its back-off ends. Until `signal` aborts. A pass that throws is a failure and a wait, never the end of the loop. */
   async run(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
       const epoch = this.deps.wakeEpoch();
@@ -170,10 +178,22 @@ export class CommandPuller {
         this.deps.log("engine-inbox: a pull failed; trying again later");
         this.fail("unexpected");
       }
+      let ackCheckedAt = startedAt;
       for (;;) {
         await this.deps.clock.sleep(WAKE_CHECK_MS, signal);
         const nowMs = this.deps.clock.now().getTime();
-        if (signal.aborted || (nowMs >= Math.min(this.holdUntil, this.ackHoldUntil) && (this.deps.wakeEpoch() !== epoch || nowMs - startedAt >= SAFETY_PULL_MS))) break;
+        if (signal.aborted) break;
+        // The safety pull is rare now, so an outcome the engine wrote is acked on its own: it must not wait 10 minutes to show as done.
+        if (nowMs - ackCheckedAt >= ACK_CHECK_MS || nowMs < ackCheckedAt) {
+          ackCheckedAt = nowMs;
+          await this.sendAcks();
+        }
+        if (nowMs < Math.min(this.holdUntil, this.ackHoldUntil)) continue;
+        const failing = this.why !== null || this.ackWhy !== null;
+        const current = this.deps.wakeEpoch();
+        const every = current === null ? NO_WAKE_PULL_MS : SAFETY_PULL_MS;
+        // A clock that went back (a negative elapsed time) is not a pull that is not yet due for ever: it pulls.
+        if (current !== epoch || failing || nowMs - startedAt >= every || nowMs < startedAt) break;
       }
     }
   }

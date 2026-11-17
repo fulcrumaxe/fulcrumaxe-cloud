@@ -20,8 +20,25 @@ import { MAX_WAIT_S, type RetryWhy, type SendOutcome } from "./upload.js";
 import { emptyDrops, type DropReason, type DropCounts } from "./shape.js";
 import type { EngineTail } from "./tail.js";
 
+/** How often the tail's file is looked at. A local read, never a request: what is held back below is held here. */
 export const FLUSH_MS = 2_000;
-export const HEARTBEAT_MS = 60_000;
+/**
+ * The slim status: how long the runner may go without any accepted request before it sends `bridge_heartbeat`, and how long a batch of nothing but the engine's and
+ * the host's own heartbeats may wait to go out (they are the same word, "alive", said by different parts): such a batch is sent when the status is due and then replaces it. Events of any other kind are never held this long.
+ */
+export const HEARTBEAT_MS = 300_000;
+/** The most events a request carries (the tail's own cap). */
+const ENGINE_BATCH_EVENTS = 100;
+/** The kinds that only say "alive"; a batch of nothing else waits for `HEARTBEAT_MS` rather than the coalescing window. */
+const SLIM_KINDS: ReadonlySet<string> = new Set(["engine_heartbeat", "host_heartbeat"]);
+/**
+ * How long events other than asks and halts may wait to be sent together, counted from the first one held. Nobody is watching the repo's detail by default
+ * (the watch signal is a later row), so it is the long window; a watching reader gets `WATCHED_COALESCE_MS` through `coalesceMs`.
+ */
+export const UNWATCHED_COALESCE_MS = 60_000;
+export const WATCHED_COALESCE_MS = 10_000;
+/** Kinds that never wait: a decision the person is needed for, its clearing, and the halt's answer (the last is the runner's own and goes out through `reportHalt`). */
+export const URGENT_KINDS: ReadonlySet<string> = new Set(["ask_raised", "ask_cleared", "halt_applied"]);
 export const OFF_RETRY_S = 300;
 export const BACKOFF_START_S = 2;
 export const BACKOFF_MAX_S = 300;
@@ -52,6 +69,8 @@ export interface BridgeLoopDeps {
   newInstanceId?: () => string;
   /** The last seq the saved cursor holds as acked, for `status` before anything is sent. */
   lastAckedSeq?: number | null;
+  /** The longest events other than asks may be held to go out together, in ms (default `UNWATCHED_COALESCE_MS`). A later row passes `WATCHED_COALESCE_MS` while someone watches. 0 sends everything at the next tick. */
+  coalesceMs?: () => number;
 }
 
 const REASONS: readonly DropReason[] = ["schema", "oversize", "redaction", "partial_line"];
@@ -98,8 +117,11 @@ export class BridgeLoop {
   private flight: EngineFlight | null = null;
   private pendingDrops: DropCounts = emptyDrops();
   private bridgeFlight: Chunk | null = null;
-  private lastHeartbeatAt: number | null = null;
-  private heartbeatInFlight = false;
+  /** When the cloud last accepted any request of this loop (the cloud's "heard"); null before the first. */
+  private lastHeardAt: number | null = null;
+  /** When the first event now held back was first seen, or when the first drop notice became owed; null when nothing waits. */
+  private heldSince: number | null = null;
+  private dropsSince: number | null = null;
   private bridgeSeq = 0;
   /** `halt_applied` reports waiting to go out in the bridge session (the kill path's answer); at most `HALT_REPORTS_MAX` are kept, the oldest dropped first. */
   private pendingHalts: Array<{ halt_epoch: number; method: "scope" | "group_only"; survivors: number }> = [];
@@ -141,7 +163,11 @@ export class BridgeLoop {
     }
   }
 
-  /** One pass: finish or take a batch, send it, then the runner's own events. Resolves with how long to wait before the next pass (ms). */
+  /**
+   * One pass: finish or take a batch, send it, then the runner's own events. Resolves with how long to wait before the next pass (ms).
+   * A batch of events that are not asks waits (up to `coalesceMs`) to go out with the ones that follow; every tick the tail is read again from its saved cursor,
+   * so an ask or a halt that lands behind them is seen within one tick and sends the whole batch at once. A batch of 100 events or more than one request goes at once.
+   */
   async cycle(): Promise<number> {
     const nowMs = this.deps.clock.now().getTime();
     if (nowMs < this.holdUntil) return this.holdUntil - nowMs;
@@ -151,12 +177,19 @@ export class BridgeLoop {
       if (polled.status === "ok") {
         const first = polled.events[0];
         const session: Session | null = first === undefined ? null : { engine_instance_id: first.engine_instance_id, repo_gh_id: this.deps.repoGhId, engine_version: this.deps.engineVersion };
-        this.flight = {
-          chunks: session === null ? [] : splitBatch(session, polled.events),
-          ackSeq: polled.events.length > 0 ? polled.events[polled.events.length - 1]!.seq : null,
-          drops: polled.dropped,
-          full: polled.more,
-        };
+        const chunks = session === null ? [] : splitBatch(session, polled.events);
+        if (this.shouldHold(polled.events, polled.more, chunks.length, nowMs)) {
+          // Held: the next tick reads these lines (and any that follow) again from the saved cursor. Nothing is lost, nothing is acked, nothing is counted twice.
+          this.deps.tail.rewind();
+        } else {
+          this.heldSince = null;
+          this.flight = {
+            chunks,
+            ackSeq: polled.events.length > 0 ? polled.events[polled.events.length - 1]!.seq : null,
+            drops: polled.dropped,
+            full: polled.more,
+          };
+        }
       }
     }
     const flight = this.flight;
@@ -186,27 +219,54 @@ export class BridgeLoop {
     return flight !== null && flight.full ? 0 : FLUSH_MS;
   }
 
-  /** The runner's own events: a notice per reason that lost lines, and the heartbeat when it is due. */
+  /** Whether a poll's events wait for company. Only a batch that holds events, none of them an ask, that is not full and still fits one request, and whose window is open. */
+  private shouldHold(events: readonly EngineEvent[], more: boolean, requests: number, nowMs: number): boolean {
+    if (events.length === 0 || more || requests > 1 || events.length >= ENGINE_BATCH_EVENTS) return false;
+    if (events.some((event) => URGENT_KINDS.has(event.kind))) return false;
+    if (events.every((event) => SLIM_KINDS.has(event.kind))) {
+      // Nothing but "alive": it goes out when the status is due, and then it is the status (the heartbeat after it is not due). Never later than that.
+      return !this.statusDue(nowMs);
+    }
+    this.heldSince ??= nowMs;
+    // A clock that went back is a window that has not elapsed, but never one that never ends: it is judged from now.
+    if (nowMs < this.heldSince) this.heldSince = nowMs;
+    return nowMs - this.heldSince < Math.max(0, this.deps.coalesceMs?.() ?? UNWATCHED_COALESCE_MS);
+  }
+
+  /** True when the cloud has heard nothing from this loop for `HEARTBEAT_MS` (or ever, or the clock went back). */
+  private statusDue(nowMs: number): boolean {
+    return this.lastHeardAt === null || nowMs < this.lastHeardAt || nowMs - this.lastHeardAt >= HEARTBEAT_MS;
+  }
+
+  /**
+   * The runner's own events: a halt report at once; the notices of lines that were lost and the heartbeat when the heartbeat is due or the coalescing window has run
+   * (the notices are not urgent, so they ride with the heartbeat). The heartbeat is due only when the cloud has heard nothing from this loop for `HEARTBEAT_MS`: an upload
+   * of events is already a sign of life, and sending a heartbeat after one would only be a second request.
+   */
   private async sendOwn(): Promise<number | null> {
     const nowMs = this.deps.clock.now().getTime();
     if (this.bridgeFlight === null) {
       const events: EngineEvent[] = [];
       const ts = this.deps.clock.now().toISOString();
       const own = (rest: Record<string, unknown>): EngineEvent => EngineEvent.parse({ v: 1, engine_instance_id: this.bridgeInstance, seq: this.bridgeSeq++, ts, ...rest });
-      for (const reason of REASONS) {
-        if (this.pendingDrops[reason] > 0) events.push(own({ kind: "bridge_dropped", count: Math.min(this.pendingDrops[reason], ENGINE_COUNT_MAX), reason }));
+      const owed = REASONS.some((reason) => this.pendingDrops[reason] > 0);
+      if (owed) this.dropsSince ??= nowMs;
+      const heartbeat = this.statusDue(nowMs);
+      const noticesDue = owed && (heartbeat || this.pendingHalts.length > 0 || nowMs - this.dropsSince! >= Math.max(0, this.deps.coalesceMs?.() ?? UNWATCHED_COALESCE_MS));
+      if (noticesDue) {
+        for (const reason of REASONS) {
+          if (this.pendingDrops[reason] > 0) events.push(own({ kind: "bridge_dropped", count: Math.min(this.pendingDrops[reason], ENGINE_COUNT_MAX), reason }));
+        }
+        this.pendingDrops = emptyDrops();
+        this.dropsSince = null;
       }
-      this.pendingDrops = emptyDrops();
       for (const halt of this.pendingHalts.splice(0)) events.push(own({ kind: "halt_applied", ...halt }));
-      this.heartbeatInFlight = this.lastHeartbeatAt === null || nowMs - this.lastHeartbeatAt >= HEARTBEAT_MS;
-      if (this.heartbeatInFlight) events.push(own({ kind: "bridge_heartbeat" }));
+      if (heartbeat) events.push(own({ kind: "bridge_heartbeat" }));
       if (events.length === 0) return null;
       this.bridgeFlight = { events };
     }
     const wait = await this.deliver(this.bridgeFlight, { engine_instance_id: this.bridgeInstance, repo_gh_id: this.deps.repoGhId, engine_version: this.deps.bridgeVersion });
     if (wait !== null) return wait;
-    if (this.heartbeatInFlight) this.lastHeartbeatAt = this.deps.clock.now().getTime();
-    this.heartbeatInFlight = false;
     this.bridgeFlight = null;
     return null;
   }
@@ -242,6 +302,7 @@ export class BridgeLoop {
     this.reason = null;
     this.failures = 0;
     this.holdUntil = 0;
+    this.lastHeardAt = this.deps.clock.now().getTime();
     this.lastSuccess = this.deps.clock.now().toISOString();
   }
 

@@ -279,8 +279,8 @@ describe("the cloud's list: its identity, its age, and the hello", () => {
     expect(b.status().socket).toBe("off");
   });
 
-  it("stops a running repo when the list it runs on is older than 10 minutes, asks again with a probe, and starts again on a fresh list", async () => {
-    expect(ALLOWED_MAX_AGE_MS).toBe(600_000);
+  it("stops a running repo when the list it runs on is older than 25 minutes, asks again with a probe, and starts again on a fresh list", async () => {
+    expect(ALLOWED_MAX_AGE_MS).toBe(1_500_000);
     saveBridgeSettings(runnerDir, [repoEntry()]);
     const b = start();
     await advanceUntil(() => running(b));
@@ -390,7 +390,7 @@ describe("the cloud's list: its identity, its age, and the hello", () => {
     expect(logs.join("\n")).not.toContain("secret");
   });
 
-  it("does not start a repo on a list older than 10 minutes", async () => {
+  it("does not start a repo on a list older than 25 minutes", async () => {
     saveBridgeSettings(runnerDir, [repoEntry()]);
     const b = start();
     await advanceUntil(() => running(b));

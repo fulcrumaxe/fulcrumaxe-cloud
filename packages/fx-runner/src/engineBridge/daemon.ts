@@ -34,10 +34,10 @@ export const SUPERVISE_MS = 10_000;
 /** The cloud's list is asked for again (by a probe pull) when none is held and a repo waits for it. */
 export const ALLOWED_PROBE_MS = 60_000;
 /**
- * The oldest the cloud's list may be for a repo to start or keep running on it: 10 minutes. A running repo's own pull (every 20 s) renews it; a list nobody renewed
+ * The oldest the cloud's list may be for a repo to start or keep running on it: 25 minutes, two safety pulls (10 minutes each) and some slack. A running repo's own pull (at every wake, and every 10 minutes at the longest) renews it; a list nobody renewed
  * (the pulls fail, or answer without a readable list) ages out, the repo stops, and a probe pull asks again.
  */
-export const ALLOWED_MAX_AGE_MS = 10 * 60_000;
+export const ALLOWED_MAX_AGE_MS = 25 * 60_000;
 export const STATUS_WRITE_MS = 60_000;
 /** A repo id no GitHub repository has: a pull for it returns the runner's list and delivers nothing. */
 export const PROBE_REPO_ID = Number.MAX_SAFE_INTEGER;

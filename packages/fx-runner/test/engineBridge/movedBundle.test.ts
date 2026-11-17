@@ -29,7 +29,7 @@ const repoRoot = path.join(root, "repo");
 for (const d of [runner, stateDir]) mkdirSync(d, { mode: 0o700 });
 mkdirSync(path.join(repoRoot, "engine"), { recursive: true });
 writeFileSync(path.join(repoRoot, "engine", "manifest.json"), JSON.stringify({ engine_version: "4.5.6" }));
-writeFileSync(path.join(stateDir, "engine-events.jsonl"), JSON.stringify({ v: 1, engine_instance_id: "0b9b3a52-6c1e-4c53-9d5f-1f3f2a6f7a10", seq: 0, ts: "2026-11-16T15:00:00.000Z", kind: "loop_tick", origin: "cron", duration_s: 5 }) + "\\n", { mode: 0o600 });
+writeFileSync(path.join(stateDir, "engine-events.jsonl"), JSON.stringify({ v: 1, engine_instance_id: "0b9b3a52-6c1e-4c53-9d5f-1f3f2a6f7a10", seq: 0, ts: "2026-11-16T15:00:00.000Z", kind: "ask_raised", ask_id: "0123456789abcdef", ask_kind: "owner_decision", source: "team_log" }) + "\\n", { mode: 0o600 });
 bundle.saveBridgeSettings(runner, [{ repo_gh_id: 77, full_name: "acme/widgets", state_dir: stateDir, repo_root: repoRoot }]);
 const sent = [];
 const key = bundle.generateRunnerKey();
@@ -49,7 +49,7 @@ const bridge = bundle.startEngineBridge({
   wakeEpoch: () => null, accepted: () => true, xdgRuntimeDir: undefined, secrets: () => [], ports, log: () => undefined, superviseMs: 50,
 });
 const deadline = Date.now() + 8000;
-while (Date.now() < deadline && !(sent.some((s) => s.startsWith("4.5.6:0loop_tick")) && bridge.status().repos[0]?.run === "running")) await new Promise((r) => setTimeout(r, 25));
+while (Date.now() < deadline && !(sent.some((s) => s.startsWith("4.5.6:0ask_raised")) && bridge.status().repos[0]?.run === "running")) await new Promise((r) => setTimeout(r, 25));
 const status = bridge.status();
 await bridge.stop();
 console.log(JSON.stringify({ sent, run: status.repos[0]?.run, upload: status.repos[0]?.upload?.state }));
@@ -90,7 +90,7 @@ describe("the bridge from its built output, moved", () => {
     expect(out.code).toBe(0);
     const result = JSON.parse(out.stdout.trim().split("\n").at(-1)!) as { sent: string[]; run: string };
     expect(result.run).toBe("running");
-    expect(result.sent).toContain("4.5.6:0loop_tick");
+    expect(result.sent).toContain("4.5.6:0ask_raised");
   }, 60_000);
 
   it("holds no path of the build machine and reads nothing from beside itself", () => {

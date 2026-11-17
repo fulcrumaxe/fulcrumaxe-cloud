@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
@@ -13,6 +13,14 @@ import { AccountPoller } from '../src/sse/poller.js';
 import { eventually, openSse, startServer } from './helpers/sse.js';
 import { engineRoutes as engineReadRoutes, engineSettingsDeps } from '../src/routes/engine.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
+
+const woken: string[] = [];
+vi.mock('@fx/core/src/pendingWork.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@fx/core/src/pendingWork.js')>()),
+  markRunnerWork: vi.fn(async (accountId: string) => {
+    woken.push(accountId);
+  }),
+}));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any; // a decoded response body: its shape is what each test asserts
@@ -358,6 +366,42 @@ describe('engine read routes and settings [pg]', () => {
     } finally {
       engineSettingsDeps.getVisibility = null;
     }
+  });
+
+  it('settings: a change to watch, operate or the ticked set wakes the account\'s runners once it has committed; a no-op, a refusal and a read do not', async () => {
+    engineSettingsDeps.getVisibility = () => async () => 'private';
+    // A known starting point whatever the earlier tests left: watch on, operate off, only the first repo ticked.
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = true, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+    await q(`DELETE FROM engine_bridge_repos WHERE account_id = $1 AND repo_id <> $2`, [A.accountId, A.repoId]);
+    const second = randomUUID();
+    await q(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) SELECT $1, account_id, installation_id, 9201, 'team', 'acme', 'wake2', 'runner_local' FROM repos WHERE id = $2`, [second, A.repoId]);
+    const put = async (body: unknown) => {
+      woken.length = 0;
+      const res = await call(owner(), 'PUT', '/engine/settings', body);
+      return { res, woken: [...woken] };
+    };
+    const startOperate = (await call(owner(), 'GET', '/engine/settings')).body.operate_enabled as boolean;
+    expect(startOperate).toBe(false);
+    // Operate on, then the same again (no change), then off.
+    expect((await put({ operate_enabled: true })).woken).toEqual([A.accountId]);
+    expect((await put({ operate_enabled: true })).woken).toEqual([]);
+    expect((await put({ operate_enabled: false })).woken).toEqual([A.accountId]);
+    // The ticked set: the same set is nothing, a bigger one and a smaller one are changes.
+    expect((await put({ repo_ids: [A.repoId] })).woken).toEqual([]);
+    expect((await put({ repo_ids: [A.repoId, second] })).woken).toEqual([A.accountId]);
+    expect((await put({ repo_ids: [A.repoId] })).woken).toEqual([A.accountId]);
+    // Watch off (operate is already off) and back on.
+    expect((await put({ watch_enabled: false })).woken).toEqual([A.accountId]);
+    expect((await put({ watch_enabled: true })).woken).toEqual([A.accountId]);
+    // Refusals and reads wake nothing: a member's write (403), operate without watch (422), an unknown repo (404), a plain read.
+    woken.length = 0;
+    expect((await call(member, 'PUT', '/engine/settings', { watch_enabled: false })).status).toBe(403);
+    expect((await call(owner(), 'PUT', '/engine/settings', { operate_enabled: true, watch_enabled: false })).status).toBe(422);
+    expect((await call(owner(), 'PUT', '/engine/settings', { repo_ids: [randomUUID()] })).status).toBe(404);
+    expect((await call(owner(), 'GET', '/engine/settings')).status).toBe(200);
+    expect(woken).toEqual([]);
+    // Left as the earlier settings test leaves it, for the tests after this one.
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
   });
 
   it('delete-data: an owner removes every engine row and writes its audit row; the switches stay', async () => {

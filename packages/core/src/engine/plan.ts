@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { freshnessWithSeen } from './panels.js';
 import { readEngineRepoFreshness, type EngineRepoFreshness } from '@fx/db/src/engineBridge.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
@@ -91,5 +92,9 @@ export async function readEnginePlan(client: Pick<PoolClient, 'query'>, repoId: 
 /** The same read for a caller: opens the tenant transaction (row security confines it to the account) and reads. */
 export async function getEnginePlan(ctx: { pool: Pool; principal: { accountId: string; userId: string } }, repoId: string): Promise<EnginePlanView | null> {
   const { accountId, userId } = ctx.principal;
-  return withTenant(ctx.pool, accountId, userId, (client) => readEnginePlan(client, repoId));
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    const view = await readEnginePlan(client, repoId);
+    // The runner's wake stamp counts as hearing from it, the same as on every other engine panel.
+    return view === null ? null : { ...view, freshness: await freshnessWithSeen(client, accountId, repoId, view.freshness) };
+  });
 }

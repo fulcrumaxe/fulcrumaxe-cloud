@@ -75,6 +75,67 @@ export function toFreshness(f: EngineRepoFreshness | null): Freshness {
   };
 }
 
+/**
+ * The wake route's last-seen stamps (`seen:<rid>` in Runtime Cache, written at most once a minute by every wake check). A quiet runner uploads only every 5 minutes,
+ * but checks the wake route every 20 s, so its check is the newer word that it is there. Injected by the app (structurally the runner-cloud `RunnerSeenReader`); a
+ * miss, an error or no reader leaves the database's word alone, so a stamp can only make a runner look MORE recently heard.
+ */
+export type RunnerSeenReader = (runnerIds: readonly string[], now: Date) => Promise<ReadonlyMap<string, Date>>;
+export const engineSeen: { reader: (() => RunnerSeenReader | null) | null } = { reader: null };
+
+/**
+ * How old the database's own word may be for the wake stamp to still count: one 5-minute status interval plus slack. The wake check comes from the runner's
+ * daemon, which can be alive while its bridge is dead (crashed, stopped, refused); a bridge that has not uploaded for longer than its status interval is not
+ * kept "live" by the daemon next to it.
+ */
+export const WAKE_STAMP_MAX_DB_AGE_S = 420;
+
+/**
+ * Pure. The smaller of the database's heard age and the age of the wake stamp (seconds), but only while the database's own age is at most
+ * `WAKE_STAMP_MAX_DB_AGE_S` (a repo nobody has heard from, or not for longer than that, keeps the database's word). A stamp from the future counts as now.
+ */
+export function heardAgeWithSeen(dbAgeS: number | null, seenAt: Date | null, now: Date): number | null {
+  if (seenAt === null || dbAgeS === null || dbAgeS > WAKE_STAMP_MAX_DB_AGE_S) return dbAgeS;
+  return Math.min(dbAgeS, Math.max(0, Math.round((now.getTime() - seenAt.getTime()) / 1000)));
+}
+
+/**
+ * The wake stamp of each repo's runner, for the account's own repos only. A repo's runner is the one the panels already name: the runner of its newest session
+ * (engine sessions first by first event, then newest), and only when that runner belongs to `accountId` and is not removed. The ids asked of the cache come
+ * only from this account's sessions, so no other account's runner can be looked up.
+ */
+export async function readRepoWakeSeen(client: Pick<PoolClient, 'query'>, accountId: string, repoIds: readonly string[], now: Date = new Date()): Promise<Map<string, Date>> {
+  const out = new Map<string, Date>();
+  const read = engineSeen.reader?.() ?? null;
+  if (read === null || repoIds.length === 0) return out;
+  try {
+    const { rows } = await client.query(
+      `SELECT n.repo_id, rn.id AS runner_id
+         FROM (SELECT DISTINCT ON (y.repo_id) y.repo_id, y.runner_id FROM engine_sessions y WHERE y.account_id = $1 AND y.repo_id = ANY($2::uuid[])
+                ORDER BY y.repo_id, y.first_event_at DESC NULLS LAST, y.created_at DESC) n
+         JOIN runners rn ON rn.id = n.runner_id AND rn.account_id = $1 AND rn.revoked_at IS NULL`,
+      [accountId, [...repoIds]],
+    );
+    if (rows.length === 0) return out;
+    const seen = await read(rows.map((r) => r.runner_id as string), now);
+    for (const r of rows) {
+      const at = seen.get(r.runner_id as string);
+      if (at !== undefined) out.set(r.repo_id as string, at);
+    }
+  } catch {
+    // fx-swallow-ok: the wake stamp only ever adds to what the database says; a failed read leaves the database's word, never an error on the panel
+  }
+  return out;
+}
+
+/** The freshness read with the wake stamp folded into `heard_age_s` (the newest word wins). A repo with no session stays null. */
+export async function freshnessWithSeen(client: Pick<PoolClient, 'query'>, accountId: string, repoId: string, f: EngineRepoFreshness | null): Promise<EngineRepoFreshness | null> {
+  if (f === null) return null;
+  const now = new Date();
+  const seen = await readRepoWakeSeen(client, accountId, [repoId], now);
+  return { ...f, heard_age_s: heardAgeWithSeen(f.heard_age_s, seen.get(repoId) ?? null, now) };
+}
+
 export interface RepoRow {
   repo_id: string;
   full_name: string;
@@ -97,7 +158,7 @@ export interface RepoRow {
 }
 
 /** Every ticked repo of the account with the runner that serves it and its liveness. The newest session names the runner; liveness uses the newest word from any session. */
-export async function readEngineRepos(client: PoolClient): Promise<RepoRow[]> {
+export async function readEngineRepos(client: PoolClient, accountId?: string): Promise<RepoRow[]> {
   const { rows } = await client.query(
     `SELECT r.id AS repo_id, CASE WHEN r.gh_owner IS NOT NULL AND r.gh_name IS NOT NULL THEN r.gh_owner || '/' || r.gh_name END AS full_name,
             st.watch_enabled, st.operate_enabled, n.id AS session_id, n.runner_id, n.last_event_at,
@@ -119,22 +180,31 @@ export async function readEngineRepos(client: PoolClient): Promise<RepoRow[]> {
       ORDER BY full_name NULLS LAST, r.id`,
     [UNNAMED_MEMBER],
   );
-  return rows.map((r) => ({
+  const now = new Date();
+  const seen = accountId === undefined ? new Map<string, Date>() : await readRepoWakeSeen(client, accountId, rows.map((r) => r.repo_id as string), now);
+  return rows.map((r) => {
+    const seenAt = seen.get(r.repo_id as string) ?? null;
+    const dbAge = r.heard === null ? null : Math.round(r.heard);
+    const heardAge = heardAgeWithSeen(dbAge, seenAt, now);
+    // The wake stamp can only make the runner look more recently heard: the later of it and the database's `last_heard_at`.
+    const heardAt = seenAt !== null && heardAge !== null && dbAge !== null && heardAge < dbAge ? seenAt : r.heard_at;
+    return {
     repo_id: r.repo_id,
     full_name: r.full_name ?? `Unnamed repository (${String(r.repo_id).slice(0, 8)})`,
     runner_id: r.runner_id,
     runner_name: r.runner_id === null ? null : (r.runner_set_name ?? `Unnamed runner (${r.registrant})`),
     session_id: r.session_id,
     last_event_at: iso(r.last_event_at),
-    last_heard_at: iso(r.heard_at),
-    liveness: livenessOf({ sessionCount: r.sessions, revoked: r.revoked === true, heardAgeS: r.heard === null ? null : Math.round(r.heard) }),
+    last_heard_at: iso(heardAt),
+    liveness: livenessOf({ sessionCount: r.sessions, revoked: r.revoked === true, heardAgeS: heardAge }),
     watch_enabled: r.watch_enabled ?? false,
     operate_enabled: r.operate_enabled ?? false,
     halted: r.halted === true,
     halt_pending: haltPending({ halted: r.halted === true, halt_epoch: Number(r.halt_epoch) }, r.applied_epoch === null || r.applied_epoch === undefined ? null : Number(r.applied_epoch)),
     halted_at: iso(r.halted_at),
     halt_epoch: Number(r.halt_epoch),
-  }));
+    };
+  });
 }
 
 /** A keyset cursor: the sort key of the last row served, as strings. Anything that is not 1 to 3 short strings is refused by the caller as an invalid cursor. */
@@ -171,19 +241,22 @@ export interface AgentItem {
 }
 
 /** `running`: agents with no stop, each running or unknown (never "running" for a session that is not live or a start 3 h old). `recent`: stopped in the last 24 h, newest first. */
-export async function readAgents(client: PoolClient, repoId: string, filter: 'running' | 'recent', limit: number, cursor: string | undefined): Promise<{ items: AgentItem[]; next_cursor: string | null }> {
+export async function readAgents(client: PoolClient, repoId: string, filter: 'running' | 'recent', limit: number, cursor: string | undefined, accountId?: string): Promise<{ items: AgentItem[]; next_cursor: string | null }> {
   const after = decodeCursor(cursor, 2);
+  // A running agent's session is live while the repo's runner was heard (an upload, or its wake check inside the bounded window) within `LIVE_WITHIN_S`.
+  const now = new Date();
+  const seenAt = accountId === undefined ? null : ((await readRepoWakeSeen(client, accountId, [repoId], now)).get(repoId) ?? null);
   const open = filter === 'running';
   const ts = open ? 'a.started_at' : 'a.stopped_at';
   const { rows } = await client.query(
     `SELECT a.id, COALESCE(a.agent_id, a.spawn_id) AS agent_id, a.role, a.discussion, a.background, a.started_at, a.stopped_at, a.verdict, a.model, ${us(ts)} AS k,
             (SELECT u.credential_mode FROM engine_agent_usage u WHERE u.session_id = a.session_id AND u.subject_kind = 'agent' AND u.subject_id = a.agent_id) AS credential_mode,
-            s.last_heard_at >= now() - make_interval(secs => $5) AS session_live, EXTRACT(EPOCH FROM (now() - a.started_at))::float8 AS start_age
+            EXTRACT(EPOCH FROM (now() - s.last_heard_at))::float8 AS heard_age, EXTRACT(EPOCH FROM (now() - a.started_at))::float8 AS start_age
        FROM engine_agents a JOIN engine_sessions s ON s.id = a.session_id
       WHERE s.repo_id = $1 AND ${open ? 'a.stopped_at IS NULL' : "a.stopped_at >= now() - interval '24 hours'"}
         AND ($2::timestamptz IS NULL OR (${ts}, a.id) < ($2::timestamptz, $3::uuid))
       ORDER BY ${ts} DESC, a.id DESC LIMIT $4`,
-    [repoId, after?.[0] ?? null, after?.[1] ?? null, limit + 1, LIVE_WITHIN_S],
+    [repoId, after?.[0] ?? null, after?.[1] ?? null, limit + 1],
   );
   const items = rows.map((r): AgentItem & { _k: string[] } => ({
     _k: [r.k, r.id],
@@ -194,7 +267,7 @@ export async function readAgents(client: PoolClient, repoId: string, filter: 'ru
     started_at: iso(r.started_at),
     stopped_at: iso(r.stopped_at),
     verdict: r.verdict,
-    state: agentStateOf({ stopped: r.stopped_at !== null, sessionLive: r.session_live === true, startAgeS: r.start_age }),
+    state: agentStateOf({ stopped: r.stopped_at !== null, sessionLive: r.heard_age !== null && (heardAgeWithSeen(Number(r.heard_age), seenAt, now) ?? Infinity) <= LIVE_WITHIN_S, startAgeS: r.start_age }),
     model: r.model,
     credential_mode: r.credential_mode,
   }));

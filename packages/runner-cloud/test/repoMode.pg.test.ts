@@ -1,9 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { CLOUD_VERIFIED_COPY_SHA256, LOCAL_AUTO_MERGE_COPY_SHA256, getRepoMode, setExecutionMode } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
+
+const woken: string[] = [];
+vi.mock("@fx/core/src/pendingWork.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@fx/core/src/pendingWork.js")>()),
+  markRunnerWork: vi.fn(async (accountId: string) => {
+    woken.push(accountId);
+  }),
+}));
 
 /** [pg] D#6 R5b-2b-iii (C40): the state-read route behind the repo mode picker. Real rows, real row security. */
 describe("GET /api/runners/repos/:id/execution-mode [pg]", () => {
@@ -345,5 +353,53 @@ describe("GET /api/runners/repos/:id/execution-mode [pg]", () => {
       expect(body(await getWith(f, id, r.repoVisibility)).runner_blocked).toBeNull();
       expect(r.calls).toHaveLength(3);
     });
+  });
+});
+
+/**
+ * [pg] The runner learns of a placement change through the wake path (its command pull is a 10-minute safety net), so every switch that changed something marks the
+ * account's runner work, and a switch away from the runner modes is one of them: the bridge for that repo must stop.
+ */
+describe("a mode switch wakes the account's runners [pg]", () => {
+  let h: Harness;
+  beforeAll(async () => {
+    h = await harness();
+  });
+  afterAll(() => h.close());
+  beforeEach(() => {
+    woken.length = 0;
+  });
+
+  async function repo(f: F2Fixture, mode: string): Promise<string> {
+    const id = randomUUID();
+    await h.admin.query("INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, 'team', 'Acme', 'widgets', $4)", [id, f.accountId, Math.floor(Math.random() * 1e12), mode]);
+    return id;
+  }
+  const move = (f: F2Fixture, id: string, mode: string) =>
+    respond(() => setExecutionMode(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: f.o1 }, id, { mode, confirm_repo: "Acme/widgets" }));
+
+  it("moving a repo off runner_local marks the account's runner work", async () => {
+    const f = await seedF2(h.admin);
+    const id = await repo(f, "runner_local");
+    const res = await move(f, id, "sandbox");
+    expect(res.status).toBe(200);
+    expect((res.body as { changed: boolean }).changed).toBe(true);
+    expect(woken).toEqual([f.accountId]);
+  });
+
+  it("moving a repo onto runner_local marks it too", async () => {
+    const f = await seedF2(h.admin);
+    const id = await repo(f, "sandbox");
+    expect((await move(f, id, "runner_local")).status).toBe(200);
+    expect(woken).toEqual([f.accountId]);
+  });
+
+  it("a switch that changes nothing, and one that is refused, mark nothing", async () => {
+    const f = await seedF2(h.admin);
+    const id = await repo(f, "sandbox");
+    expect((await move(f, id, "sandbox")).status).toBe(200);
+    const wrong = await respond(() => setExecutionMode(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: f.o1 }, id, { mode: "runner_local", confirm_repo: "nope/nope" }));
+    expect(wrong.status).toBe(400);
+    expect(woken).toEqual([]);
   });
 });

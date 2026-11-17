@@ -80,16 +80,22 @@ describe("runner-work hint from the session routes [pg]", () => {
     expect(entries.get(key)).toBeGreaterThan(0);
   });
 
-  it("a move onto a runner mode marks the account; a move to sandbox and a no-op do not", async () => {
+  it("a move that changes the placement marks the account, onto a runner mode or off it; a no-op does not", async () => {
     const f = await fresh();
     const key = runnerWorkKeyFor(f.accountId);
     const move = (repoId: string, mode: string) =>
       respond(() => setExecutionMode(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: f.o1 }, repoId, { mode, confirm_repo: "Acme/widgets" }));
     const onRunner = await repo(f, "runner_local");
+    // A no-op (already there) marks nothing.
     expect(await move(onRunner, "runner_local")).toMatchObject({ status: 200, body: { changed: false } });
-    expect(await move(onRunner, "sandbox")).toMatchObject({ status: 200, body: { changed: true } });
     await flush();
     expect(entries.has(key)).toBe(false);
+    // Off the runner modes: the runner must learn that the repo is no longer bridged, so this marks too.
+    expect(await move(onRunner, "sandbox")).toMatchObject({ status: 200, body: { changed: true } });
+    await flush();
+    expect(entries.get(key)).toBeGreaterThan(0);
+    // Each case on its own: the entry is cleared between moves.
+    entries.clear();
     expect(await move(onRunner, "runner_local")).toMatchObject({ status: 200, body: { changed: true } });
     await flush();
     expect(entries.get(key)).toBeGreaterThan(0);
