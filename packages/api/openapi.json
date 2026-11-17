@@ -46608,6 +46608,500 @@
           }
         }
       }
+    },
+    "/api/v1/engine/repos/{id}/commands": {
+      "post": {
+        "operationId": "issueEngineCommand",
+        "summary": "Send one command to the engine running on your machine",
+        "description": "Owner or admin, session only (a token is 403 `session_required`, a member 403). The repo must have operate switched on (409 `operate_off`) and a live engine session (409 `engine_not_connected`); the command goes to that session's runner. A halted repo refuses `start_day`, `resume_loop`, `request_spawn` and `set_dial` (409 `halted`); `pause_loop`, `answer_ask` and `stop_agent` stay allowed. Twenty waiting commands per repo is the most (409 `too_many_pending`). Answers 201 `pending` with the expiry, writes `engine_command.issued` in the same transaction and wakes the account's runners.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "start_day",
+                      "pause_loop",
+                      "resume_loop",
+                      "answer_ask",
+                      "set_dial",
+                      "request_spawn",
+                      "stop_agent"
+                    ]
+                  },
+                  "args": {
+                    "default": {},
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "kind",
+                  "args"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Send one command to the engine running on your machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command_id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "const": "pending"
+                    },
+                    "expires_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "command_id",
+                    "state",
+                    "expires_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repo in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`operate_off`, `engine_not_connected`, `halted` or `too_many_pending`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listEngineCommands",
+        "summary": "The latest commands sent to a repo's engine, with their state",
+        "description": "Any member, session only (a token is 403 `session_required`: the list can carry an owner's note). At most 50, newest first. `state` is the runner's own report, with two reads of time: a pending command past its life is `expired`, and a delivered one with no ack 15 minutes past its life is `not_confirmed`. The `note` of an answer is shown only to an owner or admin.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,3}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The latest commands sent to a repo's engine, with their state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "commands": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "command_seq": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "start_day",
+                              "pause_loop",
+                              "resume_loop",
+                              "answer_ask",
+                              "set_dial",
+                              "request_spawn",
+                              "stop_agent"
+                            ]
+                          },
+                          "args": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          },
+                          "note": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "delivered",
+                              "applied",
+                              "refused",
+                              "expired",
+                              "cancelled",
+                              "not_confirmed"
+                            ]
+                          },
+                          "refusal": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "issued_by": {
+                            "type": "string"
+                          },
+                          "issued_at": {
+                            "type": "string"
+                          },
+                          "expires_at": {
+                            "type": "string"
+                          },
+                          "delivered_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "acked_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "halt_epoch_at_issue": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "command_seq",
+                          "kind",
+                          "args",
+                          "state",
+                          "refusal",
+                          "issued_by",
+                          "issued_at",
+                          "expires_at",
+                          "delivered_at",
+                          "acked_at",
+                          "halt_epoch_at_issue"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "commands"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repo in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engine/commands/{id}": {
+      "delete": {
+        "operationId": "cancelEngineCommand",
+        "summary": "Cancel a command the runner has not picked up yet",
+        "description": "Owner or admin, session only. Only a `pending` command can be cancelled; one the runner already has is 409 `already_delivered`, one past its life 409 `expired`, one already cancelled 409 `already_cancelled`. Writes `engine_command.cancelled` in the same transaction. An unknown or foreign id is 404.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel a command the runner has not picked up yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command_id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "const": "cancelled"
+                    }
+                  },
+                  "required": [
+                    "command_id",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such command in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`already_delivered`, `expired` or `already_cancelled`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

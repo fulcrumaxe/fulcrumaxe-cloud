@@ -8,6 +8,10 @@ import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { writeEngineAudit, type EngineAuditAction } from '@fx/db/src/engineAudit.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
+import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
+import { handleApiRequest } from '../src/handler.js';
+import { ROUTES } from '../src/routes/index.js';
 
 /**
  * [pg] Engine bridge EB-14: every engine operate route and every runner decide path writes exactly one audit row of its action, in the same
@@ -39,8 +43,91 @@ interface GuardEntry {
   effects: (ctx: GuardContext) => Promise<number>;
 }
 
-/** Later rows add their routes here. EB-14 itself ships no route. */
-export const ENGINE_AUDIT_GUARD: GuardEntry[] = [];
+/** The real route, as the account's owner on a session, through the real handler. Rejects on any non-2xx so a refused call reads as a failed run. */
+async function callEngineRoute(ctx: GuardContext, method: string, urlPath: string, body?: unknown): Promise<void> {
+  process.env.FX_SESSION_SECRET ??= 's'.repeat(32);
+  const platformOps = createPool(process.env.API_DATABASE_URL_PLATFORM_OPS!);
+  try {
+    const cookie = `${SESSION_COOKIE_NAME}=${await signSession({ accountId: ctx.accountId, userId: ctx.userId })}`;
+    const req = new Request(`http://localhost/api/v1${urlPath}`, { method, headers: { cookie, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const res = await handleApiRequest(req, ctx.appUserPool, platformOps, ROUTES);
+    if (res.status >= 300) throw new Error(`${method} ${urlPath} answered ${res.status}`);
+  } finally {
+    await platformOps.end();
+  }
+}
+
+/**
+ * The bridge tables the command route reads (EB-4's settings and sessions) when that row has not merged yet: tables of the Spec's shape, made here and
+ * dropped after. Where the real tables exist these are not made.
+ */
+const standIns: string[] = [];
+async function ensureBridgeTables(admin: PoolClient): Promise<void> {
+  const make = async (name: string, ddl: string): Promise<void> => {
+    if ((await admin.query<{ p: boolean }>('SELECT to_regclass($1) IS NOT NULL AS p', [`public.${name}`])).rows[0]!.p) return;
+    await admin.query(ddl);
+    await admin.query(`GRANT SELECT ON ${name} TO app_user`);
+    standIns.push(name);
+  };
+  await make('engine_bridge_settings', 'CREATE TABLE engine_bridge_settings (account_id uuid PRIMARY KEY, watch_enabled boolean NOT NULL DEFAULT false, operate_enabled boolean NOT NULL DEFAULT false)');
+  await make(
+    'engine_sessions',
+    `CREATE TABLE engine_sessions (id uuid PRIMARY KEY, account_id uuid NOT NULL, runner_id uuid NOT NULL, repo_id uuid NOT NULL, engine_instance_id uuid NOT NULL, engine_version text NOT NULL DEFAULT '1.0.0',
+       last_seq bigint NOT NULL DEFAULT 0, first_event_at timestamptz NOT NULL DEFAULT now(), last_event_at timestamptz, last_heartbeat_at timestamptz)`,
+  );
+}
+
+/** One runner_local repo with a runner that covers it and a live engine session, with operate on: what the command route needs. Made once per (account, label). */
+const bridgeRepos = new Map<string, string>();
+async function bridgeRepo(ctx: GuardContext, label: string): Promise<string> {
+  const key = `${ctx.accountId}:${label}`;
+  const known = bridgeRepos.get(key);
+  if (known) return known;
+  await ensureBridgeTables(ctx.admin);
+  const repo = (await ctx.admin.query<{ id: string }>(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, NULL, $2, 'web', 'acme', 'guard', 'runner_local') RETURNING id`, [ctx.accountId, Math.floor(Math.random() * 1e12)])).rows[0]!.id;
+  const runner = await insertRunner(ctx.admin, ctx.accountId, ctx.userId, { keepPlan: true });
+  await ctx.admin.query('UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1', [runner, [repo]]);
+  await ctx.admin.query('INSERT INTO engine_bridge_settings (account_id, watch_enabled, operate_enabled) VALUES ($1, true, true) ON CONFLICT (account_id) DO UPDATE SET watch_enabled = true, operate_enabled = true', [ctx.accountId]);
+  await ctx.admin.query(
+    "INSERT INTO engine_sessions (id, account_id, runner_id, repo_id, engine_instance_id, engine_version, last_event_at, last_heartbeat_at) VALUES ($1, $2, $3, $4, $5, '1.0.0', now() + interval '1 day', now() + interval '1 day')",
+    [randomUUID(), ctx.accountId, runner, repo, randomUUID()],
+  );
+  bridgeRepos.set(key, repo);
+  return repo;
+}
+const commandRows = async (ctx: GuardContext, label: string, where = 'true'): Promise<number> =>
+  Number((await ctx.admin.query(`SELECT count(*) AS n FROM engine_commands WHERE repo_id = $1 AND ${where}`, [await bridgeRepo(ctx, label)])).rows[0].n);
+
+/** Later rows add their routes here. */
+export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
+  {
+    // EB-8a. The change is the command row: none before, one after, and a rolled-back issue leaves the first.
+    id: 'POST /api/v1/engine/repos/{id}/commands',
+    action: 'engine_command.issued',
+    covers: ['engine-commands.ts#engineCommandRoutes'],
+    run: async (ctx) => callEngineRoute(ctx, 'POST', `/engine/repos/${await bridgeRepo(ctx, 'issue')}/commands`, { kind: 'pause_loop', args: {} }),
+    effects: (ctx) => commandRows(ctx, 'issue'),
+  },
+  {
+    // EB-8a. Each run starts from a fresh pending command; the change is the cancelled count: one more after a good run, unchanged after a rolled-back one.
+    id: 'DELETE /api/v1/engine/commands/{id}',
+    action: 'engine_command.cancelled',
+    covers: [],
+    run: async (ctx) => {
+      const repo = await bridgeRepo(ctx, 'cancel');
+      const runner = (await ctx.admin.query<{ runner_id: string }>('SELECT runner_id FROM engine_sessions WHERE repo_id = $1', [repo])).rows[0]!.runner_id;
+      const id = (
+        await ctx.admin.query<{ id: string }>(
+          `INSERT INTO engine_commands (account_id, runner_id, repo_id, command_seq, kind, args, issued_by, issued_at, expires_at)
+           SELECT $1, $2, $3, COALESCE(max(command_seq), 0) + 1, 'pause_loop', '{}', $4, now(), now() + interval '600 seconds' FROM engine_commands WHERE runner_id = $2 AND repo_id = $3 RETURNING id`,
+          [ctx.accountId, runner, repo, ctx.userId],
+        )
+      ).rows[0]!.id;
+      await callEngineRoute(ctx, 'DELETE', `/engine/commands/${id}`);
+    },
+    effects: (ctx) => commandRows(ctx, 'cancel', "state = 'cancelled'"),
+  },
+];
 
 /** Exports of engine-*.ts route files that change nothing, each with the reason. A later row that adds a read-only export lists it here. */
 export const READ_ONLY_EXPORTS: Record<string, string> = {};
@@ -129,6 +216,7 @@ describe('engine audit guard', { timeout: 60_000 }, () => {
     a = await seedAccount(admin, randomUUID());
   });
   afterAll(async () => {
+    for (const name of standIns) await admin.query(`DROP TABLE IF EXISTS ${name}`);
     await admin.query(`DROP TRIGGER IF EXISTS ${FAIL_TRIGGER} ON audit_log`);
     await admin.query(`DROP FUNCTION IF EXISTS ${FAIL_FN}()`);
     await admin.query(`DROP TABLE IF EXISTS ${FAIL_TABLE}`);

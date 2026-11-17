@@ -3,6 +3,7 @@ import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTO
 import { reportError } from "@fx/telemetry";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import type { EngineUsagePort } from "./ingestEngineEvents.js";
+import type { EngineCommandSigner } from "./engineCommands.js";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
 
@@ -78,6 +79,8 @@ export interface RunnerCloudDeps {
   appUserPool: Pool;
   /** The configured public origin (FX_APP_ORIGIN). The only source of the URL a signature is checked against. */
   origin: string | undefined;
+  /** EB-8a: the signer for engine bridge commands (the job-signing key, held by the worker). Absent, or answering null, the pull route is 503 `not_configured` and delivers nothing. */
+  engineCommandSigner?: (() => Promise<EngineCommandSigner | null>) | null;
   /** The worker's lease-fail method, or null while no worker is configured. Called after a revoke has committed. */
   failRunnerLeases: FailRunnerLeases | null;
   /**

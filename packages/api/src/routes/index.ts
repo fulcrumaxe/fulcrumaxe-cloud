@@ -17,6 +17,7 @@ import { vercelConnectionRoutes } from "./vercel-connection.js";
 import { repoRoutes } from "./repos.js";
 import { roleRoutes } from "./roles.js";
 import { decisionSettingRoutes } from "./decision-settings.js";
+import { engineCommandRoutes } from "./engine-commands.js";
 import { actionRuleRoutes } from "./action-rules.js";
 import { askSettingRoutes } from "./ask-settings.js";
 import { discoveryRoutes } from "./discovery.js";
@@ -130,6 +131,7 @@ export const ROUTES: RouteEntry[] = [
   ...assistantRoutes,
   ...runHandoffRoutes,
   ...memoryRoutes,
+  ...engineCommandRoutes,
 ];
 
 // Fails fast (at import time, so both the test suite and `next start`
