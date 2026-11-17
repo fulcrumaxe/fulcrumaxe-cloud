@@ -51,6 +51,25 @@ Sources:
 - `packages/model-connection/src/crypto.ts`
 - `packages/test-guard/src/guard.ts`
 - `.github/workflows/ci.yml`
+- `packages/db/migrations/1029_engine_commands.sql`
+- `packages/db/migrations/1030_engine_decisions.sql`
+- `packages/db/migrations/1031_engine_halt.sql`
+- `packages/db/src/engineCommands.ts`
+- `packages/db/src/engineHalt.ts`
+- `packages/runner-protocol/src/engineCommands.ts`
+- `packages/runner-cloud/src/engineCommands.ts`
+- `packages/runner-cloud/src/engineDecide.ts`
+- `packages/runner-cloud/src/engineHaltReplies.ts`
+- `packages/api/src/routes/engine-commands.ts`
+- `packages/api/src/routes/engine-halt.ts`
+- `packages/worker/src/compositionRoot.ts`
+- `packages/fx-runner/src/engineBridge/commands.ts`
+- `packages/fx-runner/src/engineBridge/decideSocket.ts`
+- `packages/fx-runner/src/engineBridge/daemon.ts`
+- `packages/fx-runner/src/engineBridge/ceiling.ts`
+- `packages/fx-runner/src/engineBridge/halt.ts`
+- `packages/api/src/routes/engine.ts`
+- `packages/core/src/engine/panels.ts`
 
 ## Tenancy and RLS
 
@@ -150,6 +169,21 @@ A customer's Claude subscription credential is never allowed on our hosted sandb
 ## The zero-model-token test rule
 
 `packages/test-guard/src/guard.ts`'s `installModelCallGuard`, wired in via `packages/test-guard/src/setup.ts`, activates only when `FX_FORBID_MODEL_CALLS=1` is set. Active, it patches `fetch` to throw a `ModelCallBlockedError` on any request to `ai-gateway.vercel.sh` or `api.anthropic.com`, and patches `child_process` spawn functions to catch any command invoking the `claude` binary. `.github/workflows/ci.yml` sets `FX_FORBID_MODEL_CALLS: "1"` at the job level, and `scripts/check.sh`'s test step additionally unsets `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN` before running `pnpm test` — so the ordinary test run has neither a live credential nor a permitted path to spend one.
+
+## Engine bridge
+
+The engine bridge lets an owner or admin send a small, closed set of commands to the engine running on their own machine, and lets that engine ask the cloud before it spawns an agent or merges. These are the trust rules as merged; the runner side lives in `packages/fx-runner`.
+
+- **Commands are signed.** `packages/runner-protocol/src/engineCommands.ts`'s `signEngineCommand` signs the canonical JSON of a command with the job-signing key, and `verifyEngineCommand` checks it against the runner's keyring. The signed body names one runner (`runner_id`), one repo (`repo_gh_id`), a sequence number and the halt epoch the command was issued under, and carries a fixed `purpose` (`engine_command_v1`) so a signature made over a job can never verify as a command. The worker hands the pull route its signer from `packages/worker/src/compositionRoot.ts`'s `engineCommandSigner`, which is null when the job-signing key is not configured. With no signer, `pullEngineCommands` in `packages/runner-cloud/src/engineCommands.ts` answers 503 `not_configured` and delivers nothing.
+- **Kinds and lifetime.** There are seven kinds (`ENGINE_COMMAND_KINDS`): `start_day`, `pause_loop`, `resume_loop`, `answer_ask`, `set_dial`, `request_spawn` and `stop_agent`. Their arguments are a closed shape, checked in the protocol schema and again in the database by `engine_command_args_ok` and a CHECK constraint in `packages/db/migrations/1029_engine_commands.sql`. `set_dial` can reach only eight dial classes, and `request_spawn` only eleven named roles. A command lives at most 600 seconds (`ENGINE_COMMAND_MAX_LIFE_S`, and the `engine_commands_life` constraint), and the verifier refuses one issued more than 60 seconds ahead of its own clock (`MAX_CLOCK_SKEW_S`). A runner refuses a wrong runner, a wrong repo, a sequence number at or below the last it applied, and an expired command (`packages/fx-runner/src/engineBridge/commands.ts`'s `judge`). At most 20 commands wait per runner and repo (`MAX_PENDING_PER_TARGET` in `packages/db/src/engineCommands.ts`).
+- **Session-only issue.** The issue route (`packages/api/src/routes/engine-commands.ts`) is owner or admin and session only: it names no `principals`, so an API token is refused with 403 `session_required`. The insert policy in migration 1029 checks the same thing in the database: the issuer is the session's own user, holds the `owner` or `admin` role, and the session is not a runner's. The runner's pull moves only its own rows from pending to delivered, then acks once; a person can only cancel one that is still pending.
+- **The halt marker.** Migration `packages/db/migrations/1031_engine_halt.sql` adds one row per repo in `engine_repo_controls`: `halted_at`, and a `halt_epoch` that goes up by one on each halt and is never lowered or changed by a clear. A BEFORE INSERT trigger on `engine_commands` refuses `start_day`, `resume_loop`, `request_spawn` and `set_dial` while the repo is halted, by raising SQLSTATE `HX409` (`engine_halted`). `pause_loop`, `answer_ask` and `stop_agent` stay allowed. The trigger also stamps the current epoch into `halt_epoch_at_issue`. The same trigger on `engine_decisions` refuses every decide, and the decide route answers `ask` with `halted: true` and no receipt while the repo is halted, replays included, using its own `HALTED_REPLY` constant in `packages/runner-cloud/src/engineDecide.ts`. The pull route also withholds a halted repo's start-like commands, and any start-like command issued under an earlier epoch than the current one, so clearing a halt starts nothing by itself. The engine repos list reads the marker back as `halted`, `halted_at` and `halt_epoch`, plus a derived `halt_pending` that stays true until the runner has reported applying the current epoch (`packages/api/src/routes/engine.ts`, `packages/core/src/engine/panels.ts`). While operate is off for the account, no command is delivered at all.
+- **Who can set or clear a halt.** The marker is written only by two `SECURITY DEFINER` functions, `engine_halt_set` and `engine_halt_clear`, owned by `engine_halt_definer`, a `NOLOGIN` role with no other privileged attribute (the migration raises if it has one). Both call `engine_halt_assert_person`, which refuses a `platform_ops` login and any runner session, and then requires a verified `owner` or `admin` member of an active account. `app_user` has `SELECT` on the marker and nothing more. The routes in `packages/api/src/routes/engine-halt.ts` are session only on top of that.
+- **Tenant isolation.** `engine_commands`, `engine_decisions`, `engine_decision_answers` and `engine_repo_controls` all have row-level security enabled and forced, keyed on `app.account_id`. The runner routes also filter by account in their own SQL: the pull selects covered repos with `rn.account_id = $2` and the runner id from the verified key (`packages/runner-cloud/src/engineCommands.ts`), and `findEngineTarget` in `packages/db/src/engineCommands.ts` filters on both `account_id` and the repo. The halt helpers refuse when the account they are given is not the session's.
+- **Decisions are written by a verified runner.** Only a session that sets `app.runner_id` for a live runner of the account can insert an `engine_decisions` row, and only an owner or admin, in their own name and outside a runner session, can write an answer (`packages/db/migrations/1030_engine_decisions.sql`). A decide route with no audit writer answers 503 before reading or writing anything (`packages/runner-cloud/src/engineDecide.ts`).
+- **The runner's decide socket.** `packages/fx-runner/src/engineBridge/decideSocket.ts` serves the engine hook on a unix socket set to mode 0600, inside a 0700 directory that must belong to the runner's user and not be a link. A repo the runner is not paired with is refused locally (`wrong_repo`), as is one whose last pull said operate is off. The daemon wires the check as `puller.operateEnabled(id) === true` (`packages/fx-runner/src/engineBridge/daemon.ts`), so until a pull has said operate is on, the socket refuses.
+- **The ceiling file.** `packages/fx-runner/src/engineBridge/ceiling.ts` writes a file the engine reads, mapping `ask` to ceiling 1 and `announce` or `act` to 5, for `agent.spawn` and both merge classes (`merge.standard`, `merge.fast-path`). A halted repo gets 1 for all three. The file is written 0600 through a temp file and rename, and lives 900 seconds. A failed fetch leaves the old file in place, and, as the file's own header comment states, once it runs out the engine reads ceiling 1 for all three classes. The runner never writes a looser file from a stale or unreadable answer.
+- **The runner kill path (#995).** When a pull reports a higher `halt_epoch`, or a person runs `fx-runner engine-host stop` on the machine, `packages/fx-runner/src/engineBridge/halt.ts` writes `engine-halt.json` first, atomically and without following a link, then signals the host's process group (SIGTERM, then SIGKILL after 10 seconds). On Linux it also kills the host's systemd user scope and reads its `cgroup.procs` until empty. The result carries a `method` (`scope`, `group_only` or `none`) and a survivor count, and unknown counts as alive. A local stop is marked `local_stop` in the file, which a cloud control cannot clear, and a clear rewrites the file to not halted without restarting the host.
 
 ## What is not enforced yet
 
