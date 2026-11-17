@@ -1449,6 +1449,46 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
+  test("Log: a new line arriving at the top while a lower line is being read keeps that line where it was", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const PAGE = 100;
+    const logPage = (cursor: string) => { const start = cursor === "" ? 0 : Number(cursor); return F.envelope(F.logLines(PAGE, start), { next_cursor: String(start + PAGE) }); };
+    const { mock, errors } = await setup(page, fresh({ streaming: true, log: { ...logPage(""), next_cursor: String(PAGE) }, logPage }));
+    await open(page);
+    const rows = page.locator(`${WIN} [data-testid="tm-log-line"]`);
+    await expect(rows).toHaveCount(PAGE);
+    const probe = () => page.evaluate((sel) => {
+      const l = document.querySelector(sel + ' [data-testid="tm-log-list"]') as HTMLElement;
+      const r = [...l.children].find((c) => (c as HTMLElement).offsetTop + (c as HTMLElement).offsetHeight > l.scrollTop) as HTMLElement | undefined;
+      return r ? { id: r.getAttribute("data-id"), at: r.offsetTop - l.scrollTop } : null;
+    }, WIN);
+    await page.evaluate((sel) => { const l = document.querySelector(sel + ' [data-testid="tm-log-list"]') as HTMLElement; l.scrollTop = (l.children[70] as HTMLElement).offsetTop; }, WIN);
+    const before = await probe();
+    // A refresh answers with one new newest line and the first 99 of the lines already drawn.
+    const fresher = F.envelope([{ ...F.logLines(1, 0)[0], line_id: "k000000000000000" }, ...F.logLines(PAGE, 0).slice(0, PAGE - 1)], { next_cursor: String(PAGE) });
+    mock.logPage = () => fresher;
+    mock.streamFrame = `id: c-21\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e21", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 21 } })}\n\n`;
+    await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
+    await expect(rows.first()).toHaveAttribute("data-id", "k000000000000000");
+    await expect(rows).toHaveCount(PAGE);
+    await page.waitForTimeout(500); // lets any group still being drawn finish
+    const after = await probe();
+    expect(before).not.toBeNull();
+    expect(after?.id).toBe(before?.id);
+    expect(Math.abs((after?.at ?? 1e9) - (before?.at ?? 0))).toBeLessThan(2);
+    // Fifty new lines at once (more than one group) rebuild the list in groups; the line being read still stays where it was.
+    const burst = F.envelope([...F.logLines(50, 1000).map((l, i) => ({ ...l, line_id: "j" + String(1000 - i).padStart(15, "0") })), ...F.logLines(PAGE, 0)], { next_cursor: String(PAGE) });
+    mock.logPage = () => burst;
+    mock.streamFrame = `id: c-22\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e22", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 22 } })}\n\n`;
+    await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
+    await expect(rows).toHaveCount(PAGE + 50);
+    await page.waitForTimeout(500);
+    const last = await probe();
+    expect(last?.id).toBe(before?.id);
+    expect(Math.abs((last?.at ?? 1e9) - (before?.at ?? 0))).toBeLessThan(2);
+    await clean(page, errors);
+  });
+
   test("Log scrolling: reaching the bottom of the list loads the next page without a click", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const logPage = (cursor: string) => { const start = cursor === "" ? 0 : Number(cursor); return F.envelope(F.logLines(60, start), { next_cursor: start + 60 >= 240 ? null : String(start + 60) }); };
