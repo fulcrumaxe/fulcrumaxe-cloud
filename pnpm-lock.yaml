@@ -879,6 +879,28 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
 
+  packages/hetzner:
+    dependencies:
+      '@fx/net-guard':
+        specifier: workspace:*
+        version: link:../net-guard
+    devDependencies:
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
+      '@fx/webhooks':
+        specifier: workspace:*
+        version: link:../webhooks
+      '@types/node':
+        specifier: ^24.19.0
+        version: 24.19.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+
   packages/model-call:
     dependencies:
       '@fx/model-connection':
