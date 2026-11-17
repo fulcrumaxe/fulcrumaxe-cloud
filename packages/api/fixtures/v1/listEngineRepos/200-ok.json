@@ -12,7 +12,9 @@
       "watch_enabled": true,
       "operate_enabled": false,
       "halted": false,
-      "halt_pending": false
+      "halt_pending": false,
+      "halted_at": null,
+      "halt_epoch": 0
     }
   ],
   "next_cursor": null,

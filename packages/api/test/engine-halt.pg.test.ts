@@ -10,6 +10,7 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { runnerWorkKeyFor, setPendingHooks } from '@fx/core/src/pendingWork.js';
 import { ROUTES } from '../src/routes/index.js';
+import { readEngineRepos } from '@fx/core/src/engine/panels.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -48,7 +49,7 @@ describe('EB-11a: engine halt routes', () => {
     if (bearer) h.set('authorization', `Bearer ${bearer}`);
     else if (identity) h.set('cookie', `${SESSION_COOKIE_NAME}=${await signSession(identity)}`);
     h.set('content-type', 'application/json');
-    const req = new Request(`http://localhost/api/v1${urlPath}`, { method, headers: h, body: JSON.stringify(body ?? {}) });
+    const req = new Request(`http://localhost/api/v1${urlPath}`, { method, headers: h, body: method === 'GET' ? undefined : JSON.stringify(body ?? {}) });
     return handleApiRequest(req, appUserPool, platformOpsPool, ROUTES);
   }
   async function addMember(accountId: string, role: 'admin' | 'member'): Promise<Identity> {
@@ -234,5 +235,129 @@ describe('EB-11a: engine halt routes', () => {
     } finally {
       await admin.query(`DROP TABLE IF EXISTS ${probe}`);
     }
+  });
+
+  describe('the repo list reads the halt (halted, halt_pending, halted_at, halt_epoch)', () => {
+    /** Ticks the repo for the bridge and gives it a runner with a bridge session, so a `halt_applied` event has somewhere to land. */
+    async function bridged(f: Awaited<ReturnType<typeof fixture>>, repoId = f.repoId, accountId = f.owner.accountId, userId = f.owner.userId) {
+      await admin.query(`UPDATE repos SET execution_mode = 'runner_local', gh_owner = 'acme', gh_name = $2 WHERE id = $1`, [repoId, `w${repoId.slice(0, 8)}`]);
+      await admin.query(`INSERT INTO engine_bridge_settings (account_id, watch_enabled) VALUES ($1, true) ON CONFLICT DO NOTHING`, [accountId]);
+      await admin.query(`INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2)`, [accountId, repoId]);
+      const runnerId = randomUUID();
+      await admin.query(`INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode) VALUES ($1, $2, $3, '{"kty":"OKP","crv":"Ed25519","x":"AAAA"}', $4, 'subscription')`, [runnerId, accountId, userId, randomUUID().replace(/-/g, '').padEnd(43, 'k')]);
+      const sessionId = randomUUID();
+      await admin.query(
+        `INSERT INTO engine_sessions (id, account_id, runner_id, repo_id, engine_instance_id, engine_version, session_kind, first_event_at, last_event_at, last_heard_at)
+         VALUES ($1, $2, $3, $4, $5, '1.0.0', 'bridge', now(), now(), now())`,
+        [sessionId, accountId, runnerId, repoId, randomUUID()],
+      );
+      return sessionId;
+    }
+    let seq = 0;
+    const applied = (accountId: string, sessionId: string, epoch: number) =>
+      admin.query(`INSERT INTO engine_events (session_id, seq, account_id, ts, kind, body) VALUES ($1, $2, $3, now(), 'halt_applied', $4::jsonb)`, [sessionId, ++seq, accountId, JSON.stringify({ halt_epoch: epoch, method: 'scope', survivors: 0 })]);
+    const row = async (who: Identity, repoId: string) => {
+      const res = await call(who, 'GET', '/engine/repos');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { items: Array<Record<string, unknown>> };
+      return body.items.find((i) => i.repo_id === repoId);
+    };
+
+    it('a repo never halted reads not halted, epoch 0, with no time', async () => {
+      const f = await fixture();
+      await bridged(f);
+      expect(await row(f.owner, f.repoId)).toMatchObject({ halted: false, halt_pending: false, halted_at: null, halt_epoch: 0 });
+    });
+
+    it('a halted repo reads halted with its time and epoch; a halt sent before halt_applied is pending, and applied at its epoch it is not', async () => {
+      const f = await fixture();
+      const sessionId = await bridged(f);
+      expect((await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`)).status).toBe(200);
+      const pending = await row(f.member, f.repoId);
+      expect(pending).toMatchObject({ halted: true, halt_pending: true, halt_epoch: 1 });
+      expect(Date.now() - Date.parse(String(pending!.halted_at))).toBeLessThan(60_000);
+      await applied(f.owner.accountId, sessionId, 1);
+      expect(await row(f.member, f.repoId)).toMatchObject({ halted: true, halt_pending: false, halt_epoch: 1 });
+    });
+
+    it('an applied report of an older epoch does not cover a later halt: it is pending again', async () => {
+      const f = await fixture();
+      const sessionId = await bridged(f);
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      await applied(f.owner.accountId, sessionId, 1);
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt/clear`);
+      await call(f.adminUser, 'POST', `/engine/repos/${f.repoId}/halt`);
+      expect(await row(f.owner, f.repoId)).toMatchObject({ halted: true, halt_pending: true, halt_epoch: 2 });
+    });
+
+    it('a cleared halt reads not halted and not pending; the epoch stays; the time is gone', async () => {
+      const f = await fixture();
+      await bridged(f);
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      await call(f.adminUser, 'POST', `/engine/repos/${f.repoId}/halt/clear`);
+      expect(await row(f.owner, f.repoId)).toMatchObject({ halted: false, halt_pending: false, halted_at: null, halt_epoch: 1 });
+    });
+
+    it('another account\'s halt is never visible: its repo is not listed, and a halt and an applied report of its own change nothing here', async () => {
+      const f = await fixture();
+      await bridged(f);
+      const otherRepo = await seedRepo(f.other.accountId);
+      const theirs = await bridged(f, otherRepo, f.other.accountId, f.other.userId);
+      await call(f.other, 'POST', `/engine/repos/${otherRepo}/halt`);
+      await applied(f.other.accountId, theirs, 1);
+      expect(await row(f.owner, otherRepo)).toBeUndefined();
+      expect(await row(f.owner, f.repoId)).toMatchObject({ halted: false, halt_pending: false, halt_epoch: 0 });
+      expect(await row(f.other, otherRepo)).toMatchObject({ halted: true, halt_pending: false, halt_epoch: 1 });
+      // A halt of this account reads as pending even though the other account's runner reported an epoch.
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      expect(await row(f.owner, f.repoId)).toMatchObject({ halted: true, halt_pending: true });
+    });
+
+    it('a plain member can read the halt', async () => {
+      const f = await fixture();
+      await bridged(f);
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      expect(await row(f.member, f.repoId)).toMatchObject({ halted: true, halt_pending: true, halt_epoch: 1 });
+    });
+
+    it('two halted repos of one account: a halt_applied report for repo A does not confirm repo B', async () => {
+      const f = await fixture();
+      const sessionA = await bridged(f);
+      const repoB = await seedRepo(f.owner.accountId);
+      await bridged(f, repoB);
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      await call(f.owner, 'POST', `/engine/repos/${repoB}/halt`);
+      await applied(f.owner.accountId, sessionA, 1);
+      expect(await row(f.owner, f.repoId)).toMatchObject({ halted: true, halt_pending: false });
+      expect(await row(f.owner, repoB)).toMatchObject({ halted: true, halt_pending: true });
+    });
+
+    it('a second repo of the same account that was never halted stays not halted, epoch 0, while the first is halted', async () => {
+      const f = await fixture();
+      await bridged(f);
+      const repoB = await seedRepo(f.owner.accountId);
+      await bridged(f, repoB);
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      expect(await row(f.owner, f.repoId)).toMatchObject({ halted: true, halt_epoch: 1 });
+      expect(await row(f.owner, repoB)).toMatchObject({ halted: false, halt_pending: false, halted_at: null, halt_epoch: 0 });
+      const items = await readEngineRepos(admin);
+      expect(items.filter((i) => i.repo_id === repoB)).toHaveLength(1);
+      expect(items.find((i) => i.repo_id === repoB)).toMatchObject({ halted: false, halt_epoch: 0 });
+    });
+
+    it('with row security out of the way, another account\'s halted repo and applied report do not change this account\'s repo, and each repo reads its own', async () => {
+      const f = await fixture();
+      await bridged(f);
+      const otherRepo = await seedRepo(f.other.accountId);
+      const theirs = await bridged(f, otherRepo, f.other.accountId, f.other.userId);
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      await call(f.other, 'POST', `/engine/repos/${otherRepo}/halt`);
+      await applied(f.other.accountId, theirs, 1);
+      const rls = (await admin.query<{ bypass: boolean }>(`SELECT rolbypassrls OR rolsuper AS bypass FROM pg_roles WHERE rolname = current_user`)).rows[0]!.bypass;
+      expect(rls).toBe(true);
+      const items = await readEngineRepos(admin);
+      expect(items.find((i) => i.repo_id === f.repoId)).toMatchObject({ halted: true, halt_pending: true, halt_epoch: 1 });
+      expect(items.find((i) => i.repo_id === otherRepo)).toMatchObject({ halted: true, halt_pending: false, halt_epoch: 1 });
+    });
   });
 });
