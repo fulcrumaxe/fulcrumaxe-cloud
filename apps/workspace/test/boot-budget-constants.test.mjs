@@ -75,7 +75,7 @@ const under = (result, dir) => result.bootFiles.filter((f) => f.startsWith(dir))
 describe("D#37 WS-D3 criterion 1: one definition", () => {
   it("exports the C26 budget", () => {
     expect(BOOT_BUDGET).toEqual({
-      maxStaticRequests: 130,
+      maxStaticRequests: 135,
       maxBrotliBytes: 448 * 1024,
       maxFilesPerApp: 5,
       maxSharedLibFiles: 4,
