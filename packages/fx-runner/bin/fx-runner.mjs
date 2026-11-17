@@ -3,7 +3,7 @@
 // The environment is never copied, listed or passed on (test/cli/cli.test.ts checks this file). It is also where the real process
 // start, the real signal source and this program's own path are handed to `run`, `doctor` and `service`, so that nothing under
 // src/ has to name them. The two Anthropic variables reach `doctor` as names only, never as values.
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import { createInterface } from "node:readline/promises";
@@ -18,6 +18,8 @@ import { askOnTerminal } from "../src/ttyAsk.js";
 import { CODE_MAX_BYTES } from "../src/codeSource.js";
 import { CliError } from "../src/cliError.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
+import { terminateGroup } from "../src/engines/claude/processGroup.js";
+import { haltDepsFrom } from "../src/engineBridge/halt.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
 import { openLaunchDir } from "../src/launchDir.js";
@@ -124,11 +126,50 @@ const accountName = () => {
 };
 const scriptPath = () => realpathSync(fileURLToPath(import.meta.url));
 
+// Engine bridge EB-11b: what the engine kill path (`engine-host stop`, and the cloud halt) needs from the machine. The process group kill is the runner's
+// existing one (processGroup.ts); `ps` and `systemctl --user` get only these three variables.
+const engineHaltDeps = haltDepsFrom({
+  platform: process.platform,
+  uid: process.getuid?.(),
+  ownPid: process.pid,
+  runFile: execFile,
+  readFile: readFileSync,
+  // A process's cgroup file, so the kill path can confirm a pid belongs to the engine host's scope before it signals the pid's group. The path is named here only.
+  readPidCgroup: (pid) => {
+    try {
+      return readFileSync(`/proc/${Number(pid)}/cgroup`, "utf8");
+    } catch {
+      return undefined;
+    }
+  },
+  // The cgroup mount is named here only, like the process table above: src/ names neither.
+  cgroupProcsFile: (controlGroup) => `/sys/fs/cgroup${controlGroup}/cgroup.procs`,
+  terminateGroup: (pgid, graceMs) =>
+    terminateGroup(
+      {
+        pid: pgid,
+        exitCode: null,
+        signalCode: null,
+        kill: (signal) => {
+          try {
+            return process.kill(pgid, signal);
+          } catch {
+            return false;
+          }
+        },
+      },
+      graceMs,
+    ),
+  env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS },
+});
+
 runCli({
   updateHost,
   argv: process.argv.slice(2),
   home: process.env.HOME,
   stateDirOverride: process.env.FX_RUNNER_HOME,
+  engineStateDirOverride: process.env.AUTONOMOUS_TEAM_STATE_DIR,
+  engineHaltDeps,
   // A file holding the Vercel protection bypass secret, for a staging or protected-preview cloud. Only the path is read here; src/protectionBypass.ts reads the file.
   protectionBypassFile: process.env.FX_RUNNER_PROTECTION_BYPASS_FILE,
   uid: process.getuid?.(),
