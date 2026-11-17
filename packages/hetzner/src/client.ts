@@ -15,20 +15,23 @@ const HOST = "api.hetzner.cloud";
 const BASE = "/v1";
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_PAGES = 20;
+/** The longest `waitForAction` may be told to wait, and the shortest gap between its polls. */
+export const WAIT_MAX_MS = 30 * 60_000;
+const WAIT_MIN_STEP_MS = 500;
 const USER_DATA_MAX_BYTES = 32 * 1024;
 export const CLIENT_VERSION = "0.1.0";
 export const CREATE_KEY_LABEL = "fx-create-key";
 
 /** The closed set of codes the cloud shows copy for, plus `not_found`. Any other code Hetzner sends, and every network, TLS, timeout or shape failure, is `unavailable`. */
-export type HetznerCode = "unauthorized" | "forbidden" | "resource_limit_exceeded" | "resource_unavailable" | "placement_error" | "rate_limit_exceeded" | "uniqueness_error" | "invalid_input" | "server_error" | "unavailable" | "not_found";
-const KNOWN = new Set<string>(["unauthorized", "forbidden", "resource_limit_exceeded", "resource_unavailable", "placement_error", "rate_limit_exceeded", "uniqueness_error", "invalid_input", "server_error", "unavailable", "not_found"]);
+export type HetznerCode = "unauthorized" | "forbidden" | "resource_limit_exceeded" | "resource_unavailable" | "placement_error" | "rate_limit_exceeded" | "uniqueness_error" | "invalid_input" | "server_error" | "unavailable" | "not_found" | "locked";
+const KNOWN = new Set<string>(["unauthorized", "forbidden", "resource_limit_exceeded", "resource_unavailable", "placement_error", "rate_limit_exceeded", "uniqueness_error", "invalid_input", "server_error", "unavailable", "not_found", "locked"]);
 
 export class HetznerError extends Error {
   readonly name = "HetznerError";
   constructor(
     readonly code: HetznerCode,
     message: string,
-    readonly extra: { status?: number; hetznerCode?: string; retryAfter?: number; resetAt?: number; ambiguous?: boolean; reason?: string } = {},
+    readonly extra: { status?: number; hetznerCode?: string; retryAfter?: number; resetAt?: number; ambiguous?: boolean; reason?: string; /** The message is Hetzner's own text (an error body), which the provider seam replaces. */ remote?: boolean } = {},
   ) {
     super(message);
   }
@@ -59,14 +62,23 @@ interface RawResponse { status: number; headers: Record<string, string>; json: u
 type Query = Record<string, string | number | readonly string[] | undefined>;
 
 export interface CreateServerInput {
-  name: string; serverType: string; location: string; image: string;
-  sshKeys?: readonly string[]; firewalls?: readonly number[]; userData?: string; labels?: Record<string, string>; startAfterCreate?: boolean;
+  name: string; serverType: string; location: string;
+  /** A name (`ubuntu-24.04`) or, for a snapshot, its numeric id. */
+  image: string | number;
+  /** Ids go as numbers: Hetzner reads a string as a name. */
+  sshKeys?: readonly (string | number)[]; firewalls?: readonly number[]; userData?: string; labels?: Record<string, string>; startAfterCreate?: boolean;
   publicNet?: { enableIpv4?: boolean; enableIpv6?: boolean };
   /** A double click, a retry or a crash between create and stamp makes one server: the same key finds the first one by its label. */
   idempotencyKey: string;
 }
+export interface CreateSnapshotInput {
+  description: string; labels?: Record<string, string>;
+  /** The same key finds the snapshot a first call made, by the label `keyLabel` (default `fx-create-key`; a park uses `fx-park-id`). */
+  idempotencyKey: string; keyLabel?: string;
+}
 export interface FirewallRuleInput { direction: "in" | "out"; protocol: "tcp" | "udp" | "icmp" | "esp" | "gre"; port?: string; sourceIps?: readonly string[]; destinationIps?: readonly string[]; description?: string }
 
+const LABEL_KEY = /^([a-z0-9]([-a-z0-9.]*[a-z0-9])?\/)?[A-Za-z0-9]([-_.A-Za-z0-9]{0,61}[A-Za-z0-9])?$/;
 const LABEL_VALUE = /^[A-Za-z0-9]([-_.A-Za-z0-9]{0,61}[A-Za-z0-9])?$/;
 const sanitize = (s: string, token: string): string => {
   let out = s.replace(/[\u0000-\u001f\u007f]/g, " ");
@@ -170,8 +182,8 @@ export function createHetznerClient(options: HetznerOptions) {
     const raw = typeof e?.code === "string" && /^[a-z_]{1,40}$/.test(e.code) ? e.code : undefined;
     const message = typeof e?.message === "string" && e.message !== "" ? e.message : `Hetzner answered ${r.status}.`;
     if (r.status === 429) return limited(429);
-    const code: HetznerCode = raw !== undefined && KNOWN.has(raw) ? (raw as HetznerCode) : r.status === 404 ? "not_found" : "unavailable";
-    return fail(code, message, { status: r.status, ...(raw === undefined ? {} : { hetznerCode: raw }), ambiguous: r.status >= 500 });
+    const code: HetznerCode = raw !== undefined && KNOWN.has(raw) ? (raw as HetznerCode) : r.status === 404 ? "not_found" : r.status === 423 ? "locked" : "unavailable";
+    return fail(code, message, { status: r.status, remote: true, ...(raw === undefined ? {} : { hetznerCode: raw }), ambiguous: r.status >= 500 });
   }
 
   /** One logical request. `safe` means it may be repeated after an ambiguous failure (a read or a delete); a 429 is always repeated, because a refused request did nothing. */
@@ -235,6 +247,19 @@ export function createHetznerClient(options: HetznerOptions) {
   };
   const action = (v: unknown): P.Action => P.field(v, "action", P.parseAction);
 
+  /** One write that may land without an answer: after an ambiguous ending, or a uniqueness refusal, `find` decides. Found is success; not found allows exactly one more send. */
+  const writeOrFind = async <T, F>(post: () => Promise<T>, find: () => Promise<F | undefined>): Promise<{ made: T } | { found: F }> => {
+    for (let attempt = 0; ; attempt++) {
+      try { return { made: await post() }; } catch (e) {
+        if (!(e instanceof HetznerError) || !(e.ambiguous || e.code === "uniqueness_error")) throw e;
+        const found = await find();
+        if (found !== undefined) return { found };
+        if (e.code === "uniqueness_error" || attempt >= Math.min(maxRetries, 1)) throw e;
+        await sleep(250 * 2 ** attempt);
+      }
+    }
+  };
+
   const api = {
     /** The cheapest authenticated read (the first page of one server): `unauthorized` means the token was refused. */
     verifyToken: async (): Promise<void> => void (await send("GET", "/servers", { per_page: 1 }, undefined, true)),
@@ -283,6 +308,7 @@ export function createHetznerClient(options: HetznerOptions) {
     /** Idempotent: a repeat with the same key (or a retry after a timeout) finds the server the first call made, by its `fx-create-key` label, and returns it with `reused: true`. */
     async createServer(i: CreateServerInput): Promise<{ server: P.Server; action: P.Action | null; reused: boolean }> {
       if (!LABEL_VALUE.test(i.idempotencyKey)) throw fail("invalid_input", "The idempotency key must be 1 to 63 letters, digits, dashes, dots or underscores.");
+      if (typeof i.image === "number") int(i.image);
       if (i.userData !== undefined && Buffer.byteLength(i.userData) > USER_DATA_MAX_BYTES) throw fail("invalid_input", "user_data is larger than 32 KiB.");
       // A label is not an identity: anything else in the Hetzner project can carry it. Adopt a server only when it is exactly the one this call would have made.
       const wanted = { ...i.labels, [CREATE_KEY_LABEL]: i.idempotencyKey };
@@ -300,22 +326,62 @@ export function createHetznerClient(options: HetznerOptions) {
       const body = {
         name: i.name, server_type: i.serverType, location: i.location, image: i.image, start_after_create: i.startAfterCreate ?? true,
         labels: { ...i.labels, [CREATE_KEY_LABEL]: i.idempotencyKey },
-        ...(i.sshKeys ? { ssh_keys: i.sshKeys } : {}), ...(i.firewalls ? { firewalls: i.firewalls.map((firewall) => ({ firewall })) } : {}), ...(i.userData === undefined ? {} : { user_data: i.userData }),
+        ...(i.sshKeys ? { ssh_keys: i.sshKeys.map((k) => (typeof k === "number" ? int(k) : k)) } : {}), ...(i.firewalls ? { firewalls: i.firewalls.map((firewall) => ({ firewall })) } : {}), ...(i.userData === undefined ? {} : { user_data: i.userData }),
         ...(i.publicNet ? { public_net: { enable_ipv4: i.publicNet.enableIpv4 ?? true, enable_ipv6: i.publicNet.enableIpv6 ?? true } } : {}),
       };
-      for (let attempt = 0; ; attempt++) {
-        try {
-          const r = await send("POST", "/servers", undefined, body, false);
-          return { ...parsed(r, P.parseCreated), reused: false };
-        } catch (e) {
-          if (!(e instanceof HetznerError) || !(e.ambiguous || e.code === "uniqueness_error")) throw e;
-          const found = await find();
-          if (found) return { server: found, action: null, reused: true };
-          if (e.code === "uniqueness_error" || attempt >= maxRetries) throw e;
-          await sleep(250 * 2 ** attempt);
-        }
+      const out = await writeOrFind(async () => parsed(await send("POST", "/servers", undefined, body, false), P.parseCreated), find);
+      return "found" in out ? { server: out.found, action: null, reused: true } : { ...out.made, reused: false };
+    },
+
+    /** Starts a server from an image id: the same create path, the same create-key adoption, so a retry or a crash makes one server. */
+    createServerFromImage: (i: Omit<CreateServerInput, "image"> & { imageId: number }) => api.createServer({ ...i, image: int(i.imageId) }),
+
+    /**
+     * Takes a snapshot of a server (the `create_image` action, type `snapshot`). Idempotent by key: the first call stamps `keyLabel=<key>`; a repeat, or a retry after
+     * an ambiguous ending, finds that image by the label (and checks it is the one asked for) instead of sending again. Returns the image and the action to wait on.
+     */
+    async createSnapshot(serverId: number, i: CreateSnapshotInput): Promise<{ image: P.Image; action: P.Action | null; reused: boolean }> {
+      const keyLabel = i.keyLabel ?? CREATE_KEY_LABEL;
+      if (!LABEL_VALUE.test(i.idempotencyKey) || !LABEL_KEY.test(keyLabel)) throw fail("invalid_input", "The snapshot key must be 1 to 63 letters, digits, dashes, dots or underscores.");
+      const wanted = { ...i.labels, [keyLabel]: i.idempotencyKey };
+      const find = async (): Promise<P.Image | undefined> => {
+        const found = await api.listImages({ labelSelector: `${keyLabel}=${i.idempotencyKey}` });
+        if (found.length > 1) throw fail("uniqueness_error", "More than one snapshot carries this key.", { reason: "create_key_ambiguous" });
+        const im = found[0];
+        if (!im) return undefined;
+        if (im.createdFromId !== serverId || im.description !== i.description || !Object.entries(wanted).every(([k, v]) => im.labels[k] === v)) throw fail("uniqueness_error", "A snapshot with this key differs from the one requested.", { reason: "create_key_mismatch" });
+        return im;
+      };
+      const first = await find();
+      if (first) return { image: first, action: null, reused: true };
+      const body = { type: "snapshot", description: i.description, labels: wanted };
+      const out = await writeOrFind(async () => parsed(await send("POST", `/servers/${int(serverId)}/actions/create_image`, undefined, body, false), P.parseImageCreated), find);
+      return "found" in out ? { image: out.found, action: null, reused: true } : { ...out.made, reused: false };
+    },
+
+    /** Polls an action to `success`, within a bound, backing off from `intervalMs` (default 2 s) to 15 s. An `error` action or a timeout is `unavailable`; neither carries Hetzner's text. */
+    async waitForAction(id: number, o: { timeoutMs?: number; intervalMs?: number } = {}): Promise<P.Action> {
+      const timeout = o.timeoutMs ?? 600_000;
+      const interval = o.intervalMs ?? 2_000;
+      if (!Number.isFinite(timeout) || timeout <= 0 || timeout > WAIT_MAX_MS) throw fail("invalid_input", "The wait bound must be a finite time of at most 30 minutes.");
+      if (!Number.isFinite(interval) || interval < 0) throw fail("invalid_input", "The poll interval must be a finite, non-negative time.");
+      const end = now() + timeout;
+      for (let step = Math.max(interval, WAIT_MIN_STEP_MS); ; step = Math.min(step * 1.5, 15_000)) {
+        const a = await api.getAction(id);
+        if (a.status === "success") return a;
+        if (a.status === "error") throw fail("unavailable", "The action failed.", { reason: "action_failed" });
+        if (now() >= end) throw fail("unavailable", "The action did not finish in time.", { reason: "action_timeout" });
+        await sleep(step);
       }
     },
+    /** Images of one type (default `snapshot`), optionally by label selector. */
+    listImages: (f: { labelSelector?: string; type?: "snapshot" | "backup" | "system" | "app" } = {}) => listAll("/images", "images", P.parseImage, { type: f.type ?? "snapshot", ...sel(f.labelSelector) }),
+    getImage: async (id: number) => get(`/images/${int(id)}`, (v) => P.field(v, "image", P.parseImage)),
+    /**
+     * Idempotent: true when an image was there to delete, false when it was already gone. A locked image (Hetzner answers 423) throws `locked`.
+     * No ownership check: any image id in the project is deleted, so a caller must first check the id against its own records (MC-6a: `machine_snapshots`).
+     */
+    deleteImage: (id: number) => gone(() => send("DELETE", `/images/${int(id)}`, undefined, undefined, true)),
 
     /** Polls a server until `want` (a status, or `deleted`), within a bound, at most every `intervalMs`. Throws `unavailable` on timeout. */
     async waitForServer(id: number, want: "running" | "deleted", o: { timeoutMs?: number; intervalMs?: number } = {}): Promise<void> {

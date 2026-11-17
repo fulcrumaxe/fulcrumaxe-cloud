@@ -168,7 +168,7 @@ describe("the contract", () => {
 
   it("maps Hetzner's codes, and an unknown one to unavailable", async () => {
     const c = make({ maxRetries: 0 });
-    const cases: Array<[number, string, string]> = [[401, "unauthorized", "unauthorized"], [403, "forbidden", "forbidden"], [403, "resource_limit_exceeded", "resource_limit_exceeded"], [412, "resource_unavailable", "resource_unavailable"], [422, "placement_error", "placement_error"], [409, "uniqueness_error", "uniqueness_error"], [422, "invalid_input", "invalid_input"], [500, "server_error", "server_error"], [404, "not_found", "not_found"], [423, "locked", "unavailable"], [403, "maintenance", "unavailable"], [418, "brand_new_code", "unavailable"], [503, "unavailable", "unavailable"]];
+    const cases: Array<[number, string, string]> = [[401, "unauthorized", "unauthorized"], [403, "forbidden", "forbidden"], [403, "resource_limit_exceeded", "resource_limit_exceeded"], [412, "resource_unavailable", "resource_unavailable"], [422, "placement_error", "placement_error"], [409, "uniqueness_error", "uniqueness_error"], [422, "invalid_input", "invalid_input"], [500, "server_error", "server_error"], [404, "not_found", "not_found"], [423, "locked", "locked"], [403, "maintenance", "unavailable"], [418, "brand_new_code", "unavailable"], [503, "unavailable", "unavailable"]];
     for (const [status, code, want] of cases) {
       world.failNext.push({ status, code });
       const e = await thrown(c.listLocations());

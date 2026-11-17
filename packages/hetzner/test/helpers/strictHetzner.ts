@@ -14,6 +14,13 @@ import { generateSelfSignedCert } from "../../../webhooks/test/helpers/selfSigne
  * resource_limit_exceeded; a type not offered in the location is 412 resource_unavailable; user_data over 32 KiB is 422 invalid_input.
  * Failures can be injected (`world.failNext`: a status and code, a hang, or a dropped connection).
  *
+ * Images (MC-3c): `POST /servers/{id}/actions/create_image` takes only `type` (snapshot), `description` and `labels` and refuses any other field, any other type, bad labels and a
+ * missing server; the image starts `creating` with `image_size` null and becomes `available` (with a size) only when its action is polled to `success` (`imageSteps` polls;
+ * `imageStuck` keeps it creating, `imageActionError` fails the action); `GET /images` filters by `type` and a `label_selector` of `=`, `!=`, `key` and `!key`;
+ * `DELETE /images/{id}` is 404 when missing, 423 `locked` while creating (or when `locked`), 403 `protected` when protected; a server create takes an image by numeric id and
+ * refuses an unknown one or one that is not `available`. Create-server and create_image refuse unknown body fields. A failure can land AFTER the write committed
+ * (`failNext: {after: "hang" | "drop" | "500"}`).
+ *
  * Not faked faithfully: server boot timing (actions finish on demand), the real prices and type catalogue, rate-limit thresholds per endpoint, image and network
  * validation, the Link header (deprecated by Hetzner), firewall application, and the wording of every message.
  */
@@ -24,7 +31,7 @@ export interface FakeWorld {
   /** Requests left now (refills by limit/3600 a second on `clock`). */
   remaining: number;
   serverLimit: number;
-  failNext: Array<{ status?: number; code?: string; message?: string; hang?: boolean; drop?: boolean }>;
+  failNext: Array<{ status?: number; code?: string; message?: string; hang?: boolean; drop?: boolean; /** Only fail a request with this method (the rest pass through to a later request). */ method?: string; /** Commit the write, then answer this way. */ after?: "hang" | "drop" | "500" }>;
   servers: Array<Record<string, unknown>>;
   firewalls: Array<Record<string, unknown>>;
   sshKeys: Array<Record<string, unknown>>;
@@ -33,10 +40,19 @@ export interface FakeWorld {
   deleteOmitsAction?: boolean;
   /** When true, a server `action` reply (delete, reboot, power on and off) carries a malformed `action` object, to prove a bad reply is `unavailable`. */
   malformedAction?: boolean;
+  images: Array<Record<string, unknown>>;
+  /** Action polls before a new image is `available` (default 2). */
+  imageSteps: number;
+  /** A new image never leaves `creating`. */
+  imageStuck?: boolean;
+  /** The image action ends `error`. */
+  imageActionError?: boolean;
+  /** Image actions by id: the polls seen and the image they build. */
+  imageActions: Map<number, { imageId: number; polls: number }>;
   /** Every request seen, accepted or not. */
   requests: Array<{ method: string; path: string; headers: Record<string, string>; body: string }>;
 }
-export const newWorld = (tokens: string[]): FakeWorld => ({ tokens: new Set(tokens), clock: { t: 1_800_000_000_000 }, limit: 3600, remaining: 3600, serverLimit: 10, failNext: [], servers: [], firewalls: [], sshKeys: [], actionStatus: "success", requests: [] });
+export const newWorld = (tokens: string[]): FakeWorld => ({ tokens: new Set(tokens), clock: { t: 1_800_000_000_000 }, limit: 3600, remaining: 3600, serverLimit: 10, failNext: [], servers: [], firewalls: [], sshKeys: [], actionStatus: "success", images: [], imageSteps: 2, imageActions: new Map(), requests: [] });
 
 const money = (n: string) => ({ net: n, gross: (Number(n) * 1.19).toFixed(4) });
 const price = (location: string, h: string, m: string) => ({ location, price_hourly: money(h), price_monthly: money(m), included_traffic: 21990232555520, price_per_tb_traffic: money("1.0000") });
@@ -72,10 +88,29 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
     const last = Math.max(Math.ceil(all.length / perPage), 1);
     return { status: 200, body: { [key]: all.slice((pageNo - 1) * perPage, pageNo * perPage), meta: { pagination: { page: pageNo, per_page: perPage, previous_page: pageNo > 1 ? pageNo - 1 : null, next_page: pageNo < last ? pageNo + 1 : null, last_page: last, total_entries: all.length } } } };
   };
+  const hasLabels = (labels: Record<string, string>, sel: string): boolean =>
+    sel.split(",").every((c) => {
+      const ne = c.indexOf("!="), eq = c.indexOf("=");
+      if (ne > 0) return labels[c.slice(0, ne)] !== c.slice(ne + 2);
+      if (eq > 0) return labels[c.slice(0, eq)] === c.slice(eq + 1);
+      return c.startsWith("!") ? !(c.slice(1) in labels) : c in labels;
+    });
   const bySelector = (url: URL, all: Array<Record<string, unknown>>) => {
     const sel = url.searchParams.get("label_selector");
     const name = url.searchParams.get("name");
-    return all.filter((x) => (!name || x.name === name) && (!sel || sel.split(",").every((c) => { const [k, v] = c.split("="); return (x.labels as Record<string, string>)[k!] === v; })));
+    return all.filter((x) => (!name || x.name === name) && (!sel || hasLabels(x.labels as Record<string, string>, sel)));
+  };
+  const SERVER_FIELDS = new Set(["name", "server_type", "location", "datacenter", "image", "start_after_create", "labels", "ssh_keys", "firewalls", "user_data", "public_net", "automount", "networks", "volumes", "placement_group"]);
+  const unknownField = (b: Body, allowed: Set<string>): Reply | null => {
+    const bad = Object.keys(b).find((k) => !allowed.has(k));
+    return bad === undefined ? null : err(422, "invalid_input", `invalid input in field '${bad}': unknown field`, { fields: [{ name: bad, messages: ["unknown field"] }] });
+  };
+  const imgAction = (a: { imageId: number; polls: number }, id: number, serverId: number) => {
+    const image = world.images.find((x) => x.id === a.imageId)!;
+    const done = !world.imageStuck && !world.imageActionError && a.polls >= world.imageSteps;
+    if (done && image.status === "creating") { image.status = "available"; image.image_size = 1.5; }
+    const status = world.imageActionError ? "error" : done ? "success" : "running";
+    return { id, command: "create_image", status, progress: done ? 100 : 40, started: "2026-01-01T00:00:00+00:00", finished: status === "running" ? null : "2026-01-01T00:00:05+00:00", resources: [{ id: serverId, type: "server" }], error: status === "error" ? { code: "action_failed", message: "Action failed" } : null };
   };
   const badLabels = (l: unknown): Reply | null => {
     if (l === undefined) return null;
@@ -97,6 +132,8 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
       case "actions": {
         const e = only("GET");
         if (e) return e;
+        const tracked = id === undefined ? undefined : world.imageActions.get(Number(id));
+        if (tracked) { tracked.polls++; return { status: 200, body: { action: imgAction(tracked, Number(id), Number(((world.images.find((x) => x.id === tracked.imageId)!).created_from as { id: number }).id)) } }; }
         if (id) return { status: 200, body: { action: act("x", 1) } };
         const ids = url.searchParams.getAll("id");
         if (ids.length === 0) return err(422, "invalid_input", "invalid input in field 'id': is required", { fields: [{ name: "id", messages: ["is required"] }] });
@@ -106,7 +143,14 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
         if (!id) {
           if (method === "GET") return page(url, "servers", bySelector(url, world.servers));
           if (method !== "POST") return only("GET", "POST")!;
-          for (const f of ["name", "server_type", "image"]) if (typeof body[f] !== "string" || body[f] === "") return err(422, "invalid_input", `invalid input in field '${f}': is required`, { fields: [{ name: f, messages: ["is required"] }] });
+          const uf = unknownField(body, SERVER_FIELDS);
+          if (uf) return uf;
+          if (typeof body.image === "number") {
+            const im = world.images.find((x) => x.id === body.image);
+            if (!im) return err(422, "invalid_input", "invalid input in field 'image': image not found", { fields: [{ name: "image", messages: ["not found"] }] });
+            if (im.status !== "available") return err(422, "invalid_input", "invalid input in field 'image': image is not available", { fields: [{ name: "image", messages: ["not available"] }] });
+          }
+          for (const f of ["name", "server_type", ...(typeof body.image === "number" ? [] : ["image"])]) if (typeof body[f] !== "string" || body[f] === "") return err(422, "invalid_input", `invalid input in field '${f}': is required`, { fields: [{ name: f, messages: ["is required"] }] });
           const bl = badLabels(body.labels);
           if (bl) return bl;
           if (typeof body.user_data === "string" && Buffer.byteLength(body.user_data) > 32 * 1024) return err(422, "invalid_input", "invalid input in field 'user_data': is too long", { fields: [{ name: "user_data", messages: ["is too long"] }] });
@@ -132,6 +176,21 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
           if (method === "DELETE") { world.servers.splice(world.servers.indexOf(s), 1); return { status: 200, body: world.malformedAction ? { action: { id: "not-a-number" } } : world.deleteOmitsAction ? {} : { action: act("delete_server", s.id as number) } }; }
           return only("GET", "PUT", "DELETE")!;
         }
+        if (sub === "actions" && sub2 === "create_image") {
+          if (method !== "POST") return only("POST")!;
+          const uf = unknownField(body, new Set(["type", "description", "labels"]));
+          if (uf) return uf;
+          if (body.type !== "snapshot") return err(422, "invalid_input", "invalid input in field 'type': must be snapshot", { fields: [{ name: "type", messages: ["must be snapshot"] }] });
+          if (body.description !== undefined && typeof body.description !== "string") return err(422, "invalid_input", "invalid input in field 'description'", { fields: [{ name: "description", messages: ["is not a string"] }] });
+          const bl = badLabels(body.labels);
+          if (bl) return bl;
+          const image = { id: ++nextId, status: "creating", type: "snapshot", name: null, description: body.description ?? null, image_size: null, disk_size: 40, created: "2026-01-01T00:00:00+00:00", created_from: { id: s.id, name: s.name }, bound_to: null, os_flavor: "ubuntu", os_version: null, rapid_deploy: false, protection: { delete: false }, deprecated: null, deleted: null, architecture: "x86", labels: body.labels ?? {} };
+          world.images.push(image);
+          const a = { imageId: image.id, polls: 0 };
+          const aid = ++nextId;
+          world.imageActions.set(aid, a);
+          return { status: 201, body: { image, action: imgAction(a, aid, s.id as number) } };
+        }
         if (sub === "actions" && ["reboot", "poweron", "poweroff"].includes(sub2 ?? "")) return only("POST") ?? { status: 201, body: { action: world.malformedAction ? { id: "not-a-number" } : act(`${sub2}_server`, s.id as number) } };
         return notFound;
       }
@@ -153,6 +212,24 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
           const inUse = world.servers.some((x) => ((x.public_net as { firewalls?: Array<{ id: number }> } | undefined)?.firewalls ?? []).some((a) => a.id === f.id));
           if (inUse) return err(422, "resource_in_use", "firewall is still applied to a resource", { fields: [{ name: "id" }] });
           world.firewalls.splice(world.firewalls.indexOf(f), 1);
+          return { status: 204 };
+        }
+        return only("GET", "DELETE")!;
+      }
+      case "images": {
+        if (!id) {
+          if (method !== "GET") return only("GET")!;
+          const type = url.searchParams.get("type");
+          if (type !== null && !["system", "app", "snapshot", "backup"].includes(type)) return err(422, "invalid_input", "invalid input in field 'type'", { fields: [{ name: "type", messages: ["invalid"] }] });
+          return page(url, "images", bySelector(url, world.images).filter((x) => !type || x.type === type));
+        }
+        const im = lookup(world.images);
+        if (!im) return notFound;
+        if (method === "GET") return { status: 200, body: { image: im } };
+        if (method === "DELETE") {
+          if ((im.protection as { delete: boolean }).delete) return err(403, "protected", "image is protected");
+          if (im.status === "creating" || im.locked === true) return err(423, "locked", "item is locked");
+          world.images.splice(world.images.indexOf(im), 1);
           return { status: 204 };
         }
         return only("GET", "DELETE")!;
@@ -186,7 +263,8 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
       const raw = Buffer.concat(chunks).toString("utf8");
       const method = req.method ?? "GET";
       world.requests.push({ method, path: req.url ?? "/", headers, body: raw });
-      const injected = world.failNext.shift();
+      const at = world.failNext.findIndex((f) => f.method === undefined || f.method === method);
+      const injected = at < 0 ? undefined : world.failNext.splice(at, 1)[0];
       if (injected?.hang) return;
       if (injected?.drop) return void req.socket.destroy();
       const elapsed = (world.clock.t - lastRefill) / 1000;
@@ -202,12 +280,18 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
       if (!req.url?.startsWith("/v1/")) return send(err(404, "not_found", "not found"));
       const auth = headers["authorization"] ?? "";
       if (!auth.startsWith("Bearer ") || !world.tokens.has(auth.slice(7))) return send(err(401, "unauthorized", "unable to authenticate"));
-      if (injected) return send(err(injected.status ?? 500, injected.code ?? "server_error", injected.message ?? "injected failure"));
       let body: Body = {};
       if (method === "POST" || method === "PUT") {
-        if (!/^application\/json/i.test(headers["content-type"] ?? "")) return send(err(400, "json_error", "invalid JSON input"));
-        try { body = JSON.parse(raw || "{}") as Body; } catch { return send(err(400, "json_error", "invalid JSON input")); }
+        if (!injected?.after && !/^application\/json/i.test(headers["content-type"] ?? "")) return send(err(400, "json_error", "invalid JSON input"));
+        if (!injected?.after || /^application\/json/i.test(headers["content-type"] ?? "")) { try { body = JSON.parse(raw || "{}") as Body; } catch { return send(err(400, "json_error", "invalid JSON input")); } }
       }
+      if (injected?.after) {
+        route(method, new URL(req.url, "https://api.hetzner.cloud"), body); // the write commits
+        if (injected.after === "hang") return;
+        if (injected.after === "drop") return void req.socket.destroy();
+        return send(err(500, "server_error", "injected failure after the write"));
+      }
+      if (injected) return send(err(injected.status ?? 500, injected.code ?? "server_error", injected.message ?? "injected failure"));
       send(route(method, new URL(req.url, "https://api.hetzner.cloud"), body));
     });
   });

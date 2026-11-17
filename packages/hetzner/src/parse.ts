@@ -31,6 +31,9 @@ export interface FirewallRule { description: string | null; direction: "in" | "o
 export interface Firewall { id: number; name: string; labels: Record<string, string>; rules: FirewallRule[] }
 export interface SshKey { id: number; name: string; fingerprint: string; labels: Record<string, string> }
 export interface Action { id: number; command: string; status: "running" | "success" | "error"; progress: number; started: string; finished: string | null; error: { code: string; message: string } | null }
+/** `createdFromId` is the server a snapshot was taken from (`created_from.id`; `bound_to` is set only on backups); `imageSize` (GB) is null until the image is `available`. */
+export interface Image { id: number; status: ImageStatus; type: string; imageSize: number | null; created: string; labels: Record<string, string>; createdFromId: number | null; description: string | null }
+export type ImageStatus = "creating" | "available" | "unavailable" | "unknown";
 export interface Page<T> { items: T[]; nextPage: number | null }
 
 const STATUSES = new Set(["running", "initializing", "starting", "stopping", "off", "deleting", "migrating", "rebuilding", "unknown"]);
@@ -118,6 +121,24 @@ export const parseSshKey = (v: unknown, at = "ssh_key"): SshKey => {
 export const parseCreated = (v: unknown): { server: Server; action: Action } => {
   const o = rec(v, "body");
   return { server: parseServer(o.server), action: parseAction(o.action) };
+};
+
+const IMAGE_STATUSES = new Set(["creating", "available", "unavailable"]);
+/** Reads only the image fields the cloud uses; anything else Hetzner sends (os_flavor, created_from, protection, ...) is ignored. */
+export const parseImage = (v: unknown, at = "image"): Image => {
+  const o = rec(v, at);
+  const status = str(o.status, `${at}.status`);
+  return {
+    id: int(o.id, `${at}.id`), status: (IMAGE_STATUSES.has(status) ? status : "unknown") as ImageStatus, type: str(o.type, `${at}.type`),
+    imageSize: orNull(o.image_size, num, `${at}.image_size`), created: str(o.created, `${at}.created`), labels: labels(o.labels, `${at}.labels`),
+    createdFromId: orNull(o.created_from, (x, p) => int(rec(x, p).id, `${p}.id`), `${at}.created_from`), description: orNull(o.description, str, `${at}.description`),
+  };
+};
+
+/** The create_image response: the image and its action. */
+export const parseImageCreated = (v: unknown): { image: Image; action: Action } => {
+  const o = rec(v, "body");
+  return { image: parseImage(o.image), action: parseAction(o.action) };
 };
 
 /** One page of a list: `key` names the array, and `meta.pagination.next_page` says whether another follows. */
