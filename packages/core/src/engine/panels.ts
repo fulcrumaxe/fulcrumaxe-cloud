@@ -260,16 +260,34 @@ export interface AskItem {
   raised_at: string;
   cleared_at: string | null;
   how: string | null;
+  /** The receipt id of a decision the engine asked about (answered through the decision answer route); null for a team-log ask. */
+  decision_id: string | null;
+  decision_type: 'engine_spawn' | 'engine_merge' | 'engine_spec_ready' | null;
 }
 
-export async function readAsks(client: PoolClient, repoId: string, which: 'open' | 'all', limit: number, cursor: string | undefined): Promise<{ items: AskItem[]; next_cursor: string | null }> {
+/** A decision ask has no engine session, so it sorts under this key; the keyset order stays one order across both kinds of ask. */
+const NIL_SESSION = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * The asks of one repo: the team-log asks the engine reported, and the decisions the cloud's own dial answered `ask`. A decision is cleared by its
+ * answer row (read now, never a stamp on the receipt). One keyset order across both: (raised_at, session key, ask_id), newest first.
+ */
+export async function readAsks(client: PoolClient, repoId: string, which: 'open' | 'all', limit: number, cursor: string | undefined, accountId: string): Promise<{ items: AskItem[]; next_cursor: string | null }> {
   const after = decodeCursor(cursor, 3);
   const { rows } = await client.query(
-    `SELECT a.ask_id, a.ask_kind, a.source, a.discussion, a.pr, a.raised_at, a.cleared_at, a.how, a.session_id, ${us('a.raised_at')} AS k
-       FROM engine_asks a JOIN engine_sessions s ON s.id = a.session_id
-      WHERE s.repo_id = $1 AND ($2::boolean OR a.cleared_at IS NULL) AND ($3::timestamptz IS NULL OR (a.raised_at, a.session_id, a.ask_id) < ($3::timestamptz, $4::uuid, $5::text))
-      ORDER BY a.raised_at DESC, a.session_id DESC, a.ask_id DESC LIMIT $6`,
-    [repoId, which === 'all', after?.[0] ?? null, after?.[1] ?? null, after?.[2] ?? null, limit + 1],
+    `SELECT u.*, ${us('u.raised_at')} AS k FROM (
+        SELECT a.ask_id, a.ask_kind, a.source, a.discussion, a.pr, a.raised_at, a.cleared_at, a.how, a.session_id, NULL::uuid AS decision_id, NULL::text AS decision_type
+          FROM engine_asks a JOIN engine_sessions s ON s.id = a.session_id
+         WHERE a.account_id = $7 AND s.account_id = $7 AND s.repo_id = $1
+        UNION ALL
+        SELECT d.id::text, 'owner_decision', 'decide', (d.subject ->> 'discussion')::bigint, (d.subject ->> 'pr')::bigint, d.created_at, w.created_at,
+               CASE WHEN w.decision_id IS NULL THEN NULL ELSE 'answered_cloud' END, '${NIL_SESSION}'::uuid, d.id, d.decision_type
+          FROM engine_decisions d LEFT JOIN engine_decision_answers w ON w.account_id = d.account_id AND w.decision_id = d.id
+         WHERE d.account_id = $7 AND d.repo_id = $1 AND d.disposition = 'ask'
+      ) u
+      WHERE ($2::boolean OR u.cleared_at IS NULL) AND ($3::timestamptz IS NULL OR (u.raised_at, u.session_id, u.ask_id) < ($3::timestamptz, $4::uuid, $5::text))
+      ORDER BY u.raised_at DESC, u.session_id DESC, u.ask_id DESC LIMIT $6`,
+    [repoId, which === 'all', after?.[0] ?? null, after?.[1] ?? null, after?.[2] ?? null, limit + 1, accountId],
   );
   const items = rows.map((r): AskItem & { _k: string[] } => ({
     _k: [r.k, r.session_id, r.ask_id],
@@ -281,6 +299,8 @@ export async function readAsks(client: PoolClient, repoId: string, which: 'open'
     raised_at: iso(r.raised_at)!,
     cleared_at: iso(r.cleared_at),
     how: r.how,
+    decision_id: r.decision_id,
+    decision_type: r.decision_type,
   }));
   const p = page(items, limit, (x) => x._k);
   return { items: p.items.map(({ _k: _omit, ...x }) => x), next_cursor: p.next_cursor };

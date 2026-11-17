@@ -8,6 +8,8 @@ import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
+import { ENGINE_DECIDE_PATH, engineDecide, toResponse } from '@fx/runner-cloud';
+import { newKey, registerKey, signed } from '../../runner-cloud/test/helpers.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -143,5 +145,84 @@ describe('EB-9a: answering an engine decision', () => {
       await admin.query('DROP TRIGGER eb9a_block_audit ON audit_log');
       await admin.query('DROP FUNCTION eb9a_block_audit()');
     }
+  });
+
+  /** A repo the engine bridge covers, with a verified runner key: what `engineDecide` needs to answer a decide for it. */
+  async function bridge(f: Awaited<ReturnType<typeof fixture>>, o: { operate: boolean; session?: boolean }) {
+    const gh = 7_000_000 + Math.floor(Math.random() * 1e6);
+    const key = newKey();
+    const runnerId = await registerKey(admin, f.owner.accountId, f.owner.userId, key);
+    await admin.query('UPDATE repos SET execution_mode = $3, gh_repo_id = $2 WHERE id = $1', [f.repo, gh, 'runner_local']);
+    await admin.query('UPDATE runners SET allowed_repo_ids = ARRAY[$2]::uuid[] WHERE id = $1', [runnerId, f.repo]);
+    await admin.query('INSERT INTO engine_bridge_settings (account_id, watch_enabled, operate_enabled) VALUES ($1, true, $2)', [f.owner.accountId, o.operate]);
+    await admin.query('INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2)', [f.owner.accountId, f.repo]);
+    if (o.session === true) {
+      await admin.query(
+        `INSERT INTO engine_sessions (account_id, runner_id, repo_id, engine_instance_id, engine_version, first_event_at, last_event_at, last_heard_at) VALUES ($1, $2, $3, $4, '1.0.0', now(), now(), now())`,
+        [f.owner.accountId, runnerId, f.repo, randomUUID()],
+      );
+    }
+    const deps = { appUserPool, origin: 'https://runner.example.test', failRunnerLeases: null };
+    const decide = async (type: 'engine_merge' | 'engine_spec_ready', requestKey: string, subject: object) => {
+      const res = (await toResponse(() => engineDecide(deps, signed(key, ENGINE_DECIDE_PATH, { repo_gh_id: gh, decision_type: type, request_key: requestKey, subject })))) as { status: number; body: Record<string, unknown> };
+      return res;
+    };
+    return { decide };
+  }
+  const commandCount = async (accountId: string) => Number((await admin.query('SELECT count(*) AS n FROM engine_commands WHERE account_id = $1', [accountId])).rows[0].n);
+
+  it('the answer sends the engine nothing: no command row when operate is off, no session is live, a session is live, or the repo is halted, and it is stored (200) in each', async () => {
+    for (const state of ['operate_off', 'no_session', 'live_session', 'halted'] as const) {
+      const f = await fixture();
+      const b = await bridge(f, { operate: state !== 'operate_off', session: state === 'live_session' || state === 'halted' });
+      // Asked while operate was on (the decide gate refuses an off switch), then the state under test is set before the answer.
+      let asked: { status: number; body: Record<string, unknown> };
+      if (state === 'operate_off') {
+        await admin.query('UPDATE engine_bridge_settings SET operate_enabled = true WHERE account_id = $1', [f.owner.accountId]);
+        asked = await b.decide('engine_merge', `merge:1:${state}`, { pr: 1 });
+        await admin.query('UPDATE engine_bridge_settings SET operate_enabled = false WHERE account_id = $1', [f.owner.accountId]);
+      } else {
+        asked = await b.decide('engine_merge', `merge:1:${state}`, { pr: 1 });
+      }
+      expect(asked.body).toMatchObject({ disposition: 'ask', answered: null });
+      const id = asked.body.receipt_id as string;
+      if (state === 'halted') await admin.query('INSERT INTO engine_repo_controls (account_id, repo_id, halted_at, halt_action_id) VALUES ($1, $2, now(), $3) ON CONFLICT (account_id, repo_id) DO UPDATE SET halted_at = now(), halt_action_id = $3', [f.owner.accountId, f.repo, randomUUID()]);
+      const before = await commandCount(f.owner.accountId);
+      const res = await call(f.owner, path(id), { choice: 'approve' });
+      expect(res.status, state).toBe(200);
+      expect(await answers(id), state).toEqual([{ choice: 'approve', answered_by: f.owner.userId }]);
+      expect(await commandCount(f.owner.accountId), state).toBe(before);
+      if (state === 'operate_off') expect((await b.decide('engine_merge', `merge:1:${state}`, { pr: 1 })).status).toBe(403);
+      if (state === 'halted') {
+        const again = await b.decide('engine_merge', `merge:1:${state}`, { pr: 1 });
+        expect(again.body).toMatchObject({ disposition: 'ask', halted: true });
+        expect(again.body.answered).toBeNull();
+      }
+    }
+  });
+
+  it.each([
+    ['engine_merge', { pr: 12 }],
+    ['engine_spec_ready', { discussion: 842 }],
+  ] as const)('end to end through engineDecide, %s: approve then the same key acts, decline then it asks again, and no command is issued', async (type, subject) => {
+    const f = await fixture();
+    const b = await bridge(f, { operate: true, session: true });
+    const approveKey = `${type}:approve`;
+    const first = await b.decide(type, approveKey, subject);
+    expect(first.body).toMatchObject({ disposition: 'ask', answered: null, halted: false });
+    expect(first.body.ask_id).toBe(first.body.receipt_id);
+    const receipt = first.body.receipt_id as string;
+    const before = await commandCount(f.owner.accountId);
+    expect((await call(f.admin, path(receipt), { choice: 'approve' })).status).toBe(200);
+    const acted = await b.decide(type, approveKey, subject);
+    expect(acted.body).toEqual({ disposition: 'act', receipt_id: receipt, ask_id: receipt, answered: 'approve', halted: false });
+
+    const declineKey = `${type}:decline`;
+    const second = await b.decide(type, declineKey, subject);
+    const receipt2 = second.body.receipt_id as string;
+    expect((await call(f.owner, path(receipt2), { choice: 'decline' })).status).toBe(200);
+    const declined = await b.decide(type, declineKey, subject);
+    expect(declined.body).toEqual({ disposition: 'ask', receipt_id: receipt2, ask_id: receipt2, answered: 'decline', halted: false });
+    expect(await commandCount(f.owner.accountId)).toBe(before);
   });
 });

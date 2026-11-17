@@ -1,6 +1,18 @@
 {
   "items": [
     {
+      "ask_id": "7c1f4a52-3b6e-4d0a-9f1e-2a5b8c9d0e11",
+      "ask_kind": "owner_decision",
+      "source": "decide",
+      "discussion": null,
+      "pr": 57,
+      "raised_at": "2026-11-16T09:30:00.000Z",
+      "cleared_at": null,
+      "how": null,
+      "decision_id": "7c1f4a52-3b6e-4d0a-9f1e-2a5b8c9d0e11",
+      "decision_type": "engine_merge"
+    },
+    {
       "ask_id": "0123456789abcdef",
       "ask_kind": "owner_decision",
       "source": "team_log",
@@ -8,7 +20,9 @@
       "pr": null,
       "raised_at": "2026-11-16T09:00:00.000Z",
       "cleared_at": null,
-      "how": null
+      "how": null,
+      "decision_id": null,
+      "decision_type": null
     }
   ],
   "next_cursor": null,

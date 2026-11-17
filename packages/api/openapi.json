@@ -22365,7 +22365,7 @@
       "post": {
         "operationId": "answerEngineDecision",
         "summary": "Answer a decision the engine asked about: approve or decline",
-        "description": "Owner or admin, session only (a token is 403 `session_required`). The answer is final: a second answer is 409 `already_answered`, and a decision the dial already settled (act or announce) is 409 `not_asked`. An unknown, foreign or malformed id is 404.",
+        "description": "Owner or admin, session only (a token is 403 `session_required`). The answer is stored whatever the repo's operate switch, the engine connection or a halt is doing, and sends the engine nothing: its next ask with the same request key reads the answer back (approve is act, decline is ask), and a halt still refuses first. The answer is final: a second answer is 409 `already_answered`, and a decision the dial already settled (act or announce) is 409 `not_asked`. An unknown, foreign or malformed id is 404.",
         "security": [
           {
             "session": []
@@ -48262,6 +48262,7 @@
       "get": {
         "operationId": "listEngineAsks",
         "summary": "The engine's open questions (`state=open`, the default) or all of them",
+        "description": "Team-log asks and decision asks in one list. A decision ask (`source: decide`, `ask_kind: owner_decision`) carries `decision_id` and `decision_type`, and is answered with `POST /engine/decisions/{id}/answer`; its answer clears it. A team-log ask has both fields null.",
         "security": [
           {
             "session": []
@@ -48359,6 +48360,33 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "decision_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "decision_type": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "engine_spawn",
+                                  "engine_merge",
+                                  "engine_spec_ready"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -48369,7 +48397,9 @@
                           "pr",
                           "raised_at",
                           "cleared_at",
-                          "how"
+                          "how",
+                          "decision_id",
+                          "decision_type"
                         ],
                         "additionalProperties": false
                       }

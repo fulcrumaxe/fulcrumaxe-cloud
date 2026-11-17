@@ -31,7 +31,7 @@ export const engineDecisionRoutes: RouteEntry[] = [
     operationId: "answerEngineDecision",
     summary: "Answer a decision the engine asked about: approve or decline",
     description:
-      "Owner or admin, session only (a token is 403 `session_required`). The answer is final: a second answer is 409 `already_answered`, and a decision the dial already settled (act or announce) is 409 `not_asked`. An unknown, foreign or malformed id is 404.",
+      "Owner or admin, session only (a token is 403 `session_required`). The answer is stored whatever the repo's operate switch, the engine connection or a halt is doing, and sends the engine nothing: its next ask with the same request key reads the answer back (approve is act, decline is ask), and a halt still refuses first. The answer is final: a second answer is 409 `already_answered`, and a decision the dial already settled (act or announce) is 409 `not_asked`. An unknown, foreign or malformed id is 404.",
     principals: ["session"],
     minRole: "admin",
     idempotency: "never",

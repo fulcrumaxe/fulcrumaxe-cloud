@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
-import { agentStateOf, livenessOf } from '@fx/core/src/engine/panels.js';
+import { agentStateOf, livenessOf, readAsks } from '@fx/core/src/engine/panels.js';
 import { WEBHOOK_EVENT_TYPES } from '@fx/webhooks';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { handleApiRequest } from '../src/handler.js';
@@ -121,6 +121,7 @@ describe('engine read routes and settings [pg]', () => {
   });
 
   beforeEach(async () => {
+    await q(`DELETE FROM engine_decisions WHERE account_id = $1`, [A.accountId]);
     await q(`DELETE FROM engine_sessions WHERE account_id = $1`, [A.accountId]);
     engineSession = randomUUID();
     bridgeSession = randomUUID();
@@ -212,6 +213,119 @@ describe('engine read routes and settings [pg]', () => {
     expect([...p1.items, ...p2.items].map((a: Json) => a.agent_id).sort()).toEqual(['a-dead', 'a-live', 'a-old']);
     expect(p2.next_cursor).toBeNull();
     expect(freeText(running)).toEqual([]);
+  });
+
+  it('asks: decision asks sit beside team-log asks in one keyset order, an answer clears them, and receipts that were not asked never appear', async () => {
+    await q(`DELETE FROM engine_decisions WHERE account_id = $1`, [A.accountId]);
+    const tl = (n: string, agoS: number) =>
+      q(`INSERT INTO engine_asks (account_id, session_id, ask_id, ask_kind, source, discussion, raised_at) VALUES ($1, $2, $3, 'owner_decision', 'team_log', 842, $4)`, [A.accountId, engineSession, n.repeat(16), ago(agoS)]);
+    const dec = async (key: string, agoS: number, disposition = 'ask', type = 'engine_merge', subject: object = { pr: 5 }) =>
+      (await q(
+        `INSERT INTO engine_decisions (account_id, repo_id, decision_type, request_key, subject, disposition, catalogue_version, preset, created_at) VALUES ($1, $2, $3, $4, $5::jsonb, $6, 11, 'default', $7) RETURNING id`,
+        [A.accountId, A.repoId, type, key, JSON.stringify(subject), disposition, ago(agoS)],
+      )).rows[0].id as string;
+    await tl('1', 500);
+    const d1 = await dec('merge:5:a', 400);
+    await tl('2', 300);
+    const d2 = await dec('spec:842:b', 200, 'ask', 'engine_spec_ready', { discussion: 842, tag: 'small' });
+    await tl('3', 100);
+    const d3 = await dec('spawn:x', 50, 'ask', 'engine_spawn', { role: 'executor' });
+    await dec('merge:6:c', 10, 'act');
+    await dec('merge:7:d', 10, 'announce');
+    const want = [d3, '3'.repeat(16), d2, '2'.repeat(16), d1, '1'.repeat(16)];
+
+    const read = async (state: string, limit: number) => {
+      const seen: Json[] = [];
+      const pages: number[] = [];
+      let cursor = '';
+      for (let n = 0; n < 10; n++) {
+        const pg = (await call(owner(), 'GET', `/engine/repos/${A.repoId}/asks?state=${state}&limit=${limit}${cursor}`)).body;
+        pages.push(pg.items.length);
+        seen.push(...pg.items);
+        expect(freeText(pg.items)).toEqual([]);
+        if (pg.next_cursor === null) break;
+        cursor = `&cursor=${pg.next_cursor}`;
+      }
+      return { seen, pages };
+    };
+    const open = await read('open', 2);
+    expect(open.pages).toEqual([2, 2, 2]);
+    expect(open.seen.map((i: Json) => i.ask_id)).toEqual(want);
+    const byId = Object.fromEntries(open.seen.map((i: Json) => [i.ask_id, i]));
+    expect(byId[d1]).toMatchObject({ decision_id: d1, decision_type: 'engine_merge', source: 'decide', ask_kind: 'owner_decision', pr: 5, discussion: null, cleared_at: null, how: null });
+    expect(byId[d2]).toMatchObject({ decision_id: d2, decision_type: 'engine_spec_ready', pr: null, discussion: 842 });
+    expect(byId[d3]).toMatchObject({ decision_id: d3, decision_type: 'engine_spawn', pr: null, discussion: null });
+    expect(byId['1'.repeat(16)]).toMatchObject({ decision_id: null, decision_type: null, source: 'team_log' });
+
+    // An answer clears the decision ask: open drops it, all keeps it with the answer's own time.
+    await q(`INSERT INTO engine_decision_answers (account_id, decision_id, choice, answered_by) VALUES ($1, $2, 'decline', $3)`, [A.accountId, d2, A.userId]);
+    expect((await read('open', 2)).seen.map((i: Json) => i.ask_id)).toEqual(want.filter((x) => x !== d2));
+    const all = await read('all', 4);
+    expect(all.seen.map((i: Json) => i.ask_id)).toEqual(want);
+    const cleared = all.seen.find((i: Json) => i.ask_id === d2)!;
+    expect(cleared).toMatchObject({ how: 'answered_cloud' });
+    expect(cleared.cleared_at).toMatch(ISO);
+
+    // Equal times: the team-log ask (a real session key) sorts above the decision (the nil key), whatever the page size.
+    await tl('4', 20);
+    const d4 = await dec('merge:9:z', 20);
+    await q(`UPDATE engine_asks SET raised_at = (SELECT created_at FROM engine_decisions WHERE id = $1) WHERE ask_id = $2`, [d4, '4'.repeat(16)]);
+    for (const limit of [1, 2, 3]) {
+      const ids = (await read('open', limit)).seen.map((i: Json) => i.ask_id);
+      expect(ids, `limit ${limit}`).toHaveLength(7);
+      expect(new Set(ids).size).toBe(7);
+      expect(ids.indexOf('4'.repeat(16)), `limit ${limit}`).toBeLessThan(ids.indexOf(d4));
+    }
+  });
+
+  it("asks: another account's decisions never show, and cannot be read through this repo (RLS as app_user)", async () => {
+    await q(`DELETE FROM engine_decisions WHERE account_id = $1`, [A.accountId]);
+    const otherRepo = (await q(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, NULL, $2, 'web') RETURNING id`, [other.accountId, Math.floor(Math.random() * 1e9)])).rows[0].id as string;
+    await q(`INSERT INTO engine_decisions (account_id, repo_id, decision_type, request_key, subject, disposition, catalogue_version, preset) VALUES ($1, $2, 'engine_merge', 'merge:1:x', '{"pr":1}'::jsonb, 'ask', 11, 'default')`, [other.accountId, otherRepo]);
+    await q(`INSERT INTO engine_decisions (account_id, repo_id, decision_type, request_key, subject, disposition, catalogue_version, preset) VALUES ($1, $2, 'engine_merge', 'merge:2:x', '{"pr":2}'::jsonb, 'ask', 11, 'default')`, [A.accountId, A.repoId]);
+    const mine = (await call(owner(), 'GET', `/engine/repos/${A.repoId}/asks`)).body;
+    expect(mine.items.map((i: Json) => i.pr)).toEqual([2]);
+    expect((await call(owner(), 'GET', `/engine/repos/${otherRepo}/asks`)).status).toBe(404);
+    // Even a direct read through the app login with this account's tenant set cannot see the other account's rows.
+    const client = await appUserPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT set_config('app.account_id', $1, true), set_config('app.user_id', $2, true)`, [A.accountId, A.userId]);
+      expect((await client.query(`SELECT count(*)::int AS n FROM engine_decisions WHERE repo_id = $1`, [otherRepo])).rows[0].n).toBe(0);
+      await client.query('ROLLBACK');
+    } finally {
+      client.release();
+    }
+  });
+
+  it('asks: a second repo of the same account never leaks into this repo, and the read also names the account it serves (admin client, RLS bypassed)', async () => {
+    const repo2 = (await q(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, NULL, $2, 'web') RETURNING id`, [A.accountId, Math.floor(Math.random() * 1e9)])).rows[0].id as string;
+    const session2 = randomUUID();
+    await q(
+      `INSERT INTO engine_sessions (id, account_id, runner_id, repo_id, engine_instance_id, engine_version, first_event_at, last_event_at, last_heard_at, last_heartbeat_at, session_kind)
+       VALUES ($1, $2, $3, $4, $5, '1.0.0', now(), now(), now(), now(), 'engine')`,
+      [session2, A.accountId, runnerId, repo2, randomUUID()],
+    );
+    const mkTeamLog = (session: string, id: string) =>
+      q(`INSERT INTO engine_asks (account_id, session_id, ask_id, ask_kind, source, discussion, raised_at) VALUES ($1, $2, $3, 'owner_decision', 'team_log', 842, now())`, [A.accountId, session, id.repeat(16)]);
+    const mkDecision = (repo: string, key: string) =>
+      q(`INSERT INTO engine_decisions (account_id, repo_id, decision_type, request_key, subject, disposition, catalogue_version, preset) VALUES ($1, $2, 'engine_merge', $3, '{"pr":3}'::jsonb, 'ask', 11, 'default')`, [A.accountId, repo, key]);
+    await mkTeamLog(session2, 'c');
+    await mkDecision(repo2, 'merge:3:other-repo');
+    await mkTeamLog(engineSession, 'd');
+    await mkDecision(A.repoId, 'merge:3:this-repo');
+    for (const state of ['open', 'all']) {
+      const own = (await call(owner(), 'GET', `/engine/repos/${A.repoId}/asks?state=${state}`)).body.items;
+      expect(own.map((i: Json) => i.source).sort(), state).toEqual(['decide', 'team_log']);
+      expect(own.find((i: Json) => i.source === 'team_log').ask_id, state).toBe('d'.repeat(16));
+      const otherRepoItems = (await readAsks(admin, repo2, state as 'open' | 'all', 50, undefined, A.accountId)).items;
+      expect(otherRepoItems.map((i) => i.source).sort(), state).toEqual(['decide', 'team_log']);
+    }
+    // The account predicate: with row security out of the way, another account's id on this repo reads nothing.
+    for (const which of ['open', 'all'] as const) {
+      expect((await readAsks(admin, A.repoId, which, 50, undefined, other.accountId)).items, which).toHaveLength(0);
+      expect((await readAsks(admin, A.repoId, which, 50, undefined, A.accountId)).items, which).toHaveLength(2);
+    }
   });
 
   it('lanes, gates, asks and log: the newest per key, the pr filter, open or all, and keyset pages with no row lost', async () => {
