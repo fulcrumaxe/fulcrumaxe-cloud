@@ -96,6 +96,8 @@ export const ANSWER_WORDS = {
   lockOperate: "Operate is off for this repository, so answers can't be sent from here. An owner or admin can switch it on in Team.",
   halted: "The engine is halted. An answer is still delivered, but nothing new starts until the halt is cleared.",
   waitingAdmin: "Waiting for an owner or admin to answer.",
+  // A decision ask shows its controls to a member too, locked, so the item is never hidden from the person it is waiting on.
+  lockMember: "Only owners and admins can answer this. Ask one of them to approve or decline it.",
   sendAgain: "Send again",
   noteSent: "Your note",
   // The states of a sent answer.
@@ -175,10 +177,10 @@ export function noteProblem(note) {
 }
 
 /** The choices an engine ask offers: a decision ask is approve or decline; every other kind may also be deferred. */
-export const choicesFor = (row) => (row.askKind === "decision" ? ["approve", "decline"] : ["approve", "decline", "defer"]);
+export const choicesFor = (row) => (row.askKind === "decision" || row.decision ? ["approve", "decline"] : ["approve", "decline", "defer"]);
 
 /** Whether the row can be answered at all: a usable ask id (or the decision's id), on a repo the page knows. */
-export const answerable = (row) => row.repoId !== "" && (row.decisionId !== "" || ASK_ID.test(row.askId));
+export const answerable = (row) => row.repoId !== "" && (row.decisionId !== "" || (!row.decision && ASK_ID.test(row.askId)));
 
 /**
  * Why the controls are locked, or "" when they are not. Halted is not a lock: an answer is allowed while the engine is halted (it is the way to decide what
@@ -288,6 +290,18 @@ export const ENGINE_KIND_WORDS = {
   other: "The engine raised a question that needs you.",
 };
 export const engineKindWords = (kind) => (typeof kind === "string" && Object.hasOwn(ENGINE_KIND_WORDS, kind) ? ENGINE_KIND_WORDS[kind] : ENGINE_KIND_WORDS.other);
+
+/**
+ * What a decision ask is, in words (the decision type is a closed list, so nothing the engine wrote is shown). A missing pull request or Discussion number is left out
+ * rather than printed; a spawn decision has neither. A type this page does not know reads as the kind's own sentence.
+ */
+export function decisionWords(type, pr, discussion, kind) {
+  const n = (v) => (Number.isInteger(v) && v >= 1 ? " #" + v : "");
+  if (type === "engine_spawn") return "The engine wants to start an agent.";
+  if (type === "engine_merge") return n(pr) !== "" ? "The engine wants to merge PR" + n(pr) + "." : "The engine wants to merge a pull request.";
+  if (type === "engine_spec_ready") return n(discussion) !== "" ? "The engine wants to mark Discussion" + n(discussion) + " ready." : "The engine wants to mark a Discussion ready.";
+  return engineKindWords(kind);
+}
 
 const DUE_FORMAT = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
 const dueMs = (iso) => (typeof iso === "string" ? Date.parse(iso) : NaN);
@@ -555,6 +569,10 @@ export function readEngineAsk(repo, env, a, readAt) {
   if (!Number.isFinite(raisedMs)) return null;
   const asOfMs = dueMs(env.as_of);
   const teamLog = env.source_ages_s && Number.isFinite(env.source_ages_s.team_log) ? env.source_ages_s.team_log : null;
+  // A decision ask is one whose source is the decision log or that carries a receipt id; it is answered through the decision route, by that id.
+  // One that does not carry a usable id is still a decision: it is never sent down the command path, so it cannot be answered here.
+  const decision = a.source === "decide" || (a.decision_id !== undefined && a.decision_id !== null);
+  const decisionId = decision && typeof a.decision_id === "string" && UUID.test(a.decision_id) ? a.decision_id : "";
   return {
     kind: "engine",
     id: "engine-" + repo.repo_id + "-" + a.ask_id,
@@ -563,13 +581,14 @@ export function readEngineAsk(repo, env, a, readAt) {
     title: repo.full_name !== "" ? repo.full_name : WORDS.engineRepo,
     reason: "",
     state: "open",
-    sentence: engineKindWords(a.ask_kind),
+    sentence: decision ?decisionWords(a.decision_type, a.pr, a.discussion, a.ask_kind) : engineKindWords(a.ask_kind),
     links: [engineLink(repo.full_name, "discussions", a.discussion), engineLink(repo.full_name, "pull", a.pr)].filter(Boolean),
     // EB-13b: what answering needs. The switches and the halt are the repo's, read with the list; `decisionId` is the id of the decision receipt when the ask carries one.
     repoId: repo.repo_id,
     askId: a.ask_id,
     askKind: typeof a.ask_kind === "string" ? a.ask_kind : "",
-    decisionId: a.ask_kind === "decision" && typeof a.decision_id === "string" && UUID.test(a.decision_id) ? a.decision_id : "",
+    decision,
+    decisionId,
     watchEnabled: repo.watch_enabled !== false,
     operateEnabled: repo.operate_enabled === true,
     halted: repo.halted === true,
@@ -748,6 +767,8 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
   };
   // Who may answer is read once per window open, beside the first list read. A failed read means "not an admin", never the list's error.
   let adminRead = null;
+  const answeredElsewhere = new Set(); // decision ids the cloud said were already answered: dropped from every read until the window closes
+  const stillAsked = (rows) => rows.filter((r) => !(r.kind === "engine" && r.decisionId !== "" && answeredElsewhere.has(r.decisionId)));
   const keys = new Map(); // ask id -> { choice, key }: the Idempotency-Key of an answer that has not settled yet
   const closed = new Map(); // id -> row closed here, shown until the window closes
   const busy = new Map(); // id -> "done" | "withdraw" | "keep" | "replace" | "release"
@@ -765,7 +786,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
       adminRead ||= Promise.resolve(call("GET", ME_URL, undefined, signal)).then((me) => !!me && me.is_admin === true, () => false);
       const [all, isAdmin] = await Promise.all([readAll(call, signal, engineCache, now()), adminRead]);
       if (mine !== gen) return;
-      open = all.rows;
+      open = stillAsked(all.rows);
       for (const r of open) closed.delete(r.id);
       // A confirmation is only valid for the head it was shown with: if the request has moved on, or is gone, the question is withdrawn and the new head is on screen.
       for (const [cid, head] of [...confirming]) {
@@ -776,7 +797,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
         }
       }
       st = { ...st, status: "ready", isAdmin, truncated: all.truncated, moreAsks: all.moreAsks, moreItems: all.moreItems, notShown: all.notShown };
-      takeEngine(all.rows.filter((r) => r.kind === "engine"), all.engineFailed, all.engineMore);
+      takeEngine(open.filter((r) => r.kind === "engine"), all.engineFailed, all.engineMore);
       await rememberSent(open, mine);
       if (mine !== gen) return;
       merge();
@@ -798,7 +819,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
    */
   async function rememberSent(rows, mine) {
     if (!st.isAdmin) return;
-    const todo = rows.filter((r) => r.kind === "engine" && r.decisionId === "" && ASK_ID.test(r.askId) && r.repoId !== "" && !checked.has(r.id));
+    const todo = rows.filter((r) => r.kind === "engine" && !r.decision && ASK_ID.test(r.askId) && r.repoId !== "" && !checked.has(r.id));
     let found = false;
     for (const repoId of new Set(todo.map((r) => r.repoId))) {
       let list;
@@ -871,9 +892,10 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
     try {
       const eng = await readEngine(call, signal, engineCache, now());
       if (mine !== gen || st.status !== "ready") return;
-      open = insertEngine(open, eng.rows);
-      takeEngine(eng.rows, eng.failed, eng.more);
-      await rememberSent(eng.rows, mine);
+      const shown = stillAsked(eng.rows);
+      open = insertEngine(open, shown);
+      takeEngine(shown, eng.failed, eng.more);
+      await rememberSent(shown, mine);
       if (mine !== gen) return;
       merge();
     } catch (e) {
@@ -1080,6 +1102,17 @@ export function createNeedsYou({ call = api, signal, onChange = () => {}, now = 
       if (cancelled(e)) return;
       // A final refusal settles the key. A 409 "still running" does not: the first request may yet commit, so a press again must replay the same key.
       if (e && e.status >= 400 && e.status < 500 && !(e.status === 409 && e.code === "idempotency_in_progress")) keys.delete(id);
+      if (viaDecision && e && e.status === 409 && e.code === "already_answered") {
+        // Answered somewhere else: say so, and drop the item (it is not shown again, even if the engine's read still lists it for a moment).
+        answeredElsewhere.add(row.decisionId);
+        open = open.filter((r) => r.id !== id);
+        forgetEngine(id);
+        st = { ...st, error: "", announce: "", focusAct: null };
+        say(WORDS.alreadyAnswered);
+        merge();
+        onChange();
+        return;
+      }
       st = { ...st, error: sendFailure(e, failureSentence), focusAct: { id, act: "choice-" + choice } };
       await load(); // a refused answer may mean the repo changed under the person (operate switched off, halted): show what is true now
       return;

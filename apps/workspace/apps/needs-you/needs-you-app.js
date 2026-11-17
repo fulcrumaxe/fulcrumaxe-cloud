@@ -187,8 +187,10 @@ function mountApp(contentEl) {
   // field keeps its text across redraws (the model holds it), and the count beside it is updated by the field's own input event, with no announcement per keystroke.
   function answerView(row, headId) {
     if (!answerable(row)) return null;
-    if (!list.state.isAdmin) return row.operateEnabled ? h("p", { class: "ny-sentence", "data-testid": "ny-waiting" }, ANSWER_WORDS.waitingAdmin) : null;
-    const lock = lockReason(row);
+    // A decision ask is never hidden from a member: its controls are shown locked, with the reason beside them (the server still refuses a member with 403).
+    const memberLock = !list.state.isAdmin && row.decisionId !== "";
+    if (!list.state.isAdmin && !memberLock) return row.operateEnabled ? h("p", { class: "ny-sentence", "data-testid": "ny-waiting" }, ANSWER_WORDS.waitingAdmin) : null;
+    const lock = memberLock ? ANSWER_WORDS.lockMember : lockReason(row);
     const sent = list.engineSent(row.id);
     const working = list.busyVerb(row.id) !== "";
     // An ask whose waiting answers could not be checked is locked like a closed one: a second answer might otherwise follow one the engine has not shown yet.
