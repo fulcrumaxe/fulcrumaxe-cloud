@@ -183,7 +183,7 @@ export class Inbox {
       const m = entry.match(OUTCOME);
       if (m === null) continue;
       const ack = EngineCommandAck.safeParse(this.readJson(path.join(this.done, entry)));
-      if (ack.success && ack.data.outcome !== "expired" && ack.data.outcome !== "not_confirmed") out.push({ name: m[1]!, commandId: m[1]!.slice(m[1]!.indexOf("-") + 1), ack: ack.data });
+      if (ack.success) out.push({ name: m[1]!, commandId: m[1]!.slice(m[1]!.indexOf("-") + 1), ack: ack.data });
     }
     return out;
   }
