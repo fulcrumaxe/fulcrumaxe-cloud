@@ -35,6 +35,7 @@ export { RECONCILE_JOBS, buildReconcileJobs } from './jobs.js';
 export { createErrorEventsPrune, errorEventsPrune, ERROR_EVENTS_RETENTION_DAYS } from './jobs/errorEventsPrune.js';
 export { createEngineEventsPrune, engineEventsPrune, ENGINE_EVENTS_PRUNE_JOB } from './jobs/engineEventsPrune.js';
 export { createMachinePrune, machinePrune, MACHINE_PRUNE_JOB } from './jobs/machinePrune.js';
+export { createOnboardingPrune, onboardingPrune, ONBOARDING_PRUNE_JOB } from './jobs/onboardingPrune.js';
 export { createMemorySweep, memorySweep, MEMORY_SWEEP_JOB, MEMORY_SWEEPS, type MemorySweep } from './jobs/memorySweep.js';
 export {
   createStripeSubscriptionsJob,
