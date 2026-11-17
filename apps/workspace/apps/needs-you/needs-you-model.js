@@ -35,6 +35,21 @@ export const NEEDS_HUMAN_URL = "/api/v1/work-items?stage=needs_human&limit=200";
 export const ME_URL = "/api/cloud/auth/me";
 /** The live events that make the list read again (C28 rule (i): the shell's one stream, no new subscription). */
 export const LIVE_EVENTS = ["decision.ask_answered", "decision.ask_overdue", "work_item.needs_human", "work_item.stage_changed", "work_item.closed", "pr.opened"];
+/**
+ * EB-6c: the engine's open asks, read through the engine bridge's read API (ids, enums and times only; nothing the engine wrote as free text).
+ * `engine.changed` is its own live event (ids only): it reads only the engine asks, 1 s after the first event, so a burst is one read.
+ */
+export const ENGINE_REPOS_URL = "/api/v1/engine/repos";
+export const engineAsksUrl = (repoId) => "/api/v1/engine/repos/" + encodeURIComponent(repoId) + "/asks?state=open&limit=200";
+export const ENGINE_CHANGED = "engine.changed";
+export const ENGINE_DEBOUNCE_MS = 1000;
+export const ENGINE_MAX_REPOS = 20;
+export const ENGINE_MAX_PAGES = 3;
+/** An ask raised longer ago than this says it may be stale. */
+export const ENGINE_STALE_ASK_MS = 7 * 24 * 3600 * 1000;
+/** L2: the machine is "last seen" once it has been quiet longer than this; a source older than its limit says so (the asks come from the team log). */
+export const ENGINE_HEARTBEAT_STALE_S = 180;
+export const ENGINE_TEAM_LOG_LIMIT_S = 2 * 3600;
 /** The card's top button: the approve route. The id is encoded; no body goes with it (the route takes none). */
 export const approveUrl = (id) => "/api/v1/work-items/" + encodeURIComponent(id) + "/approve";
 export const REFRESH_MS = 30000;
@@ -102,7 +117,24 @@ export const WORDS = {
   stalledNoAction: "Open this item's card to choose what happens next.",
   startedByAnswer: "Started. The card moves when it is done.",
   heldByAnswer: "Held. Nothing starts until a person starts it from the card.",
+  engineError: "Engine asks could not be loaded",
+  moreEngine: "More engine asks are waiting than this list shows.",
+  engineRepo: "A repository",
+  engineStale: "This ask is over 7 days old and may be stale.",
+  engineNoHeartbeat: "The machine has not been heard from; this ask may already be answered.",
 };
+
+/** One fixed sentence per kind of engine ask (the enum is never shown). An ask kind this page does not know reads as "other". */
+export const ENGINE_KIND_WORDS = {
+  owner_decision: "The engine is waiting for you to decide something.",
+  merge_blocked: "The engine cannot merge a pull request until you step in.",
+  credential: "The engine needs a login or a key from you.",
+  budget: "The engine stopped on a spending limit and needs you.",
+  review_blocked: "A review is blocked until you step in.",
+  decision: "The engine is asking you to approve or decline a step.",
+  other: "The engine raised a question that needs you.",
+};
+export const engineKindWords = (kind) => (typeof kind === "string" && Object.hasOwn(ENGINE_KIND_WORDS, kind) ? ENGINE_KIND_WORDS[kind] : ENGINE_KIND_WORDS.other);
 
 const DUE_FORMAT = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
 const dueMs = (iso) => (typeof iso === "string" ? Date.parse(iso) : NaN);
@@ -305,7 +337,7 @@ const ms = (n) => (Number.isFinite(n) ? n : Infinity);
  * second decision, so asks are all kept). Order: asks (overdue first, then due time, then id), then stalled and needs-a-person rows together
  * oldest first, then merge rows, then setup requests. Sorts are stable, so the server's order breaks every remaining tie.
  */
-export function arrangeRows({ asks, stalled, people, merges, requests, signIns = [] }) {
+export function arrangeRows({ asks, stalled, people, merges, requests, signIns = [], engine = [] }) {
   const taken = new Set(asks.map((a) => a.workItemId));
   const fresh = (rows) => rows.filter((r) => !taken.has(r.workItemId) && taken.add(r.workItemId));
   const s = fresh(stalled);
@@ -313,7 +345,7 @@ export function arrangeRows({ asks, stalled, people, merges, requests, signIns =
   const m = fresh(merges);
   const sortedAsks = [...asks].sort((a, b) => Number(b.overdue) - Number(a.overdue) || ms(a.dueMs) - ms(b.dueMs) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const person = [...s, ...p].sort((a, b) => ms(a.sinceMs) - ms(b.sinceMs));
-  return [...sortedAsks, ...person, ...signIns, ...m, ...requests];
+  return [...sortedAsks, ...person, ...signIns, ...engine, ...m, ...requests];
 }
 
 /** The sentence for a failed action, chosen by status; the server's own message is never shown. */
@@ -353,9 +385,144 @@ export async function readPages(call, firstUrl, signal) {
   return { data, more: true };
 }
 
+const GITHUB_NAME = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
+
+/** A link to a Discussion (`segment` "discussions") or a pull request ("pull") of a repo, built from the cloud's own repo name; null when the name or number is not usable. */
+export function engineLink(fullName, segment, n) {
+  if (typeof fullName !== "string" || !GITHUB_NAME.test(fullName) || !Number.isInteger(n) || n < 1) return null;
+  const [owner, name] = fullName.split("/");
+  if (owner === "." || owner === ".." || name === "." || name === "..") return null;
+  return { href: "https://github.com/" + owner + "/" + name + "/" + segment + "/" + n, text: (segment === "pull" ? "PR #" : "D#") + n };
+}
+
+/** One engine ask of a repo's read, or null when it is not usable. `env` is the read's envelope (as_of, heard_age_s, source_ages_s); `readAt` is when it was read. */
+export function readEngineAsk(repo, env, a, readAt) {
+  if (!a || typeof a.ask_id !== "string" || a.ask_id === "" || a.ask_id.length > 64) return null;
+  const raisedMs = dueMs(a.raised_at);
+  if (!Number.isFinite(raisedMs)) return null;
+  const asOfMs = dueMs(env.as_of);
+  const teamLog = env.source_ages_s && Number.isFinite(env.source_ages_s.team_log) ? env.source_ages_s.team_log : null;
+  return {
+    kind: "engine",
+    id: "engine-" + repo.repo_id + "-" + a.ask_id,
+    workItemId: "",
+    // The repo's name is a cloud-side name that a person typed on GitHub: the page puts it in <bdi>.
+    title: repo.full_name !== "" ? repo.full_name : WORDS.engineRepo,
+    reason: "",
+    state: "open",
+    sentence: engineKindWords(a.ask_kind),
+    links: [engineLink(repo.full_name, "discussions", a.discussion), engineLink(repo.full_name, "pull", a.pr)].filter(Boolean),
+    raisedMs,
+    asOfMs: Number.isFinite(asOfMs) ? asOfMs : readAt,
+    heardAgeS: Number.isFinite(env.heard_age_s) ? env.heard_age_s : null,
+    teamLogAgeS: teamLog,
+    readAt,
+  };
+}
+
+const wholeMinutes = (s) => Math.max(0, Math.floor(s / 60));
+/** "N min" under two hours, "N h" under two days, else "N days"; the time since something, never negative. */
+export function ageWords(seconds) {
+  const m = wholeMinutes(Number.isFinite(seconds) ? seconds : 0);
+  if (m < 120) return m + " min";
+  if (m < 2880) return Math.floor(m / 60) + " h";
+  return Math.floor(m / 1440) + " days";
+}
+const CLOCK = { hour: "2-digit", minute: "2-digit" };
+/** The sentences an engine row shows about its own age and its data's age (L2), worked out at draw time so they stay true between reads. "" means there is nothing to say. */
+export function engineWords(row, now = Date.now()) {
+  const sinceRaised = (now - row.raisedMs) / 1000;
+  const heard = row.heardAgeS === null ? null : row.heardAgeS + Math.max(0, now - row.readAt) / 1000;
+  const teamLog = row.teamLogAgeS === null ? null : row.teamLogAgeS + Math.max(0, now - row.readAt) / 1000;
+  return {
+    raised: sinceRaised < 60 ? "Raised just now" : "Raised " + ageWords(sinceRaised) + " ago",
+    stale: now - row.raisedMs > ENGINE_STALE_ASK_MS ? WORDS.engineStale : "",
+    asOf: "As of " + new Intl.DateTimeFormat(undefined, CLOCK).format(new Date(row.asOfMs)) + " (" + ageWords((now - row.asOfMs) / 1000) + " ago)",
+    machine: heard === null ? WORDS.engineNoHeartbeat : heard > ENGINE_HEARTBEAT_STALE_S ? "Machine last seen " + ageWords(heard) + " ago; this ask may already be answered." : "",
+    source: teamLog !== null && teamLog > ENGINE_TEAM_LOG_LIMIT_S ? "Team log not updated for " + Math.floor(teamLog / 3600) + " h." : "",
+  };
+}
+
+/** One repo's open asks, page by page up to ENGINE_MAX_PAGES. The first page's envelope speaks for the repo's freshness. */
+async function readRepoAsks(call, repo, signal) {
+  const first = engineAsksUrl(repo.repo_id);
+  const items = [];
+  let env = null;
+  let url = first;
+  for (let page = 0; page < ENGINE_MAX_PAGES; page += 1) {
+    const res = await call("GET", url, undefined, signal);
+    if (!res || !Array.isArray(res.items) || !(res.next_cursor === null || typeof res.next_cursor === "string")) throw new Error("shape");
+    env ||= res;
+    items.push(...res.items);
+    if (res.next_cursor === null) return { env, items, more: false };
+    url = first + "&cursor=" + encodeURIComponent(res.next_cursor);
+  }
+  return { env, items, more: true };
+}
+
+const byAge = (a, b) => a.raisedMs - b.raisedMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+/**
+ * The engine's open asks, as rows. This read never fails the list: a failed read is `failed: true` and the rows of the last good read of that repo stay (their age
+ * then shows how old they are). A cloud without the engine routes (404 on the repo list) has no engine asks and no error. A cancelled read still cancels.
+ * `cache` (repo id -> rows) is the caller's, kept between reads.
+ */
+export async function readEngine(call, signal, cache, now = Date.now()) {
+  let repos;
+  try {
+    const res = await call("GET", ENGINE_REPOS_URL, undefined, signal);
+    if (!res || !Array.isArray(res.items)) throw new Error("shape");
+    repos = res.items.filter((r) => r && typeof r.repo_id === "string" && r.repo_id !== "" && typeof r.full_name === "string" && r.watch_enabled !== false).map((r) => ({ repo_id: r.repo_id, full_name: r.full_name }));
+  } catch (e) {
+    if (cancelled(e)) throw e;
+    if (e && e.status === 404) {
+      cache.clear();
+      return { rows: [], failed: false, more: false };
+    }
+    return { rows: [...cache.values()].flat().sort(byAge), failed: true, more: false };
+  }
+  const listed = repos.slice(0, ENGINE_MAX_REPOS);
+  for (const id of [...cache.keys()]) if (!listed.some((r) => r.repo_id === id)) cache.delete(id);
+  const readAt = now;
+  const settled = await Promise.allSettled(listed.map((r) => readRepoAsks(call, r, signal)));
+  let failed = false;
+  let more = repos.length > ENGINE_MAX_REPOS;
+  settled.forEach((s, i) => {
+    if (s.status === "fulfilled") {
+      more = more || s.value.more;
+      cache.set(listed[i].repo_id, s.value.items.map((a) => readEngineAsk(listed[i], s.value.env, a, readAt)).filter(Boolean));
+    } else if (cancelled(s.reason)) {
+      throw s.reason;
+    } else if (s.reason && s.reason.status === 404) {
+      cache.delete(listed[i].repo_id); // the repo is no longer ticked
+    } else {
+      failed = true;
+    }
+  });
+  return { rows: [...cache.values()].flat().sort(byAge), failed, more };
+}
+
+/** Puts engine rows into an arranged list: after the rows that come before them in arrangeRows (asks, stalled, needs-a-person, sign-in), before the merge rows and requests. */
+export function insertEngine(rows, engine) {
+  const rest = rows.filter((r) => r.kind !== "engine");
+  const at = rest.findIndex((r) => r.kind === "merge" || r.kind === "setup");
+  return at < 0 ? [...rest, ...engine] : [...rest.slice(0, at), ...engine, ...rest.slice(at)];
+}
+
+/** What a person hears when the engine asks change between two reads: "" when nothing changed. Counts only, never text from an ask. */
+export function engineChangeWords(before, after, wasFailed, nowFailed) {
+  const added = after.filter((id) => !before.includes(id)).length;
+  const gone = before.filter((id) => !after.includes(id)).length;
+  const parts = [];
+  if (added > 0) parts.push(added === 1 ? "1 new engine ask." : added + " new engine asks.");
+  if (gone > 0) parts.push(gone === 1 ? "1 engine ask cleared." : gone + " engine asks cleared.");
+  if (nowFailed && !wasFailed) parts.push(WORDS.engineError + ".");
+  return parts.join(" ");
+}
+
 /** The five reads behind the list, and the rows they make (the one place the row rules live; the Pipeline board's count calls it too). Any failed read rejects. */
-export async function readAll(call, signal) {
-  const [data, asks, merges, stalled, items, signIn] = await Promise.all([call("GET", LIST_URL, undefined, signal), readPages(call, ASKS_FIRST_URL, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal), readPages(call, NEEDS_HUMAN_URL, signal), readSignInItems(call, signal)]);
+export async function readAll(call, signal, engineCache = new Map(), now = Date.now()) {
+  const [data, asks, merges, stalled, items, signIn, engine] = await Promise.all([call("GET", LIST_URL, undefined, signal), readPages(call, ASKS_FIRST_URL, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal), readPages(call, NEEDS_HUMAN_URL, signal), readSignInItems(call, signal), readEngine(call, signal, engineCache, now)]);
   if (!data || !Array.isArray(data.requests) || !merges || !Array.isArray(merges.items) || !stalled || !Array.isArray(stalled.items)) throw new Error("shape");
   const rows = arrangeRows({
     asks: asks.data.map(readAsk).filter(Boolean),
@@ -363,17 +530,18 @@ export async function readAll(call, signal) {
     people: items.data.map(readPerson).filter(Boolean),
     merges: merges.items.map(readMerge).filter(Boolean),
     signIns: signIn.map(readSignIn).filter(Boolean),
+    engine: engine.rows,
     requests: data.requests.map(readRequest).filter((r) => r && (r.state === "open" || r.branchManaged || r.replacePending)),
   });
   const notShown = [merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0);
-  return { rows, truncated: data.truncated === true, moreAsks: asks.more, moreItems: items.more, notShown };
+  return { rows, truncated: data.truncated === true, moreAsks: asks.more, moreItems: items.more, notShown, engineFailed: engine.failed, engineMore: engine.more };
 }
 
 /** The Pipeline board's number: the same reads and row rules as the list. `more` is true when a page cap was reached or rows are not shown. */
 export async function readNeedsYouCount(call = api, signal) {
   const r = await readAll(call, signal);
   // A line that only offers the undo of an answer (Keep, or a Replace waiting for its update) is not something that needs a person, so it is not counted.
-  return { count: r.rows.filter((row) => !row.branchManaged && !row.replacePending).length + r.notShown, more: r.moreAsks || r.moreItems || r.notShown > 0 };
+  return { count: r.rows.filter((row) => !row.branchManaged && !row.replacePending).length + r.notShown, more: r.moreAsks || r.moreItems || r.notShown > 0 || r.engineFailed || r.engineMore };
 }
 
 /** The board button's words: no number while the count is unknown (loading or failed). */
@@ -387,8 +555,19 @@ export function entryLabel(c) {
  * The list: the open requests the cloud returns, then the ones this person closed in this window, each showing its outcome (a request put back
  * by a failed check is open again and so is simply in the open part). `state` is { status, rows, truncated, announce, error }.
  */
-export function createNeedsYou({ call = api, signal, onChange = () => {} } = {}) {
-  let st = { status: "loading", rows: [], truncated: false, moreAsks: false, moreItems: false, notShown: 0, isAdmin: false, announce: "", focusId: null, focusAct: null, error: "" };
+export function createNeedsYou({ call = api, signal, onChange = () => {}, now = Date.now } = {}) {
+  let st = { status: "loading", rows: [], truncated: false, moreAsks: false, moreItems: false, notShown: 0, engineFailed: false, engineMore: false, isAdmin: false, announce: "", focusId: null, focusAct: null, error: "" };
+  // EB-6c: the engine asks' last good read per repo, and the ids heard about last (null until the first read, so the first draw says nothing).
+  const engineCache = new Map();
+  let engineSeen = null;
+  /** The engine part of a read, added to the state: what changed is said once, and the first read says nothing. */
+  const takeEngine = (rows, failed, more) => {
+    const ids = rows.map((r) => r.id);
+    // The first read says nothing about the asks (they are just there), but a failed first read is said: the line it leaves is easy to miss.
+    const said = engineSeen === null ? (failed ? WORDS.engineError + "." : "") : engineChangeWords(engineSeen, ids, st.engineFailed, failed);
+    engineSeen = ids;
+    st = { ...st, engineFailed: failed, engineMore: more, announce: said === "" ? st.announce : st.announce === "" ? said : st.announce + " " + said };
+  };
   // Who may answer is read once per window open, beside the first list read. A failed read means "not an admin", never the list's error.
   let adminRead = null;
   const keys = new Map(); // ask id -> { choice, key }: the Idempotency-Key of an answer that has not settled yet
@@ -406,7 +585,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     try {
       // Every read must answer: a screen that showed only some of them would say nothing is waiting while another part is unread.
       adminRead ||= Promise.resolve(call("GET", ME_URL, undefined, signal)).then((me) => !!me && me.is_admin === true, () => false);
-      const [all, isAdmin] = await Promise.all([readAll(call, signal), adminRead]);
+      const [all, isAdmin] = await Promise.all([readAll(call, signal, engineCache, now()), adminRead]);
       if (mine !== gen) return;
       open = all.rows;
       for (const r of open) closed.delete(r.id);
@@ -419,10 +598,28 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
         }
       }
       st = { ...st, status: "ready", isAdmin, truncated: all.truncated, moreAsks: all.moreAsks, moreItems: all.moreItems, notShown: all.notShown };
+      takeEngine(all.rows.filter((r) => r.kind === "engine"), all.engineFailed, all.engineMore);
       merge();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;
       if (st.status !== "ready") st = { ...st, status: "error" };
+    }
+    onChange();
+  }
+
+  /** EB-6c: reads only the engine asks (on `engine.changed`) and swaps them into the list. A full read that started after this one began wins. */
+  async function loadEngine() {
+    const mine = gen;
+    try {
+      const eng = await readEngine(call, signal, engineCache, now());
+      if (mine !== gen || st.status !== "ready") return;
+      open = insertEngine(open, eng.rows);
+      takeEngine(eng.rows, eng.failed, eng.more);
+      merge();
+    } catch (e) {
+      if (cancelled(e)) return;
+      // fx-swallow-ok: readEngine answers failures itself (they are `failed`); anything else is a defect in this read and the next full read shows the truth
+      return;
     }
     onChange();
   }
@@ -575,47 +772,74 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
   };
 
   // Live events and the timer read through refresh(): one read in flight, and events that arrive during it cause one more read after it.
+  // `engine.changed` asks for the engine part only (EB-6c); a full read that is wanted at the same time covers it.
   let reading = false;
-  let again = false;
+  let wantFull = false;
+  let wantEngine = false;
   let running = false;
-  async function refresh() {
-    if (!running) return;
-    if (reading) {
-      again = true;
-      return;
-    }
+  async function drain() {
+    if (reading) return;
     reading = true;
-    await load();
-    reading = false;
-    if (again) {
-      again = false;
-      await refresh();
+    try {
+      while (running && (wantFull || wantEngine)) {
+        const full = wantFull;
+        wantFull = false;
+        wantEngine = false;
+        await (full ? load() : loadEngine());
+      }
+    } finally {
+      reading = false;
     }
+  }
+  function refresh() {
+    if (!running) return Promise.resolve();
+    wantFull = true;
+    return drain();
+  }
+  function refreshEngine() {
+    if (!running) return Promise.resolve();
+    wantEngine = true;
+    return drain();
   }
   let stopFn = null;
   /**
    * Reads again on the live stream's refresh, on each of LIVE_EVENTS and every REFRESH_MS, but not on the timer while the page is hidden.
    * `subscribe(handler)` and `listen(type, handler)` return their off function. Starting twice replaces the first. Nothing is left running after stop().
    */
-  function start({ subscribe, listen, setTimer = setInterval, clearTimer = clearInterval, hidden = () => false } = {}) {
+  function start({ subscribe, listen, setTimer = setInterval, clearTimer = clearInterval, setDelay = setTimeout, clearDelay = clearTimeout, hidden = () => false } = {}) {
     stop();
     running = true;
     const offs = [typeof subscribe === "function" ? subscribe(() => refresh()) : () => {}];
     if (typeof listen === "function") for (const type of LIVE_EVENTS) offs.push(listen(type, () => refresh()));
+    // `engine.changed`: the first event of a burst starts a 1 s wait, the rest join it, and one engine read follows.
+    let pending = null;
+    if (typeof listen === "function")
+      offs.push(
+        listen(ENGINE_CHANGED, () => {
+          if (pending !== null) return;
+          pending = setDelay(() => {
+            pending = null;
+            refreshEngine();
+          }, ENGINE_DEBOUNCE_MS);
+        })
+      );
     const timer = setTimer(() => {
       if (!hidden()) refresh();
     }, REFRESH_MS);
     stopFn = () => {
       offs.forEach((off) => off());
       clearTimer(timer);
+      if (pending !== null) clearDelay(pending);
+      pending = null;
     };
   }
   function stop() {
     running = false;
-    again = false;
+    wantFull = false;
+    wantEngine = false;
     if (stopFn) stopFn();
     stopFn = null;
   }
 
-  return { load, act, keep, askReplace, cancelReplace, replace, release, confirmingHead: (id) => confirming.get(id) ?? "", answer, unstick, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
+  return { load, loadEngine, act, keep, askReplace, cancelReplace, replace, release, confirmingHead: (id) => confirming.get(id) ?? "", answer, unstick, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
 }

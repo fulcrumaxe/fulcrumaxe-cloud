@@ -476,6 +476,16 @@ test.describe("D#37 WS-F1d: Pipeline board entry to Needs you", () => {
     expect(await body(page)).not.toMatch(/\bnull\b|undefined|NaN|Invalid Date|ApiError|Could not load|isn't available/);
   });
 
+  test("EB-6c: when the engine asks cannot be read the button says so with a plus and never 'Nothing needs you'", async ({ page }) => {
+    await page.route("**/api/v1/setup-requests?*", (r) => r.fulfill({ json: { requests: [], truncated: false } }));
+    await page.route("**/api/v1/decision-asks?*", (r) => r.fulfill({ json: { data: [], next_cursor: null } }));
+    await page.route("**/api/v1/merge-ready", (r) => r.fulfill({ json: { items: [], not_shown: 0 } }));
+    await page.route("**/api/v1/engine/repos", (r) => r.fulfill({ status: 500, json: { error: { code: "server_error", message: "x", request_id: "r" } } }));
+    await setup(page);
+    await expect(button(page)).toHaveText("Needs you (0+)");
+    expect(await body(page)).not.toMatch(/Nothing needs you/);
+  });
+
   test("D1/E4: when the ask pages hit the cap the number gets a plus", async ({ page }) => {
     await page.route("**/api/v1/decision-asks?*", (r) => r.fulfill({ json: { data: [], next_cursor: "more" } }));
     await setup(page);

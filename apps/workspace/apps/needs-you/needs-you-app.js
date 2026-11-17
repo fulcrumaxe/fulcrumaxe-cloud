@@ -5,7 +5,7 @@
 // second press is ignored. When a row changes under the person, focus goes to the same control, else to the row's heading.
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
-import { WORDS, canMarkDone, confirmWords, createNeedsYou, isBranchRow, notShownWords, nowAtWords, waitingHolderWords } from "./needs-you-model.js";
+import { WORDS, canMarkDone, confirmWords, createNeedsYou, engineWords, isBranchRow, notShownWords, nowAtWords, waitingHolderWords } from "./needs-you-model.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -182,7 +182,29 @@ function mountApp(contentEl) {
     );
   }
 
+  // EB-6c: an open ask of the engine, read-only (answering is a later row). The repo's name is untrusted text and goes in <bdi>; the D# and PR # links are built from it by the model.
+  // The sentences about age are worked out here, at draw time, so they stay true between reads. Each link keeps its data-act so focus returns to it after a redraw.
+  function engineView(row) {
+    const headId = "ny-h-" + row.id;
+    const w = engineWords(row, Date.now());
+    return h(
+      "li",
+      { class: "ny-row", "data-testid": "ny-row", "data-kind": "engine", "data-id": row.id, "data-state": row.state },
+      h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, h("bdi", null, row.title)),
+      h("p", { class: "ny-sentence", "data-testid": "ny-sentence" }, row.sentence),
+      row.links.length > 0
+        ? h("p", { class: "ny-refs", "data-testid": "ny-refs" }, row.links.map((l, i) => h("a", { class: "ny-link", href: l.href, target: "_blank", rel: "noopener noreferrer", "aria-describedby": headId, "data-act": "link-" + i, "data-testid": "ny-engine-link-" + i }, l.text, h("span", { class: "ny-sr", "data-testid": "ny-engine-link-hint-" + i }, " (opens in a new tab)"))))
+        : null,
+      h("p", { "data-testid": "ny-raised" }, w.raised),
+      w.stale ? h("p", { class: "ny-warn", "data-testid": "ny-stale" }, w.stale) : null,
+      w.machine ? h("p", { class: "ny-warn", "data-testid": "ny-machine" }, w.machine) : null,
+      w.source ? h("p", { class: "ny-warn", "data-testid": "ny-source" }, w.source) : null,
+      h("p", { class: "ny-muted", "data-testid": "ny-asof" }, w.asOf)
+    );
+  }
+
   function rowView(row) {
+    if (row.kind === "engine") return engineView(row);
     if (row.kind === "stalled") return stalledView(row);
     if (row.kind === "ask") return askView(row);
     if (row.kind === "person") return personView(row);
@@ -226,8 +248,8 @@ function mountApp(contentEl) {
     const body =
       s.status === "loading" ? h("p", { class: "ny-muted", role: "status", "data-testid": "ny-loading" }, WORDS.loading)
       : s.status === "error" ? h("p", { class: "ny-error", role: "alert", "data-testid": "ny-error" }, WORDS.error)
-      : s.rows.length === 0 ? h("p", { class: "ny-muted", "data-testid": "ny-empty" }, WORDS.empty)
-      : h("ul", { class: "ny-rows", "data-testid": "ny-rows" }, s.rows.map(rowView));
+      : s.rows.length === 0 ? (s.engineFailed ? null : h("p", { class: "ny-muted", "data-testid": "ny-empty" }, WORDS.empty)) // "nothing needs you" would be false while the engine's asks are unread
+      : h("ul", { class: "ny-rows", role: "list", "data-testid": "ny-rows" }, s.rows.map(rowView));
     setText(heading, WORDS.title + (s.status === "ready" ? " (" + openCount + ")" : ""));
     const focusId = s.focusId;
     if (s.announce !== "") {
@@ -237,7 +259,10 @@ function mountApp(contentEl) {
       live.textContent = ""; // a new action starts: the same sentence can be said again when it ends
     }
     setText(alertEl, s.error);
-    content.replaceChildren(body);
+    content.replaceChildren(...(body ? [body] : []));
+    // EB-6c: one plain line, not an alert (it is spoken once, through the live region, when it first appears); the other rows stay.
+    if (s.status === "ready" && s.engineFailed) content.appendChild(h("p", { class: "ny-warn", "data-testid": "ny-engine-error" }, WORDS.engineError));
+    if (s.status === "ready" && s.engineMore) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-engine" }, WORDS.moreEngine));
     if (s.status === "ready" && s.notShown > 0) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-not-shown" }, notShownWords(s.notShown)));
     if (s.status === "ready" && s.moreAsks) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-asks" }, WORDS.moreAsks));
     if (s.status === "ready" && s.moreItems) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-items" }, WORDS.moreItems));

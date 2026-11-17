@@ -35,7 +35,7 @@ function fakeCall(routes) {
   const askLog = []; // the decision-ask calls; kept apart so the setup-request tests below count only their own requests
   const all = { ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ["GET " + SIGN_IN_URL]: { items: [] }, ["GET " + NEEDS_HUMAN_URL]: { data: [], next_cursor: null }, ["GET " + ME_URL]: { is_admin: true }, ...routes };
   const call = vi.fn(async (method, path, body) => {
-    (path.startsWith(ASKS_URL) || path === ME_URL || path.startsWith("/api/v1/work-items") || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.startsWith(SIGN_IN_URL) || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
+    (path.startsWith(ASKS_URL) || path === ME_URL || path.startsWith("/api/v1/work-items") || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.startsWith(SIGN_IN_URL) || path.startsWith("/api/v1/engine") || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
     // The real API answers 400 to any body on the done and withdraw routes (packages/api/src/handler.ts).
     if (method === "POST" && /\/(done|withdraw)$/.test(path) && body !== undefined) throw fail(400, "invalid_request");
     const r = all[method + " " + path];
@@ -540,7 +540,7 @@ describe("decision asks", () => {
     expect(f.list.state.rows.map((r) => r.kind)).toEqual(["ask", "setup"]);
     expect(f.list.state.notShown).toBe(0);
     expect(f.log).toEqual([["GET", LIST_URL, undefined]]);
-    expect(f.askLog).toEqual([["GET", ME_URL, undefined], ["GET", ASKS_FIRST_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined], ["GET", NEEDS_HUMAN_URL, undefined], ["GET", SIGN_IN_URL, undefined]]);
+    expect(f.askLog).toEqual([["GET", ME_URL, undefined], ["GET", ASKS_FIRST_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined], ["GET", NEEDS_HUMAN_URL, undefined], ["GET", SIGN_IN_URL, undefined], ["GET", "/api/v1/engine/repos", undefined]]);
     expect(notShownWords(1)).toBe("1 more isn't shown.");
     expect(notShownWords(3)).toBe("3 more aren't shown.");
   });
@@ -964,7 +964,7 @@ describe("WS-F1d: live", () => {
 
   it("C2: stop() removes every subscription and the timer", async () => {
     const r = await rig();
-    expect(r.count()).toBe(LIVE_EVENTS.length);
+    expect(r.count()).toBe(LIVE_EVENTS.length + 1); // the six events, and engine.changed (EB-6c)
     r.list.stop();
     expect(r.count()).toBe(0);
     r.timers[0].fn(); // a timer that fired anyway reads nothing once stopped
