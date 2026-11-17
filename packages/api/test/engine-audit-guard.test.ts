@@ -112,6 +112,20 @@ async function callEngine(c: GuardContext, method: 'PUT', urlPath: string, body?
   if (res.status !== 200) throw new Error(`${method} ${urlPath} answered ${res.status}`);
 }
 
+/** The decision the engine asked about, with no answer yet: each run of the answer route needs a fresh one, since an answer is final. */
+async function askedDecision(ctx: GuardContext): Promise<string> {
+  const repo = (
+    await ctx.admin.query<{ id: string }>(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, NULL, $2, 'web') RETURNING id`, [ctx.accountId, Math.floor(Math.random() * 1e9)])
+  ).rows[0]!.id;
+  return (
+    await ctx.admin.query<{ id: string }>(
+      `INSERT INTO engine_decisions (account_id, repo_id, decision_type, request_key, subject, disposition, catalogue_version, preset)
+       VALUES ($1, $2, 'engine_merge', $3, '{"pr":1}'::jsonb, 'ask', 11, 'default') RETURNING id`,
+      [ctx.accountId, repo, `guard:${randomUUID()}`],
+    )
+  ).rows[0]!.id;
+}
+
 /** Later rows add their routes here. */
 export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
   {
@@ -173,6 +187,35 @@ export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
     },
     effects: async (c) =>
       Number((await c.admin.query(`SELECT count(*) AS n FROM ${SEEDED_TABLE} s WHERE NOT EXISTS (SELECT 1 FROM engine_sessions e WHERE e.id = s.session_id)`)).rows[0].n),
+  },
+  {
+    id: 'POST /api/v1/engine/decisions/{id}/answer',
+    action: 'engine_decision.answered',
+    covers: ['engine-decisions.ts#engineDecisionRoutes'],
+    run: async (ctx) => {
+      const id = await askedDecision(ctx);
+      const platformOpsPool = createPool(process.env.API_DATABASE_URL_PLATFORM_OPS!);
+      const previousSecret = process.env.FX_SESSION_SECRET;
+      process.env.FX_SESSION_SECRET = 's'.repeat(32);
+      try {
+        const res = await handleApiRequest(
+          new Request(`http://localhost/api/v1/engine/decisions/${id}/answer`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', cookie: `${SESSION_COOKIE_NAME}=${await signSession({ accountId: ctx.accountId, userId: ctx.userId })}` },
+            body: JSON.stringify({ choice: 'approve' }),
+          }),
+          ctx.appUserPool,
+          platformOpsPool,
+          ROUTES,
+        );
+        if (res.status !== 200) throw new Error(`answer route answered ${res.status}`);
+      } finally {
+        if (previousSecret === undefined) delete process.env.FX_SESSION_SECRET;
+        else process.env.FX_SESSION_SECRET = previousSecret;
+        await platformOpsPool.end();
+      }
+    },
+    effects: async (ctx) => Number((await ctx.admin.query(`SELECT count(*) AS n FROM engine_decision_answers WHERE account_id = $1`, [ctx.accountId])).rows[0].n),
   },
 ];
 

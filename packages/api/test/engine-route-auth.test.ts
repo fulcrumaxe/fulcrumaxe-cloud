@@ -14,11 +14,12 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import * as engineModule from '../src/routes/engine.js';
+import { engineDecisionRoutes } from '../src/routes/engine-decisions.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const ROUTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes');
-// This file's list is the routes of engine.ts (the read API and settings); the command routes (engine-commands.ts) are session-only by default and are guarded in their own test.
-const engineRoutes = ROUTES.filter((r) => engineModule.engineRoutes.includes(r));
+// This file's list is the routes of engine.ts (the read API and settings) and the decision answer route (engine-decisions.ts); the command routes (engine-commands.ts) are session-only by default and are guarded in their own test.
+const engineRoutes = ROUTES.filter((r) => engineModule.engineRoutes.includes(r) || engineDecisionRoutes.includes(r));
 
 /** The exports of every `packages/api/src/routes/engine*.ts`, as `<file>#<name>`. */
 const exportsOf = (): string[] =>
@@ -43,6 +44,7 @@ describe('engine route auth meta-test [pg]', () => {
   let member: { accountId: string; userId: string };
   let admin2: { accountId: string; userId: string };
   let stranger: { accountId: string; userId: string };
+  let decisionId: string;
   let readToken: string;
   let everyScopeToken: string;
 
@@ -51,13 +53,14 @@ describe('engine route auth meta-test [pg]', () => {
     if (bearer) headers.set('authorization', `Bearer ${bearer}`);
     else if (who !== 'none') headers.set('cookie', `${SESSION_COOKIE_NAME}=${await signSession(who)}`);
     if (method !== 'GET') headers.set('content-type', 'application/json');
-    return (await handleApiRequest(new Request(`http://localhost${urlPath}`, { method, headers, body: method === 'GET' ? undefined : '{}' }), appUserPool, platformOpsPool, ROUTES)).status;
+    return (await handleApiRequest(new Request(`http://localhost${urlPath}`, { method, headers, body: method === 'GET' ? undefined : method === 'POST' ? JSON.stringify({ choice: 'approve' }) : '{}' }), appUserPool, platformOpsPool, ROUTES)).status;
   };
   const bodyOf = async (urlPath: string, who: { accountId: string; userId: string }) => {
     const headers = new Headers({ accept: 'application/json', cookie: `${SESSION_COOKIE_NAME}=${await signSession(who)}` });
     return (await handleApiRequest(new Request(`http://localhost${urlPath}`, { headers }), appUserPool, platformOpsPool, ROUTES)).json() as Promise<{ items?: unknown[]; repos?: Array<{ repo_id: string }>; watch_enabled?: boolean }>;
   };
-  const urlOf = (p: string) => p.replace('{id}', A.repoId);
+  // The decision route names a real decision of this account, so the stranger's 404 is isolation and not an unknown id.
+  const urlOf = (p: string) => p.replace('{id}', p.includes('/decisions/') ? decisionId : A.repoId);
 
   beforeAll(async () => {
     adminPool = createPool(process.env.API_DATABASE_URL!);
@@ -76,6 +79,11 @@ describe('engine route auth meta-test [pg]', () => {
     await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [A.repoId]);
     await admin.query(`INSERT INTO engine_bridge_settings (account_id, watch_enabled) VALUES ($1, true)`, [A.accountId]);
     await admin.query(`INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2)`, [A.accountId, A.repoId]);
+    decisionId = (await admin.query<{ id: string }>(
+      `INSERT INTO engine_decisions (account_id, repo_id, decision_type, request_key, subject, disposition, catalogue_version, preset)
+       VALUES ($1, $2, 'engine_merge', $3, '{"pr":1}'::jsonb, 'ask', 11, 'default') RETURNING id`,
+      [A.accountId, A.repoId, `k:${randomUUID().slice(0, 8)}`],
+    )).rows[0]!.id;
     readToken = generateToken();
     await insertApiToken(appUserPool, { accountId: A.accountId, createdBy: A.userId, tokenHash: hashToken(readToken), displayHint: 'fxat_...test', scopes: ['read'], expiresAt: new Date(Date.now() + 86_400_000) });
     everyScopeToken = generateToken();
@@ -89,9 +97,12 @@ describe('engine route auth meta-test [pg]', () => {
 
   it('lists every engine route and every export of routes/engine*.ts, and none is left unnamed', () => {
     expect(engineRoutes.length).toBeGreaterThanOrEqual(11);
-    const unknown = exportsOf().filter((x) => !(x in HELPER_EXPORTS) && x !== 'engine.ts#engineRoutes');
+    const unknown = exportsOf().filter((x) => !(x in HELPER_EXPORTS) && x !== 'engine.ts#engineRoutes' && x !== 'engine-decisions.ts#engineDecisionRoutes');
     expect(unknown).toEqual([]);
     expect(Object.keys(engineModule).sort()).toEqual(['engineRoutes', 'engineSettingsDeps']);
+    // A route added to engine-decisions.ts is noticed here and must come with its own review of the probes below.
+    expect(engineDecisionRoutes.map((r) => r.operationId)).toEqual(['answerEngineDecision']);
+    for (const id of ['answerEngineDecision']) expect(engineRoutes.some((r) => r.operationId === id), id).toBe(true);
     for (const r of engineRoutes) {
       expect(Object.hasOwn(r, 'principals'), `${r.method} ${r.path}: principals`).toBe(true);
       expect(['member', 'admin', 'owner']).toContain(r.minRole);

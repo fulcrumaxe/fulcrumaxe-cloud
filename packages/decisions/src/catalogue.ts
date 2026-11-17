@@ -31,7 +31,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 10;
+export const CATALOGUE_VERSION = 11;
 
 /**
  * How long a class-2 or class-3 decision stays free to reverse, in hours (D#7 C23: a per-entry catalogue field, 24 h, the same on every
@@ -262,6 +262,47 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     allowedDispositions: ["ask"],
     reversal: { availability: "compensating_work" },
     customerProximity: "customer_facing",
+    dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
+  },
+
+  // D#842 EB-9a: the engine's three decisions, asked of the cloud before the engine acts (spawn an agent, merge a pull request,
+  // flip a Spec to ready). The engine runs on a customer's own machine, so each is internal-only with no data of its own.
+  // `engine_spec_ready` offers only act or ask: Balanced proposes announce, which clamps to ask, and a Feature or Critical Spec
+  // is resolved through `start_parent_item` instead (see `engineDecide.ts`), so this entry never loosens that start.
+  {
+    id: "engine_spawn",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
+  },
+  {
+    id: "engine_merge",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: {
+      availability: "not_reversible",
+      reason: "a merge can't be undone from here; halt the engine or tighten the dial to stop the next one",
+    },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
+  },
+  {
+    id: "engine_spec_ready",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag"],
     reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,

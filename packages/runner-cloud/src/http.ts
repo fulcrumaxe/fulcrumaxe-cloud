@@ -4,6 +4,7 @@ import { reportError } from "@fx/telemetry";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import type { EngineUsagePort } from "./ingestEngineEvents.js";
 import type { EngineCommandSigner } from "./engineCommands.js";
+import type { EngineDecidePorts } from "./engineDecide.js";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
 
@@ -77,6 +78,11 @@ export interface RunnerCloudDeps {
    * platform_ops login; a test scans the source to keep it that way.
    */
   appUserPool: Pool;
+  /**
+   * EB-9a: what the engine decide route reads outside its own table, and its audit writer. Absent, the route uses the database ports and writes its
+   * audit row through `writeEngineAudit`; a set of ports with no audit writer is 503 `not_configured` before anything is read or written.
+   */
+  engineDecide?: EngineDecidePorts | null;
   /** The configured public origin (FX_APP_ORIGIN). The only source of the URL a signature is checked against. */
   origin: string | undefined;
   /** EB-8a: the signer for engine bridge commands (the job-signing key, held by the worker). Absent, or answering null, the pull route is 503 `not_configured` and delivers nothing. */

@@ -1,6 +1,15 @@
 export { CATALOGUE, CATALOGUE_IDS, CATALOGUE_VERSION, DEFAULT_REVERSAL_WINDOW_HOURS, getCatalogueEntry } from "./catalogue.js";
 export { reversalWindowFor } from "./reversalWindow.js";
 export {
+  ENGINE_DECISION_TYPES,
+  ENGINE_SPEC_TAGS,
+  isEngineDecisionType,
+  resolveEngineDecision,
+  type EngineDecisionType,
+  type EngineResolution,
+  type EngineSpecTag,
+} from "./engineDecision.js";
+export {
   AUTONOMOUS_PRESET,
   BALANCED_PRESET,
   CAUTIOUS_PRESET,

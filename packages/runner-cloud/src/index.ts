@@ -23,6 +23,7 @@ export { RUNNER_CHECK_REPLY_MS, checkStatusOf, runnerReplyOf, type RunnerCheckSt
 export { CLAIM_PATH, claimRun } from "./claim.js";
 export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
 export { ENGINE_COMMANDS_PULL_PATH, ackEngineCommand, engineCommandAckPath, pullEngineCommands, type EngineCommandSigner } from "./engineCommands.js";
+export { ENGINE_DECIDE_PATH, engineDecide, parseEngineDecide, pgEngineDecidePorts, type EngineDecideAuditEntry, type EngineDecidePorts, type EngineGate } from "./engineDecide.js";
 export { eventsPath, ingestEvents } from "./ingestEvents.js";
 export { ENGINE_EVENTS_PATH, engineSeqInOrder, ingestEngineEvents, parseEngineBatch, type EngineUsagePort, type EngineUsageSubject } from "./ingestEngineEvents.js";
 export { DISPATCH_BASE_KIND, branchOf, donePath, doneRun } from "./done.js";

@@ -27,6 +27,9 @@ const APPROVED: Record<string, string> = {
   start_after_reclassify: "Starting an item that was later judged larger",
   reversal_recorded: "Undoing an earlier decision",
   reversal_over_cap: "Undoing a decision again after two undos",
+  engine_spawn: "Letting the engine start an agent",
+  engine_merge: "Letting the engine merge a pull request",
+  engine_spec_ready: "Letting the engine mark a Spec ready to build",
 };
 
 describe("decision labels", () => {

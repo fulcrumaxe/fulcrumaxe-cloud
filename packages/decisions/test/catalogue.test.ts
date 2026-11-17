@@ -31,6 +31,9 @@ const VALID_CLASSES: readonly DecisionClass[] = [
 /** Frozen v1 catalogue (DP1 criterion 1). A change here is deliberate. */
 const EXPECTED_V1_IDS = [
   "dependency_patch_bump",
+  "engine_merge",
+  "engine_spawn",
+  "engine_spec_ready",
   "external_paid_api_call",
   "launch_sub_item",
   "memory_auto_approve",
