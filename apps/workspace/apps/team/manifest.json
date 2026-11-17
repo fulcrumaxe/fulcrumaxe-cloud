@@ -1,0 +1,5 @@
+{
+  "id": "team",
+  "entry": "team-app.js",
+  "styles": ["team-app.css"]
+}

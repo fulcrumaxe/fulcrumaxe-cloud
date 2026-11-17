@@ -355,6 +355,17 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // Opening the Team app reads the engine switch and the repos behind it (GET only, the documented shapes). Watch is off here, so no panel is read;
+    // team.spec.ts mocks every other state.
+    if (urlPath === "/api/v1/engine/settings" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ watch_enabled: false, operate_enabled: false, can_edit: false, repos: [] }));
+      return;
+    }
+    if (urlPath === "/api/v1/engine/repos" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ items: [] }));
+      return;
+    }
+
     // Opening the Needs you app also lists the items that stopped on their own (GET only). None here: the rows of the other lists are what these tests look at.
     if (urlPath === "/api/v1/stalled-items" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ items: [], not_shown: 0 }));
