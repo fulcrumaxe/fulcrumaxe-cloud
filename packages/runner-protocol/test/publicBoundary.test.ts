@@ -20,11 +20,13 @@ function filesUnder(dir: string): string[] {
     return statSync(full).isDirectory() ? filesUnder(full) : [full];
   });
 }
-const sourceFiles = filesUnder(path.join(PACKAGE_DIR, "src")).filter((f) => f.endsWith(".ts"));
+// Declaration files have no emit, so they are left out; the plain .js sources (the confusables module) are checked like the .ts ones.
+const sourceFiles = filesUnder(path.join(PACKAGE_DIR, "src")).filter((f) => (f.endsWith(".ts") && !f.endsWith(".d.ts")) || f.endsWith(".js"));
 const testFiles = filesUnder(path.join(PACKAGE_DIR, "test")).filter((f) => f.endsWith(".ts"));
 
 /** The built output of every source file, as the TypeScript compiler writes it (comments kept, as tsc keeps them). */
 function built(file: string): string {
+  if (file.endsWith(".js")) return readFileSync(file, "utf8");
   return ts.transpileModule(readFileSync(file, "utf8"), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }, fileName: file }).outputText;
 }
 
