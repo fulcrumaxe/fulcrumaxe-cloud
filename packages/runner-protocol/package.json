@@ -16,6 +16,8 @@
     "./streamJson": "./src/streamJson.ts",
     "./toolActivity": "./src/toolActivity.ts",
     "./contextLedger": "./src/contextLedger.ts",
+    "./confusables": "./src/confusables/skeleton.js",
+    "./confusablesTable": "./src/confusables/skeletonTable.js",
     "./planePush": "./src/planePush/index.ts",
     "./planePushIdentity": "./src/planePush/planePushIdentity.ts",
     "./planePushText": "./src/planePush/planePushText.ts",
