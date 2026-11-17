@@ -40,6 +40,7 @@ Sources:
 - [`@fx/sitekit-claims`](packages/sitekit-claims.md) — claim schema and the render-refuses-unverified gate.
 - [`@fx/sitekit-template`](packages/sitekit-template.md) — the fixed site template.
 - [`@fx/sitekit-checks`](packages/sitekit-checks.md) — deterministic mechanical checks over rendered output.
+- [`@fx/hetzner`](packages/hetzner.md) — typed Hetzner Cloud API client and the provider-neutral machine seam; not wired into any app yet.
 - [`@fx/design`](packages/design.md) — the shared visual token/component layer.
 
 ## Apps

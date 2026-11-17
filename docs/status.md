@@ -180,7 +180,7 @@ Sources:
 | `packages/fx-runner` | implemented-and-tested | 293 test files. The local runner: job verification, role tools, clean environment, the Claude engine, the daemon and the verify browser. |
 | `packages/gh-policy` | implemented-and-tested | 15 test files. The pure decision engine for the GitHub proxy. |
 | `packages/github` | implemented-and-tested | 70 test files, 25 against a real Postgres. GitHub App webhook intake, the event mapper, installation tokens and the merge-gate GraphQL documents. |
-| `packages/hetzner` | implemented-and-tested | 1 test file. Typed, strict Hetzner Cloud API client with a strict local fake over real TLS; unused by any other project so far. |
+| `packages/hetzner` | implemented-and-tested | 3 test files, no database, against a strict local fake of the Hetzner API. A typed Hetzner Cloud client and the provider-neutral machine seam; no app depends on it yet. |
 | `packages/model-call` | implemented-and-tested | 11 test files. Server-side model calls over the account's own key, including the streaming tool-use turn the assistant uses. |
 | `packages/model-connection` | implemented-and-tested | 18 test files, 2 against a real Postgres. Bring-your-own-key connections: envelope encryption and validation. |
 | `packages/model-router` | implemented-and-tested | 13 test files, 3 against a real Postgres. Data-driven model routing, escalation and floors, including the site kit's two roles. |
