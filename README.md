@@ -101,7 +101,8 @@ packages/
   github/             GitHub App webhook intake, event mapping, installation
                       tokens, merge-gate GraphQL documents
   hetzner/            typed, strict client for the Hetzner Cloud API (servers,
-                      firewalls, SSH keys, pricing); nothing depends on it yet
+                      firewalls, SSH keys, pricing, snapshots and servers from an image);
+                      nothing depends on it yet
   model-call/         server-side model calls over the account's own key
   model-connection/   bring-your-own-key connections: encryption, validation
   model-router/       Postgres-backed model routing, escalation, floors
@@ -211,7 +212,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1032` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`) and the plan snapshot (`1032`); `1028` is not used |
+| `0800`–`1035` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -317,6 +318,9 @@ Sources:
 - `packages/db/migrations/1030_engine_decisions.sql`
 - `packages/db/migrations/1031_engine_halt.sql`
 - `packages/db/migrations/1032_engine_plan.sql`
+- `packages/db/migrations/1033_engine_commands_ask_index.sql`
+- `packages/db/migrations/1034_engine_halt_stamp_exact.sql`
+- `packages/db/migrations/1035_machine_tables.sql`
 - `packages/fx-runner/src/engineBridge/`
 - `packages/api/src/routes/engine.ts`
 - `apps/workspace/apps/team/`
