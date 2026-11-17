@@ -9,7 +9,7 @@ import { generateSelfSignedCert } from "../../../webhooks/test/helpers/selfSigne
  *
  * Enforced: `/v1` prefix; `Authorization: Bearer <known token>` (else 401 unauthorized); JSON bodies on writes (else 400 json_error); `{error:{code,message,details}}` error bodies;
  * `page` / `per_page` (default 25, max 50, invalid -> default) with `meta.pagination`; `RateLimit-Limit/-Remaining/-Reset` (a UNIX time) on every response, a gradual refill of
- * limit/3600 a second on a shared clock, and 429 rate_limit_exceeded at zero; label keys and values by the published pattern; the create
+ * limit/3600 a second on a shared clock, and 429 rate_limit_exceeded at zero; label keys and values by the published pattern; `id` required on GET /actions; the create
  * response carries `root_password` (so a client that kept it is caught); a taken server name or SSH-key fingerprint is 409 uniqueness_error; the account server limit is 403
  * resource_limit_exceeded; a type not offered in the location is 412 resource_unavailable; user_data over 32 KiB is 422 invalid_input.
  * Failures can be injected (`world.failNext`: a status and code, a hang, or a dropped connection).
@@ -26,15 +26,17 @@ export interface FakeWorld {
   serverLimit: number;
   failNext: Array<{ status?: number; code?: string; message?: string; hang?: boolean; drop?: boolean }>;
   servers: Array<Record<string, unknown>>;
+  firewalls: Array<Record<string, unknown>>;
+  sshKeys: Array<Record<string, unknown>>;
   actionStatus: "running" | "success" | "error";
   /** The published reply to a delete marks `action` optional: when true, a delete answers 200 with `{}`. */
   deleteOmitsAction?: boolean;
-  /** When true, an `action` reply carries a malformed `action` object, to prove a bad reply is `unavailable`. */
+  /** When true, a server `action` reply (delete, reboot, power on and off) carries a malformed `action` object, to prove a bad reply is `unavailable`. */
   malformedAction?: boolean;
   /** Every request seen, accepted or not. */
   requests: Array<{ method: string; path: string; headers: Record<string, string>; body: string }>;
 }
-export const newWorld = (tokens: string[]): FakeWorld => ({ tokens: new Set(tokens), clock: { t: 1_800_000_000_000 }, limit: 3600, remaining: 3600, serverLimit: 10, failNext: [], servers: [], actionStatus: "success", requests: [] });
+export const newWorld = (tokens: string[]): FakeWorld => ({ tokens: new Set(tokens), clock: { t: 1_800_000_000_000 }, limit: 3600, remaining: 3600, serverLimit: 10, failNext: [], servers: [], firewalls: [], sshKeys: [], actionStatus: "success", requests: [] });
 
 const money = (n: string) => ({ net: n, gross: (Number(n) * 1.19).toFixed(4) });
 const price = (location: string, h: string, m: string) => ({ location, price_hourly: money(h), price_monthly: money(m), included_traffic: 21990232555520, price_per_tb_traffic: money("1.0000") });
@@ -84,7 +86,7 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
 
   function route(method: string, url: URL, body: Body): Reply {
     const parts = url.pathname.slice(3).split("/").filter(Boolean); // after /v1
-    const [res, id, sub] = parts;
+    const [res, id, sub, sub2] = parts;
     const lookup = (arr: Array<Record<string, unknown>>) => arr.find((x) => String(x.id) === id);
     const notFound = err(404, "not_found", "not found");
     const only = (...m: string[]) => (m.includes(method) ? null : err(405, "method_not_allowed", "The request method is not allowed"));
@@ -95,7 +97,10 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
       case "actions": {
         const e = only("GET");
         if (e) return e;
-        return id ? { status: 200, body: { action: act("x", 1) } } : notFound;
+        if (id) return { status: 200, body: { action: act("x", 1) } };
+        const ids = url.searchParams.getAll("id");
+        if (ids.length === 0) return err(422, "invalid_input", "invalid input in field 'id': is required", { fields: [{ name: "id", messages: ["is required"] }] });
+        return { status: 200, body: { actions: ids.map((i) => ({ ...act("x", 1), id: Number(i) })) } };
       }
       case "servers": {
         if (!id) {
@@ -118,10 +123,55 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
         if (!s) return notFound;
         if (!sub) {
           if (method === "GET") return { status: 200, body: { server: s } };
+          if (method === "PUT") {
+            if (typeof body.name !== "string" || body.name === "") return err(422, "invalid_input", "invalid input in field 'name'", { fields: [{ name: "name", messages: ["is required"] }] });
+            if (world.servers.some((o) => o !== s && o.name === body.name)) return err(409, "uniqueness_error", "server name is already used", { fields: [{ name: "name" }] });
+            s.name = body.name;
+            return { status: 200, body: { server: s } };
+          }
           if (method === "DELETE") { world.servers.splice(world.servers.indexOf(s), 1); return { status: 200, body: world.malformedAction ? { action: { id: "not-a-number" } } : world.deleteOmitsAction ? {} : { action: act("delete_server", s.id as number) } }; }
-          return only("GET", "DELETE")!;
+          return only("GET", "PUT", "DELETE")!;
         }
+        if (sub === "actions" && ["reboot", "poweron", "poweroff"].includes(sub2 ?? "")) return only("POST") ?? { status: 201, body: { action: world.malformedAction ? { id: "not-a-number" } : act(`${sub2}_server`, s.id as number) } };
         return notFound;
+      }
+      case "firewalls": {
+        if (!id) {
+          if (method === "GET") return page(url, "firewalls", bySelector(url, world.firewalls));
+          if (method !== "POST") return only("GET", "POST")!;
+          if (typeof body.name !== "string" || !Array.isArray(body.rules)) return err(422, "invalid_input", "invalid input in field 'name'", { fields: [{ name: "name", messages: ["is required"] }] });
+          if (world.firewalls.some((f) => f.name === body.name)) return err(409, "uniqueness_error", "firewall name is already used", { fields: [{ name: "name" }] });
+          const f = { id: ++nextId, name: body.name, labels: body.labels ?? {}, created: "2026-01-01T00:00:00+00:00", rules: body.rules, applied_to: [] };
+          world.firewalls.push(f);
+          return { status: 201, body: { firewall: f, actions: [] } };
+        }
+        const f = lookup(world.firewalls);
+        if (!f) return notFound;
+        if (method === "GET") return { status: 200, body: { firewall: f } };
+        if (method === "DELETE") {
+          // delete_firewall in https://docs.hetzner.cloud/cloud.spec.json (DELETE /firewalls/{id}): "Operation specific errors" lists 422 `resource_in_use`, "Firewall still applied to a resource". Not 409.
+          const inUse = world.servers.some((x) => ((x.public_net as { firewalls?: Array<{ id: number }> } | undefined)?.firewalls ?? []).some((a) => a.id === f.id));
+          if (inUse) return err(422, "resource_in_use", "firewall is still applied to a resource", { fields: [{ name: "id" }] });
+          world.firewalls.splice(world.firewalls.indexOf(f), 1);
+          return { status: 204 };
+        }
+        return only("GET", "DELETE")!;
+      }
+      case "ssh_keys": {
+        if (!id) {
+          if (method === "GET") return page(url, "ssh_keys", bySelector(url, world.sshKeys).filter((k) => !url.searchParams.get("fingerprint") || k.fingerprint === url.searchParams.get("fingerprint")));
+          if (method !== "POST") return only("GET", "POST")!;
+          if (typeof body.name !== "string" || typeof body.public_key !== "string") return err(422, "invalid_input", "invalid input in field 'public_key'", { fields: [{ name: "public_key", messages: ["is required"] }] });
+          const fingerprint = `fp:${body.public_key.slice(-16)}`;
+          if (world.sshKeys.some((k) => k.fingerprint === fingerprint)) return err(409, "uniqueness_error", "SSH key with the same fingerprint already exists", { fields: [{ name: "public_key" }] });
+          const k = { id: ++nextId, name: body.name, fingerprint, public_key: body.public_key, labels: body.labels ?? {}, created: "2026-01-01T00:00:00+00:00" };
+          world.sshKeys.push(k);
+          return { status: 201, body: { ssh_key: k } };
+        }
+        const k = lookup(world.sshKeys);
+        if (!k) return notFound;
+        if (method === "DELETE") { world.sshKeys.splice(world.sshKeys.indexOf(k), 1); return { status: 204 }; }
+        return only("DELETE")!;
       }
       default: return notFound;
     }

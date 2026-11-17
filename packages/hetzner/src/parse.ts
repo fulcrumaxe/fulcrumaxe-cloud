@@ -27,6 +27,9 @@ export interface ServerType { id: number; name: string; description: string; cor
 export interface Pricing { currency: string; vatRate: string; serverTypes: Array<{ id: number; name: string; prices: Price[] }>; primaryIps: Array<{ type: string; prices: Array<{ location: string; hourlyNet: string; hourlyGross: string; monthlyNet: string; monthlyGross: string }> }> }
 export type ServerStatus = "running" | "initializing" | "starting" | "stopping" | "off" | "deleting" | "migrating" | "rebuilding" | "unknown";
 export interface Server { id: number; name: string; status: ServerStatus; created: string; ipv4: string | null; ipv6: string | null; labels: Record<string, string>; serverType: { id: number; name: string }; location: { id: number; name: string }; firewalls: Array<{ id: number; status: string }> }
+export interface FirewallRule { description: string | null; direction: "in" | "out"; protocol: string; port: string | null; sourceIps: string[]; destinationIps: string[] }
+export interface Firewall { id: number; name: string; labels: Record<string, string>; rules: FirewallRule[] }
+export interface SshKey { id: number; name: string; fingerprint: string; labels: Record<string, string> }
 export interface Action { id: number; command: string; status: "running" | "success" | "error"; progress: number; started: string; finished: string | null; error: { code: string; message: string } | null }
 export interface Page<T> { items: T[]; nextPage: number | null }
 
@@ -91,6 +94,24 @@ export const parseServer = (v: unknown, at = "server"): Server => {
     location: { id: int(loc.id, `${at}.location.id`), name: str(loc.name, `${at}.location.name`) },
     firewalls: list(net.firewalls ?? [], `${at}.public_net.firewalls`, (x, p) => { const f = rec(x, p); return { id: int(f.id, `${p}.id`), status: str(f.status, `${p}.status`) }; }),
   };
+};
+
+export const parseFirewall = (v: unknown, at = "firewall"): Firewall => {
+  const o = rec(v, at);
+  return {
+    id: int(o.id, `${at}.id`), name: str(o.name, `${at}.name`), labels: o.labels === undefined ? {} : labels(o.labels, `${at}.labels`),
+    rules: list(o.rules, `${at}.rules`, (x, p) => {
+      const r = rec(x, p);
+      const direction = str(r.direction, `${p}.direction`);
+      if (direction !== "in" && direction !== "out") fail(`${p}.direction`, "in or out");
+      return { description: orNull(r.description, str, `${p}.description`), direction: direction as "in" | "out", protocol: str(r.protocol, `${p}.protocol`), port: orNull(r.port, str, `${p}.port`), sourceIps: list(r.source_ips ?? [], `${p}.source_ips`, str), destinationIps: list(r.destination_ips ?? [], `${p}.destination_ips`, str) };
+    }),
+  };
+};
+
+export const parseSshKey = (v: unknown, at = "ssh_key"): SshKey => {
+  const o = rec(v, at);
+  return { id: int(o.id, `${at}.id`), name: str(o.name, `${at}.name`), fingerprint: str(o.fingerprint, `${at}.fingerprint`), labels: labels(o.labels, `${at}.labels`) };
 };
 
 /** The create response: the server and its action. `root_password` and `next_actions` are deliberately not read. */
