@@ -141,3 +141,7 @@ node_modules/
 # apps/web/scripts/copy-workspace.mjs, which dev, build, typecheck and the web
 # vitest globalSetup each run first.
 apps/web/app/_generated/
+
+# A signed-in browser state for the live journeys holds a real session. Keep it outside the repository; these names are a second line of defence.
+*.storage-state.json
+storage-state*.json
