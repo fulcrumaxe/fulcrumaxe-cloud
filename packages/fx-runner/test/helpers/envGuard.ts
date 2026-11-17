@@ -50,6 +50,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engineBridge/cursor.ts": ["crypto", "fs", "path"], // the cursor: a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create, one rename
   "src/engineBridge/tail.ts": ["fs"], // positioned reads of the events file through the no-follow handle cursor.ts opened
   "src/engineBridge/loop.ts": ["crypto"], // a random id for the bridge's own session
+  "src/engineBridge/ceiling.ts": ["crypto", "fs", "path"], // the dial ceiling file: a random temp-file name, a no-follow exclusive 0600 create judged by lstat of the directory and name, one rename
   "src/engineBridge/inbox.ts": ["crypto", "fs", "path"], // the engine inbox: lstat on the directories, no-follow opens judged by the handle, a random temp-file name, an exclusive 0600 create, one rename
   "src/engineBridge/decideSocket.ts": ["fs", "http", "path"], // the decide socket: lstat on its 0700 directory, an http server on that Unix socket only, chmod 0600
   "src/engineBridge/engineVersion.ts": ["fs", "path"], // EB-3c: the engine's manifest version: lstat on its directory, a no-follow open judged by the handle, one positioned read

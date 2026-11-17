@@ -36,3 +36,4 @@ export * from "./derivedFiles.js";
 export * from "./activityRow.js";
 export * from "./engineEvents.js";
 export * from "./engineCommands.js";
+export * from "./engineDials.js";
