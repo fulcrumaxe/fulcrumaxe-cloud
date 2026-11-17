@@ -12,6 +12,8 @@ const enc = (v) => encodeURIComponent(String(v));
 export const panelUrl = (kind, repoId) => REPOS_URL + "/" + enc(repoId) + PANEL_PATH[kind];
 export const commandsUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/commands";
 export const commandUrl = (id) => "/api/v1/engine/commands/" + enc(id);
+export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
+export const clearHaltUrl = (repoId) => haltUrl(repoId) + "/clear";
 export const dialsUrl = (repoId) => "/api/v1/repos/" + enc(repoId) + "/decision-settings";
 export const dialUrl = (repoId) => dialsUrl(repoId) + "/dial";
 
@@ -26,6 +28,8 @@ export function createTeamApi(call = api) {
     commands: (repoId, signal) => call("GET", commandsUrl(repoId) + "?limit=50", undefined, signal),
     issue: (repoId, kind, args, signal) => call("POST", commandsUrl(repoId), { kind, args }, signal),
     cancel: (id, signal) => call("DELETE", commandUrl(id), undefined, signal),
+    halt: (repoId, signal) => call("POST", haltUrl(repoId), {}, signal),
+    clearHalt: (repoId, signal) => call("POST", clearHaltUrl(repoId), {}, signal),
     dials: (repoId, signal) => call("GET", dialsUrl(repoId), undefined, signal),
     setDial: (repoId, type, disposition, signal) => call("POST", dialUrl(repoId), { decision_type: type, disposition }, signal),
   };

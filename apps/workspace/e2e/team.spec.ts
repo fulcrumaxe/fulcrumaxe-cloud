@@ -48,6 +48,12 @@ interface Mock {
   /** The answer to a dial POST: 200, or an error status with `dialCode`. */
   dialStatus: number;
   dialCode: string;
+  /** Every POST to a halt route, as "halt" or "clear". */
+  halts: string[];
+  /** The answer to a halt or clear POST: 200, or an error status with `haltCode`. A successful halt leaves the repo halted, and pending when `haltPends`. */
+  haltStatus: number;
+  haltCode: string;
+  haltPends: boolean;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -59,7 +65,7 @@ function fresh(over: Partial<Mock> = {}): Mock {
     lanes: F.envelope([F.lane({ pr: 7, state: "testing" }), F.lane({ pr: 9, discussion: 44, state: "queued" }), F.lane({ pr: 5, discussion: 40, state: "merged" })]),
     gates: F.envelope([F.gate({ pr: 7, gate: "gate1", result: "pass" }), F.gate({ pr: 7, gate: "code_review", result: "fail" }), F.gate({ pr: 5, gate: "ci_full", result: "pass" })]),
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
-    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", ...over,
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, ...over,
   };
 }
 
@@ -110,6 +116,15 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean } = {}) {
       const id = `c0000000-0000-4000-8000-${String(mock.commands.commands.length + 1).padStart(12, "0")}`;
       mock.commands = { commands: [F.command({ id, kind: body.kind, args: body.args }), ...mock.commands.commands] };
       return json(route, 201, { command_id: id, state: "pending", expires_at: new Date(Date.now() + 540000).toISOString() });
+    }
+    const hm = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/halt(/clear)?$`)) : null;
+    if (hm) {
+      const kind = hm[2] ? "clear" : "halt";
+      mock.halts.push(kind);
+      expect(req.postDataJSON()).toEqual({});
+      if (mock.haltStatus !== 200) return json(route, mock.haltStatus, { error: { code: mock.haltCode, message: SERVER_TEXT, request_id: "r" } });
+      mock.repos = mock.repos.map((r) => (r.repo_id === decodeURIComponent(hm[1]) ? { ...r, halted: kind === "halt", halt_pending: kind === "halt" && mock.haltPends } : r));
+      return json(route, 200, kind === "halt" ? { halt_epoch: 1, halted: true, applied: false } : { halt_epoch: 1, halted: false });
     }
     if (req.method() === "DELETE" && url.pathname.startsWith(`${BASE}/commands/`)) {
       const id = decodeURIComponent(url.pathname.slice(`${BASE}/commands/`.length));
@@ -1018,6 +1033,271 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
+  // ── Halt ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  const REPOS_READS = (mock: Mock) => mock.reads.filter((r) => r === `${BASE}/repos`).length;
+
+  test("an owner halts: Halt asks first in plain words with the runner's name, focus goes to Cancel, Escape and Cancel give it back, Yes sends one POST and the chip reads Halting…", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    await expect(t(page, "tm-halt-chip")).toBeHidden();
+    const btn = t(page, "tm-halt-btn");
+    await expect(btn).toHaveText("Halt");
+    await expect(btn).toHaveAttribute("aria-disabled", "false");
+    const confirm = t(page, "tm-halt-confirm");
+    await press(btn);
+    await expect(confirm).toBeVisible();
+    await expect(t(page, "tm-halt-confirm-text")).toHaveText("This stops the engine on Workshop laptop now and kills its agents.");
+    await expect(confirm).toContainText("Every command is refused until an owner or admin clears the halt.");
+    await expect(confirm).toHaveAttribute("role", "group");
+    const labelledBy = (await confirm.getAttribute("aria-labelledby")) ?? "";
+    await expect(page.locator(`${WIN} #${labelledBy}`)).toHaveText("Halt the engine?");
+    expect(await activeId(page)).toBe("tm-halt-cancel");
+    await page.keyboard.press("Shift+Tab");
+    expect(await activeId(page)).toBe("tm-halt-yes");
+    await press(t(page, "tm-halt-cancel"));
+    await expect(confirm).toHaveCount(0);
+    expect(await activeId(page)).toBe("tm-halt-btn");
+    await press(btn);
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    expect(await activeId(page)).toBe("tm-halt-btn");
+    expect(mock.halts).toEqual([]);
+    await press(btn);
+    await press(t(page, "tm-halt-yes"));
+    await expect(t(page, "tm-halt-chip")).toHaveText("Halting…");
+    expect(mock.halts).toEqual(["halt"]);
+    await expect(confirm).toHaveCount(0);
+    await expect(t(page, "tm-halt-text")).toHaveAttribute("data-state", "pending");
+    await expect(t(page, "tm-clear-btn")).toHaveText("Clear halt");
+    await expect(t(page, "tm-halt-btn")).toHaveCount(0);
+    expect(await activeId(page)).toBe("tm-clear-btn"); // focus follows the one control that stands for the action
+    await expect(t(page, "tm-live")).toHaveText("Halting. Waiting for the machine to confirm it stopped the engine.");
+    await expect(t(page, "tm-op-why")).toHaveText("The engine is halted.");
+    await clean(page, errors);
+  });
+
+  test("the halt applied: the chip reads Halted on the next read, said once; a clear asks first, says the engine is not started, and puts the app back", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn(), { clock: true });
+    await open(page);
+    await press(t(page, "tm-halt-btn"));
+    await press(t(page, "tm-halt-yes"));
+    await expect(t(page, "tm-halt-chip")).toHaveText("Halting…");
+    mock.repos = mock.repos.map((r) => ({ ...r, halt_pending: false }));
+    await watchSaid(page);
+    await page.clock.runFor(15_500);
+    await expect(t(page, "tm-halt-chip")).toHaveText("Halted");
+    await expect(t(page, "tm-live")).toHaveText("The engine is halted.");
+    await expect(t(page, "tm-halt-text")).toHaveText("The engine is halted. It is stopped on the machine and every command is refused until a person clears the halt.");
+    await expect(t(page, "tm-op-why")).toHaveText("The engine is halted.");
+    await expect(t(page, "tm-op-pause")).toHaveAttribute("aria-disabled", "true");
+    const said1 = await said(page);
+    await page.clock.runFor(15_500);
+    await page.clock.runFor(15_500);
+    await page.waitForTimeout(300);
+    expect(await said(page)).toBe(said1); // a poll that finds the same state says nothing
+    const confirm = t(page, "tm-halt-confirm");
+    await press(t(page, "tm-clear-btn"));
+    await expect(confirm).toBeVisible();
+    await expect(page.locator(`${WIN} #tm-halt-q`)).toHaveText("Clear the halt?");
+    await expect(confirm).toContainText("The engine is not started for you");
+    await expect(confirm).toContainText("does not lift that");
+    expect(await activeId(page)).toBe("tm-halt-cancel");
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    expect(await activeId(page)).toBe("tm-clear-btn");
+    expect(mock.halts).toEqual(["halt"]);
+    await press(t(page, "tm-clear-btn"));
+    await press(t(page, "tm-halt-yes"));
+    expect(mock.halts).toEqual(["halt", "clear"]);
+    await expect(t(page, "tm-halt-chip")).toBeHidden();
+    await expect(t(page, "tm-halt-btn")).toHaveText("Halt");
+    expect(await activeId(page)).toBe("tm-halt-btn");
+    await expect(t(page, "tm-live")).toHaveText("The halt is cleared. The engine is not started again until you start it.");
+    await expect(t(page, "tm-op-pause")).toHaveAttribute("aria-disabled", "false");
+    await clean(page, errors);
+  });
+
+  test("a member sees the halted state and its chip but no Halt, no Clear and no question; an owner sees Halt even while operate is off", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const member = await setup(page, operateOn({ settings: F.settings({ can_edit: false, operate_enabled: true }), repos: [F.repo({ operate_enabled: true, halted: true })] }));
+    await open(page);
+    await expect(t(page, "tm-halt-chip")).toHaveText("Halted");
+    await expect(t(page, "tm-halt-text")).toContainText("The engine is halted.");
+    await expect(page.locator(`${WIN} [data-testid="tm-halt"] button`)).toHaveCount(0);
+    await expect(t(page, "tm-operate")).toBeHidden();
+    await clean(page, member.errors);
+  });
+
+  test("a member of a repo that is not halted sees no halt section at all", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, operateOn({ settings: F.settings({ can_edit: false, operate_enabled: true }) }));
+    await open(page);
+    await expect(t(page, "tm-halt")).toBeHidden();
+    await expect(t(page, "tm-halt-chip")).toBeHidden();
+    await clean(page, errors);
+  });
+
+  test("an owner with operate off can still halt: the Halt button is there and sends one POST", async ({ page }) => {
+    const { mock, errors } = await setup(page, fresh({ settings: makeFixtures(Date.now()).settings() }));
+    await open(page);
+    await expect(t(page, "tm-op-pause")).toHaveAttribute("aria-disabled", "true");
+    await press(t(page, "tm-halt-btn"));
+    await press(t(page, "tm-halt-yes"));
+    await expect.poll(() => mock.halts).toEqual(["halt"]);
+    await clean(page, errors);
+  });
+
+  test("every refusal of a halt or a clear is a plain sentence in the page, never the server's text, and the repos are read again", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    const cases: [number, string, string][] = [
+      [403, "forbidden", "Only an owner or admin can halt the engine."],
+      [404, "not_found", "That repository no longer exists."],
+      [409, "conflict", "The halt was not accepted. Reload the page and try again."],
+      [500, "server_error", "The halt may not have gone through. Check the state above, then try again."],
+    ];
+    for (const [status, code, sentence] of cases) {
+      mock.haltStatus = status;
+      mock.haltCode = code;
+      const reads = REPOS_READS(mock);
+      await press(t(page, "tm-halt-btn"));
+      await press(t(page, "tm-halt-yes"));
+      await expect(t(page, "tm-halt-note")).toHaveText(sentence);
+      await expect(t(page, "tm-live")).toContainText(sentence);
+      expect(await activeId(page)).toBe("tm-halt-btn");
+      await expect.poll(() => REPOS_READS(mock)).toBeGreaterThan(reads);
+      await expect(page.locator(`${WIN} [data-testid="tm-halt"] button`)).toHaveCount(1);
+    }
+    expect(mock.halts).toEqual(["halt", "halt", "halt", "halt"]);
+    mock.haltStatus = 200;
+    mock.haltCode = "";
+    await press(t(page, "tm-halt-btn"));
+    await expect(t(page, "tm-halt-note")).toHaveCount(0); // a new question clears the note
+    await press(t(page, "tm-halt-yes"));
+    await expect(t(page, "tm-clear-btn")).toBeVisible();
+    mock.haltStatus = 403;
+    mock.haltCode = "forbidden";
+    await press(t(page, "tm-clear-btn"));
+    await press(t(page, "tm-halt-yes"));
+    await expect(t(page, "tm-halt-note")).toHaveText("Only an owner or admin, signed in, can clear a halt.");
+    expect(await activeId(page)).toBe("tm-clear-btn");
+    await clean(page, errors);
+  });
+
+  test("a save in flight locks Halt with aria-disabled and a reason while focus stays on it", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    await page.route((u) => u.pathname.endsWith("/halt"), async (route) => { await gate; await route.fallback(); });
+    await press(t(page, "tm-halt-btn"));
+    await press(t(page, "tm-halt-yes"));
+    await expect(t(page, "tm-clear-btn").or(t(page, "tm-halt-btn"))).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-halt-why")).toHaveText("Another change is being saved. Try again in a moment.");
+    await expect(t(page, "tm-halt-btn")).toHaveAttribute("aria-describedby", "tm-halt-why");
+    expect(await activeId(page)).toBe("tm-halt-btn");
+    await t(page, "tm-halt-btn").evaluate((el) => (el as HTMLElement).click()); // a press while it is out opens nothing and sends nothing more
+    await expect(t(page, "tm-halt-confirm")).toHaveCount(0);
+    release();
+    await expect.poll(() => mock.halts).toEqual(["halt"]);
+    await expect(t(page, "tm-clear-btn")).toHaveAttribute("aria-disabled", "false");
+    await expect(t(page, "tm-halt-why")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("the question closes when someone else halts: focus lands on the control that replaced it", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn(), { clock: true });
+    await open(page);
+    await press(t(page, "tm-halt-btn"));
+    await expect(t(page, "tm-halt-confirm")).toBeVisible();
+    mock.repos = mock.repos.map((r) => ({ ...r, halted: true, halt_pending: false }));
+    await page.clock.runFor(15_500);
+    await expect(t(page, "tm-halt-confirm")).toHaveCount(0);
+    await expect(t(page, "tm-clear-btn")).toBeVisible();
+    expect(await activeId(page)).toBe("tm-clear-btn");
+    expect(mock.halts).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("a hostile runner name is only ever text in the halt question", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, operateOn({ repos: [F.repo({ operate_enabled: true, runner_name: HOSTILE })] }));
+    await open(page);
+    await press(t(page, "tm-halt-btn"));
+    await expect(t(page, "tm-halt-confirm-text")).toContainText(HOSTILE);
+    expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+    await expect(page.locator(`${WIN} [data-testid="tm-halt-confirm"] img, ${WIN} [data-testid="tm-halt-confirm"] script, ${WIN} [data-testid="tm-halt-confirm"] a`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("themes with the halt on screen: axe finds nothing serious, and the halt text, chip, note and focus rings keep contrast 4.5 and 3 under every theme (numbers recorded)", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, operateOn({ repos: [F.repo({ operate_enabled: true, halted: true, halt_pending: true })] }));
+    await open(page);
+    const measure = () => page.evaluate((sel) => {
+      const lum = (c: string) => {
+        const m = c.match(/[\d.]+/g)!.map(Number);
+        const [r, g, b] = m.slice(0, 3).map((v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      };
+      const bg = (el: Element) => {
+        for (let e: Element | null = el; e; e = e.parentElement) {
+          const c = getComputedStyle(e).backgroundColor;
+          const m = c.match(/[\d.]+/g)!.map(Number);
+          if (m.length < 4 || m[3] === 1) return c;
+        }
+        return "rgb(0, 0, 0)";
+      };
+      const ratio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      let text = 21;
+      for (const el of document.querySelectorAll(`${sel} .tm-halt-chip, ${sel} .tm-halt-state, ${sel} .tm-halt-note, ${sel} .tm-halt .tm-btn, ${sel} .tm-halt .tm-sub, ${sel} .tm-halt .tm-muted, ${sel} .tm-confirm p`)) {
+        if ((el as HTMLElement).offsetParent === null) continue;
+        text = Math.min(text, ratio(lum(getComputedStyle(el).color), lum(bg(el))));
+      }
+      const ae = document.activeElement as HTMLElement | null;
+      let ring = -1; // -1: the keyboard is not on a control of the app
+      if (ae && ae.closest(sel) && ae.matches(":focus-visible")) {
+        const cs = getComputedStyle(ae);
+        ring = cs.outlineStyle === "none" || parseFloat(cs.outlineWidth) < 2 ? 0 : ratio(lum(cs.outlineColor), lum(bg(ae.parentElement as Element)));
+      }
+      return { text: Math.round(text * 100) / 100, ring: Math.round(ring * 100) / 100 };
+    }, WIN);
+    const axe = async (label: string) => {
+      const res = await new AxeBuilder({ page }).include(WIN).exclude(`${WIN} .window-titlebar`).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
+      expect(res.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`), label).toEqual([]);
+    };
+    const ratios: Record<string, number> = {};
+    const rings: Record<string, number> = {};
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      await axe(theme + " halting");
+      // The keyboard lands on Clear halt, opens the question with Enter (so focus-visible holds on Cancel), and walks back.
+      await t(page, "tm-clear-btn").focus();
+      await page.keyboard.press("Shift+Tab");
+      await page.keyboard.press("Tab");
+      const a = await measure();
+      rings[theme + " clear"] = a.ring;
+      ratios[theme + " halting"] = a.text;
+      await page.keyboard.press("Enter");
+      await expect(t(page, "tm-halt-confirm")).toBeVisible();
+      expect(await activeId(page)).toBe("tm-halt-cancel");
+      await axe(theme + " question");
+      const b = await measure();
+      rings[theme + " cancel"] = b.ring;
+      ratios[theme + " question"] = b.text;
+      await page.keyboard.press("Shift+Tab");
+      const c = await measure();
+      rings[theme + " yes"] = c.ring;
+      await page.keyboard.press("Escape");
+      await expect(t(page, "tm-halt-confirm")).toHaveCount(0);
+    }
+    for (const [k, v] of Object.entries(ratios)) expect(v, k).toBeGreaterThanOrEqual(4.5);
+    expect(Object.entries(rings).filter(([, v]) => v < 3), "focus rings under 3:1 (or missing)").toEqual([]);
+    console.log("HALT-CONTRAST " + JSON.stringify({ project: test.info().project.name, ...ratios }));
+    console.log("HALT-FOCUSRING " + JSON.stringify({ project: test.info().project.name, ...rings }));
+    await clean(page, errors);
+  });
+
   test("themes: axe finds nothing serious or critical, the app's text keeps a contrast of at least 4.5 and its focus ring at least 3 under every theme (numbers recorded)", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const { errors } = await setup(page, operateOn({ commands: { commands: [F.command(), F.command({ id: "c0000000-0000-4000-8000-000000000002", kind: "start_day", state: "refused", refusal: "halted", acked_at: F.iso(10) })] }, agents: F.envelope([F.agent(), F.agent({ agent_id: "b2c3d4e5f6071829", started_at: F.iso(5 * 3600) })], { heard_age_s: 400, missing_events: 3, gaps: [{ from_seq: 1, to_seq: 3, before_ts: F.iso(900) }], source_ages_s: { loop: 9000 } }) }));
@@ -1065,7 +1345,7 @@ test.describe("Team app", () => {
       ratios[theme] = min;
       expect(min, theme).toBeGreaterThanOrEqual(4.5);
       // Focus ring, reached with the keyboard (so :focus-visible holds): the picker, the settings button, a box in the sheet and a link.
-      for (const id of ["tm-repo", "tm-settings-btn", "tm-watch", "tm-d", "tm-op-switch", "tm-op-start", "tm-op-role", "tm-op-discussion", "tm-op-class", "tm-op-setdial", "tm-dial-select", "tm-dial-apply", "tm-cmd-cancel"]) {
+      for (const id of ["tm-repo", "tm-settings-btn", "tm-watch", "tm-d", "tm-op-switch", "tm-op-start", "tm-op-role", "tm-op-discussion", "tm-op-class", "tm-op-setdial", "tm-dial-select", "tm-dial-apply", "tm-cmd-cancel", "tm-halt-btn"]) {
         await t(page, id).first().focus();
         await page.keyboard.press("Shift+Tab");
         await page.keyboard.press("Tab");

@@ -81,3 +81,13 @@
   .tm-select, .tm-bar .tm-btn { flex: 1 1 100%; }
   .tm-confirm .tm-btn { width: 100%; margin: 0 0 8px; }
 }
+
+/* Halt: the state is carried by a thick frame and weight, never by colour alone; the chip reads the same words. */
+.tm-halt { margin: 8px 0; }
+.tm-halt > * + * { margin-top: 8px; }
+.tm-halt-state, .tm-halt-note { margin: 6px 0; padding: 8px 10px; border: 3px double var(--accent, #1aff80); font-weight: 700; }
+.tm-halt-note { border-style: solid; border-width: 2px; }
+.tm-halt-chip { border-width: 3px; border-style: double; }
+.tm-halt-chip[data-halt="pending"] { border-style: dashed; }
+.tm-halt-chip[hidden] { display: none; }
+.tm-halt-chip:focus-visible, .tm-halt h3:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; }
