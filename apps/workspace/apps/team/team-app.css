@@ -17,7 +17,7 @@
 .tm-muted { margin: 6px 0; font-size: 0.8rem; }
 .tm-error, .tm-notice { margin: 6px 0; padding-left: 8px; border-left: 3px solid var(--accent, #1aff80); font-weight: 600; }
 .tm-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
-.tm-select, .tm-btn {
+.tm-select, .tm-btn, .tm-input {
   min-height: 44px;
   padding: 4px 12px;
   background: var(--bg-surface, #0a0a0a);
@@ -29,11 +29,11 @@
   max-width: 100%;
 }
 .tm-btn:hover:not([aria-disabled="true"]), .tm-select:hover { border-color: var(--accent, #1aff80); }
-.tm-btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; border-style: dashed; }
+.tm-btn[aria-disabled="true"], .tm-select[aria-disabled="true"], .tm-input[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; border-style: dashed; }
 .tm-chip { padding: 2px 8px; border: 1px solid var(--accent, #1aff80); font-weight: 600; }
 .tm-chip:empty { display: none; }
 .tm-runner { overflow-wrap: anywhere; }
-.tm-banner { margin: 8px 0; padding: 8px 10px; border: 2px solid var(--accent, #1aff80); font-weight: 600; }
+.tm-banner, .tm-op-why { margin: 8px 0; padding: 8px 10px; border: 2px solid var(--accent, #1aff80); font-weight: 600; }
 .tm-notices { margin: 0 0 8px; padding: 0; list-style: none; }
 .tm-sheet { margin: 8px 0; padding: 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
 .tm-sheet > * + * { margin-top: 8px; }
@@ -56,10 +56,22 @@
 .tm-gate { padding: 1px 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
 .tm-gate[data-result="fail"], .tm-gate[data-result="error"] { border-width: 2px; border-color: var(--accent, #1aff80); font-weight: 700; }
 .tm-link { color: inherit; text-decoration: underline; }
-.tm-link:focus-visible, .tm-btn:focus-visible, .tm-select:focus-visible, .tm-check input:focus-visible, .tm-title:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; } /* the text colour holds 4.5:1 on every theme, so the ring does too; the accent is not held to that */
-/* Crystal and Orchard switch every select's outline off with !important at three classes of specificity; the ring is the one cue a keyboard user has, so this rule outranks them. */
+.tm-link:focus-visible, .tm-btn:focus-visible, .tm-input:focus-visible, .tm-op h4:focus-visible, .tm-select:focus-visible, .tm-check input:focus-visible, .tm-title:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; } /* the text colour holds 4.5:1 on every theme, so the ring does too; the accent is not held to that */
+/* Crystal and Orchard switch every select's and text field's outline off with !important at three classes of specificity; the ring is the one cue a keyboard user has, so this rule outranks them. */
 .tm-app .tm-select.tm-select:focus-visible { outline: 2px solid var(--text-primary, #1aff80) !important; outline-offset: 2px !important; }
+/* The same for the number field: those two themes style a text field with a longer selector than a select's, so this one is repeated to outrank it. */
+.tm-app.tm-app .tm-input.tm-input.tm-input:focus-visible { outline: 2px solid var(--text-primary, #1aff80) !important; outline-offset: 2px !important; }
 .tm-app [hidden] { display: none; }
+
+/* Operate: rows of controls that wrap, labelled fields, and a reason line that is as plain as the banner. */
+.tm-op { margin-top: 12px; }
+.tm-op > * + * { margin-top: 8px; }
+.tm-op-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 6px 0; }
+.tm-field { display: flex; flex-direction: column; gap: 2px; font-size: 0.8rem; }
+.tm-input { width: 9rem; }
+.tm-stop { margin-left: 8px; }
+.tm-cmd-detail { display: inline; }
+.tm-item .tm-btn { margin-left: 8px; }
 
 /* Wide windows: the two panels sit side by side. Phones and narrow windows keep one column and full-width controls. */
 @container (min-width: 640px) {

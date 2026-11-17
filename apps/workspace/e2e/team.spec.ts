@@ -35,6 +35,19 @@ interface Mock {
   putCode: string;
   streaming: boolean;
   streamFrame: string | null;
+  /** The command list ({commands}) and the repo's decision settings; both change when the app writes. */
+  commands: Obj;
+  dials: Obj;
+  /** Every POST to the command route or the dial route. */
+  posts: { path: string; body: any }[]; // eslint-disable-line @typescript-eslint/no-explicit-any
+  /** Every DELETE of a command, by id. */
+  deletes: string[];
+  /** The answer to a command POST (201) or a command DELETE (200), or an error status with `postCode`. */
+  postStatus: number;
+  postCode: string;
+  /** The answer to a dial POST: 200, or an error status with `dialCode`. */
+  dialStatus: number;
+  dialCode: string;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -45,7 +58,8 @@ function fresh(over: Partial<Mock> = {}): Mock {
     agents: F.envelope([F.agent(), F.agent({ agent_id: "b2c3d4e5f6071829", role: "code-reviewer", discussion: 43, background: true, started_at: F.iso(120) })]),
     lanes: F.envelope([F.lane({ pr: 7, state: "testing" }), F.lane({ pr: 9, discussion: 44, state: "queued" }), F.lane({ pr: 5, discussion: 40, state: "merged" })]),
     gates: F.envelope([F.gate({ pr: 7, gate: "gate1", result: "pass" }), F.gate({ pr: 7, gate: "code_review", result: "fail" }), F.gate({ pr: 5, gate: "ci_full", result: "pass" })]),
-    puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null, ...over,
+    puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", ...over,
   };
 }
 
@@ -64,6 +78,17 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean } = {}) {
     mock.streamFrame = null;
     await route.fulfill({ status: 200, contentType: "text/event-stream", headers: { "cache-control": "no-store" }, body });
   });
+  await page.route((u) => u.pathname.startsWith("/api/v1/repos/") && u.pathname.includes("/decision-settings"), async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    mock.reads.push(url.pathname);
+    if (req.method() === "GET") return json(route, 200, mock.dials);
+    const body = req.postDataJSON();
+    mock.posts.push({ path: url.pathname, body });
+    if (mock.dialStatus !== 200) return json(route, mock.dialStatus, { error: { code: mock.dialCode, message: SERVER_TEXT, request_id: "r" } });
+    mock.dials = { ...mock.dials, dials: mock.dials.dials.map((d: Obj) => (d.decision_type === body.decision_type ? { ...d, disposition: body.disposition } : d)) };
+    return json(route, 200, mock.dials);
+  });
   await page.route((u) => u.pathname.startsWith(BASE), async (route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -75,12 +100,33 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean } = {}) {
       if (url.pathname === `${BASE}/repos`) return json(route, 200, { items: mock.repos });
       const m = url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/(agents|lanes|gates)$`));
       if (m) return json(route, 200, mock[m[2] as "agents" | "lanes" | "gates"]);
+      if (url.pathname.endsWith("/commands")) return json(route, 200, mock.commands);
+    }
+    if (req.method() === "POST" && url.pathname.endsWith("/commands")) {
+      const body = req.postDataJSON();
+      mock.posts.push({ path: url.pathname, body });
+      if (mock.postStatus !== 201) return json(route, mock.postStatus, { error: { code: mock.postCode, message: SERVER_TEXT, request_id: "r" } });
+      const F = makeFixtures(Date.now());
+      const id = `c0000000-0000-4000-8000-${String(mock.commands.commands.length + 1).padStart(12, "0")}`;
+      mock.commands = { commands: [F.command({ id, kind: body.kind, args: body.args }), ...mock.commands.commands] };
+      return json(route, 201, { command_id: id, state: "pending", expires_at: new Date(Date.now() + 540000).toISOString() });
+    }
+    if (req.method() === "DELETE" && url.pathname.startsWith(`${BASE}/commands/`)) {
+      const id = decodeURIComponent(url.pathname.slice(`${BASE}/commands/`.length));
+      mock.deletes.push(id);
+      if (mock.postStatus !== 201) return json(route, mock.postStatus, { error: { code: mock.postCode, message: SERVER_TEXT, request_id: "r" } });
+      mock.commands = { commands: mock.commands.commands.map((c: Obj) => (c.id === id ? { ...c, state: "cancelled" } : c)) };
+      return json(route, 200, { command_id: id, state: "cancelled" });
     }
     if (req.method() === "PUT") {
       mock.puts.push({ path: url.pathname, body: req.postDataJSON() });
       if (mock.putStatus !== 200) return json(route, mock.putStatus, { error: { code: mock.putCode, message: SERVER_TEXT, request_id: "r" } });
       const body = (req.postDataJSON() ?? {}) as Obj;
       if (typeof body.watch_enabled === "boolean") mock.settings = { ...mock.settings, watch_enabled: body.watch_enabled };
+      if (typeof body.operate_enabled === "boolean") {
+        mock.settings = { ...mock.settings, operate_enabled: body.operate_enabled };
+        mock.repos = mock.repos.map((r) => ({ ...r, operate_enabled: body.operate_enabled }));
+      }
       if (Array.isArray(body.repo_ids)) mock.settings = { ...mock.settings, repos: mock.settings.repos.map((r: Obj) => ({ ...r, enabled: body.repo_ids.includes(r.repo_id) })) };
       return json(route, 200, { ok: true });
     }
@@ -184,9 +230,9 @@ test.describe("Team app", () => {
     expect(over[0]).toBeLessThanOrEqual(over[1]);
     for (const id of ["tm-repo", "tm-settings-btn"]) expect((await box(t(page, id))).height).toBeGreaterThanOrEqual(43.5); // the phone window is drawn at a scale just under 1
     // Element counts: one picker, one chip, two panels, five rows (2 agents, 3 lane rows), one heading.
-    expect(await page.locator(`${WIN} .tm-panel`).count()).toBe(2);
-    expect(await page.locator(`${WIN} .tm-panel .tm-item`).count()).toBe(5);
-    expect(await page.locator(`${WIN} select`).count()).toBe(1);
+    expect(await page.locator(`${WIN} .tm-panels .tm-panel`).count()).toBe(2);
+    expect(await page.locator(`${WIN} .tm-panels .tm-item`).count()).toBe(5);
+    expect(await page.locator(`${WIN} .tm-bar select`).count()).toBe(1);
     expect(await page.locator(`${WIN} h2`).count()).toBe(1);
     console.log("LAYOUT " + JSON.stringify({ project: test.info().project.name, app: [Math.round(app.width), Math.round(app.height), cssWidth], agents: [Math.round(a.x), Math.round(a.y), Math.round(a.width), Math.round(a.height)], lanes: [Math.round(l.x), Math.round(l.y), Math.round(l.width), Math.round(l.height)], wide }));
     await clean(page, errors);
@@ -594,9 +640,387 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-live")).toHaveText("A public repository can't be watched.");
   });
 
+  // ── Operate ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  // A locked control is aria-disabled, so Playwright's own click would wait for it forever; a locked press is sent as a bare click event.
+  const operateOn = (over: Partial<Mock> = {}) => {
+    const F = makeFixtures(Date.now());
+    return fresh({ settings: F.settings({ operate_enabled: true }), repos: [F.repo({ operate_enabled: true }), F.repo({ repo_id: REPO_B, full_name: "acme-labs/site", operate_enabled: true })], ...over });
+  };
+  const activeId = (page: Page) => page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? document.activeElement?.getAttribute("data-focus"));
+  const CMDS = `${BASE}/repos/${REPO_A}/commands`;
+  const SENT = "Sent. Waiting for the runner to pick it up.";
+  const watchSaid = (page: Page) => page.evaluate((sel) => {
+    const w = window as unknown as { __said: number };
+    w.__said = 0;
+    new MutationObserver(() => { w.__said += 1; }).observe(document.querySelector(sel) as Element, { childList: true, characterData: true, subtree: true });
+  }, `${WIN} [data-testid="tm-live"]`);
+  const said = (page: Page) => page.evaluate(() => (window as unknown as { __said: number }).__said);
+
+  test("operate off: the panel says so, every control is aria-disabled with the reason, none is disabled, and a press sends nothing; the switch turns it on", async ({ page }) => {
+    const { mock, errors } = await setup(page, fresh());
+    await open(page);
+    await expect(t(page, "tm-operate")).toBeVisible();
+    await expect(t(page, "tm-op-why")).toHaveText("Operate is off.");
+    const gate = page.locator(`${WIN} [data-gate]`);
+    expect(await gate.count()).toBeGreaterThanOrEqual(14); // 3 buttons, the request form (3), the dial form (4), the 3 dial selects and their 3 Apply buttons, and 2 Stop buttons
+    for (let i = 0; i < (await gate.count()); i++) {
+      await expect(gate.nth(i)).toHaveAttribute("aria-disabled", "true");
+      await expect(gate.nth(i)).toHaveAttribute("aria-describedby", "tm-op-why");
+      await expect(gate.nth(i)).not.toHaveAttribute("disabled", /.*/);
+    }
+    await expect(page.locator(`${WIN} .tm-app ul:not([role="list"])`)).toHaveCount(0);
+    await t(page, "tm-op-pause").focus();
+    expect(await activeId(page)).toBe("tm-op-pause"); // still in the Tab order
+    await t(page, "tm-op-pause").dispatchEvent("click");
+    await t(page, "tm-op-request").dispatchEvent("click");
+    await page.keyboard.press("Space");
+    expect(mock.posts).toEqual([]);
+    // The switch is how it gets turned on, so it is the one control that is not locked by this.
+    const sw = t(page, "tm-op-switch");
+    await expect(sw).not.toBeChecked();
+    await expect(sw).not.toHaveAttribute("aria-disabled", "true");
+    await sw.focus();
+    await page.keyboard.press("Space");
+    await expect(t(page, "tm-op-why")).toHaveCount(0);
+    await expect(t(page, "tm-op-pause")).not.toHaveAttribute("aria-disabled", "true");
+    expect(await activeId(page)).toBe("tm-op-switch");
+    expect(mock.puts).toEqual([{ path: `${BASE}/settings`, body: { operate_enabled: true } }]);
+    await clean(page, errors);
+  });
+
+  test("a member sees no operate controls and no command or dial is read; watch off and a halt lock everything with their reason", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const member = await setup(page, fresh({ settings: F.settings({ can_edit: false, operate_enabled: true }) }));
+    await open(page);
+    await expect(t(page, "tm-operate")).toBeHidden();
+    await expect(t(page, "tm-stop")).toHaveCount(0);
+    expect(member.mock.reads.some((r) => r.includes("/commands") || r.includes("decision-settings"))).toBe(false);
+    await clean(page, member.errors);
+  });
+
+  test("watch off: the panel stays, locked, with the reason and a switch that says to turn watch on first", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false, operate_enabled: true }) }));
+    await open(page);
+    await expect(t(page, "tm-op-why")).toHaveText("Engine watch is off.");
+    await expect(t(page, "tm-op-switch")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-op-switch")).toHaveAttribute("aria-describedby", "tm-op-sw-why");
+    await expect(t(page, "tm-op-sw-why")).toHaveText("Turn on engine watch first.");
+    await expect(t(page, "tm-op-start")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-op-cmds")).toHaveText("");
+    await clean(page, errors);
+  });
+
+  test("a halted repo locks every control with the halt as the reason; a runner that was removed hides them; an offline machine says commands expire", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const halted = await setup(page, operateOn({ repos: [F.repo({ operate_enabled: true, halted: true })] }));
+    await open(page);
+    await expect(t(page, "tm-op-why")).toHaveText("The engine is halted.");
+    await expect(t(page, "tm-op-pause")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-stop").first()).toHaveAttribute("aria-disabled", "true");
+    await clean(page, halted.errors);
+  });
+
+  test("a removed runner hides the controls; an offline machine says commands will expire in 10 min", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const m = operateOn({ repos: [F.repo({ operate_enabled: true, liveness: "runner_removed" }), F.repo({ repo_id: REPO_B, full_name: "acme-labs/site", operate_enabled: true, liveness: "stale", last_heard_at: F.iso(600) })] });
+    const { errors } = await setup(page, m);
+    await open(page);
+    await expect(t(page, "tm-op-removed")).toHaveText("The runner for this repository was removed, so commands can't be sent.");
+    await expect(t(page, "tm-op-ctl")).toBeHidden();
+    await t(page, "tm-repo").selectOption(REPO_B);
+    await expect(t(page, "tm-op-offline")).toHaveText("Machine offline; commands will expire in 10 min.");
+    await expect(t(page, "tm-op-ctl")).toBeVisible();
+    await clean(page, errors);
+  });
+
+  test("Start day, Pause loop and Resume loop each send one command, say so once, keep focus on the button, and show the command pending", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    const live = t(page, "tm-live");
+    for (const [id, kind] of [["tm-op-start", "start_day"], ["tm-op-pause", "pause_loop"], ["tm-op-resume", "resume_loop"]] as const) {
+      await press(t(page, id));
+      await expect(live).toHaveText(SENT);
+      await expect(t(page, id)).not.toHaveAttribute("aria-disabled", "true");
+      expect(await activeId(page)).toBe(id);
+      expect(mock.posts.at(-1)).toEqual({ path: CMDS, body: { kind, args: {} } });
+    }
+    expect(mock.posts).toHaveLength(3);
+    await expect(t(page, "tm-cmd")).toHaveCount(3);
+    await expect(t(page, "tm-cmd").first().locator('[data-testid="tm-cmd-state"]')).toHaveText("Pending");
+    await expect(t(page, "tm-cmd").first()).toContainText("Resume the loop");
+    await expect(t(page, "tm-cmds-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(page.locator(`${WIN} .tm-app ul:not([role="list"])`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("Request agent sends the role and the Discussion; a bad number sends nothing and says why; what was typed survives the refresh", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    await t(page, "tm-op-role").selectOption("code-reviewer");
+    await t(page, "tm-op-discussion").fill("0");
+    await press(t(page, "tm-op-request"));
+    await expect(t(page, "tm-live")).toHaveText("Choose a role and enter a Discussion number of 1 or more.");
+    expect(mock.posts).toEqual([]);
+    await t(page, "tm-op-discussion").fill("42");
+    await press(t(page, "tm-op-request"));
+    await expect(t(page, "tm-live")).toHaveText(SENT);
+    expect(mock.posts).toEqual([{ path: CMDS, body: { kind: "request_spawn", args: { role: "code-reviewer", discussion: 42 } } }]);
+    await expect(t(page, "tm-cmd").first()).toContainText("Request a code reviewer for D#42");
+    await expect(t(page, "tm-op-discussion")).toHaveValue("42"); // the form is built once: the refresh after the send did not clear it
+    await expect(t(page, "tm-op-role")).toHaveValue("code-reviewer");
+    expect(await activeId(page)).toBe("tm-op-request");
+    await clean(page, errors);
+  });
+
+  test("Set a dial sends the class, the level and how long it lasts", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    await expect(t(page, "tm-op-class").locator("option")).toHaveCount(8);
+    await t(page, "tm-op-class").selectOption("merge.standard");
+    await t(page, "tm-op-level").selectOption("2");
+    await t(page, "tm-op-ttl").selectOption("for_today");
+    await press(t(page, "tm-op-setdial"));
+    await expect(t(page, "tm-live")).toHaveText(SENT);
+    expect(mock.posts).toEqual([{ path: CMDS, body: { kind: "set_dial", args: { dial_class: "merge.standard", level: 2, ttl: "for_today" } } }]);
+    await expect(t(page, "tm-cmd").first()).toContainText("Set standard merges to level 2 (for today)");
+    await clean(page, errors);
+  });
+
+  test("Stop asks first: focus goes to Cancel, Escape and Cancel give it back to the Stop button, and Yes sends one stop and leaves the button saying it is on its way", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    await expect(t(page, "tm-stop")).toHaveCount(2);
+    const first = t(page, "tm-stop").first();
+    await expect(first).toHaveAttribute("aria-label", "Stop the executor agent on D#42 (id a1b2c3)");
+    await expect(t(page, "tm-stop").nth(1)).toHaveAttribute("aria-label", "Stop the code reviewer agent on D#43 (id b2c3d4)"); // words, never the wire role
+    const confirm = t(page, "tm-stop-confirm");
+    await press(first);
+    await expect(confirm).toBeVisible();
+    await expect(t(page, "tm-stop-who")).toHaveText("Stop the executor agent on D#42 (id a1b2c3).");
+    expect(await activeId(page)).toBe("tm-stop-cancel");
+    await expect(confirm).toHaveAttribute("role", "group");
+    const labelledBy = (await confirm.getAttribute("aria-labelledby")) ?? "";
+    await expect(page.locator(`${WIN} #${labelledBy}`)).toHaveText("Stop this agent?");
+    await page.keyboard.press("Shift+Tab");
+    expect(await activeId(page)).toBe("tm-stop-yes");
+    await press(t(page, "tm-stop-cancel"));
+    await expect(confirm).toHaveCount(0);
+    expect(await activeId(page)).toBe("tm-stop");
+    await press(first);
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    expect(await activeId(page)).toBe("tm-stop");
+    expect(mock.posts).toEqual([]);
+    await press(first);
+    await press(t(page, "tm-stop-yes"));
+    await expect(t(page, "tm-live")).toHaveText(SENT);
+    await expect(confirm).toHaveCount(0);
+    expect(mock.posts).toEqual([{ path: CMDS, body: { kind: "stop_agent", args: { agent_id: "a1b2c3d4e5f60718" } } }]);
+    await expect(t(page, "tm-stop").first()).toHaveText("Stop requested");
+    await expect(t(page, "tm-stop").first()).toHaveAttribute("aria-disabled", "true");
+    expect(await activeId(page)).toBe("tm-stop");
+    await expect(t(page, "tm-cmd").first()).toContainText("Stop the executor agent");
+    await clean(page, errors);
+  });
+
+  test("Stop closes with its agent: when the agent goes away the question closes and focus lands on the agents heading", async ({ page }) => {
+    const mockData = operateOn();
+    const { errors } = await setup(page, mockData, { clock: true });
+    await open(page);
+    await press(t(page, "tm-stop").first());
+    await expect(t(page, "tm-stop-confirm")).toBeVisible();
+    expect(await activeId(page)).toBe("tm-stop-cancel");
+    mockData.agents = { ...mockData.agents, items: mockData.agents.items.slice(1) };
+    await page.clock.runFor(61_000);
+    await expect(t(page, "tm-stop-confirm")).toHaveCount(0);
+    expect(await activeId(page)).toBe("agents-head");
+    await expect(t(page, "tm-stop")).toHaveCount(1);
+    await clean(page, errors);
+  });
+
+  test("a command's outcome is said once, when its state changes; what was already there is not announced", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const id = "c0000000-0000-4000-8000-000000000001";
+    const mockData = operateOn({ commands: { commands: [F.command({ id, state: "applied", acked_at: F.iso(20), kind: "start_day" }), F.command({ id: "c0000000-0000-4000-8000-000000000002", state: "pending" })] } });
+    const { errors } = await setup(page, mockData, { clock: true });
+    await open(page);
+    await expect(t(page, "tm-live")).toHaveText("");
+    await watchSaid(page);
+    mockData.commands = { commands: [mockData.commands.commands[0], { ...mockData.commands.commands[1], state: "applied", acked_at: new Date().toISOString() }] };
+    await page.clock.runFor(61_000);
+    await expect(t(page, "tm-live")).toHaveText("Pause the loop: Applied. The engine did it.");
+    const once = await said(page);
+    await page.clock.runFor(61_000);
+    await page.clock.runFor(61_000);
+    expect(await said(page)).toBe(once); // nothing changed, nothing said again
+    await expect(t(page, "tm-live")).toHaveText("Pause the loop: Applied. The engine did it.");
+    await clean(page, errors);
+  });
+
+  test("Cancel stays usable while operate is off or the repo is halted, though every other control is locked", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const id = "c0000000-0000-4000-8000-000000000001";
+    const { mock, errors } = await setup(page, operateOn({ repos: [F.repo({ operate_enabled: true, halted: true })], commands: { commands: [F.command({ id })] } }));
+    await open(page);
+    await expect(t(page, "tm-op-why")).toHaveText("The engine is halted.");
+    await expect(t(page, "tm-op-pause")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-cmd-cancel")).toHaveAttribute("aria-disabled", "false");
+    await expect(t(page, "tm-cmd-cancel")).not.toHaveAttribute("aria-describedby", /.*/);
+    await press(t(page, "tm-cmd-cancel"));
+    await expect(t(page, "tm-live")).toHaveText("Command cancelled.");
+    expect(mock.deletes).toEqual([id]);
+    await clean(page, errors);
+  });
+
+  test("every 409 and the 403 on a send is a plain sentence, never the server's text; the same sentence twice is said twice", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    const cases: [number, string, string][] = [
+      [409, "too_many_pending", "Too many commands are waiting (20 is the most). Wait for some to finish, or cancel one."],
+      [409, "operate_off", "Operate is off for this repository. Turn it on first."],
+      [409, "engine_not_connected", "No engine is connected for this repository. Start the engine on your machine first."],
+      [409, "halted", "The engine is halted, so this command isn't allowed."],
+      [403, "forbidden", "Only an owner or admin can send commands."],
+      [500, "server_error", "That didn't send. Try again."],
+    ];
+    for (const [status, code, sentence] of cases) {
+      mock.postStatus = status;
+      mock.postCode = code;
+      await press(t(page, "tm-op-pause"));
+      await expect(t(page, "tm-live")).toHaveText(sentence);
+      await expect(t(page, "tm-op-pause")).not.toHaveAttribute("aria-disabled", "true");
+      expect(await activeId(page)).toBe("tm-op-pause");
+    }
+    await expect(t(page, "tm-cmd")).toHaveCount(0); // nothing was queued by a refusal
+    await watchSaid(page);
+    mock.postStatus = 409;
+    mock.postCode = "too_many_pending";
+    await press(t(page, "tm-op-pause"));
+    await expect.poll(() => said(page)).toBeGreaterThan(0);
+    const first = await said(page);
+    await press(t(page, "tm-op-pause"));
+    await expect.poll(() => said(page)).toBeGreaterThan(first);
+    await clean(page, errors);
+  });
+
+  test("a command's state is a word, with the refusal in plain words; Applied needs the runner's report; only a pending command has Cancel", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const id = (n: number) => `c0000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const commands = [
+      F.command({ id: id(1), state: "pending" }),
+      F.command({ id: id(2), state: "delivered", delivered_at: F.iso(30), expires_at: new Date(Date.now() + 500000).toISOString() }),
+      F.command({ id: id(3), state: "applied", acked_at: F.iso(20) }),
+      F.command({ id: id(4), state: "applied", acked_at: null }),
+      F.command({ id: id(5), state: "refused", refusal: "host_not_running", acked_at: F.iso(20) }),
+      F.command({ id: id(6), state: "expired", expires_at: F.iso(5) }),
+      F.command({ id: id(7), state: "not_confirmed", delivered_at: F.iso(900) }),
+      F.command({ id: id(8), state: "cancelled" }),
+      F.command({ id: id(9), state: "pending", expires_at: F.iso(1) }),
+    ];
+    const { errors } = await setup(page, operateOn({ commands: { commands } }));
+    await open(page);
+    await expect(t(page, "tm-cmd-state")).toHaveText(["Pending", "Delivered", "Applied", "Delivered", "Refused", "Expired", "Not confirmed", "Cancelled", "Expired"]);
+    await expect(t(page, "tm-cmd").nth(4).locator('[data-testid="tm-cmd-detail"]')).toHaveText("The engine host is not running on that machine.");
+    await expect(t(page, "tm-cmd-cancel")).toHaveCount(1);
+    await expect(t(page, "tm-cmd-cancel")).toHaveAttribute("aria-label", "Cancel: Pause the loop");
+    await clean(page, errors);
+  });
+
+  test("Cancel on a pending command sends one DELETE, shows Cancelled, and puts focus on the list heading; a refusal says why", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const id = "c0000000-0000-4000-8000-000000000001";
+    const { mock, errors } = await setup(page, operateOn({ commands: { commands: [F.command({ id }), F.command({ id: "c0000000-0000-4000-8000-000000000002", kind: "start_day" })] } }));
+    await open(page);
+    await expect(t(page, "tm-cmd-cancel")).toHaveCount(2);
+    mock.postStatus = 409;
+    mock.postCode = "already_delivered";
+    const listReads = () => mock.reads.filter((r) => r.includes("/commands")).length;
+    const before409 = listReads();
+    await press(t(page, "tm-cmd-cancel").first());
+    await expect.poll(listReads).toBeGreaterThan(before409); // a 409 means the list was stale: it is read again
+    await expect(t(page, "tm-live")).toHaveText("The runner already has this command, so it can't be cancelled.");
+    mock.postStatus = 201;
+    await press(t(page, "tm-cmd-cancel").first());
+    await expect(t(page, "tm-live")).toHaveText("Command cancelled.");
+    expect(mock.deletes).toEqual([id, id]);
+    await expect(t(page, "tm-cmd-state").first()).toHaveText("Cancelled");
+    await expect(t(page, "tm-cmd-cancel")).toHaveCount(1);
+    expect(await activeId(page)).toBe("cmds-head");
+    await clean(page, errors);
+  });
+
+  test("the three engine dials: Apply posts one, focus stays on Apply, a refusal is a sentence, and an unapplied choice survives the clock ticking over", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn(), { clock: true });
+    await open(page);
+    await expect(t(page, "tm-dial")).toHaveCount(3);
+    await expect(t(page, "tm-dial").nth(1)).toContainText("Server label for engine_merge");
+    await expect(t(page, "tm-dial-select").nth(2).locator("option")).toHaveText(["Go ahead", "Ask me first"]);
+    await expect(t(page, "tm-dials-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    // A choice not yet applied is kept while the panels are read again, even across a minute.
+    await t(page, "tm-dial-select").first().selectOption("act");
+    const before = mock.reads.filter((r) => r.endsWith("/lanes")).length;
+    await page.clock.runFor(61_000);
+    await expect.poll(() => mock.reads.filter((r) => r.endsWith("/lanes")).length).toBeGreaterThan(before);
+    await expect(t(page, "tm-dial-select").first()).toHaveValue("act");
+    // Apply the middle one.
+    await t(page, "tm-dial-select").nth(1).selectOption("act");
+    await press(t(page, "tm-dial-apply").nth(1));
+    await expect(t(page, "tm-live")).toHaveText("Dial saved.");
+    expect(mock.posts).toEqual([{ path: `/api/v1/repos/${REPO_A}/decision-settings/dial`, body: { decision_type: "engine_merge", disposition: "act" } }]);
+    await expect(t(page, "tm-dial-select").nth(1)).toHaveValue("act");
+    expect(await activeId(page)).toBe("tm-dial-apply");
+    // A refusal.
+    mock.dialStatus = 422;
+    mock.dialCode = "validation_failed";
+    await press(t(page, "tm-dial-apply").nth(2));
+    await expect(t(page, "tm-live")).toHaveText("That setting isn't allowed for this dial.");
+    await clean(page, errors);
+  });
+
+  test("while a command is out every control is aria-disabled, focus stays on the button, and a second press sends nothing; afterwards it comes back and the result is said", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn());
+    await open(page);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    await page.route((u) => u.pathname.endsWith("/commands"), async (route) => { if (route.request().method() === "POST") await held; await route.fallback(); });
+    const pause = t(page, "tm-op-pause");
+    await pause.focus();
+    await page.keyboard.press("Space");
+    await expect(pause).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-op-start")).toHaveAttribute("aria-disabled", "true");
+    await expect(pause).not.toHaveAttribute("disabled", /.*/);
+    expect(await activeId(page)).toBe("tm-op-pause");
+    await page.keyboard.press("Space"); // a press while the send is out changes nothing
+    release();
+    await expect(pause).not.toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "tm-live")).toHaveText(SENT);
+    expect(await activeId(page)).toBe("tm-op-pause");
+    expect(mock.posts).toHaveLength(1);
+    await clean(page, errors);
+  });
+
+  test("a refresh that finds the same list says nothing; the operate notice is announced when it changes", async ({ page }) => {
+    const { mock, errors } = await setup(page, operateOn(), { clock: true });
+    await open(page);
+    await press(t(page, "tm-op-pause"));
+    await expect(t(page, "tm-live")).toHaveText(SENT);
+    await watchSaid(page);
+    const poll = async () => {
+      const before = mock.reads.filter((r) => r.endsWith("/gates")).length;
+      await page.clock.runFor(15_500);
+      await expect.poll(() => mock.reads.filter((r) => r.endsWith("/gates")).length).toBeGreaterThan(before);
+      await page.waitForTimeout(300);
+    };
+    await poll();
+    await poll();
+    expect(await said(page)).toBe(0);
+    await clean(page, errors);
+  });
+
   test("themes: axe finds nothing serious or critical, the app's text keeps a contrast of at least 4.5 and its focus ring at least 3 under every theme (numbers recorded)", async ({ page }) => {
     const F = makeFixtures(Date.now());
-    const { errors } = await setup(page, fresh({ agents: F.envelope([F.agent(), F.agent({ agent_id: "b2c3d4e5f6071829", started_at: F.iso(5 * 3600) })], { heard_age_s: 400, missing_events: 3, gaps: [{ from_seq: 1, to_seq: 3, before_ts: F.iso(900) }], source_ages_s: { loop: 9000 } }) }));
+    const { errors } = await setup(page, operateOn({ commands: { commands: [F.command(), F.command({ id: "c0000000-0000-4000-8000-000000000002", kind: "start_day", state: "refused", refusal: "halted", acked_at: F.iso(10) })] }, agents: F.envelope([F.agent(), F.agent({ agent_id: "b2c3d4e5f6071829", started_at: F.iso(5 * 3600) })], { heard_age_s: 400, missing_events: 3, gaps: [{ from_seq: 1, to_seq: 3, before_ts: F.iso(900) }], source_ages_s: { loop: 9000 } }) }));
     await open(page);
     await press(t(page, "tm-settings-btn"));
     const ratios: Record<string, number> = {};
@@ -623,7 +1047,7 @@ test.describe("Team app", () => {
           return "rgb(0, 0, 0)";
         };
         let worst = 21;
-        for (const el of document.querySelectorAll(`${sel} .tm-asof, ${sel} .tm-warn, ${sel} .tm-chip, ${sel} .tm-banner, ${sel} .tm-notice, ${sel} .tm-muted, ${sel} .tm-role, ${sel} .tm-state, ${sel} .tm-gate, ${sel} .tm-link, ${sel} .tm-btn, ${sel} .tm-check`)) {
+        for (const el of document.querySelectorAll(`${sel} .tm-asof, ${sel} .tm-warn, ${sel} .tm-chip, ${sel} .tm-banner, ${sel} .tm-notice, ${sel} .tm-muted, ${sel} .tm-role, ${sel} .tm-state, ${sel} .tm-gate, ${sel} .tm-link, ${sel} .tm-btn, ${sel} .tm-check, ${sel} .tm-field, ${sel} .tm-select, ${sel} .tm-input, ${sel} .tm-cmd-detail`)) {
           const a = lum(getComputedStyle(el).color), b = lum(bg(el));
           worst = Math.min(worst, (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05));
         }
@@ -641,7 +1065,7 @@ test.describe("Team app", () => {
       ratios[theme] = min;
       expect(min, theme).toBeGreaterThanOrEqual(4.5);
       // Focus ring, reached with the keyboard (so :focus-visible holds): the picker, the settings button, a box in the sheet and a link.
-      for (const id of ["tm-repo", "tm-settings-btn", "tm-watch", "tm-d"]) {
+      for (const id of ["tm-repo", "tm-settings-btn", "tm-watch", "tm-d", "tm-op-switch", "tm-op-start", "tm-op-role", "tm-op-discussion", "tm-op-class", "tm-op-setdial", "tm-dial-select", "tm-dial-apply", "tm-cmd-cancel"]) {
         await t(page, id).first().focus();
         await page.keyboard.press("Shift+Tab");
         await page.keyboard.press("Tab");
