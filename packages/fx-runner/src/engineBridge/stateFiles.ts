@@ -69,6 +69,15 @@ export function writeJsonAtomic(dir: string, name: string, value: unknown, uid: 
   }
 }
 
+/** Removes `<dir>/<name>` when it is a plain file; absent is fine, a link or another kind of entry is refused (a link is never followed or removed here). */
+export function removeStateFile(dir: string, name: string): void {
+  const target = path.join(dir, name);
+  const st = lstatSync(target, { throwIfNoEntry: false });
+  if (st === undefined) return;
+  if (st.isSymbolicLink() || !st.isFile()) throw new EngineStateError("a file of the bridge is a link or not a plain file");
+  unlinkSync(target);
+}
+
 /** Reads `<dir>/<name>` as JSON, or undefined when it is absent. A link, a file of another owner, a file open to others or an oversized one is refused. */
 export function readJsonNoFollow(dir: string, name: string, uid: number): unknown {
   const target = path.join(dir, name);

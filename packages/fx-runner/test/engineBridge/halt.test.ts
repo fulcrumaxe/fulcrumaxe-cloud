@@ -16,6 +16,7 @@ import {
   readHaltFile,
   readHostHandle,
   haltDepsFrom,
+  startTimeOf,
   stopEngineHostLocally,
   writeHaltFile,
   type HaltDeps,
@@ -33,6 +34,14 @@ function realHaltDeps(): HaltDeps {
     ownPid: process.pid,
     runFile: execFile as never,
     readFile: readFileSync,
+    readPidStart: (pid) => {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+      } catch {
+        return undefined;
+      }
+    },
     readPidCgroup: (pid) => {
       try {
         return readFileSync(`/proc/${pid}/cgroup`, "utf8");
@@ -265,6 +274,47 @@ describe("killEngineHost, group only (the macOS path, and Linux without a scope)
       expect(running(child.pid!)).toBe(true);
     } finally {
       child.kill("SIGKILL");
+    }
+  });
+
+  it("a stale handle whose pid was reused by another group leader (a different start time) is not signalled, on Linux with a unit and without one, and on the `ps` path", async () => {
+    const real = realHaltDeps();
+    const readPidStart = (pid: number): string | undefined => real.readPidStart?.(pid);
+    const mine = (pid: number): boolean => pid > 1; // the unit check is not what this test is about
+    for (const [platform, unit] of [["linux", "fx-engine-host-77.scope"], ["linux", undefined], ["darwin", undefined]] as const) {
+      // An unrelated process that happens to be a group leader now holds the recorded pid.
+      const stranger = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+      stranger.unref();
+      try {
+        for (let i = 0; i < 50 && !running(stranger.pid!); i++) await sleepMs(20);
+        const deps = fastDeps({ platform, readPidStart, readPidCgroup: (pid) => (mine(pid) ? "0::/user.slice/fx-engine-host-77.scope\n" : undefined) });
+        const handle = { pid: stranger.pid!, ...(unit === undefined ? {} : { unit }), start_time: platform === "linux" ? "1" : "Thu Jan  1 00:00:00 1970" };
+        const out = await killEngineHost(handle, deps);
+        expect(out.refused?.join(" "), `${platform} ${unit}`).toMatch(/reused pid/);
+        expect(running(stranger.pid!), `${platform} ${unit}: the stranger must not be signalled`).toBe(true);
+      } finally {
+        process.kill(-stranger.pid!, "SIGKILL");
+      }
+    }
+  });
+
+  it("the same handle with the process's real start time is signalled (the token matches), and the token round-trips through the handle file", async () => {
+    const real = realHaltDeps();
+    const host = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+    host.unref();
+    for (let i = 0; i < 50 && !running(host.pid!); i++) await sleepMs(20);
+    const start = await startTimeOf(host.pid!, real);
+    expect(start).toBeDefined();
+    writeFileSync(path.join(dir, ENGINE_HOST_FILE), JSON.stringify({ pid: host.pid, start_time: start }), { mode: 0o600 });
+    const handle = readHostHandle(dir, uid)!;
+    expect(handle).toEqual({ pid: host.pid, start_time: start });
+    const out = await killEngineHost(handle, fastDeps());
+    expect(out.refused).toBeUndefined();
+    await sleepMs(100);
+    expect(running(host.pid!)).toBe(false);
+    for (const bad of [{ pid: 4242, start_time: 5 }, { pid: 4242, start_time: "a;b" }, { pid: 4242, start_time: "" }, { pid: 4242, start_time: "x".repeat(65) }]) {
+      writeFileSync(path.join(dir, ENGINE_HOST_FILE), JSON.stringify(bad), { mode: 0o600 });
+      expect(() => readHostHandle(dir, uid)).toThrow(EngineStateError);
     }
   });
 
@@ -639,7 +689,7 @@ describe("fx-runner engine-host stop", () => {
   });
 
   it("refuses an unknown subcommand", async () => {
-    expect(await runCli(io([], [], ["engine-host", "start"]))).toBe(2);
+    expect(await runCli(io([], [], ["engine-host", "restart"]))).toBe(2);
   });
 
   it("a corrupt host file does not stop the halt: the halt file is written, the outcome is none with 1 survivor, nothing is signalled, and it exits 1 saying why", async () => {

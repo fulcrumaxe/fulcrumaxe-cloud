@@ -1,0 +1,417 @@
+/**
+ * EB-12a: the supervisor of the engine's headless Team Lead. One long-lived installed `claude` runs as `claude -p --input-format stream-json
+ * --output-format stream-json --verbose`, started in its own process group inside a `systemd-run --user --scope` unit, with its working directory at the
+ * repo's main checkout. The supervisor owns these promises:
+ *  - it refuses to start unless the bridge is enabled, the cloud's operate switch is on, no halt file says halted, and a scope can be used to prove a kill;
+ *  - the host's stdin stays open for the whole life of the session (closing it ends the session and stops the subagents' shells), and is closed only by `stop`;
+ *  - a crash restarts it with `--resume <session_id>` after 1, 2, then 5 minutes; a sixth crash within an hour stops it for good (`crash_loop`);
+ *  - the stream (stdout and stderr) goes only to a local 0600 log. It is never parsed beyond the session id of an `init` line, never sent anywhere and never
+ *    written into an event, and the text sent to the host is never logged. A log write that fails stops the host cleanly (`log_failed`);
+ *  - a halt always stops the host: the halt file and the bridge state are read again right before the spawn, right after the handle is written and on every
+ *    heartbeat, and a host that is halted (or whose operate switch went off, or whose files can no longer be read) is ended through the kill path with
+ *    `host_stopped`, whether or not a kill path ran in between. This closes the window where a halt lands after the first check and before there is a handle
+ *    or a scope for the kill path to find;
+ *  - one supervisor per machine: a lifetime lock is held for the supervisor's whole life, to the last exit path, so a second `start` is refused (`already_running`) even while
+ *    the first has no host during a back-off. A handle left by a dead supervisor blocks a start only when its pid is alive and its cgroup is its scope.
+ * The host gets no flag that skips permissions; `assertHostArgv` refuses one. Nothing here names a process or a child-process module: bin/fx-runner.mjs hands in
+ * the real start, the clock and the kill path.
+ *
+ * Residual risk, stated plainly: the host inherits `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (the decide socket needs the second). A tool call can
+ * therefore run `systemd-run --user ...` and start a process in a scope of its own, which neither the group kill nor this host's scope kill reaches. Dropping
+ * the variables would only be friction, since the agent can rebuild them, so this is a known limit of the scope-based proof and not a boundary. The kill
+ * path reports what it could count (`survivors`), and `host_stopped` carries that number after a forced stop.
+ */
+import { EngineStateError, removeStateFile, writeJsonAtomic } from "../engineBridge/stateFiles.js";
+import { ENGINE_HOST_FILE, readHaltFile, readHostHandle, type EngineHostHandle } from "../engineBridge/halt.js";
+import type { BridgeState, HostLock, HostLog } from "./hostFiles.js";
+
+export type RefusalReason = "bridge_disabled" | "operate_off" | "halted" | "platform_kill_unverified" | "state_unreadable" | "running_as_root" | "already_running";
+export type StopReason = "stopped_by_person" | "halted" | "crash_loop" | "operate_off" | "machine_shutdown" | "log_failed" | "host_failed";
+/** `survivors` is present when the kill path ran: processes of the host's tree it found still alive afterwards. */
+export type HostEvent = { kind: "host_started" } | { kind: "host_stopped"; reason: StopReason; survivors?: number } | { kind: "host_heartbeat" };
+
+export const BACKOFF_MS: readonly number[] = [60_000, 120_000, 300_000];
+export const CRASH_LIMIT = 6;
+export const CRASH_WINDOW_MS = 3_600_000;
+export const HEARTBEAT_MS = 60_000;
+/** After stdin is closed for a clean stop, how long the host gets to leave before the kill path ends it. */
+export const STOP_GRACE_MS = 10_000;
+const SESSION_LINE_MAX = 1 << 20;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const INIT_PREFIX = '{"type":"system","subtype":"init"';
+
+/** The host's argument vector after the program. Fixed: no model, tool or permission flag is added, so the repo's and the user's own settings apply. */
+export const HOST_ARGS: readonly string[] = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
+const FORBIDDEN_ARG = /permission|dangerous|bypass|allowedtools|allowed-tools|settings|add-dir|mcp-config/i;
+
+/** Refuses an argument vector that adds anything beyond the fixed one and `--resume <uuid>`. */
+export function assertHostArgv(args: readonly string[]): void {
+  const base = HOST_ARGS.length;
+  const fixed = args.slice(0, base).every((a, i) => a === HOST_ARGS[i]);
+  const tail = args.slice(base);
+  const resumeOk = tail.length === 0 || (tail.length === 2 && tail[0] === "--resume" && UUID.test(tail[1] ?? ""));
+  if (!fixed || !resumeOk || args.some((a) => FORBIDDEN_ARG.test(a))) throw new EngineStateError("refusing a host argument vector with extra flags");
+}
+
+export interface HostSpawnSpec {
+  file: string;
+  args: string[];
+  cwd: string;
+  /** A fixed allowlist of variables, built by the caller; never a copy of the environment, never a credential. */
+  env: Record<string, string>;
+}
+
+/** The part of the started host the supervisor uses (a structural type: no child-process import here). */
+export interface HostChild {
+  /** The pid of the host, the leader of its own process group. Undefined when it could not start. */
+  pid: number | undefined;
+  /** Writes text to the host's standard input. Never closes it. */
+  write(text: string): void;
+  closeStdin(): void;
+  onStdout(cb: (text: string) => void): void;
+  onStderr(cb: (text: string) => void): void;
+  onExit(cb: () => void): void;
+}
+
+export interface SupervisorDeps {
+  stateDir: string;
+  uid: number;
+  platform: NodeJS.Platform;
+  /** The path of the installed claude, absolute, from the runner's own resolution (and version-checked by the caller). */
+  claudePath: string;
+  readBridgeState: () => BridgeState | undefined;
+  launch: (spec: HostSpawnSpec) => HostChild;
+  env: Record<string, string>;
+  log: HostLog;
+  emit: (event: HostEvent) => void;
+  now: () => number;
+  /** Calls `fn` after `ms`; returns a function that cancels it. */
+  after: (ms: number, fn: () => void) => () => void;
+  /** Whether a pid is a live process (for "already running"). */
+  isAlive: (pid: number) => boolean;
+  /** When a process started (field 22 of its stat file on Linux), or undefined when it is gone or unreadable. */
+  startTimeOf: (pid: number) => string | undefined;
+  /** Whether a live pid is the host the handle describes: its cgroup names the handle's scope. A reused pid is not. False when that cannot be shown. */
+  isOurHost: (handle: EngineHostHandle) => boolean;
+  /** Takes the supervisor's lifetime lock; undefined when another supervisor holds it. The supervisor releases it on every exit path. */
+  acquireLock: () => HostLock | undefined;
+  /** Whether `systemd-run --user --scope` works on this machine. */
+  scopeAvailable: () => Promise<boolean>;
+  /** EB-11b's kill path on the recorded handle (process group, then scope). Its result, when it carries `survivors`, is reported. */
+  killHost: (handle: EngineHostHandle) => Promise<unknown>;
+  /** SIGKILL to what is left in a scope, by unit name only (no pid: a dead host's pid may be reused). */
+  killScope: (unit: string) => Promise<void>;
+}
+
+export interface Supervisor {
+  /** Checks every refusal, then starts the host. A refusal starts nothing. */
+  start(): Promise<{ ok: true } | { ok: false; reason: RefusalReason }>;
+  /** Sends one user message to the host's stdin. False when no host is running. The text is never logged. */
+  send(text: string): boolean;
+  /** Ends the host cleanly: close stdin, then the kill path after the grace. Idempotent. */
+  stop(reason: "stopped_by_person" | "machine_shutdown" | "log_failed"): Promise<void>;
+  /** Resolves with the reason once `host_stopped` was emitted. */
+  stopped: Promise<StopReason>;
+  /** The session id read from the host's last `init` line, once there is one. */
+  sessionId(): string | undefined;
+  /** How many processes of the host's tree the kill path found still alive (0 when it did not run). */
+  survivors(): number;
+  /** Log writes that failed; the first one stops the host. */
+  logFailures(): number;
+  /** Removes the handle file and releases the lock and the log, without a kill: the last step of a process that is exiting. Idempotent. */
+  cleanup(): void;
+}
+
+export function createSupervisor(deps: SupervisorDeps): Supervisor {
+  let current: HostChild | undefined;
+  let handle: EngineHostHandle | undefined;
+  let lock: HostLock | undefined;
+  let unit = "";
+  let checkout = "";
+  let session: string | undefined;
+  let stopping = false;
+  let finished = false;
+  let crashes: number[] = [];
+  let survivorCount = 0;
+  let killRan = false;
+  let logFails = 0;
+  let cancelTimer: (() => void) | undefined;
+  let cancelBeat: (() => void) | undefined;
+  const exitWaiters: Array<() => void> = [];
+  let resolveStopped!: (r: StopReason) => void;
+  const stopped = new Promise<StopReason>((resolve) => (resolveStopped = resolve));
+
+  /** The first refusal that applies, reading the files fresh each time. */
+  async function refusal(): Promise<RefusalReason | undefined> {
+    if (deps.uid === 0) return "running_as_root";
+    if (deps.platform !== "linux" || !(await deps.scopeAvailable())) return "platform_kill_unverified";
+    try {
+      const state = deps.readBridgeState();
+      if (state === undefined || !state.bridge_enabled) return "bridge_disabled";
+      if (!state.operate_enabled) return "operate_off";
+      if (readHaltFile(deps.stateDir, deps.uid)?.halted === true) return "halted";
+      unit = `fx-engine-host-${state.repo_gh_id}.scope`;
+      checkout = state.repo_checkout;
+    } catch (error) {
+      if (error instanceof EngineStateError) return "state_unreadable";
+      throw error;
+    }
+    return undefined;
+  }
+
+  /** The files read again, synchronously, right now: why the host must not run, or undefined. A file that cannot be read safely counts as halted (fail closed). */
+  function mustStop(): StopReason | undefined {
+    try {
+      const state = deps.readBridgeState();
+      if (state === undefined || !state.bridge_enabled || !state.operate_enabled) return "operate_off";
+      if (readHaltFile(deps.stateDir, deps.uid)?.halted === true) return "halted";
+      return undefined;
+    } catch (error) {
+      if (error instanceof EngineStateError) return "halted";
+      throw error;
+    }
+  }
+
+  /** Removes `engine-host.json` only when this supervisor wrote it: a refused start (another host's handle may be there) never deletes what is not its own. */
+  function removeHandle(): void {
+    if (handle === undefined) return;
+    handle = undefined;
+    try {
+      removeStateFile(deps.stateDir, ENGINE_HOST_FILE);
+    } catch {
+      // fx-swallow-ok: a handle file that cannot be removed is judged by the next start (its pid and cgroup must still match before it refuses)
+    }
+  }
+
+  function release(): void {
+    lock?.release();
+    lock = undefined;
+  }
+
+  function finish(reason: StopReason): void {
+    if (finished) return;
+    finished = true;
+    cancelTimer?.();
+    cancelBeat?.();
+    removeHandle();
+    deps.log.close();
+    release();
+    deps.emit(killRan ? { kind: "host_stopped", reason, survivors: survivorCount } : { kind: "host_stopped", reason });
+    resolveStopped(reason);
+  }
+
+  const reasonFor = (r: RefusalReason): StopReason => (r === "bridge_disabled" || r === "operate_off" ? "operate_off" : "halted");
+
+  function noteKill(result: unknown): void {
+    killRan = true;
+    const n = (result as { survivors?: unknown } | null | undefined)?.survivors;
+    if (typeof n === "number" && Number.isSafeInteger(n) && n > 0) survivorCount = Math.max(survivorCount, n);
+  }
+
+  /** Ends the host through the kill path because it must not run: nothing waits for a grace, and the handle is not trusted to be the only record. */
+  async function haltStop(reason: StopReason): Promise<void> {
+    if (finished || stopping) return;
+    stopping = true;
+    cancelTimer?.();
+    cancelBeat?.();
+    const target = handle ?? (current?.pid === undefined ? undefined : { pid: current.pid, unit });
+    try {
+      if (target !== undefined) noteKill(await deps.killHost(target));
+      if (unit !== "") await deps.killScope(unit);
+    } catch {
+      // fx-swallow-ok: a kill path that throws must not leave the supervisor half-stopped; it still ends, and the reason stays the fixed one
+    }
+    finish(reason);
+  }
+
+  function beat(): void {
+    cancelBeat = deps.after(HEARTBEAT_MS, () => {
+      if (current === undefined || finished || stopping) return;
+      const why = mustStop();
+      if (why !== undefined) {
+        void haltStop(why);
+        return;
+      }
+      deps.emit({ kind: "host_heartbeat" });
+      beat();
+    });
+  }
+
+  function logWrite(text: string): void {
+    let ok = false;
+    try {
+      ok = deps.log.write(text);
+    } catch {
+      // fx-swallow-ok: a log that throws is the same as one that failed: counted below, and the host stops
+    }
+    if (ok) return;
+    logFails++;
+    if (logFails === 1) void api.stop("log_failed");
+  }
+
+  /** Starts one host. A reason is returned (and nothing is started) when the files already say it must not run. */
+  function launch(): StopReason | undefined {
+    const args = [...HOST_ARGS, ...(session === undefined ? [] : ["--resume", session])];
+    assertHostArgv(args);
+    const before = mustStop();
+    if (before !== undefined) return before;
+    const child = deps.launch({ file: "systemd-run", args: ["--user", "--scope", "--quiet", `--unit=${unit.replace(/\.scope$/, "")}`, "--", deps.claudePath, ...args], cwd: checkout, env: deps.env });
+    current = child;
+    let tail = "";
+    let skipping = false;
+    child.onStdout((text) => {
+      logWrite(text);
+      // Only the session id of an `init` line is read; a line too long to hold is skipped to its end.
+      tail += text;
+      let nl = tail.indexOf("\n");
+      while (nl !== -1) {
+        const line = tail.slice(0, nl);
+        tail = tail.slice(nl + 1);
+        if (!skipping && line.startsWith(INIT_PREFIX)) {
+          try {
+            const id = (JSON.parse(line) as { session_id?: unknown }).session_id;
+            if (typeof id === "string" && UUID.test(id)) session = id;
+          } catch {
+            // fx-swallow-ok: a line that is not JSON is not an init line; the session id is simply not updated
+          }
+        }
+        skipping = false;
+        nl = tail.indexOf("\n");
+      }
+      if (tail.length > SESSION_LINE_MAX) {
+        tail = "";
+        skipping = true;
+      }
+    });
+    child.onStderr((text) => logWrite(text));
+    child.onExit(() => onExit(child));
+    if (child.pid === undefined) {
+      queueMicrotask(() => onExit(child));
+      return undefined;
+    }
+    // The start time goes in the handle so the kill path never signals a pid that has since been reused (it is left out only when the host is already gone).
+    const startTime = deps.startTimeOf(child.pid);
+    handle = { pid: child.pid, unit, ...(startTime === undefined ? {} : { start_time: startTime }) };
+    try {
+      writeJsonAtomic(deps.stateDir, ENGINE_HOST_FILE, handle, deps.uid);
+    } catch {
+      // fx-swallow-ok: a host that has no handle cannot be found by the kill path later, so it is ended now (through the kill path, by its pid and scope) with a fixed reason
+      void haltStop("host_failed");
+      return undefined;
+    }
+    // A halt that landed between the first check and the handle above found nothing for the kill path to end: look again now that there is something to kill.
+    const after = mustStop();
+    if (after !== undefined) {
+      void haltStop(after);
+      return undefined;
+    }
+    deps.emit({ kind: "host_started" });
+    beat();
+    return undefined;
+  }
+
+  function onExit(child: HostChild): void {
+    if (child !== current) return;
+    current = undefined;
+    cancelBeat?.();
+    for (const w of exitWaiters.splice(0)) w();
+    if (stopping) return;
+    void afterCrash();
+  }
+
+  async function afterCrash(): Promise<void> {
+    // The dead host's handle must go first: its pid could be reused, and the kill path signals by pid.
+    removeHandle();
+    try {
+      await deps.killScope(unit);
+    } catch {
+      // fx-swallow-ok: a scope that cannot be cleared is judged again by the next start's checks; the restart goes on
+    }
+    const why = await refusal();
+    if (why !== undefined) return finish(reasonFor(why));
+    const at = deps.now();
+    crashes = crashes.filter((t) => at - t < CRASH_WINDOW_MS);
+    crashes.push(at);
+    if (crashes.length >= CRASH_LIMIT) return finish("crash_loop");
+    const wait = BACKOFF_MS[Math.min(crashes.length - 1, BACKOFF_MS.length - 1)] ?? 300_000;
+    cancelTimer = deps.after(wait, () => {
+      void (async () => {
+        try {
+          if (stopping || finished) return;
+          const again = await refusal();
+          if (again !== undefined) return finish(reasonFor(again));
+          const held = launch();
+          if (held !== undefined) finish(held);
+        } catch {
+          // fx-swallow-ok: nothing may escape a timer; a restart that failed in any way ends the host with a fixed reason (no error text is kept)
+          await haltStop("host_failed");
+        }
+      })();
+    });
+  }
+
+  const api: Supervisor = {
+    stopped,
+    sessionId: () => session,
+    survivors: () => survivorCount,
+    logFailures: () => logFails,
+    cleanup() {
+      removeHandle();
+      deps.log.close();
+      release();
+    },
+    async start() {
+      const why = await refusal();
+      if (why !== undefined) return { ok: false, reason: why };
+      try {
+        lock = deps.acquireLock();
+        if (lock === undefined) return { ok: false, reason: "already_running" };
+        const recorded = readHostHandle(deps.stateDir, deps.uid);
+        // The lock keeps every other supervisor out, so a handle here was left by a dead one. Its host still blocks a start only while it is really there.
+        if (recorded !== undefined && deps.isAlive(recorded.pid) && deps.isOurHost(recorded)) {
+          release();
+          return { ok: false, reason: "already_running" };
+        }
+      } catch (error) {
+        release();
+        if (error instanceof EngineStateError) return { ok: false, reason: "state_unreadable" };
+        throw error;
+      }
+      const held = launch();
+      if (held !== undefined) {
+        release();
+        return { ok: false, reason: held === "operate_off" ? "operate_off" : "halted" };
+      }
+      return { ok: true };
+    },
+    send(text) {
+      if (current === undefined || stopping) return false;
+      current.write(`${JSON.stringify({ type: "user", message: { role: "user", content: text } })}\n`);
+      return true;
+    },
+    async stop(reason) {
+      if (finished) return;
+      if (stopping) {
+        await stopped;
+        return;
+      }
+      stopping = true;
+      cancelTimer?.();
+      const child = current;
+      if (child !== undefined) {
+        const gone = new Promise<void>((resolve) => exitWaiters.push(resolve));
+        child.closeStdin();
+        let cancelGrace: (() => void) | undefined;
+        const timedOut = new Promise<"grace">((resolve) => (cancelGrace = deps.after(STOP_GRACE_MS, () => resolve("grace"))));
+        if ((await Promise.race([gone.then(() => "exit" as const), timedOut])) === "grace" && handle !== undefined) {
+          noteKill(await deps.killHost(handle));
+          await gone;
+        }
+        cancelGrace?.();
+      }
+      if (unit !== "") await deps.killScope(unit);
+      finish(reason);
+    },
+  };
+  return api;
+}
