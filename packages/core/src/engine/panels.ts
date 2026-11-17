@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { round } from '@fx/stats';
 import type { EngineRepoFreshness } from '@fx/db/src/engineBridge.js';
+import { haltPending } from '@fx/db/src/engineHalt.js';
 import { readEngineAgentStats, type EngineAgentStats } from './read.js';
 
 /**
@@ -85,9 +86,14 @@ export interface RepoRow {
   liveness: Liveness;
   watch_enabled: boolean;
   operate_enabled: boolean;
-  /** Wired by the halt row (migration 1031); until then no repo is halted. */
+  /** The repo's halt marker (migration 1031), read under row security. A repo with no marker row has never been halted. */
   halted: boolean;
+  /** Halted, and the runner has not yet reported `halt_applied` at or above the current epoch. Derived on read, never stored. */
   halt_pending: boolean;
+  /** When the current halt was set; null while not halted. */
+  halted_at: string | null;
+  /** +1 per halt, unchanged by a clear; 0 for a repo never halted. */
+  halt_epoch: number;
 }
 
 /** Every ticked repo of the account with the runner that serves it and its liveness. The newest session names the runner; liveness uses the newest word from any session. */
@@ -96,7 +102,8 @@ export async function readEngineRepos(client: PoolClient): Promise<RepoRow[]> {
     `SELECT r.id AS repo_id, CASE WHEN r.gh_owner IS NOT NULL AND r.gh_name IS NOT NULL THEN r.gh_owner || '/' || r.gh_name END AS full_name,
             st.watch_enabled, st.operate_enabled, n.id AS session_id, n.runner_id, n.last_event_at,
             a.heard_at, a.sessions, (rn.revoked_at IS NOT NULL) AS revoked, rs.name AS runner_set_name,
-            COALESCE(NULLIF(ru.name, ''), NULLIF(ru.github_login, ''), $1) AS registrant, EXTRACT(EPOCH FROM (now() - a.heard_at))::float8 AS heard
+            COALESCE(NULLIF(ru.name, ''), NULLIF(ru.github_login, ''), $1) AS registrant, EXTRACT(EPOCH FROM (now() - a.heard_at))::float8 AS heard,
+            (c.halted_at IS NOT NULL) AS halted, c.halted_at, COALESCE(c.halt_epoch, 0) AS halt_epoch, ap.applied_epoch
        FROM engine_bridge_repos b
        JOIN repos r ON r.id = b.repo_id
        LEFT JOIN engine_bridge_settings st ON st.account_id = b.account_id
@@ -105,6 +112,10 @@ export async function readEngineRepos(client: PoolClient): Promise<RepoRow[]> {
        LEFT JOIN runners rn ON rn.id = n.runner_id
        LEFT JOIN runner_settings rs ON rs.runner_id = rn.id AND rs.account_id = rn.account_id
        LEFT JOIN users ru ON ru.id = rn.registered_by
+       LEFT JOIN engine_repo_controls c ON c.account_id = b.account_id AND c.repo_id = b.repo_id
+       -- The newest epoch the runner reported applying, from the repo's sessions (the bridge session carries it). Only looked up while halted.
+       LEFT JOIN LATERAL (SELECT max((ev.body->>'halt_epoch')::int) AS applied_epoch FROM engine_events ev JOIN engine_sessions es ON es.id = ev.session_id
+                           WHERE ev.account_id = b.account_id AND es.account_id = b.account_id AND c.halted_at IS NOT NULL AND es.repo_id = b.repo_id AND ev.kind = 'halt_applied') ap ON true
       ORDER BY full_name NULLS LAST, r.id`,
     [UNNAMED_MEMBER],
   );
@@ -119,8 +130,10 @@ export async function readEngineRepos(client: PoolClient): Promise<RepoRow[]> {
     liveness: livenessOf({ sessionCount: r.sessions, revoked: r.revoked === true, heardAgeS: r.heard === null ? null : Math.round(r.heard) }),
     watch_enabled: r.watch_enabled ?? false,
     operate_enabled: r.operate_enabled ?? false,
-    halted: false,
-    halt_pending: false,
+    halted: r.halted === true,
+    halt_pending: haltPending({ halted: r.halted === true, halt_epoch: Number(r.halt_epoch) }, r.applied_epoch === null || r.applied_epoch === undefined ? null : Number(r.applied_epoch)),
+    halted_at: iso(r.halted_at),
+    halt_epoch: Number(r.halt_epoch),
   }));
 }
 

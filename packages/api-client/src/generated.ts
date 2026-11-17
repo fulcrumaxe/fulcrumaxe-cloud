@@ -5365,6 +5365,8 @@ export interface Operations {
         operate_enabled: boolean;
         halted: boolean;
         halt_pending: boolean;
+        halted_at: string | null;
+        halt_epoch: number;
       }>;
       next_cursor: string | null;
       as_of: string;

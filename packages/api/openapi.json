@@ -47352,6 +47352,17 @@
                           },
                           "halt_pending": {
                             "type": "boolean"
+                          },
+                          "halted_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "halt_epoch": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
                           }
                         },
                         "required": [
@@ -47366,7 +47377,9 @@
                           "watch_enabled",
                           "operate_enabled",
                           "halted",
-                          "halt_pending"
+                          "halt_pending",
+                          "halted_at",
+                          "halt_epoch"
                         ],
                         "additionalProperties": false
                       }
