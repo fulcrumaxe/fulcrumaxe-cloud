@@ -29,6 +29,8 @@ import { verifyLoginCommand, type VerifyLoginHost } from "./commands/verifyLogin
 import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
 import { purgeChildCommand } from "./commands/purgeChild.js";
 import { configCommand, updateCommand } from "./commands/update.js";
+import { engineHostCommand } from "./commands/engineHost.js";
+import type { HaltDeps } from "./engineBridge/halt.js";
 import type { UpdateHost } from "./update/updater.js";
 
 export interface CliIo {
@@ -40,8 +42,10 @@ export interface CliIo {
   stateDirOverride?: string | undefined;
   /** `FX_RUNNER_PROTECTION_BYPASS_FILE`, looked up by name by the caller: a file holding the Vercel protection bypass secret (staging only). */
   protectionBypassFile?: string | undefined;
-  /** `AUTONOMOUS_TEAM_STATE_DIR`, looked up by name by the caller: the engine's state directory, where `engine-bridge enable` binds a repo when `--state-dir` is not given. */
+  /** `AUTONOMOUS_TEAM_STATE_DIR`, looked up by name by the caller: the engine's state directory, where `engine-bridge enable` binds a repo when `--state-dir` is not given and `engine-host stop` writes the halt file. */
   engineStateDirOverride?: string | undefined;
+  /** What the engine kill path needs from the machine; the real one when left out. Tests set it. */
+  engineHaltDeps?: HaltDeps | undefined;
   /** The user id the process runs as, for the owner check on that file. */
   uid?: number | undefined;
   /** The machine's host name, looked up by the caller (`os.hostname()`); tests set it. */
@@ -125,6 +129,9 @@ Commands:
   engine-bridge enable --repo <owner/name> --repo-root <dir> [--state-dir <dir>] | disable [--repo <owner/name>] | status
                      Bridge an engine repo to the workspace's team app. enable asks the cloud whether this runner is paired with the repo and refuses one that is not; the engine's state
                      directory belongs to that one repo. status shows what the running daemon last said, per repo, with no event content. A running fx-runner picks changes up within seconds.
+  engine-host stop | resume
+                     stop: end the engine host on this machine now (its process group and, on Linux, its systemd scope) and write a halt file the workspace cannot clear. Makes no cloud call.
+                     resume: lift that local stop (nothing is started).
   pause | resume     Stop claiming new jobs (running ones finish), or start again. The runner stays registered and keeps its place.
 `;
 
@@ -147,6 +154,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   config: { flags: [], switches: [], positionals: 3 },
   pause: { flags: [], switches: [] },
   drain: { flags: [], switches: ["no-wait"] },
+  "engine-host": { flags: [], switches: [], positionals: 1 },
   resume: { flags: [], switches: [] },
   "engine-bridge": { flags: ["repo", "repo-root", "state-dir"], switches: [], positionals: 1 },
   credentials: { flags: [], switches: [] },
@@ -258,6 +266,7 @@ export async function runCli(io: CliIo): Promise<number> {
     }
     if (command === "assistant") return await assistantCommand(positionals, ctx);
     if (command === "engine-bridge") return await engineBridgeCommand(positionals, flags, ctx, { home: io.home, engineStateDirOverride: io.engineStateDirOverride });
+    if (command === "engine-host") return await engineHostCommand(positionals, ctx, { engineStateDirOverride: io.engineStateDirOverride, home: io.home, deps: io.engineHaltDeps });
     if (command === "pause" || command === "resume") return claimingCommand(command, ctx);
     if (command === "drain") {
       if (io.host === undefined) throw new CliError("drain is only available from the fx-runner program");
