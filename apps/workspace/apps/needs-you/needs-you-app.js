@@ -5,7 +5,7 @@
 // second press is ignored. When a row changes under the person, focus goes to the same control, else to the row's heading.
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
-import { WORDS, canMarkDone, confirmWords, createNeedsYou, engineWords, isBranchRow, notShownWords, nowAtWords, waitingHolderWords } from "./needs-you-model.js";
+import { ANSWER_WORDS, CHOICE_LABELS, WORDS, answerable, canMarkDone, choicesFor, lockReason, sentIsFinal, stateWords, confirmWords, createNeedsYou, engineWords, isBranchRow, notShownWords, nowAtWords, waitingHolderWords } from "./needs-you-model.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -182,7 +182,93 @@ function mountApp(contentEl) {
     );
   }
 
-  // EB-6c: an open ask of the engine, read-only (answering is a later row). The repo's name is untrusted text and goes in <bdi>; the D# and PR # links are built from it by the model.
+  // EB-13b: the answer controls of an engine ask. An owner or admin sees Approve, Decline and (except for a decision) Defer, and an optional one-line note. They are never
+  // `disabled`: a locked or busy control is aria-disabled with its reason in view and named by aria-describedby, so it keeps focus and a second press is ignored. The note
+  // field keeps its text across redraws (the model holds it), and the count beside it is updated by the field's own input event, with no announcement per keystroke.
+  function answerView(row, headId) {
+    if (!answerable(row)) return null;
+    if (!list.state.isAdmin) return row.operateEnabled ? h("p", { class: "ny-sentence", "data-testid": "ny-waiting" }, ANSWER_WORDS.waitingAdmin) : null;
+    const lock = lockReason(row);
+    const sent = list.engineSent(row.id);
+    const working = list.busyVerb(row.id) !== "";
+    // An ask whose waiting answers could not be checked is locked like a closed one: a second answer might otherwise follow one the engine has not shown yet.
+    const unchecked = sent === null && list.engineUnchecked(row.id);
+    const still = lock !== "" || unchecked || working || (sent !== null && sentIsFinal(sent));
+    const lockId = "ny-lock-" + row.id;
+    const uncheckedId = "ny-unchecked-" + row.id;
+    const noteId = "ny-note-" + row.id;
+    const hintId = "ny-hint-" + row.id;
+    const countId = "ny-count-" + row.id;
+    const withNote = row.decisionId === "";
+    const count = h("span", { id: countId, class: "ny-count", "data-testid": "ny-count" }, ANSWER_WORDS.count(list.noteOf(row.id).length));
+    const field = withNote
+      ? h(
+          "div",
+          { class: "ny-note-field" },
+          h("label", { class: "ny-note-label", for: noteId }, ANSWER_WORDS.note),
+          h("input", {
+            id: noteId,
+            type: "text",
+            class: "ny-note",
+            autocomplete: "off",
+            value: list.noteOf(row.id),
+            readonly: still,
+            "aria-disabled": still ? "true" : "false",
+            "aria-describedby": hintId + " " + countId,
+            "data-act": "note",
+            "data-testid": "ny-note-" + row.id,
+            onInput: (ev) => {
+              list.setNote(row.id, ev.target.value);
+              count.textContent = ANSWER_WORDS.count(ev.target.value.length);
+            },
+          }),
+          h("span", { id: hintId, class: "ny-muted" }, ANSWER_WORDS.noteHint),
+          count
+        )
+      : null;
+    const choiceBtn = (choice) =>
+      h(
+        "button",
+        {
+          type: "button",
+          class: "ny-btn",
+          "data-testid": "ny-choice-" + row.id + "-" + choice,
+          "data-act": "choice-" + choice,
+          "aria-disabled": still ? "true" : "false",
+          "aria-label": CHOICE_LABELS[choice] + ": " + row.title,
+          "aria-describedby": lock !== "" ? lockId : unchecked ? uncheckedId : null,
+          onClick: () => {
+            if (list.busyVerb(row.id) === "") list.answerEngine(row.id, choice);
+          },
+        },
+        CHOICE_LABELS[choice]
+      );
+    const again = sent !== null && !sentIsFinal(sent);
+    return h(
+      "div",
+      { class: "ny-answer", role: "group", "aria-labelledby": headId, "data-testid": "ny-answer" },
+      lock !== "" ? h("p", { id: lockId, class: "ny-warn", "data-testid": "ny-lock" }, lock) : null,
+      row.halted ? h("p", { class: "ny-muted", "data-testid": "ny-halted" }, ANSWER_WORDS.halted) : null,
+      unchecked ? h("p", { id: uncheckedId, class: "ny-warn", "data-testid": "ny-unchecked" }, ANSWER_WORDS.cantCheck) : null,
+      sent !== null ? h("p", { class: again ? "ny-warn" : "ny-sentence", "data-testid": "ny-sent", "data-state": sent.state }, stateWords(sent)) : null,
+      // The note that was sent is shown back as text, in a quotation: a text node, never markup.
+      sent !== null && sent.note !== "" ? h("p", { class: "ny-reason", "data-testid": "ny-note-sent" }, ANSWER_WORDS.noteSent + ": ", h("q", null, sent.note)) : null,
+      field,
+      h(
+        "div",
+        { class: "ny-actions" },
+        choicesFor(row).map(choiceBtn),
+        unchecked
+          ? h("button", { type: "button", class: "ny-btn", "data-testid": "ny-recheck-" + row.id, "data-act": "recheck", "aria-disabled": working ? "true" : "false", "aria-label": ANSWER_WORDS.tryAgain + ": " + row.title, onClick: () => { if (list.busyVerb(row.id) === "") list.recheck(row.id); } }, ANSWER_WORDS.tryAgain)
+          : null,
+        again
+          ? h("button", { type: "button", class: "ny-btn", "data-testid": "ny-again-" + row.id, "data-act": "again", "aria-disabled": still ? "true" : "false", "aria-label": ANSWER_WORDS.sendAgain + ": " + row.title, onClick: () => list.sendAgain(row.id) }, ANSWER_WORDS.sendAgain)
+          : null
+      )
+    );
+  }
+
+  // EB-6c: an open ask of the engine (EB-13b adds the answer controls). The repo's name is untrusted text and goes in <bdi>; the D# and PR # links are built from it by the model.
   // The sentences about age are worked out here, at draw time, so they stay true between reads. Each link keeps its data-act so focus returns to it after a redraw.
   function engineView(row) {
     const headId = "ny-h-" + row.id;
@@ -199,7 +285,8 @@ function mountApp(contentEl) {
       w.stale ? h("p", { class: "ny-warn", "data-testid": "ny-stale" }, w.stale) : null,
       w.machine ? h("p", { class: "ny-warn", "data-testid": "ny-machine" }, w.machine) : null,
       w.source ? h("p", { class: "ny-warn", "data-testid": "ny-source" }, w.source) : null,
-      h("p", { class: "ny-muted", "data-testid": "ny-asof" }, w.asOf)
+      h("p", { class: "ny-muted", "data-testid": "ny-asof" }, w.asOf),
+      answerView(row, headId)
     );
   }
 
@@ -244,6 +331,8 @@ function mountApp(contentEl) {
     const held = root.ownerDocument.activeElement;
     const heldRow = held && content.contains(held) && held.closest ? held.closest("[data-id]") : null;
     const heldKey = heldRow ? [heldRow.getAttribute("data-id"), held.getAttribute("data-act") || ""] : null;
+    // The caret of a field being typed in survives the redraw with the field's text (the model holds the text).
+    const caret = held && held.tagName === "INPUT" && typeof held.selectionStart === "number" ? [held.selectionStart, held.selectionEnd] : null;
     const openCount = s.rows.filter((r) => r.state === "open").length;
     const body =
       s.status === "loading" ? h("p", { class: "ny-muted", role: "status", "data-testid": "ny-loading" }, WORDS.loading)
@@ -281,6 +370,7 @@ function mountApp(contentEl) {
       const row = [...content.querySelectorAll("[data-id]")].find((r) => r.getAttribute("data-id") === heldKey[0]);
       const again = row && heldKey[1] ? [...row.querySelectorAll("[data-act]")].find((b) => b.getAttribute("data-act") === heldKey[1]) : null;
       (again || (row && row.querySelector("h3")) || heading).focus();
+      if (again && caret && again.tagName === "INPUT") again.setSelectionRange(caret[0], caret[1]);
     }
   }
 
