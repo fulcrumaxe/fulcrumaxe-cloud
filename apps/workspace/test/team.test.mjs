@@ -548,7 +548,45 @@ describe("refresh", () => {
     await t.refresh();
     const v = t.view();
     expect(v.lanes.open).toHaveLength(1);
-    expect(v.refreshFailed).toBe(WORDS.refreshFailed);
+    expect(v.refreshFailed).toBe(""); // one panel failing is that panel's note, not the view's
+  });
+  it("one panel failing marks that panel only; the view-wide note stays off", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("plan", REPO_A)]: fail(404) }); // a server without the plan route answers 404 with no code
+    await t.load();
+    const v = t.view();
+    expect(v.plan).toMatchObject({ failed: true, none: false, view: null });
+    expect(v.agents.failed).toBe(false);
+    expect(v.lanes.failed).toBe(false);
+    expect(v.refreshFailed).toBe("");
+    expect(v.failedKeys).toEqual(["plan"]);
+  });
+  it("the plan route's 204 (no snapshot yet) is the not-synced state, never a failure", async () => {
+    const { t } = team({}, { ["GET " + panelUrl("plan", REPO_A)]: null });
+    await t.load();
+    expect(t.view().plan).toMatchObject({ failed: false, none: true });
+    expect(t.view().refreshFailed).toBe("");
+    expect(t.view().failedKeys).toEqual([]);
+  });
+  it("every panel failing at once, or the core reads failing, turns the view-wide note on", async () => {
+    const all = {};
+    for (const k of ["agents", "lanes", "gates", "log", "plan", "stats", "usage"]) all["GET " + panelUrl(k, REPO_A)] = fail(500, "server_error");
+    const a = team({}, all);
+    await a.t.load();
+    expect(a.t.view().refreshFailed).toBe(WORDS.refreshFailed);
+    // settings failing on a refresh, after a good load
+    let n = 0;
+    const b = team({}, { ["GET " + SETTINGS_URL]: () => (++n === 1 ? F.settings() : fail(500, "server_error")) });
+    await b.t.load();
+    expect(b.t.view().refreshFailed).toBe("");
+    await b.t.refresh();
+    expect(b.t.view().refreshFailed).toBe(WORDS.refreshFailed);
+    expect(b.t.view().agents.failed).toBe(false); // the last data stays
+    // the repo list failing on a refresh
+    let m = 0;
+    const c = team({}, { ["GET " + REPOS_URL]: () => (++m === 1 ? F.list([F.repo()]) : fail(500, "server_error")) });
+    await c.t.load();
+    await c.t.refresh();
+    expect(c.t.view().refreshFailed).toBe(WORDS.refreshFailed);
   });
   it("a first read that fails shows the panel as unreadable, not as empty", async () => {
     const { t } = team({}, { ["GET " + panelUrl("lanes", REPO_A)]: fail(500, "server_error") });
@@ -942,7 +980,7 @@ describe("cost (EB-6b.6): the server's figures, as sent, through the one formatt
     await t.load();
     expect(t.view().usage).toMatchObject({ failed: true, view: null });
     expect(t.view().agents.failed).toBe(false);
-    expect(t.view().refreshFailed).toBe(WORDS.refreshFailed);
+    expect(t.view().refreshFailed).toBe("");
   });
   it("its gap, its age and its source ages reach the banner, the notices and the header like every other panel's", async () => {
     const { t } = team({}, { ["GET " + panelUrl("usage", REPO_A)]: F.usage({ missing_events: 3, gaps: [{ from_seq: 1, to_seq: 3, before_ts: F.iso(400) }], source_ages_s: { loop: 2 * 3600 }, heard_age_s: 900 }) });

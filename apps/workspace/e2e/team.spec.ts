@@ -37,6 +37,8 @@ interface Mock {
   reads: string[];
   /** Path fragments that answer 500. */
   fail: string[];
+  /** The plan GET answers 404 with no code, as a server that has no such route does. */
+  failPlan404?: boolean;
   /** The PUT answer: 200, or an error status with its code. */
   putStatus: number;
   putCode: string;
@@ -114,6 +116,7 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean } = {}) {
       if (url.pathname === `${BASE}/settings`) return json(route, 200, mock.settings);
       if (url.pathname === `${BASE}/repos`) return json(route, 200, { items: mock.repos });
       const m = url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/(agents|lanes|gates|log|plan|stats|usage)$`));
+      if (m && m[2] === "plan" && mock.failPlan404) return json(route, 404, { error: { code: "", message: SERVER_TEXT, request_id: "r" } });
       if (m && m[2] === "plan") return mock.plan === null ? route.fulfill({ status: 204 }) : json(route, 200, mock.plan);
       if (m && m[2] === "log" && mock.logPage) return json(route, 200, mock.logPage(url.searchParams.get("cursor") ?? ""));
       if (m) return json(route, 200, mock[m[2] as "agents" | "lanes" | "gates" | "log" | "stats" | "usage"]);
@@ -374,7 +377,17 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-lanes-failed")).toHaveText("This panel couldn't be read.");
     await expect(t(page, "tm-lanes-empty")).toHaveCount(0);
     await expect(t(page, "tm-agent")).toHaveCount(2);
-    await expect(t(page, "tm-refresh-failed")).toHaveText("Couldn't refresh. Showing the last data received.");
+    await expect(t(page, "tm-refresh-failed")).toBeHidden(); // one panel failing does not flag the refresh of the whole view
+    await clean(page, errors);
+  });
+
+  test("the plan route answering 404 (not there yet) fails the Plan panel only: its error shows, the view note does not", async ({ page }) => {
+    const { errors } = await setup(page, fresh({ failPlan404: true }));
+    await open(page);
+    await expect(t(page, "tm-plan-failed")).toHaveText("This panel couldn't be read.");
+    await expect(t(page, "tm-agent")).toHaveCount(2);
+    await expect(t(page, "tm-stats-failed")).toHaveCount(0);
+    await expect(t(page, "tm-refresh-failed")).toBeHidden();
     await clean(page, errors);
   });
 
@@ -662,13 +675,16 @@ test.describe("Team app", () => {
   test("the banner and the refresh note are announced when they change and not on every poll", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const gap = (n: number) => ({ missing_events: n, gaps: [{ from_seq: 1, to_seq: n, before_ts: F.iso(900) }] });
+    const ALL = ["/agents", "/lanes", "/gates", "/log", "/plan", "/stats", "/usage"]; // the note is for the whole view failing, so every panel read fails together
     const mock = fresh({ agents: F.envelope([F.agent()], gap(3)), fail: ["/lanes"] });
     const { errors } = await setup(page, mock, { clock: true });
     await open(page);
     const live = t(page, "tm-live");
     await expect(live).toContainText("Events missing since");
     await expect(live).toContainText("(3 events)");
-    await expect(live).toContainText("Couldn't refresh. Showing the last data received.");
+    await expect(live).toContainText("Merge lane panel couldn't be read.");
+    await expect(live).not.toContainText("Couldn't refresh");
+    await expect(t(page, "tm-refresh-failed")).toBeHidden();
     await page.evaluate((sel) => {
       const w = window as unknown as { __said: number };
       w.__said = 0;
@@ -694,7 +710,7 @@ test.describe("Team app", () => {
     mock.fail = [];
     await poll();
     expect(await count()).toBe(afterBanner);
-    mock.fail = ["/lanes"];
+    mock.fail = ALL;
     await poll();
     await expect(live).toHaveText("Couldn't refresh. Showing the last data received.");
     expect(await count()).toBeGreaterThan(afterBanner);

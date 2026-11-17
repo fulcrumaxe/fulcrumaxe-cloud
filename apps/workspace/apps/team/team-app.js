@@ -269,7 +269,7 @@ function mountApp(contentEl) {
     if (d.sheet) swap("sheet", sheet, d.sheet, () => sheetNodes(d.sheet));
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
-    const broken = hasRepos && d.refreshFailed ? Object.keys(TITLE).filter((k) => d[k].failed).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not
+    const broken = hasRepos ? Object.keys(TITLE).filter((k) => d[k].failed && d.failedKeys.includes(k)).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not
     const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
     if (msg) live.replaceChildren(h("span", null, msg));
     swap("body", body, d.kind === "ready" ? { k: "ready" } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving }, () => {
