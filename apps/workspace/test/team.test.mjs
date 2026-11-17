@@ -332,6 +332,173 @@ describe("settings", () => {
   });
 });
 
+describe("a save and a refresh at the same time", () => {
+  /** A server that remembers the watch switch. A held read answers with what the server said when the read began. */
+  function server() {
+    const s = { watch: true, operate: false, hold: null, release: null, failPut: null };
+    const routes = {
+      ["GET " + SETTINGS_URL]: () => { const snap = F.settings({ watch_enabled: s.watch, operate_enabled: s.operate, ...(s.ids ? { repos: [F.settingsRepo({ enabled: s.ids.includes(REPO_A) }), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: false, eligible: false, refusal: "public_repo" })] } : {}), ...(s.other ? { repos: [F.settingsRepo(), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: true, eligible: true })] } : {}) }); return s.hold ? s.hold.then(() => snap) : snap; },
+      ["PUT " + SETTINGS_URL]: (body) => {
+        if (s.failPut) return s.failPut;
+        const apply = () => { if ("watch_enabled" in body) s.watch = body.watch_enabled; if ("operate_enabled" in body) s.operate = body.operate_enabled; if ("repo_ids" in body) s.ids = body.repo_ids; };
+        if (!s.release) { apply(); return { ok: true }; }
+        return new Promise((r) => { s.release.fn = () => { apply(); r({ ok: true }); }; });
+      },
+    };
+    return { s, routes };
+  }
+  /** The controller with a record of the settings it held at every change. */
+  function tracked(routes) {
+    const f = fakeCall(routes);
+    const hist = [], ops = [];
+    const t = createTeam({ client: createTeamApi(f.call), ...clock(), onChange: () => { hist.push(t.state.settings ? t.state.settings.watch : null); ops.push(t.state.settings ? t.state.settings.operate : null); } });
+    t.view = () => describeState(t.state, NOW);
+    return { t, f, hist, ops };
+  }
+
+  it("a refresh that lands while a save is out does not undo the click, and the server's answer shows once the save is done", async () => {
+    const { s, routes } = server();
+    s.release = {};
+    const { t } = team({}, routes);
+    await t.load();
+    const save = t.setWatch(false);
+    expect(t.view().sheet.watch).toBe(false);
+    s.other = true; // the server now also has the second repo ticked
+    await t.refresh();
+    expect(t.view().sheet.watch).toBe(false);
+    expect(t.state.saving).toBe(true);
+    expect(t.state.settings.repos.find((r) => r.id === REPO_B).enabled).toBe(false); // that answer was dropped
+    s.release.fn();
+    await save;
+    expect(t.view().sheet.watch).toBe(false);
+    expect(t.state.settings.repos.find((r) => r.id === REPO_B).enabled).toBe(true); // the read after the save
+  });
+  it("a refresh begun before the save and landing after it is dropped", async () => {
+    const { s, routes } = server();
+    const { t, hist } = tracked(routes);
+    await t.load();
+    let release;
+    s.hold = new Promise((r) => { release = r; });
+    const old = t.refresh(); // asks while the server still says true
+    await flush();
+    const save = t.setWatch(false); // saved and answered while that read is out
+    await flush(); await flush();
+    s.hold = null;
+    expect(t.view().sheet.watch).toBe(false);
+    release(); // the old read lands now, with watch: true
+    await old; await save; await flush(); await flush();
+    expect(hist.includes(false)).toBe(true);
+    expect(hist.slice(hist.indexOf(false)).includes(true)).toBe(false); // once the save is in, the old answer never shows
+    expect(t.state.settings.watch).toBe(false);
+    expect(t.state.saving).toBe(false);
+  });
+  it("a repo box keeps the person's choice while its save is out and a refresh lands, then shows the server's answer", async () => {
+    const { s, routes } = server();
+    s.release = {};
+    const { t } = team({}, routes);
+    await t.load();
+    const box = () => t.view().sheet.repos.find((r) => r.id === REPO_A).checked;
+    expect(box()).toBe(true);
+    const save = t.setRepo(REPO_A, false);
+    expect(box()).toBe(false);
+    await t.refresh(); // the server still says ticked
+    expect(box()).toBe(false);
+    expect(t.state.settings.repos.find((r) => r.id === REPO_A).enabled).toBe(true); // that answer was dropped
+    s.release.fn();
+    await save;
+    expect(box()).toBe(false);
+  });
+  it("the operate switch keeps the person's choice while its save is out and a refresh lands", async () => {
+    const { s, routes } = server();
+    s.release = {};
+    const { t } = team({}, routes);
+    await t.load();
+    expect(t.view().operate.sw.on).toBe(false);
+    const save = t.operate.setOperate(true);
+    expect(t.view().operate.sw.on).toBe(true);
+    s.other = true; // a different answer, to see whether it is kept
+    await t.refresh(); // the server still says operate is off
+    expect(t.view().operate.sw.on).toBe(true);
+    expect(t.state.settings.repos.find((r) => r.id === REPO_B).enabled).toBe(false); // that answer was dropped
+    s.release.fn();
+    await save;
+    expect(t.view().operate.sw.on).toBe(true);
+    expect(t.state.settings.repos.find((r) => r.id === REPO_B).enabled).toBe(true); // the read after the save
+  });
+  it("an operate read begun before the save and landing after it is dropped", async () => {
+    const { s, routes } = server();
+    const { t, ops } = tracked(routes);
+    await t.load();
+    let release;
+    s.hold = new Promise((r) => { release = r; });
+    const old = t.refresh(); // asks while the server says operate is off
+    await flush();
+    const save = t.operate.setOperate(true);
+    await flush(); await flush();
+    s.hold = null;
+    release(); // the old read lands with operate: false
+    await old; await save; await flush(); await flush();
+    expect(ops.includes(true)).toBe(true);
+    expect(ops.slice(ops.indexOf(true)).includes(false)).toBe(false);
+    expect(t.state.settings.operate).toBe(true);
+  });
+  it("a failed operate save puts the switch back", async () => {
+    const { s, routes } = server();
+    s.failPut = fail(500, "server_error");
+    const { t } = team({}, routes);
+    await t.load();
+    await t.operate.setOperate(true);
+    expect(t.view().operate.sw.on).toBe(false);
+    expect(t.state.draft).toBe(null);
+  });
+  it("a failed save puts the last server value back and says so once", async () => {
+    const { s, routes } = server();
+    s.failPut = fail(500, "server_error");
+    const notices = [];
+    const f = fakeCall(routes);
+    const t = createTeam({ client: createTeamApi(f.call), ...clock(), onChange: () => notices.push(t.state.notice) });
+    await t.load();
+    const save = t.setWatch(false);
+    expect(describeState(t.state, NOW).sheet.watch).toBe(false); // shown while the save is out
+    await save;
+    await t.refresh();
+    expect(describeState(t.state, NOW).sheet.watch).toBe(true);
+    expect(t.state.notice).toBe(failureSentence(fail(500, "server_error")));
+    expect(notices.filter((n, i) => n !== "" && n !== notices[i - 1])).toHaveLength(1);
+  });
+  it("a refresh that finds the same settings keeps the same objects, so nothing that shows them is redrawn", async () => {
+    const { t } = team();
+    await t.load();
+    const [settings, repos] = [t.state.settings, t.state.repos];
+    const sheet = JSON.stringify(t.view().sheet);
+    await t.refresh();
+    expect(t.state.settings).toBe(settings);
+    expect(t.state.repos).toBe(repos);
+    expect(JSON.stringify(t.view().sheet)).toBe(sheet);
+  });
+});
+
+describe("a hidden tab", () => {
+  it("reads nothing on the timer, on engine.changed or on a live-stream nudge, and reads once when shown again", async () => {
+    let hidden = true, shown, nudge, on;
+    const { t, f, clk } = team();
+    await t.load();
+    t.start({ hidden: () => hidden, subscribe: (fn) => { nudge = fn; return () => {}; }, listen: (type, fn) => { on = fn; return () => {}; }, visibility: (fn) => { shown = fn; return () => {}; } });
+    f.log.length = 0;
+    clk.fire((x) => x.ms === REFRESH_MS);
+    on({ type: "engine.changed", data: { repo_id: REPO_A, session_id: "s", last_seq: 3 } });
+    clk.fire((x) => x.ms === DEBOUNCE_MS);
+    nudge();
+    await flush(); await flush();
+    expect(f.log).toHaveLength(0);
+    hidden = false;
+    shown();
+    await flush(); await flush(); await flush();
+    expect(f.log.filter(([, p]) => p === SETTINGS_URL)).toHaveLength(1);
+    expect(REFRESH_MS).toBe(15000);
+  });
+});
+
 describe("refresh", () => {
   it("engine.changed for the open repo refetches every panel once, 1 s after the last event in a burst", async () => {
     const { t, f, clk } = team();

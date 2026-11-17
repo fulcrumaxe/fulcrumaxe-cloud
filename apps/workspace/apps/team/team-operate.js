@@ -287,10 +287,11 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
     setOperate(on) {
       const st = get();
       if (!st.settings || !st.settings.canEdit || !st.settings.watch || st.op.saving || st.saving) return Promise.resolve(false);
-      patch({ saving: true, notice: "", confirmStop: null, confirmHalt: null });
+      // The choice stays on screen while the save is out (draft); a failure drops it, a success makes it the shown value until the read that follows.
+      set({ draft: { repos: {}, operate: on === true }, op: { ...st.op, saving: true, notice: "", confirmStop: null, confirmHalt: null } });
       return client.saveSettings({ operate_enabled: on === true }, signal).then(
-        () => { patch({ saving: false, notice: OP_WORDS.operateSaved }); return refresh(); },
-        (e) => { if (!aborted(e)) patch({ saving: false, notice: e && e.status === 403 ? OP_WORDS.forbidden : OP_WORDS.sendFailed }); },
+        () => { set({ draft: null, settings: { ...get().settings, operate: on === true }, op: { ...get().op, saving: false, notice: OP_WORDS.operateSaved } }); return refresh(); },
+        (e) => { if (!aborted(e)) set({ draft: null, op: { ...get().op, saving: false, notice: e && e.status === 403 ? OP_WORDS.forbidden : OP_WORDS.sendFailed } }); },
       );
     },
   };

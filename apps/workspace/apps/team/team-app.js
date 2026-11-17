@@ -15,6 +15,13 @@ if (!FULC || typeof FULC.register !== "function") {
 
 const link = (href, text, extra) => (href ? h("a", { class: "tm-link", href, target: "_blank", rel: "noopener noreferrer", "aria-label": text + WORDS.newWindow, ...extra }, text) : h("span", extra, text));
 
+/** Calls `fn` each time the tab is shown again; returns the function that stops it. */
+function onVisible(fn) {
+  const f = () => { if (!document.hidden) fn(); };
+  document.addEventListener("visibilitychange", f);
+  return () => document.removeEventListener("visibilitychange", f);
+}
+
 function mountApp(contentEl) {
   const ac = new AbortController();
   const team = createTeam({ signal: ac.signal, onChange: () => paint() });
@@ -362,7 +369,7 @@ function mountApp(contentEl) {
 
   paint();
   team.load();
-  team.start({ subscribe: onRefresh, listen: on, hidden: () => document.hidden });
+  team.start({ subscribe: onRefresh, listen: on, hidden: () => document.hidden, visibility: onVisible });
   return {
     destroy() {
       team.stop();

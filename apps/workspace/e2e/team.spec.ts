@@ -531,6 +531,49 @@ test.describe("Team app", () => {
     await expect.poll(() => mock.reads.filter((r) => r.endsWith("/lanes")).length).toBeGreaterThanOrEqual(1);
   });
 
+  test("a refresh that lands while a save is out does not put the ticked box back; the box and the saved value agree after a reload", async ({ page }) => {
+    const { mock, errors } = await setup(page, fresh({ streaming: true }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    const repoBox = t(page, `tm-repo-${REPO_A}`);
+    await expect(repoBox).toBeChecked();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    await page.route((u) => u.pathname === `${BASE}/settings`, async (route) => { if (route.request().method() === "PUT") await held; await route.fallback(); });
+    await press(repoBox); // untick: the save is held
+    await expect(repoBox).not.toBeChecked();
+    const settingsReads = () => mock.reads.filter((r) => r === `${BASE}/settings`).length;
+    const before = settingsReads();
+    mock.streamFrame = `id: c-2\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e2", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 11 } })}\n\n`;
+    await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
+    await expect.poll(settingsReads, { timeout: 10_000 }).toBeGreaterThan(before); // the refresh read the old, ticked value while the save was out
+    await expect(t(page, `tm-repo-${REPO_A}`)).not.toBeChecked();
+    release();
+    await expect.poll(() => mock.puts.length).toBe(1);
+    await expect(t(page, `tm-repo-${REPO_A}`)).not.toBeChecked();
+    await page.reload();
+    await waitForDesktop(page);
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, `tm-repo-${REPO_A}`)).not.toBeChecked();
+    await clean(page, errors);
+  });
+
+  test("a refresh that finds nothing new keeps the same boxes: not rebuilt, focus and identity stay", async ({ page }) => {
+    const { mock } = await setup(page, fresh({ streaming: true }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await t(page, `tm-repo-${REPO_A}`).focus();
+    await page.evaluate((id) => { (document.querySelector(`[data-testid="tm-repo-${id}"]`) as HTMLElement & { mark?: number }).mark = 7; }, REPO_A);
+    const before = mock.reads.length;
+    mock.streamFrame = `id: c-3\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e3", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 12 } })}\n\n`;
+    await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
+    await expect.poll(() => mock.reads.length, { timeout: 10_000 }).toBeGreaterThan(before);
+    await expect.poll(() => mock.reads.filter((r) => r === `${BASE}/settings`).length).toBeGreaterThan(1);
+    expect(await page.evaluate((id) => (document.querySelector(`[data-testid="tm-repo-${id}"]`) as (HTMLElement & { mark?: number }) | null)?.mark, REPO_A)).toBe(7);
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe(`tm-repo-${REPO_A}`);
+  });
+
   test("toggling a box keeps keyboard focus on it while the save is out and after it, and the box stays in the Tab order", async ({ page }) => {
     const { mock, errors } = await setup(page, fresh());
     await open(page);
