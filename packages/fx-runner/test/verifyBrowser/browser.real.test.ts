@@ -206,6 +206,15 @@ function job(withState: boolean) {
   return { call, server, jobDir };
 }
 
+/**
+ * Waits, through the server's own `wait_text` tool, until the text is visible, and fails here, naming it, when it is not. `wait_text` answers `text_not_visible` when the time runs out
+ * (it does not throw), so a bare call lets the test go on to take a snapshot of a page that never showed the element, and the failure then points at a later `ref()` lookup instead.
+ */
+async function seen(j: { call: (name: string, args?: unknown) => Promise<string> }, text: string): Promise<void> {
+  const reply = await j.call("wait_text", { text });
+  expect(reply, `wait_text "${text}"`).toContain("text_visible");
+}
+
 function cmdlines(jobDir: string): string[][] {
   return browserPids(jobDir).map((pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0"));
 }
@@ -237,7 +246,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     // Click, reload, undo: the counter changes, persists across a reload, and goes back.
     expect(await j.call("open", { path: "/" })).toContain("opened");
     expect(await j.call("wait_text", { text: "Items: 0" })).toContain("text_visible");
-    await j.call("wait_text", { text: "Add item" });
+    await seen(j, "Add item");
     let snap = await j.call("snapshot");
     expect(snap).toContain("first visit");
     const ref = (label: string) => {
@@ -288,7 +297,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     for (const a of lines) expect(a).not.toContain("--no-sandbox");
 
     // The second origin gets no hit: a link, a redirect and a protocol-relative path are all stopped.
-    await j.call("wait_text", { text: "Partner site" });
+    await seen(j, "Partner site");
     snap = await j.call("snapshot");
     expect(await j.call("click", { ref: ref("Partner site") })).toContain("error: left_origin");
     expect(otherHits, "after the link click").toBe(0);
@@ -301,9 +310,9 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
 
     // file:// cannot be opened, and a link to it goes nowhere.
     expect(await j.call("open", { path: "file:///etc/passwd" })).toContain("error: bad_path");
-    await j.call("open", { path: "/" });
-    await j.call("wait_text", { text: "Items:" });
-    await j.call("wait_text", { text: "Local file" });
+    expect(await j.call("open", { path: "/" })).toContain("opened");
+    await seen(j, "Items:");
+    await seen(j, "Local file");
     snap = await j.call("snapshot");
     await j.call("click", { ref: ref("Local file") });
     expect(await j.call("snapshot")).toContain("Dashboard");
@@ -335,7 +344,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
   it("opens a desktop-style icon with a double-click and not with a single click", async () => {
     const j = job(false);
     await j.call("open", { path: "/desk" });
-    await j.call("wait_text", { text: "Notes icon" });
+    await seen(j, "Notes icon");
     const snap = await j.call("snapshot");
     const ref = /(e\d+) \S+ "Notes icon"/.exec(snap)![1]!;
     expect(await j.call("click", { ref })).toContain("clicked");
@@ -364,7 +373,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
     const j = job(false);
     await j.call("open", { path: "/popups" });
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    await j.call("wait_text", { text: "Send form" });
+    await seen(j, "Send form");
     let snap = await j.call("snapshot");
     expect(snap).toContain("Popups");
     const ref = (label: string) => {
