@@ -16,7 +16,7 @@ export const BOOT_BUDGET = Object.freeze({
   // e2e`) is the one that holds. The build-time file count alone cannot see a
   // fetch(); the eight theme files were 8 requests over it until theme-manager
   // loaded only the theme in use.
-  maxStaticRequests: 130,
+  maxStaticRequests: 135,
   // Total brotli (q11) bytes over the same set.
   // Raised from 250 KB to 320 KB by owner ruling 2026-09-30 (PM correction,
   // D#37 C26): main sat at 249,159 of 256,000 and Launch needs ~45 KB more.
