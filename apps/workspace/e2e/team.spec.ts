@@ -1096,7 +1096,7 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-halt-btn")).toHaveCount(0);
     expect(await activeId(page)).toBe("tm-clear-btn"); // focus follows the one control that stands for the action
     await expect(t(page, "tm-live")).toHaveText("Halting. Waiting for the machine to confirm it stopped the engine.");
-    await expect(t(page, "tm-op-why")).toHaveText("The engine is halted.");
+    await expect(t(page, "tm-op-why")).toHaveText("A halt is being applied."); // pending wins over halted while the machine has not confirmed
     await clean(page, errors);
   });
 

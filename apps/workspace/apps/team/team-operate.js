@@ -61,7 +61,7 @@ export const HALT_WORDS = {
   askHaltTitle: "Halt the engine?", askClearTitle: "Clear the halt?", haltTail: " now and kills its agents.", haltLead: "This stops the engine on ", yourMachine: "your machine",
   haltRisk: "Work the agents have not finished can be lost. Every command is refused until an owner or admin clears the halt.",
   clearText: "Commands are allowed again. The engine is not started for you: use Resume loop or Start day afterwards.",
-  clearLocal: "If it was stopped on the machine itself, clearing does not lift that. Halt here again and then clear, or resume it on the machine.",
+  clearLocal: "If it was stopped on the machine itself, clearing does not lift that. Afterwards, halt here and clear again, or resume it on the machine.",
   busy: "Another change is being saved. Try again in a moment.",
   clearedSaid: "The halt is cleared. The engine is not started again until you start it.", pendingSaid: "Halting. Waiting for the machine to confirm it stopped the engine.", haltedSaid: "The engine is halted.",
   haltForbidden: "Only an owner or admin can halt the engine.", clearForbidden: "Only an owner or admin, signed in, can clear a halt.", signedOut: "Your session has ended. Sign in again.",
@@ -105,13 +105,13 @@ export function readDials(raw) {
 }
 
 // ── what the page draws ─────────────────────────────────────────────────────────────────────────────────────────────────────
-/** Why every control is locked, or "". Watch first, then operate (the account's switch and the repo's), then a halt. */
+/** Why every control is locked, or "". A halt being applied first (it is what the owner just did), then watch, then operate (the account's switch and the repo's), then a halt. */
 export function lockReason(settings, repo) {
+  if (repo && repo.haltPending) return OP_WORDS.haltPending;
   if (!settings.watch) return OP_WORDS.watchOff;
   if (!repo) return OP_WORDS.noRepo;
   if (!settings.operate || !repo.operate) return OP_WORDS.operateOff;
   if (repo.halted) return OP_WORDS.halted;
-  if (repo.haltPending) return OP_WORDS.haltPending;
   return "";
 }
 const argText = (c, agentName) => {
