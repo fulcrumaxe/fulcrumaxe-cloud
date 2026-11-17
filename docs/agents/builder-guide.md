@@ -51,7 +51,7 @@ Sources:
 ## 2. The environment
 
 - Work inside the Nix dev shell. `nix develop` gives Node 24, pnpm, the Postgres binaries
-  (`initdb`, `pg_ctl`) the database tests start, and the Playwright browsers. CI runs every step
+  (`initdb`, `pg_ctl`) the database tests start, `ps` (from `procps`, because an `fx-runner` test reads the real process list and the NixOS runner's service `PATH` is minimal, #985), and the Playwright browsers. CI runs every step
   inside `nix develop .#ci`; use that shell when you need to reproduce a CI result exactly.
 - Install with `pnpm install --frozen-lockfile`. Never change `pnpm-lock.yaml` unless the task adds
   or removes a dependency, and never symlink `node_modules` from another checkout: an install then
@@ -117,6 +117,7 @@ request.
 | If your change... | Run | And do |
 |---|---|---|
 | imports another workspace package, in source or in a test | `node --test scripts/ci/declared-imports.test.mjs` and `pnpm typecheck` | Declare it in `package.json` (`devDependencies` for a test-only import). A test import compiles the other package under your package's flags, so typecheck everything, not just your package. |
+| adds a new package or app directory | `packages/test-guard/test/workspace-coverage.test.ts` | Register it in `vitest.workspace.ts` and list `../test-guard/src/setup.ts` first in its `vitest.config.ts` `setupFiles`, as `packages/hetzner` does (#1030). |
 | adds or changes an API route or schema | `packages/api/test/openapi-drift.test.ts`, `packages/api/test/inventory.test.ts`, `packages/api-client/test/drift.test.ts`, `packages/api/test/contract.test.ts` | Regenerate with `pnpm --filter @fx/api gen-openapi`, then `pnpm --filter @fx/api-client gen`, and commit `packages/api/openapi.json` and `packages/api-client/src/generated.ts`. Never edit either by hand. |
 | adds `apps/web/app/api/**/route.ts` | `apps/web/test/route-inventory.test.ts` | Add its line to `apps/web/app/api/ROUTES.allowlist`. Run every test that enumerates routes or `vercel.json`: `git grep -l "vercel.json\|ROUTES.allowlist" -- '*.test.*'`. |
 | adds a cron to a `vercel.json` | `apps/live-e2e/test/platform-pack.test.ts` | Declare its probe; the test fails on a scheduled cron no probe covers. |
@@ -160,6 +161,10 @@ The rules live in `packages/db/migrations/README.md`. In short:
   `packages/db/scripts/neon-shape-entries.sh`), a pinned `search_path`, an owner that matches its
   kind, and `EXECUTE` granted to the one role that calls it. "The same as an older migration" is
   not proof: older files may be exempt from checks a new one must pass.
+  A definer that belongs to a NOLOGIN role of its own (as `engine_halt_definer` does in
+  `packages/db/migrations/1031_engine_halt.sql`, #992) needs its own check in
+  `packages/db/scripts/test-neon-shape.sh` that pins the exact function signatures, their ACLs and
+  the role's privileges.
 - Run before you report: `bash packages/db/scripts/check-migration-order.sh --base origin/main`,
   `bash packages/db/scripts/test-neon-shape.sh`, `node scripts/ci/check-migration-compat.mjs`, and
   the whole `packages/db` suite (`pnpm --filter @fx/db test`), including the inventory tests above.

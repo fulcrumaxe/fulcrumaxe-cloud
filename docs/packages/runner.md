@@ -14,6 +14,14 @@ Sources:
 - `packages/fx-runner/src/verifyBrowser/ground.ts`
 - `packages/fx-runner/src/daemon/signInState.ts`
 - `packages/fx-runner/src/daemon/client.ts`
+- `packages/fx-runner/src/commands/engineBridge.ts`
+- `packages/fx-runner/src/engineBridge/daemon.ts`
+- `packages/fx-runner/src/engineBridge/loop.ts`
+- `packages/fx-runner/src/engineBridge/commands.ts`
+- `packages/fx-runner/src/engineBridge/inbox.ts`
+- `packages/fx-runner/src/engineBridge/decideSocket.ts`
+- `packages/fx-runner/src/engineBridge/ceiling.ts`
+- `packages/runner/src/targets/jobIssuer.ts`
 - `packages/fx-runner/src/commands/verifyLogin.ts`
 - `packages/worker/src/checkFix.ts`
 - `packages/worker/src/advance.ts`
@@ -102,7 +110,23 @@ The CLI reaches the extension through `--chrome` (only this role; every other ro
 
 ### Test files a check-fix round may add to its scope (#976)
 
-A check-fix round's start (`packages/worker/src/checkFix.ts`) may pass `scopeExtra` on its `StartAgentRunInput` (`packages/runner/src/startAgentRun.ts`, `ExecutionRun` in `packages/runner/src/executionTarget.ts`): the failed test files the cloud counted as inside the change, read from the failed run's stored check summary, plus the files an earlier check-fix round of the same chain was given. The job issuer (`packages/runner/src/targets/jobIssuer.ts`) applies it only to a job that is itself a `check_fix` round and only on top of a Spec scope that was read. It re-tests every path with `checkFixScopeExtra` (`packages/runner-protocol/src/acceptanceScope.ts`): a plain repository-relative file of test-file shape that the Spec's list does not already hold, at most `CHECK_FIX_SCOPE_EXTRA_MAX` (20). Anything else is dropped without refusing the job. The cloud reads the summary's header lines only above the `CHECK_HEADER_END` line, which the runner writes after its header (`packages/fx-runner/src/daemon/checkStep.ts`), and only when the run's runner is at `CHECK_HEADER_END_MIN_PROTOCOL` (19) or later; `CURRENT_PROTOCOL_VERSION` in `packages/runner-protocol/src/messages.ts` is 19. `widenForCheckFix` in `packages/runner-cloud/src/done.ts` holds the pull request to the Spec's list plus exactly those files.
+A check-fix round's start (`packages/worker/src/checkFix.ts`) may pass `scopeExtra` on its `StartAgentRunInput` (`packages/runner/src/startAgentRun.ts`, `ExecutionRun` in `packages/runner/src/executionTarget.ts`): the failed test files the cloud counted as inside the change, read from the failed run's stored check summary, plus the files an earlier check-fix round of the same chain was given. The job issuer (`packages/runner/src/targets/jobIssuer.ts`) applies it only to a job that is itself a `check_fix` round and only on top of a Spec scope that was read. It re-tests every path with `checkFixScopeExtra` (`packages/runner-protocol/src/acceptanceScope.ts`): a plain repository-relative file of test-file shape that the Spec's list does not already hold, at most `CHECK_FIX_SCOPE_EXTRA_MAX` (20). Anything else is dropped without refusing the job. The cloud reads the summary's header lines only above the `CHECK_HEADER_END` line, which the runner writes after its header (`packages/fx-runner/src/daemon/checkStep.ts`), and only when the run's runner is at `CHECK_HEADER_END_MIN_PROTOCOL` (19) or later; `CURRENT_PROTOCOL_VERSION` in `packages/runner-protocol/src/messages.ts` is 20. `widenForCheckFix` in `packages/runner-cloud/src/done.ts` holds the pull request to the Spec's list plus exactly those files.
+
+### The engine bridge on the runner (#998, #1002, #1010, #1023)
+
+The engine bridge connects the autonomous team a person runs on their own machine to the workspace's Team app. It is off unless two things hold: the runner's hello lists the `engine_bridge_v1` capability (the fifteenth in `RUNNER_CAPABILITIES`, `packages/runner-protocol/src/job.ts`) and speaks protocol 20 or later (`ENGINE_BRIDGE_MIN_PROTOCOL`). `HelloMessage` refuses a hello that lists the capability below that version, and `engineBridgeAllowed` in `packages/runner-protocol/src/messages.ts` is the one predicate a route uses. When a cloud refuses a hello, the client drops `browser_playwright_v1`, `browser_chrome_v1` and `deploy_order_v1` first and then this capability, so a cloud without it keeps the capabilities it does know (`packages/fx-runner/src/daemon/client.ts`).
+
+A person turns it on per repo with `fx-runner engine-bridge enable --repo <owner/name> --repo-root <dir> [--state-dir <dir>]`, and off with `disable [--repo <owner/name>]`; `status` prints what the running daemon last said, with no event content and no network call (`packages/fx-runner/src/commands/engineBridge.ts`). `enable` asks the cloud which repos this runner is paired with and refuses (exit 2, with a fixed reason) a repo not on that list, an engine state directory another bridged repo already uses, or a repo root with no readable `engine/manifest.json` version. When that check itself fails, the message now says what went wrong in words and what to do next: the HTTP status and short error code, or a short network code, never the cloud's own text (#1023). A running `fx-runner run` picks the settings file up within seconds and starts, per repo (`packages/fx-runner/src/engineBridge/daemon.ts`):
+
+- an upload loop that tails the engine's events file, sends batches in order (at most 100 events, requests of at most 256 KiB) and moves its cursor only past what the cloud accepted (`loop.ts`);
+- a command puller that fetches the signed engine commands for this runner, judges each (signature, runner, repo, operate switch, expiry, sequence), acks a refusal with a closed reason, and hands valid ones to the engine through an inbox directory in the engine's state directory (`commands.ts`, `inbox.ts`). A halt epoch above the local one runs the kill path before any command is written, and the start-like commands (`start_day`, `resume_loop`, `request_spawn`, `set_dial`) are refused while the repo is halted;
+- a dial ceiling keeper that writes a small file in the engine's state directory from the cloud's answer (`ceiling.ts`, #1002). It lives 15 minutes and is rewritten every 5. When a fetch fails nothing new is written, the old file runs out, and the engine then reads ceiling 1 for the spawn class and the two merge classes (`agent.spawn`, `merge.standard`, `merge.fast-path`); `engine_spec_ready` sets no ceiling. A halted repo is written at the strictest ceiling.
+
+One decide socket serves the machine (`decideSocket.ts`): a local Unix socket, mode 0600, that forwards the engine's decision requests to the cloud in the runner's own signed request, and only for repos this runner runs. The socket itself refuses (`operate_off`) only when the answer it is handed is `false` (`packages/fx-runner/src/engineBridge/decideSocket.ts`), but the daemon hands it `true` only after a pull has said operate is on, so before the first pull a request is refused too (`packages/fx-runner/src/engineBridge/daemon.ts`). The cloud signs the commands with the job-signing key through `signEngineCommand` on `JobSigner` (`packages/runner/src/targets/jobIssuer.ts`). Every log line of the bridge is fixed text.
+
+### A fix round under a runner parent (#989)
+
+A runner run can have at most one runner child, because of a database key on runner follow-ups. When an executor fix round ended without a session (a refused push), the next round used to pick that run as its parent and be refused by the key for good. `freeRunnerParent` in `packages/worker/src/advance.ts` now walks to the end of the runner-child chain (at most `RUNNER_CHAIN_HOPS_MAX`, 50 hops) and starts the round under that run; a longer chain is refused as `parent_chain_too_long`, and a unique-key refusal from the database answers `already_running` instead of a dead end.
 
 ### Overlap facts on a blocked plane merge (#963, #964)
 

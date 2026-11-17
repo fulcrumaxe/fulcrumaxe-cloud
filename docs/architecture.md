@@ -40,6 +40,14 @@ Sources:
 - `packages/core/src/verify/rows.ts`
 - `packages/core/src/verify/signIn.ts`
 - `packages/core/src/verify/startApps.ts`
+- `packages/api/src/routes/engine.ts`
+- `packages/api/src/routes/engine-commands.ts`
+- `packages/api/src/routes/engine-halt.ts`
+- `packages/api/src/routes/engine-decisions.ts`
+- `packages/runner-cloud/src/engineDecide.ts`
+- `packages/fx-runner/src/engineBridge/daemon.ts`
+- `packages/worker/src/compositionRoot.ts`
+- `packages/hetzner/package.json`
 - `packages/core/src/verify/settings.ts`
 - `packages/core/src/verify/bugItem.ts`
 - `.github/workflows/ci.yml`
@@ -64,7 +72,7 @@ Every edge below is a real `dependencies` entry in the source project's `package
 | `apps/gh-proxy` | `@fx/db`, `@fx/github`, `@fx/net-guard`, `@fx/runner`, `web` |
 | `apps/ops` | `@fx/db`, `@fx/telemetry` |
 | `apps/web` | `@fulcrumaxe/runner-protocol`, `@fx/api`, `@fx/billing`, `@fx/core`, `@fx/db`, `@fx/design`, `@fx/gh-policy`, `@fx/github`, `@fx/model-connection`, `@fx/net-guard`, `@fx/partners`, `@fx/pipeline`, `@fx/plan-data`, `@fx/reconcile`, `@fx/runner`, `@fx/runner-cloud`, `@fx/spend`, `@fx/telemetry`, `@fx/webhooks`, `@fx/worker` |
-| `packages/api` | `@fulcrumaxe/runner-protocol`, `@fx/billing`, `@fx/core`, `@fx/db`, `@fx/decisions`, `@fx/discussions`, `@fx/model-call`, `@fx/model-connection`, `@fx/model-router`, `@fx/pipeline`, `@fx/plan-data`, `@fx/receipts`, `@fx/runner-cloud`, `@fx/sitekit-publish-gates`, `@fx/spend`, `@fx/telemetry`, `@fx/webhooks` |
+| `packages/api` | `@fulcrumaxe/runner-protocol`, `@fx/billing`, `@fx/core`, `@fx/db`, `@fx/decisions`, `@fx/discussions`, `@fx/model-call`, `@fx/model-connection`, `@fx/model-router`, `@fx/pipeline`, `@fx/plan-data`, `@fx/receipts`, `@fx/runner-cloud`, `@fx/sitekit-pipeline`, `@fx/sitekit-publish-gates`, `@fx/spend`, `@fx/telemetry`, `@fx/webhooks` |
 | `packages/billing` | `@fx/core`, `@fx/spend`, `@fx/telemetry` |
 | `packages/core` | `@fulcrumaxe/runner-protocol`, `@fx/db`, `@fx/decisions`, `@fx/plan-data`, `@fx/roles`, `@fx/runtime`, `@fx/stats`, `@fx/trust` |
 | `packages/db` | `@fx/decisions`, `@fx/telemetry` |
@@ -77,6 +85,7 @@ Every edge below is a real `dependencies` entry in the source project's `package
 | `packages/fx-runner` | `@fulcrumaxe/runner-protocol` |
 | `packages/gh-policy` | `@fulcrumaxe/runner-protocol` |
 | `packages/github` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/db`, `@fx/gh-policy`, `@fx/net-guard`, `@fx/runner`, `@fx/telemetry`, `@fx/trust` |
+| `packages/hetzner` | `@fx/net-guard` |
 | `packages/model-call` | `@fx/model-connection`, `@fx/runtime` |
 | `packages/model-connection` | `@fx/core`, `@fx/db`, `@fx/telemetry` |
 | `packages/model-router` | `@fx/db`, `@fx/roles`, `@fx/runtime`, `@fx/spend` |
@@ -85,7 +94,7 @@ Every edge below is a real `dependencies` entry in the source project's `package
 | `packages/pipeline` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/discussions`, `@fx/runner`, `@fx/spend`, `@fx/telemetry`, `@fx/trust` |
 | `packages/receipts` | `@fx/db`, `@fx/decisions`, `@fx/github`, `@fx/spend` |
 | `packages/reconcile` | `@fx/db` |
-| `packages/runner-cloud` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/db`, `@fx/gh-policy`, `@fx/runner`, `@fx/telemetry` |
+| `packages/runner-cloud` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/db`, `@fx/decisions`, `@fx/gh-policy`, `@fx/runner`, `@fx/telemetry` |
 | `packages/runner` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/features`, `@fx/net-guard`, `@fx/runtime`, `@fx/spend`, `@fx/telemetry` |
 | `packages/runtime` | `@fulcrumaxe/runner-protocol` |
 | `packages/sitekit-pipeline` | `@fx/sitekit-claims`, `@fx/trust` |
@@ -98,7 +107,7 @@ Every edge below is a real `dependencies` entry in the source project's `package
 
 Leaves with no internal runtime dependency: `apps/live-e2e`, `apps/live-sink`, `apps/workspace`, `packages/api-client`, `packages/cli`, `packages/decisions`, `packages/design`, `packages/env-spec`, `packages/net-guard`, `packages/plan-data`, `packages/roles`, `packages/runner-protocol`, `packages/sitekit-checks`, `packages/sitekit-claims`, `packages/stats`, `packages/test-guard`, `packages/trust`.
 
-`packages/test-guard` is wired into every project through `vitest.workspace.ts`'s `setupFiles` (a test-runtime path reference, not a `package.json` dependency). `packages/doc-templates` is a private package left out of the workspace in `pnpm-workspace.yaml`, so the public lockfile carries no importer for it.
+`packages/hetzner` (`@fx/hetzner`, #1030) is a typed, strict client for the Hetzner Cloud API: locations, server types, pricing, servers, firewalls, SSH keys and actions, with bounded timeouts and retries, rate-limit headers honoured and an idempotent server create (`packages/hetzner/src/client.ts`). Its host is resolved through `@fx/net-guard`, and its token is scrubbed from every error. No other package or app depends on it yet, and its tests run against a strict local fake over real TLS. `packages/test-guard` is wired into every project through `vitest.workspace.ts`'s `setupFiles` (a test-runtime path reference, not a `package.json` dependency). `packages/doc-templates` is a private package left out of the workspace in `pnpm-workspace.yaml`, so the public lockfile carries no importer for it.
 
 ## Request flow
 
@@ -124,8 +133,8 @@ A work item moves through the stages in `packages/core/src/work-items/stages.ts`
    - It places one deploy order for the merge commit, which a runner on the repository's own machine claims, then polls the app's `/api/health` for up to 15 minutes until the reported commit is the merge commit or a genuine sync commit that descends from it. A failed deploy ends the row `unverified: deploy_failed`; an app that never answers ends it `deployment_unreachable`, one that answers with another commit `commit_not_deployed`.
    - Once the commit qualifies (`packages/worker/src/verifyRun.ts`), it starts one `deploy-verifier` job on a runner, with the checkout pinned to the merge commit. A repository that does not run work on a runner ends `unverified: no_browser`. A repository whose daily verify budget is used up holds the row at `deploying` until the next tick.
    - Before a job starts, the stage reads what the account's runners last said about their saved verify sign-in (`packages/core/src/verify/signIn.ts`, #947). When every runner that has said anything reports it `expired` or `missing`, the row is held with the reason `needs_sign_in` instead of starting, since the job would only come back without an account. A runner that never reported (an older build) does not hold a row. If the app turns out not to know the sign-in while the check runs, the row goes back from `running` to `pending` with the same hold and starts again once a runner reports a good sign-in newer than the hold. A row waits at most 24 hours and is parked at most three times before it ends `unverified: sign_in_expired` (`packages/core/src/verify/rows.ts`, `packages/worker/src/verifyRun.ts`).
-   - A criterion may carry a `[start: <app id>]` marker naming the first-party app a browser journey opens first. Only ids on a closed list (`packages/core/src/verify/startApps.ts`, #957) are kept, so spec text cannot name a page or a URL.
-   - The tester answers with a JSON envelope of journeys (the Spec's criteria plus the repository's standing journeys), each `pass`, `fail` or `blocked`. The pipeline parses it strictly and decides; a `pass` without a step, an undo check and a reload is refused as a hollow pass and the row ends `unverified`.
+   - A criterion may carry a `[start: <app id>]` marker naming the first-party app a browser journey opens first. Only ids on a closed list (`packages/core/src/verify/startApps.ts`, #957) are kept, so spec text cannot name a page or a URL. The list now includes the Team app (`team`, #999).
+   - The tester answers with a JSON envelope of journeys (the Spec's criteria plus the repository's standing journeys), each `pass`, `fail` or `blocked`. The pipeline parses it strictly and decides; a `pass` without a step and an undo check is refused as a hollow pass and the row ends `unverified`, and so is one without a reload, unless the journey is marked view only (a filter, sort or reading, which resets on reload by design) (`isEvidencedPass` in `packages/core/src/verify/rows.ts`, #982).
    - A `failed` row files one bug item, keyed on the row and its first failing journey (`packages/core/src/verify/bugItem.ts`). A row that could not check anything files none. The streak of consecutive `verified` rows is derived from the finished rows: a pass counts, a `failed` or `unverified` row resets it.
 
 ### The cloud's own `fx-gate1`
@@ -148,6 +157,16 @@ A repository has an execution mode (`repos.execution_mode`, `packages/runner-clo
 - `runner_verified`: the agent runs on the customer's machine and the cloud verifies the result.
 
 Reviews follow the same split. A review run on a hosted sandbox counts at the merge gate; a run on the customer's runner counts only when local review is on for the repository and the runner is trusted for that role (`runner_not_trusted_*` stop reasons otherwise).
+
+### The engine bridge
+
+A person can run the autonomous team (the engine) on their own machine and watch or operate it from the workspace. This is a separate path from the pipeline above, off by default: an owner or admin turns on a watch switch and, separately, an operate switch for the account, and ticks the repositories (`engine_bridge_settings`, `engine_bridge_repos`, migration `packages/db/migrations/1027_engine_bridge.sql`, #1001). Everything the cloud shows is computed from closed facts the engine reports (ids, enums, counts, timestamps), never from prose, and none of it feeds a spend cap.
+
+- **Up.** The runner (`packages/fx-runner/src/engineBridge/`) tails the engine's events file and posts batches, signed with the runner's own key, to `/api/runner/engine/events`. The cloud stores them through a database function that checks the switches, the repo, the runner and the strict sequence order, and writes the read model in the same transaction (agents, merge lanes, gate receipts, asks, usage; `packages/db/migrations/1027_engine_bridge.sql`). A repo's plan and roadmap arrive as chunks of one snapshot (`packages/db/migrations/1032_engine_plan.sql`, #1004).
+- **Down.** An owner or admin sends one of seven commands (`start_day`, `pause_loop`, `resume_loop`, `answer_ask`, `set_dial`, `request_spawn`, `stop_agent`) with `POST /api/v1/engine/repos/{id}/commands` (`packages/api/src/routes/engine-commands.ts`, session only, at most 20 waiting commands per runner and repo, `MAX_PENDING_PER_TARGET` in `packages/db/src/engineCommands.ts`). The cloud signs it with the job-signing key (`engineCommandSigner` in `packages/worker/src/compositionRoot.ts`), and the runner pulls it from `/api/runner/engine/commands/pull`, checks it, hands it to the engine and acknowledges the outcome (#998, migration `packages/db/migrations/1029_engine_commands.sql`). A command lives at most ten minutes.
+- **Decisions.** Before the engine spawns an agent, merges a pull request or marks a Spec ready, it asks `/api/runner/engine/decide` through a local socket on the runner. The cloud answers from the repo's dial (`engine_spawn`, `engine_merge`, `engine_spec_ready` in `packages/decisions`), and a decision that needs a person shows up as an ask they answer with `POST /api/v1/engine/decisions/{id}/answer` (#993, migration `packages/db/migrations/1030_engine_decisions.sql`). `/api/runner/engine/dials` hands the runner the resulting ceilings, which it writes as a short-lived file the engine reads (#1002).
+- **Halt.** `POST /api/v1/engine/repos/{id}/halt` sets a per-repo marker (`engine_repo_controls`, migration `packages/db/migrations/1031_engine_halt.sql`, #992) until a person clears it with `halt/clear`. While it is set, decide answers `ask` with `halted: true` and writes no receipt (`packages/runner-cloud/src/engineHaltReplies.ts`), and the command insert trigger refuses the start-like kinds (`start_day`, `resume_loop`, `request_spawn`, `set_dial`) with HX409. A halt bumps an epoch the runner reads and kills the engine on; a clear never lowers it. Setting and clearing run through two `SECURITY DEFINER` functions that check the caller is an owner or admin session.
+- **Read.** The workspace's Team app and the engine items in Needs you read `/api/v1/engine/...` (`packages/api/src/routes/engine.ts`, #1003) and the live `engine.changed` event; see [the workspace app](apps/workspace.md).
 
 ### The review sandbox image
 

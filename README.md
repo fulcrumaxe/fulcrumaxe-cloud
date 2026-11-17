@@ -32,6 +32,15 @@ whose driver is deterministic code, not a model (`packages/pipeline`,
    while the runner's saved sign-in has expired
    (`packages/core/src/verify/signIn.ts`).
 
+Beside that pipeline, a person can run the autonomous team on their own machine
+and watch or operate it from the workspace: the **engine bridge**. The runner
+uploads closed facts about the engine to the cloud and pulls signed commands,
+decisions and a halt marker come back, and the workspace's Team app and the
+engine items in Needs you show and answer them. It is off until an owner or
+admin turns it on, and what it shows is information, never spend
+(`packages/fx-runner/src/engineBridge/`, `packages/api/src/routes/engine.ts`,
+`apps/workspace/apps/team/`; see `docs/architecture.md`).
+
 It also hosts the **site kit**, which turns a customer's repo into a
 fact-verified project website (`packages/sitekit-claims`,
 `packages/sitekit-template`, `packages/sitekit-checks`,
@@ -61,8 +70,8 @@ apps/
                       routes, the pipeline workflows
   workspace/          the fulcrumaxe workspace UI, imported from fulcrumaxe-os
                       via a secure importer and filtered to a cloud profile;
-                      its first-party apps (pipeline, runs, repos, roles, ...)
-                      are under apps/workspace/apps/
+                      its first-party apps (pipeline, needs-you, team, runs,
+                      repos, roles, ...) are under apps/workspace/apps/
   gh-proxy/           proxy-only deployable for the GitHub proxy
   ops/                operator console
   live-e2e/           live end-to-end packs run against a deployed environment
@@ -74,10 +83,12 @@ packages/
   billing/            Stripe billing: webhook, account status/plan state
   cli/                the `fulcrumaxe` command line over the public API
   core/               tenancy + auth, work items and stages, corrections,
-                      the assistant, verify rows and settings
+                      the assistant, verify rows and settings, the engine
+                      bridge's read side
   db/                 Postgres schema, migrations, tenancy helpers
                       (withTenant), the row-level-security inventory
-  decisions/          decision-type catalogue, autonomy presets, decide()
+  decisions/          decision-type catalogue (including the engine's three
+                      decisions), autonomy presets, decide()
   design/             shared visual tokens and components
   discussions/        the Discussions and work-item service
   env-build/ env-network/ env-orchestration/ env-presets/ env-spec/
@@ -89,6 +100,8 @@ packages/
   gh-policy/          pure decision engine for the GitHub proxy
   github/             GitHub App webhook intake, event mapping, installation
                       tokens, merge-gate GraphQL documents
+  hetzner/            typed, strict client for the Hetzner Cloud API (servers,
+                      firewalls, SSH keys, pricing); nothing depends on it yet
   model-call/         server-side model calls over the account's own key
   model-connection/   bring-your-own-key connections: encryption, validation
   model-router/       Postgres-backed model routing, escalation, floors
@@ -198,7 +211,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1023` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`) and the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`) |
+| `0800`–`1032` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`) and the plan snapshot (`1032`); `1028` is not used |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -298,6 +311,16 @@ Sources:
 - `packages/db/migrations/1021_plane_merge_overlap_facts.sql`
 - `packages/db/migrations/1022_criteria_verifications.sql`
 - `packages/db/migrations/1023_merge_conflict_round_expected_signals.sql`
+- `packages/db/migrations/1025_runner_protocol_at_claim.sql`
+- `packages/db/migrations/1027_engine_bridge.sql`
+- `packages/db/migrations/1029_engine_commands.sql`
+- `packages/db/migrations/1030_engine_decisions.sql`
+- `packages/db/migrations/1031_engine_halt.sql`
+- `packages/db/migrations/1032_engine_plan.sql`
+- `packages/fx-runner/src/engineBridge/`
+- `packages/api/src/routes/engine.ts`
+- `apps/workspace/apps/team/`
+- `packages/hetzner/package.json`
 - `scripts/ci/rollup-position.mjs`
 - `packages/pipeline/src/review/queueJump.ts`
 - `packages/core/src/verify/signIn.ts`

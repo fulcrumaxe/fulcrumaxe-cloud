@@ -26,6 +26,7 @@ Sources:
 - `packages/db/migrations/0803_resolve_host.sql`
 - `packages/db/test/partners.test.ts`
 - `packages/db/test/partners-isolation.test.ts`
+- `packages/db/migrations/1027_engine_bridge.sql`
 
 ## What it does
 
@@ -78,7 +79,7 @@ depends on -- lives in `@fx/db`:
 
 ## Tests
 
-`packages/partners/test` holds unit tests for the normaliser, the cache, the middleware step, the context and the signup hook, and `packages/partners/test/pg/live.test.ts`, which runs the resolver and the signup hook against the real database functions on a throwaway Postgres (its `vitest.config.ts` reuses `packages/core`'s global setup, and runs files one at a time because they share that database). Partner-tenancy behavior in the schema is tested from `packages/db`'s own suite: `packages/db/test/partners.test.ts` and `packages/db/test/partners-isolation.test.ts` (see [`db.md`](./db.md) for that package's test harness).
+`packages/partners/test` holds unit tests for the normaliser, the cache, the middleware step, the context and the signup hook, and `packages/partners/test/pg/live.test.ts`, which runs the resolver and the signup hook against the real database functions on a throwaway Postgres (its `vitest.config.ts` reuses `packages/core`'s global setup, and runs files one at a time because they share that database). Partner-tenancy behavior in the schema is tested from `packages/db`'s own suite: `packages/db/test/partners.test.ts` and `packages/db/test/partners-isolation.test.ts` (see [`db.md`](./db.md) for that package's test harness). `partners-isolation.test.ts` also checks that no policy reads `app.user_id` without going through `account_members` or `partner_members`, and keeps a named list of exempt `account_members` policies (the `*_definer_select` ones that let a definer read only the caller's own membership row); `engine_bridge_definer_select` (`packages/db/migrations/1027_engine_bridge.sql`, #1001) is the newest of them.
 
 ## Known gaps
 
