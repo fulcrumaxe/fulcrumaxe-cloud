@@ -113,6 +113,23 @@ describe("a valid command", () => {
     expect(cloud.acks).toHaveLength(1);
   });
 
+  it.each(["expired", "not_confirmed"] as const)("is acked %s once when the engine left that outcome in done/, and the outcome file is cleaned up", async (outcome) => {
+    const { puller } = make();
+    const c = cloud.command(REPO, 1);
+    queue(c);
+    await puller.pullOnce();
+    const name = `1-${c.command_id}`;
+    writeFileSync(path.join(inboxDir(), "done", `${name}.outcome.json`), JSON.stringify({ outcome }), { mode: 0o600 });
+    renameSync(path.join(inboxDir(), `${name}.json`), path.join(inboxDir(), "done", `${name}.json`));
+    await puller.pullOnce();
+    expect(cloud.acks).toEqual([{ id: c.command_id, ack: { outcome } }]);
+    expect(existsSync(path.join(inboxDir(), "done", `${name}.acked.json`))).toBe(true);
+    expect(existsSync(path.join(inboxDir(), "done", `${name}.outcome.json`))).toBe(false);
+    await puller.pullOnce();
+    await puller.pullOnce();
+    expect(cloud.acks).toHaveLength(1);
+  });
+
   it("is acked not_confirmed and moved to done/ once the engine has not consumed it 10 minutes after its expiry", async () => {
     const { puller } = make();
     const c = cloud.command(REPO, 1);
