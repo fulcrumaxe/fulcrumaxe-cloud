@@ -2569,6 +2569,19 @@ export interface Operations {
       answered_option: string;
     };
   };
+  answerEngineDecision: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      choice: "approve" | "decline";
+    };
+    response: {
+      decision_id: string;
+      choice: "approve" | "decline";
+    };
+  };
   approveSubItem: {
     path: {
       id: string;
@@ -6736,6 +6749,17 @@ export const operations = {
     scope: null,
     tokenSelfOnly: false,
     idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  answerEngineDecision: {
+    method: "POST",
+    path: "/api/v1/engine/decisions/{id}/answer",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,

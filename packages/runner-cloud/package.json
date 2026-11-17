@@ -19,6 +19,7 @@
     "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
+    "@fx/decisions": "workspace:*",
     "@fx/gh-policy": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/telemetry": "workspace:*",

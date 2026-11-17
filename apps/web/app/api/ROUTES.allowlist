@@ -33,6 +33,7 @@ runner/deploy-order-claim/route.ts
 runner/deploy-order-report/route.ts
 runner/engine/commands/[id]/ack/route.ts
 runner/engine/commands/pull/route.ts
+runner/engine/decide/route.ts
 runner/engine/events/route.ts
 runner/git-ticket/route.ts
 runner/heartbeat/route.ts

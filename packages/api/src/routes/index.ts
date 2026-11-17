@@ -25,6 +25,7 @@ import { followUpRoutes } from "./followUps.js";
 import { planWritebackRoutes } from "./planWriteback.js";
 import { setupRequestRoutes } from "./setupRequests.js";
 import { decisionAskRoutes } from "./decisionAsks.js";
+import { engineDecisionRoutes } from "./engine-decisions.js";
 import { subItemApprovalRoutes } from "./subItemApprovals.js";
 import { receiptRoutes } from "./receipts.js";
 import { mergeReadyRoutes } from "./mergeReady.js";
@@ -102,6 +103,7 @@ export const ROUTES: RouteEntry[] = [
   ...planWritebackRoutes,
   ...setupRequestRoutes,
   ...decisionAskRoutes,
+  ...engineDecisionRoutes,
   ...subItemApprovalRoutes,
   ...receiptRoutes,
   ...mergeReadyRoutes,

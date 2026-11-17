@@ -50,7 +50,7 @@ interface ErrorBody {
   details?: { path: string; code: string }[];
 }
 
-const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call', 'run_extension', 'merge_after_reviews', 'memory_auto_approve'];
+const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call', 'run_extension', 'merge_after_reviews', 'memory_auto_approve', 'engine_spawn', 'engine_merge', 'engine_spec_ready'];
 
 /**
  * D#7 DP10a: the Autonomy settings API, called through the real `handleApiRequest` against real Postgres (RLS, the owner/admin INSERT
@@ -147,7 +147,7 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(s.presets.map((p) => p.name)).toEqual(['cautious', 'balanced', 'autonomous']);
     expect(new Set(s.presets.map((p) => p.customer_role)).size).toBe(3);
     const dials = dialsByType(s);
-    expect(s.dials).toHaveLength(21);
+    expect(s.dials).toHaveLength(24);
     for (const type of CLASS_2) expect(dials[type], type).toMatchObject({ adjustable: true, source: 'default', preset: null, version: null });
     expect(dials.runner_run_on_member_plan!.disposition).toBe('announce');
     // The dials the runtime reads as Balanced with no row show announce; a dial no runtime path reads keeps the catalogue default.
@@ -205,6 +205,9 @@ describe('D#7 DP10a: decision settings routes', () => {
       ['launch_sub_item', 'act'],
       ['tool_call', 'act'],
       ['run_extension', 'act'],
+      ['engine_spawn', 'act'],
+      ['engine_merge', 'act'],
+      ['engine_spec_ready', 'act'],
     ]);
     for (const m of [...cautious.moves, ...autonomous.moves]) expect(CLASS_2).toContain(m.decision_type);
     expect(await versions(f.repoId)).toHaveLength(0);
@@ -259,20 +262,20 @@ describe('D#7 DP10a: decision settings routes', () => {
     // The member-plan dial is held back (a preset never loosens it, D#7 DW-R7), so no preset matches the repo as a whole.
     expect(s.active_preset).toBeNull();
     expect(s.moved!.map((m) => m.decision_type).sort()).toEqual([
-      'launch_sub_item', 'nonbreaking_refactor_approach', 'run_extension', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice', 'tool_call',
+      'engine_merge', 'engine_spawn', 'engine_spec_ready', 'launch_sub_item', 'nonbreaking_refactor_approach', 'run_extension', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice', 'tool_call',
     ]);
     const dials = dialsByType(s);
     expect(dials.nonbreaking_refactor_approach).toMatchObject({ disposition: 'act', source: 'preset', preset: 'autonomous', version: 1 });
     expect(dials.publish_deprecation_notice).toMatchObject({ disposition: 'ask', source: 'default', version: null });
     const rows = await versions(f.repoId);
-    expect(rows).toHaveLength(8);
+    expect(rows).toHaveLength(11);
     for (const r of rows) {
       expect(CLASS_2).toContain(r.decision_type);
       expect(r.changed_by).toBe(f.admin.userId);
       expect(r.preset).toBe('autonomous');
     }
     const audit = await auditRows(f.owner.accountId);
-    expect(audit).toHaveLength(8);
+    expect(audit).toHaveLength(11);
     for (const a of audit) expect(a.actor).toBe(f.admin.userId);
     expect(audit.find((a) => a.payload.decision_type === 'runner_run_on_member_plan')).toBeUndefined();
   });
@@ -296,7 +299,7 @@ describe('D#7 DP10a: decision settings routes', () => {
       const applied = (await res.json()) as Settings & { held?: unknown };
       expect(applied.held).toEqual(preview.held);
       expect(applied.moved!.map((m) => m.decision_type)).not.toContain(RUN);
-      expect(applied.moved).toHaveLength(8);
+      expect(applied.moved).toHaveLength(11);
       expect(dialsByType(applied)[RUN]).toMatchObject({ disposition: 'announce', source: 'default', version: null });
       expect(applied.active_preset).toBeNull();
       expect(await runnerRows(f.repoId)).toEqual([]);
