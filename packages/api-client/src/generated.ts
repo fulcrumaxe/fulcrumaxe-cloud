@@ -424,6 +424,7 @@ export interface Operations {
         };
       };
       runner_api_equivalent_usd: number;
+      engine_api_equivalent_usd: number;
     };
   };
   getWorkItemTimeline: {
@@ -2935,6 +2936,7 @@ export interface Operations {
         limit_usd: number;
       };
       own_plan_api_equivalent_usd: number;
+      engine_api_equivalent_usd: number;
       compute_notice: ({
         code: "compute_allowance_80";
         message: string;
@@ -5332,6 +5334,385 @@ export interface Operations {
       state: "cancelled";
     };
   };
+  listEngineRepos: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      items: Array<{
+        repo_id: string;
+        full_name: string;
+        runner_id: string | null;
+        runner_name: string | null;
+        session_id: string | null;
+        last_event_at: string | null;
+        last_heard_at: string | null;
+        liveness: "live" | "stale" | "runner_removed" | "never";
+        watch_enabled: boolean;
+        operate_enabled: boolean;
+        halted: boolean;
+        halt_pending: boolean;
+      }>;
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+    };
+  };
+  listEngineAgents: {
+    path: {
+      id: string;
+    };
+    query: {
+      limit?: string;
+      cursor?: string;
+      state?: "running" | "recent";
+    };
+    body: undefined;
+    response: {
+      items: Array<{
+        agent_id: string;
+        role: string;
+        discussion: number | null;
+        background: boolean | null;
+        started_at: string | null;
+        stopped_at: string | null;
+        verdict: string | null;
+        state: "running" | "unknown" | "stopped";
+        model: string | null;
+        credential_mode: string | null;
+      }>;
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+    };
+  };
+  listEngineLanes: {
+    path: {
+      id: string;
+    };
+    query: {
+      limit?: string;
+      cursor?: string;
+    };
+    body: undefined;
+    response: {
+      items: Array<{
+        pr: number;
+        discussion: number | null;
+        state: string;
+        updated_at: string;
+      }>;
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+    };
+  };
+  listEngineGates: {
+    path: {
+      id: string;
+    };
+    query: {
+      limit?: string;
+      cursor?: string;
+      pr?: string;
+    };
+    body: undefined;
+    response: {
+      items: Array<{
+        pr: number;
+        gate: string;
+        result: string;
+        head_sha: string;
+        at: string;
+      }>;
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+    };
+  };
+  listEngineAsks: {
+    path: {
+      id: string;
+    };
+    query: {
+      limit?: string;
+      cursor?: string;
+      state?: "open" | "all";
+    };
+    body: undefined;
+    response: {
+      items: Array<{
+        ask_id: string;
+        ask_kind: string;
+        source: string;
+        discussion: number | null;
+        pr: number | null;
+        raised_at: string;
+        cleared_at: string | null;
+        how: string | null;
+      }>;
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+    };
+  };
+  listEngineLog: {
+    path: {
+      id: string;
+    };
+    query: {
+      limit?: string;
+      cursor?: string;
+    };
+    body: undefined;
+    response: {
+      items: Array<{
+        line_id: string;
+        actor_role: string;
+        category: string;
+        discussion: number | null;
+        pr: number | null;
+        ts: string;
+      }>;
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+    };
+  };
+  getEngineUsage: {
+    path: {
+      id: string;
+    };
+    query: {
+      from?: string;
+      to?: string;
+    };
+    body: undefined;
+    response: {
+      items: Array<{
+        subject_kind: "agent" | "tick";
+        subject_id: string;
+        model: string | null;
+        credential_mode: string | null;
+        tokens: ({
+          input: number;
+          output: number;
+          cache_read: number;
+          cache_write: number;
+        }) | (null);
+        api_equivalent_usd: number | null;
+        state: ("recorded" | "not_priced" | "not_recorded") | (null);
+        note: string | null;
+        provenance: {
+          session_id: string;
+          seqs: Array<number>;
+        };
+      }>;
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+      window: {
+        from: string;
+        to: string;
+      };
+      totals: {
+        api_equivalent_usd: number;
+        tokens: {
+          input: number;
+          output: number;
+          cache_read: number;
+          cache_write: number;
+        };
+      };
+    };
+  };
+  getEngineStats: {
+    path: {
+      id: string;
+    };
+    query: {
+      from?: string;
+      to?: string;
+    };
+    body: undefined;
+    response: {
+      next_cursor: string | null;
+      as_of: string;
+      heard_age_s: number | null;
+      source_ages_s: {
+        [key: string]: number;
+      };
+      gaps: Array<{
+        from_seq: number;
+        to_seq: number;
+        before_ts: string | null;
+      }>;
+      missing_events: number;
+      window: {
+        from: string;
+        to: string;
+      };
+      agents_by_role: {
+        value: {
+          [key: string]: number;
+        };
+        provenance: {
+          kinds: Array<string>;
+          count: number;
+          seqs: Array<{
+            session_id: string;
+            seq: number;
+          }>;
+        };
+      };
+      duration_s: {
+        n: number;
+        median: number | null;
+        p90: number | null;
+        provenance: {
+          kinds: Array<string>;
+          count: number;
+          seqs: Array<{
+            session_id: string;
+            seq: number;
+          }>;
+        };
+      };
+      merges: {
+        value: number;
+        provenance: {
+          kinds: Array<string>;
+          count: number;
+          seqs: Array<{
+            session_id: string;
+            seq: number;
+          }>;
+        };
+      };
+      gate_pass_rate: {
+        value: number | null;
+        numerator: number;
+        denominator: number;
+        provenance: {
+          kinds: Array<string>;
+          count: number;
+          seqs: Array<{
+            session_id: string;
+            seq: number;
+          }>;
+        };
+      };
+    };
+  };
+  getEngineSettings: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      watch_enabled: boolean;
+      operate_enabled: boolean;
+      can_edit: boolean;
+      repos: Array<{
+        repo_id: string;
+        full_name: string;
+        enabled: boolean;
+        eligible: boolean;
+        refusal: ("repo_not_runner_local" | "public_repo") | (null);
+      }>;
+    };
+  };
+  setEngineSettings: {
+    path: undefined;
+    query: undefined;
+    body: {
+      watch_enabled?: boolean;
+      operate_enabled?: boolean;
+      repo_ids?: Array<string>;
+    };
+    response: {
+      watch_enabled: boolean;
+      operate_enabled: boolean;
+      can_edit: boolean;
+      repos: Array<{
+        repo_id: string;
+        full_name: string;
+        enabled: boolean;
+        eligible: boolean;
+        refusal: ("repo_not_runner_local" | "public_repo") | (null);
+      }>;
+    };
+  };
+  deleteEngineData: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      deleted_sessions: number;
+    };
+  };
 }
 
 /** Every operation by operationId. scope is the scope a token needs (null when it needs none or cannot be used). */
@@ -7621,6 +8002,127 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  listEngineRepos: {
+    method: "GET",
+    path: "/api/v1/engine/repos",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  listEngineAgents: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/agents",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["limit","cursor","state"],
+    hasBody: false,
+  },
+  listEngineLanes: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/lanes",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["limit","cursor"],
+    hasBody: false,
+  },
+  listEngineGates: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/gates",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["limit","cursor","pr"],
+    hasBody: false,
+  },
+  listEngineAsks: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/asks",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["limit","cursor","state"],
+    hasBody: false,
+  },
+  listEngineLog: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/log",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["limit","cursor"],
+    hasBody: false,
+  },
+  getEngineUsage: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/usage",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["from","to"],
+    hasBody: false,
+  },
+  getEngineStats: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/stats",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["from","to"],
+    hasBody: false,
+  },
+  getEngineSettings: {
+    method: "GET",
+    path: "/api/v1/engine/settings",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  setEngineSettings: {
+    method: "PUT",
+    path: "/api/v1/engine/settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  deleteEngineData: {
+    method: "PUT",
+    path: "/api/v1/engine/settings/delete-data",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
     queryParams: [],
     hasBody: false,
   },

@@ -85,6 +85,10 @@ const FIELD_RULES: Record<string, (value: unknown) => string | number | boolean 
   decisionType: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
   timeoutOutcome: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
   answeredOption: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
+  // Engine bridge EB-5: the ids of `engine.changed` (a stream-only event, never a webhook type): which repo and session changed, and how far the session has got.
+  repo_id: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
+  session_id: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
+  last_seq: (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null),
   createdBy: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
 };
 

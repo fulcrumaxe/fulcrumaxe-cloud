@@ -45,7 +45,7 @@ function parseRepoId(raw: string): string {
   return raw;
 }
 
-function resolveWindow(query: { from?: string; to?: string }, now: Date): { from: Date; to: Date } {
+export function resolveWindow(query: { from?: string; to?: string }, now: Date): { from: Date; to: Date } {
   const to = query.to ? parseTimestamp(query.to, "to") : now;
   const from = query.from
     ? parseTimestamp(query.from, "from")
@@ -116,6 +116,9 @@ export const statsResponseSchema = z.object({
     .describe(
       "What the runs on the person's own machine recorded in this window (and repo, when repo_id is given) would have cost at API prices. Information, never spend: no cost KPI includes it. The same figure that work items and /usage call own_plan_api_equivalent_usd (named differently here because this endpoint's key guard refuses keys containing plan).",
     ),
+  engine_api_equivalent_usd: z
+    .number()
+    .describe("What the usage of the person's own engine recorded in this window (and repo, when repo_id is given) would have cost at API prices, priced by the cloud. Information, never spend: no cost KPI includes it."),
 });
 
 const statsQuerySchema = z.object({

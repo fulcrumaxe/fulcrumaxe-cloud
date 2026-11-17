@@ -114,3 +114,18 @@ export async function readEngineAgentStats(client: PoolClient, w: Window): Promi
   };
   return { agents_by_role, duration_s: { n: durations.length, median: p(0.5), p90: p(0.9) } };
 }
+
+/**
+ * The stats endpoint's engine figure, the twin of `runnerApiEquivalentUsd`: the API-equivalent of the engine usage recorded in `[from, to)`, for one repo when
+ * `repoId` is given. Rounded to the table's four decimals the same way; a row with no price adds nothing. INFORMATION, NEVER SPEND: no cap, reservation or
+ * envelope reads it, and it is returned beside the stats `metrics`, never inside them.
+ */
+export async function engineApiEquivalentUsd(client: PoolClient, input: { from: Date; to: Date; repoId: string | null }): Promise<number> {
+  const { rows } = await client.query<{ sum: string }>(
+    `SELECT COALESCE(SUM(u.api_equivalent_usd), 0)::text AS sum
+       FROM engine_agent_usage u JOIN engine_sessions s ON s.id = u.session_id
+      WHERE u.recorded_at >= $1 AND u.recorded_at < $2 AND ($3::uuid IS NULL OR s.repo_id = $3::uuid)`,
+    [input.from, input.to, input.repoId],
+  );
+  return Math.round(Number(rows[0]?.sum ?? 0) * 10000) / 10000;
+}

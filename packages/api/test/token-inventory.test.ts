@@ -205,6 +205,7 @@ describe('token-inventory: write scopes open only the routes that declare them',
       'getRunLimits', 'getRunAction', 'exportRunEvents', 'listDiscussions', 'getDiscussion',
       'listComments', 'listProposals', 'getProposal', 'getLatestPlanImport', 'getRepoPlan', 'getRunnerConcurrency', 'getDiscoverySetting',
       'getAccountBuildConcurrency', 'getAccountBuildConcurrencyHistory', 'getRepoBuildConcurrency', 'getRepoBuildConcurrencyHistory', 'estimateProposals', 'getAutostartEnvelope', 'getEnvelopeMargin',
+      'listEngineRepos', 'listEngineAgents', 'listEngineLanes', 'listEngineGates', 'listEngineAsks', 'listEngineLog', 'getEngineUsage', 'getEngineStats', 'getEngineSettings',
       'getFollowUpSetting', 'listWorkItemFollowUps', 'getPlanWritebackSetting', 'listWorkItemReceipts',
     ].map((id) => `${id}:read`);
     expect([...tokenRoutes].sort()).toEqual(

@@ -29,6 +29,8 @@ export interface Usage {
    * `model` or any other budget above, is not reserved, and no cap or refusal reads it.
    */
   own_plan_api_equivalent_usd: number;
+  /** Engine bridge EB-5: what this month's usage of the person's own engine (what it reported, priced by the cloud) would have cost at API prices. INFORMATION, NEVER SPEND, like the figure above. */
+  engine_api_equivalent_usd: number;
   /**
    * D#483 S5-k3: the notice at 80% of the compute allowance, derived from the two compute budgets above on every read (never stored), or
    * null. It is information: it pauses nothing and denies no reservation.
@@ -104,7 +106,13 @@ export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promis
       [accountId, periodStart, new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1))],
     );
     const ownPlanUsd = Number(ownPlan.rows[0]?.sum ?? 0);
-    return { at: (b: Budget) => ({ spent: pick(ledger.rows, b), reserved: pick(open.rows, b) }), ownPlanUsd };
+    const engine = await client.query<{ sum: string }>(
+      `SELECT COALESCE(SUM(api_equivalent_usd), 0)::text AS sum FROM engine_agent_usage
+        WHERE account_id = $1 AND recorded_at >= $2 AND recorded_at < $3`,
+      [accountId, periodStart, new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1))],
+    );
+    const engineUsd = Number(engine.rows[0]?.sum ?? 0);
+    return { at: (b: Budget) => ({ spent: pick(ledger.rows, b), reserved: pick(open.rows, b) }), ownPlanUsd, engineUsd };
   });
   const usage = (b: Budget, limit: number): BudgetUsage => ({
     spent_usd: round4(sums.at(b).spent),
@@ -119,6 +127,7 @@ export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promis
     foreground_compute: foreground,
     background_compute: background,
     own_plan_api_equivalent_usd: round4(sums.ownPlanUsd),
+    engine_api_equivalent_usd: round4(sums.engineUsd),
     compute_notice: computeNoticeFor({ foreground_compute: foreground, background_compute: background }),
   };
 }

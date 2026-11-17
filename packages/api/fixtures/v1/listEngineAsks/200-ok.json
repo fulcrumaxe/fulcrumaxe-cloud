@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "ask_id": "0123456789abcdef",
+      "ask_kind": "owner_decision",
+      "source": "team_log",
+      "discussion": 42,
+      "pr": null,
+      "raised_at": "2026-11-16T09:00:00.000Z",
+      "cleared_at": null,
+      "how": null
+    }
+  ],
+  "next_cursor": null,
+  "as_of": "2026-11-16T10:00:30.000Z",
+  "heard_age_s": 20,
+  "source_ages_s": {
+    "loop": 60,
+    "team_log": 120,
+    "plan": 3600,
+    "merge_queue": 300
+  },
+  "gaps": [],
+  "missing_events": 0
+}

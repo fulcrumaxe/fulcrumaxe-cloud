@@ -4,6 +4,7 @@ import { NotFoundError } from '../tenancy/errors.js';
 import type { InstallationAppKind } from '../repos/appKinds.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { runnerApiEquivalentUsd } from '../runs/runnerUsage.js';
+import { engineApiEquivalentUsd } from '../engine/read.js';
 
 /** D#45 S3: this module's own local copy of the ctx principal shape (matches work-items/read.ts's). */
 export interface Principal {
@@ -114,6 +115,8 @@ export interface GetStatsResult {
   metrics: KpiResults;
   /** D#6 R2b-5a: information, never spend. Not a KPI: kept outside `metrics` and read by no cost KPI. */
   runner_api_equivalent_usd: number;
+  /** Engine bridge EB-5: the same kind of figure for the person's own engine (recorded usage, priced by the cloud). Information, never spend. */
+  engine_api_equivalent_usd: number;
 }
 
 /**
@@ -158,12 +161,14 @@ export async function getStats(ctx: StatsReadCtx, input: GetStatsInput): Promise
         : computeKpis({ items: allItems, runs: allRuns, installations }, window).first_pr_from_install;
 
     const runnerApiEquivalent = await runnerApiEquivalentUsd(client, { from, to, repoId });
+    const engineApiEquivalent = await engineApiEquivalentUsd(client, { from, to, repoId });
 
     return {
       window: { from: from.toISOString(), to: to.toISOString(), repo_id: repoId },
       generated_at: generatedAt.toISOString(),
       metrics: { ...scoped, first_pr_from_install: firstPrFromInstall },
       runner_api_equivalent_usd: runnerApiEquivalent,
+      engine_api_equivalent_usd: engineApiEquivalent,
     };
   });
 }

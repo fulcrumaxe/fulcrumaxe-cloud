@@ -1,0 +1,64 @@
+{
+  "next_cursor": null,
+  "as_of": "2026-11-16T10:00:30.000Z",
+  "heard_age_s": 20,
+  "source_ages_s": {
+    "loop": 60,
+    "team_log": 120,
+    "plan": 3600,
+    "merge_queue": 300
+  },
+  "gaps": [],
+  "missing_events": 0,
+  "window": {
+    "from": "2026-10-17T00:00:00.000Z",
+    "to": "2026-11-16T00:00:00.000Z"
+  },
+  "agents_by_role": {
+    "value": {
+      "executor": 1
+    },
+    "provenance": {
+      "kinds": [
+        "agent_started",
+        "agent_stopped"
+      ],
+      "count": 0,
+      "seqs": []
+    }
+  },
+  "duration_s": {
+    "n": 0,
+    "median": null,
+    "p90": null,
+    "provenance": {
+      "kinds": [
+        "agent_stopped"
+      ],
+      "count": 0,
+      "seqs": []
+    }
+  },
+  "merges": {
+    "value": 0,
+    "provenance": {
+      "kinds": [
+        "merged"
+      ],
+      "count": 0,
+      "seqs": []
+    }
+  },
+  "gate_pass_rate": {
+    "value": null,
+    "numerator": 0,
+    "denominator": 0,
+    "provenance": {
+      "kinds": [
+        "gate_receipt"
+      ],
+      "count": 0,
+      "seqs": []
+    }
+  }
+}

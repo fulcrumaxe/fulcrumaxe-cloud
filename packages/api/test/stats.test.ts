@@ -210,7 +210,7 @@ describe('stats: GET /api/v1/stats, GET /api/v1/work-items/{id}/timeline (D#45 S
       const res = await dispatch(await sessionRequest('http://localhost/api/v1/stats', { accountId, userId }));
       expect(res.status).toBe(200);
       const body = (await res.json()) as { window: unknown; generated_at: string; metrics: Record<string, unknown>; runner_api_equivalent_usd: number };
-      expect(Object.keys(body).sort()).toEqual(['generated_at', 'metrics', 'runner_api_equivalent_usd', 'window']);
+      expect(Object.keys(body).sort()).toEqual(['engine_api_equivalent_usd', 'generated_at', 'metrics', 'runner_api_equivalent_usd', 'window']);
       expect(typeof body.runner_api_equivalent_usd).toBe('number');
       expect(Object.keys(body.metrics).sort()).toEqual(KPI_METRIC_IDS);
     });
