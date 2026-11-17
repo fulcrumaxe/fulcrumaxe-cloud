@@ -307,12 +307,13 @@ export function describe(st, nowMs) {
   if (st.status === "loading") return { kind: "loading", text: WORDS.loading };
   if (st.status === "error" || !st.settings) return { kind: "error", text: WORDS.error };
   const sheet = {
-    open: st.sheetOpen, canEdit: st.settings.canEdit, watch: st.settings.watch, saving: st.saving, confirmDelete: st.confirmDelete, notice: st.notice, readOnly: st.settings.canEdit ? "" : WORDS.readOnly,
-    repos: st.settings.repos.map((r) => ({ id: r.id, name: r.name, checked: r.enabled, refused: !r.eligible && !r.enabled, reason: r.eligible || r.enabled ? "" : WORDS.refusals[r.refusal] || WORDS.refusalOther })),
+    open: st.sheetOpen, canEdit: st.settings.canEdit, watch: st.draft && st.draft.watch !== undefined ? st.draft.watch : st.settings.watch, saving: st.saving, confirmDelete: st.confirmDelete, notice: st.notice, readOnly: st.settings.canEdit ? "" : WORDS.readOnly,
+    repos: st.settings.repos.map((r) => ({ id: r.id, name: r.name, checked: st.draft && Object.hasOwn(st.draft.repos, r.id) ? st.draft.repos[r.id] : r.enabled, refused: !r.eligible && !r.enabled, reason: r.eligible || r.enabled ? "" : WORDS.refusals[r.refusal] || WORDS.refusalOther })),
   };
   const repo = st.repos.find((r) => r.id === st.selectedId);
+  const shown = st.draft && st.draft.operate !== undefined ? { ...st, settings: { ...st.settings, operate: st.draft.operate } } : st; // the operate switch the person just chose, while its save is out
   const asOf = (iso) => asOfWords({ as_of: iso }, nowMs);
-  const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", operate: describeOperate(st, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
+  const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", operate: describeOperate(shown, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
   if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   if (!repo) return { kind: "norepos", text: WORDS.noRepos, ...base };
   const { agents, lanes, gates, log, plan, stats, usage } = st.panels;
@@ -325,7 +326,7 @@ export function describe(st, nowMs) {
   const lane = lanes ? laneRows(lanes, gates, nowMs, repo.name) : null;
   const rows = agents ? agents.items.map((a) => agentRow(a, live, nowMs, repo.name)).filter((r) => r.state !== "stopped").map((r) => ({ ...r, stop: r.state === "running" ? stopOf(st, r.stopId) : null, who: agentWords(r) })) : [];
   return {
-    kind: "ready", ...base, operate: describeOperate(st, nowMs, repo, asOf, rows), halt: describeHalt(st, repo),
+    kind: "ready", ...base, operate: describeOperate(shown, nowMs, repo, asOf, rows), halt: describeHalt(st, repo),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
     chip: chipOf(repo), runner: repo.runner, banner: gapBanner(envs), notices: sourceNotices(envs, lanes),
     agents: { ...head(agents), failed: !agents, rows, empty: WORDS.noAgents },
@@ -347,12 +348,15 @@ const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, fa
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
 export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval } = {}) {
-  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, op: NO_OP };
-  let busy = false, again = false, pick = 0, debounce = null, stopFn = null;
-  const set = (patch) => { st = { ...st, ...patch }; onChange(); };
+  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, op: NO_OP, draft: null };
+  let busy = false, again = false, pick = 0, debounce = null, stopFn = null, saveVer = 0, hiddenFn = () => false;
+  // A save starting or ending moves saveVer. A read remembers it when it starts; if it has moved, or a save is out, by the time the answer lands
+  // the answer was asked before the save changed things and is dropped (the read that follows the save shows the server's answer).
+  const set = (patch) => { if (("saving" in patch && patch.saving !== st.saving) || (patch.op && patch.op.saving !== st.op.saving)) saveVer += 1; st = { ...st, ...patch }; onChange(); };
   const operate = createOperate({ client, signal, get: () => st, set, refresh: () => refresh(), aborted: (e) => aborted(e, signal) });
 
   async function read() {
+    const ver = saveVer;
     let settings, repos = [];
     try {
       settings = readSettings(await client.settings(signal));
@@ -366,6 +370,10 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
       set(st.settings ? { refreshFailed: true } : { status: "error" });
       return;
     }
+    if (ver !== saveVer || st.saving || st.op.saving) return;
+    // The same answer as the last one keeps the same objects, so nothing that shows them is redrawn.
+    if (st.settings && JSON.stringify(st.settings) === JSON.stringify(settings)) settings = st.settings;
+    if (JSON.stringify(st.repos) === JSON.stringify(repos)) repos = st.repos;
     const selectedId = repos.some((r) => r.id === st.selectedId) ? st.selectedId : repos.length ? repos[0].id : "";
     const changed = selectedId !== st.selectedId;
     set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op, ...(changed ? { log: NO_LOG, planPage: 0, provOpen: [] } : {}) }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
@@ -425,14 +433,16 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     set({ selectedId: id, panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], refreshFailed: false, op: NO_OP });
     refresh();
   }
-  async function put(call, ok, forbidden) {
+  /** `draft` is what the person just chose: it stays on screen while the save is out, and is dropped if the save fails (the last server value comes back). */
+  async function put(call, ok, forbidden, draft = null, commit = null) {
     if (st.saving) return;
-    set({ saving: true, notice: "", confirmDelete: false });
+    set({ saving: true, notice: "", confirmDelete: false, draft });
     try { await call(); } catch (e) {
-      if (!aborted(e, signal)) set({ saving: false, notice: failureSentence(e, forbidden) });
+      if (!aborted(e, signal)) set({ saving: false, draft: null, notice: failureSentence(e, forbidden) });
       return;
     }
-    set({ saving: false, notice: ok });
+    // The choice becomes the shown value at once; the read that follows replaces it with the server's own answer.
+    set({ saving: false, draft: null, notice: ok, ...(commit && st.settings ? { settings: commit(st.settings) } : {}) });
     await refresh();
   }
   const enabledIds = (except, on) => st.settings.repos.filter((r) => (r.id === except ? on : r.enabled)).map((r) => r.sendId);
@@ -440,12 +450,15 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     const rid = dto && isObj(dto.data) ? idKey(dto.data.repo_id) : "";
     if (rid !== "" && st.selectedId !== "" && rid !== st.selectedId) return; // another repo's event: nothing here changed
     if (debounce !== null) clearTimer(debounce);
-    debounce = setTimer(() => { debounce = null; refresh(); }, DEBOUNCE_MS);
+    debounce = setTimer(() => { debounce = null; refreshVisible(); }, DEBOUNCE_MS);
   }
-  function start({ subscribe, listen, hidden = () => false } = {}) {
+  const refreshVisible = () => { if (!hiddenFn()) refresh(); }; // a hidden tab reads nothing; one read follows when it is shown again
+  function start({ subscribe, listen, hidden = () => false, visibility } = {}) {
     stop();
-    const offs = [typeof subscribe === "function" ? subscribe(() => refresh()) : () => {}, typeof listen === "function" ? listen(LIVE_EVENT, onChanged) : () => {}];
-    const timer = setRepeat(() => { if (!hidden()) refresh(); }, REFRESH_MS);
+    hiddenFn = hidden;
+    const offs = [typeof subscribe === "function" ? subscribe(refreshVisible) : () => {}, typeof listen === "function" ? listen(LIVE_EVENT, onChanged) : () => {},
+      typeof visibility === "function" ? visibility(refreshVisible) : () => {}];
+    const timer = setRepeat(refreshVisible, REFRESH_MS);
     stopFn = () => { offs.forEach((off) => off()); clearRepeat(timer); };
   }
   function stop() {
@@ -461,8 +474,8 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     toggleProv: (id) => set({ provOpen: st.provOpen.includes(id) ? st.provOpen.filter((k) => k !== id) : st.provOpen.concat(id) }),
     planPage: (by) => set({ planPage: Math.max(0, st.planPage + by) }),
     toggleSheet: () => set({ sheetOpen: !st.sheetOpen, confirmDelete: false, notice: "" }),
-    setWatch: (on) => put(() => client.saveSettings({ watch_enabled: on }, signal), WORDS.saved),
-    setRepo: (id, on) => put(() => client.saveSettings({ repo_ids: enabledIds(id, on) }, signal), WORDS.saved),
+    setWatch: (on) => put(() => client.saveSettings({ watch_enabled: on }, signal), WORDS.saved, undefined, { watch: on, repos: {} }, (s) => ({ ...s, watch: on })),
+    setRepo: (id, on) => put(() => client.saveSettings({ repo_ids: enabledIds(id, on) }, signal), WORDS.saved, undefined, { repos: { [id]: on } }, (s) => ({ ...s, repos: s.repos.map((r) => (r.id === id ? { ...r, enabled: on } : r)) })),
     askDelete: () => set({ confirmDelete: true }),
     cancelDelete: () => set({ confirmDelete: false }),
     operate,
