@@ -473,6 +473,74 @@ describe('engine commands: issue, cancel, list [pg]', () => {
       expect((await list(null, f.repo)).status).toBe(401);
     });
 
+    describe('ask_id filter', () => {
+      const ASK = '0123456789abcdef';
+      const OTHER_ASK = 'fedcba9876543210';
+
+      it('returns only the answers to that ask, newest first, with the note only for an owner or admin', async () => {
+        const f = await fixture();
+        await issue(f.owner, f.repo, 'pause_loop');
+        await issue(f.owner, f.repo, 'answer_ask', { ask_id: OTHER_ASK, choice: 'decline' });
+        const first = ((await (await issue(f.owner, f.repo, 'answer_ask', { ask_id: ASK, choice: 'defer' })).json()) as { command_id: string }).command_id;
+        await admin.query("UPDATE engine_commands SET state = 'expired' WHERE id = $1", [first]);
+        const second = ((await (await issue(f.admin, f.repo, 'answer_ask', { ask_id: ASK, choice: 'approve', note: 'ship it' })).json()) as { command_id: string }).command_id;
+        const asOwner = (await (await list(f.owner, f.repo, `?ask_id=${ASK}`)).json()) as { commands: Array<Record<string, unknown> & { args: { ask_id?: string } }> };
+        expect(asOwner.commands.map((c) => c.id)).toEqual([second, first]);
+        expect(asOwner.commands.every((c) => c.kind === 'answer_ask' && c.args.ask_id === ASK)).toBe(true);
+        expect(asOwner.commands[0]).toMatchObject({ note: 'ship it', state: 'pending' });
+        const asMember = await (await list(f.member, f.repo, `?ask_id=${ASK}`)).json();
+        expect(JSON.stringify(asMember)).not.toContain('ship it');
+        expect(JSON.stringify(asMember)).not.toContain('"note"');
+        expect((asMember as { commands: unknown[] }).commands).toHaveLength(2);
+        expect(((await (await list(f.owner, f.repo, '?ask_id=0000000000000000')).json()) as { commands: unknown[] }).commands).toEqual([]);
+      });
+
+      it('caps at 20, even when more are asked for', async () => {
+        const f = await fixture();
+        for (let i = 0; i < 25; i++) {
+          await admin.query(
+            `INSERT INTO engine_commands (account_id, runner_id, repo_id, command_seq, kind, args, issued_by, issued_at, expires_at, state) VALUES ($1, $2, $3, $4, 'answer_ask', $6::jsonb, $5, now(), now() + interval '600 seconds', 'expired')`,
+            [f.owner.accountId, f.runner, f.repo, i + 1, f.owner.userId, JSON.stringify({ ask_id: ASK, choice: 'defer' })],
+          );
+        }
+        expect(((await (await list(f.owner, f.repo, `?ask_id=${ASK}`)).json()) as { commands: unknown[] }).commands).toHaveLength(20);
+        expect(((await (await list(f.owner, f.repo, `?ask_id=${ASK}&limit=50`)).json()) as { commands: unknown[] }).commands).toHaveLength(20);
+        expect(((await (await list(f.owner, f.repo, `?ask_id=${ASK}&limit=5`)).json()) as { commands: unknown[] }).commands).toHaveLength(5);
+      });
+
+      it('never shows another account or another repo, even for the same ask id', async () => {
+        const f = await fixture();
+        const other = await fixture();
+        const sibling = (await admin.query<{ id: string }>(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, NULL, $2, 'web', 'acme', 'w2', 'runner_local') RETURNING id`, [f.owner.accountId, Math.floor(Math.random() * 1e9) + 2e9])).rows[0]!.id;
+        await admin.query(`INSERT INTO engine_commands (account_id, runner_id, repo_id, command_seq, kind, args, issued_by, issued_at, expires_at) VALUES ($1, $2, $3, 1, 'answer_ask', $5::jsonb, $4, now(), now() + interval '600 seconds')`, [f.owner.accountId, f.runner, sibling, f.owner.userId, JSON.stringify({ ask_id: ASK, choice: 'approve' })]);
+        await issue(other.owner, other.repo, 'answer_ask', { ask_id: ASK, choice: 'approve' });
+        expect(((await (await list(f.owner, f.repo, `?ask_id=${ASK}`)).json()) as { commands: unknown[] }).commands).toEqual([]);
+        expect(((await (await list(f.owner, sibling, `?ask_id=${ASK}`)).json()) as { commands: unknown[] }).commands).toHaveLength(1);
+        expect((await list(other.owner, f.repo, `?ask_id=${ASK}`)).status).toBe(404);
+        expect(((await (await list(other.owner, other.repo, `?ask_id=${ASK}`)).json()) as { commands: unknown[] }).commands).toHaveLength(1);
+      });
+
+      it('refuses a bad ask_id with 400 invalid_request, and still needs a session', async () => {
+        const f = await fixture();
+        for (const bad of ['', 'x', '0123456789ABCDEF', '0123456789abcde', '0123456789abcdef0', "0123456789abcde'", '%00123456789abcde', 'a%20b']) {
+          const res = await list(f.owner, f.repo, `?ask_id=${bad}`);
+          expect(res.status, bad).toBe(400);
+          expect(await code(res), bad).toBe('invalid_request');
+        }
+        const token = generateToken();
+        await insertApiToken(plain, { accountId: f.owner.accountId, createdBy: f.owner.userId, tokenHash: hashToken(token), displayHint: 'fxat_...test', scopes: ['read'], expiresAt: new Date(Date.now() + 86_400_000) });
+        expect((await list(null, f.repo, `?ask_id=${ASK}`, token)).status).toBe(403);
+        expect((await list(null, f.repo, `?ask_id=${ASK}`)).status).toBe(401);
+      });
+
+      it('has the partial ask index the lookup relies on', async () => {
+        const idx = await admin.query<{ indexdef: string }>("SELECT indexdef FROM pg_indexes WHERE tablename = 'engine_commands' AND indexname = 'engine_commands_ask_idx'");
+        expect(idx.rowCount).toBe(1);
+        expect(idx.rows[0]!.indexdef).toMatch(/\(account_id, repo_id, \(\(args ->> 'ask_id'::text\)\)\)/);
+        expect(idx.rows[0]!.indexdef).toContain("kind = 'answer_ask'");
+      });
+    });
+
     it('every field is an id, an enum, a number or a timestamp, apart from a note owners and admins see', async () => {
       const f = await fixture();
       await issue(f.owner, f.repo, 'request_spawn');

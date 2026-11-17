@@ -32,8 +32,13 @@ const issueResponseSchema = z.object({ command_id: z.string(), state: z.literal(
 
 const idParamsSchema = z.object({ id: z.string() });
 const cancelResponseSchema = z.object({ command_id: z.string(), state: z.literal("cancelled") });
-const listQuerySchema = z.object({ limit: z.string().regex(/^[0-9]{1,3}$/).optional() });
+// `ask_id` has the shape an ask's id has everywhere else (16 lowercase hex digits); anything else is refused with a 400 in the handler (the query
+// schema's own refusal would be a 422), never searched for.
+const listQuerySchema = z.object({ limit: z.string().regex(/^[0-9]{1,3}$/).optional(), ask_id: z.string().optional() });
+const ASK_ID = /^[0-9a-f]{16}$/;
 const LIST_MAX = 50;
+/** The most answers one ask can show: a person can answer an ask again only while the first is still waiting, so twenty is far more than a real ask has. */
+const ASK_LIST_MAX = 20;
 
 const commandViewSchema = z.object({
   id: z.string(),
@@ -163,7 +168,8 @@ export const engineCommandRoutes: RouteEntry[] = [
     summary: "The latest commands sent to a repo's engine, with their state",
     description:
       "Any member, session only (a token is 403 `session_required`: the list can carry an owner's note). At most 50, newest first. `state` is the runner's own report, with two reads of time: a pending command past its life is `expired`, " +
-      "and a delivered one with no ack 15 minutes past its life is `not_confirmed`. The `note` of an answer is shown only to an owner or admin.",
+      "and a delivered one with no ack 15 minutes past its life is `not_confirmed`. The `note` of an answer is shown only to an owner or admin. " +
+      "With `ask_id` (16 lowercase hex digits; anything else is 400 `invalid_request`) the list is only the `answer_ask` commands for that ask, at most 20, newest first.",
     // principals omitted -> session-only.
     minRole: "member",
     idempotency: "never",
@@ -176,7 +182,11 @@ export const engineCommandRoutes: RouteEntry[] = [
       assertRepoIdShape(repoId);
       const { accountId, userId, role } = ctx.principal;
       const wantNote = role === "owner" || role === "admin";
-      const limit = Math.min(Number((input.query as z.infer<typeof listQuerySchema>).limit ?? LIST_MAX) || LIST_MAX, LIST_MAX);
+      const query = input.query as z.infer<typeof listQuerySchema>;
+      const askId = query.ask_id;
+      if (askId !== undefined && !ASK_ID.test(askId)) throw new ApiError(400, "invalid_request", "ask_id must be 16 lowercase hex digits");
+      const cap = askId === undefined ? LIST_MAX : ASK_LIST_MAX;
+      const limit = Math.min(Number(query.limit ?? cap) || cap, cap);
       return withTenant(ctx.pool, accountId, userId, async (client) => {
         const repo = await client.query("SELECT 1 FROM repos WHERE id = $1 AND account_id = $2", [repoId, accountId]);
         if (repo.rowCount === 0) throw new ApiError(404, "not_found", "no such repo");
@@ -189,8 +199,10 @@ export const engineCommandRoutes: RouteEntry[] = [
                        WHEN state = 'delivered' AND expires_at + make_interval(secs => $3) <= now() THEN 'not_confirmed'
                        ELSE state END AS state,
                   refusal, issued_by, issued_at, expires_at, delivered_at, acked_at, halt_epoch_at_issue
-             FROM engine_commands WHERE repo_id = $1 ORDER BY issued_at DESC, command_seq DESC LIMIT $2`,
-          [repoId, limit, NOT_CONFIRMED_AFTER_S],
+             FROM engine_commands WHERE repo_id = $1 AND account_id = $5
+              AND ($4::text IS NULL OR (kind = 'answer_ask' AND args ->> 'ask_id' = $4))
+            ORDER BY issued_at DESC, command_seq DESC LIMIT $2`,
+          [repoId, limit, NOT_CONFIRMED_AFTER_S, askId ?? null, accountId],
         );
         return {
           commands: rows.map((r) => {
