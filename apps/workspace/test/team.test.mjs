@@ -7,8 +7,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { DELETE_URL, REPOS_URL, SETTINGS_URL, commandUrl, commandsUrl, createTeamApi, dialUrl, dialsUrl, panelUrl } from "../apps/team/team-api.js";
-import { DIAL_CLASSES, ENGINE_DIALS, OP_WORDS, REFUSALS, ROLES, TTL, agentWords, cancelFailure, commandRow, dialFailure, lockReason, readCommands, readDials, sendFailure } from "../apps/team/team-operate.js";
+import { DELETE_URL, REPOS_URL, SETTINGS_URL, clearHaltUrl, commandUrl, commandsUrl, createTeamApi, dialUrl, dialsUrl, haltUrl, panelUrl } from "../apps/team/team-api.js";
+import { DIAL_CLASSES, ENGINE_DIALS, HALT_WORDS, OP_WORDS, REFUSALS, ROLES, TTL, agentWords, cancelFailure, commandRow, dialFailure, haltFailure, lockReason, readCommands, readDials, sendFailure } from "../apps/team/team-operate.js";
 import { DEBOUNCE_MS, REFRESH_MS, SOURCE_LIMIT_S, WORDS, agentRow, asOfWords, chipOf, createTeam, describe as describeState, failureSentence, gapBanner, githubLink, hm, isStale, laneRows, readEnvelope, readRepos, readSettings, sourceNotices } from "../apps/team/team-model.js";
 import { HOSTILE, REPO_A, REPO_B, makeFixtures } from "./fixtures/team/fixtures.mjs";
 
@@ -821,5 +821,170 @@ describe("operate: what a screen may show", () => {
   it("the engine dial wording and the closed command sets match the protocol", () => {
     expect(ENGINE_DIALS).toEqual(["engine_spawn", "engine_merge", "engine_spec_ready"]);
     expect(OP_WORDS.operateOff).toBe("Operate is off.");
+  });
+});
+
+describe("halt: the state, who sees controls, the questions and the requests", () => {
+  const e = (status, code, extra = {}) => Object.assign(new Error("server text that must never be shown"), { status, code, ...extra });
+  const HALT = "POST " + haltUrl(REPO_A), CLEAR = "POST " + clearHaltUrl(REPO_A);
+  const ok = (over = {}) => ({ [HALT]: { halt_epoch: 1, halted: true, applied: false }, [CLEAR]: { halt_epoch: 1, halted: false }, ...over });
+  const withRepo = (repoOver, settingsOver = {}, routes = {}) => ({ ["GET " + SETTINGS_URL]: F.settings({ operate_enabled: true, ...settingsOver }), ["GET " + REPOS_URL]: F.list([F.repo({ operate_enabled: true, ...repoOver })]), ...ok(), ...routes });
+  const halting = async (repoOver = {}, settingsOver = {}, routes = {}) => {
+    const r = team({}, withRepo(repoOver, settingsOver, routes));
+    await r.t.load();
+    r.f.log.length = 0;
+    return r;
+  };
+  it("the two routes are the halt routes of the repo, and each is one POST with an empty object", async () => {
+    expect(haltUrl(REPO_A)).toBe("/api/v1/engine/repos/" + REPO_A + "/halt");
+    expect(clearHaltUrl(REPO_A)).toBe("/api/v1/engine/repos/" + REPO_A + "/halt/clear");
+    const call = vi.fn(async () => ({}));
+    await createTeamApi(call).halt(REPO_A);
+    await createTeamApi(call).clearHalt(REPO_A);
+    expect(call.mock.calls.map((c) => c.slice(0, 3))).toEqual([["POST", haltUrl(REPO_A), {}], ["POST", clearHaltUrl(REPO_A), {}]]);
+  });
+  it("not halted: an owner sees Halt and no Clear; a member sees no controls and no chip", async () => {
+    const owner = await halting();
+    expect(owner.t.view().halt).toMatchObject({ state: "none", chip: "", canHalt: true, canClear: false, confirm: null });
+    const member = await halting({}, { can_edit: false });
+    expect(member.t.view().halt).toMatchObject({ state: "none", canHalt: false, canClear: false });
+  });
+  it("halting: the chip reads Halting…, and Clear halt is offered to an owner only", async () => {
+    const owner = await halting({ halted: true, halt_pending: true });
+    expect(owner.t.view().halt).toMatchObject({ state: "pending", chip: "Halting…", canHalt: false, canClear: true, text: HALT_WORDS.pending });
+    const member = await halting({ halted: true, halt_pending: true }, { can_edit: false });
+    expect(member.t.view().halt).toMatchObject({ state: "pending", chip: "Halting…", canHalt: false, canClear: false });
+  });
+  it("halted: the chip reads Halted, in the owner's view and the member's", async () => {
+    const owner = await halting({ halted: true });
+    expect(owner.t.view().halt).toMatchObject({ state: "halted", chip: "Halted", canHalt: false, canClear: true, text: HALT_WORDS.halted });
+    const member = await halting({ halted: true }, { can_edit: false });
+    expect(member.t.view().halt).toMatchObject({ state: "halted", chip: "Halted", canClear: false, canHalt: false });
+    expect(member.t.view().operate).toEqual({ show: false });
+  });
+  it("Halt works while operate is off, and watch off shows no halt at all", async () => {
+    const off = await halting({ operate_enabled: false }, { operate_enabled: false });
+    expect(off.t.view().halt.canHalt).toBe(true);
+    expect(await off.t.operate.pause()).toBe(false); // everything else stays locked
+    const watchOff = await halting({}, { watch_enabled: false });
+    expect(watchOff.t.view().halt).toBeUndefined();
+    watchOff.t.operate.askHalt("halt");
+    expect(await watchOff.t.operate.halt()).toBe(false);
+    expect(sends(watchOff.f)).toEqual([]);
+  });
+  it("Halt asks first, in plain words naming the runner; Cancel sends nothing; Yes sends one POST and closes the question", async () => {
+    const { t, f } = await halting();
+    t.operate.askHalt("halt");
+    const c = t.view().halt.confirm;
+    expect(c).toMatchObject({ kind: "halt", title: "Halt the engine?", yes: "Yes, halt" });
+    expect(c.parts).toEqual(["This stops the engine on ", { bdi: "Workshop laptop" }, " now and kills its agents."]);
+    expect(c.texts[0]).toContain("Every command is refused until an owner or admin clears the halt");
+    t.operate.cancelHalt();
+    expect(t.view().halt.confirm).toBeNull();
+    expect(sends(f)).toEqual([]);
+    t.operate.askHalt("halt");
+    expect(await t.operate.halt()).toBe(true);
+    expect(sends(f)).toEqual([["POST", haltUrl(REPO_A), {}]]);
+    expect(t.state.op.confirmHalt).toBeNull();
+    expect(f.log.at(-1)[0]).toBe("GET"); // the repos are read again
+  });
+  it("a runner with no name reads your machine, and a hostile name stays a text part", async () => {
+    const a = await halting({ runner_name: "" });
+    a.t.operate.askHalt("halt");
+    expect(a.t.view().halt.confirm.parts[1]).toBe("your machine");
+    const b = await halting({ runner_name: HOSTILE });
+    b.t.operate.askHalt("halt");
+    expect(b.t.view().halt.confirm.parts[1]).toEqual({ bdi: HOSTILE });
+  });
+  it("Clear halt has its own question, says the engine is not started and that a local stop is not lifted, and sends one POST", async () => {
+    const { t, f } = await halting({ halted: true });
+    t.operate.askHalt("clear");
+    const c = t.view().halt.confirm;
+    expect(c).toMatchObject({ kind: "clear", title: "Clear the halt?", yes: "Yes, clear it" });
+    expect(c.parts.join("")).toContain("The engine is not started for you");
+    expect(c.texts[0]).toContain("does not lift that");
+    expect(await t.operate.clearHalt()).toBe(true);
+    expect(sends(f)).toEqual([["POST", clearHaltUrl(REPO_A), {}]]);
+  });
+  it("a press that does not fit the state sends nothing: Halt on a halted repo, Clear on a live one, a member, a save in flight", async () => {
+    const halted = await halting({ halted: true });
+    halted.t.operate.askHalt("halt");
+    expect(halted.t.state.op.confirmHalt).toBeNull();
+    expect(await halted.t.operate.halt()).toBe(false);
+    const live = await halting();
+    live.t.operate.askHalt("clear");
+    expect(live.t.state.op.confirmHalt).toBeNull();
+    expect(await live.t.operate.clearHalt()).toBe(false);
+    const member = await halting({}, { can_edit: false });
+    expect(await member.t.operate.halt()).toBe(false);
+    expect(sends(halted.f).concat(sends(live.f), sends(member.f))).toEqual([]);
+    const busy = await halting({}, {}, { [HALT]: () => new Promise(() => {}) });
+    const first = busy.t.operate.halt();
+    expect(busy.t.view().halt.locked).toBe(true);
+    expect(busy.t.view().halt.why).toBe(HALT_WORDS.busy);
+    expect(await busy.t.operate.halt()).toBe(false);
+    expect(sends(busy.f)).toHaveLength(1);
+    void first;
+  });
+  it("the question closes when the state changes under it: someone else halted, or cleared", async () => {
+    const { t, f } = await halting();
+    t.operate.askHalt("halt");
+    f.routes["GET " + REPOS_URL] = F.list([F.repo({ operate_enabled: true, halted: true })]);
+    await t.refresh();
+    expect(t.view().halt.confirm).toBeNull();
+    expect(t.view().halt.stale).toBe(true);
+    t.operate.cancelHalt();
+    t.operate.askHalt("clear");
+    f.routes["GET " + REPOS_URL] = F.list([F.repo({ operate_enabled: true })]);
+    await t.refresh();
+    expect(t.view().halt.confirm).toBeNull();
+  });
+  it("opening a halt question closes a stop question and the other way round", async () => {
+    const { t } = await halting();
+    t.operate.askStop("a1b2c3d4e5f60718");
+    t.operate.askHalt("halt");
+    expect(t.state.op.confirmStop).toBeNull();
+    expect(t.state.op.confirmHalt).toBe("halt");
+    t.operate.askStop("a1b2c3d4e5f60718");
+    expect(t.state.op.confirmHalt).toBeNull();
+  });
+  it("every refusal is a plain sentence, never the server's text; an unknown outcome says the halt may not have gone through", () => {
+    expect(haltFailure(e(403, "forbidden"), false)).toBe("Only an owner or admin can halt the engine.");
+    expect(haltFailure(e(403, "session_required"), true)).toBe("Only an owner or admin, signed in, can clear a halt.");
+    expect(haltFailure(e(401, "unauthorized"), false)).toBe(HALT_WORDS.signedOut);
+    expect(haltFailure(e(404, "not_found"), false)).toBe(HALT_WORDS.gone);
+    expect(haltFailure(e(429, "rate_limited", { retryAfter: 8 }), false)).toBe("Try again in 8 seconds.");
+    for (const x of [e(400, "x"), e(409, "x"), e(422, "x")]) { expect(haltFailure(x, false)).toBe(HALT_WORDS.haltRefused); expect(haltFailure(x, true)).toBe(HALT_WORDS.clearRefused); }
+    for (const x of [e(500, "server_error"), e(0, "offline"), e(0, "timeout"), null]) { expect(haltFailure(x, false)).toBe(HALT_WORDS.haltUnknown); expect(haltFailure(x, true)).toBe(HALT_WORDS.clearUnknown); }
+    for (const w of Object.values(HALT_WORDS)) expect(w).not.toMatch(bad);
+  });
+  it("a refused halt shows the sentence as a note and reads the repos again, so what is true is shown", async () => {
+    for (const [err, sentence] of [[e(403, "forbidden"), HALT_WORDS.haltForbidden], [e(409, "x"), HALT_WORDS.haltRefused], [e(500, "server_error"), HALT_WORDS.haltUnknown]]) {
+      const { t, f } = await halting({}, {}, { [HALT]: err });
+      t.operate.askHalt("halt");
+      expect(await t.operate.halt()).toBe(false);
+      expect(t.view().halt.note).toBe(sentence);
+      expect(t.state.op.saving).toBe(false);
+      expect(f.log.filter(([m]) => m === "GET").length).toBeGreaterThan(0);
+      expect(texts(t.view().halt)).not.toContain("server text");
+    }
+  });
+  it("a refused clear says so the same way, and the note is gone once another question opens", async () => {
+    const { t } = await halting({ halted: true }, {}, { [CLEAR]: e(403, "forbidden") });
+    expect(await t.operate.clearHalt()).toBe(false);
+    expect(t.view().halt.note).toBe(HALT_WORDS.clearForbidden);
+    t.operate.askHalt("clear");
+    expect(t.view().halt.note).toBe("");
+  });
+  it("no halt string holds null, undefined or NaN in any state", async () => {
+    for (const repoOver of [{}, { halted: true }, { halted: true, halt_pending: true }, { halt_pending: true }, { runner_name: HOSTILE, halted: true }]) {
+      const { t } = await halting(repoOver);
+      t.operate.askHalt(repoOver.halted || repoOver.halt_pending ? "clear" : "halt");
+      for (const text of strings(t.view().halt)) expect(text).not.toMatch(bad);
+    }
+  });
+  it("the halt flags are read as booleans and nothing else", () => {
+    expect(readRepos([{ repo_id: REPO_A, full_name: "a/b", halted: "yes", halt_pending: 1 }])[0]).toMatchObject({ halted: false, haltPending: false });
+    expect(readRepos([{ repo_id: REPO_A, full_name: "a/b", halted: true, halt_pending: true }])[0]).toMatchObject({ halted: true, haltPending: true });
   });
 });

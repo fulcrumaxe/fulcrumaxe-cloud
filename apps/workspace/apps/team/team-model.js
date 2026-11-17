@@ -11,7 +11,7 @@
 // Every word that reaches the page is a string made here; nothing is null, undefined or NaN.
 import { isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { PANELS, createTeamApi } from "./team-api.js";
-import { NO_OP, agentWords, createOperate, describeOperate, isAgentId, stopOf } from "./team-operate.js";
+import { NO_OP, agentWords, createOperate, describeHalt, describeOperate, isAgentId, stopOf } from "./team-operate.js";
 
 export const LIVE_EVENT = "engine.changed";
 export const REFRESH_MS = 15000;
@@ -207,7 +207,7 @@ export function describe(st, nowMs) {
   const lane = lanes ? laneRows(lanes, gates, nowMs, repo.name) : null;
   const rows = agents ? agents.items.map((a) => agentRow(a, live, nowMs, repo.name)).filter((r) => r.state !== "stopped").map((r) => ({ ...r, stop: r.state === "running" ? stopOf(st, r.stopId) : null, who: agentWords(r) })) : [];
   return {
-    kind: "ready", ...base, operate: describeOperate(st, nowMs, repo, asOf, rows),
+    kind: "ready", ...base, operate: describeOperate(st, nowMs, repo, asOf, rows), halt: describeHalt(st, repo),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
     chip: chipOf(repo), runner: repo.runner, banner: gapBanner([agents, lanes, gates]), notices: sourceNotices([agents, lanes, gates], lanes),
     agents: { ...head(agents), failed: !agents, rows, empty: WORDS.noAgents },

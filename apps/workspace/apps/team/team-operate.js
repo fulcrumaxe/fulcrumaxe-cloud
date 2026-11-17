@@ -52,7 +52,23 @@ const SEND_409 = {
   halted: "The engine is halted, so this command isn't allowed.", too_many_pending: "Too many commands are waiting (20 is the most). Wait for some to finish, or cancel one.",
 };
 const CANCEL_409 = { already_delivered: "The runner already has this command, so it can't be cancelled.", expired: "That command has already expired.", already_cancelled: "That command is already cancelled." };
-export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null };
+export const HALT_WORDS = {
+  halt: "Halt", clear: "Clear halt", yesHalt: "Yes, halt", yesClear: "Yes, clear it", cancel: "Cancel", head: "Halt", chipPending: "Halting…", chipHalted: "Halted",
+  none: "The engine is not halted. A halt stops it now and refuses every command until a person clears it.",
+  noneOwner: "The engine is not halted. A halt stops it now and refuses every command until a person clears it. If the engine was stopped on the machine itself, halting here and then clearing is how to end that stop from the cloud.",
+  pending: "Halting. The machine has not yet confirmed that the engine and its agents are stopped. Every command is refused until a person clears the halt.",
+  halted: "The engine is halted. It is stopped on the machine and every command is refused until a person clears the halt.",
+  askHaltTitle: "Halt the engine?", askClearTitle: "Clear the halt?", haltTail: " now and kills its agents.", haltLead: "This stops the engine on ", yourMachine: "your machine",
+  haltRisk: "Work the agents have not finished can be lost. Every command is refused until an owner or admin clears the halt.",
+  clearText: "Commands are allowed again. The engine is not started for you: use Resume loop or Start day afterwards.",
+  clearLocal: "If it was stopped on the machine itself, clearing does not lift that. Halt here again and then clear, or resume it on the machine.",
+  busy: "Another change is being saved. Try again in a moment.",
+  clearedSaid: "The halt is cleared. The engine is not started again until you start it.", pendingSaid: "Halting. Waiting for the machine to confirm it stopped the engine.", haltedSaid: "The engine is halted.",
+  haltForbidden: "Only an owner or admin can halt the engine.", clearForbidden: "Only an owner or admin, signed in, can clear a halt.", signedOut: "Your session has ended. Sign in again.",
+  gone: "That repository no longer exists.", haltRefused: "The halt was not accepted. Reload the page and try again.", clearRefused: "The halt was not cleared. Reload the page and try again.",
+  haltUnknown: "The halt may not have gone through. Check the state above, then try again.", clearUnknown: "The halt may not have been cleared. Check the state above, then try again.",
+};
+export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null, confirmHalt: null, haltNote: "" };
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const stamp = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null);
@@ -146,6 +162,26 @@ export function stopOf(st, agentId) {
   return { pending: pendingStops(st.op.commands).has(agentId) };
 }
 
+/** The halt of the open repo, for everyone (a member sees the state and no controls). `confirm` is null unless the question still fits the state. */
+export function describeHalt(st, repo) {
+  const s = st.settings;
+  if (!s || !repo) return null;
+  const state = repo.halted ? (repo.haltPending ? "pending" : "halted") : repo.haltPending ? "pending" : "none";
+  const can = s.canEdit && s.watch;
+  const busy = !!st.op.saving || !!st.saving;
+  const kind = st.op.confirmHalt;
+  const fits = (kind === "halt" && state === "none") || (kind === "clear" && state !== "none");
+  const parts = [HALT_WORDS.haltLead, repo.runner !== "" ? { bdi: repo.runner } : HALT_WORDS.yourMachine, HALT_WORDS.haltTail];
+  const confirm = can && fits ? (kind === "halt"
+    ? { kind, title: HALT_WORDS.askHaltTitle, parts, texts: [HALT_WORDS.haltRisk], yes: HALT_WORDS.yesHalt }
+    : { kind, title: HALT_WORDS.askClearTitle, parts: [HALT_WORDS.clearText], texts: [HALT_WORDS.clearLocal], yes: HALT_WORDS.yesClear }) : null;
+  return {
+    id: repo.id, state, chip: state === "pending" ? HALT_WORDS.chipPending : state === "halted" ? HALT_WORDS.chipHalted : "",
+    text: state === "pending" ? HALT_WORDS.pending : state === "halted" ? HALT_WORDS.halted : can ? HALT_WORDS.noneOwner : HALT_WORDS.none,
+    canHalt: can && state === "none", canClear: can && state !== "none", locked: busy, why: busy ? HALT_WORDS.busy : "", note: can ? st.op.haltNote : "", confirm, stale: !!kind && !confirm,
+  };
+}
+
 // ── sentences for a refusal ─────────────────────────────────────────────────────────────────────────────────────────────────
 export function sendFailure(e) {
   if (isRateLimited(e)) return retryWords(waitSeconds(e));
@@ -153,6 +189,16 @@ export function sendFailure(e) {
   if (e && e.status === 404) return OP_WORDS.gone;
   if (e && e.status === 409 && typeof e.code === "string" && Object.hasOwn(SEND_409, e.code)) return SEND_409[e.code];
   return OP_WORDS.sendFailed;
+}
+/** Every refusal of a halt or a clear in words: the 4xx the routes give, a limit on how often it may be asked, and the answers that leave it unknown whether it happened. */
+export function haltFailure(e, clearing) {
+  if (isRateLimited(e)) return retryWords(waitSeconds(e));
+  const st = e && Number.isInteger(e.status) ? e.status : 0;
+  if (st === 401) return HALT_WORDS.signedOut;
+  if (st === 403) return clearing ? HALT_WORDS.clearForbidden : HALT_WORDS.haltForbidden;
+  if (st === 404) return HALT_WORDS.gone;
+  if (st >= 400 && st < 500) return clearing ? HALT_WORDS.clearRefused : HALT_WORDS.haltRefused;
+  return clearing ? HALT_WORDS.clearUnknown : HALT_WORDS.haltUnknown;
 }
 export function cancelFailure(e) {
   if (e && e.status === 409 && typeof e.code === "string" && Object.hasOwn(CANCEL_409, e.code)) return CANCEL_409[e.code];
@@ -182,20 +228,28 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
     const repo = st.repos.find((r) => r.id === st.selectedId);
     return !st.settings || !st.settings.canEdit || st.op.saving || st.saving || !st.settings.watch || !repo;
   };
-  async function run(call, ok, failure, { isLocked = locked, refreshOn409 = false } = {}) {
+  async function run(call, ok, failure, { isLocked = locked, refreshOn409 = false, refreshOnFail = false, note = "notice" } = {}) {
     if (isLocked()) return false;
-    patch({ saving: true, notice: "", confirmStop: null });
+    patch({ saving: true, notice: "", haltNote: "", confirmStop: null, confirmHalt: null });
     try { await call(get().selectedId); } catch (e) {
       if (!aborted(e)) {
-        patch({ saving: false, notice: failure(e) });
-        if (refreshOn409 && e && e.status === 409) await refresh(); // the list was out of date: show what became of the command
+        patch({ saving: false, [note]: failure(e) });
+        if (refreshOnFail || (refreshOn409 && e && e.status === 409)) await refresh(); // the list was out of date, or the answer was lost: show what is true now
       }
       return false;
     }
-    patch({ saving: false, notice: ok });
+    patch({ saving: false, [note]: ok });
     await refresh();
     return true;
   }
+  // A halt is allowed while operate is off or the repo is already halted (that is what it is for); watch off, no repo, a member and a save in flight lock it.
+  // A halt needs a repo that is not halted, and a clear one that is.
+  const haltable = (clearing) => {
+    const st = get();
+    const repo = st.repos.find((r) => r.id === st.selectedId);
+    if (!st.settings || !st.settings.canEdit || !st.settings.watch || !repo || st.op.saving || st.saving) return false;
+    return clearing === (repo.halted || repo.haltPending);
+  };
   const send = (kind, args) => run((id) => client.issue(id, kind, args, signal), OP_WORDS.sent, sendFailure);
   return {
     async read(repoId, stale) {
@@ -221,15 +275,19 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
       if (!Object.hasOwn(DIAL_CLASSES, dialClass) || !Number.isInteger(n) || n < 1 || n > 5 || !Object.hasOwn(TTL, ttl)) { patch({ notice: "" }); patch({ notice: OP_WORDS.badDial }); return Promise.resolve(false); }
       return send("set_dial", { dial_class: dialClass, level: n, ttl });
     },
-    askStop(id) { if (isAgentId(id) && !locked()) patch({ confirmStop: { id } }); },
+    askStop(id) { if (isAgentId(id) && !locked()) patch({ confirmStop: { id }, confirmHalt: null }); },
     cancelStop: () => patch({ confirmStop: null }),
+    askHalt(kind) { if ((kind === "halt" || kind === "clear") && haltable(kind === "clear")) patch({ confirmHalt: kind, confirmStop: null, haltNote: "" }); },
+    cancelHalt: () => patch({ confirmHalt: null }),
+    halt: () => run((id) => client.halt(id, signal), "", (e) => haltFailure(e, false), { isLocked: () => !haltable(false), refreshOnFail: true, note: "haltNote" }),
+    clearHalt: () => run((id) => client.clearHalt(id, signal), "", (e) => haltFailure(e, true), { isLocked: () => !haltable(true), refreshOnFail: true, note: "haltNote" }),
     stop(id) { return isAgentId(id) ? send("stop_agent", { agent_id: id }) : Promise.resolve(false); },
     cancel: (id) => run(() => client.cancel(id, signal), OP_WORDS.cancelled, cancelFailure, { isLocked: cancelLocked, refreshOn409: true }),
     saveDial: (type, value) => (ENGINE_DIALS.includes(type) && Object.hasOwn(DISPOSITION_TEXT, value) ? run((rid) => client.setDial(rid, type, value, signal), OP_WORDS.dialSaved, dialFailure) : Promise.resolve(false)),
     setOperate(on) {
       const st = get();
       if (!st.settings || !st.settings.canEdit || !st.settings.watch || st.op.saving || st.saving) return Promise.resolve(false);
-      patch({ saving: true, notice: "", confirmStop: null });
+      patch({ saving: true, notice: "", confirmStop: null, confirmHalt: null });
       return client.saveSettings({ operate_enabled: on === true }, signal).then(
         () => { patch({ saving: false, notice: OP_WORDS.operateSaved }); return refresh(); },
         (e) => { if (!aborted(e)) patch({ saving: false, notice: e && e.status === 403 ? OP_WORDS.forbidden : OP_WORDS.sendFailed }); },

@@ -6,7 +6,7 @@
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { WORDS, createTeam, describe } from "./team-model.js";
-import { DIAL_CLASSES, OP_WORDS, ROLES, TTL } from "./team-operate.js";
+import { DIAL_CLASSES, HALT_WORDS, OP_WORDS, ROLES, TTL } from "./team-operate.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -37,16 +37,17 @@ function mountApp(contentEl) {
     }
     if (hadFocus && !parent.contains(document.activeElement)) heading.focus();
   };
-  const said = { n: "", b: "", r: "", o: "" };
+  const said = { n: "", b: "", r: "", o: "", w: "" };
   const hear = (k, v) => (said[k] === v ? "" : (said[k] = v));
   const setText = (el, value) => { if (el.textContent !== value) el.textContent = value; };
 
   const heading = h("h2", { class: "tm-title", id: "tm-heading", tabindex: "-1", "data-testid": "tm-heading" }, WORDS.title);
   const picker = h("select", { class: "tm-select", "data-testid": "tm-repo", "aria-label": "Repository", onChange: (e) => team.select(e.target.value) });
   const chip = h("span", { class: "tm-chip", "data-testid": "tm-chip" });
+  const haltChip = h("span", { class: "tm-chip tm-halt-chip", "data-testid": "tm-halt-chip" });
   const runner = h("span", { class: "tm-runner", "data-testid": "tm-runner" });
   const sheetBtn = h("button", { type: "button", class: "tm-btn", "data-testid": "tm-settings-btn", "aria-expanded": "false", "aria-controls": "tm-sheet", onClick: () => team.toggleSheet() }, WORDS.settings);
-  const bar = h("div", { class: "tm-bar" }, picker, chip, runner, sheetBtn);
+  const bar = h("div", { class: "tm-bar" }, picker, chip, haltChip, runner, sheetBtn);
   const live = h("p", { class: "tm-live", role: "status", "aria-live": "polite", "data-testid": "tm-live" });
   const banner = h("p", { class: "tm-banner", "data-testid": "tm-banner", role: "note" });
   const notices = h("ul", { class: "tm-notices", role: "list", "data-testid": "tm-notices" });
@@ -86,7 +87,9 @@ function mountApp(contentEl) {
   const opDials = h("div", { class: "tm-op-dials", "data-testid": "tm-op-dials" });
   const opWrap = h("section", { class: "tm-panel tm-op", "data-testid": "tm-operate" }, h("h3", { class: "tm-sub" }, OP_WORDS.operate), opTop, opCtl, opConfirm, opCmds, opDials);
   opWrap.hidden = true;
-  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, live, banner, notices, note, sheet, body, opWrap));
+  const haltBox = h("section", { class: "tm-panel tm-halt", "aria-labelledby": "tm-halt-h", "data-testid": "tm-halt" });
+  haltBox.hidden = true;
+  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, live, banner, notices, note, haltBox, sheet, body, opWrap));
 
   // A control that cannot be used right now keeps its place in the Tab order (aria-disabled, not disabled): focus stays on it through a save, and a member who tabs to it hears why.
   const box = (attrs, checked, enabled, why, set) => h("input", { type: "checkbox", checked, "aria-disabled": enabled ? null : "true", "aria-describedby": enabled ? null : why, onClick: (e) => { if (!enabled) e.preventDefault(); }, onChange: (e) => set(e.target.checked), ...attrs });
@@ -141,6 +144,45 @@ function mountApp(contentEl) {
          p.merged.length ? h("div", { "data-testid": "tm-merged" }, h("h4", { class: "tm-sub" }, WORDS.mergedToday), h("ul", { class: "tm-list", role: "list" }, p.merged.map(laneItem))) : null]);
   }
 
+  // The halt: shown to everyone (a member reads the state, nothing more); an owner or admin also gets Halt or Clear halt behind a question of its own.
+  // Focus stays on the one control that stands for the action (data-focus "halt-primary"), whichever of Halt and Clear halt is drawn.
+  const closeHalt = () => { want = "halt-primary"; ops.cancelHalt(); };
+  const haltBtn = (label, testid, hl, kind) => h("button", { type: "button", class: "tm-btn", "data-testid": testid, "data-focus": "halt-primary", "aria-disabled": hl.locked ? "true" : "false", "aria-describedby": hl.locked ? "tm-halt-why" : null,
+    onClick: (e) => { if (e.currentTarget.getAttribute("aria-disabled") === "true") return; want = "halt-cancel"; ops.askHalt(kind); if (!team.state.op.confirmHalt) want = null; } }, label);
+  const confirmNode = (c) => h("div", { class: "tm-confirm", role: "group", "aria-labelledby": "tm-halt-q", "data-testid": "tm-halt-confirm", onKeydown: (e) => { if (e.key === "Escape") { e.stopPropagation(); closeHalt(); } } },
+    h("h4", { class: "tm-sub", id: "tm-halt-q" }, c.title), h("p", { "data-testid": "tm-halt-confirm-text" }, c.parts.map((p) => (typeof p === "string" ? p : h("bdi", null, p.bdi)))), c.texts.map((t) => h("p", null, t)),
+    h("button", { type: "button", class: "tm-btn", "data-testid": "tm-halt-yes", "data-focus": "halt-yes", onClick: () => { want = "halt-primary"; if (c.kind === "halt") ops.halt(); else ops.clearHalt(); } }, c.yes),
+    h("button", { type: "button", class: "tm-btn", "data-testid": "tm-halt-cancel", "data-focus": "halt-cancel", onClick: closeHalt }, HALT_WORDS.cancel));
+  function paintHalt(hl) {
+    const shown = !!hl && (hl.state !== "none" || hl.canHalt);
+    haltBox.hidden = !shown;
+    setText(haltChip, hl ? hl.chip : "");
+    haltChip.dataset.halt = hl ? hl.state : "none";
+    haltChip.hidden = !hl || hl.state === "none";
+    const hadFocus = haltBox.contains(document.activeElement);
+    swap("halt", haltBox, shown ? { ...hl, id: "" } : null, () => (shown ? [
+      h("h3", { class: "tm-sub", id: "tm-halt-h", tabindex: "-1", "data-focus": "halt-head" }, HALT_WORDS.head),
+      h("p", { class: hl.state === "none" ? "tm-muted" : "tm-halt-state", "data-testid": "tm-halt-text", "data-state": hl.state }, hl.text),
+      hl.note ? h("p", { class: "tm-halt-note", role: "note", "data-testid": "tm-halt-note" }, hl.note) : null,
+      hl.why ? h("p", { class: "tm-muted", id: "tm-halt-why", "data-testid": "tm-halt-why" }, hl.why) : null,
+      hl.confirm ? confirmNode(hl.confirm) : hl.canHalt ? haltBtn(HALT_WORDS.halt, "tm-halt-btn", hl, "halt") : hl.canClear ? haltBtn(HALT_WORDS.clear, "tm-clear-btn", hl, "clear") : null,
+    ] : null));
+    // The state changed under an open question (another person halted or cleared): it closes, and focus goes to the control that replaced it.
+    if (hl && hl.stale) {
+      if (hadFocus) want = "halt-primary";
+      queueMicrotask(() => ops.cancelHalt());
+    }
+  }
+  // A change of state is said once; the first state of a repo is a baseline, not news.
+  let haltSeen = null, haltRepo = null;
+  function haltWords(hl) {
+    const id = hl ? hl.id : "", st = hl ? hl.state : "none";
+    if (id !== haltRepo) { haltRepo = id; haltSeen = st; return ""; }
+    if (st === haltSeen) return "";
+    haltSeen = st;
+    return st === "none" ? HALT_WORDS.clearedSaid : st === "pending" ? HALT_WORDS.pendingSaid : HALT_WORDS.haltedSaid;
+  }
+
   function paint() {
     const d = describe(team.state, Date.now());
     const hasRepos = d.kind === "ready";
@@ -167,7 +209,7 @@ function mountApp(contentEl) {
     if (d.sheet) swap("sheet", sheet, d.sheet, () => sheetNodes(d.sheet));
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
-    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || "")].filter(Boolean).join(" ");
+    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || "")].filter(Boolean).join(" ");
     if (msg) live.replaceChildren(h("span", null, msg));
     swap("body", body, d.kind === "ready" ? { a: d.agents, l: d.lanes } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving }, () => {
       if (d.kind === "ready") return h("div", { class: "tm-panels" }, agentsPanel(d.agents), lanesPanel(d.lanes));
@@ -175,6 +217,7 @@ function mountApp(contentEl) {
       return h("p", { class: d.kind === "error" ? "tm-error" : "tm-muted", role: d.kind === "error" ? "alert" : "status", "data-testid": "tm-" + d.kind }, d.text);
     });
     paintOperate(o);
+    paintHalt(d.halt || null);
     if (want) { // a control that closed a part asks for focus on one that lives in another part
       const el = [...root.querySelectorAll("[data-focus]")].find((e) => e.getAttribute("data-focus") === want);
       if (el) { el.focus(); want = null; }
