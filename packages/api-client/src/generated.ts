@@ -5297,6 +5297,7 @@ export interface Operations {
     };
     query: {
       limit?: string;
+      ask_id?: string;
     };
     body: undefined;
     response: {
@@ -8067,7 +8068,7 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: ["id"],
-    queryParams: ["limit"],
+    queryParams: ["limit","ask_id"],
     hasBody: false,
   },
   issueEngineCommand: {
