@@ -5726,6 +5726,29 @@ export interface Operations {
       deleted_sessions: number;
     };
   };
+  haltEngineRepo: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: Record<string, never>;
+    response: {
+      halt_epoch: number;
+      halted: true;
+      applied: false;
+    };
+  };
+  clearEngineRepoHalt: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: Record<string, never>;
+    response: {
+      halt_epoch: number;
+      halted: false;
+    };
+  };
 }
 
 /** Every operation by operationId. scope is the scope a token needs (null when it needs none or cannot be used). */
@@ -8149,6 +8172,28 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: false,
+  },
+  haltEngineRepo: {
+    method: "POST",
+    path: "/api/v1/engine/repos/{id}/halt",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  clearEngineRepoHalt: {
+    method: "POST",
+    path: "/api/v1/engine/repos/{id}/halt/clear",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
 } as const;
 

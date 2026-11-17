@@ -1592,6 +1592,93 @@ check_work_item_halt_definer_role_shape() {
   fi
 }
 
+# Engine bridge EB-11a halt (1031): the five SECURITY DEFINER functions owned by engine_halt_definer, matched by exact signature
+# (engine_halt_lock(uuid, uuid), engine_halt_epoch(uuid, uuid), engine_halt_assert_person(text), engine_halt_set(uuid), engine_halt_clear(uuid)). Prints their oids when
+# each is pinned to search_path=pg_catalog, public, pg_temp, with no PUBLIC entry and no grant option, and an ACL that holds exactly
+# who calls it besides the owner: the lock and epoch helpers app_user, agent_run_writer and the migration role; set and clear app_user; the person
+# guard nobody. SHAPE_FAIL:<count> when a definer owned by the role is not one of these; nothing when the role owns none (the generic
+# owner check then rejects anything else).
+check_engine_halt_definer_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = ANY (ARRAY['public.engine_halt_lock(uuid,uuid)'::regprocedure, 'public.engine_halt_assert_person(text)'::regprocedure,
+                                        'public.engine_halt_set(uuid)'::regprocedure, 'public.engine_halt_clear(uuid)'::regprocedure,
+                                        'public.engine_halt_epoch(uuid,uuid)'::regprocedure])
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0 OR a.is_grantable)
+        AND coalesce((SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee) ORDER BY pg_get_userbyid(a.grantee))
+                        FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner), ARRAY[]::name[])
+            = CASE
+                WHEN p.oid = ANY (ARRAY['public.engine_halt_lock(uuid,uuid)'::regprocedure, 'public.engine_halt_epoch(uuid,uuid)'::regprocedure]) THEN ARRAY['agent_run_writer', 'app_user', 'fx_migrator']::name[]
+                WHEN p.oid = ANY (ARRAY['public.engine_halt_set(uuid)'::regprocedure, 'public.engine_halt_clear(uuid)'::regprocedure]) THEN ARRAY['app_user']::name[]
+                ELSE ARRAY[]::name[] END) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'engine_halt_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'engine-halt-definer-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by engine_halt_definer fail the exception shape (not one of the five engine_halt functions, a loose search_path, an EXECUTE grant beyond the ones 1031 makes, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# Engine bridge EB-11a halt (1031): role shape of engine_halt_definer. A no-op when the role does not exist. Every problem is named:
+# NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly
+# the 11 granted by 1031 (engine_repo_controls SELECT, INSERT and UPDATE; account_members account_id, user_id and role SELECT; repos id
+# and account_id SELECT; accounts id and deleted_at SELECT; USAGE on public), owning exactly its five functions and nothing else, no
+# CREATE on public. Its six policies are pinned too (accounts, account_members and repos select, engine_repo_controls select, insert
+# and update), and neither app_user nor platform_ops can write the marker table directly: the definer functions are the only way in.
+check_engine_halt_definer_role_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'engine_halt_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid),
+    pol AS (SELECT tablename, cmd FROM pg_policies WHERE roles = ARRAY['engine_halt_definer']::name[])
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'engine_halt_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 11 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[
+              'table engine_repo_controls SELECT','table engine_repo_controls INSERT','table engine_repo_controls UPDATE',
+              'column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT',
+              'column repos.id SELECT','column repos.account_id SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT',
+              'schema public USAGE']))
+           THEN 'privileges are not exactly the 11 granted by 1031' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 5 OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.engine_halt_lock(uuid,uuid)'::regprocedure,
+                'public.engine_halt_assert_person(text)'::regprocedure, 'public.engine_halt_set(uuid)'::regprocedure, 'public.engine_halt_clear(uuid)'::regprocedure,
+                'public.engine_halt_epoch(uuid,uuid)'::regprocedure]))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its five functions and nothing else' END,
+      CASE WHEN has_schema_privilege('engine_halt_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END,
+      CASE WHEN (SELECT count(*) FROM pol) <> 6
+              OR (SELECT count(*) FROM pol WHERE tablename = 'engine_repo_controls') <> 3
+              OR (SELECT count(*) FROM pol WHERE tablename IN ('accounts', 'account_members', 'repos') AND cmd = 'SELECT') <> 3
+           THEN 'its six policies are not accounts, account_members and repos select plus engine_repo_controls select, insert and update' END,
+      CASE WHEN has_table_privilege('app_user', 'public.engine_repo_controls', 'INSERT,UPDATE,DELETE,TRUNCATE')
+              OR has_table_privilege('platform_ops', 'public.engine_repo_controls', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
+           THEN 'app_user can write, or platform_ops can touch, engine_repo_controls directly' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'engine_halt_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): engine_halt_definer role shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # D#6 R2b-3 (0754, C21 section 11): the SECURITY DEFINER functions owned by runner_lease_definer. Prints their oids, comma separated,
 # when each is one of the seven exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public,
 # pg_temp, with an ACL that holds the one login that calls it (app_user for the throttle, agent_run_writer for the other six) and
