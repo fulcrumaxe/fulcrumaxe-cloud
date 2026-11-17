@@ -186,6 +186,57 @@ function mountApp(contentEl) {
   const logItem = (l) => h("li", { class: "tm-item", "data-testid": "tm-log-line", "data-id": l.id },
     h("span", { class: "tm-time" }, l.time), " ", h("strong", { class: "tm-role" }, h("bdi", null, l.role)), " ", h("span", { class: "tm-cat" }, l.category),
     l.discussion ? " " : null, dLink(l.discussion, l.discussionLink), l.pr ? " " : null, l.pr ? link(l.prLink, "PR #" + l.pr, { "data-testid": "tm-log-pr" }) : null);
+  // The rows are brought up to date without rebuilding the list: lines that left the top are removed, lines already drawn stay, and new lines are added a few at a
+  // time with a turn given back to the page between groups, so no single task is long on a slow phone (the list holds up to 400 rows). The first group is drawn at once,
+  // so a short list is complete the moment the call returns. A newer call stops the one still adding rows and works from whatever is drawn by then.
+  const LOG_CHUNK = 40;
+  const rowSig = new WeakMap(); // a drawn row -> the text of the line it shows
+  let logSig = "", logJob = 0;
+  const giveTurn = () => (globalThis.scheduler && typeof globalThis.scheduler.yield === "function" ? globalThis.scheduler.yield() : new Promise((r) => setTimeout(r, 0)));
+  const drawRow = (l, sig) => { const li = logItem(l); rowSig.set(li, sig); return li; };
+  function syncLogRows(rows, kept) {
+    const sigs = rows.map((r) => JSON.stringify(r));
+    const all = sigs.join("\n");
+    if (all === logSig) return;
+    logSig = all;
+    const job = ++logJob;
+    const have = [...logList.children];
+    // Drawn rows that stay: a run of `keep` rows from drawn row `drop`, the same lines in the same order as the new list from its row `front` on. Drawn rows outside
+    // the run are removed; rows before `front` are new lines at the top (put in before the kept ones); the rows after the run are added in groups below.
+    let drop = -1, front = 0, keep = 0;
+    for (let d = 0; d < have.length && drop < 0; d++) {
+      const f = sigs.indexOf(rowSig.get(have[d]));
+      const run = Math.min(have.length - d, sigs.length - f);
+      if (f >= 0 && f <= LOG_CHUNK && have.slice(d, d + run).every((li, i) => rowSig.get(li) === sigs[f + i])) { drop = d; front = f; keep = run; }
+    }
+    const hadFocus = logList.contains(document.activeElement);
+    for (const li of drop < 0 ? have : [...have.slice(0, drop), ...have.slice(drop + keep)]) li.remove();
+    if (hadFocus && !logList.contains(document.activeElement)) heading.focus();
+    // dom-insert-ok: drawRow() returns h() nodes
+    if (front > 0) logList.prepend(...rows.slice(0, front).map((r, i) => drawRow(r, sigs[i])));
+    let at = front + keep;
+    // The row the person was reading stays where it was. It is put back as soon as it is drawn and the rows drawn reach far enough, and again after each later group until it holds.
+    let placed = !kept;
+    const place = () => {
+      if (!kept) return;
+      const el = [...logList.children].find((r) => r.getAttribute("data-id") === kept.id);
+      if (!el) return;
+      const want = el.offsetTop - kept.at;
+      logList.scrollTop = want;
+      placed = Math.abs(logList.scrollTop - want) < 1; // the list can only scroll as far as the rows drawn so far reach
+    };
+    const add = (upTo) => {
+      const end = Math.min(rows.length, Math.max(at + LOG_CHUNK, upTo));
+      // dom-insert-ok: drawRow() returns h() nodes
+      logList.append(...rows.slice(at, end).map((r, i) => drawRow(r, sigs[at + i])));
+      at = end;
+    };
+    // A rebuild draws its first group through the row being read, so that row is there to be put back.
+    add(drop < 0 && kept ? rows.findIndex((r) => r.id === kept.id) + 1 : 0);
+    place();
+    if (at >= rows.length) return;
+    (async () => { while (at < rows.length) { await giveTurn(); if (job !== logJob || ac.signal.aborted) return; add(0); if (!placed) place(); } })();
+  }
   function paintLog(p) {
     swap("p:log-top", logTop, [p.failed, p.rows.length, p.empty, p.note], () => [h("p", { class: "tm-muted", "data-testid": "tm-log-note" }, p.note), p.failed ? failedP("log") : p.rows.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-log-empty" }, p.empty) : null]);
     logList.hidden = p.failed || p.rows.length === 0;
@@ -194,9 +245,7 @@ function mountApp(contentEl) {
     const rows = [...logList.children];
     const top = rows.find((r) => r.offsetTop + r.offsetHeight > logList.scrollTop);
     const kept = top ? { id: top.getAttribute("data-id"), at: top.offsetTop - logList.scrollTop } : null;
-    swap("p:log-rows", logList, p.rows, () => p.rows.map(logItem));
-    const again = kept && [...logList.children].find((r) => r.getAttribute("data-id") === kept.id);
-    if (again) logList.scrollTop = again.offsetTop - kept.at;
+    syncLogRows(p.rows, kept);
     swap("p:log-bar", logBar, [p.older, p.canOlder, p.olderFailed, p.newest], () => [
       pageBtn("tm-log-older", "log-older", p.older, p.canOlder, () => team.loadOlder()),
       p.newest ? pageBtn("tm-log-newest", "log-newest", p.newest, true, () => team.newest()) : null,
