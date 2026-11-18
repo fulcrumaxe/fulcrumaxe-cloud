@@ -110,8 +110,9 @@ packages/
   github/             GitHub App webhook intake, event mapping, installation
                       tokens, merge-gate GraphQL documents
   hetzner/            typed, strict client for the Hetzner Cloud API (servers,
-                      firewalls, SSH keys, pricing, snapshots and servers from an image);
-                      nothing depends on it yet
+                      firewalls, SSH keys, pricing, snapshots and servers from an image,
+                      and the probe that checks a customer's token); only the API's
+                      token route uses it
   model-call/         server-side model calls over the account's own key
   model-connection/   bring-your-own-key connections: encryption, validation
   model-router/       Postgres-backed model routing, escalation, floors
@@ -150,9 +151,9 @@ site-kit publishes on a customer's domain.
 ## Getting set up
 
 Requirements: Node 24, pnpm, and Postgres binaries (`initdb`, `pg_ctl`) on PATH
-for the database tests. `flake.nix`'s dev shell provides `nodejs_24`, `pnpm`
-and `postgresql`, plus the Playwright browsers `apps/workspace`'s e2e test
-needs:
+for the database tests, and Go for the VM helper's tests. `flake.nix`'s dev shell
+provides `nodejs_24`, `pnpm`, `postgresql` and `go`, plus the Playwright browsers
+`apps/workspace`'s e2e test needs:
 
 ```bash
 nix develop
@@ -177,8 +178,9 @@ bash scripts/check.sh        # the gate; stops at the first failure
 test, lint, typecheck, `scripts/check-globalsetup-env.sh` (guards against a
 package's `globalSetup.ts` writing shared `process.env` state or picking a port
 with `Math.random()`), `scripts/check-agent-run-columns.sh`, `pnpm test` (with
-`FX_FORBID_MODEL_CALLS=1` and the model API keys unset), the site-kit browser
-tier, `packages/db/scripts/test-neon-shape.sh` (proves the migration chain
+`FX_FORBID_MODEL_CALLS=1` and the model API keys unset), `go vet` and `go test`
+for the VM helper in `packages/fx-runner/vmhelper` (when `packages/fx-runner` is
+part of the run), the site-kit browser tier, `packages/db/scripts/test-neon-shape.sh` (proves the migration chain
 applies under a Neon-shaped non-superuser owner),
 `packages/db/scripts/check-migration-order.sh`, the `apps/web` build with its
 trace and baked-path checks, then `pnpm test:guard`.

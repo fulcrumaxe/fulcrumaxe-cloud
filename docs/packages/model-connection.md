@@ -12,6 +12,9 @@ Sources:
 - `packages/model-connection/src/planKinds.ts`
 - `packages/model-connection/src/keyAccess.ts`
 - `packages/model-connection/src/httpClient.ts`
+- `packages/model-connection/src/machineOps.ts`
+- `packages/model-connection/src/kekFormat.ts`
+- `packages/api/src/routes/machine-credential.ts`
 - `packages/db/migrations/0606_derived_account_status.sql`
 
 ## What it does
@@ -57,6 +60,16 @@ Everything `packages/model-connection/src/index.ts` re-exports: `types.ts` (`Pro
 ## Vercel connection (D#598 P8d-2)
 
 `src/vercelConnection.ts` stores one Vercel API token per account in `vercel_connections` (migration 0885), sealed with the same `seal`/`open` envelope and the same `FX_KEK_V{n}` keys as a model key, but bound to its own AAD purpose (`vercel_token`) so a sealed token cannot be opened as anything else. `connectVercel`, `rotateVercel` and `removeVercel` are owner/admin only and write `vercel_connection.connect|rotate|remove` audit rows (tail of the token only); the token is checked with Vercel first (`createVercelTokenValidator`, through the net-guarded pinned fetch) and a refused or unreachable check stores nothing. Rotation is one row-locked UPDATE of every sealed column. The token is opened in exactly one place, `createSealedVercelCredentials(...).resolve`, the lookup behind the setup-request env-var check; it answers `unavailable` (never an error, never partial) for no connection, a rejected one, a KEK version that is not configured, or a seal that does not open. A 401 from Vercel (and only a 401; a 403 or 404 means this token cannot see that project, which a new token may fix) marks the connection `rejected` through `markRejected`, pinned to the stored token's nonce so a token rotated in meanwhile is never marked. Routes: `GET|POST|PUT|DELETE /api/v1/vercel-connection`; per-state wording is in `src/vercelCopy.ts`. Tests: `test/vercelConnection.test.ts`, `packages/api/test/vercel-connection.test.ts`, `packages/db/test/vercel-connections-schema.test.ts`.
+
+## Hetzner Cloud token (#1057)
+
+`src/machineOps.ts` stores one Hetzner Cloud API token per account in `machine_provider_credentials` (migration 1035), and it is the only reader of it. The token is sealed with the same `seal`/`open` envelope but under its own key, `FX_MACHINE_KEK_V1`, and its own AAD purpose (`hetzner_token`). That key is never the model-connection key and never falls back to it: only version 1 exists, and a missing or malformed value is `machine_kek_unset`, which turns the whole feature off (`/api/health` lists `machine_kek_unset` among its `unconfigured` codes while it is). The value must be canonical base64, padded and with nothing before, inside or after it, of exactly 32 bytes; `parseKek32` in `src/kekFormat.ts` is the one parser, shared with the environment check, so what the check accepts the reader accepts.
+
+- **Connecting.** `POST /api/v1/machine-credentials/hetzner` (session only, owner or admin, body `{token}`, rate-limited like a model key: one try every 10 seconds, 30 an hour per account) checks the machine key, the token's format (64 letters and digits) and that none is connected, then asks Hetzner through `createHetznerCredentialProbe` (`@fx/hetzner`) and seals nothing until the probe says `ok`. It answers 201 with an id, a status, `token_hint` (the last four characters), `unlabelled_server_count` (servers in the project the cloud did not make, a warning only) and `created_at`. The token is never in any response, error, log line or audit row. Errors carry a fixed message and a code from a closed list: `machine_kek_unset` and `not_configured` (503), `invalid_token_format`, `token_invalid` and `token_read_only` (422), `provider_unreachable` (503), `already_connected` (409).
+- **Removing.** `DELETE /api/v1/machine-credentials/hetzner` sets the sealed columns to NULL and keeps the row as removed; the account's server rows stay. It answers 204, or 404 `not_connected`. Both routes write an audit row (`machine_credential.added`, `machine_credential.removed`).
+- **Reading it.** `withHetznerToken` (a call that names no server) and `withManagedServer` (a call on one server id, refused `server_not_managed` before the seal is read unless the id is one of the account's `managed_servers`) are the only ways out. Each reads the row, writes the `server.unsealed` audit row, calls the database's `machine_credential_use` and opens the seal inside one transaction, ends it, and then hands the token to a callback, so no lock is held over the Hetzner call. If the audit write, the read or the open fails, the transaction rolls back and the callback never runs. A 401 from Hetzner marks the credential `invalid` (a 403 does not), and later reads answer `credential_invalid` until the token is replaced. A seal that does not open is `unseal_failed`.
+- **What keeps it narrow.** `test/machineOps.static.test.ts` pins that `machineOps.ts` is the only file that reads `FX_MACHINE_KEK_V1`, the only caller of `machine_credential_use` and the only writer of the `server.unsealed` audit action. A Hetzner token shape (64 letters and digits with no prefix, and not all hex, so a sha-256 digest is kept) is also redacted from run events and runner telemetry.
+- **Nothing calls the readers yet.** No code creates, lists or deletes a server through them; the routes above are the only caller of this file.
 
 ## Security notes
 

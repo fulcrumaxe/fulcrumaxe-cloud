@@ -1,6 +1,6 @@
 # @fx/hetzner
 
-A typed, strict client for the Hetzner Cloud API, and a small provider-neutral seam on top of it. The client covers locations, server types, pricing, servers, firewalls, SSH keys and actions. It is a library only: nothing in the repo imports it yet.
+A typed, strict client for the Hetzner Cloud API, and a small provider-neutral seam on top of it. The client covers locations, server types, pricing, servers, firewalls, SSH keys and actions. It is a library. The one thing outside the package that uses it is the token probe described below.
 
 Sources:
 - `packages/hetzner/package.json`
@@ -8,6 +8,7 @@ Sources:
 - `packages/hetzner/src/client.ts`
 - `packages/hetzner/src/parse.ts`
 - `packages/hetzner/src/provider.ts`
+- `packages/hetzner/src/probe.ts`
 - `packages/hetzner/vitest.config.ts`
 - `packages/hetzner/test/`
 - `packages/hetzner/test/helpers/strictHetzner.ts`
@@ -20,9 +21,9 @@ Sources:
 
 The package is private (`"private": true`, `"license": "UNLICENSED"` in `packages/hetzner/package.json`) and is built in two merged steps: the client core and servers (#1030), then firewalls, SSH keys and power controls (#1031).
 
-## No app depends on it yet
+## What depends on it
 
-No other `package.json` in the repo lists `@fx/hetzner`, and no source file outside `packages/hetzner/` imports it. Its only workspace dependency is `@fx/net-guard` (`packages/hetzner/package.json`), whose `resolveChecked` and `isBlockedAddress` the client uses to resolve `api.hetzner.cloud` and refuse a blocked address (`packages/hetzner/src/client.ts`). Treat the whole surface below as unwired.
+Only `packages/api/package.json` lists `@fx/hetzner`, and the one import is `createHetznerCredentialProbe` in `packages/api/src/routes/machine-credential.ts` (#1057). No app and no server-creating code calls the client or the provider seam yet. Its only workspace dependency is `@fx/net-guard` (`packages/hetzner/package.json`), whose `resolveChecked` and `isBlockedAddress` the client uses to resolve `api.hetzner.cloud` and refuse a blocked address (`packages/hetzner/src/client.ts`). Treat the client and the provider seam below as unwired.
 
 ## The client
 
@@ -41,6 +42,10 @@ No other `package.json` in the repo lists `@fx/hetzner`, and no source file outs
 - **Token handling.** Every error message is scrubbed of the token and of `Bearer ...` text, and the client logs nothing. The client also pins the connection to the address it resolved and refuses a blocked one.
 
 Everything above is exported from `packages/hetzner/src/index.ts`, along with the types `HetznerClient`, `HetznerOptions`, `CreateServerInput`, `FirewallRuleInput`, `Action`, `Firewall`, `FirewallRule`, `Location`, `Price`, `Pricing`, `Server`, `ServerStatus`, `ServerType` and `SshKey`.
+
+## The token probe
+
+`createHetznerCredentialProbe(options)` (`packages/hetzner/src/probe.ts`) asks Hetzner what a token can do before the cloud stores it. `check(token)` makes a read (`GET /servers`), then a write: it creates a throwaway SSH key named `fx-probe-<uuid>` and labelled `fx-probe=1`, from a fresh ed25519 key whose private half is never kept, and deletes it again (one retry). It then lists the project's servers and counts those without the `fx-managed=1` label (`MANAGED_LABEL`), which every server the cloud creates will carry. The answer is a closed verdict: `ok` with `unlabelledServers`, `invalid` (Hetzner refused the token), `read_only` (the write was refused) or `unreachable` (anything else). A key that was made but could not be deleted is `unreachable`, because a delete is a write too; the inert key stays in the person's project under its label for a later sweep, and each retry makes its own. The token stays in the client's closure and no result carries it. Tests: `packages/hetzner/test/probe.test.ts`.
 
 ## Errors
 
