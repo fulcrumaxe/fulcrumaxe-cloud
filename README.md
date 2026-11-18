@@ -39,7 +39,14 @@ decisions and a halt marker come back, and the workspace's Team app and the
 engine items in Needs you show and answer them. It is off until an owner or
 admin turns it on, and what it shows is information, never spend
 (`packages/fx-runner/src/engineBridge/`, `packages/api/src/routes/engine.ts`,
-`apps/workspace/apps/team/`; see `docs/architecture.md`).
+`apps/workspace/apps/team/`; see `docs/architecture.md`). A person can also run the
+engine's Team Lead on the machine as a supervised headless process (`fx-runner
+engine-host start | stop | status | resume`), which gets scheduled messages and the
+bridge's commands and keeps its session across restarts
+(`packages/fx-runner/src/engineHost/`; see `docs/packages/runner.md`). A machine with
+no credential can be linked to an account by a code a signed-in owner or admin types at
+`/link`; the cloud side is merged and the runner does not call it yet
+(`packages/runner-cloud/src/deviceFlow.ts`, `apps/web/app/link/page.tsx`).
 
 It also hosts the **site kit**, which turns a customer's repo into a
 fact-verified project website (`packages/sitekit-claims`,
@@ -96,7 +103,8 @@ packages/
                       Dockerfile build plan, network policy, ensure-env step
   features/           feature-exposure catalogue and emergency floor
   fx-runner/          the local runner: job verification, role tools, the
-                      Claude engine, the daemon and the verify browser
+                      Claude engine, the daemon, the verify browser, the engine
+                      bridge and the engine host
   gh-policy/          pure decision engine for the GitHub proxy
   github/             GitHub App webhook intake, event mapping, installation
                       tokens, merge-gate GraphQL documents
@@ -118,7 +126,7 @@ packages/
   runner/             hosted-sandbox orchestration: network policy, run
                       status and resume, funding
   runner-cloud/       the cloud side of the local runner: registration,
-                      claims, events, the merge order
+                      the device-code link flow, claims, events, the merge order
   runner-protocol/    wire protocol between the cloud and a runner
   runtime/            model/runtime adapters: local, production, fake
   sitekit-checks/ sitekit-claims/ sitekit-pipeline/ sitekit-publish-gates/
@@ -212,7 +220,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1035` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes |
+| `0800`–`1037` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes. `1036_onboarding_tables.sql` adds the onboarding tables (the track an account chose, a repository's setup, the plan draft a person reviews, the published engine versions) and the table of pending device codes, and `1037_device_registration.sql` adds the functions that start, look up, approve, deny and poll a device code |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -321,7 +329,12 @@ Sources:
 - `packages/db/migrations/1033_engine_commands_ask_index.sql`
 - `packages/db/migrations/1034_engine_halt_stamp_exact.sql`
 - `packages/db/migrations/1035_machine_tables.sql`
+- `packages/db/migrations/1036_onboarding_tables.sql`
+- `packages/db/migrations/1037_device_registration.sql`
 - `packages/fx-runner/src/engineBridge/`
+- `packages/fx-runner/src/engineHost/`
+- `packages/runner-cloud/src/deviceFlow.ts`
+- `apps/web/app/link/page.tsx`
 - `packages/api/src/routes/engine.ts`
 - `apps/workspace/apps/team/`
 - `packages/hetzner/package.json`

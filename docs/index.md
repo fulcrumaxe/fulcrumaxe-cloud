@@ -29,7 +29,7 @@ Sources:
 - [`@fx/billing`](packages/billing.md) — Stripe test-mode billing.
 - [`@fx/partners`](packages/partners.md) — partner layer.
 - [`@fx/decisions`](packages/decisions.md) — decision-type catalogue, presets, and the pure `decide()` resolver.
-- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam.
+- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge and engine host (`fx-runner engine-host`).
 - [`@fx/runtime`](packages/runtime.md) — model/runtime adapters.
 - [`@fx/model-router`](packages/model-router.md) — data-driven model routing, escalation, floors.
 - [`@fx/model-connection`](packages/model-connection.md) — customer bring-your-own-key model connections.
@@ -45,13 +45,13 @@ Sources:
 
 ## Apps
 
-- [`apps/web`](apps/web.md) — the Next.js App Router console.
+- [`apps/web`](apps/web.md) — the Next.js App Router console, including the `/link` page where a person approves a machine.
 - [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile; its first-party apps (pipeline, needs-you, team, runs and others) are under `apps/workspace/apps/`.
 - [`apps/live-e2e`](apps/live-e2e.md) — live end-to-end packs: manifest, selection, targets and the `plan` command.
 
 ## Cross-cutting
 
 - [Data model](data-model.md) — the tenant schema across all migrations.
-- [Security](security.md) — the tenancy, auth and RLS model.
+- [Security](security.md) — the tenancy, auth and RLS model, the engine bridge's trust rules and the device-code link flow.
 - [Operations](operations.md) — running and operating this repo, including the CI jobs and the dormant merge-queue rollup switch.
 - Operator runbooks (hosted Postgres, billing, staging) are not part of this public tree.
