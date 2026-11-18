@@ -75,6 +75,7 @@
     {"package":"packages/model-connection","watch":["packages/**","apps/**"],"reason":"packages/model-connection/test/machineOps.static.test.ts walks packages and apps for the machine key, the credential reader and the unseal audit write"},
     {"package":"packages/receipts","watch":["packages/**","apps/**"],"reason":"packages/receipts/test/deps-direction.test.ts walks packages and apps"},
     {"package":"packages/runner","watch":["packages/**","apps/**"],"reason":"packages/runner/test/queuedCallSites.test.ts and other guards walk apps and packages"},
+    {"package":"packages/runner-cloud","watch":["apps/**","packages/*/src/**","packages/db/migrations/**"],"reason":"packages/runner-cloud/test/sandboxInventory.imports.test.ts walks every application, every package src and every migration for the sandbox inventory tables and host-limit fields"},
     {"package":"packages/runner-protocol","watch":["packages/*/src/**"],"reason":"packages/runner-protocol/test/planePush/noForcePush.test.ts walks every package's src"},
     {"package":"packages/worker","watch":["packages/**","apps/**"],"reason":"packages/worker/test/conflictRoundSource.test.ts and other source scans walk packages and apps"},
     {"package":"packages/test-guard","watch":["packages/*/vitest.config.ts","apps/*/vitest.config.ts","packages/*/package.json","apps/*/package.json","pnpm-workspace.yaml","vitest.workspace.ts"],"reason":"packages/test-guard/test/workspace-coverage.test.ts walks every workspace package and checks its vitest.config.ts wires in the model-call guard"},

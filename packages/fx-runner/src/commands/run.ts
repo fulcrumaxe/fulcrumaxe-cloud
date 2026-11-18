@@ -38,6 +38,7 @@ import { createVerifyLocal } from "../daemon/verifyLocal.js";
 import { readSignInState } from "../daemon/signInState.js";
 import { readHostFacts } from "../hostFacts.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
+import { createInventoryReporter, emptyInventorySource } from "../daemon/sandboxInventory.js";
 import { startEngineBridge, type EngineBridge, type EngineBridgePorts } from "../engineBridge/daemon.js";
 import { createEventsUploader } from "../engineBridge/upload.js";
 import { createRunnerClient } from "../daemon/client.js";
@@ -360,7 +361,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     /** D#842 EB-3c: set once the hello is answered; the engine bridge starts only when the cloud kept `engine_bridge_v1`. */
     let engineBridgeAccepted = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
-    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
+    // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
+    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, ...(readHostFacts()?.sandbox_engine === "microvm" ? { sandboxInventory: createInventoryReporter({ source: emptyInventorySource, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
     const git = createGitPath({ platform: host.platform, pushLog, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });

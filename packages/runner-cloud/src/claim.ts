@@ -2,13 +2,24 @@ import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessag
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { deployOrderWaiting } from "./deployOrder.js";
-import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 import { configuredWakeKey, wakeGrantFor, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
 
 export const CLAIM_PATH = "/api/runner/claim";
 /** The longest `retry_after` an idle claim answer may carry (the protocol's own bound). */
 const CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS = 3600;
+
+/** The definer answers 22023 for an inventory it refuses (a runner below protocol 21, or a list the schema should have stopped, such as a date that is out of range: 22007 and 22008): the same 400 as any bad message. */
+async function refuseBadInventory<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    const code = pgCode(error);
+    if (code === "22023" || code === "22007" || code === "22008") throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+    throw error;
+  }
+}
 
 /**
  * POST /api/runner/claim (D#6 R2b-3, body criteria 1 to 3 and 5). The signature names the runner; the cloud reads its scope
@@ -36,7 +47,7 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   // D#6 RUNNER-WAKE R3a: read once per request. With no key the capability row is not even read, and nothing below changes.
   const wakeKey = configuredWakeKey(deps.wakeKey);
 
-  const gate = await asRunner(() =>
+  const gate = await asRunner(() => refuseBadInventory(() =>
     withRunnerSession(deps.appUserPool, runner, async (client) => {
       // A runner revoked between the verification and here, or whose account is suspended, gets 42501: `asRunner` makes it a 401.
       const { rows } = await client.query<{ wait: number }>("SELECT runner_claim_throttle($1) AS wait", [CLAIM_MIN_INTERVAL_SECONDS * 1000]);
@@ -49,6 +60,9 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       if (waited <= 0 && message.sandbox_unavailable === undefined) await client.query("SELECT runner_capacity_record($1::int, $2::int, $3::text)", [message.capacity?.light.limit ?? null, message.capacity?.heavy.limit ?? null, message.capacity?.limited_by ?? null]);
       // D#749 VERIFY-SIGNIN-EXPIRY: the state of the runner's saved verify sign-in, when it said one (protocol 18 and later; the function ignores a runner whose hello declared less). Kept for the post-merge verify stage.
       if (waited <= 0 && message.sandbox_unavailable === undefined && message.verify_sign_in !== undefined) await client.query("SELECT runner_verify_sign_in_record($1::text)", [message.verify_sign_in]);
+      // D#587 B-7a: the sandbox inventory, when the runner sent one (it does so only when its list changed, or every 10 minutes). Replaced whole through the
+      // definer, which refuses unknown keys, a protocol below 21 and more than 200 rows. Routing and display only; nothing below reads it.
+      if (waited <= 0 && message.sandboxes !== undefined) await client.query("SELECT runner_sandboxes_record($1::jsonb)", [JSON.stringify(message.sandboxes)]);
       // D#6 C43-6: how long this runner is still held back by its plan's usage limit, in whole seconds rounded up (0: not at all). Worked out from the
       // stored end time against the database clock on every claim, so a pause that has ended needs no cleanup and the next claim just goes ahead.
       let pausedFor = 0;
@@ -95,7 +109,7 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) deployOrder = await deployOrderWaiting(client, runner);
       return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder };
     }),
-  );
+  ));
   const wait = gate.waited;
   if (wait > 0) {
     const retryAfter = Math.min(CLAIM_MIN_INTERVAL_SECONDS, Math.max(1, Math.ceil(wait / 1000)));
