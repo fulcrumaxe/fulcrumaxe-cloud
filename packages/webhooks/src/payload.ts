@@ -59,7 +59,13 @@ const BUDGETS = new Set(['model', 'foreground_compute', 'background_compute']);
  * the field entirely. An unrecognized key is dropped unconditionally by
  * `sanitizeWebhookPayload` below -- there is no default/passthrough case.
  */
-const FIELD_RULES: Record<string, (value: unknown) => string | number | boolean | null> = {
+/** What one allowlisted field may be: a scalar, or (only `panels`) a list of names from a closed set. */
+export type PayloadValue = string | number | boolean | null | string[];
+
+/** The panels an `engine.changed` notice may name (ON-23a). The SQL map in migration 1039 produces exactly these names, in this order. */
+export const ENGINE_NOTICE_PANELS = ['agents', 'lanes', 'gates', 'asks', 'log', 'plan', 'stats', 'usage', 'status'] as const;
+
+const FIELD_RULES: Record<string, (value: unknown) => PayloadValue> = {
   repoFullName: (v) => (typeof v === 'string' && REPO_FULL_NAME_RE.test(v) ? v : null),
   prUrl: (v) => (typeof v === 'string' && v.startsWith(GITHUB_URL_PREFIX) ? v : null),
   prNumber: (v) => (typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null),
@@ -89,6 +95,13 @@ const FIELD_RULES: Record<string, (value: unknown) => string | number | boolean 
   repo_id: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
   session_id: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
   last_seq: (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null),
+  // ON-23a: the panels the notice names. A closed set, each name once, in the set's own order; anything else (a non-array, an unknown name, a repeat) drops the whole field.
+  panels: (v) => {
+    if (!Array.isArray(v) || v.length === 0 || v.length > ENGINE_NOTICE_PANELS.length) return null;
+    const names = ENGINE_NOTICE_PANELS as readonly string[];
+    if (!v.every((x) => typeof x === 'string' && names.includes(x)) || new Set(v).size !== v.length) return null;
+    return ENGINE_NOTICE_PANELS.filter((n) => v.includes(n));
+  },
   createdBy: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
 };
 
@@ -101,8 +114,8 @@ const FIELD_RULES: Record<string, (value: unknown) => string | number | boolean 
  * anything else a future producer might carelessly attach -- is dropped
  * unconditionally, never passed through.
  */
-export function sanitizeWebhookPayload(raw: Record<string, unknown>): Record<string, string | number | boolean | null> {
-  const out: Record<string, string | number | boolean | null> = {};
+export function sanitizeWebhookPayload(raw: Record<string, unknown>): Record<string, PayloadValue> {
+  const out: Record<string, PayloadValue> = {};
   for (const [key, value] of Object.entries(raw)) {
     const rule = FIELD_RULES[key];
     if (!rule) continue;

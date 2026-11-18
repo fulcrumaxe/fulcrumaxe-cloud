@@ -138,3 +138,18 @@ describe('payload: the v1 webhook event catalogue', () => {
     expect(isKnownWebhookEventType('something.made.up')).toBe(false);
   });
 });
+
+describe('payload: the engine.changed panels field (ON-23a)', () => {
+  const ID = '0b5c3a1e-0000-4000-8000-000000000001';
+
+  it('keeps a closed-set list, once each, in the closed set order, next to the ids', () => {
+    expect(sanitizeWebhookPayload({ repo_id: ID, session_id: ID, last_seq: 4, panels: ['status', 'agents', 'stats'] })).toEqual({ repo_id: ID, session_id: ID, last_seq: 4, panels: ['agents', 'stats', 'status'] });
+    expect(sanitizeWebhookPayload({ panels: ['agents', 'lanes', 'gates', 'asks', 'log', 'plan', 'stats', 'usage', 'status'] }).panels).toHaveLength(9);
+  });
+
+  it('drops the whole field for a name outside the set, a repeat, an empty list or a non-list, and never a partial list', () => {
+    for (const bad of [['agents', 'billing'], ['agents', 'agents'], [], 'agents', 'agents,stats', { 0: 'agents' }, [1], [['agents']], null, ['AGENTS'], ['agents '], Array(10).fill('agents')]) {
+      expect(sanitizeWebhookPayload({ repo_id: ID, panels: bad as unknown })).toEqual({ repo_id: ID });
+    }
+  });
+});

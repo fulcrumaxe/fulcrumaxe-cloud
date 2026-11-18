@@ -7,7 +7,7 @@ import { bumpSessionEpoch } from '@fx/core/src/auth/identity.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
-import { AccountPoller, type AccountEventRow, type AccountSubscription } from '../src/sse/poller.js';
+import { AccountPoller, NUDGE_MIN_TICK_GAP_MS, NUDGE_WAKE_MARGIN_MS, type AccountEventRow, type AccountSubscription } from '../src/sse/poller.js';
 import { NudgeListener } from '../src/sse/nudge.js';
 import { handleEventsRequest, type StreamDeps } from '../src/sse/stream.js';
 import { seedAccountWithMember } from './helpers/seed.js';
@@ -132,6 +132,57 @@ describe('idle-account wake-up latency (API-5d)', () => {
     console.log(`API-5d control (nudge off) latency ms: ${ms}`);
     expect(ms).toBeGreaterThan(5_000);
   }, 60_000);
+
+  /** An engine change notice as the ingest writes it (ON-23a): ids and the panels it names. */
+  const engineNotice = (accountId: string): Promise<{ rows: Array<{ id: string }> }> =>
+    admin.query(`INSERT INTO domain_events (account_id, type, payload) VALUES ($1, 'engine.changed', $2::jsonb) RETURNING id`, [
+      accountId,
+      JSON.stringify({ repo_id: '0b5c3a1e-0000-4000-8000-000000000001', session_id: '0b5c3a1e-0000-4000-8000-000000000002', last_seq: 3, panels: ['agents', 'status'] }),
+    ]);
+
+  it('an engine.changed notice is nudged: it reaches an idle stream within the settle window plus the wake margin and one 250 ms tick grid, panels intact (ON-23a)', async () => {
+    const { accountId } = await seedAccountWithMember(admin);
+    const got: AccountEventRow[] = [];
+    const sub = nudgedPoller.subscribe(accountId, 0n, { onEvents: (r) => got.push(...r), onFail: () => {} });
+    try {
+      await sleep(300);
+      const timings: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const before = got.length;
+        const inserted = Date.now();
+        await engineNotice(accountId);
+        await eventually(() => got.length === before + 1, 5_000);
+        timings.push(Date.now() - inserted);
+      }
+      console.log(`ON-23a engine.changed nudge latency ms (3 runs): ${timings.join(', ')}`);
+      for (const t of timings) {
+        expect(t).toBeGreaterThanOrEqual(SETTLE_MS - 50);
+        expect(t).toBeLessThanOrEqual(SETTLE_MS + NUDGE_WAKE_MARGIN_MS + NUDGE_MIN_TICK_GAP_MS + 250); // the last 250 ms is the read and scheduling slack
+      }
+      expect(got.every((r) => r.type === 'engine.changed' && JSON.stringify((r.payload as { panels: string[] }).panels) === '["agents","status"]')).toBe(true);
+    } finally {
+      sub.unsubscribe();
+    }
+  }, 30_000);
+
+  it('with the listener degraded (no nudge source), an engine.changed notice still arrives, on the 10 s idle tick (ON-23a)', async () => {
+    const { accountId } = await seedAccountWithMember(admin);
+    const poller = new AccountPoller({ pool: app, platformOpsPool: ops, settleMs: SETTLE_MS, nudgeSource: null });
+    const got: AccountEventRow[] = [];
+    const sub = poller.subscribe(accountId, 0n, { onEvents: (r) => got.push(...r), onFail: () => {} });
+    try {
+      await sleep(300);
+      const inserted = Date.now();
+      await engineNotice(accountId);
+      await eventually(() => got.length === 1, 14_000);
+      const ms = Date.now() - inserted;
+      console.log(`ON-23a engine.changed degraded latency ms: ${ms}`);
+      expect(ms).toBeGreaterThan(SETTLE_MS + 500); // not nudged: it waited for a tick
+      expect(ms).toBeLessThanOrEqual(12_000);
+    } finally {
+      sub.unsubscribe();
+    }
+  }, 30_000);
 
   it('a NOTIFY arriving while the newest row is inside the settle window does not deliver it early: it arrives once, after the window, in order', async () => {
     const { accountId } = await seedAccountWithMember(admin);

@@ -76,7 +76,7 @@ const REFUSALS: Readonly<Record<string, number>> = { engine_bridge_off: 403, eng
  * runner (409 `engine_instance_other_runner`), then the closed body of every event (400), the order of the seq numbers (400 `seq_order`; a first number at or below the
  * last stored one is 409 `seq_not_increasing` with `last_accepted_seq`) and the day's quotas (429 `engine_event_quota`: 5000 events a session and 20000 a repo per UTC
  * day). A refusal stores nothing. A hole in the numbers is accepted and recorded. Tokens an event reports are priced by the cloud afterwards, in the same transaction.
- * The `engine.changed` notice (ids only) is written by the definer itself, once per batch that stored something, in that same transaction.
+ * The `engine.changed` notice (ids and the names of the changed panels only) is written by the definer itself, once per batch that stored something, in that same transaction.
  */
 export async function ingestEngineEvents(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
   if (req.body.byteLength > MAX_BODY_BYTES) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");

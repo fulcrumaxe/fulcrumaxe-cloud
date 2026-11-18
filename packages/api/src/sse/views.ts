@@ -24,7 +24,7 @@ export interface AccountEventDTO {
   id: string;
   type: string;
   created_at: string;
-  data: Record<string, string | number | boolean | null>;
+  data: Record<string, string | number | boolean | null | string[]>;
 }
 
 /**
