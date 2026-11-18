@@ -1,0 +1,30 @@
+{
+  "_comment": "Path lanes for merge-queue admission (never CI scope: scripts/ci/affected.mjs decides scope from the real diff). The classifier is scripts/ci/lanes.mjs. First match wins, in this order: hot, then each entry of `lanes`, then `per_dir`. Anything that matches nothing is `hot`. `hot` is every glob in scripts/ci/full-run-triggers.json `triggers` (read at run time, never copied) plus `hot_extra` below. Globs are anchored at the repository root: ** crosses directories, * does not. A rule may carry `exclude` globs, which take a path out of that rule only. Two non-hot rules must never both match a file (lanes.test.mjs checks every tracked file).",
+  "version": 1,
+  "hot_extra": [
+    {"glob":"packages/api/openapi.json","reason":"the generated API document: every route PR rewrites it"},
+    {"glob":"packages/api-client/src/generated.ts","reason":"the generated client: regenerated from the API document"},
+    {"glob":".autonomous-team/config.json","reason":"team switches, including the lane switch itself"},
+    {"glob":".github/**","reason":"repository automation, not only the workflows"},
+    {"glob":"infra/**","reason":"deployment definitions"},
+    {"glob":"lint/**","reason":"lint rules every package runs"},
+    {"glob":"packaging/**","reason":"release packaging"},
+    {"glob":".fulcrumaxe/**","reason":"engine settings"},
+    {"glob":"tsconfig.base.json","reason":"the TypeScript config every package extends"},
+    {"glob":".nvmrc","reason":"the Node version every job runs"},
+    {"glob":".gitignore","reason":"changes what is tracked"},
+    {"glob":"LICENSE*","reason":"licence text: rare, so kept serial"},
+    {"glob":"NOTICE*","reason":"notices: rare, so kept serial"},
+    {"glob":"THIRD-PARTY-NOTICES*","reason":"notices: rare, so kept serial"}
+  ],
+  "lanes": [
+    {"name":"runner","globs":["packages/runner/**","packages/runner-cloud/**","packages/runner-protocol/**","packages/fx-runner/**"]},
+    {"name":"workspace","globs":["apps/workspace/**"]},
+    {"name":"web","globs":["apps/web/**"]},
+    {"name":"docs","globs":["docs/**","wiki/**","**/*.md"],"exclude":["packages/**","apps/**"]}
+  ],
+  "per_dir": [
+    {"prefix":"packages/","lane_prefix":"pkg:"},
+    {"prefix":"apps/","lane_prefix":"app:"}
+  ]
+}
