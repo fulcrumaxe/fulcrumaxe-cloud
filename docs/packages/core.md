@@ -69,7 +69,18 @@ Under `src/`:
   base64url cursors and a per-repo freshness envelope; liveness (`live`,
   `stale`, `runner_removed`, `never`) and agent state (`running`, `unknown`,
   `stopped`) are derived on read, never stored, and a runner counts as live
-  when it was heard within `LIVE_WITHIN_S` (180 seconds). `read.ts` reads
+  when it was heard within `LIVE_WITHIN_S` (180 seconds). Each repo row
+  carries its halt state, read from `engine_repo_controls`: `halted`,
+  `halted_at`, `halt_epoch`, and `halt_pending`, which is true while halted
+  and the runner has not yet reported a `halt_applied` event at or above the
+  current epoch (#1027). A runner's liveness and the freshness envelope take
+  the newer of its last upload and its last wake check, which the app injects
+  through `engineSeen.reader`; the wake check counts only while the last upload
+  is at most 420 seconds old (`WAKE_STAMP_MAX_DB_AGE_S`), and it can only make
+  a runner look more recently heard, never less (#1036). `readAsks` returns two kinds of ask in one newest-first
+  order: the team-log asks the engine reported, and decisions the cloud's
+  dial answered `ask`, which carry a `decision_id` and a `decision_type` and
+  count as cleared once an answer row exists (#1028). `read.ts` reads
   the engine's recorded usage and its API-equivalent dollar total. `plan.ts`
   returns a repo's newest complete plan snapshot (see below). These are
   information, never spend: no cap or envelope reads them. Each read runs on
@@ -220,7 +231,7 @@ cost once enough runs exist. `tokens/service.ts` reads/writes `api_tokens`
 (minting, listing, revocation) and reads `accounts.status` to refuse
 minting for an inactive account; `stats/read.ts` reads
 `v_kpi_work_items`/`v_kpi_runs`/`installations` and carries `n_person_change_requests`, so a person's request for changes stays out of the review-verdict KPIs (#432); `runs/read.ts` and
-`work-items/read.ts` read `agent_runs` and `work_items` respectively. A run row now carries `work_item` (issue number and a cleaned title, or null when the run has none or row security hides the item), and `listRuns` takes a `role` filter next to `status` (#960). `getStats` returns `engine_api_equivalent_usd` next to `runner_api_equivalent_usd`, read from `engine_agent_usage` and kept out of every cost KPI (#1003). `engine/` reads `engine_bridge_repos`, `engine_sessions`, `engine_agents`, `engine_lanes`, `engine_gate_receipts`, `engine_asks`, `engine_events`, `engine_agent_usage` (migration 1027) and the plan snapshot tables (migration 1032). The run column list in `tenancy/scopedAccess.ts` also includes `runner_protocol_version`, recorded at claim time (#977). A run refused for spend carries a fixed `failure_reason` code, derived on read by `runs/refusal.ts` (#898). A run on a member's plan counts as claim-approved only when its `runner_run_on_member_plan` receipt has actor `policy`, so a Yes answered in Needs you is not mistaken for the claim's (#718). `WorkItemDTO` gains `parent_issue_number` for a planned PR child (the issue number of its parent, which a card needs to offer Approve, #839) and `context_pct`, the whole percent of the context window the item's newest running run has filled, shown only from the warning level and derived on every read from the run's figure row (#743).
+`work-items/read.ts` read `agent_runs` and `work_items` respectively. A run row now carries `work_item` (issue number and a cleaned title, or null when the run has none or row security hides the item), and `listRuns` takes a `role` filter next to `status` (#960). `getStats` returns `engine_api_equivalent_usd` next to `runner_api_equivalent_usd`, read from `engine_agent_usage` and kept out of every cost KPI (#1003). `engine/` reads `engine_bridge_repos`, `engine_sessions`, `engine_agents`, `engine_lanes`, `engine_gate_receipts`, `engine_asks`, `engine_events`, `engine_agent_usage` (migration 1027), `engine_repo_controls` (migration 1031) and `engine_decisions` with `engine_decision_answers` (migration 1030) and the plan snapshot tables (migration 1032). The run column list in `tenancy/scopedAccess.ts` also includes `runner_protocol_version`, recorded at claim time (#977). A run refused for spend carries a fixed `failure_reason` code, derived on read by `runs/refusal.ts` (#898). A run on a member's plan counts as claim-approved only when its `runner_run_on_member_plan` receipt has actor `policy`, so a Yes answered in Needs you is not mistaken for the claim's (#718). `WorkItemDTO` gains `parent_issue_number` for a planned PR child (the issue number of its parent, which a card needs to offer Approve, #839) and `context_pct`, the whole percent of the context window the item's newest running run has filled, shown only from the warning level and derived on every read from the run's figure row (#743).
 
 `setup-requests/` (D#598 P8a) reads and writes `setup_requests` (migration 0856): `kinds.ts` is the closed list of six step kinds, the
 plain-text limits, the provider-link host list (github.com, vercel.com) and the fixed title templates; `store.ts` proposes, lists,
