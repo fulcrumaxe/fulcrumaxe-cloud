@@ -1848,6 +1848,12 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
     clone.querySelectorAll('[data-secret-node]').forEach(function (n) {
       n.replaceWith(placeholder('secret'));
     });
+    // A long list marks itself [data-preview-keep="N"]: a thumbnail a few hundred pixels wide shows only the top of it, so the copy keeps the first N children.
+    clone.querySelectorAll('[data-preview-keep]').forEach(function (n) {
+      const keep = parseInt(n.getAttribute('data-preview-keep'), 10);
+      if (!(keep >= 0)) return;
+      while (n.children.length > keep) n.lastElementChild.remove();
+    });
     return clone;
   }
 
