@@ -109,7 +109,7 @@ function setup(): World {
   writeFileSync(claude, FAKE);
   chmodSync(claude, 0o755);
   const world = { dir, state, checkout, claude, record: path.join(dir, "record.jsonl"), specs: [], pids: [], events: [], killed: [], scoped: [], timers: [], now: { t: 1_000_000 }, ours: new Set<number>(), starts: new Map<number, string>(), afterSpawn: undefined, killResult: undefined } as unknown as World;
-  const gate: BridgeState = { repo_gh_id: "123", bridge_enabled: true, operate_enabled: true, repo_checkout: checkout };
+  const gate: BridgeState = { repo_gh_id: "123", bridge_enabled: true, operate_enabled: true, repo_checkout: checkout, written_at: Date.now() };
   const writeGate = (g: BridgeState): void => writeFileSync(path.join(state, BRIDGE_STATE_FILE), JSON.stringify(g), { mode: 0o600 });
   writeGate(gate);
   world.setState = (s) => writeGate({ ...gate, ...s });
@@ -206,7 +206,7 @@ describe("EB-12a start refusals", () => {
     await refuses("bridge_disabled");
     w.setState({ operate_enabled: false });
     await refuses("operate_off");
-    writeFileSync(path.join(w.state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: "1; rm", bridge_enabled: true, operate_enabled: true, repo_checkout: w.checkout }), { mode: 0o600 });
+    writeFileSync(path.join(w.state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: "1; rm", bridge_enabled: true, operate_enabled: true, repo_checkout: w.checkout, written_at: Date.now() }), { mode: 0o600 });
     await refuses("state_unreadable");
     rmSync(path.join(w.state, BRIDGE_STATE_FILE));
     await refuses("bridge_disabled");
@@ -436,7 +436,7 @@ describe("EB-12a what is logged", () => {
   });
   it("reads the bridge state only in its exact shape", () => {
     const put = (o: unknown): void => writeFileSync(path.join(w.state, BRIDGE_STATE_FILE), JSON.stringify(o), { mode: 0o600 });
-    const ok = { repo_gh_id: "9", bridge_enabled: true, operate_enabled: false, repo_checkout: w.checkout };
+    const ok = { repo_gh_id: "9", bridge_enabled: true, operate_enabled: false, repo_checkout: w.checkout, written_at: Date.now() };
     put(ok);
     expect(readBridgeState(w.state, uid)).toEqual(ok);
     for (const bad of [{ ...ok, extra: 1 }, { ...ok, repo_checkout: "relative/dir" }, { ...ok, repo_gh_id: "x" }, { ...ok, operate_enabled: "yes" }, [], null]) {
@@ -568,7 +568,7 @@ describe("EB-12a the repo id and the handle", () => {
     for (const bad of ["0", "0123", "12345678901234567890", "", "-1", "1e3", " 1"]) expect(isRepoGhId(bad)).toBe(false);
     for (const good of ["1", "123", "9223372036854775807"]) expect(isRepoGhId(good)).toBe(true);
     for (const bad of ["0", "0123", "12345678901234567890"]) {
-      writeFileSync(path.join(w.state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: bad, bridge_enabled: true, operate_enabled: true, repo_checkout: w.checkout }), { mode: 0o600 });
+      writeFileSync(path.join(w.state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: bad, bridge_enabled: true, operate_enabled: true, repo_checkout: w.checkout, written_at: Date.now() }), { mode: 0o600 });
       expect(await w.make(["serve"]).start()).toEqual({ ok: false, reason: "state_unreadable" });
     }
     expect(w.specs).toHaveLength(0);

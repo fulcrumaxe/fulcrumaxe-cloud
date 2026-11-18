@@ -21,6 +21,7 @@ import { CommandPuller, PULL_PATH, createCloudPost, type HaltOutcome, type PullS
 import { loadCursor } from "./cursor.js";
 import { serveDecideSocket, socketPathFor, type DecideSocket } from "./decideSocket.js";
 import { readEngineVersion } from "./engineVersion.js";
+import { removeBridgeState, writeBridgeState } from "../engineHost/hostFiles.js";
 import { Inbox } from "./inbox.js";
 import { BridgeLoop, type BridgeStatus } from "./loop.js";
 import { loadBridgeSettings, type BridgedRepo } from "./settings.js";
@@ -301,6 +302,26 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
       handleControl: (repoGhId, control) => handleControl(repo, repoGhId, control),
       localHalted: () => localHalted(repo),
       reportHalt: (_repoGhId, report) => loop.reportHalt(report),
+      // The engine host reads this file to start and to keep running: it is written only after a pull the cloud answered, never from a guess.
+      onPulled: (repoGhId, haltFailed) => {
+        if (repoGhId !== repo.repo_gh_id || abort.signal.aborted || units.get(repo.repo_gh_id)?.abort !== abort || deps.uid === undefined) return;
+        if (haltFailed) {
+          // A halt was asked for and could not be completed: the halt file may still read "not halted", so the host must not be told to operate. Removal needs no free disk space.
+          try {
+            removeBridgeState(repo.state_dir);
+          } catch {
+            // fx-swallow-ok: a link or odd entry at the name is left alone (the host refuses it too); the file ages out
+            log("engine-bridge: the bridge state file could not be removed after a failed halt");
+          }
+          return;
+        }
+        try {
+          writeBridgeState(repo.state_dir, uidNum, { repo_gh_id: String(repo.repo_gh_id), bridge_enabled: true, operate_enabled: puller.operateEnabled(repo.repo_gh_id) === true, repo_checkout: repo.repo_root }, clock.now().getTime());
+        } catch {
+          // fx-swallow-ok: the error could name a path; the host then sees an old or missing file and does not run, and a fixed line says so
+          log("engine-bridge: the bridge state file could not be written; the engine host will not run until it can");
+        }
+      },
       log,
     });
     // Three loops, each its own promise: a failure in one is a fixed line and never reaches the others or the claim loop.
@@ -321,6 +342,13 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
     units.delete(id);
     unit.abort.abort();
     await unit.done;
+    // After the loops ended, so a pull that was in flight cannot write it again. Absent reads as "off" to the engine host.
+    try {
+      removeBridgeState(unit.repo.state_dir);
+    } catch {
+      // fx-swallow-ok: a link or odd entry at the name is left alone (the host refuses it too); the file ages out
+      deps.log("engine-bridge: the bridge state file could not be removed");
+    }
     refused.set(id, why);
     deps.log("engine-bridge: stopped for a repo");
   }
