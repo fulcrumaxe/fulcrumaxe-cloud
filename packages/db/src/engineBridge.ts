@@ -104,7 +104,7 @@ export interface EngineRepoFreshness {
   as_of: string | null;
   /** Seconds since the runner was last heard on any session of the repo (derived on read, never stored). */
   heard_age_s: number | null;
-  /** The age of each source the engine reads, as the repo's newest engine session last reported them (a bridge session reports none). */
+  /** The age of each source the engine reads, as the repo's newest engine session last reported them (a bridge session and the engine host's spool session report none, so they never speak for the sources). */
   source_ages_s: Record<string, number>;
   /** The latest 20 holes in the seq numbers across every session of the repo, newest detected first. */
   gaps: Array<{ from_seq: number; to_seq: number; before_ts: string | null }>;
@@ -132,7 +132,7 @@ export async function readEngineRepoFreshness(client: Pick<PoolClient, 'query'>,
     [repoId],
   );
   const ages = await client.query(
-    `SELECT source_ages_s FROM engine_sessions WHERE repo_id = $1 AND session_kind = 'engine' ORDER BY last_heard_at DESC NULLS LAST, created_at DESC, id LIMIT 1`,
+    `SELECT source_ages_s FROM engine_sessions WHERE repo_id = $1 AND session_kind = 'engine' AND source_ages_s IS NOT NULL ORDER BY last_heard_at DESC NULLS LAST, created_at DESC, id LIMIT 1`,
     [repoId],
   );
   const g = await client.query(

@@ -47,6 +47,11 @@ export interface TailOptions {
   uid: number | undefined;
   /** Most bytes read from the file per poll; at least twice the line cap. */
   maxPollBytes?: number;
+  /**
+   * True for an engine instance id that belongs to another tail of the same loop. Such a line is a forgery (or a mix-up) and is dropped as a schema drop, so the cursor
+   * still moves past it: one file can never put events into the other's session.
+   */
+  isForeignInstance?: (instanceId: string) => boolean;
 }
 
 interface Pos {
@@ -81,6 +86,21 @@ export class EngineTail {
     this.maxEvents = Math.max(1, opts.maxEvents ?? 100);
     this.maxLines = Math.max(1, opts.maxLines ?? 10_000);
     this.maxPollBytes = Math.max(2 * MAX_LINE_BYTES, opts.maxPollBytes ?? 1024 * 1024);
+  }
+
+  /** The engine instance this tail is on: the one of its saved cursor or of the events it has read; null before any. Never throws. */
+  currentInstance(): string | null {
+    try {
+      if (!this.loaded) {
+        this.committed = loadCursor(this.opts.cursorPath, this.opts.observe, this.opts.uid);
+        this.loaded = true;
+        this.rewind();
+      }
+    } catch {
+      // fx-swallow-ok: a refused cursor file is "no instance known"; the poll itself refuses it again and says so once
+      return null;
+    }
+    return this.work.instance;
   }
 
   /** Go back to the saved cursor, so the next poll re-reads whatever was not acked. */
@@ -200,6 +220,12 @@ export class EngineTail {
         if (!verdict.ok) result.dropped[verdict.reason]++;
         else {
           const event = verdict.event;
+          if (this.opts.isForeignInstance?.(event.engine_instance_id) === true) {
+            // Another tail's session: never sent, counted so the cursor moves past it.
+            result.dropped.schema++;
+            at = nl + 1;
+            continue;
+          }
           if (this.work.instance === null) this.work.instance = event.engine_instance_id;
           else if (event.engine_instance_id !== this.work.instance) {
             if (events.length > 0) {

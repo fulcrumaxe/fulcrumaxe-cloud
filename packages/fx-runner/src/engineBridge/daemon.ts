@@ -28,6 +28,8 @@ import { EngineTail } from "./tail.js";
 import type { SendOutcome } from "./upload.js";
 
 export const ENGINE_EVENTS_FILE = "engine-events.jsonl";
+/** The engine host's own events, written by `engineHost/hostFeeds.ts` (`SPOOL_FILE`; a test pins the two names equal). */
+export const HOST_EVENTS_FILE = "engine-host-events.jsonl";
 export const BRIDGE_STATUS_FILE = "engine-bridge-status.json";
 /** How often the supervisor looks again: settings, the cloud's list, the loops it must start or stop. */
 export const SUPERVISE_MS = 10_000;
@@ -143,6 +145,36 @@ export function parseAllowedRepos(body: unknown): Allowed[] | undefined {
   return out;
 }
 
+const engineCursorPath = (runnerStateDir: string, repoGhId: number): string => path.join(runnerStateDir, "engine-bridge", `${repoGhId}.cursor.json`);
+
+/**
+ * The two tails of a repo: the engine's own events file and the engine host's. Each has a cursor file of its own (the two never share state), the same owner check, and
+ * refuses an event that carries the other's engine instance: one file can never put events into the other's session.
+ */
+export function createBridgeTails(args: { stateDir: string; runnerStateDir: string; repoGhId: number; uid: number | undefined; secrets: () => readonly string[]; log: (line: string) => void }): { tail: EngineTail; hostTail: EngineTail } {
+  const { stateDir, runnerStateDir, repoGhId, uid, secrets, log } = args;
+  // An engine instance id belongs to the file it first appears in (or the cursor that already holds it): the other tail never adopts it, so one file cannot take over a
+  // session of the other, whether it is the other's current one, an old one from before a restart, or one the other has not read yet.
+  const owners = new Map<string, "engine" | "host">();
+  const foreign =
+    (me: "engine" | "host") =>
+    (id: string): boolean => {
+      for (const [name, t] of [["engine", tail], ["host", hostTail]] as const) {
+        const known = t.currentInstance();
+        if (known !== null && !owners.has(known)) owners.set(known, name);
+      }
+      const owner = owners.get(id);
+      if (owner === undefined) {
+        owners.set(id, me);
+        return false;
+      }
+      return owner !== me;
+    };
+  const tail: EngineTail = new EngineTail({ eventsPath: path.join(stateDir, ENGINE_EVENTS_FILE), cursorPath: engineCursorPath(runnerStateDir, repoGhId), uid, secrets, log, isForeignInstance: foreign("engine") });
+  const hostTail: EngineTail = new EngineTail({ eventsPath: path.join(stateDir, HOST_EVENTS_FILE), cursorPath: path.join(runnerStateDir, "engine-bridge", `${repoGhId}.host.cursor.json`), uid, secrets, log, isForeignInstance: foreign("host") });
+  return { tail, hostTail };
+}
+
 interface Unit {
   repo: BridgedRepo;
   abort: AbortController;
@@ -239,15 +271,15 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
   function start(repo: BridgedRepo, engineVersion: string): void {
     const abort = new AbortController();
     const log = deps.log;
-    const cursorPath = path.join(deps.runnerStateDir, "engine-bridge", `${repo.repo_gh_id}.cursor.json`);
+    const cursorPath = engineCursorPath(deps.runnerStateDir, repo.repo_gh_id);
     let lastAckedSeq: number | null = null;
     try {
       lastAckedSeq = loadCursor(cursorPath, undefined, deps.uid)?.last_acked_seq ?? null;
     } catch {
       // fx-swallow-ok: a refused cursor shows no acked seq in `status`; the tail itself refuses it again and says so once
     }
-    const tail = new EngineTail({ eventsPath: path.join(repo.state_dir, ENGINE_EVENTS_FILE), cursorPath, uid: deps.uid, secrets: deps.secrets, log });
-    const loop = new BridgeLoop({ tail, send: deps.send, clock, repoGhId: repo.repo_gh_id, engineVersion, bridgeVersion: deps.runnerVersion, log, lastAckedSeq });
+    const { tail, hostTail } = createBridgeTails({ stateDir: repo.state_dir, runnerStateDir: deps.runnerStateDir, repoGhId: repo.repo_gh_id, uid: deps.uid, secrets: deps.secrets, log });
+    const loop = new BridgeLoop({ tail, tails: [hostTail], send: deps.send, clock, repoGhId: repo.repo_gh_id, engineVersion, bridgeVersion: deps.runnerVersion, log, lastAckedSeq });
     const keeper = ports.ceiling.create(deps.cloud, { stateDir: repo.state_dir, uid: deps.uid, clock, repoGhId: repo.repo_gh_id, log });
     let lastControl: string | undefined;
     const puller = new CommandPuller({
