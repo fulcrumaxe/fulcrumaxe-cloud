@@ -52,11 +52,13 @@ func TestRealJailer(t *testing.T) {
 	}
 	l := &JailerLauncher{Jailer: os.Getenv("FX_VM_JAILER"), Firecracker: os.Getenv("FX_VM_FIRECRACKER"), CgroupRoot: "/sys/fs/cgroup", CgroupParent: parent, AmbientCaps: pinned.JailerOnlyCaps()}
 	cfg := config.Config{JailRoot: os.Getenv("FX_VM_JAIL_ROOT"), RunnerUID: 1001, RunnerGID: 1001, UIDFirst: 200000, UIDCount: 4, GIDFirst: 200000, GIDCount: 4,
-		MaxSandboxes: 2, MaxVCPUs: 2, MaxMemMB: 512}
+		MaxSandboxes: 2, MaxVCPUs: 2, MaxMemMB: 512, FirecrackerPath: l.Firecracker}
 	m, err := New(cfg, &logLauncher{t: t, inner: l})
 	if err != nil {
 		t.Fatal(err)
 	}
+	newFixtureIn(t, cfg.JailRoot).use(m) // the staged tree holds the fixture's template files
+	useRealMounts(t)                     // and the vsock bind mount is real here
 	defer m.Close()
 	a, b := "real-a", "real-b"
 	for _, id := range []string{a, b} {

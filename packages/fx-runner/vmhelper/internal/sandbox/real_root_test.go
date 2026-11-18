@@ -37,6 +37,7 @@ func TestRealRootPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
+	newFixture(t).use(m)
 	a, c := m.Prepare(prep("box-a"))
 	if c != protocol.OK {
 		t.Fatal(c)

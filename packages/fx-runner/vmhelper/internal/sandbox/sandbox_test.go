@@ -60,7 +60,7 @@ func mkroot(t *testing.T) string {
 
 func cfgFor(root string, max int64) config.Config {
 	return config.Config{JailRoot: root, RunnerUID: 1000, RunnerGID: 1000, UIDFirst: 100000, UIDCount: 16, GIDFirst: 100000, GIDCount: 16,
-		MaxSandboxes: max, MaxVCPUs: 4, MaxMemMB: 4096}
+		MaxSandboxes: max, MaxVCPUs: 4, MaxMemMB: 4096, FirecrackerPath: "/opt/fx/firecracker"}
 }
 
 func newMgr(t *testing.T, max int64, l Launcher) (*Manager, string) {
@@ -70,6 +70,7 @@ func newMgr(t *testing.T, max int64, l Launcher) (*Manager, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	newFixture(t).use(m)
 	t.Cleanup(m.Close)
 	return m, root
 }
@@ -198,6 +199,7 @@ func TestAllocatorExhaustedRangeIsOverCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
+	newFixture(t).use(m)
 	if _, c := m.Prepare(prep("a1")); c != protocol.OK {
 		t.Fatal(c)
 	}

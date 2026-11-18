@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const good = `{"jail_root":"/srv/fx-jails","runner_uid":4242,"runner_gid":4243,"uid_first":200000,"uid_count":16,"gid_first":200000,"gid_count":16,"max_sandboxes":8,"max_vcpus":4,"max_mem_mb":8192,"jailer_path":"/opt/fx/jailer","firecracker_path":"/opt/fx/firecracker"}`
+const good = `{"jail_root":"/srv/fx-jails","runner_uid":4242,"runner_gid":4243,"uid_first":200000,"uid_count":16,"gid_first":200000,"gid_count":16,"max_sandboxes":8,"max_vcpus":4,"max_mem_mb":8192,"jailer_path":"/opt/fx/jailer","firecracker_path":"/opt/fx/firecracker","template_manifest_path":"/etc/fx/templates.json","template_dir":"/var/lib/fx/templates"}`
 
 func TestGoodConfig(t *testing.T) {
 	c, err := Parse([]byte(good))

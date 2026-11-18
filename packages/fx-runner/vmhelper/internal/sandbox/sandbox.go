@@ -24,6 +24,7 @@ package sandbox
 import (
 	"errors"
 	"os"
+	"path"
 	"sort"
 	"sync"
 	"syscall"
@@ -73,9 +74,13 @@ type box struct {
 	spec    Spec
 	created time.Time
 	inst    Instance
+	busy    chan struct{} // non-nil while one start or destroy of this id is under way: the id's reservation
 }
 
-// Manager implements server.Backend. It is safe for concurrent use; one lock covers the whole registry.
+// Manager implements server.Backend. It is safe for concurrent use. The lock covers the registry map only and
+// is never held across a launch, a copy or an unmount: a start or destroy reserves its id (box.busy) and
+// works without the lock, so List, Prepare and other ids never wait on it. A second operation on the same id
+// waits for the reservation.
 type Manager struct {
 	Launcher Launcher
 	Now      func() time.Time
@@ -92,6 +97,7 @@ type Manager struct {
 	maxMemMB  int64
 	jailsFd   int
 	vsockFd   int
+	stg       stager
 	remap     func(uid, gid uint32) (uint32, uint32) // tests only: map a nominal owner onto one the test can really chown to
 	mu        sync.Mutex
 	boxes     map[string]*box
@@ -107,6 +113,7 @@ func newManager(cfg config.Config, l Launcher, rootUID uint32, remap func(uint32
 	m := &Manager{Launcher: l, Now: time.Now, root: cfg.JailRoot, rootUID: rootUID, runnerUID: cfg.RunnerUID,
 		uidFirst: cfg.UIDFirst, uidCount: cfg.UIDCount, gidFirst: cfg.GIDFirst, gidCount: cfg.GIDCount,
 		maxBoxes: cfg.MaxSandboxes, maxVCPUs: cfg.MaxVCPUs, maxMemMB: cfg.MaxMemMB, remap: remap,
+		stg:   stager{manifest: cfg.ManifestPath, dir: cfg.TemplateDir, exec: path.Base(cfg.FirecrackerPath)},
 		boxes: map[string]*box{}, jailsFd: -1, vsockFd: -1}
 	rfd, err := openAbs(m.root)
 	if err != nil {
@@ -269,6 +276,9 @@ func (m *Manager) Prepare(r protocol.Request) (server.Reply, protocol.Code) {
 	if r.VCPUs < 1 || r.MemMB < 1 || r.VCPUs > m.maxVCPUs || r.MemMB > m.maxMemMB {
 		return server.Reply{}, protocol.OverCap
 	}
+	if _, code := m.lookup(r.Template); code != protocol.OK {
+		return server.Reply{}, code // before anything is created
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, dup := m.boxes[r.SandboxID]; dup {
@@ -312,48 +322,88 @@ func (m *Manager) Prepare(r protocol.Request) (server.Reply, protocol.Code) {
 	return server.Reply{VsockDir: vdir, SandboxGID: gid}, protocol.OK
 }
 
-// Start drives the Launcher for a prepared sandbox. Starting a running one answers OK again, unchanged.
-// The lock is held across the launch: the real launcher's cost is a later concern.
-func (m *Manager) Start(id string) (server.Reply, protocol.Code) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	b, ok := m.boxes[id]
-	if !ok {
-		return server.Reply{}, protocol.UnknownSandbox
+// reserve waits until nothing else is starting or destroying id, then reserves it. The caller must call the
+// returned release exactly once; remove also drops the id from the registry. The lock is held only to look
+// and to mark, never while waiting or working.
+func (m *Manager) reserve(id string) (b *box, release func(remove bool), code protocol.Code) {
+	for {
+		m.mu.Lock()
+		b, ok := m.boxes[id]
+		if !ok {
+			m.mu.Unlock()
+			return nil, nil, protocol.UnknownSandbox
+		}
+		if b.busy == nil {
+			ch := make(chan struct{})
+			b.busy = ch
+			m.mu.Unlock()
+			return b, func(remove bool) {
+				m.mu.Lock()
+				b.busy = nil
+				if remove {
+					delete(m.boxes, id)
+				}
+				m.mu.Unlock()
+				close(ch)
+			}, protocol.OK
+		}
+		ch := b.busy
+		m.mu.Unlock()
+		<-ch
 	}
+}
+
+// Start stages the template files and the vsock mount, then drives the Launcher, for a prepared sandbox.
+// Starting a running one answers OK again, unchanged. A failure leaves nothing staged.
+func (m *Manager) Start(id string) (server.Reply, protocol.Code) {
+	b, release, code := m.reserve(id)
+	if code != protocol.OK {
+		return server.Reply{}, code
+	}
+	defer release(false)
+	ok := server.Reply{VsockDir: b.spec.VsockDir, SandboxGID: b.spec.GID}
 	if b.inst != nil {
-		return server.Reply{VsockDir: b.spec.VsockDir, SandboxGID: b.spec.GID}, protocol.OK
+		return ok, protocol.OK
+	}
+	digests, code := m.lookup(b.spec.Template)
+	if code != protocol.OK {
+		return server.Reply{}, code
+	}
+	if err := m.stage(b.spec, digests); err != nil {
+		return server.Reply{}, protocol.Internal
 	}
 	inst, err := m.Launcher.Launch(b.spec)
-	switch {
-	case errors.Is(err, ErrUnavailable):
-		return server.Reply{}, protocol.Unavailable
-	case err != nil || inst == nil:
+	if err != nil || inst == nil {
+		_ = m.unstage(id) // a failed cleanup leaves the tree for Destroy, which retries it
+		if errors.Is(err, ErrUnavailable) {
+			return server.Reply{}, protocol.Unavailable
+		}
 		return server.Reply{}, protocol.Internal
 	}
 	b.inst = inst
-	return server.Reply{VsockDir: b.spec.VsockDir, SandboxGID: b.spec.GID}, protocol.OK
+	return ok, protocol.OK
 }
 
-// Destroy stops the sandbox if it runs, removes both directories, and frees its ids. If any step fails the
-// entry stays registered, so a retry finds it.
+// Destroy stops the sandbox if it runs, unmounts the vsock mount, removes both directories, and frees its
+// ids. If any step fails the entry stays registered, so a retry finds it. Nothing is deleted while the mount
+// is still there.
 func (m *Manager) Destroy(id string) protocol.Code {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	b, ok := m.boxes[id]
-	if !ok {
-		return protocol.UnknownSandbox
+	b, release, code := m.reserve(id)
+	if code != protocol.OK {
+		return code
 	}
 	if b.inst != nil {
 		if err := b.inst.Stop(); err != nil {
+			release(false)
 			return protocol.Internal
 		}
 		b.inst = nil
 	}
-	if removeAtOwned(m.vsockFd, id, m.mayTake) != nil || removeAtOwned(m.jailsFd, id, m.mayTake) != nil {
+	if m.unmountVsock(id) != nil || removeAtOwned(m.vsockFd, id, m.mayTake) != nil || removeAtOwned(m.jailsFd, id, m.mayTake) != nil {
+		release(false)
 		return protocol.Internal
 	}
-	delete(m.boxes, id)
+	release(true)
 	return protocol.OK
 }
 
@@ -387,8 +437,8 @@ func (m *Manager) Reap() ReapResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var res ReapResult
-	seen := map[string]bool{}
-	for _, fd := range []int{m.vsockFd, m.jailsFd} {
+	seen, held := map[string]bool{}, map[string]bool{}
+	for _, fd := range []int{m.jailsFd, m.vsockFd} {
 		names, err := list(fd)
 		if err != nil {
 			res.Failed++
@@ -402,8 +452,12 @@ func (m *Manager) Reap() ReapResult {
 			if _, live := m.boxes[n]; live {
 				continue
 			}
-			if removeAtOwned(fd, n, m.mayTake) != nil {
+			if fd == m.vsockFd && held[n] {
+				continue // its jail could not be cleared (a mount may still hold this directory): keep both
+			}
+			if fd == m.jailsFd && m.unmountVsock(n) != nil || removeAtOwned(fd, n, m.mayTake) != nil {
 				res.Failed++
+				held[n] = true
 				continue
 			}
 			seen[n] = true
