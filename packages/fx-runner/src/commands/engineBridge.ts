@@ -10,6 +10,7 @@
  *    event content, no path and nothing the cloud sent. It makes no network call.
  */
 import path from "node:path";
+import { plainFileExists } from "../engineBridge/cursor.js";
 import { CliError } from "../cliError.js";
 import { loadRegistration } from "../config.js";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
@@ -39,6 +40,16 @@ export function engineStateDirFor(flag: string | undefined, override: string | u
   const chosen = flag ?? (override !== undefined && override !== "" ? override : home === undefined ? undefined : path.join(home, ".autonomous-forever-state"));
   if (chosen === undefined || !isPlainAbsolute(chosen)) throw refusal("the engine's state directory must be an absolute path (give --state-dir)");
   return chosen;
+}
+
+/**
+ * Says which state directory the bridge will read and where that choice came from. `--repo-root` never decides it: with neither `--state-dir` nor the environment
+ * variable it is the engine's shared default, which is not where an engine run with its own AUTONOMOUS_TEAM_STATE_DIR writes.
+ */
+export function stateDirNote(stateDir: string, source: "flag" | "env" | "default", uid: number | undefined): string {
+  const from = source === "flag" ? "from --state-dir" : source === "env" ? "from AUTONOMOUS_TEAM_STATE_DIR" : "the engine's default: neither --state-dir nor AUTONOMOUS_TEAM_STATE_DIR was given, and --repo-root does not choose it";
+  const events = plainFileExists(path.join(stateDir, "engine-events.jsonl"), uid);
+  return `The bridge will read the engine's events from ${stateDir} (${from}).${events ? "" : " There is no engine-events.jsonl there yet: if your engine writes its events to another directory, run enable again with --state-dir <that directory>; nothing will upload until they match."}`;
 }
 
 /** A short code for a failed request (`ECONNREFUSED`, `TimeoutError`, ...), or "unknown". Never the error's text, which can carry an address. */
@@ -80,7 +91,7 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
   if (action !== "enable" && action !== "disable" && action !== "status") throw new CliError("usage: fx-runner engine-bridge enable --repo <owner/name> --repo-root <dir> [--state-dir <dir>] | disable [--repo <owner/name>] | status", 2);
   const allowedFlags = action === "enable" ? ["repo", "repo-root", "state-dir"] : action === "disable" ? ["repo"] : [];
   for (const name of flags.keys()) if (!allowedFlags.includes(name)) throw new CliError(`--${name} does not go with engine-bridge ${action}`, 2);
-  if (action === "status") return status(ctx);
+  if (action === "status") return status(ctx, options);
   const repo = str(flags, "repo");
   if (repo !== undefined && !FULL_NAME.test(repo)) throw refusal("--repo must be owner/name");
   const loaded = loadBridgeSettings(ctx.stateDir);
@@ -140,11 +151,12 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
   if (why === "state_dir_unchecked") throw refusal("that state directory could not be checked against the others; nothing was changed");
   if (why === "too_many_repos") throw refusal("too many repos are bridged on this machine; nothing was changed");
   saveBridgeSettings(ctx.stateDir, [...loaded.repos.filter((r) => r.repo_gh_id !== entry.repo_gh_id), entry]);
+  ctx.out(stateDirNote(stateDir, str(flags, "state-dir") !== undefined ? "flag" : options.engineStateDirOverride !== undefined && options.engineStateDirOverride !== "" ? "env" : "default", ctx.uid));
   ctx.out("That repo is bridged. A running fx-runner starts its bridge within a few seconds once the workspace's switch for it is on; check: fx-runner engine-bridge status");
   return 0;
 }
 
-function status(ctx: CommandContext): number {
+function status(ctx: CommandContext, options: EngineBridgeCommandOptions): number {
   const loaded = loadBridgeSettings(ctx.stateDir);
   if (!loaded.ok) {
     ctx.out("Engine bridge: the settings file is damaged; nothing is bridged. Remove engine-bridge.json from the runner's state directory and enable the repos again.");
@@ -168,7 +180,7 @@ function status(ctx: CommandContext): number {
       continue;
     }
     const u = s.upload;
-    ctx.out(`  ${repo.full_name}: ${u.state}${u.reason === null ? "" : ` (${u.reason})`}; last acked seq ${u.lastAckedSeq ?? "none"}; last success ${u.lastSuccessAt ?? "never"}; command pull ${s.pull?.state ?? "unknown"}${s.pull?.why == null ? "" : ` (${s.pull.why})`}`);
+    ctx.out(`  ${repo.full_name}: ${u.state}${u.reason === null ? "" : ` (${u.reason})`}; last acked seq ${u.lastAckedSeq ?? "none"}; last success ${u.lastSuccessAt ?? "never"}; command pull ${s.pull?.state ?? "unknown"}${s.pull?.why == null ? "" : ` (${s.pull.why})`}${options.home !== undefined && repo.state_dir === path.join(options.home, ".autonomous-forever-state") ? "; reads the engine's default state directory" : ""}`);
   }
   return 0;
 }
