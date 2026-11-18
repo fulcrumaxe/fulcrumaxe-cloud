@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -64,7 +65,11 @@ func closeFd(fd int) { _ = syscall.Close(fd) }
 
 // openAbs opens an absolute directory one component at a time, each with O_NOFOLLOW, so a symlink at any
 // level (not just the last) is refused. The returned descriptor is the only handle later work uses.
-func openAbs(p string) (int, error) {
+func openAbs(p string) (int, error) { return openAbsAs(p, dirFlags) }
+
+// openAbsAs is openAbs with the flags of the last component chosen by the caller: every ancestor is opened
+// for search, the last one as asked (pathDirFlags needs no read access to it).
+func openAbsAs(p string, last int) (int, error) {
 	if err := cleanAbs(p); err != nil {
 		return -1, err
 	}
@@ -75,8 +80,13 @@ func openAbs(p string) (int, error) {
 	if p == "/" {
 		return fd, nil
 	}
-	for _, comp := range strings.Split(p[1:], "/") {
-		next, err := syscall.Openat(fd, comp, dirFlags, 0)
+	comps := strings.Split(p[1:], "/")
+	for i, comp := range comps {
+		flags := dirFlags
+		if i == len(comps)-1 {
+			flags = last
+		}
+		next, err := syscall.Openat(fd, comp, flags, 0)
 		closeFd(fd)
 		if err != nil {
 			return -1, fmt.Errorf("open %q: %w", comp, err)
@@ -161,8 +171,9 @@ func stripACL(fd int) error {
 	return nil
 }
 
-// checkDirFd requires fd to be a directory with exactly this owner, group and permission bits, and no ACL.
-func checkDirFd(fd int, uid, gid uint32, mode os.FileMode) error {
+// checkDirStat requires fd (which may be an O_PATH descriptor) to be a directory with exactly this owner,
+// group and permission bits.
+func checkDirStat(fd int, uid, gid uint32, mode os.FileMode) error {
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
 		return err
@@ -172,6 +183,14 @@ func checkDirFd(fd int, uid, gid uint32, mode os.FileMode) error {
 	}
 	if st.Uid != uid || st.Gid != gid || os.FileMode(st.Mode&0o7777) != mode {
 		return errOwner
+	}
+	return nil
+}
+
+// checkDirFd is checkDirStat, and the directory must carry no ACL.
+func checkDirFd(fd int, uid, gid uint32, mode os.FileMode) error {
+	if err := checkDirStat(fd, uid, gid, mode); err != nil {
+		return err
 	}
 	if acl, err := hasACL(fd); acl || err != nil {
 		return errACL
@@ -189,6 +208,57 @@ func unlinkat(dir int, name string, flags uintptr) error {
 		return e
 	}
 	return nil
+}
+
+// reapUID and reapGID are who a directory is handed to before it is emptied: root. Tests set their own ids.
+var reapUID, reapGID uint32
+
+// fchownEmpty changes the owner of the object behind an O_PATH descriptor (AT_EMPTY_PATH): no name is
+// resolved, so nothing can be swapped in between the checks made on fd and the change.
+func fchownEmpty(fd int, uid, gid uint32) error {
+	empty, _ := syscall.BytePtrFromString("")
+	_, _, e := syscall.Syscall6(syscall.SYS_FCHOWNAT, uintptr(fd), uintptr(unsafe.Pointer(empty)), uintptr(uid), uintptr(gid), atEmptyPath, 0)
+	if e != 0 {
+		return e
+	}
+	return nil
+}
+
+// pathDirFlags opens a directory for inspection only: no read access is needed (the helper holds no
+// CAP_DAC_OVERRIDE), fstat works on the descriptor, and a symlink is not followed.
+const oPath = 0x200000 // O_PATH, the same on amd64 and arm64 (the syscall package does not export it)
+
+const pathDirFlags = oPath | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+
+// takeOver gives the directory name below parent to root and opens it for listing. Everything is decided on
+// one descriptor: name is opened O_PATH without following a symlink and without crossing a mount, the owner
+// must be one that may legitimately hold a directory in this tree (mayOwn; nil means any), then the owner is
+// changed (AT_EMPTY_PATH, CAP_CHOWN only), the mode is set to 0700 through /proc/self/fd (so a sandbox that
+// closed its own directory cannot make it undeletable), and the directory is reopened through the same
+// descriptor. A name swapped for a link to a file, a symlink or a directory of a stranger is refused before
+// anything is changed.
+func takeOver(parent int, name string, mayOwn func(uint32) bool) (int, error) {
+	pfd, err := openDirSameMountAs(parent, name, pathDirFlags)
+	if err != nil {
+		return -1, err
+	}
+	defer closeFd(pfd)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(pfd, &st); err != nil {
+		return -1, err
+	}
+	// (O_DIRECTORY on the open already made it a directory.)
+	if mayOwn != nil && !mayOwn(st.Uid) {
+		return -1, errOwner
+	}
+	if err := fchownEmpty(pfd, reapUID, reapGID); err != nil {
+		return -1, err
+	}
+	proc := "/proc/self/fd/" + strconv.Itoa(pfd)
+	if err := syscall.Chmod(proc, uint32(JailDirMode)); err != nil {
+		return -1, err
+	}
+	return syscall.Open(proc, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 }
 
 // ---- mount identity ------------------------------------------------------------------------------------
@@ -219,12 +289,12 @@ type openHow struct{ flags, mode, resolve uint64 }
 
 // openat2Dir opens name below parent as a directory with no symlink and no mount crossing. ENOSYS or EPERM
 // (an old kernel, or a seccomp filter without openat2) means "cannot tell": ok is false.
-func openat2Dir(parent int, name string) (fd int, ok bool, err error) {
+func openat2Dir(parent int, name string, flags int) (fd int, ok bool, err error) {
 	p, err := syscall.BytePtrFromString(name)
 	if err != nil {
 		return -1, true, err
 	}
-	how := openHow{flags: uint64(dirFlags), resolve: resolveNoXdev | resolveNoSymlinks | resolveNoMagiclink}
+	how := openHow{flags: uint64(flags), resolve: resolveNoXdev | resolveNoSymlinks | resolveNoMagiclink}
 	r, _, e := syscall.Syscall6(sysOpenat2, uintptr(parent), uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&how)), unsafe.Sizeof(how), 0, 0)
 	switch {
 	case e == 0:
@@ -254,19 +324,25 @@ func statxMountID(fd int) (id uint64, ok bool) {
 // openDirSameMount opens the directory name below parent without following a symlink and without crossing
 // a mount point of any kind; a mount point answers errMount.
 func openDirSameMount(parent int, name string) (int, error) {
+	return openDirSameMountAs(parent, name, dirFlags)
+}
+
+// openDirSameMountAs is openDirSameMount with the open flags chosen by the caller (O_PATH for a look that
+// needs no read access).
+func openDirSameMountAs(parent int, name string, flags int) (int, error) {
 	if !plainName(name) {
 		return -1, errBadName
 	}
 	fd, viaOpenat2 := -1, false
 	if useOpenat2 {
-		f, ok, err := openat2Dir(parent, name)
+		f, ok, err := openat2Dir(parent, name, flags)
 		if err != nil {
 			return -1, err
 		}
 		fd, viaOpenat2 = f, ok
 	}
 	if !viaOpenat2 {
-		f, err := syscall.Openat(parent, name, dirFlags, 0)
+		f, err := syscall.Openat(parent, name, flags, 0)
 		if err != nil {
 			return -1, err
 		}
@@ -314,7 +390,10 @@ type frame struct {
 // point. A non-directory is unlinked (a symlink is removed itself, never entered). A directory is opened
 // with O_NOFOLLOW and no mount crossing, emptied, then removed. The walk is iterative with a descriptor per
 // level, bounded by depthLimit; anything it cannot finish is an error and leaves what remains in place.
-func removeAt(parent int, name string) error {
+func removeAt(parent int, name string) error { return removeAtOwned(parent, name, nil) }
+
+// removeAtOwned is removeAt that takes over only directories whose owner mayOwn accepts (nil: any owner).
+func removeAtOwned(parent int, name string, mayOwn func(uint32) bool) error {
 	if !plainName(name) {
 		return errBadName
 	}
@@ -332,9 +411,9 @@ func removeAt(parent int, name string) error {
 		if len(stack) >= depthLimit {
 			return errDeep
 		}
-		fd, err := openDirSameMount(parentFd, n)
+		fd, err := takeOver(parentFd, n, mayOwn)
 		if err != nil {
-			return err // a symlink swapped in after the unlink fails here (ELOOP, ENOTDIR)
+			return err // a symlink, a file or a stranger's directory swapped in is refused here
 		}
 		names, err := listFn(fd)
 		if err != nil {
@@ -442,6 +521,15 @@ type Policy struct {
 // sandboxGID, mode VsockDirMode and no ACL. The caller does every later access with openat on the returned
 // descriptor and closes it; it must not reopen the path.
 func OpenVsockDir(pol Policy, p, id string, sandboxGID uint32) (int, error) {
+	return openVsockDirAs(pol, p, id, sandboxGID, false)
+}
+
+// openVsockDirAs is OpenVsockDir. With pathOnly the last component is opened O_PATH and checked from fstat
+// alone, which needs no read access: that is how the helper checks its own directory, which (0710, the
+// runner as owner, the sandbox gid) is closed to root without CAP_DAC_OVERRIDE. The ACL of that directory
+// was stripped and checked by mkdirOwned on its own descriptor. A consumer running as the runner uid uses
+// OpenVsockDir, which opens it for reading and checks the ACL too.
+func openVsockDirAs(pol Policy, p, id string, sandboxGID uint32, pathOnly bool) (int, error) {
 	if err := ValidateVsockDir(p, id); err != nil {
 		return -1, err
 	}
@@ -464,11 +552,22 @@ func OpenVsockDir(pol Policy, p, id string, sandboxGID uint32) (int, error) {
 	if err := checkDirFd(vfd, pol.RootUID, pol.RootGID, VsockRootMode); err != nil {
 		return -1, fmt.Errorf("vsock root: %w", err)
 	}
-	fd, err := openChild(vfd, id)
+	if !plainName(id) {
+		return -1, errBadName
+	}
+	flags := dirFlags
+	if pathOnly {
+		flags = pathDirFlags
+	}
+	fd, err := syscall.Openat(vfd, id, flags, 0)
 	if err != nil {
 		return -1, err
 	}
-	if err := checkDirFd(fd, pol.RunnerUID, sandboxGID, VsockDirMode); err != nil {
+	check := checkDirFd
+	if pathOnly {
+		check = checkDirStat
+	}
+	if err := check(fd, pol.RunnerUID, sandboxGID, VsockDirMode); err != nil {
 		closeFd(fd)
 		return -1, err
 	}

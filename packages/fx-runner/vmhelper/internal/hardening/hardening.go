@@ -23,6 +23,9 @@ type Capability struct {
 	Name   string `json:"name"`
 	Number uint   `json:"number"`
 	Reason string `json:"reason"`
+	// JailerOnly marks a capability the helper holds in its permitted and inheritable sets but never in its
+	// effective set: it is raised into the ambient set of the jailer child only.
+	JailerOnly bool `json:"jailer_only,omitempty"`
 }
 
 // Pinned is the parsed file.
@@ -33,9 +36,27 @@ type Pinned struct {
 	StateDirectory       string            `json:"state_directory"`
 	StateDirectoryMode   string            `json:"state_directory_mode"`
 	ReadWritePaths       []string          `json:"read_write_paths"`
-	Directives           map[string]string `json:"directives"`
+	Directives           map[string]Values `json:"directives"`
 	Capabilities         []Capability      `json:"capabilities"`
 	Notes                []string          `json:"notes"`
+}
+
+// Values are the values of one directive: a JSON string is one line, an array is one line per element
+// (systemd takes DeviceAllow= once per device).
+type Values []string
+
+func (v *Values) UnmarshalJSON(b []byte) error {
+	var one string
+	if json.Unmarshal(b, &one) == nil {
+		*v = Values{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil || len(many) == 0 {
+		return errors.New("a directive is a string or a non-empty array of strings")
+	}
+	*v = many
+	return nil
 }
 
 // RuntimeDirMode is RuntimeDirectoryMode as a file mode (the file writes it in octal, as systemd does).
@@ -97,19 +118,47 @@ func (p Pinned) Mask() uint64 {
 	return m
 }
 
-// CheckStatus compares a /proc/<pid>/status text with what the unit pins: CapEff and CapBnd equal to the
-// set, CapAmb empty, NoNewPrivs 1 (NoNewPrivileges=yes) and Seccomp 2 (a filter is installed:
+// EffectiveMask is the set the helper holds effective after start-up: every pinned capability except the
+// jailer-only ones.
+func (p Pinned) EffectiveMask() uint64 {
+	var m uint64
+	for _, c := range p.Capabilities {
+		if !c.JailerOnly {
+			m |= 1 << c.Number
+		}
+	}
+	return m
+}
+
+// JailerOnlyMask is the set held permitted and inheritable but not effective.
+func (p Pinned) JailerOnlyMask() uint64 { return p.Mask() &^ p.EffectiveMask() }
+
+// JailerOnlyCaps lists the jailer-only capability numbers, for the child's ambient set.
+func (p Pinned) JailerOnlyCaps() []uintptr {
+	var out []uintptr
+	for _, c := range p.Capabilities {
+		if c.JailerOnly {
+			out = append(out, uintptr(c.Number))
+		}
+	}
+	return out
+}
+
+// CheckStatus compares a /proc/<pid>/status text with what the unit pins and the start-up drop leaves:
+// CapEff the effective mask, CapPrm and CapBnd the whole set, CapInh the jailer-only caps, CapAmb empty, NoNewPrivs 1 (NoNewPrivileges=yes) and Seccomp 2 (a filter is installed:
 // SystemCallFilter=). A unit that lost any of them still starts, so the process checks itself. The error
 // is one line and names the field, never the status text.
 func (p Pinned) CheckStatus(status string) error {
-	want := p.Mask()
-	for _, field := range []string{"CapEff", "CapBnd"} {
-		got, ok := statusNum(status, field, 16)
+	for _, f := range []struct {
+		name string
+		want uint64
+	}{{"CapEff", p.EffectiveMask()}, {"CapPrm", p.Mask()}, {"CapBnd", p.Mask()}, {"CapInh", p.JailerOnlyMask()}} {
+		got, ok := statusNum(status, f.name, 16)
 		if !ok {
-			return fmt.Errorf("%s is missing from the process status", field)
+			return fmt.Errorf("%s is missing from the process status", f.name)
 		}
-		if got != want {
-			return fmt.Errorf("%s is %016x, pinned set is %016x", field, got, want)
+		if got != f.want {
+			return fmt.Errorf("%s is %016x, pinned set is %016x", f.name, got, f.want)
 		}
 	}
 	if got, ok := statusNum(status, "CapAmb", 16); !ok || got != 0 {
@@ -169,7 +218,9 @@ func (p Pinned) RenderUnit(u UnitParams) (string, error) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		b.WriteString(k + "=" + p.Directives[k] + "\n")
+		for _, v := range p.Directives[k] {
+			b.WriteString(k + "=" + v + "\n")
+		}
 	}
 	b.WriteString("\n[Install]\nWantedBy=multi-user.target\n")
 	return b.String(), nil

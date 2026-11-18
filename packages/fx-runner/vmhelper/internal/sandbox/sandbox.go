@@ -160,8 +160,8 @@ func (m *Manager) ensureDir(parent int, name string, mode os.FileMode) (int, err
 	return fd, nil
 }
 
-// mkdirOwned creates name below parent with mode 0700, opens it with O_NOFOLLOW, sets the owner, then the
-// final mode (so the group never holds access to a directory it does not yet own), and verifies all of it
+// mkdirOwned creates name below parent with mode 0700, opens it with O_NOFOLLOW, sets the final mode, then the
+// owner, and verifies all of it
 // on the descriptor. On any failure the directory is removed again.
 func (m *Manager) mkdirOwned(parent int, name string, mode os.FileMode, uid, gid uint32) (int, error) {
 	if !plainName(name) {
@@ -187,20 +187,35 @@ func (m *Manager) mkdirOwned(parent int, name string, mode os.FileMode, uid, gid
 	if m.remap != nil {
 		eu, eg = m.remap(uid, gid)
 	}
-	// An ACL the new directory inherited (or was given) is removed before the owner and mode are set.
+	// An ACL the new directory inherited (or was given) is removed before the mode and owner are set.
 	if err := stripACL(fd); err != nil {
 		return fail(err)
 	}
-	if err := syscall.Fchown(fd, int(eu), int(eg)); err != nil {
+	// chmod before chown: once the directory belongs to the sandbox's uid, setting its mode would need
+	// CAP_FOWNER, which the helper does not hold. The group is still root's while the mode is set.
+	if err := syscall.Fchmod(fd, uint32(mode)); err != nil {
 		return fail(err)
 	}
-	if err := syscall.Fchmod(fd, uint32(mode)); err != nil {
+	if err := syscall.Fchown(fd, int(eu), int(eg)); err != nil {
 		return fail(err)
 	}
 	if err := checkDirFd(fd, eu, eg, mode); err != nil {
 		return fail(err)
 	}
 	return fd, nil
+}
+
+// mayTake says whether a directory owned by uid may be taken over by removal: root, the runner, or a uid of
+// the sandbox range. Anything else in the tree is refused, not chowned.
+func (m *Manager) mayTake(uid uint32) bool {
+	if uid == m.effUID(m.rootUID) || uid == m.effUID(m.runnerUID) {
+		return true
+	}
+	if m.remap != nil {
+		u, _ := m.remap(m.uidFirst, 0)
+		return uid == u
+	}
+	return uid >= m.uidFirst && uint64(uid) < uint64(m.uidFirst)+uint64(m.uidCount)
 }
 
 // policy is the consumer-side view of this layout, with the owners as they really are on disk.
@@ -274,7 +289,7 @@ func (m *Manager) Prepare(r protocol.Request) (server.Reply, protocol.Code) {
 	closeFd(jd)
 	vd, err := m.mkdirOwned(m.vsockFd, r.SandboxID, VsockDirMode, m.runnerUID, gid)
 	if err != nil {
-		_ = removeAt(m.jailsFd, r.SandboxID)
+		_ = removeAtOwned(m.jailsFd, r.SandboxID, m.mayTake)
 		return server.Reply{}, protocol.Internal
 	}
 	closeFd(vd)
@@ -283,13 +298,13 @@ func (m *Manager) Prepare(r protocol.Request) (server.Reply, protocol.Code) {
 	if m.remap != nil {
 		_, onDiskGID = m.remap(m.runnerUID, gid)
 	}
-	chk, err := OpenVsockDir(m.policy(), vdir, r.SandboxID, onDiskGID)
+	chk, err := openVsockDirAs(m.policy(), vdir, r.SandboxID, onDiskGID, true)
 	if err == nil {
 		closeFd(chk)
 	}
 	if err != nil {
-		_ = removeAt(m.vsockFd, r.SandboxID)
-		_ = removeAt(m.jailsFd, r.SandboxID)
+		_ = removeAtOwned(m.vsockFd, r.SandboxID, m.mayTake)
+		_ = removeAtOwned(m.jailsFd, r.SandboxID, m.mayTake)
 		return server.Reply{}, protocol.Internal
 	}
 	m.boxes[r.SandboxID] = &box{created: m.Now(), spec: Spec{ID: r.SandboxID, Template: r.Template, UID: uid, GID: gid,
@@ -335,7 +350,7 @@ func (m *Manager) Destroy(id string) protocol.Code {
 		}
 		b.inst = nil
 	}
-	if removeAt(m.vsockFd, id) != nil || removeAt(m.jailsFd, id) != nil {
+	if removeAtOwned(m.vsockFd, id, m.mayTake) != nil || removeAtOwned(m.jailsFd, id, m.mayTake) != nil {
 		return protocol.Internal
 	}
 	delete(m.boxes, id)
@@ -387,7 +402,7 @@ func (m *Manager) Reap() ReapResult {
 			if _, live := m.boxes[n]; live {
 				continue
 			}
-			if removeAt(fd, n) != nil {
+			if removeAtOwned(fd, n, m.mayTake) != nil {
 				res.Failed++
 				continue
 			}
