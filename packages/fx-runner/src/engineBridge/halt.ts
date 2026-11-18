@@ -57,6 +57,12 @@ export interface EngineHostHandle {
    * reader hands commands to the host only while this is no older than 60 s, and takes them back when it is. Absent in a handle written by anything older.
    */
   heartbeat_at?: string;
+  /**
+   * The supervisor's own pid and start time (EB-12c), next to the host's `pid`: the process that claims commands for the host and answers them. A reader that needs
+   * to know whether that claimer is alive reads these two. Absent in a handle written by anything older.
+   */
+  claimer_pid?: number;
+  claimer_start?: string;
 }
 
 /** What a start time may look like on file: digits (Linux ticks) or a `ps` date line. Anything else is refused. */
@@ -213,13 +219,17 @@ export function readHostHandle(stateDir: string, uid: number): EngineHostHandle 
   if (raw === undefined) return undefined;
   const o = raw as Record<string, unknown> | null;
   if (o === null || typeof o !== "object" || Array.isArray(o)) throw new EngineStateError("engine-host.json is not an object");
-  const extra = Object.keys(o).filter((k) => k !== "pid" && k !== "unit" && k !== "start_time" && k !== "heartbeat_at");
+  const extra = Object.keys(o).filter((k) => k !== "pid" && k !== "unit" && k !== "start_time" && k !== "heartbeat_at" && k !== "claimer_pid" && k !== "claimer_start");
   if (extra.length > 0 || !Number.isSafeInteger(o.pid) || (o.pid as number) <= 1) throw new EngineStateError("engine-host.json has an unexpected shape");
   if (o.unit !== undefined && (typeof o.unit !== "string" || !UNIT.test(o.unit))) throw new EngineStateError("engine-host.json names a unit that is not an engine host scope");
   if (o.start_time !== undefined && (typeof o.start_time !== "string" || !START_TIME.test(o.start_time))) throw new EngineStateError("engine-host.json has an unexpected start time");
   if (o.heartbeat_at !== undefined && (typeof o.heartbeat_at !== "string" || o.heartbeat_at.length > 40 || !Number.isFinite(Date.parse(o.heartbeat_at)))) throw new EngineStateError("engine-host.json has an unexpected heartbeat time");
+  if (o.claimer_pid !== undefined && (!Number.isSafeInteger(o.claimer_pid) || (o.claimer_pid as number) <= 1)) throw new EngineStateError("engine-host.json has an unexpected claimer pid");
+  if (o.claimer_start !== undefined && (typeof o.claimer_start !== "string" || !START_TIME.test(o.claimer_start))) throw new EngineStateError("engine-host.json has an unexpected claimer start time");
   return {
     pid: o.pid as number,
+    ...(o.claimer_pid === undefined ? {} : { claimer_pid: o.claimer_pid as number }),
+    ...(o.claimer_start === undefined ? {} : { claimer_start: o.claimer_start as string }),
     ...(o.unit === undefined ? {} : { unit: o.unit as string }),
     ...(o.start_time === undefined ? {} : { start_time: o.start_time as string }),
     ...(o.heartbeat_at === undefined ? {} : { heartbeat_at: o.heartbeat_at as string }),

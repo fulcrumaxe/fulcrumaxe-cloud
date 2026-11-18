@@ -37,6 +37,8 @@ export interface HostInbox {
   writeOutcome(name: string, ack: EngineCommandAck): boolean;
   /** True when `engine-inbox/done/<name>.outcome.json` exists (a link counts: the name is taken). False when the done directory is missing. Throws `EngineStateError` for an unsafe directory. */
   hasOutcome(name: string): boolean;
+  /** Removes `claimed/<name>.json` (a link is removed, never followed). Only for a command that already has an outcome. Nothing happens when there is no such file; throws `EngineStateError` for an unsafe directory. */
+  dropClaimed(name: string): void;
 }
 
 function checkDir(dir: string, uid: number, create: boolean): boolean {
@@ -109,6 +111,14 @@ export function openHostInbox(stateDir: string, uid: number): HostInbox {
     hasOutcome(name) {
       if (!checkDir(stateDir, uid, false) || !checkDir(engineInbox, uid, false) || !checkDir(done, uid, false)) return false;
       return lstatSync(path.join(done, `${name}.outcome.json`), { throwIfNoEntry: false }) !== undefined;
+    },
+    dropClaimed(name) {
+      if (!checkDir(stateDir, uid, false) || !checkDir(inbox, uid, false) || !checkDir(claimed, uid, false)) return;
+      try {
+        unlinkSync(path.join(claimed, `${name}.json`));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     },
     writeOutcome(name, ack) {
       // The parent is judged as the done directory is: a link or a wide `engine-inbox` would send the outcome somewhere the reader does not look.

@@ -28,9 +28,9 @@ export interface HostLog {
 }
 
 /** Opens the log for append at 0600; a link, a file of another owner or one open to others is refused. Past `maxBytes` the file becomes `<name>.1` (replacing the older one) and a new one starts. */
-export function openHostLog(dir: string, uid: number, maxBytes: number = HOST_LOG_MAX_BYTES): HostLog {
+export function openHostLog(dir: string, uid: number, maxBytes: number = HOST_LOG_MAX_BYTES, name: string = HOST_LOG_FILE): HostLog {
   ensurePrivateDir(dir, uid);
-  const target = path.join(dir, HOST_LOG_FILE);
+  const target = path.join(dir, name);
   let fd = -1;
   let size = 0;
   const open = (): void => {

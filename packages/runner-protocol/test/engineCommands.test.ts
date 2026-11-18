@@ -281,7 +281,7 @@ describe("pull and ack", () => {
   it("takes an ack with a closed outcome and a closed refusal that goes with a refusal only", () => {
     const ack = (body: unknown) => EngineCommandAck.safeParse(body).success;
     expect([...ENGINE_COMMAND_OUTCOMES]).toEqual(["applied", "refused", "expired", "not_confirmed"]);
-    expect(COMMAND_REFUSALS).toHaveLength(11);
+    expect(COMMAND_REFUSALS).toHaveLength(12);
     expect(ack({ outcome: "applied" })).toBe(true);
     expect(ack({ outcome: "not_confirmed" })).toBe(true);
     expect(ack({ outcome: "expired" })).toBe(true);
