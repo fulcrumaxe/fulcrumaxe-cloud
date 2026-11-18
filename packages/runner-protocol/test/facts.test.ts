@@ -62,8 +62,12 @@ describe("facts (criterion 1)", () => {
 
   it("adds no free text: every leaf of facts is an enum, a literal set or a bounded integer (criterion 3)", () => {
     expect(nonStrictObjects(RunnerFacts)).toEqual([]);
-    for (const [key, leaf] of Object.entries(RunnerFacts.shape)) {
-      const closed = leaf instanceof z.ZodEnum || leaf instanceof z.ZodUnion || (leaf instanceof z.ZodNumber && leaf.minValue !== null && leaf.maxValue !== null && leaf.isInt);
+    for (const [key, optionalLeaf] of Object.entries(RunnerFacts.shape)) {
+      // D#587 B-7a: the limits are optional; what is inside must still be closed (a bounded integer, or a bounded list of ids matching one pattern).
+      const leaf = optionalLeaf instanceof z.ZodOptional ? optionalLeaf.unwrap() : optionalLeaf;
+      const list = leaf instanceof z.ZodEffects ? leaf.innerType() : leaf;
+      const boundedIds = list instanceof z.ZodArray && list.element instanceof z.ZodString && list.element._def.checks.some((c: { kind: string }) => c.kind === "regex") && list._def.maxLength !== null;
+      const closed = boundedIds || leaf instanceof z.ZodEnum || leaf instanceof z.ZodUnion || (leaf instanceof z.ZodNumber && leaf.minValue !== null && leaf.maxValue !== null && leaf.isInt);
       expect(closed, key).toBe(true);
     }
     expect(nonStrictObjects(RUNNER_MESSAGES.hello)).toEqual([]);
@@ -105,7 +109,7 @@ describe("the register name (criteria 2 and 3)", () => {
 
 describe("one protocol version", () => {
   it("is a single constant in the protocol package, which the cloud re-exports and the runner sends on hello", async () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(20);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(21);
     const { readFileSync: read } = await import("node:fs");
     const cloud = read(new URL("../../runner-cloud/src/http.ts", import.meta.url), "utf8");
     const runner = read(new URL("../../fx-runner/src/version.ts", import.meta.url), "utf8");

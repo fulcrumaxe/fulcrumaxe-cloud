@@ -246,9 +246,9 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
  * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
- * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`).  Version 17 is the first whose runner accepts a fix job's `fix_round_kind` (`FIX_ROUND_KIND_JOB_MIN_PROTOCOL`). Version 18 is the first whose runner says on its claim whether the saved verify sign-in is still good (`VERIFY_SIGN_IN_MIN_PROTOCOL`). Version 19 is the first whose runner writes the check header end marker (`CHECK_HEADER_END_MIN_PROTOCOL`). Version 20 is the first whose runner speaks the engine bridge (`ENGINE_BRIDGE_MIN_PROTOCOL`, capability `engine_bridge_v1`). A bump never cuts an older runner off, see below.
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). Version 15 is the first whose runner accepts a job's `scope`, the Spec's file patterns (`SCOPE_JOB_MIN_PROTOCOL`). Version 16 is the first whose runner accepts a deploy verifier job's `browser_method` (`BROWSER_METHOD_JOB_MIN_PROTOCOL`).  Version 17 is the first whose runner accepts a fix job's `fix_round_kind` (`FIX_ROUND_KIND_JOB_MIN_PROTOCOL`). Version 18 is the first whose runner says on its claim whether the saved verify sign-in is still good (`VERIFY_SIGN_IN_MIN_PROTOCOL`). Version 19 is the first whose runner writes the check header end marker (`CHECK_HEADER_END_MIN_PROTOCOL`). Version 20 is the first whose runner speaks the engine bridge (`ENGINE_BRIDGE_MIN_PROTOCOL`, capability `engine_bridge_v1`). Version 21 is the first whose runner may send host limits and bootable template ids on its hello facts and a sandbox inventory on its claim (`SANDBOX_INVENTORY_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 20;
+export const CURRENT_PROTOCOL_VERSION = 21;
 /** The engine bridge: a runner at this version or above sends engine events, pulls signed engine commands and asks for decisions. It is also gated by the `engine_bridge_v1` capability. */
 export const ENGINE_BRIDGE_MIN_PROTOCOL = 20;
 /** D#6 CHECK-FIX-SCOPE: the first protocol whose runner writes `CHECK_HEADER_END` after its check header. A summary from an older runner can have its tail read as header, so the cloud never widens a job's scope from one. */
@@ -362,6 +362,43 @@ export const VERIFY_SIGN_IN_STATES = ["ok", "expiring_soon", "expired", "missing
 export const VerifySignInState = z.enum(VERIFY_SIGN_IN_STATES);
 export type VerifySignInState = z.infer<typeof VerifySignInState>;
 
+/**
+ * D#587 B-7a: the first version whose runner may send a sandbox inventory on its claim and host limits on its hello facts. Same gate as the others: an older runner's strict parse would refuse the keys, so
+ * the cloud keeps nothing for a runner whose hello declared less. The inventory is metadata only (names, states, times, sizes and counts, never content or logs) and is routing and display data: no security
+ * decision reads it. The runner sends it when its hash changed, and at least every `SANDBOX_INVENTORY_MAX_QUIET_SECONDS`.
+ */
+export const SANDBOX_INVENTORY_MIN_PROTOCOL = 21;
+export const SANDBOX_INVENTORY_MAX_ROWS = 200;
+export const SANDBOX_INVENTORY_MAX_QUIET_SECONDS = 600;
+/** The sandbox id the VM helper accepts (its `idPattern`), so a name that could not name a sandbox is refused here too. */
+export const SANDBOX_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
+export const SANDBOX_STATES = ["creating", "running", "stopped", "snapshotted", "error"] as const;
+export const SandboxState = z.enum(SANDBOX_STATES);
+export type SandboxState = z.infer<typeof SandboxState>;
+/** The most template ids a runner lists as bootable, and the shape of one (the same pattern as a sandbox id). */
+export const MAX_BOOTABLE_TEMPLATES = 8;
+export const BootableTemplateId = z.string().regex(SANDBOX_NAME_PATTERN);
+
+/** The exact shape the cloud's definer accepts (UTC, up to nine fractional digits, a year from 0001), with a length cap, so a string the database would refuse never gets past the schema. */
+const SandboxInstant = z.string().max(30).datetime().regex(/^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$/);
+export const SandboxInventoryRow = z
+  .object({
+    name: z.string().regex(SANDBOX_NAME_PATTERN),
+    state: SandboxState,
+    created_at: SandboxInstant,
+    last_used_at: SandboxInstant.nullable(),
+    disk_bytes: safeInt.min(0).max(999_999_999_999_999),
+    snapshot_count: safeInt.min(0).max(10_000),
+    snapshot_age_s: safeInt.min(0).max(2_147_483_647).nullable(),
+  })
+  .strict();
+export type SandboxInventoryRow = z.infer<typeof SandboxInventoryRow>;
+export const SandboxInventory = z
+  .array(SandboxInventoryRow)
+  .max(SANDBOX_INVENTORY_MAX_ROWS)
+  .refine((rows) => new Set(rows.map((r) => r.name)).size === rows.length, { message: "a sandbox name appears once" });
+export type SandboxInventory = z.infer<typeof SandboxInventory>;
+
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;
 
@@ -381,6 +418,11 @@ export const RunnerFacts = z
     mem_gb_bucket: z.union([z.literal(4), z.literal(8), z.literal(16), z.literal(32), z.literal(64), z.literal(128)]),
     cpus: safeInt.min(1).max(256),
     sandbox_engine: z.enum(RUNNER_SANDBOX_ENGINES),
+    // D#587 B-7a (protocol 21): the host limits and the template ids the runner can boot. Optional claims for routing and display, never for a decision.
+    max_vms: safeInt.min(0).max(256).optional(),
+    max_vcpus: safeInt.min(0).max(4096).optional(),
+    max_memory_mb: safeInt.min(0).max(16_777_216).optional(),
+    bootable_templates: z.array(BootableTemplateId).max(MAX_BOOTABLE_TEMPLATES).refine((l) => new Set(l).size === l.length, { message: "a template appears once" }).optional(),
   })
   .strict();
 export type RunnerFacts = z.infer<typeof RunnerFacts>;
@@ -405,9 +447,14 @@ export const HelloMessage = z
       .optional(),
   })
   .strict()
-  .refine((hello) => hello.capabilities === undefined || !hello.capabilities.includes(ENGINE_BRIDGE_CAPABILITY) || hello.protocol_version >= ENGINE_BRIDGE_MIN_PROTOCOL, {
-    message: "engine_bridge_v1 needs a protocol version that speaks the engine bridge",
-    path: ["capabilities"],
+  .superRefine((hello, ctx) => {
+    if (hello.capabilities?.includes(ENGINE_BRIDGE_CAPABILITY) && hello.protocol_version < ENGINE_BRIDGE_MIN_PROTOCOL) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "engine_bridge_v1 needs a protocol version that speaks the engine bridge", path: ["capabilities"] });
+    }
+    const f = hello.facts;
+    if (f && (f.max_vms !== undefined || f.max_vcpus !== undefined || f.max_memory_mb !== undefined || f.bootable_templates !== undefined) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "host limits need a protocol version that speaks them", path: ["facts"] });
+    }
   });
 export type HelloMessage = z.infer<typeof HelloMessage>;
 
@@ -464,7 +511,7 @@ export function capacityFreeSlots(capacity: ClaimCapacity, running: { light: num
   return { light: Math.min(freeLight, headroom), heavy: Math.min(freeHeavy, headroom), total: Math.min(freeLight + freeHeavy, headroom) };
 }
 
-export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional() }).strict();
+export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional(), sandboxes: SandboxInventory.optional() }).strict();
 
 export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
 

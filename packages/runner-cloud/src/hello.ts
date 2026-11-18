@@ -36,7 +36,11 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
       // D#605 FL-2: the machine's facts, when this runner sent them, through the definer that names the runner from the session. Same transaction as
       // the hello: a refusal rolls both back. No authorization path (request verification, the ticket, the job signer) reads them back.
       const facts = message.facts;
-      if (facts !== undefined) await client.query("SELECT runner_facts_record($1, $2, $3::int, $4::int, $5)", [facts.os, facts.arch, facts.mem_gb_bucket, facts.cpus, facts.sandbox_engine]);
+      if (facts !== undefined) {
+        await client.query("SELECT runner_facts_record($1, $2, $3::int, $4::int, $5)", [facts.os, facts.arch, facts.mem_gb_bucket, facts.cpus, facts.sandbox_engine]);
+        // D#587 B-7a: the host limits and bootable templates, rewritten on every hello with facts (none sent is none stored). Routing and display only.
+        await client.query("SELECT runner_sandbox_facts_record($1::int, $2::int, $3::int, $4::text[])", [facts.max_vms ?? null, facts.max_vcpus ?? null, facts.max_memory_mb ?? null, facts.bootable_templates ?? []]);
+      }
       // D#483 S4-b2c: the capabilities, rewritten on EVERY hello (none sent is none stored), so a runner that is downgraded stops being offered
       // what it can no longer run. Same definer shape and the same transaction.
       await client.query("SELECT runner_capabilities_record($1::text[])", [message.capabilities ?? []]);
