@@ -30,6 +30,7 @@ export type EnvScope = "web" | "build" | "platform" | "tooling";
 export type Validation =
   | { type: "any" }
   | { type: "base64-32" }
+  | { type: "base64-32-canonical" }
   | { type: "min-chars"; n: number }
   | { type: "min-bytes"; n: number }
   | { type: "postgres-url" }
@@ -150,6 +151,7 @@ export const ENV_MANIFEST: readonly EnvVar[] = [
   { name: "FX_KEK_CURRENT_VERSION", scope: "web", requiredIn: NONE, secret: false, feature: "Model connections and action approvals", validation: { type: "positive-int" }, whenMissing: "default_used", note: "Version 1 is current" },
   { name: "FX_WEBHOOK_KEK_V1", scope: "web", requiredIn: SP, secret: true, feature: "Outbound webhooks", validation: b64, whenMissing: "request_fails", note: "Outbound webhook secrets cannot be sealed or opened" },
   { name: "FX_WEBHOOK_KEK_CURRENT_VERSION", scope: "web", requiredIn: NONE, secret: false, feature: "Outbound webhooks", validation: { type: "positive-int" }, whenMissing: "default_used", note: "Version 1 is current" },
+  { name: "FX_MACHINE_KEK_V1", scope: "web", requiredIn: NONE, secret: true, feature: "Hetzner Cloud machines", validation: { type: "base64-32-canonical" }, whenMissing: "feature_disabled", note: "Hetzner Cloud is off: adding a Hetzner token and every Hetzner call is refused (machine_kek_unset) and the token is never opened. Local and rented machines still work. Read only by the machine_ops code path; generated with its own key, never the model-connection key" },
   { name: "FX_CURSOR_KEY_V1", scope: "web", requiredIn: SP, secret: true, feature: "Public API event stream", validation: b64, whenMissing: "request_fails", note: "/api/v1/events and every paginated list answer 500 because a cursor cannot be sealed" },
 
   // Public API.

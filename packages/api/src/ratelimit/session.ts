@@ -88,6 +88,8 @@ export const SESSION_LIMITS = {
   modelKeyTest: { name: "model-key-test", account: [{ limit: 1, seconds: 10 }, { limit: 30, seconds: 3600 }] },
   /** Connecting or replacing a Vercel token calls Vercel to check it each time: same budget as a model key. */
   vercelTokenPut: { name: "vercel-token-put", account: [{ limit: 1, seconds: 10 }, { limit: 30, seconds: 3600 }] },
+  /** Connecting a Hetzner token calls Hetzner three times (a read, a probe key made and deleted, a server list): same budget as a model key. */
+  machineCredentialPut: { name: "machine-credential-put", account: [{ limit: 1, seconds: 10 }, { limit: 30, seconds: 3600 }] },
   /** Building a GitHub install link, and minting a repo-create link (which also has its own hour and day count). */
   githubInstallUrl: { name: "github-install-url", account: TEN_PER_MINUTE },
   githubCreateIntent: { name: "github-create-intent", account: TEN_PER_MINUTE },

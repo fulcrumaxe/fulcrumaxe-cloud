@@ -14,6 +14,7 @@ import { webhookEndpointRoutes } from "./webhook-endpoints.js";
 import { eventRoutes } from "./events.js";
 import { modelConnectionRoutes } from "./model-connection.js";
 import { vercelConnectionRoutes } from "./vercel-connection.js";
+import { machineCredentialRoutes } from "./machine-credential.js";
 import { repoRoutes } from "./repos.js";
 import { roleRoutes } from "./roles.js";
 import { decisionSettingRoutes } from "./decision-settings.js";
@@ -97,6 +98,7 @@ export const ROUTES: RouteEntry[] = [
   ...eventRoutes,
   ...modelConnectionRoutes,
   ...vercelConnectionRoutes,
+  ...machineCredentialRoutes,
   ...repoRoutes,
   ...roleRoutes,
   ...decisionSettingRoutes,

@@ -3,11 +3,25 @@ import { describe, expect, it } from "vitest";
 import { ENV_MANIFEST, type DeployKind, type Validation } from "../env-manifest";
 import { deployKindOf, evaluateEnv, validateValue } from "../lib/env/check";
 import { PLANE_IDENTITY_EMAIL, PLANE_IDENTITY_NAME } from "@fx/core/src/repos/planePushIdentity.js";
+import { machineKekSource } from "@fx/model-connection";
 import { completeEnv } from "./support/envFixtures";
 
 /** For every validation type: values that pass, and values that fail with the expected fixed code. */
 const CASES: Record<Validation["type"], { validation: Validation; good: string[]; bad: [string, string][] }> = {
   any: { validation: { type: "any" }, good: ["x"], bad: [] },
+  // D#845: the machine key. The runtime reader (packages/model-connection kekFormat) judges the same way: padded, canonical, 32 bytes, nothing around it.
+  "base64-32-canonical": {
+    validation: { type: "base64-32-canonical" },
+    good: [Buffer.alloc(32, 1).toString("base64")],
+    bad: [
+      [Buffer.alloc(31, 1).toString("base64"), "not_canonical_base64_32_bytes"],
+      [Buffer.alloc(33, 1).toString("base64"), "not_canonical_base64_32_bytes"],
+      [Buffer.alloc(32, 1).toString("base64").slice(0, -1), "not_canonical_base64_32_bytes"], // unpadded
+      [` ${Buffer.alloc(32, 1).toString("base64")}`, "not_canonical_base64_32_bytes"],
+      [`${Buffer.alloc(32, 1).toString("base64")}!!`, "not_canonical_base64_32_bytes"],
+      [`${Buffer.alloc(32, 0xfb).toString("base64url")}=`, "not_canonical_base64_32_bytes"], // the URL alphabet (- and _), not the standard one
+    ],
+  },
   "base64-32": {
     validation: { type: "base64-32" },
     good: [Buffer.alloc(32, 1).toString("base64")],
@@ -115,6 +129,17 @@ describe("validateValue", () => {
       for (const [bad, reason] of c.bad) expect(reason.includes(bad) && bad.length > 3, `${c.validation.type}: ${reason}`).toBe(false);
     }
   });
+});
+
+describe("the machine key: health and the runtime reader agree", () => {
+  const good = Buffer.alloc(32, 5).toString("base64");
+  const values = [good, good.slice(0, -1), `${good} `, ` ${good}`, `${good}\n`, Buffer.alloc(31, 5).toString("base64"), Buffer.alloc(33, 5).toString("base64"), Buffer.alloc(32, 0xfb).toString("base64url"), "short", "====", "A".repeat(43) + "B="];
+  it.each(values)("%s", (value) => {
+    const manifest = validateValue({ type: "base64-32-canonical" }, value) === null;
+    const runtime = (() => { try { machineKekSource({ FX_MACHINE_KEK_V1: value }).keyFor(1); return true; } catch { return false; } })();
+    expect(manifest).toBe(runtime);
+  });
+  it("accepts the canonical key on both sides", () => expect(validateValue({ type: "base64-32-canonical" }, good)).toBeNull());
 });
 
 describe("deployKindOf", () => {

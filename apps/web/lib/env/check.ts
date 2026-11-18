@@ -1,4 +1,6 @@
 import { createPrivateKey } from "node:crypto";
+// The one parser for a 32-byte base64 key, shared with the machine key reader. A runtime import, so it names the .ts file Node loads under type stripping.
+import { parseKek32 } from "../../../../packages/model-connection/src/kekFormat.ts";
 import type { DeployKind, EnvVar, Validation } from "../../env-manifest";
 
 /**
@@ -72,6 +74,8 @@ export function validateValue(validation: Validation, value: string): string | n
       return null;
     case "base64-32":
       return Buffer.from(value, "base64").length === BASE64_32_BYTES ? null : "not_base64_32_bytes";
+    case "base64-32-canonical":
+      return parseKek32(value) ? null : "not_canonical_base64_32_bytes";
     case "min-chars":
       return value.length >= validation.n ? null : `shorter_than_${validation.n}_chars`;
     case "min-bytes":
