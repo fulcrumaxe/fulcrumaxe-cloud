@@ -44,7 +44,7 @@ describe("register (R4a.1)", () => {
 
   it("sends no name when the host name has nothing printable, and cuts one over 64 characters (D#605 FL-2)", async () => {
     rig.cloud.codeModes.set(CODE, "api_key");
-    const attempt = (hostname: string) => rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { hostname });
+    const attempt = (hostname: string) => rig.run(["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { hostname });
     expect((await attempt("​\u0007 ")).code).toBe(0);
     expect(JSON.parse(rig.cloud.seen[0]!.body)).not.toHaveProperty("name");
     rmSync(rig.dir, { recursive: true, force: true });
@@ -56,7 +56,7 @@ describe("register (R4a.1)", () => {
   it("says the cloud is too old, not that fx-runner is, when a cloud that predates names refuses the register", async () => {
     rig.cloud.codeModes.set(CODE, "api_key");
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ error: { code: "invalid_message", message: "invalid_message" } }), { status: 400, headers: { "content-type": "application/json" } }));
-    const result = await rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn: fetchFn as unknown as typeof fetch });
+    const result = await rig.run(["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn: fetchFn as unknown as typeof fetch });
     expect(result.code).not.toBe(0);
     expect(result.err).toContain("this cloud does not support runner names yet; ask your admin to update");
     expect(result.err).not.toContain("update fx-runner");
@@ -71,30 +71,33 @@ describe("register (R4a.1)", () => {
   });
 
   it("refuses bad input before any request: an unknown mode, a malformed code, a missing or unsafe cloud address", async () => {
-    const base = ["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin];
+    const base = ["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin];
     const swap = (flag: string, value: string): string[] => base.map((a, i) => (base[i - 1] === flag ? value : a));
     for (const argv of [
       swap("--credential-mode", "both"),
-      swap("--code", "fxrr_short"),
-      swap("--code", "nope"),
       swap("--cloud-url", "http://example.com"),
       swap("--cloud-url", "https://example.com/some/path"),
       swap("--cloud-url", "https://user:pw@example.com"),
       swap("--cloud-url", "ftp://example.com"),
       swap("--cloud-url", "not a url"),
-      base.slice(0, 4),
+      base.slice(0, 3),
       base.slice(2),
     ]) {
       const result = await rig.run(argv);
       expect(result.code, argv.join(" ")).toBe(2);
       expect(result.err + result.out).not.toContain(CODE);
     }
+    for (const bad of ["fxrr_short", "nope"]) {
+      const result = await rig.run(base, { readCode: async () => bad });
+      expect(result.code, bad).toBe(2);
+      expect(result.err + result.out).not.toContain(bad);
+    }
     expect(rig.cloud.seen).toEqual([]);
     expect(stateFiles()).toEqual([]);
   });
 
   it("an unusable code leaves nothing behind and does not echo the code", async () => {
-    const result = await rig.run(["register", "--code", `fxrr_${"Z9y8X7w6".repeat(5)}`, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin]);
+    const result = await rig.run(["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { readCode: async () => `fxrr_${"Z9y8X7w6".repeat(5)}` });
     expect(result.code).toBe(1);
     expect(result.err).toContain("401 invalid_code");
     expect(result.err).not.toContain("Z9y8X7w6");
@@ -122,7 +125,7 @@ describe("register (R4a.1)", () => {
     expect(down.code).toBe(1);
     expect(down.err).toBe("fx-runner: could not reach the cloud; check --cloud-url and your network, then try again\n");
     const fetchFn = vi.fn(async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
-    const odd = await rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn });
+    const odd = await rig.run(["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn });
     expect(odd.code).toBe(1);
     expect(stateFiles()).toEqual([]);
   });

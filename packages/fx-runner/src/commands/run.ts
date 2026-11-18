@@ -270,7 +270,7 @@ export const EXIT_RESTART_FOR_UPDATE = 75;
 
 export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunHooks = {}, updateHost?: UpdateHost): Promise<number> {
   const registration = loadRegistration(ctx.stateDir);
-  if (!registration) throw new CliError("not registered; run: fx-runner register --code <code> --credential-mode <mode> --cloud-url <url>");
+  if (!registration) throw new CliError("not registered; run: fx-runner register --code-stdin --credential-mode <mode> --cloud-url <url>");
   const key = loadRunnerKey(ctx.stateDir);
   if (!key || key.jkt !== registration.jkt) throw new CliError("the runner key is missing or does not match the registration; run: fx-runner revoke --local, then register again");
   const keyring = keyringFor(registration.cloud_origin, hooks.keyrings);

@@ -436,7 +436,7 @@ main() {
     *":$FX_HOME/bin:"*) ;;
     *) say "Add fx-runner to your PATH: export PATH=\"$FX_HOME/bin:\$PATH\"" ;;
   esac
-  say "Next: fx-runner register --code <code> --credential-mode <subscription|api_key> --cloud-url <url>"
+  say "Next: fx-runner register --code-stdin --credential-mode <subscription|api_key> --cloud-url <url>"
   exit "$EXIT_CODE"
 }
 

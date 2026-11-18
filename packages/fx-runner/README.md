@@ -158,7 +158,7 @@ It only calls out (no listening socket).
   Register as the account with `sudo -u <account> env FX_RUNNER_HOME=/var/lib/fx-runner fx-runner register --code-stdin ...`.
 - `fx-runner register` reads the code or token from standard input (`--code-stdin`) or from a file (`--code-file <path>`, which must
   be a regular file owned by you with no access for group or others, opened without following a link), so the secret is never in the
-  process list. `--code <value>` still works for one release and prints a deprecation line on the error stream. `--name <name>` sets
+  process list. `--code <value>` is refused with a message naming those two options, and the value is never echoed. `--name <name>` sets
   the runner's name (1 to 64 printable characters; it needs a cloud that accepts names). `doctor` warns when a per-user unit is
   installed and the account does not linger (`loginctl show-user` says `Linger=no`): the service would stop at logout.
 
