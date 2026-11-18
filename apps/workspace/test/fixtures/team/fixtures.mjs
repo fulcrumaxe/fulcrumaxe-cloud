@@ -26,7 +26,9 @@ export function makeFixtures(nowMs) {
   const agent = (over = {}) => ({
     agent_id: "a1b2c3d4e5f60718", role: "executor", discussion: 42, background: false, started_at: iso(600), stopped_at: null, verdict: null, state: "running", model: "sonnet-5", credential_mode: "subscription", ...over,
   });
-  const lane = (over = {}) => ({ pr: 7, discussion: 42, state: "testing", updated_at: iso(300), ...over });
+  // The page sets a merged PR apart as "merged today" by the viewer's calendar day, so a merged lane stamped minutes in the past falls on yesterday
+  // when a run starts just after midnight (and the lane silently drops out). A merged lane defaults to the fixture's own "now"; any other state keeps its age.
+  const lane = (over = {}) => ({ pr: 7, discussion: 42, state: "testing", updated_at: iso(over.state === "merged" ? 0 : 300), ...over });
   const gate = (over = {}) => ({ pr: 7, gate: "gate1", result: "pass", head_sha: "a".repeat(40), at: iso(200), ...over });
   const list = (items) => ({ items });
   // The command channel and the decision dials, in the shapes engine-commands.ts and decision-settings.ts document.
