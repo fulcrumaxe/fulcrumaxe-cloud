@@ -126,6 +126,9 @@ export function findChromium(env: Readonly<Record<string, string | undefined>>, 
   return undefined;
 }
 
+/** A navigation that failed with a network error (not an abort): Chromium then commits its own error page. Anchored at the start, since the rest of the message holds the address. */
+const NET_LOAD_FAILED = /^(?:page\.goto: )?net::ERR_(?!ABORTED\b)[A-Z0-9_]+/;
+
 function classify(error: unknown): ToolError {
   if (error instanceof ToolError) return error;
   const text = error instanceof Error ? error.message : "";
@@ -270,7 +273,14 @@ export async function launchDriver(cfg: DriverConfig): Promise<PageDriver> {
           } catch (error) {
             // Parking on about:blank after a refused navigation: Chromium commits its error page for the refused load first, which interrupts this load and makes goto throw, but the load
             // is still queued and lands afterwards, where it would cancel whatever page the next call opens. Wait for it to land, so no navigation of ours is pending when the call ends.
-            if (url !== "about:blank") throw error;
+            if (url !== "about:blank") {
+              // A load that failed in the network layer (the pin refuses with ERR_BLOCKED_BY_CLIENT) fails before Chromium has committed its error page. If the call returned now, the page could still read as the old address (about:blank, allowed),
+              // and the error page would land during the caller's next navigation and cancel it. Wait for the error page to commit, so the page is never left mid-navigation.
+              if (NET_LOAD_FAILED.test(error instanceof Error ? error.message : "") && !page.url().startsWith("chrome-error:")) {
+                await page.waitForURL(/^chrome-error:/, { timeout: ACTION_MS }).catch(() => undefined);
+              }
+              throw error;
+            }
             await page.waitForURL("about:blank", { timeout: ACTION_MS });
           }
         }),
