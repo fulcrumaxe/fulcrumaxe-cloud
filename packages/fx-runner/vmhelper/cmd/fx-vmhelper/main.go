@@ -1,9 +1,8 @@
 //go:build linux
 
 // Command fx-vmhelper is the root service behind the local runner's microVM sandboxes. This build holds
-// the protocol and the server: the socket, the peer-uid gate, strict frames, logging and the pinned
-// hardening values. The sandbox lifecycle (jail, cgroup, jailer launch) arrives in the next change, so
-// until then every prepare is refused with "unavailable" and nothing is ever created.
+// the protocol, the server and the sandbox registry (ids, jail and vsock directories, reaping). The
+// jailer launch, cgroups and uid/gid drop arrive in the next change: until then start answers "unavailable".
 //
 //	fx-vmhelper -config <file>
 package main
@@ -19,17 +18,32 @@ import (
 	"fx-vmhelper/internal/config"
 	"fx-vmhelper/internal/hardening"
 	"fx-vmhelper/internal/protocol"
+	"fx-vmhelper/internal/sandbox"
 	"fx-vmhelper/internal/server"
 	"fx-vmhelper/internal/vmlog"
 )
 
-// noSandboxes is the backend of this build: nothing can be prepared, so nothing exists to start or destroy.
-type noSandboxes struct{}
+// groupFile is read at start-up; a test replaces it.
+var groupFile, passwdFile = "/etc/group", "/etc/passwd"
 
-func (noSandboxes) Prepare(protocol.Request) protocol.Code { return protocol.Unavailable }
-func (noSandboxes) Start(string) protocol.Code             { return protocol.UnknownSandbox }
-func (noSandboxes) Destroy(string) protocol.Code           { return protocol.UnknownSandbox }
-func (noSandboxes) List() ([]server.Entry, protocol.Code)  { return nil, protocol.OK }
+// raiseNoFile lifts the soft descriptor limit to what removing a deep jail tree can need (one descriptor
+// per level, up to the sandbox package's depth limit), within the hard limit.
+func raiseNoFile() { raiseNoFileTo(8192) }
+
+// raiseNoFileTo sets the soft limit to want, or to the hard limit if that is lower; it never lowers it.
+func raiseNoFileTo(want uint64) {
+	var l syscall.Rlimit
+	if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &l) != nil {
+		return
+	}
+	if l.Max < want {
+		want = l.Max
+	}
+	if l.Cur < want {
+		l.Cur = want
+		_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &l)
+	}
+}
 
 // readStatus returns the process's own status text; tests replace it to feed a drifted one.
 var readStatus = func() ([]byte, error) { return os.ReadFile("/proc/self/status") }
@@ -88,6 +102,26 @@ func serve(args []string) int {
 	if err := cfg.CheckSocketGroups(dirGID, uint32(os.Getegid())); err != nil {
 		return fail("%v", err)
 	}
+	// No sandbox gid may be a group that has members: they would hold its bits on a sandbox's directory.
+	gf, err := os.Open(groupFile)
+	if err != nil {
+		return fail("cannot read the group file")
+	}
+	err = cfg.CheckGroupFile(gf)
+	gf.Close()
+	if err != nil {
+		return fail("%v", err)
+	}
+	pf, err := os.Open(passwdFile)
+	if err != nil {
+		return fail("cannot read the passwd file")
+	}
+	err = cfg.CheckPasswdFile(pf)
+	pf.Close()
+	if err != nil {
+		return fail("%v", err)
+	}
+	raiseNoFile()
 	ln, err := server.Listen(pinned.RuntimeDirPath(), pinned.SocketName, 0, mode)
 	if err != nil {
 		return fail("%v", err)
@@ -96,7 +130,15 @@ func serve(args []string) int {
 	log.Event("start", "protocol", fmt.Sprint(protocol.Version), "max_sandboxes", fmt.Sprint(cfg.MaxSandboxes))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	s := &server.Server{RunnerUID: cfg.RunnerUID, Caps: cfg.Caps(), Backend: noSandboxes{}, Log: log}
+	// This build has no launcher: prepare builds the directories, start answers "unavailable".
+	mgr, err := sandbox.New(cfg, sandbox.NoLauncher{})
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer mgr.Close()
+	reaped := mgr.Reap()
+	log.Event("reap", "removed", fmt.Sprint(len(reaped.Removed)), "skipped", fmt.Sprint(reaped.Skipped), "failed", fmt.Sprint(reaped.Failed))
+	s := &server.Server{RunnerUID: cfg.RunnerUID, Caps: cfg.Caps(), Backend: mgr, Log: log}
 	if err := s.Serve(ctx, ln); err != nil {
 		return fail("serve: %v", err)
 	}

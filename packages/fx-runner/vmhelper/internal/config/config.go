@@ -57,6 +57,9 @@ const MinID = 100000
 // unmapped user.
 const Nobody = 65534
 
+// NoID is 2^32-1, which is (uid_t)-1 and (gid_t)-1: "no change" to chown and setresuid, never a real id.
+const NoID = 1<<32 - 1
+
 var keys = []string{"jail_root", "runner_uid", "runner_gid", "uid_first", "uid_count", "gid_first", "gid_count", "max_sandboxes", "max_vcpus", "max_mem_mb"}
 
 // Load reads path, which must be a regular file owned by ownerUID (0 in production) that no one else can
@@ -162,6 +165,8 @@ func Parse(data []byte) (Config, error) {
 // last two cannot happen; they are checked on their own so that lowering the floor cannot open them.)
 func checkRange(kind string, first, count, floor uint32) error {
 	switch {
+	case uint64(first)+uint64(count) > NoID: // the last id, first+count-1, must stay below 2^32-1
+		return fmt.Errorf("config: the %s range runs past the largest usable id", kind)
 	case first < floor:
 		return fmt.Errorf("config: the %s range must start at %d or above, not %d", kind, floor, first)
 	case contains(first, count, 0):
@@ -195,4 +200,69 @@ func has(k string) bool {
 
 func contains(first, count, v uint32) bool {
 	return v >= first && uint64(v) < uint64(first)+uint64(count)
+}
+
+// CheckGroupFile refuses a gid range that overlaps a group listed in the group file (the /etc/group format)
+// with any member. A member of such a group would hold that group's bits on a sandbox's directory, whose
+// group is one id of the range. A line that is not four colon-separated fields with a numeric gid (other
+// than a blank line, a comment or a "+" compat line) is an error: the file is read fail-closed.
+func (c Config) CheckGroupFile(r io.Reader) error {
+	data, err := io.ReadAll(io.LimitReader(r, 4<<20))
+	if err != nil {
+		return errors.New("config: cannot read the group file")
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || line[0] == '#' || line[0] == '+' || line[0] == '-' {
+			continue
+		}
+		f := strings.Split(line, ":")
+		if len(f) != 4 || len(f[2]) == 0 || len(f[2]) > 10 {
+			return errors.New("config: the group file has a line that is not name:password:gid:members")
+		}
+		var gid uint64
+		for _, ch := range f[2] {
+			if ch < '0' || ch > '9' {
+				return errors.New("config: the group file has a non-numeric gid")
+			}
+			gid = gid*10 + uint64(ch-'0')
+		}
+		if gid <= NoID && contains(c.GIDFirst, c.GIDCount, uint32(gid)) && strings.TrimSpace(f[3]) != "" {
+			return fmt.Errorf("config: the gid range holds group %d, which has members", gid)
+		}
+	}
+	return nil
+}
+
+// CheckPasswdFile refuses a gid range that holds the primary group of any user in the passwd file (the
+// /etc/passwd format), whether or not the group file lists that user as a member: that user would hold the
+// group's bits on a sandbox's directory. Same rules as CheckGroupFile: a malformed line is an error.
+//
+// Only the local files are read. Users and groups from other NSS sources (LDAP, sssd, systemd-userdbd)
+// are not visible to it; a host that has them must keep the sandbox id ranges out of their id space, which
+// the installer is to check.
+func (c Config) CheckPasswdFile(r io.Reader) error {
+	data, err := io.ReadAll(io.LimitReader(r, 4<<20))
+	if err != nil {
+		return errors.New("config: cannot read the passwd file")
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || line[0] == '#' || line[0] == '+' || line[0] == '-' {
+			continue
+		}
+		f := strings.Split(line, ":")
+		if len(f) != 7 || len(f[3]) == 0 || len(f[3]) > 10 {
+			return errors.New("config: the passwd file has a line that is not seven colon-separated fields")
+		}
+		var gid uint64
+		for _, ch := range f[3] {
+			if ch < '0' || ch > '9' {
+				return errors.New("config: the passwd file has a non-numeric gid")
+			}
+			gid = gid*10 + uint64(ch-'0')
+		}
+		if gid <= NoID && contains(c.GIDFirst, c.GIDCount, uint32(gid)) {
+			return fmt.Errorf("config: the gid range holds %d, the primary group of a user", gid)
+		}
+	}
+	return nil
 }

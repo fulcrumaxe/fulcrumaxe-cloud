@@ -34,27 +34,27 @@ func newFake() *fakeBackend {
 	return &fakeBackend{templates: map[string]bool{"fx-agent": true}, max: 2, boxes: map[string]int64{}}
 }
 
-func (f *fakeBackend) Prepare(r protocol.Request) protocol.Code {
+func (f *fakeBackend) Prepare(r protocol.Request) (Reply, protocol.Code) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	switch {
 	case !f.templates[r.Template]:
-		return protocol.UnknownTemplate
+		return Reply{}, protocol.UnknownTemplate
 	case len(f.boxes) >= f.max:
-		return protocol.OverCap
+		return Reply{}, protocol.OverCap
 	}
 	f.boxes[r.SandboxID] = 1700000000
-	return protocol.OK
+	return Reply{VsockDir: "/jail/vsock/" + r.SandboxID, SandboxGID: 100007}, protocol.OK
 }
-func (f *fakeBackend) Start(id string) protocol.Code {
+func (f *fakeBackend) Start(id string) (Reply, protocol.Code) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	if _, ok := f.boxes[id]; !ok {
-		return protocol.UnknownSandbox
+		return Reply{}, protocol.UnknownSandbox
 	}
-	return protocol.OK
+	return Reply{VsockDir: "/jail/vsock/" + id, SandboxGID: 100007}, protocol.OK
 }
 func (f *fakeBackend) Destroy(id string) protocol.Code {
 	f.mu.Lock()
@@ -72,7 +72,7 @@ func (f *fakeBackend) List() ([]Entry, protocol.Code) {
 	f.calls++
 	var out []Entry
 	for id, c := range f.boxes {
-		out = append(out, Entry{SandboxID: id, Created: c})
+		out = append(out, Entry{SandboxID: id, Created: c, VsockDir: "/jail/vsock/" + id, SandboxGID: 100007})
 	}
 	return out, protocol.OK
 }
@@ -273,13 +273,13 @@ func TestVerbsEndToEnd(t *testing.T) {
 		}
 		return strings.TrimSpace(s)
 	}
-	if got := say(`{"verb":"prepare","sandbox_id":"job-1","template":"fx-agent","vcpus":2,"mem_mb":1024}`); got != `{"ok":true,"protocol":1}` {
+	if got := say(`{"verb":"prepare","sandbox_id":"job-1","template":"fx-agent","vcpus":2,"mem_mb":1024}`); got != `{"ok":true,"protocol":1,"vsock_dir":"/jail/vsock/job-1","sandbox_gid":100007}` {
 		t.Fatal(got)
 	}
-	if got := say(`{"verb":"list"}`); got != `{"ok":true,"protocol":1,"sandboxes":[{"sandbox_id":"job-1","created":1700000000}]}` {
+	if got := say(`{"verb":"list"}`); got != `{"ok":true,"protocol":1,"sandboxes":[{"sandbox_id":"job-1","created":1700000000,"vsock_dir":"/jail/vsock/job-1","sandbox_gid":100007}]}` {
 		t.Fatal(got)
 	}
-	if got := say(`{"verb":"start","sandbox_id":"job-1"}`); got != `{"ok":true,"protocol":1}` {
+	if got := say(`{"verb":"start","sandbox_id":"job-1"}`); got != `{"ok":true,"protocol":1,"vsock_dir":"/jail/vsock/job-1","sandbox_gid":100007}` {
 		t.Fatal(got)
 	}
 	if got := say(`{"verb":"destroy","sandbox_id":"job-1"}`); got != `{"ok":true,"protocol":1}` {

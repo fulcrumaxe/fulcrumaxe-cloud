@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"fx-vmhelper/internal/hardening"
@@ -75,5 +76,50 @@ func TestBinaryRefusesToServeWithoutThePinnedCapabilities(t *testing.T) {
 	// no config flag: usage error, exit 2
 	if err := exec.Command(bin).Run(); err == nil || err.(*exec.ExitError).ExitCode() != 2 {
 		t.Fatalf("%v", err)
+	}
+}
+
+// raiseNoFile lifts the soft descriptor limit to 8192, or to the hard limit when that is lower, and never
+// lowers it.
+func TestRaiseNoFile(t *testing.T) {
+	var orig syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &orig); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Setrlimit(syscall.RLIMIT_NOFILE, &orig)
+	get := func() syscall.Rlimit {
+		var l syscall.Rlimit
+		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	low := syscall.Rlimit{Cur: 256, Max: orig.Max}
+	if orig.Max < 256 {
+		t.Skip("hard limit below 256")
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &low); err != nil {
+		t.Fatal(err)
+	}
+	raiseNoFile()
+	want := uint64(8192)
+	if orig.Max < want {
+		want = orig.Max
+	}
+	if got := get(); got.Cur != want || got.Max != orig.Max {
+		t.Fatalf("soft limit %d (hard %d), want %d (hard %d)", got.Cur, got.Max, want, orig.Max)
+	}
+	// a limit already above the target is left alone
+	raiseNoFileTo(100)
+	if got := get(); got.Cur != want {
+		t.Fatalf("a lower target changed the limit to %d", got.Cur)
+	}
+	// a target above the hard limit is capped there
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: 256, Max: 1024}); err != nil {
+		t.Fatal(err)
+	}
+	raiseNoFileTo(1 << 20)
+	if got := get(); got.Cur != 1024 {
+		t.Fatalf("soft limit %d, want the hard limit 1024", got.Cur)
 	}
 }
