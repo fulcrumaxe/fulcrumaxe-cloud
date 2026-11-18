@@ -31,6 +31,8 @@ rum/route.ts
 runner/claim/route.ts
 runner/deploy-order-claim/route.ts
 runner/deploy-order-report/route.ts
+runner/device/poll/route.ts
+runner/device/start/route.ts
 runner/engine/commands/[id]/ack/route.ts
 runner/engine/commands/pull/route.ts
 runner/engine/decide/route.ts

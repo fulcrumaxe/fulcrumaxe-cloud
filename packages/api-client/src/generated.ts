@@ -3181,6 +3181,46 @@ export interface Operations {
       accepted: boolean;
     };
   };
+  lookupRunnerDeviceCode: {
+    path: undefined;
+    query: undefined;
+    body: {
+      user_code: string;
+    };
+    response: {
+      facts: {
+        hostname?: string;
+        os: string;
+        arch: string;
+        kvm: boolean;
+        ip_country?: string;
+      };
+      expires_at: string;
+      warning: string;
+    };
+  };
+  approveRunnerDeviceCode: {
+    path: undefined;
+    query: undefined;
+    body: {
+      user_code: string;
+      name?: string;
+      confirm: true;
+    };
+    response: {
+      runner_id: string;
+    };
+  };
+  denyRunnerDeviceCode: {
+    path: undefined;
+    query: undefined;
+    body: {
+      user_code: string;
+    };
+    response: {
+      denied: true;
+    };
+  };
   getAccountBuildConcurrency: {
     path: undefined;
     query: undefined;
@@ -7128,6 +7168,39 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: false,
+  },
+  lookupRunnerDeviceCode: {
+    method: "POST",
+    path: "/api/v1/runners/device/lookup",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  approveRunnerDeviceCode: {
+    method: "POST",
+    path: "/api/v1/runners/device/approve",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  denyRunnerDeviceCode: {
+    method: "POST",
+    path: "/api/v1/runners/device/deny",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
   },
   getAccountBuildConcurrency: {
     method: "GET",
