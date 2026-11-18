@@ -9,7 +9,7 @@ import { verifySelfSignedRequest } from "./verifyRunnerRequest.js";
 
 export const REGISTER_PATH = "/api/runner/register";
 /** The limit for an account on this plan, or 503 when the plan data cannot say. A missing figure is never a default, and never unlimited. */
-function maxRunnersOf(deps: RunnerCloudDeps, plan: string | undefined): number {
+export function maxRunnersOf(deps: Pick<RunnerCloudDeps, "maxRunners">, plan: string | undefined): number {
   try {
     const max = plan === undefined ? undefined : deps.maxRunners?.(plan);
     if (typeof max === "number" && Number.isInteger(max) && max >= 0) return max;

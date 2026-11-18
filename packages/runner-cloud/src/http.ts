@@ -113,6 +113,13 @@ export interface RunnerCloudDeps {
    */
   planePushIdentity?: (() => { name: string; email: string } | null) | null;
   /**
+   * ON-2: the server key the typed device code is hashed with (HMAC-SHA256), read on each call (apps/web reads FX_DEVICE_CODE_KEY, `readDeviceCodeKey`).
+   * Null, absent or throwing: the device flow answers 503 `not_configured` and stores nothing.
+   */
+  deviceCodeKey?: (() => Buffer | null) | null;
+  /** ON-2: the most device-code starts in an hour across all addresses (apps/web reads FX_DEVICE_FLOW_GLOBAL_PER_HOUR; absent is 1,000). */
+  deviceFlowGlobalPerHour?: (() => number) | null;
+  /**
    * D#6 RUNNER-WAKE R3a: the HMAC key the wake token is minted with (apps/web reads FX_RUNNER_WAKE_KEY on each call, `readWakeKey`). Null, absent or
    * throwing: no grant is minted and hello and claim answer exactly as before.
    */

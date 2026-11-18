@@ -8,6 +8,7 @@ export * from "./redact.js";
 export * from "./detailRules.js";
 export * from "./memoryText.js";
 export * from "./messages.js";
+export * from "./deviceFlow.js";
 export * from "./replies.js";
 export * from "./claimReplyBound.js";
 export * from "./job.js";
