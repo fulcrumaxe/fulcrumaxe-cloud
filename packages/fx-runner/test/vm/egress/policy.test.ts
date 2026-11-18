@@ -51,11 +51,48 @@ describe("parseEgressPolicy", () => {
     ["a forwardURL to an address literal", { allow: { "git.example.com": [{ forwardURL: "https://169.254.169.254/x" }] } }],
     ["a forwardURL that is not a URL", { allow: { "git.example.com": [{ forwardURL: "nope" }] } }],
     ["a forwardURL that is not a string", { allow: { "git.example.com": [{ forwardURL: 7 }] } }],
+    ["a forwardURL that is a URL object", { allow: { "git.example.com": [{ forwardURL: new URL("https://proxy.example.com/x") }] } }],
   ];
   it.each(REFUSED)("refuses %s", (_name, value) => {
     expect(() => parseEgressPolicy(value)).toThrow(PolicyRefused);
   });
   it("does not echo the offending value", () => {
     expect(() => parseEgressPolicy({ allow: ["169.254.169.254"] })).toThrow(/^egress policy refused: a host is not a plain DNS name$/);
+  });
+});
+
+describe("parseEgressPolicy: the reverse endpoint's routes", () => {
+  const routeOf = (rules: unknown) => parseEgressPolicy({ allow: { "api.example.com": rules } }).routes.get("api.example.com");
+  it("reads a forwardURL rule and a transform rule, lower-casing header names", () => {
+    expect(routeOf([{ forwardURL: "https://proxy.example.com/api/fwd" }])?.forwardURL?.href).toBe("https://proxy.example.com/api/fwd");
+    expect(routeOf([{ transform: [{ headers: { "X-Api-Key": "k", Authorization: "Bearer x" } }, { headers: { "ai-reporting-tags": "t" } }] }])?.headers).toEqual({ "x-api-key": "k", authorization: "Bearer x", "ai-reporting-tags": "t" });
+  });
+  it("a direct host and a deny-all policy have no route", () => {
+    expect(routeOf([])).toBeUndefined();
+    expect(parseEgressPolicy("deny-all").routes.size).toBe(0);
+  });
+  const UNSERVED: Array<[string, unknown]> = [
+    ["two rules", [{ transform: [{ headers: { a: "1" } }] }, { transform: [{ headers: { b: "2" } }] }]],
+    ["a match", [{ match: "x", transform: [{ headers: { a: "1" } }] }]],
+    ["a response rule", [{ response: [] }]],
+    ["a forward and a transform in one rule", [{ forwardURL: "https://proxy.example.com/x", transform: [{ headers: { a: "1" } }] }]],
+    ["an empty transform", [{ transform: [] }]],
+    ["a transform that sets no header", [{ transform: [{ headers: {} }] }]],
+    ["a transform entry with no headers", [{ transform: [{}] }]],
+    ["a transform entry with another key", [{ transform: [{ headers: { a: "1" }, body: "x" }] }]],
+    ["a header named host", [{ transform: [{ headers: { Host: "evil.example.com" } }] }]],
+    ["a header named content-length", [{ transform: [{ headers: { "Content-Length": "1" } }] }]],
+    ["a header value with a line break", [{ transform: [{ headers: { a: "x\r\nb: y" } }] }]],
+    ["a header value with a leading space", [{ transform: [{ headers: { a: " x" } }] }]],
+    ["a header value with a trailing space", [{ transform: [{ headers: { a: "x " } }] }]],
+    ["a header value with a tab", [{ transform: [{ headers: { a: "x\ty" } }] }]],
+    ["an empty header value", [{ transform: [{ headers: { a: "" } }] }]],
+    ["a header name with a space", [{ transform: [{ headers: { "a b": "1" } }] }]],
+    ["a non-string header value", [{ transform: [{ headers: { a: 1 } }] }]],
+  ];
+  it.each(UNSERVED)("serves no route for %s, but the host stays in the policy as rewritten", (_name, rules) => {
+    const parsed = parseEgressPolicy({ allow: { "api.example.com": rules } });
+    expect(parsed.routes.size).toBe(0);
+    expect(parsed.hosts.get("api.example.com")).toBe("rewritten");
   });
 });
