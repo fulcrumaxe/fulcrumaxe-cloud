@@ -153,6 +153,8 @@ export interface RepoRow {
   halt_pending: boolean;
   /** When the current halt was set; null while not halted. */
   halted_at: string | null;
+  /** Who set the current halt (migration 1038): a member of this account, or null (not halted, a halt from before the column, or the person has left the account). */
+  halted_by: { id: string; display_name: string } | null;
   /** +1 per halt, unchanged by a clear; 0 for a repo never halted. */
   halt_epoch: number;
 }
@@ -164,7 +166,8 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
             st.watch_enabled, st.operate_enabled, n.id AS session_id, n.runner_id, n.last_event_at,
             a.heard_at, a.sessions, (rn.revoked_at IS NOT NULL) AS revoked, rs.name AS runner_set_name,
             COALESCE(NULLIF(ru.name, ''), NULLIF(ru.github_login, ''), $1) AS registrant, EXTRACT(EPOCH FROM (now() - a.heard_at))::float8 AS heard,
-            (c.halted_at IS NOT NULL) AS halted, c.halted_at, COALESCE(c.halt_epoch, 0) AS halt_epoch, ap.applied_epoch
+            (c.halted_at IS NOT NULL) AS halted, c.halted_at, COALESCE(c.halt_epoch, 0) AS halt_epoch, ap.applied_epoch,
+            hm.user_id AS halted_by_id, COALESCE(NULLIF(hu.name, ''), NULLIF(hu.github_login, ''), $1) AS halted_by_name
        FROM engine_bridge_repos b
        JOIN repos r ON r.id = b.repo_id
        LEFT JOIN engine_bridge_settings st ON st.account_id = b.account_id
@@ -174,6 +177,9 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
        LEFT JOIN runner_settings rs ON rs.runner_id = rn.id AND rs.account_id = rn.account_id
        LEFT JOIN users ru ON ru.id = rn.registered_by
        LEFT JOIN engine_repo_controls c ON c.account_id = b.account_id AND c.repo_id = b.repo_id
+       -- Who halted it: only a person who is a member of this repo's own account (never a user of another account, whatever the column holds).
+       LEFT JOIN account_members hm ON hm.account_id = b.account_id AND hm.user_id = c.halted_by AND c.halted_at IS NOT NULL
+       LEFT JOIN users hu ON hu.id = hm.user_id
        -- The newest epoch the runner reported applying, from the repo's sessions (the bridge session carries it). Only looked up while halted.
        LEFT JOIN LATERAL (SELECT max((ev.body->>'halt_epoch')::int) AS applied_epoch FROM engine_events ev JOIN engine_sessions es ON es.id = ev.session_id
                            WHERE ev.account_id = b.account_id AND es.account_id = b.account_id AND c.halted_at IS NOT NULL AND es.repo_id = b.repo_id AND ev.kind = 'halt_applied') ap ON true
@@ -202,6 +208,7 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
     halted: r.halted === true,
     halt_pending: haltPending({ halted: r.halted === true, halt_epoch: Number(r.halt_epoch) }, r.applied_epoch === null || r.applied_epoch === undefined ? null : Number(r.applied_epoch)),
     halted_at: iso(r.halted_at),
+    halted_by: r.halted_by_id === null || r.halted_by_id === undefined ? null : { id: r.halted_by_id, display_name: r.halted_by_name },
     halt_epoch: Number(r.halt_epoch),
     };
   });

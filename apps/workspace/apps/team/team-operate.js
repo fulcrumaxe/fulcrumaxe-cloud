@@ -62,6 +62,7 @@ export const HALT_WORDS = {
   haltRisk: "Work the agents have not finished can be lost. Every command is refused until an owner or admin clears the halt.",
   clearText: "Commands are allowed again. The engine is not started for you: use Resume loop or Start day afterwards.",
   clearLocal: "If it was stopped on the machine itself, clearing does not lift that. Afterwards, halt here and clear again, or resume it on the machine.",
+  byLead: "Halted by ", atWord: "at", haltedAt: "Halted at",
   busy: "Another change is being saved. Try again in a moment.",
   clearedSaid: "The halt is cleared. The engine is not started again until you start it.", pendingSaid: "Halting. Waiting for the machine to confirm it stopped the engine.", haltedSaid: "The engine is halted.",
   haltForbidden: "Only an owner or admin can halt the engine.", clearForbidden: "Only an owner or admin, signed in, can clear a halt.", signedOut: "Your session has ended. Sign in again.",
@@ -163,7 +164,23 @@ export function stopOf(st, agentId) {
 }
 
 /** The halt of the open repo, for everyone (a member sees the state and no controls). `confirm` is null unless the question still fits the state. */
-export function describeHalt(st, repo) {
+/** "14:05", or "11-17 14:05" when it was not today, in the person's own time; "" for a value that is not a time. */
+function haltTime(iso, nowMs) {
+  const t = stamp(iso);
+  if (t === null) return "";
+  const d = new Date(t), p = (n) => String(n).padStart(2, "0");
+  const day = nowMs !== undefined && d.toDateString() !== new Date(nowMs).toDateString() ? p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " : "";
+  return day + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+/** "Halted by <name> at <time>": the name in its own isolated run (parts), the same sentence as plain text. Null when there is no time to say. */
+function haltedBy(repo, nowMs) {
+  const at = repo.halted ? haltTime(repo.haltedAt, nowMs) : "";
+  if (at === "") return null;
+  return repo.haltedBy !== ""
+    ? { parts: [HALT_WORDS.byLead, { bdi: repo.haltedBy }, " " + HALT_WORDS.atWord + " " + at], text: HALT_WORDS.byLead + repo.haltedBy + " " + HALT_WORDS.atWord + " " + at }
+    : { parts: [HALT_WORDS.haltedAt + " " + at], text: HALT_WORDS.haltedAt + " " + at };
+}
+export function describeHalt(st, repo, nowMs) {
   const s = st.settings;
   if (!s || !repo) return null;
   const state = repo.halted ? (repo.haltPending ? "pending" : "halted") : repo.haltPending ? "pending" : "none";
@@ -176,7 +193,7 @@ export function describeHalt(st, repo) {
     ? { kind, title: HALT_WORDS.askHaltTitle, parts, texts: [HALT_WORDS.haltRisk], yes: HALT_WORDS.yesHalt }
     : { kind, title: HALT_WORDS.askClearTitle, parts: [HALT_WORDS.clearText], texts: [HALT_WORDS.clearLocal], yes: HALT_WORDS.yesClear }) : null;
   return {
-    id: repo.id, state, chip: state === "pending" ? HALT_WORDS.chipPending : state === "halted" ? HALT_WORDS.chipHalted : "",
+    id: repo.id, by: haltedBy(repo, nowMs), state, chip: state === "pending" ? HALT_WORDS.chipPending : state === "halted" ? HALT_WORDS.chipHalted : "",
     text: state === "pending" ? HALT_WORDS.pending : state === "halted" ? HALT_WORDS.halted : can ? HALT_WORDS.noneOwner : HALT_WORDS.none,
     canHalt: can && state === "none", canClear: can && state !== "none", locked: busy, why: busy ? HALT_WORDS.busy : "", note: can ? st.op.haltNote : "", confirm, stale: !!kind && !confirm,
   };

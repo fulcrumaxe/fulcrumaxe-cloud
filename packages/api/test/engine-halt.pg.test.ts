@@ -345,6 +345,65 @@ describe('EB-11a: engine halt routes', () => {
       expect(items.find((i) => i.repo_id === repoB)).toMatchObject({ halted: false, halt_epoch: 0 });
     });
 
+    const nameUser = (userId: string, name: string) => admin.query(`UPDATE users SET name = $2 WHERE id = $1`, [userId, name]);
+    const by = async (who: Identity, repoId: string) => (await row(who, repoId))?.halted_by;
+
+    it('a halt shows who set it as {id, display_name}; the body cannot choose it; a clear and a not-halted repo show null', async () => {
+      const f = await fixture();
+      await bridged(f);
+      await nameUser(f.owner.userId, 'Olive Owner');
+      await nameUser(f.adminUser.userId, 'Adam Admin');
+      expect(await by(f.member, f.repoId)).toBeNull();
+      // A body that names someone is refused outright, and nothing is halted.
+      expect((await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`, { halted_by: f.adminUser.userId })).status).toBe(422);
+      expect(await by(f.member, f.repoId)).toBeNull();
+      expect((await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`)).status).toBe(200);
+      expect(await by(f.member, f.repoId)).toEqual({ id: f.owner.userId, display_name: 'Olive Owner' });
+      await call(f.adminUser, 'POST', `/engine/repos/${f.repoId}/halt/clear`);
+      expect(await by(f.member, f.repoId)).toBeNull();
+      await call(f.adminUser, 'POST', `/engine/repos/${f.repoId}/halt`);
+      expect(await by(f.member, f.repoId)).toEqual({ id: f.adminUser.userId, display_name: 'Adam Admin' });
+    });
+
+    it('a second repo of the same account shows its own person, and a never-halted one shows none', async () => {
+      const f = await fixture();
+      await bridged(f);
+      const repoB = await seedRepo(f.owner.accountId);
+      await bridged(f, repoB);
+      const repoC = await seedRepo(f.owner.accountId);
+      await bridged(f, repoC);
+      await nameUser(f.owner.userId, 'Olive Owner');
+      await nameUser(f.adminUser.userId, 'Adam Admin');
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      await call(f.adminUser, 'POST', `/engine/repos/${repoB}/halt`);
+      expect(await by(f.member, f.repoId)).toEqual({ id: f.owner.userId, display_name: 'Olive Owner' });
+      expect(await by(f.member, repoB)).toEqual({ id: f.adminUser.userId, display_name: 'Adam Admin' });
+      expect(await by(f.member, repoC)).toBeNull();
+      const items = await readEngineRepos(admin);
+      expect(items.filter((i) => [f.repoId, repoB, repoC].includes(i.repo_id))).toHaveLength(3);
+    });
+
+    it('a user of a foreign account is never shown, even if the column holds one (read with row security out of the way)', async () => {
+      const f = await fixture();
+      await bridged(f);
+      await nameUser(f.other.userId, 'Mallory Foreign');
+      await call(f.owner, 'POST', `/engine/repos/${f.repoId}/halt`);
+      // The only way to plant a foreign id is the RLS-bypassing admin client.
+      await admin.query(`UPDATE engine_repo_controls SET halted_by = $2 WHERE repo_id = $1`, [f.repoId, f.other.userId]);
+      const rls = (await admin.query<{ bypass: boolean }>(`SELECT rolbypassrls OR rolsuper AS bypass FROM pg_roles WHERE rolname = current_user`)).rows[0]!.bypass;
+      expect(rls).toBe(true);
+      const mine = (await readEngineRepos(admin)).find((i) => i.repo_id === f.repoId);
+      expect(mine).toMatchObject({ halted: true, halted_by: null });
+      expect(JSON.stringify(await readEngineRepos(admin))).not.toContain('Mallory Foreign');
+      // The foreign person's own account, halted by them, shows them there and only there.
+      const otherRepo = await seedRepo(f.other.accountId);
+      await bridged(f, otherRepo, f.other.accountId, f.other.userId);
+      await call(f.other, 'POST', `/engine/repos/${otherRepo}/halt`);
+      const all = await readEngineRepos(admin);
+      expect(all.find((i) => i.repo_id === otherRepo)?.halted_by).toEqual({ id: f.other.userId, display_name: 'Mallory Foreign' });
+      expect(all.find((i) => i.repo_id === f.repoId)?.halted_by).toBeNull();
+    });
+
     it('with row security out of the way, another account\'s halted repo and applied report do not change this account\'s repo, and each repo reads its own', async () => {
       const f = await fixture();
       await bridged(f);

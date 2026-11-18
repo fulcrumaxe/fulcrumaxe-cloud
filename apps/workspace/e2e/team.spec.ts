@@ -1211,6 +1211,39 @@ test.describe("Team app", () => {
     await clean(page, member.errors);
   });
 
+  const hhmmOf = (iso: string) => { const d = new Date(iso); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+  const memberOf = (F: ReturnType<typeof makeFixtures>, over: Record<string, unknown>) =>
+    operateOn({ settings: F.settings({ can_edit: false, operate_enabled: true }), repos: [F.repo({ operate_enabled: true, ...over })] });
+
+  test("a halted repo says who halted it and when, to a member too: the name is in its own run, inside the labelled halt region", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const at = F.iso(5 * 60);
+    const member = await setup(page, memberOf(F, { halted: true, halted_at: at, halted_by: { id: "u0000000-0000-4000-8000-000000000009", display_name: "Olive Owner" } }));
+    await open(page);
+    const by = t(page, "tm-halt-by");
+    await expect(by).toHaveText(`Halted by Olive Owner at ${hhmmOf(at)}`);
+    await expect(by.locator("bdi")).toHaveText("Olive Owner");
+    await expect(page.locator(`${WIN} [data-testid="tm-halt"][aria-labelledby="tm-halt-h"] [data-testid="tm-halt-by"]`)).toHaveCount(1);
+    await clean(page, member.errors);
+  });
+
+  test("a halt with no recorded author says only when it was halted, and never null or undefined", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const at = F.iso(5 * 60);
+    const { errors } = await setup(page, memberOf(F, { halted: true, halted_at: at, halted_by: null }));
+    await open(page);
+    await expect(t(page, "tm-halt-by")).toHaveText(`Halted at ${hhmmOf(at)}`);
+    await clean(page, errors);
+  });
+
+  test("a repo that is not halted shows no halted-by line", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, memberOf(F, { halted: false, halted_at: null, halted_by: null }));
+    await open(page);
+    await expect(t(page, "tm-halt-by")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
   test("a member of a repo that is not halted sees no halt section at all", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const { errors } = await setup(page, operateOn({ settings: F.settings({ can_edit: false, operate_enabled: true }) }));
@@ -1333,7 +1366,7 @@ test.describe("Team app", () => {
       };
       const ratio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
       let text = 21;
-      for (const el of document.querySelectorAll(`${sel} .tm-halt-chip, ${sel} .tm-halt-state, ${sel} .tm-halt-note, ${sel} .tm-halt .tm-btn, ${sel} .tm-halt .tm-sub, ${sel} .tm-halt .tm-muted, ${sel} .tm-confirm p`)) {
+      for (const el of document.querySelectorAll(`${sel} .tm-halt-chip, ${sel} .tm-halt-state, ${sel} .tm-halt-note, ${sel} .tm-halt-by, ${sel} .tm-halt .tm-btn, ${sel} .tm-halt .tm-sub, ${sel} .tm-halt .tm-muted, ${sel} .tm-confirm p`)) {
         if ((el as HTMLElement).offsetParent === null) continue;
         text = Math.min(text, ratio(lum(getComputedStyle(el).color), lum(bg(el))));
       }

@@ -5407,6 +5407,10 @@ export interface Operations {
         halted: boolean;
         halt_pending: boolean;
         halted_at: string | null;
+        halted_by: ({
+          id: string;
+          display_name: string;
+        }) | (null);
         halt_epoch: number;
       }>;
       next_cursor: string | null;

@@ -61,7 +61,7 @@ const nstr = z.string().nullable();
 const repoItem = z.object({
   repo_id: z.string(), full_name: z.string(), runner_id: nstr, runner_name: nstr, session_id: nstr, last_event_at: nstr, last_heard_at: nstr,
   liveness: z.enum(["live", "stale", "runner_removed", "never"]), watch_enabled: z.boolean(), operate_enabled: z.boolean(), halted: z.boolean(), halt_pending: z.boolean(),
-  halted_at: nstr, halt_epoch: z.number().int(),
+  halted_at: nstr, halted_by: z.object({ id: z.string(), display_name: z.string() }).nullable(), halt_epoch: z.number().int(),
 });
 const agentItem = z.object({
   agent_id: z.string(), role: z.string(), discussion: nnum, background: z.boolean().nullable(), started_at: nstr, stopped_at: nstr, verdict: nstr,
