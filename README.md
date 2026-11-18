@@ -39,7 +39,8 @@ decisions and a halt marker come back, and the workspace's Team app and the
 engine items in Needs you show and answer them. It is off until an owner or
 admin turns it on, and what it shows is information, never spend
 (`packages/fx-runner/src/engineBridge/`, `packages/api/src/routes/engine.ts`,
-`apps/workspace/apps/team/`; see `docs/architecture.md`). A person can also run the
+`apps/workspace/apps/team/`; see `docs/architecture.md`). It uploads the engine's
+own events file and the engine host's, each with its own cursor. A person can also run the
 engine's Team Lead on the machine as a supervised headless process (`fx-runner
 engine-host start | stop | status | resume`), which gets scheduled messages and the
 bridge's commands and keeps its session across restarts
@@ -220,7 +221,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1037` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes. `1036_onboarding_tables.sql` adds the onboarding tables (the track an account chose, a repository's setup, the plan draft a person reviews, the published engine versions) and the table of pending device codes, and `1037_device_registration.sql` adds the functions that start, look up, approve, deny and poll a device code |
+| `0800`–`1039` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes. `1036_onboarding_tables.sql` adds the onboarding tables (the track an account chose, a repository's setup, the plan draft a person reviews, the published engine versions) and the table of pending device codes, and `1037_device_registration.sql` adds the functions that start, look up, approve, deny and poll a device code. `1038_engine_halt_by.sql` records who set an engine halt, and `1039_engine_notice_panels.sql` makes each engine change notice name the panels it touches and wakes open streams on it |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -282,6 +283,9 @@ on the private repository, `overlay`. The `ci:full` label forces a full run
 (`.github/workflows/ci-full-label.yml` re-runs the latest run when the label is
 added), and `scripts/ci/full-run-triggers.json` lists the paths that force one
 and the extra test edges and repository-wide scans that select more packages.
+A merge-queue run is scoped by the whole group (every commit back to the target
+branch, with each pull request's labels): `workspace-e2e` is narrowed to it, `check` keeps
+its full suite, and anything the script cannot establish answers `full`.
 A dormant `Rollup` step in the merge-queue run (`scripts/ci/rollup-position.mjs`,
 on only while the repository variable `ROLLUP_ENABLED` is `true`) lets an entry
 with another entry on top of it wait instead of running the suites.
@@ -331,6 +335,8 @@ Sources:
 - `packages/db/migrations/1035_machine_tables.sql`
 - `packages/db/migrations/1036_onboarding_tables.sql`
 - `packages/db/migrations/1037_device_registration.sql`
+- `packages/db/migrations/1038_engine_halt_by.sql`
+- `packages/db/migrations/1039_engine_notice_panels.sql`
 - `packages/fx-runner/src/engineBridge/`
 - `packages/fx-runner/src/engineHost/`
 - `packages/runner-cloud/src/deviceFlow.ts`
