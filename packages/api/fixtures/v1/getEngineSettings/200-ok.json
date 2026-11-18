@@ -8,7 +8,8 @@
       "full_name": "acme-labs/widgets",
       "enabled": true,
       "eligible": true,
-      "refusal": null
+      "refusal": null,
+      "bridged_runner_id": "3b9d6f0a-52c4-4e6b-9a7d-1c8e2f4a5b60"
     }
   ]
 }

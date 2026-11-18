@@ -97,3 +97,5 @@
 .tm-halt-chip[data-halt="pending"] { border-style: dashed; }
 .tm-halt-chip[hidden] { display: none; }
 .tm-halt-chip:focus-visible, .tm-halt h3:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; }
+.tm-code { margin: 6px 0; padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.8rem; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.tm-code:focus-visible { outline: 2px solid var(--text-primary, #1aff80); outline-offset: 2px; }

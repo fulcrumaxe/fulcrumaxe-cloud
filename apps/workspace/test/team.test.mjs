@@ -1,13 +1,13 @@
 // apps/workspace/test/team.test.mjs
 //
-// The Team app's logic (team-model.js, team-api.js) against a fake client. The page, with the real DOM, axe, the layouts and the production CSP,
+// The Team app's logic (team-model.js) against a fake client. The page, with the real DOM, axe, the layouts and the production CSP,
 // is driven on the built output in e2e/team.spec.ts. Pinned here: the exact requests, the agent-state table (L3), the data age and gap rules
 // (L1, L2), the per-source limits, the refetch-everything-on-engine.changed rule, and that nothing a screen shows is null, undefined or NaN.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { DELETE_URL, LOG_LIMIT, REPOS_URL, SETTINGS_URL, clearHaltUrl, commandUrl, commandsUrl, createTeamApi, dialUrl, dialsUrl, haltUrl, lanesUrl, logUrl, panelUrl } from "../apps/team/team-api.js";
+import { DELETE_URL, LOG_LIMIT, REPOS_URL, SETTINGS_URL, clearHaltUrl, commandUrl, commandsUrl, createTeamApi, dialUrl, dialsUrl, haltUrl, lanesUrl, logUrl, panelUrl } from "../apps/team/team-model.js";
 import { DIAL_CLASSES, ENGINE_DIALS, HALT_WORDS, OP_WORDS, REFUSALS, ROLES, TTL, agentWords, cancelFailure, commandRow, dialFailure, haltFailure, lockReason, readCommands, readDials, sendFailure } from "../apps/team/team-operate.js";
 import { DEBOUNCE_MS, LANE_PAGES, LOG_WINDOW, ROADMAP_PAGE, SAFETY_MS, SOURCE_LIMIT_S, WORDS, agentRow, asOfWords, chipOf, createTeam, describe as describeState, failureSentence, gapBanner, githubLink, hm, isStale, laneRows, logRow, planView, readEnvelope, readPlan, readRepos, readSettings, readStats, readUsage, sourceNotices, statsView, usageView } from "../apps/team/team-model.js";
 import { HOSTILE, REPO_A, REPO_B, makeFixtures } from "./fixtures/team/fixtures.mjs";
@@ -106,7 +106,7 @@ describe("requests", () => {
   it("reads no repo and no panel while watch is off", async () => {
     const { t, f } = team({}, { ["GET " + SETTINGS_URL]: F.settings({ watch_enabled: false }) });
     await t.load();
-    expect(f.log).toHaveLength(1);
+    expect(f.log.map(([m, p]) => m + " " + p)).toEqual(["GET " + SETTINGS_URL, "GET /api/runners"]); // the off screen names the runner, so it reads them; nothing else
     expect(t.state.status).toBe("ready");
     expect(t.view().kind).toBe("off");
   });
@@ -693,7 +693,7 @@ describe("what a screen may show", () => {
     // so the list cannot go stale and a computed median or total anywhere else still matches the ban below.
     const READS = ["raw.gate_pass_rate", "median: num(", "dur.median", '"median "', "api_equivalent_usd", "raw.totals", "usd as dollars", "dollars(", '"No API price for this model"', 'usage: "Cost"'];
     // The cost analyst is one of the protocol's spawnable roles, so its name is a role id here and not a figure.
-    const src = Object.fromEntries(["team-model.js", "team-app.js", "team-api.js", "team-operate.js"].map((f) => [f, readFileSync(join(dir, f), "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/cost-analyst|Cost analyst/g, "")]));
+    const src = Object.fromEntries(["team-model.js", "team-app.js", "team-operate.js"].map((f) => [f, readFileSync(join(dir, f), "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/cost-analyst|Cost analyst/g, "")]));
     expect(READS.filter((r) => Object.values(src).some((t) => t.includes(r)))).toEqual(READS);
     for (const [file, text] of Object.entries(src)) {
       const stripped = READS.reduce((t, r) => t.split(r).join(" "), text);

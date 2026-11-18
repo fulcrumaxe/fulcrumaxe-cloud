@@ -363,6 +363,31 @@ describe('engine bridge tables [pg]', () => {
       expect(w.can_edit).toBe(false);
       await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [a.repoId]);
     });
+
+    it('bridged_runner_id: the runner of the repo\'s newest session, null for a second repo of the same account, and nothing of another account', async () => {
+      const second = randomUUID();
+      await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, 'team', 'acme', 'second', 'runner_local')`, [second, a.accountId, Math.floor(Math.random() * 1e9)]);
+      await admin.query(`DELETE FROM engine_sessions WHERE repo_id = ANY ($1::uuid[])`, [[a.repoId, second, b.repoId]]);
+      const view = () => withTenant(appPool, a.accountId, a.userId, (c) => readEngineSettingsView(c, true));
+      const bridged = async () => Object.fromEntries((await view()).repos.map((r) => [r.repo_id, r.bridged_runner_id]));
+      expect(await bridged()).toEqual({ [a.repoId]: null, [second]: null });
+      await admin.query(`INSERT INTO engine_sessions (account_id, runner_id, repo_id, engine_instance_id, engine_version, session_kind) VALUES ($1, $2, $3, $4, '1.2.3', 'bridge')`, [a.accountId, ids.a.runner, a.repoId, randomUUID()]);
+      expect(await bridged()).toEqual({ [a.repoId]: ids.a.runner, [second]: null }); // the second repo of the same account stays empty
+      // A newer session from another runner of the same account moves the repo to that runner.
+      const later = await insertRunner(admin, a.accountId, a.userId);
+      await admin.query(`INSERT INTO engine_sessions (account_id, runner_id, repo_id, engine_instance_id, engine_version, session_kind, created_at) VALUES ($1, $2, $3, $4, '1.2.3', 'bridge', now() + interval '1 minute')`, [a.accountId, later, a.repoId, randomUUID()]);
+      expect(await bridged()).toEqual({ [a.repoId]: later, [second]: null });
+      await admin.query(`DELETE FROM engine_sessions WHERE runner_id = $1`, [later]);
+      // Another account's session for its own repo never shows here, and the RLS-bypassing admin client with no account named reads no repo at all.
+      await admin.query(`INSERT INTO engine_sessions (account_id, runner_id, repo_id, engine_instance_id, engine_version, session_kind) VALUES ($1, $2, $3, $4, '1.2.3', 'bridge')`, [b.accountId, ids.b.runner, b.repoId, randomUUID()]);
+      expect(Object.keys(await bridged())).not.toContain(b.repoId);
+      expect((await readEngineSettingsView(admin, true)).repos).toEqual([]);
+      const asB = await withTenant(appPool, b.accountId, b.userId, (c) => readEngineSettingsView(c, true));
+      expect(asB.repos.find((r) => r.repo_id === b.repoId)?.bridged_runner_id).toBe(ids.b.runner);
+      expect(asB.repos.map((r) => r.bridged_runner_id)).not.toContain(ids.a.runner);
+      await admin.query(`DELETE FROM engine_sessions WHERE repo_id = ANY ($1::uuid[])`, [[a.repoId, second, b.repoId]]);
+      await admin.query(`DELETE FROM repos WHERE id = $1`, [second]);
+    });
   });
 
   describe('freshness read', () => {

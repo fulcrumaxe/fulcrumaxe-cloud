@@ -50396,6 +50396,18 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "bridged_runner_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -50403,7 +50415,8 @@
                           "full_name",
                           "enabled",
                           "eligible",
-                          "refusal"
+                          "refusal",
+                          "bridged_runner_id"
                         ],
                         "additionalProperties": false
                       }
@@ -50577,6 +50590,18 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "bridged_runner_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -50584,7 +50609,8 @@
                           "full_name",
                           "enabled",
                           "eligible",
-                          "refusal"
+                          "refusal",
+                          "bridged_runner_id"
                         ],
                         "additionalProperties": false
                       }

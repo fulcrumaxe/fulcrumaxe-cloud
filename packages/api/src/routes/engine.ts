@@ -91,7 +91,7 @@ const statsResponse = freshOnly.extend({
 });
 const settingsResponse = z.object({
   watch_enabled: z.boolean(), operate_enabled: z.boolean(), can_edit: z.boolean(),
-  repos: z.array(z.object({ repo_id: z.string(), full_name: z.string(), enabled: z.boolean(), eligible: z.boolean(), refusal: z.enum(["repo_not_runner_local", "public_repo"]).nullable() })),
+  repos: z.array(z.object({ repo_id: z.string(), full_name: z.string(), enabled: z.boolean(), eligible: z.boolean(), refusal: z.enum(["repo_not_runner_local", "public_repo"]).nullable(), bridged_runner_id: z.string().uuid().nullable() })),
 });
 const settingsBody = z.object({ watch_enabled: z.boolean().optional(), operate_enabled: z.boolean().optional(), repo_ids: z.array(z.string().uuid()).max(500).optional() }).strict();
 
