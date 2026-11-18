@@ -17,12 +17,13 @@ import (
 // A process whose capabilities are right but whose unit lost NoNewPrivileges, the seccomp filter or an
 // empty ambient set refuses to serve: one fatal line naming the field, exit 1, and nothing is created.
 func TestDriftedStatusFailsClosedWithOneLine(t *testing.T) {
-	mask := hardening.Load().Mask()
+	p := hardening.Load()
 	status := func(amb uint64, nnp, seccomp int) string {
-		return fmt.Sprintf("NoNewPrivs:\t%d\nSeccomp:\t%d\nCapPrm:\t%016x\nCapEff:\t%016x\nCapBnd:\t%016x\nCapAmb:\t%016x\n", nnp, seccomp, mask, mask, mask, amb)
+		return fmt.Sprintf("NoNewPrivs:\t%d\nSeccomp:\t%d\nCapInh:\t%016x\nCapPrm:\t%016x\nCapEff:\t%016x\nCapBnd:\t%016x\nCapAmb:\t%016x\n", nnp, seccomp, p.JailerOnlyMask(), p.Mask(), p.EffectiveMask(), p.Mask(), amb)
 	}
-	orig := readStatus
-	defer func() { readStatus = orig }()
+	orig, origDrop := readStatus, dropCaps
+	defer func() { readStatus, dropCaps = orig, origDrop }()
+	dropCaps = func(hardening.Pinned) error { return nil }
 	dir := t.TempDir()
 	for name, tc := range map[string]struct{ status, want string }{
 		"no_new_privs off": {status(0, 0, 2), "NoNewPrivs"},

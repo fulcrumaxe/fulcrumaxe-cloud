@@ -16,6 +16,12 @@ import (
 // and gid and tries to enter and list sandbox A's vsock directory. It is skipped by default, and it has not
 // been run by the author of this change (no root on the build host); the owner-opted real-root CI step in the
 // next change is where it runs.
+//
+// On the thread switch it makes with asUser: Go's own Setresuid applies to every thread of the process, and the raw
+// SYS_SETRESUID used here changes only the calling thread, which then stays in Go's pool of threads. A real-root run showed a
+// thread of the process holding root's effective capabilities again after such a switch, so that process is
+// not a place to assert the helper's capability set; TestRealJailer therefore runs other uids in child processes. No production code
+// calls either one: the helper never switches a thread's uid.
 func TestRealRootPermissions(t *testing.T) {
 	if os.Getenv("FX_VMHELPER_REAL_ROOT") != "1" || os.Geteuid() != 0 {
 		t.Skip("set FX_VMHELPER_REAL_ROOT=1 and run as root")
@@ -76,28 +82,30 @@ func parent(p string) string {
 	return "/"
 }
 
-// asUser runs f with this OS thread's effective uid, gid and supplementary groups changed, then restores them.
-// Raw syscalls act on the calling thread only, which is why the thread is locked. If the restore fails the
-// thread is left locked so that it dies with the goroutine instead of returning to the pool as non-root.
+// asUser runs f as uid and gid with no supplementary groups, on its own OS thread that ends with the goroutine
+// (it is locked and never unlocked). Used by TestRealRootPermissions only. TestRealJailer does not use it: in a
+// real-root run a sibling thread of the same process was seen with its capabilities back after such a call, so
+// anything that asserts the helper's capability set runs the other uid in a child process (asSandboxUID).
 func asUser(t *testing.T, uid, gid uint32, f func()) {
 	t.Helper()
-	runtime.LockOSThread()
-	none := ^uintptr(0)
-	if _, _, e := syscall.RawSyscall(syscall.SYS_SETGROUPS, 0, 0, 0); e != 0 {
-		t.Fatal(e)
-	}
-	if _, _, e := syscall.RawSyscall(syscall.SYS_SETRESGID, none, uintptr(gid), none); e != 0 {
-		t.Fatal(e)
-	}
-	if _, _, e := syscall.RawSyscall(syscall.SYS_SETRESUID, none, uintptr(uid), none); e != 0 {
-		t.Fatal(e)
-	}
-	f()
-	if _, _, e := syscall.RawSyscall(syscall.SYS_SETRESUID, none, 0, none); e != 0 {
-		t.Fatal("cannot restore euid: thread left locked", e)
-	}
-	if _, _, e := syscall.RawSyscall(syscall.SYS_SETRESGID, none, 0, none); e != 0 {
-		t.Fatal("cannot restore egid: thread left locked", e)
-	}
-	runtime.UnlockOSThread()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.LockOSThread() // no UnlockOSThread: the thread dies with this goroutine
+		none := ^uintptr(0)
+		if _, _, e := syscall.RawSyscall(syscall.SYS_SETGROUPS, 0, 0, 0); e != 0 {
+			t.Errorf("setgroups: %v", e)
+			return
+		}
+		if _, _, e := syscall.RawSyscall(syscall.SYS_SETRESGID, none, uintptr(gid), none); e != 0 {
+			t.Errorf("setresgid: %v", e)
+			return
+		}
+		if _, _, e := syscall.RawSyscall(syscall.SYS_SETRESUID, none, uintptr(uid), none); e != 0 {
+			t.Errorf("setresuid: %v", e)
+			return
+		}
+		f()
+	}()
+	<-done
 }

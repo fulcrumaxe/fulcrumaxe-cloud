@@ -14,6 +14,8 @@
 //	               that holds the group of the socket directory (CheckSocketGroups)
 //	max_sandboxes  how many sandboxes may be prepared at once
 //	max_vcpus, max_mem_mb   per-sandbox ceilings a prepare request is checked against
+//	jailer_path, firecracker_path
+//	               absolute, clean paths of the two pinned binaries; the launcher runs these and nothing else
 package config
 
 import (
@@ -29,16 +31,18 @@ import (
 )
 
 type Config struct {
-	JailRoot     string
-	RunnerUID    uint32
-	RunnerGID    uint32
-	UIDFirst     uint32
-	UIDCount     uint32
-	GIDFirst     uint32
-	GIDCount     uint32
-	MaxSandboxes int64
-	MaxVCPUs     int64
-	MaxMemMB     int64
+	JailRoot        string
+	RunnerUID       uint32
+	RunnerGID       uint32
+	UIDFirst        uint32
+	UIDCount        uint32
+	GIDFirst        uint32
+	GIDCount        uint32
+	MaxSandboxes    int64
+	MaxVCPUs        int64
+	MaxMemMB        int64
+	JailerPath      string
+	FirecrackerPath string
 }
 
 // Caps returns the per-sandbox ceilings for the request schema.
@@ -60,7 +64,7 @@ const Nobody = 65534
 // NoID is 2^32-1, which is (uid_t)-1 and (gid_t)-1: "no change" to chown and setresuid, never a real id.
 const NoID = 1<<32 - 1
 
-var keys = []string{"jail_root", "runner_uid", "runner_gid", "uid_first", "uid_count", "gid_first", "gid_count", "max_sandboxes", "max_vcpus", "max_mem_mb"}
+var keys = []string{"jail_root", "runner_uid", "runner_gid", "uid_first", "uid_count", "gid_first", "gid_count", "max_sandboxes", "max_vcpus", "max_mem_mb", "jailer_path", "firecracker_path"}
 
 // Load reads path, which must be a regular file owned by ownerUID (0 in production) that no one else can
 // write. The open does not follow a symlink in the last component.
@@ -117,15 +121,20 @@ func Parse(data []byte) (Config, error) {
 			return Config{}, fmt.Errorf("config: required key %q is missing (there is no default)", k)
 		}
 	}
-	root, ok := f["jail_root"].(string)
-	if !ok {
-		return Config{}, errors.New("config: jail_root must be a string")
+	var paths [3]string
+	for i, k := range []string{"jail_root", "jailer_path", "firecracker_path"} {
+		v, ok := f[k].(string)
+		if !ok {
+			return Config{}, fmt.Errorf("config: %s must be a string", k)
+		}
+		if !path.IsAbs(v) || path.Clean(v) != v || v == "/" || len(v) > 200 || strings.ContainsRune(v, 0) {
+			return Config{}, fmt.Errorf("config: %s must be an absolute, clean path below /", k)
+		}
+		paths[i] = v
 	}
-	if !path.IsAbs(root) || path.Clean(root) != root || root == "/" || len(root) > 200 || strings.ContainsRune(root, 0) {
-		return Config{}, errors.New("config: jail_root must be an absolute, clean path below /")
-	}
+	root := paths[0]
 	n := map[string]int64{}
-	for _, k := range keys[1:] {
+	for _, k := range keys[1 : len(keys)-2] {
 		v, ok := protocol.PlainInt(f[k])
 		if !ok {
 			return Config{}, fmt.Errorf("config: %s must be a plain integer", k)
@@ -133,7 +142,7 @@ func Parse(data []byte) (Config, error) {
 		n[k] = v
 	}
 	c := Config{JailRoot: root, RunnerUID: uint32(n["runner_uid"]), RunnerGID: uint32(n["runner_gid"]), UIDFirst: uint32(n["uid_first"]), UIDCount: uint32(n["uid_count"]),
-		GIDFirst: uint32(n["gid_first"]), GIDCount: uint32(n["gid_count"]), MaxSandboxes: n["max_sandboxes"], MaxVCPUs: n["max_vcpus"], MaxMemMB: n["max_mem_mb"]}
+		GIDFirst: uint32(n["gid_first"]), GIDCount: uint32(n["gid_count"]), MaxSandboxes: n["max_sandboxes"], MaxVCPUs: n["max_vcpus"], MaxMemMB: n["max_mem_mb"], JailerPath: paths[1], FirecrackerPath: paths[2]}
 	switch {
 	case c.RunnerUID == 0:
 		return Config{}, errors.New("config: runner_uid must not be 0")

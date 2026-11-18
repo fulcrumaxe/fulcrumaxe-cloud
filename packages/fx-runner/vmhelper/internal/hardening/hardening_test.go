@@ -15,8 +15,11 @@ func unitMap(t *testing.T, text string) map[string]string {
 	m := map[string]string{}
 	for _, line := range strings.Split(text, "\n") {
 		if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(line, "[") {
-			if _, dup := m[k]; dup {
-				t.Fatalf("directive %s written twice", k)
+			if old, dup := m[k]; dup {
+				if k != "DeviceAllow" {
+					t.Fatalf("directive %s written twice", k)
+				}
+				v = old + "\n" + v // systemd takes DeviceAllow once per device
 			}
 			m[k] = v
 		}
@@ -44,7 +47,7 @@ func TestUnitCarriesEveryPinnedValue(t *testing.T) {
 	}
 	u := unitMap(t, text)
 	for k, v := range p.Directives {
-		if u[k] != v {
+		if u[k] != strings.Join(v, "\n") {
 			t.Errorf("%s: unit has %q, file has %q", k, u[k], v)
 		}
 	}
@@ -70,11 +73,11 @@ func TestSpecValues(t *testing.T) {
 		"IPAddressDeny": "any", "UMask": "0077", "ProtectKernelModules": "yes",
 	}
 	for k, v := range want {
-		if p.Directives[k] != v {
+		if strings.Join(p.Directives[k], "\n") != v {
 			t.Errorf("%s=%q, want %q", k, p.Directives[k], v)
 		}
 	}
-	if p.Directives["SystemCallFilter"] == "" {
+	if len(p.Directives["SystemCallFilter"]) == 0 {
 		t.Error("SystemCallFilter is not pinned")
 	}
 	if p.RuntimeDirectoryMode != "0750" {
@@ -101,26 +104,32 @@ func TestEveryCapabilityHasAReasonAndOnlyOnce(t *testing.T) {
 	}
 }
 
-// The set is exactly the five the jailer needs. The four that were dropped each have a way round that the
-// lifecycle change is built to (see "notes" in hardening.json), and CAP_SYS_CHROOT is unconfirmed until the
-// real-root step runs the jailer.
-func TestCapabilitySetIsTheMinimalFive(t *testing.T) {
+// The set is the five the jailer needs plus CAP_DAC_OVERRIDE, which is for the jailer child only (Correction
+// 6: the jailer creates /dev inside a chroot root it has just chowned to the sandbox uid). CAP_FOWNER,
+// CAP_KILL and CAP_SYS_CHROOT were left out on purpose; the real-root run confirmed none is needed.
+func TestCapabilitySetIsTheMinimalSix(t *testing.T) {
 	p := Load()
-	if got := p.CapabilityBoundingSet(); got != "CAP_CHOWN CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_MKNOD" {
+	if got := p.CapabilityBoundingSet(); got != "CAP_CHOWN CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_MKNOD" {
 		t.Fatal(got)
 	}
 	for _, c := range p.Capabilities {
+		if c.Name == "CAP_DAC_OVERRIDE" && (!c.JailerOnly || !strings.Contains(c.Reason, "44348324152") || !strings.Contains(c.Reason, "44348802212")) {
+			t.Errorf("CAP_DAC_OVERRIDE must be jailer-only and cite the runs: %+v", c)
+		}
+		if c.JailerOnly && c.Name != "CAP_DAC_OVERRIDE" {
+			t.Errorf("%s is marked jailer-only", c.Name)
+		}
 		if c.Name == "CAP_SYS_ADMIN" && strings.Contains(c.Reason, "cgroup") {
 			t.Errorf("cgroup writes need no capability: %q", c.Reason)
 		}
-		for _, dropped := range []string{"CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_KILL", "CAP_SYS_CHROOT"} {
+		for _, dropped := range []string{"CAP_FOWNER", "CAP_KILL", "CAP_SYS_CHROOT"} {
 			if c.Name == dropped {
 				t.Errorf("%s was dropped on purpose", dropped)
 			}
 		}
 	}
 	notes := strings.Join(p.Notes, "\n")
-	for _, must := range []string{"CAP_SYS_CHROOT", "real-root", "cgroup.kill", "fchownat"} {
+	for _, must := range []string{"CAP_SYS_CHROOT", "real-root", "cgroup.kill", "chown with an empty path"} {
 		if !strings.Contains(notes, must) {
 			t.Errorf("notes do not mention %q", must)
 		}
@@ -131,9 +140,10 @@ func TestExtraDirectivesAndRuntimeMode(t *testing.T) {
 	p := Load()
 	for k, v := range map[string]string{
 		"SystemCallArchitectures": "native", "LockPersonality": "yes", "RestrictSUIDSGID": "yes",
-		"DevicePolicy": "closed", "DeviceAllow": "/dev/kvm rw", "SystemCallFilter": "@system-service @mount",
+		"DevicePolicy": "closed", "SystemCallFilter": "@system-service @mount", "Delegate": "yes",
+		"DeviceAllow": "/dev/kvm rwm\n/dev/net/tun m\n/dev/userfaultfd m",
 	} {
-		if p.Directives[k] != v {
+		if strings.Join(p.Directives[k], "\n") != v {
 			t.Errorf("%s=%q, want %q", k, p.Directives[k], v)
 		}
 	}
@@ -141,7 +151,7 @@ func TestExtraDirectivesAndRuntimeMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"SystemCallArchitectures=native", "LockPersonality=yes", "RestrictSUIDSGID=yes", "DevicePolicy=closed", "DeviceAllow=/dev/kvm rw"} {
+	for _, line := range []string{"SystemCallArchitectures=native", "LockPersonality=yes", "RestrictSUIDSGID=yes", "DevicePolicy=closed", "Delegate=yes", "DeviceAllow=/dev/kvm rwm", "DeviceAllow=/dev/net/tun m", "DeviceAllow=/dev/userfaultfd m"} {
 		if !strings.Contains("\n"+text, "\n"+line+"\n") {
 			t.Errorf("the unit lacks %q", line)
 		}
@@ -163,31 +173,38 @@ func TestExtraDirectivesAndRuntimeMode(t *testing.T) {
 func TestCheckStatus(t *testing.T) {
 	p := Load()
 	status := func(eff, bnd uint64, amb uint64, nnp, seccomp int) string {
-		return fmt.Sprintf("Name:\tfx-vmhelper\nNoNewPrivs:\t%d\nSeccomp:\t%d\nCapInh:\t0000000000000000\nCapPrm:\t%016x\nCapEff:\t%016x\nCapBnd:\t%016x\nCapAmb:\t%016x\n", nnp, seccomp, eff, eff, bnd, amb)
+		return fmt.Sprintf("Name:\tfx-vmhelper\nNoNewPrivs:\t%d\nSeccomp:\t%d\nCapInh:\t%016x\nCapPrm:\t%016x\nCapEff:\t%016x\nCapBnd:\t%016x\nCapAmb:\t%016x\n", nnp, seccomp, p.JailerOnlyMask(), bnd, eff, bnd, amb)
 	}
-	good := func() string { return status(p.Mask(), p.Mask(), 0, 1, 2) }
+	eff := p.EffectiveMask()
+	good := func() string { return status(eff, p.Mask(), 0, 1, 2) }
 	if err := p.CheckStatus(good()); err != nil {
 		t.Fatal(err)
 	}
-	if p.Mask() != 0x082000c1 { // bits 0, 6, 7, 21, 27
+	if p.Mask() != 0x082000c3 { // bits 0, 1, 6, 7, 21, 27
 		t.Fatalf("mask %016x", p.Mask())
 	}
 	for name, s := range map[string]string{
-		"wider bounding set":  status(p.Mask(), p.Mask()|1<<12, 0, 1, 2),
-		"narrower effective":  status(p.Mask()&^(1<<27), p.Mask(), 0, 1, 2),
-		"full root":           status(0x000001ffffffffff, 0x000001ffffffffff, 0, 1, 2),
-		"no caps":             status(0, 0, 0, 1, 2),
-		"ambient capability":  status(p.Mask(), p.Mask(), 1<<21, 1, 2),
-		"no_new_privs off":    status(p.Mask(), p.Mask(), 0, 0, 2),
-		"seccomp off":         status(p.Mask(), p.Mask(), 0, 1, 0),
-		"seccomp strict mode": status(p.Mask(), p.Mask(), 0, 1, 1),
-		"missing line":        "Name:\tx\n",
-		"junk":                "CapEff:\tzz\nCapBnd:\tzz\n",
-		"missing NoNewPrivs":  strings.Replace(good(), "NoNewPrivs:\t1\n", "", 1),
-		"missing Seccomp":     strings.Replace(good(), "Seccomp:\t2\n", "", 1),
-		"missing CapAmb":      strings.Replace(good(), "CapAmb:\t0000000000000000\n", "", 1),
-		"junk NoNewPrivs":     strings.Replace(good(), "NoNewPrivs:\t1", "NoNewPrivs:\tyes", 1),
-		"hex where decimal":   strings.Replace(good(), "Seccomp:\t2", "Seccomp:\t0x2", 1),
+		"wider bounding set":           status(eff, p.Mask()|1<<12, 0, 1, 2),
+		"narrower effective":           status(eff&^(1<<27), p.Mask(), 0, 1, 2),
+		"DAC override still effective": status(p.Mask(), p.Mask(), 0, 1, 2),
+		"full root":                    status(0x000001ffffffffff, 0x000001ffffffffff, 0, 1, 2),
+		"no caps":                      status(0, 0, 0, 1, 2),
+		"ambient capability":           status(eff, p.Mask(), 1<<21, 1, 2),
+		"ambient DAC override":         status(eff, p.Mask(), 1<<1, 1, 2),
+		"no_new_privs off":             status(eff, p.Mask(), 0, 0, 2),
+		"seccomp off":                  status(eff, p.Mask(), 0, 1, 0),
+		"seccomp strict mode":          status(eff, p.Mask(), 0, 1, 1),
+		"permitted lost DAC":           strings.Replace(good(), "CapPrm:\t"+fmt.Sprintf("%016x", p.Mask()), "CapPrm:\t"+fmt.Sprintf("%016x", eff), 1),
+		"inheritable empty":            strings.Replace(good(), "CapInh:\t"+fmt.Sprintf("%016x", p.JailerOnlyMask()), "CapInh:\t0000000000000000", 1),
+		"missing CapPrm":               strings.Replace(good(), "CapPrm:\t"+fmt.Sprintf("%016x", p.Mask())+"\n", "", 1),
+		"missing CapInh":               strings.Replace(good(), "CapInh:\t"+fmt.Sprintf("%016x", p.JailerOnlyMask())+"\n", "", 1),
+		"missing line":                 "Name:\tx\n",
+		"junk":                         "CapEff:\tzz\nCapBnd:\tzz\n",
+		"missing NoNewPrivs":           strings.Replace(good(), "NoNewPrivs:\t1\n", "", 1),
+		"missing Seccomp":              strings.Replace(good(), "Seccomp:\t2\n", "", 1),
+		"missing CapAmb":               strings.Replace(good(), "CapAmb:\t0000000000000000\n", "", 1),
+		"junk NoNewPrivs":              strings.Replace(good(), "NoNewPrivs:\t1", "NoNewPrivs:\tyes", 1),
+		"hex where decimal":            strings.Replace(good(), "Seccomp:\t2", "Seccomp:\t0x2", 1),
 	} {
 		err := p.CheckStatus(s)
 		if err == nil {
@@ -224,9 +241,27 @@ func TestSyscallGroupsExist(t *testing.T) {
 	if err != nil {
 		t.Skip("systemd-analyze is not installed")
 	}
-	for _, g := range strings.Fields(Load().Directives["SystemCallFilter"]) {
+	for _, g := range strings.Fields(Load().Directives["SystemCallFilter"][0]) {
 		if out, err := exec.Command(bin, "syscall-filter", g).CombinedOutput(); err != nil {
 			t.Errorf("%s: %v: %s", g, err, out)
 		}
+	}
+}
+
+// DeviceAllow is a list in the file and a line per device in the unit. /dev/kvm needs m as well as rw
+// (the jailer's mknod is checked against m), and tun and userfaultfd get m alone: the jailer makes the
+// nodes, nothing may open them.
+func TestDeviceAllowIsAListWithMknodAccess(t *testing.T) {
+	got := Load().Directives["DeviceAllow"]
+	want := []string{"/dev/kvm rwm", "/dev/net/tun m", "/dev/userfaultfd m"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("%q", got)
+	}
+	var v Values
+	if err := v.UnmarshalJSON([]byte(`[]`)); err == nil {
+		t.Error("an empty list was accepted")
+	}
+	if err := v.UnmarshalJSON([]byte(`7`)); err == nil {
+		t.Error("a number was accepted")
 	}
 }

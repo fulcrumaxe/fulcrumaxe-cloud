@@ -3,10 +3,48 @@
 The root service behind the local runner's Firecracker microVM sandboxes (runner v2). Go, standard
 library only. Linux only.
 
-This directory holds the protocol, the server and the sandbox registry (`internal/sandbox`): id allocation,
-the jail and vsock directories with their permissions, and start-up reaping. The real jailer launch,
-cgroups and uid/gid drop are a separate change: `start` drives a `Launcher`, and this build's launcher
-answers `unavailable`.
+This directory holds the protocol, the server, the sandbox registry (`internal/sandbox`: id allocation, the jail
+and vsock directories with their permissions, start-up reaping) and the real launcher
+(`internal/sandbox/launcher.go`): `start` runs the pinned jailer, which builds the chroot, puts Firecracker in its
+own cgroup below this unit's `vms` subtree and drops to the sandbox's uid and gid.
+
+## Launch
+
+- The process is started with `os/exec` from an argument list (no shell) built from validated values, with an
+  empty environment. The id is two elements, `--id` and `<id>`: the jailer's parser takes the value after a flag
+  and has no `--flag=value` form, so `--id=<id>` is refused by the jailer itself. The id pattern forbids a
+  leading dash, and the launcher refuses one again.
+- The jailer and Firecracker come from `jailer_path` and `firecracker_path` in the root config. At start-up and at
+  every launch each path must be a regular executable that only root can change, reached through directories
+  only root can change, with no symlink on the way.
+- The jail directory is handed to root (mode stays 0700) just before the launch, through an `O_PATH`
+  descriptor: the helper's own file operations run without `CAP_DAC_OVERRIDE`, so it cannot open a directory
+  that belongs to the sandbox uid.
+- Capabilities. The pinned set is `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_SETGID`, `CAP_SETUID`, `CAP_SYS_ADMIN`
+  and `CAP_MKNOD`. `CAP_DAC_OVERRIDE` is for the jailer: the jailer chowns the chroot root to the sandbox uid
+  (0700) and then creates `/dev` and more inside it, which root cannot do without it. The helper holds it
+  permitted and inheritable but never effective: `serve` drops it from the effective set of every thread
+  first, before anything else, and the start-up check reads the status of the process and of each thread.
+  What this does and does not do: it keeps the helper's own file operations from ever running with the
+  override (a bug in them fails instead of reaching through permissions). It does not stop the jailer from
+  having it: an exec at euid 0 gets the whole bounding set whatever the parent's effective set was, so the
+  jailer child runs with the override until it drops to the sandbox uid, as Firecracker's supported production
+  setup has it run as root. The launcher also puts it in the child's ambient set (`SysProcAttr.AmbientCaps`);
+  that is redundant today and is kept so the child keeps it if the exec ever stops getting the bounding set
+  by being root. A compromised helper could raise the capability again, so none of this is a boundary against
+  a compromised helper.
+- `memory.max` is the guest's memory plus 256 MiB for Firecracker itself; `cpu.max` is `vcpus * 100000 / 100000`.
+- A launch succeeds only when `/proc/<pid>/status` shows all four uids and gids equal to the sandbox's and no
+  supplementary group (the jailer clears them before it execs Firecracker; the helper checks the result).
+- Destroy writes `1` to the sandbox's `cgroup.kill`, waits for the process and for the cgroup to empty, removes
+  the cgroup, then removes the directories: each directory is taken back to root with `fchownat`
+  (`AT_SYMLINK_NOFOLLOW`) before it is opened and emptied, so no capability beyond `CAP_CHOWN` is needed.
+  Directory modes are set before the owner is changed (a chmod after the chown would need `CAP_FOWNER`).
+- At start-up the helper moves itself into `<unit>/helper`, enables `cpu` and `memory` for the unit and for
+  `<unit>/vms`, and kills and removes any sandbox cgroup left there by an earlier run.
+- Not in this change: the template copy and hash, the Firecracker configuration (boot source, drives, the vsock
+  device) and the path by which the daemon reaches the API socket, and making the vsock directory visible inside
+  the jail.
 
 ## Protocol
 
@@ -97,8 +135,9 @@ gid range must not hold the group of the socket directory or the helper's own gi
 
 ## Start-up self-check
 
-Before it reads the config the helper checks `/proc/self/status`: `CapEff` and `CapBnd` equal the pinned
-set, `CapAmb` is empty, `NoNewPrivs` is 1 and `Seccomp` is 2. Any difference is one fatal line and exit 1.
+After the capability drop, and before it reads the config, the helper checks `/proc/self/status`: `CapEff` is the
+pinned set without the jailer-only capability, `CapPrm` and `CapBnd` are the whole set, `CapInh` is the jailer-only
+capability, `CapAmb` is empty, `NoNewPrivs` is 1 and `Seccomp` is 2. Any difference is one fatal line and exit 1.
 
 ## Socket lifetime
 
@@ -109,13 +148,21 @@ the next start, and systemd removes the runtime directory when the unit stops.
 ## Pinned values
 
 `internal/hardening/hardening.json` is the one file of unit hardening values and capabilities (each with
-its reason). The unit generator (`hardening.RenderUnit`), the start-up capability check and the tests read
+its reason). A directive may hold a list (`DeviceAllow` is `/dev/kvm rwm`, `/dev/net/tun m` and
+`/dev/userfaultfd m`: the jailer makes those nodes inside each jail and fails the launch if a mknod is refused,
+and only `/dev/kvm` may be opened). The unit generator (`hardening.RenderUnit`), the start-up capability check and the tests read
 it; so will the NixOS module.
+
+## Build
+
+Build with `CGO_ENABLED=0` (the module is standard library only). The capability drop changes every thread with
+`syscall.AllThreadsSyscall`, which Go refuses in a cgo binary; the helper then stops with one fatal line.
 
 ## Test
 
     cd packages/fx-runner/vmhelper && go vet ./... && go test ./...
 
 `scripts/check.sh` runs the same when `packages/fx-runner` is affected. Nothing here needs root. The one
-real-permission test (`TestRealRootPermissions`, a real chown and real uid switch) runs only with
-`FX_VMHELPER_REAL_ROOT=1` as root; the real jailer, Firecracker and cgroup tests belong to the next change.
+real-permission test (`TestRealRootPermissions`, a real chown and real uid switch) and `TestRealJailer` (the real jailer and Firecracker)
+run only with `FX_VMHELPER_REAL_ROOT=1` as root. `.github/workflows/vmhelper-real-root.yml` runs the second inside a
+systemd service that carries the pinned properties.
