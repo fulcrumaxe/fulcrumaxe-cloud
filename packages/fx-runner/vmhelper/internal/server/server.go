@@ -56,13 +56,24 @@ func errName(err error) string {
 type Entry struct {
 	SandboxID string `json:"sandbox_id"`
 	Created   int64  `json:"created,omitempty"`
+	// VsockDir is the absolute directory that holds the sandbox's vsock sockets. The helper builds it from
+	// its root-owned config and the validated id; a caller never supplies it.
+	VsockDir string `json:"vsock_dir"`
+	// SandboxGID is the gid of the sandbox's group, which owns its vsock directory; a consumer checks it.
+	SandboxGID uint32 `json:"sandbox_gid"`
+}
+
+// Reply is what a successful prepare or start adds to its answer.
+type Reply struct {
+	VsockDir   string
+	SandboxGID uint32
 }
 
 // Backend is what a validated request is handed to. Each call returns protocol.OK or one refusal code.
-// B-2a-1b supplies the real one; the server never builds a path, a command line or an id of its own.
+// The sandbox package supplies the real one; the server never builds a path, a command line or an id of its own.
 type Backend interface {
-	Prepare(r protocol.Request) protocol.Code
-	Start(id string) protocol.Code
+	Prepare(r protocol.Request) (Reply, protocol.Code)
+	Start(id string) (Reply, protocol.Code)
 	Destroy(id string) protocol.Code
 	List() ([]Entry, protocol.Code)
 }
@@ -83,6 +94,8 @@ type response struct {
 	OK        bool          `json:"ok"`
 	Protocol  int           `json:"protocol"`
 	Code      protocol.Code `json:"code,omitempty"`
+	VsockDir  string        `json:"vsock_dir,omitempty"`
+	GID       uint32        `json:"sandbox_gid,omitempty"` // never 0: a sandbox gid is at least config.MinID
 	Sandboxes *[]Entry      `json:"sandboxes,omitempty"`
 }
 
@@ -235,6 +248,7 @@ func (s *Server) handle(c net.Conn, uid uint32, timeout time.Duration, release f
 }
 
 func (s *Server) dispatch(req protocol.Request) (resp response, code protocol.Code) {
+	var reply Reply
 	defer func() {
 		if r := recover(); r != nil {
 			resp, code = refusal(protocol.Internal), protocol.Internal
@@ -242,9 +256,9 @@ func (s *Server) dispatch(req protocol.Request) (resp response, code protocol.Co
 	}()
 	switch req.Verb {
 	case protocol.Prepare:
-		code = s.Backend.Prepare(req)
+		reply, code = s.Backend.Prepare(req)
 	case protocol.Start:
-		code = s.Backend.Start(req.SandboxID)
+		reply, code = s.Backend.Start(req.SandboxID)
 	case protocol.Destroy:
 		code = s.Backend.Destroy(req.SandboxID)
 	case protocol.List:
@@ -259,7 +273,7 @@ func (s *Server) dispatch(req protocol.Request) (resp response, code protocol.Co
 		code = protocol.UnknownVerb
 	}
 	if code == protocol.OK {
-		return response{OK: true, Protocol: protocol.Version}, code
+		return response{OK: true, Protocol: protocol.Version, VsockDir: reply.VsockDir, GID: reply.SandboxGID}, code
 	}
 	return refusal(code), code
 }

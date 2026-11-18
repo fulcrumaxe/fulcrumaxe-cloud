@@ -167,3 +167,105 @@ func TestLoadChecksOwnerModeAndSymlink(t *testing.T) {
 		t.Fatal("a missing file was accepted")
 	}
 }
+
+// The 9-digit limit on config integers keeps Parse itself from reaching 2^32-1, so the range check is tested
+// on its own: a range whose last id would be (uid_t)-1 or beyond is refused, for uid and gid alike.
+func TestRangeMayNotRunPastTheTopID(t *testing.T) {
+	for _, kind := range []string{"uid", "gid"} {
+		for _, c := range []struct {
+			first, count uint32
+			ok           bool
+		}{
+			{0xFFFFFFF0, 100, false}, // wraps past 2^32
+			{0xFFFFFFFE, 2, false},   // last id would be 2^32-1
+			{0xFFFFFFFF, 1, false},
+			{0xFFFFFFFE, 1, true}, // last id 2^32-2
+			{200000, 16, true},
+		} {
+			if err := checkRange(kind, c.first, c.count, MinID); (err == nil) != c.ok {
+				t.Errorf("%s first=%d count=%d: %v", kind, c.first, c.count, err)
+			}
+		}
+	}
+}
+
+const groupFile = `# comment
+
+root:x:0:
+wheel:x:1:alice,bob
+fxgrp:x:200003:
+shared:x:200005:carol
+other:x:200100:dave
+low:x:199999:erin
++::::
+`
+
+func TestGroupFileRefusesAnOverlapWithMembers(t *testing.T) {
+	c := Config{GIDFirst: 200000, GIDCount: 16} // 200000..200015
+	err := c.CheckGroupFile(strings.NewReader(groupFile))
+	if err == nil || !strings.Contains(err.Error(), "200005") {
+		t.Fatalf("got %v", err)
+	}
+	ok := strings.Replace(groupFile, "shared:x:200005:carol", "shared:x:200005:", 1)
+	if err := c.CheckGroupFile(strings.NewReader(ok)); err != nil {
+		t.Fatalf("a group in range without members was refused: %v", err)
+	}
+	// the first and the last id of the range, and the ids just outside it
+	for gid, want := range map[string]bool{"200000": true, "200015": true, "199999": false, "200016": false} {
+		line := "g:x:" + gid + ":someone\n"
+		if err := c.CheckGroupFile(strings.NewReader(line)); (err != nil) != want {
+			t.Errorf("gid %s: %v", gid, err)
+		}
+	}
+}
+
+func TestGroupFileMalformedLinesFailClosed(t *testing.T) {
+	c := Config{GIDFirst: 200000, GIDCount: 16}
+	for _, bad := range []string{"g:x:abc:u\n", "g:x:200000\n", "g:x::u\n", "g:x:20000000000000:u\n", "justtext\n"} {
+		if err := c.CheckGroupFile(strings.NewReader(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if err := c.CheckGroupFile(strings.NewReader("")); err != nil {
+		t.Errorf("an empty file: %v", err)
+	}
+}
+
+const passwdFile = `root:x:0:0:root:/root:/bin/sh
+alice:x:1000:100:Alice:/home/alice:/bin/sh
+svc:x:300:200003:svc:/var/empty:/bin/false
+far:x:301:200100:far:/var/empty:/bin/false
+# comment
+
++::::::
+`
+
+func TestPasswdFileRefusesAPrimaryGroupInTheRange(t *testing.T) {
+	c := Config{GIDFirst: 200000, GIDCount: 16}
+	err := c.CheckPasswdFile(strings.NewReader(passwdFile))
+	if err == nil || !strings.Contains(err.Error(), "200003") {
+		t.Fatalf("got %v", err)
+	}
+	ok := strings.Replace(passwdFile, "svc:x:300:200003", "svc:x:300:100", 1)
+	if err := c.CheckPasswdFile(strings.NewReader(ok)); err != nil {
+		t.Fatalf("a clean file was refused: %v", err)
+	}
+	for gid, want := range map[string]bool{"200000": true, "200015": true, "199999": false, "200016": false} {
+		line := "u:x:5:" + gid + ":u:/h:/s\n"
+		if err := c.CheckPasswdFile(strings.NewReader(line)); (err != nil) != want {
+			t.Errorf("gid %s: %v", gid, err)
+		}
+	}
+}
+
+func TestPasswdFileMalformedLinesFailClosed(t *testing.T) {
+	c := Config{GIDFirst: 200000, GIDCount: 16}
+	for _, bad := range []string{"u:x:5:abc:u:/h:/s\n", "u:x:5:200000\n", "u:x:5::u:/h:/s\n", "u:x:5:20000000000000:u:/h:/s\n", "justtext\n"} {
+		if err := c.CheckPasswdFile(strings.NewReader(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if err := c.CheckPasswdFile(strings.NewReader("")); err != nil {
+		t.Errorf("an empty file: %v", err)
+	}
+}
