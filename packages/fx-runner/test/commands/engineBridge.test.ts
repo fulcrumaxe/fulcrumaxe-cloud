@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
 import { saveRegistration } from "../../src/config.js";
 import { BRIDGE_STATUS_FILE } from "../../src/engineBridge/daemon.js";
+import { plainFileExists } from "../../src/engineBridge/cursor.js";
 import { BRIDGE_SETTINGS_FILE, bindingRefusal, loadBridgeSettings, saveBridgeSettings } from "../../src/engineBridge/settings.js";
 import { BRIDGE_STATE_FILE, writeBridgeState } from "../../src/engineHost/hostFiles.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
@@ -113,6 +114,32 @@ describe("engine-bridge enable", () => {
     const code = await runCli({ argv: ["engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot], home, stateDirOverride: state, engineStateDirOverride: path.join(root, "from-env"), uid, stdout: (t) => out.push(t), stderr: (t) => err.push(t), fetchFn: fetch, now: () => new Date() });
     expect(code).toBe(0);
     expect(saved()![0]!.state_dir).toBe(path.join(root, "from-env"));
+  });
+
+  it("says which state directory it bound and why, and warns when no engine-events.jsonl is there (the repo root does not choose it)", async () => {
+    // Neither --state-dir nor the environment variable: the shared default, which has no events file. The live check of 11-18 enabled like this and uploaded nothing.
+    expect(await cli("engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot)).toBe(0);
+    const text = out.join("");
+    expect(text).toContain(path.join(home, ".autonomous-forever-state"));
+    expect(text).toContain("neither --state-dir nor AUTONOMOUS_TEAM_STATE_DIR was given, and --repo-root does not choose it");
+    expect(text).toContain("no engine-events.jsonl there yet");
+    out.length = 0;
+    const own = path.join(root, "own-state");
+    mkdirSync(own, { mode: 0o700 });
+    writeFileSync(path.join(own, "engine-events.jsonl"), "", { mode: 0o600 });
+    expect(await cli("engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot, "--state-dir", own)).toBe(0);
+    expect(out.join("")).toContain("(from --state-dir)");
+    expect(out.join("")).not.toContain("no engine-events.jsonl");
+  });
+
+  it("warns when engine-events.jsonl is a symlink to a real file: the bridge would refuse it, so it is not there", async () => {
+    const own = path.join(root, "link-state");
+    mkdirSync(own, { mode: 0o700 });
+    const real = path.join(root, "real-events.jsonl");
+    writeFileSync(real, "", { mode: 0o600 });
+    symlinkSync(real, path.join(own, "engine-events.jsonl"));
+    expect(await cli("engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot, "--state-dir", own)).toBe(0);
+    expect(out.join("")).toContain("no engine-events.jsonl there yet");
   });
 
   it("refuses an unknown flag and an enable that names no repo", async () => {
@@ -334,6 +361,43 @@ describe("a state directory that cannot be resolved, or that sits in another rep
   });
 });
 
+describe("plainFileExists: a file the bridge would read", () => {
+  const plain = (name: string, mode = 0o600): string => {
+    const file = path.join(root, name);
+    writeFileSync(file, "", { mode });
+    chmodSync(file, mode);
+    return file;
+  };
+
+  it("is true for a plain file of this user with no open write bits, and false when absent", () => {
+    expect(plainFileExists(plain("ok.jsonl"), uid)).toBe(true);
+    expect(plainFileExists(path.join(root, "absent.jsonl"), uid)).toBe(false);
+  });
+
+  it("is false for a symlink to a real file (no link is followed)", () => {
+    const real = plain("target.jsonl");
+    const link = path.join(root, "link.jsonl");
+    symlinkSync(real, link);
+    expect(plainFileExists(link, uid)).toBe(false);
+  });
+
+  it("is false for a file that others or the group can write (0o022 bits)", () => {
+    expect(plainFileExists(plain("group.jsonl", 0o620), uid)).toBe(false);
+    expect(plainFileExists(plain("other.jsonl", 0o602), uid)).toBe(false);
+  });
+
+  it("is false for a directory", () => {
+    const dir = path.join(root, "a-dir");
+    mkdirSync(dir);
+    expect(plainFileExists(dir, uid)).toBe(false);
+  });
+
+  it("is false for a file of another user (the runner's uid differs from the owner)", () => {
+    expect(uid).toBeDefined();
+    expect(plainFileExists(plain("foreign.jsonl"), uid! + 1)).toBe(false);
+  });
+});
+
 describe("engine-bridge status", () => {
   const statusFile = (repos: unknown[], updatedAt = new Date()): void => writeFileSync(path.join(state, BRIDGE_STATUS_FILE), JSON.stringify({ version: 1, updated_at: updatedAt.toISOString(), settings: "ok", hello: true, socket: "serving", repos }), { mode: 0o600 });
 
@@ -362,6 +426,14 @@ describe("engine-bridge status", () => {
     statusFile([{ repo_gh_id: 77, full_name: "acme/widgets", run: "refused", reason: "not_allowed", upload: null, pull: null, ceiling: null }]);
     await cli("engine-bridge", "status");
     expect(out.join("")).toContain("acme/widgets: refused (not_allowed)");
+  });
+
+  it("says when a repo reads the engine's default state directory, without printing any path", async () => {
+    saveBridgeSettings(state, [{ repo_gh_id: 77, full_name: "acme/widgets", state_dir: path.join(home, ".autonomous-forever-state"), repo_root: "/r/secret-root" }]);
+    statusFile([{ repo_gh_id: 77, full_name: "acme/widgets", run: "running", reason: null, upload: { state: "uploading", lastAckedSeq: 11, lastSuccessAt: "2026-11-18T18:08:25.000Z", reason: null }, pull: { state: "idle", why: null }, ceiling: null }]);
+    expect(await cli("engine-bridge", "status")).toBe(0);
+    expect(out.join("")).toContain("command pull idle; reads the engine's default state directory");
+    expect(out.join("")).not.toContain(home);
   });
 
   it("says the settings file is damaged, and exits 1, rather than showing nothing", async () => {

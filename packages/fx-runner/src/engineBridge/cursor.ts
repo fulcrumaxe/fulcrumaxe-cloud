@@ -40,6 +40,19 @@ export function openPlain(file: string, forbiddenMode: number, observe: OpenObse
   }
 }
 
+/** True when `file` is there as a plain file the bridge would read (no link followed, same owner rules as the tail); false when absent or refused. Reads nothing. */
+export function plainFileExists(file: string, uid: number | undefined): boolean {
+  try {
+    const opened = openPlain(file, 0o022, undefined, uid);
+    if (opened === null) return false;
+    closeSync(opened.fd);
+    return true;
+  } catch {
+    // fx-swallow-ok: a refused file is one the bridge will not read either, so it counts as not there
+    return false;
+  }
+}
+
 export interface Cursor {
   engine_instance_id: string | null;
   inode: number;
