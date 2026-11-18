@@ -39,6 +39,12 @@ describe('stream views (D#31 API-5)', () => {
     expect(dto.data).not.toHaveProperty('title');
   });
 
+  it('an engine.changed notice keeps its ids and a closed-set panels list on the wire, and loses a panel list that names anything else', () => {
+    const ids = { repo_id: randomUUID(), session_id: randomUUID(), last_seq: 12 };
+    expect(toAccountEventDTO(row({ type: 'engine.changed', payload: { ...ids, panels: ['agents', 'status'] } })).data).toEqual({ ...ids, panels: ['agents', 'status'] });
+    expect(toAccountEventDTO(row({ type: 'engine.changed', payload: { ...ids, panels: ['agents', 'a free text title'] } })).data).toEqual(ids);
+  });
+
   it('run event DTOs are redacted again on the way out, even when the stored row was not', () => {
     const dto = toRunEventDTO({ seq: 1, kind: 'log', at: '2026-09-01T12:00:00.000Z', payload: { line: `${FAKE_FXAT} ${FAKE_WHSEC}`, nested: [FAKE_FXAT] } });
     const text = JSON.stringify(dto);

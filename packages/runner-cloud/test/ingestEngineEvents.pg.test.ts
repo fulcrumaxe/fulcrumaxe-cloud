@@ -213,7 +213,7 @@ describe("engine events ingest [pg]", () => {
     // Five batches back to back, with no wait between them: five notices, each naming its own batch's last seq, ids only.
     const first = await notes();
     expect(first.map((p) => p.last_seq)).toEqual([1, 3, 5, 7, 9]);
-    expect(first.every((p) => Object.keys(p).sort().join() === "last_seq,repo_id,session_id" && p.repo_id === A.repoId)).toBe(true);
+    expect(first.every((p) => Object.keys(p).sort().join() === "last_seq,panels,repo_id,session_id" && p.repo_id === A.repoId && JSON.stringify(p.panels) === '["stats"]')).toBe(true);
     expect((await post(batch([merged(0)]))).status).toBe(409);
     expect((await post(batch([merged(20), merged(20)]))).status).toBe(400);
     expect((await notes()).length).toBe(5);
@@ -249,7 +249,53 @@ describe("engine events ingest [pg]", () => {
     expect(s.last_heartbeat_at).not.toBeNull();
     const notes = (await h.admin.query(`SELECT payload FROM domain_events WHERE account_id = $1 AND type = 'engine.changed' AND payload->>'session_id' = (SELECT id::text FROM engine_sessions)`, [A.accountId])).rows;
     expect(notes).toHaveLength(1);
-    expect(Object.keys(notes[0].payload).sort()).toEqual(["last_seq", "repo_id", "session_id"]);
+    expect(Object.keys(notes[0].payload).sort()).toEqual(["last_seq", "panels", "repo_id", "session_id"]);
+    // The union of what the ten kinds touch (a stop with no usage still lists the agent as "not recorded" on the usage panel), in the closed set's order.
+    expect(notes[0].payload.panels).toEqual(["agents", "lanes", "gates", "asks", "stats", "usage", "status"]);
+  });
+
+  const notices = async () => (await h.admin.query(`SELECT payload FROM domain_events WHERE account_id = $1 AND type = 'engine.changed' ORDER BY seq`, [A.accountId])).rows.map((r) => r.payload);
+  const ev = (seq: number, kind: string, f: object) => ({ v: 1, seq, ts: T, kind, engine_instance_id: instance, ...f });
+
+  it("two batches a second apart are two notices, each naming only its own batch's panels (insert-only, never merged into an open one)", async () => {
+    expect((await post(batch([ev(0, "team_log_line", { line_id: "0123456789abcdef", actor_role: "team-lead", category: "starting" })]))).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 1000));
+    expect((await post(batch([ev(1, "merge_lane", { pr: 5, state: "queued" })]))).status).toBe(200);
+    const n = await notices();
+    expect(n.map((p) => p.panels)).toEqual([["log"], ["lanes", "gates"]]);
+    expect(n.map((p) => p.last_seq)).toEqual([0, 1]);
+    expect((await h.admin.query(`SELECT count(*)::int AS n FROM domain_events WHERE account_id = $1 AND type = 'engine.changed'`, [A.accountId])).rows[0].n).toBe(2);
+  });
+
+  it("a usage-bearing tick names usage and a tick without usage does not; a plan chunk names plan; an ask names asks", async () => {
+    const tick = (seq: number, usage: boolean) => ev(seq, "tick_ended", { tick_kind: "loop", credential_mode: "subscription", ...(usage ? { usage: { input: 1, output: 1, cache_read: 0, cache_write: 0 } } : {}) });
+    expect((await post(batch([tick(0, false)]))).status).toBe(200);
+    expect((await post(batch([tick(1, true)]))).status).toBe(200);
+    expect((await post(batch([ev(2, "plan_snapshot", { snapshot_id: "s1", chunk_index: 0, chunk_count: 1, plan_date: "2026-11-16", items: [], roadmap: [] })]))).status).toBe(200);
+    expect((await post(batch([ev(3, "ask_raised", { ask_id: "0123456789abcdef", ask_kind: "other", source: "team_log" })]))).status).toBe(200);
+    expect((await notices()).map((p) => p.panels)).toEqual([["status"], ["usage", "status"], ["plan"], ["asks"]]);
+  });
+
+  it("every notice names panels from the closed set, in its order, once each", async () => {
+    expect((await post(batch([ev(0, "agent_started", { spawn_id: "toolu_9", role: "executor", background: true, isolation: "none" }), ev(1, "host_started", {}), ev(2, "loop_tick", { origin: "cron", duration_s: 1 })]))).status).toBe(200);
+    expect((await post(batch([ev(3, "spawn_blocked", { role: "executor", reason: "budget" })]))).status).toBe(200);
+    const closed = ["agents", "lanes", "gates", "asks", "log", "plan", "stats", "usage", "status"];
+    const n = await notices();
+    for (const p of n) {
+      expect(p.panels.every((x: string) => closed.includes(x))).toBe(true);
+      expect(new Set(p.panels).size).toBe(p.panels.length);
+      expect(p.panels).toEqual(closed.filter((x) => p.panels.includes(x)));
+    }
+    expect(n.map((p) => p.panels)).toEqual([["agents", "stats", "status"], ["status"]]);
+  });
+
+  it("an idle engine, which sends one status upload every 5 minutes, writes at most 20 notices an hour, each naming status alone, and the ingest asks nothing more of the runner", async () => {
+    // 13 uploads in an hour (one at start, then every 5 minutes): the runner's own bridge-timers test pins that schedule; here each one is posted and counted.
+    for (let i = 0; i < 13; i++) expect((await post(batch([ev(i, "engine_heartbeat", { origin: "host" })]))).status).toBe(200);
+    const n = await notices();
+    expect(n.length).toBe(13);
+    expect(n.length).toBeLessThanOrEqual(20);
+    expect(n.every((p) => JSON.stringify(p.panels) === '["status"]')).toBe(true);
   });
 
   it("passes the tokens an agent or tick reported to the pricing port (never a dollar amount) and sets, not adds, a repeated stop", async () => {

@@ -7,8 +7,8 @@ import { realClock, type Clock } from "./clock.js";
 /**
  * D#31 API-5d: the wake-up for an idle account's feed.
  *
- * The migration-0652 trigger sends `NOTIFY fx_account_nudge, '<account id>'` when a session.revoked or
- * api_token.* event commits. Each process keeps ONE dedicated `pg.Client` (never a pooled connection)
+ * The migration-0652 trigger (widened by 1039) sends `NOTIFY fx_account_nudge, '<account id>'` when a session.revoked,
+ * api_token.* or engine.changed event commits. Each process keeps ONE dedicated `pg.Client` (never a pooled connection)
  * LISTENing on that channel and hands each account id to the poller, which schedules that account's next
  * read (poller.ts `nudge()`). The payload is the account id only; the poller still reads events only
  * through `withTenant` under the subscriber's own account, so a forged NOTIFY can cause at most one bounded
@@ -20,8 +20,8 @@ import { realClock, type Clock } from "./clock.js";
  */
 export const NUDGE_CHANNEL = "fx_account_nudge";
 
-/** The event types the migration-0652 trigger notifies for. Must equal the trigger's WHEN list (a test compares them). */
-export const NUDGE_EVENT_TYPES = ["session.revoked", "api_token.created", "api_token.revoked"] as const;
+/** The event types the trigger notifies for (0652, widened by 1039 with the engine change notice). Must equal the trigger's WHEN list (a test compares them). */
+export const NUDGE_EVENT_TYPES = ["session.revoked", "api_token.created", "api_token.revoked", "engine.changed"] as const;
 
 /** A probe that has not come back through the LISTEN connection in this long marks the listener degraded. */
 export const PROBE_TIMEOUT_MS = 5_000;

@@ -34,7 +34,7 @@ import { resolveWindow } from "./stats.js";
  *    the top level so every panel reads them the same way (L1, L2).
  *  - Nothing here is text the engine wrote: ids, enums, counts, timestamps and cloud-side names only. Dollar figures come from the cloud's own pricing.
  *  - Settings: PUT is an owner or admin on a session; delete-data is an owner on a session. Each change writes its audit row in the same transaction.
- *  - `engine.changed` (ids only) reaches `/api/v1/events` (SSE and JSON) for the account; it is not a webhook type.
+ *  - `engine.changed` (ids and the names of the changed panels only) reaches `/api/v1/events` (SSE and JSON) for the account; it is not a webhook type.
  */
 
 /** Whether a repo is private, asked of GitHub on every call and never remembered. Anything but a clear "private" is refused (fail closed). Production registers it. */
