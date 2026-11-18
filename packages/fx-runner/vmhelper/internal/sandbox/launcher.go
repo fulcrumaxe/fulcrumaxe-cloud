@@ -98,35 +98,9 @@ func (l *JailerLauncher) Argv(s Spec) ([]string, error) {
 // CheckBinary requires path to be a regular executable file that only root can change, reached through
 // directories only root can change, with no symlink on the way (every component is opened O_NOFOLLOW).
 func (l *JailerLauncher) CheckBinary(path string) error {
-	base := l.chainBase
-	if base == "" {
-		base = "/"
-	}
-	if err := cleanAbs(path); err != nil || !(base == "/" || strings.HasPrefix(path, base+"/")) {
-		return fmt.Errorf("launch: %s is not a clean absolute path", config.Clean(path))
-	}
-	fd, err := openAbs(base)
+	fd, err := openRootChain(l.chainBase, path, l.OwnerUID)
 	if err != nil {
 		return err
-	}
-	comps := strings.Split(strings.TrimPrefix(strings.TrimPrefix(path, base), "/"), "/")
-	for i, c := range comps {
-		last := i == len(comps)-1
-		flags := dirFlags
-		if last {
-			flags = syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
-		}
-		var st syscall.Stat_t
-		if err := syscall.Fstat(fd, &st); err != nil || st.Uid != l.OwnerUID || st.Mode&0o022 != 0 {
-			closeFd(fd)
-			return fmt.Errorf("launch: %s is not in a root-owned, root-writable-only chain (the directory above %q is owned by %d with mode %o)", config.Clean(path), config.Clean(c), st.Uid, st.Mode&0o7777)
-		}
-		next, err := syscall.Openat(fd, c, flags, 0)
-		closeFd(fd)
-		if err != nil {
-			return fmt.Errorf("launch: cannot open %s without following a symlink", config.Clean(path))
-		}
-		fd = next
 	}
 	defer closeFd(fd)
 	var st syscall.Stat_t
@@ -134,6 +108,42 @@ func (l *JailerLauncher) CheckBinary(path string) error {
 		return fmt.Errorf("launch: %s is not a root-owned executable file", config.Clean(path))
 	}
 	return nil
+}
+
+// openRootChain opens path (below base, "/" when empty) one component at a time with O_NOFOLLOW and returns
+// the descriptor of its last component. Every directory on the way, base included, must belong to owner and
+// be writable by no one else; the caller checks the last component itself. A manifest, a template and a
+// binary all take this one route.
+func openRootChain(base, path string, owner uint32) (int, error) {
+	if base == "" {
+		base = "/"
+	}
+	if err := cleanAbs(path); err != nil || !(base == "/" || strings.HasPrefix(path, base+"/")) {
+		return -1, fmt.Errorf("launch: %s is not a clean absolute path", config.Clean(path))
+	}
+	fd, err := openAbs(base)
+	if err != nil {
+		return -1, err
+	}
+	comps := strings.Split(strings.TrimPrefix(strings.TrimPrefix(path, base), "/"), "/")
+	for i, c := range comps {
+		flags := dirFlags
+		if i == len(comps)-1 {
+			flags = syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+		}
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil || st.Uid != owner || st.Mode&0o022 != 0 {
+			closeFd(fd)
+			return -1, fmt.Errorf("launch: %s is not in a root-owned, root-writable-only chain (the directory above %q is owned by %d with mode %o)", config.Clean(path), config.Clean(c), st.Uid, st.Mode&0o7777)
+		}
+		next, err := syscall.Openat(fd, c, flags, 0)
+		closeFd(fd)
+		if err != nil {
+			return -1, fmt.Errorf("launch: cannot open %s without following a symlink", config.Clean(path))
+		}
+		fd = next
+	}
+	return fd, nil
 }
 
 // handOver gives the jail directory to the jailer's user (root): the helper holds no CAP_DAC_OVERRIDE, so

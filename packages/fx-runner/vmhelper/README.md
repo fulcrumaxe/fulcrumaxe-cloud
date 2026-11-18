@@ -33,6 +33,17 @@ own cgroup below this unit's `vms` subtree and drops to the sandbox's uid and gi
   that is redundant today and is kept so the child keeps it if the exec ever stops getting the bounding set
   by being root. A compromised helper could raise the capability again, so none of this is a boundary against
   a compromised helper.
+- Before the launch, `start` stages `<jail>/<exec name>/<id>/root/{kernel,rootfs,vsock}`. The files are copies
+  from `template_dir/<template>/<kind>`, opened through the same root-owned-chain check as the binaries and
+  hashed while copied against the root-owned manifest at `template_manifest_path` (`{id: {kernel, rootfs}}`
+  with sha256 digests, written by the install from the signed release metadata; the helper only reads it, at
+  every prepare and start). A template id the manifest lacks answers `unknown_template`; a mismatch or any
+  other failure removes everything staged and answers `internal`. The vsock directory is bind-mounted
+  (`nosuid,nodev,noexec`) on `vsock` by descriptor: `open_tree` + `move_mount`, or, on a kernel before 5.2,
+  `mount(2)` on two `/proc/self/fd` links (the only reason for the fallback). Destroy and start-up reaping
+  unmount it first and delete nothing while it is mounted.
+- A start or destroy reserves its sandbox id; the registry lock is never held across a launch, so `list` and
+  other ids do not wait.
 - `memory.max` is the guest's memory plus 256 MiB for Firecracker itself; `cpu.max` is `vcpus * 100000 / 100000`.
 - A launch succeeds only when `/proc/<pid>/status` shows all four uids and gids equal to the sandbox's and no
   supplementary group (the jailer clears them before it execs Firecracker; the helper checks the result).

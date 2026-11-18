@@ -479,6 +479,7 @@ func TestManagerDestroyWithRealLauncher(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
+	newFixture(t).use(m)
 	_, c := m.Prepare(prep("box-a"))
 	if c != protocol.OK {
 		t.Fatal(c)
@@ -486,14 +487,14 @@ func TestManagerDestroyWithRealLauncher(t *testing.T) {
 	m.mu.Lock()
 	b := m.boxes["box-a"]
 	m.mu.Unlock()
+	if _, c := m.Start("box-a"); c != protocol.OK { // stages <jail>/firecracker/box-a/root before the launch
+		t.Fatal(c)
+	}
 	if err := os.MkdirAll(b.spec.JailDir+"/firecracker/box-a/root/run", 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(b.spec.JailDir+"/firecracker/box-a/root", 0o700); err != nil {
 		t.Fatal(err)
-	}
-	if _, c := m.Start("box-a"); c != protocol.OK {
-		t.Fatal(c)
 	}
 	if c := m.Destroy("box-a"); c != protocol.OK {
 		t.Fatal(c)
