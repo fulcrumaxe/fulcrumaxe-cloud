@@ -18,7 +18,13 @@ Sources:
 - `apps/web/app/api/runner/engine/commands/pull/route.ts`
 - `apps/web/app/api/runner/engine/decide/route.ts`
 - `apps/web/app/api/runner/engine/dials/route.ts`
+- `apps/web/app/api/runner/device/start/handler.ts`
+- `apps/web/app/api/runner/device/poll/handler.ts`
+- `apps/web/app/link/page.tsx`
+- `apps/web/app/link/LinkForm.tsx`
+- `packages/api/src/routes/runnerDevice.ts`
 - `apps/web/app/api/v1/[...path]/route.ts`
+- `apps/web/lib/runnerSeenCache.ts`
 - `apps/web/app/api/cron/proposal-verify-sweep/handler.ts`
 - `apps/web/app/api/cron/proposal-verify-sweep/route.ts`
 - `apps/web/vercel.json`
@@ -43,6 +49,7 @@ Pages under `apps/web/app/`:
 |---|---|---|
 | `/` | `app/(team)/page.tsx` | Team product skeleton — placeholder heading and paragraph only. |
 | `/site-kit` | `app/(sitekit)/site-kit/page.tsx` | Site-kit product skeleton — placeholder heading and paragraph only. |
+| `/link` | `app/link/page.tsx`, `app/link/LinkForm.tsx` | Where a signed-in owner or admin types the code a machine shows (#1035). It reads nothing from its address, so a link cannot fill the code in. The form looks the code up, shows the machine's facts and a fixed warning, then approves or cancels it through `/api/v1/runners/device/*`. |
 
 API routes under `apps/web/app/api/` (also enumerated in
 `apps/web/app/api/ROUTES.allowlist`):
@@ -65,6 +72,8 @@ API routes under `apps/web/app/api/` (also enumerated in
 | `/api/health` | GET | Liveness plus a check of the settings this deployment needs (`apps/web/env-manifest.ts`; see [staging.md](../ops/staging.md)). Answers `200 {ok: true, config: "ok"}`, or `503 {ok: false, config: "incomplete"}` when a required setting is missing or invalid; anonymous callers see no variable names. With `Authorization: Bearer <CRON_SECRET>` it also lists `missing`, `invalid` (name and reason code, never a value), `invalid_optional` and `disabled` (optional features that are off). Features whose settings are not there yet (pipeline worker, GitHub proxy forwarding) show as `disabled`, not as incomplete. On a staging deployment the body also carries `commit`: `FX_DEPLOY_COMMIT` when it is a commit id (a command-line deploy stamps it), else the platform's own commit, else `null`. |
 | `/api/mode` | GET | Static `{mode: "cloud", profile: "cloud", features: {...all false}}` — the feature flags `apps/workspace`'s `core/features.js` reads. |
 | `/api/rum` (`#172`) | POST | Receives beaconed boot-performance marks (`boot:signin-visible`/`boot:desktop-ready`), rate-limited per IP. |
+| `/api/runner/device/start` | POST | A machine with no credential asks for a link code (#1035). No session, cookie, token or signature: a signed proof that the caller holds the key it presents is in the body. A per-minute cap per address (20) applies before the body is read; the per-hour limits are the database's. Answers 503 `not_configured` when `FX_DEVICE_CODE_KEY` is unset. |
+| `/api/runner/device/poll` | POST | The same machine polls for its approval, signed by the key it started with (60 a minute per address before the lookup). Answers pending, then the registration once, or a 410 when the code ended (#1035). |
 | `/api/runner/engine/events` | POST | Engine bridge ingest (#1001): a runner's signed batch of engine events, stored through `@fx/runner-cloud`. No session, cookie or token is read; the runner's own signature is the credential. |
 | `/api/runner/engine/commands/pull` | POST | The runner asks for its pending signed engine commands (#998). Signed by the runner like the others. |
 | `/api/runner/engine/commands/{id}/ack` | POST | The runner reports what became of one command: applied, refused, expired or not confirmed (#998). |
@@ -73,7 +82,7 @@ API routes under `apps/web/app/api/` (also enumerated in
 | `/api/shell/session` | GET, POST | The one route module every rewritten shell-session path lands on — see How it works. |
 | `/api/stripe/webhook` | POST | Stripe webhook receiver; signature verification and event handling live in `@fx/billing`. |
 | `/api/system/mode` | GET | Static `{cloud: true}`. |
-| `/api/v1/{...path}` (`#126`–`#167`) | GET, POST, DELETE (per resource) | The public API v1 catch-all: forwards to `@fx/api`'s `handleApiRequest`, which does routing, authn/authz (session or bearer token) and error mapping against `packages/api/src/routes/`' registry — `GET /account`, `GET`/`POST /tokens`, `POST /tokens/revoke-mine`, `DELETE /tokens/{id}`, `GET /runs`, `GET /runs/{id}`, `GET /work-items`, `GET /work-items/{id}`, `GET /stats`, `GET /work-items/{id}/timeline`, `GET /work-items/{id}/activity` (session only: what the pipeline is doing for one item). `GET /runs/{id}/insight` (session only: one run's outcome, cost split, activity lines and facts, for the Runs app's detail). `GET /runs/{id}/context` (session only: what one run loaded into its context, for the Runs app's context panel). |
+| `/api/v1/{...path}` (`#126`–`#167`) | GET, POST, DELETE (per resource) | The public API v1 catch-all: forwards to `@fx/api`'s `handleApiRequest`, which does routing, authn/authz (session or bearer token) and error mapping against `packages/api/src/routes/`' registry — `GET /account`, `GET`/`POST /tokens`, `POST /tokens/revoke-mine`, `DELETE /tokens/{id}`, `GET /runs`, `GET /runs/{id}`, `GET /work-items`, `GET /work-items/{id}`, `GET /stats`, `GET /work-items/{id}/timeline`, `GET /work-items/{id}/activity` (session only: what the pipeline is doing for one item). `GET /runs/{id}/insight` (session only: one run's outcome, cost split, activity lines and facts, for the Runs app's detail). `GET /runs/{id}/context` (session only: what one run loaded into its context, for the Runs app's context panel). `POST /runners/device/lookup`, `/approve` and `/deny` (session only, owner or admin: the person's side of linking a machine by a typed code, #1035). |
 | `/api/v1/openapi.json` | GET | The generated OpenAPI 3.1 document for the routes above; matched before the catch-all since Next resolves the more specific segment first. |
 
 ## What an idle deployment costs
@@ -158,7 +167,7 @@ security-header set, and session/principal-header handling.
 `apps/web/middleware.test.ts`, `apps/web/test/csrf.test.ts`, and
 `apps/web/test/headers.test.ts` cover the middleware steps, CSRF
 classification, and the security-header values respectively.
-The `/api/v1` catch-all route file also gives the engine settings route a live GitHub privacy check (`createAppRepoVisibility`), so ticking a repository for the engine bridge asks GitHub whether it is private at that moment (#1003). `apps/web/test/route-inventory.test.ts` checks the route set against
+The `/api/v1` catch-all route file also gives the engine panels a reader for the runner's wake-check stamps in the platform's runtime cache (`engineSeen.reader`, `apps/web/lib/runnerSeenCache.ts`), so a runner that uploads only every 5 minutes still reads live (#1036). It also gives the engine settings route a live GitHub privacy check (`createAppRepoVisibility`), so ticking a repository for the engine bridge asks GitHub whether it is private at that moment (#1003). `apps/web/test/route-inventory.test.ts` checks the route set against
 `apps/web/app/api/ROUTES.allowlist`. `apps/web/test/shell-routes.test.ts`
 covers the shell-session rewrite/dispatch. Each route also has a colocated
 `handler.test.ts` — including `app/api/gh-proxy/[...path]/handler.test.ts`

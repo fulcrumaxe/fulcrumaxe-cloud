@@ -116,6 +116,14 @@ Sources:
 - `packages/fx-runner/src/commands/engineBridge.ts`
 - `apps/workspace/apps/team/`
 - `apps/workspace/apps/needs-you/needs-you-model.js`
+- `packages/fx-runner/src/engineHost/`
+- `packages/fx-runner/src/commands/engineHost.ts`
+- `packages/db/migrations/1036_onboarding_tables.sql`
+- `packages/db/migrations/1037_device_registration.sql`
+- `packages/runner-cloud/src/deviceFlow.ts`
+- `packages/reconcile/src/jobs/onboardingPrune.ts`
+- `packages/api/src/routes/runnerDevice.ts`
+- `apps/web/app/link/page.tsx`
 - `packages/spend/src/usage.ts`
 
 ## What the pipeline does today
@@ -139,6 +147,9 @@ Sources:
 - The engine's decisions are asked of the cloud before it acts: `engine_spawn`, `engine_merge` and `engine_spec_ready` are catalogue entries that default to ask, a Feature or Critical Spec is resolved as the start of a parent item, and while a repo is halted, decide answers `ask` with `halted: true` and writes no receipt, and the command insert trigger refuses the start-like kinds with HX409, until a person clears the halt (`packages/decisions/src/engineDecision.ts`, `packages/runner-cloud/src/engineHaltReplies.ts`, `packages/db/migrations/1031_engine_halt.sql`, #993, #992). A command inserted from a person's session is stamped with exactly the current halt epoch (`packages/db/migrations/1034_engine_halt_stamp_exact.sql`, #1024). A person's answer to a decision ask is stored and sends the engine no command; the engine reads it back on its next ask with the same request key (`packages/api/src/routes/engine-decisions.ts`, #1028). The runner turns the repo's resolved dials into a short-lived ceiling file the engine reads, and when it cannot refresh it the file runs out and the engine reads the strictest ceiling (`packages/fx-runner/src/engineBridge/ceiling.ts`, #1002). `fx-runner engine-bridge enable`, `disable` and `status` set it up per repo and say in words why an enable was refused (`packages/fx-runner/src/commands/engineBridge.ts`, #1010, #1023). What the engine costs is shown as an API-priced estimate beside, never inside, the account's spend (`packages/spend/src/usage.ts`).
 - `@fx/hetzner` is a typed, strict client for the Hetzner Cloud API with a local fake for tests; it can also take an idempotent snapshot of a server, start a server from an image, wait for an action and delete an image (`packages/hetzner/src/client.ts`, `packages/hetzner/src/provider.ts`, #1030, #1041). No app or package calls it yet.
 - Five machine tables exist (a sealed Hetzner token, managed servers, which machine runs a repo's engine, sealed Claude sign-in requests and daily token usage per machine), with a sealed-credential reader function and three retention prunes run every 5 minutes by the reconciler; no route, app or package reads or writes the tables themselves yet (`packages/db/migrations/1035_machine_tables.sql`, `packages/reconcile/src/jobs/machinePrune.ts`, #1032).
+- A person can start the engine's Team Lead on their own machine as a supervised headless process, with `fx-runner engine-host start`. The runner sends it fixed messages on a schedule, loop and check-in ticks and an optional daily start-of-day tick, plus the cloud commands the bridge pulled, applies each command at most once, keeps its session so a restart or reboot resumes the same conversation, and sends a re-orient message after the host's context was compacted. `engine-host stop` ends it locally through the kill path a cloud halt uses (`packages/fx-runner/src/commands/engineHost.ts`, `packages/fx-runner/src/engineHost/ticks.ts`, `packages/fx-runner/src/engineHost/session.ts`, #997, #1009, #1011). The host's own events are written to a local file and nothing here uploads them, and it starts only where the bridge's local state file exists, which no source file here writes (`packages/fx-runner/src/engineHost/hostFeeds.ts`, `packages/fx-runner/src/engineHost/hostFiles.ts`).
+- A machine with no credential can ask to be linked to an account: it starts a code with a signed proof of its key, an owner or admin types the code at `/link` while signed in, looks up the machine's facts and approves or cancels it, and the machine's next signed poll collects its registration once. The new runner has no repositories. These are the cloud routes, the definers and the page; nothing in `packages/fx-runner` calls them yet (`packages/runner-cloud/src/deviceFlow.ts`, `packages/api/src/routes/runnerDevice.ts`, `apps/web/app/link/page.tsx`, `packages/db/migrations/1037_device_registration.sql`, #1034, #1035).
+- Onboarding has tables for the track an account chose, a repository's setup steps, the plan draft a person reviews, and the published engine versions (`packages/db/migrations/1036_onboarding_tables.sql`, #1033); only the device-code table has code behind it, plus a reconciler job that deletes old codes and drafts (`packages/reconcile/src/jobs/onboardingPrune.ts`).
 - A person's sign-off on criteria a reviewer could not verify has a database table and a core module that reads the confirm list and records it, bound to one head (`packages/db/migrations/1022_criteria_verifications.sql`, `packages/core/src/work-items/criteriaVerification.ts`, #975); no route, gate or app calls them yet.
 - The assistant answers questions about a repository's work and proposes corrections. It is session-only, has a closed tool registry, a per-conversation cost cap and stores no messages.
 - Decisions are recorded as receipts in the pull request body and can be reversed; an autonomy dial per repository sets what the platform decides on its own.
@@ -151,6 +162,7 @@ Sources:
 - Merge-queue rollups: the `Rollup` CI step runs only in a merge-queue run while the repository variable `ROLLUP_ENABLED` is `true` (`.github/workflows/ci.yml`, `scripts/ci/rollup-position.mjs`, #939).
 - The operator's own Claude subscription: `FX_OPERATOR_SUBSCRIPTION` and its allow-list.
 - The onboarding preview: `FX_ONBOARDING_PREVIEW`.
+- Linking a machine by a typed code: `FX_DEVICE_CODE_KEY` (at least 32 characters); without it the start, lookup, approve and deny routes answer 503 `not_configured` and store nothing. `FX_DEVICE_FLOW_GLOBAL_PER_HOUR` changes the global start limit from 1,000 an hour (`apps/web/env-manifest.ts`, `packages/runner-cloud/src/deviceFlow.ts`).
 - The engine bridge: an account's watch and operate switches are both off until an owner or admin turns them on, and a repository must be ticked and paired with a runner that has the `engine_bridge_v1` capability (`packages/db/migrations/1027_engine_bridge.sql`, `packages/api/src/routes/engine.ts`).
 
 ## Not enforced or not proven here
@@ -166,7 +178,7 @@ Sources:
 | `apps/live-e2e` | implemented-and-tested | 50 test files, 6 Playwright specs. Live packs against a deployed environment: manifest, selection, targets and the `plan` command. Not part of the pull request check. |
 | `apps/live-sink` | implemented-and-tested | 2 test files. Webhook sink the live suite reads deliveries back from. |
 | `apps/ops` | implemented-and-tested | 6 test files. Operator console. |
-| `apps/web` | implemented-and-tested | 160 test files, 4 against a real Postgres. The Next.js app: sign-in, the shell, `/api/v1/*` through one dispatcher, the Stripe and GitHub webhooks, cron routes and the pipeline workflows. Its web build and a trace check run in `scripts/check.sh`. |
+| `apps/web` | implemented-and-tested | 161 test files, 4 against a real Postgres. The Next.js app: sign-in, the shell, `/api/v1/*` through one dispatcher, the Stripe and GitHub webhooks, cron routes and the pipeline workflows. Its web build and a trace check run in `scripts/check.sh`. |
 | `apps/workspace` | implemented-and-tested | 180 test files, 89 Playwright specs. The imported workspace UI filtered to the cloud build profile, with first-party apps for onboarding, pipeline, needs-you, team, runs, memory, repos, runners, roles, site review, model key, Vercel, budget and billing, and developer. Checked mechanically by `import/checks.mjs`, unit tests and Playwright on desktop, phone and tablet viewports. |
 
 ## Packages
@@ -174,11 +186,11 @@ Sources:
 | Project | Status | Evidence |
 |---|---|---|
 | `packages/api-client` | implemented-and-tested | 3 test files. Typed client generated from `packages/api/openapi.json`; a drift test pins the generated file. |
-| `packages/api` | implemented-and-tested | 138 test files, 10 against a real Postgres. Public API v1: route registry, dispatcher, OpenAPI document, the assistant route and the delegation token and device link. |
+| `packages/api` | implemented-and-tested | 139 test files, 10 against a real Postgres. Public API v1: route registry, dispatcher, OpenAPI document, the assistant route and the delegation token and device link. |
 | `packages/billing` | implemented-and-tested | 19 test files. Stripe billing, account status and plan state. |
 | `packages/cli` | implemented-and-tested | 5 test files. The `fulcrumaxe` command line over the public API. |
 | `packages/core` | implemented-and-tested | 184 test files, 68 against a real Postgres. Tenancy and auth, work-item reads and stages, corrections, the assistant's conversations and tools, API tokens, the post-merge verify rows, settings and orders. |
-| `packages/db` | implemented-and-tested | 246 test files, 95 against a real Postgres. Migrations, `withTenant`, the RLS and grant inventories, the migration runner and its Neon-shape and ordering checks. |
+| `packages/db` | implemented-and-tested | 248 test files, 97 against a real Postgres. Migrations, `withTenant`, the RLS and grant inventories, the migration runner and its Neon-shape and ordering checks. |
 | `packages/decisions` | implemented-and-tested | 20 test files. The decision catalogue (including the engine's three decisions), presets and the pure `decide()` resolver. |
 | `packages/design` | implemented-and-tested | 8 test files. The shared visual layer; string and React renderers are checked for markup parity. |
 | `packages/discussions` | implemented-and-tested | 24 test files, 20 against a real Postgres. The Discussions and work-item service. |
@@ -188,7 +200,7 @@ Sources:
 | `packages/env-presets` | implemented-and-tested | 3 test files. The language preset environments as frozen data. |
 | `packages/env-spec` | implemented-and-tested | 4 test files. The canonical EnvSpec schema and version id. |
 | `packages/features` | implemented-and-tested | 5 test files. The feature exposure catalogue and the emergency floor. |
-| `packages/fx-runner` | implemented-and-tested | 297 test files. The local runner: job verification, role tools, clean environment, the Claude engine, the daemon and the verify browser. |
+| `packages/fx-runner` | implemented-and-tested | 300 test files. The local runner: job verification, role tools, clean environment, the Claude engine, the daemon, the verify browser, the engine bridge and the engine host. |
 | `packages/gh-policy` | implemented-and-tested | 15 test files. The pure decision engine for the GitHub proxy. |
 | `packages/github` | implemented-and-tested | 70 test files, 25 against a real Postgres. GitHub App webhook intake, the event mapper, installation tokens and the merge-gate GraphQL documents. |
 | `packages/hetzner` | implemented-and-tested | 4 test files, no database, against a strict local fake of the Hetzner API. A typed Hetzner Cloud client, with snapshots and servers from an image, and the provider-neutral machine seam; no app depends on it yet. |
@@ -201,10 +213,10 @@ Sources:
 | `packages/pipeline` | implemented-and-tested | 225 test files, 110 against a real Postgres. The stage machine, review and fix rounds, the merge gate, the merge queue, concurrency, discovery, plan write-back and the verify rules. |
 | `packages/plan-data` | implemented-and-tested | 11 test files. Loads and validates the plan, pricing and cap data from `FX_PLAN_DATA`; fails closed. |
 | `packages/receipts` | implemented-and-tested | 11 test files, 3 against a real Postgres. The decision-receipt block in a pull request body, and reversals. |
-| `packages/reconcile` | implemented-and-tested | 18 test files, 13 against a real Postgres. The reconciler framework: due jobs under an atomic lease, with a time limit and a circuit breaker. |
+| `packages/reconcile` | implemented-and-tested | 19 test files, 14 against a real Postgres. The reconciler framework: due jobs under an atomic lease, with a time limit and a circuit breaker. |
 | `packages/roles` | implemented-and-tested | 14 test files. The role cards and the manifest that binds them. |
-| `packages/runner-cloud` | implemented-and-tested | 57 test files, 40 against a real Postgres. The cloud side of the local runner: registration, claims, events, done, the local-only GitHub allowlist, the merge order. |
-| `packages/runner-protocol` | implemented-and-tested | 59 test files. Wire protocol between the cloud and a runner: message schemas, the signed job, request signing, the verdict envelope parser. |
+| `packages/runner-cloud` | implemented-and-tested | 58 test files, 41 against a real Postgres. The cloud side of the local runner: registration, the device-code link flow, claims, events, done, the local-only GitHub allowlist, the merge order. |
+| `packages/runner-protocol` | implemented-and-tested | 60 test files. Wire protocol between the cloud and a runner: message schemas, the signed job, request signing, the device-flow messages and key proof, the verdict envelope parser. |
 | `packages/runner` | implemented-and-tested | 146 test files, 72 against a real Postgres. Hosted-sandbox orchestration: network policy, sandbox naming, the Vercel sandbox port, run status and resume, funding. |
 | `packages/runtime` | implemented-and-tested | 18 test files. Local, production and fake model runners. |
 | `packages/sitekit-checks` | implemented-and-tested | 20 test files. Mechanical checks over rendered site kit output. |
@@ -218,4 +230,4 @@ Sources:
 | `packages/test-guard` | implemented-and-tested | 4 test files. Fails any test that reaches a model API; its own fixture proves it still fires. |
 | `packages/trust` | implemented-and-tested | 8 test files. Author trust, control-token sanitising and fencing, provenance vocabulary. |
 | `packages/webhooks` | implemented-and-tested | 11 test files. Outbound webhook sweep: due deliveries, fan-out from domain events. |
-| `packages/worker` | implemented-and-tested | 202 test files, 153 against a real Postgres. The pipeline worker's composition root: pools, ports, advance, sweeps, run actions, plane publish and the post-merge verify stage. |
+| `packages/worker` | implemented-and-tested | 203 test files, 154 against a real Postgres. The pipeline worker's composition root: pools, ports, advance, sweeps, run actions, plane publish and the post-merge verify stage. |
