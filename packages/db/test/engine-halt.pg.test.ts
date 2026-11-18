@@ -116,6 +116,42 @@ describe('engine halt (1031)', () => {
     });
   });
 
+  describe('who halted (1038)', () => {
+    const haltedBy = async (repoId: string) => (await admin.query<{ halted_by: string | null }>(`SELECT halted_by FROM engine_repo_controls WHERE repo_id = $1`, [repoId])).rows[0]?.halted_by;
+    const asUser = <T>(userId: string, fn: (c: PoolClient) => Promise<T>) => withTenant(appUserPool, a.accountId, userId, fn);
+
+    it('a halt records the acting person; a repeat by someone else keeps the first; a clear empties it; the next halt records its own author', async () => {
+      const r = await repo();
+      const admin2 = await member(a, 'admin');
+      expect(await haltedBy(r)).toBeUndefined();
+      await asOwner((c) => setEngineHalt(c, r));
+      expect(await haltedBy(r)).toBe(a.userId);
+      await asUser(admin2, (c) => setEngineHalt(c, r));
+      expect(await haltedBy(r)).toBe(a.userId);
+      await asUser(admin2, (c) => clearEngineHalt(c, r));
+      expect(await haltedBy(r)).toBeNull();
+      await asUser(admin2, (c) => setEngineHalt(c, r));
+      expect(await haltedBy(r)).toBe(admin2);
+    });
+
+    it('a caller cannot choose halted_by: the functions take only the repo, and app_user cannot write the column', async () => {
+      const r = await repo();
+      const other = await member(a, 'admin');
+      await expect(asOwner((c) => c.query(`SELECT * FROM engine_halt_set($1, $2)`, [r, other]))).rejects.toMatchObject({ code: '42883' });
+      await asOwner((c) => setEngineHalt(c, r));
+      await expect(asOwner((c) => c.query(`UPDATE engine_repo_controls SET halted_by = $2 WHERE repo_id = $1`, [r, other]))).rejects.toMatchObject({ code: '42501' });
+      expect(await haltedBy(r)).toBe(a.userId);
+      expect(await asOwner((c) => c.query(`SELECT has_column_privilege('app_user', 'public.engine_repo_controls', 'halted_by', 'UPDATE') AS u`).then((x) => x.rows[0].u))).toBe(false);
+    });
+
+    it('halted_by only exists while halted, and it names a real user', async () => {
+      const r = await repo();
+      await asOwner((c) => setEngineHalt(c, r));
+      await expect(admin.query(`UPDATE engine_repo_controls SET halted_at = NULL, halt_action_id = NULL WHERE repo_id = $1`, [r])).rejects.toMatchObject({ code: '23514' });
+      await expect(admin.query(`UPDATE engine_repo_controls SET halted_by = $2 WHERE repo_id = $1`, [r, randomUUID()])).rejects.toMatchObject({ code: '23503' });
+    });
+  });
+
   describe('only a person writes the marker', () => {
     it('app_user holds SELECT only on the table: no INSERT, UPDATE or DELETE, even as the account\'s owner', async () => {
       const r = await repo();

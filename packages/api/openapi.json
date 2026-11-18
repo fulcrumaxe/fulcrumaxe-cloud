@@ -47856,6 +47856,29 @@
                               "null"
                             ]
                           },
+                          "halted_by": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "string"
+                                  },
+                                  "display_name": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "display_name"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "halt_epoch": {
                             "type": "integer",
                             "minimum": -9007199254740991,
@@ -47876,6 +47899,7 @@
                           "halted",
                           "halt_pending",
                           "halted_at",
+                          "halted_by",
                           "halt_epoch"
                         ],
                         "additionalProperties": false

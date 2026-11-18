@@ -275,6 +275,7 @@ function mountApp(contentEl) {
     swap("halt", haltBox, shown ? { ...hl, id: "" } : null, () => (shown ? [
       h("h3", { class: "tm-sub", id: "tm-halt-h", tabindex: "-1", "data-focus": "halt-head" }, HALT_WORDS.head),
       h("p", { class: hl.state === "none" ? "tm-muted" : "tm-halt-state", "data-testid": "tm-halt-text", "data-state": hl.state }, hl.text),
+      hl.by ? h("p", { class: "tm-halt-by", "data-testid": "tm-halt-by" }, hl.by.parts.map((p) => (typeof p === "string" ? p : h("bdi", null, p.bdi)))) : null,
       hl.note ? h("p", { class: "tm-halt-note", role: "note", "data-testid": "tm-halt-note" }, hl.note) : null,
       hl.why ? h("p", { class: "tm-muted", id: "tm-halt-why", "data-testid": "tm-halt-why" }, hl.why) : null,
       hl.confirm ? confirmNode(hl.confirm) : hl.canHalt ? haltBtn(HALT_WORDS.halt, "tm-halt-btn", hl, "halt") : hl.canClear ? haltBtn(HALT_WORDS.clear, "tm-clear-btn", hl, "clear") : null,

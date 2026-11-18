@@ -1410,6 +1410,29 @@ describe("halt: the state, who sees controls, the questions and the requests", (
     const member = await halting({ halted: true, halt_pending: true }, { can_edit: false });
     expect(member.t.view().halt).toMatchObject({ state: "pending", chip: "Halting…", canHalt: false, canClear: false });
   });
+  it("halted: says who halted it and when, to an owner and to a member; the name is isolated text, never markup", async () => {
+    const at = F.iso(5 * 60);
+    const by = { id: "u0000000-0000-4000-8000-000000000009", display_name: "Olive <b>Owner</b>" };
+    const hh = (iso) => hm(iso);
+    for (const settings of [{}, { can_edit: false }]) {
+      const r = await halting({ halted: true, halted_at: at, halted_by: by }, settings);
+      const w = r.t.view().halt.by;
+      expect(w.text).toBe("Halted by Olive <b>Owner</b> at " + hh(at));
+      expect(w.parts).toEqual(["Halted by ", { bdi: "Olive <b>Owner</b>" }, " at " + hh(at)]);
+    }
+    // A halt from before the author was recorded, or an author who has left the account: the time alone, never "null" or "undefined".
+    for (const halted_by of [null, undefined, { id: by.id, display_name: "" }, "x"]) {
+      const w = (await halting({ halted: true, halted_at: at, halted_by })).t.view().halt.by;
+      expect(w.text).toBe("Halted at " + hh(at));
+      expect(w.text).not.toMatch(/null|undefined/);
+    }
+    // Yesterday's halt carries its day; a halt with no usable time, and a repo that is not halted, say nothing.
+    const old = new Date(NOW - 26 * 3600 * 1000).toISOString();
+    expect((await halting({ halted: true, halted_at: old, halted_by: by })).t.view().halt.by.text).toMatch(/^Halted by Olive <b>Owner<\/b> at \d\d-\d\d \d\d:\d\d$/);
+    expect((await halting({ halted: true, halted_at: null, halted_by: by })).t.view().halt.by).toBeNull();
+    expect((await halting({ halted: true, halted_at: "soon", halted_by: by })).t.view().halt.by).toBeNull();
+    expect((await halting({ halted: false, halted_at: at, halted_by: by })).t.view().halt.by).toBeNull();
+  });
   it("halted: the chip reads Halted, in the owner's view and the member's", async () => {
     const owner = await halting({ halted: true });
     expect(owner.t.view().halt).toMatchObject({ state: "halted", chip: "Halted", canHalt: false, canClear: true, text: HALT_WORDS.halted });
