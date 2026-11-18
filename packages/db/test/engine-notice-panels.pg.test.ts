@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool } from 'pg';
 import { createPool } from '../src/pool.js';
@@ -30,14 +30,41 @@ function whenKinds(sql: string, fn: string): string[] {
   return [...sql.slice(start, end).matchAll(/WHEN '([a-z_]+)' THEN/g)].map((m) => m[1]!);
 }
 
-/** The projected tables each kind writes, read from the ingest's own branches in 1027, plus the plan tables the 1032 trigger fills. */
+/**
+ * The ingest function's current body: the newest migration (by its number prefix) that defines engine_events_ingest. 1027 created it and 1039 re-carried
+ * it, so a later re-carry is picked up here without the test being edited.
+ */
+function newestIngestMigration(): string {
+  const dir = new URL('../migrations/', import.meta.url);
+  const files = readdirSync(dir).filter((f) => /^\d+_.*\.sql$/.test(f)).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+  const defining = files.filter((f) => /CREATE (?:OR REPLACE )?FUNCTION engine_events_ingest\(/.test(readFileSync(new URL(f, dir), 'utf8')));
+  expect(defining.length, 'a migration defines engine_events_ingest').toBeGreaterThan(0);
+  return readFileSync(new URL(defining[defining.length - 1]!, dir), 'utf8');
+}
+
+/** The kind literals a source names through `kind = '..'`, `kind IN ('..', ..)` or `kind = ANY(ARRAY['..', ..])` / `ANY('{a,b}')`. */
+function kindLiterals(src: string): Set<string> {
+  const kinds = new Set<string>();
+  for (const m of src.matchAll(/(?<![A-Za-z0-9_])kind\s*=\s*'([a-z_]+)'/g)) kinds.add(m[1]!);
+  for (const m of src.matchAll(/(?<![A-Za-z0-9_])kind\s*(?:IN\s*\(([^)]*)\)|=\s*ANY\s*\(([^)]*)\))/gi)) {
+    for (const lit of (m[1] ?? m[2]!).matchAll(/'([^']*)'/g)) for (const k of lit[1]!.replace(/[{}]/g, '').split(',')) if (/^[a-z_]+$/.test(k.trim())) kinds.add(k.trim());
+  }
+  return kinds;
+}
+
+/** The projected tables each kind writes, read from the newest ingest body's own branches, plus the plan tables the 1032 trigger fills. */
 function tableWriters(): Map<string, Set<string>> {
-  const body = MIGRATION_1027.slice(MIGRATION_1027.indexOf("IF kind = 'agent_started' THEN"), MIGRATION_1027.indexOf("IF kind IN ('engine_heartbeat'"));
+  const ingest = newestIngestMigration();
+  const bodyStart = ingest.indexOf("IF kind = 'agent_started' THEN");
+  const bodyEnd = ingest.indexOf("IF kind IN ('engine_heartbeat'");
+  expect(bodyStart, 'ingest kind branches found').toBeGreaterThan(-1);
+  expect(bodyEnd, 'ingest branch end found').toBeGreaterThan(bodyStart);
+  const body = ingest.slice(bodyStart, bodyEnd);
   const writers = new Map<string, Set<string>>();
   const add = (table: string, kind: string): void => void writers.set(table, (writers.get(table) ?? new Set()).add(kind));
   const parts = body.split(/(?:IF|ELSIF) kind = '([a-z_]+)' THEN/);
   for (let i = 1; i < parts.length; i += 2) for (const m of parts[i + 1]!.matchAll(/(?:INSERT INTO|UPDATE|DELETE FROM) public\.(engine_[a-z_]+)/g)) add(m[1]!, parts[i]!);
-  const usage = MIGRATION_1027.slice(MIGRATION_1027.indexOf("IF kind IN ('agent_stopped', 'tick_ended') AND b ? 'usage' THEN"));
+  const usage = ingest.slice(ingest.indexOf("IF kind IN ('agent_stopped', 'tick_ended') AND b ? 'usage' THEN"));
   expect(usage.slice(0, 600)).toContain('engine_agent_usage');
   for (const k of ['agent_stopped', 'tick_ended']) add('engine_agent_usage', k);
   // The plan tables are written by a row trigger on engine_events, for this one kind.
@@ -81,7 +108,7 @@ function readKinds(panel: string): Set<string> {
   const kinds = new Set<string>();
   for (const [file, name] of def.fns) {
     const src = fnSource(file, name);
-    for (const m of src.matchAll(/(?<![A-Za-z0-9_])kind = '([a-z_]+)'/g)) kinds.add(m[1]!);
+    for (const k of kindLiterals(src)) kinds.add(k);
     for (const t of new Set([...src.matchAll(/\b(engine_[a-z_]+)\b/g)].map((m) => m[1]!))) {
       if (writers.has(t)) for (const k of writers.get(t)!) kinds.add(k);
       else expect(NOT_KIND_WRITTEN, `${name} reads ${t}, which no event kind writes and is not declared as such`).toContain(t);
@@ -105,6 +132,14 @@ describe('engine notice panels: the kind map (migration 1039)', () => {
   afterAll(async () => {
     await admin.end();
     await app.end();
+  });
+
+  it('kindLiterals reads equality, IN lists and = ANY forms, and ignores a longer identifier ending in kind', () => {
+    expect([...kindLiterals(`WHERE kind = 'a_b' AND subject_kind = 'agent'`)]).toEqual(['a_b']);
+    expect([...kindLiterals(`WHERE kind IN ('a', 'b_c')`)].sort()).toEqual(['a', 'b_c']);
+    expect([...kindLiterals(`WHERE kind=ANY(ARRAY['x','y'])`)].sort()).toEqual(['x', 'y']);
+    expect([...kindLiterals(`WHERE kind = ANY('{p,q}'::text[])`)].sort()).toEqual(['p', 'q']);
+    expect([...kindLiterals(`WHERE subject_kind IN ('agent', 'tick')`)]).toEqual([]);
   });
 
   it('completeness: the runner protocol kinds, the 1027 body spec and the panel map are the same set, and the closed set is the one the SQL names', async () => {
