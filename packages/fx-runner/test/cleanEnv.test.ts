@@ -158,6 +158,17 @@ describe("cleanEnv allowlist", () => {
     expect(envAccessViolations(SPAWN_IMPORT + call, "src/engines/claude/engine.ts"), call).not.toEqual([]);
   });
 
+  it("the guard exempts the guest agent's wire op name \"exec\" in that one file, as an `op` frame field only", () => {
+    const file = "src/vm/sandboxd/guestAgent.ts";
+    expect(envAccessViolations('const f = { op: "exec", argv: [] };', file)).toEqual([]);
+    for (const bad of ['const f = "exec";', 'const f = { cmd: "exec" };', 'const f = { op: "execFile" };', 'x["exec"]();', 'const f = { op: "spawn" };', 'const f = ["exec"];']) {
+      expect(envAccessViolations(bad, file), bad).not.toEqual([]);
+    }
+    for (const other of ["src/vm/sandboxd/command.ts", "src/vm/sandboxd/sandboxd.ts", "src/vm/command.ts", "src/engines/claude/engine.ts", "src/job/cleanEnv.ts"]) {
+      expect(envAccessViolations('const f = { op: "exec", argv: [] };', other), other).not.toEqual([]);
+    }
+  });
+
   it("the guard lets processGroup.ts name process only as process.kill or process.platform", () => {
     const file = "src/engines/claude/processGroup.ts";
     expect(envAccessViolations("process.kill(-pid, 'SIGTERM'); const w = process.platform !== 'win32';", file)).toEqual([]);

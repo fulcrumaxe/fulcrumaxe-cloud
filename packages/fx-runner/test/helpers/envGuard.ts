@@ -166,6 +166,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#587 B-1, the microVM image build (`fx-runner vm build-image`). It reads no environment and starts no process itself: crane, tar and mke2fs run through the injected host (scripts/vm-main.mjs).
   "src/vm/buildImage.ts": ["crypto", "fs", "path"], // SHA-256 of the root disk and the guest files, a work directory per architecture, a sparse disk file of the computed size, and the staged guest files
   "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
+  "src/vm/sandboxd/command.ts": ["crypto"], // D#587 B-2b-iii: a random command id and pid-file name; no process is started here, the command runs in the guest through the agent
+  "src/vm/sandboxd/guestAgent.ts": ["net", "stream"], // D#587 B-2b-iii: the guest agent client: a Unix-socket connection to the sandbox's vsock proxy and the Duplex type it is handed; no process is started
+  "src/vm/sandboxd/helperClient.ts": ["stream"], // D#587 B-2b-iii: the helper client takes an injected Duplex and speaks framed JSON over it; only the stream type is named
+  "src/vm/sandboxd/sandboxd.ts": ["path"], // D#587 B-2b-iii: joins the per-sandbox directory and socket names below the state directory
   // D#749 V2c-2a, the verify browser server. No environment read (the host environment, streams and job directory arrive as arguments) and no process of its own: Chromium is started by playwright-core.
   "src/verifyBrowser/server.ts": ["fs", "path", "stream"], // the one answer.json in the job directory (exclusive create, 0600); stream is only the types of the injected input and output
   "src/commands/verifyBrowserServer.ts": ["path"], // D#749 V2c-2b: the server entry checks its path flags are plain absolute paths; nothing is read or written here
@@ -224,6 +228,19 @@ function loadedSpecifier(node: ts.Node): { spec: ts.Expression | undefined } | u
 const SPAWN_NAME = /^spawn/i;
 const SPAWN_SEAM_FILE = "src/engines/claude/engine.ts";
 const CHILD_PROCESS_NAMES = new Set(["spawn", "ChildProcess"]);
+/**
+ * The one reviewed exemption to the banned child-process names: the guest agent protocol's wire op name (B-1b) is the word "exec". It is
+ * allowed only in that file, only as the exact string, and only as the value of an `op` property in an object literal (a frame field), so it
+ * can never be called, indexed or passed as a function name. No other file, string or position is exempt.
+ */
+export const WIRE_OP_EXEMPTION: Readonly<Record<string, string>> = { "src/vm/sandboxd/guestAgent.ts": "exec" };
+
+function isWireOpFrameField(node: ts.Node, file: string, text: string): boolean {
+  if (WIRE_OP_EXEMPTION[file] !== text || !ts.isStringLiteral(node)) return false;
+  const parent = node.parent;
+  return ts.isPropertyAssignment(parent) && parent.initializer === node && ts.isIdentifier(parent.name) && parent.name.text === "op" && ts.isObjectLiteralExpression(parent.parent);
+}
+
 const BANNED_STRINGS = new Set(["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]);
 
 function isChildProcessSpec(spec: string): boolean {
@@ -352,7 +369,7 @@ export function envAccessViolations(source0: string, file: string = ENV_READER_F
       if (/^(?:node:)?process$/.test(node.text)) found.add("import of the process module");
       if (node.text.includes("/proc/")) found.add("/proc/ path");
       if (node.text === "constructor") found.add("constructor member");
-      if (BANNED_STRINGS.has(node.text)) found.add("child process function named by a string");
+      if (BANNED_STRINGS.has(node.text) && !isWireOpFrameField(node, file, node.text)) found.add("child process function named by a string");
       // Allowed only as the element right after "--proc" in an array literal: the mount-point argument, never a path being built.
       const parent = node.parent;
       const exactProc =
