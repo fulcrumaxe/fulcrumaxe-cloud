@@ -26,6 +26,8 @@ import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
 import { findCliStubs } from "../daemon/cliStubs.js";
+import { ENGINE_LINES, engineLineOf, missingCaps, type VmHostFacts } from "../vm/limits.js";
+import { loadSettings } from "../runnerSettings.js";
 import { updatesLine } from "./update.js";
 import { userUnitInstalled } from "./service.js";
 
@@ -59,6 +61,8 @@ export interface DoctorHost {
   /** `XDG_CONFIG_HOME` and the account name, looked up by the caller: where a per-user service unit would be, and the name the lingering advice uses. */
   xdgConfigHome?: string | undefined;
   userName?: string | undefined;
+  /** D#587 B-6a: what the machine says about KVM, the VM helper's socket and memory. Left out means every one of them is unreadable, which never reads as available. */
+  vm?: VmHostFacts | undefined;
   /** This program's version and real path, for the Updates line. Absent in tests that do not care. */
   update?: { version?: string | undefined; execPath?: string | undefined } | undefined;
 }
@@ -105,6 +109,51 @@ async function limitsCheck(host: DoctorHost, line: (level: Level, label: string,
   });
   if (support.ok) line("PASS", "Job limits", "each job runs in its own systemd scope with a memory and a process limit");
   else line("WARN", "Job limits", `${UNENFORCED_LINE} (${support.reason})`);
+}
+
+const MIB = 1024 ** 2;
+
+/**
+ * D#587 B-6a: the `sandbox_engine:` line, from the closed set in `vm/limits.ts`, and in `microvm` mode the limits and the host memory reading. The engine
+ * line is printed whatever the mode; the checks after it can FAIL only when the person asked for `microvm`, and then the runner claims nothing. A fact that could
+ * not be read is a failure there, never a pass.
+ */
+function vmEngineCheck(ctx: CommandContext, host: DoctorHost, line: (level: Level, label: string, detail: string) => void): void {
+  const settings = loadSettings(ctx.stateDir);
+  const engine = settings.sandboxEngine ?? "os_sandbox";
+  const text = engineLineOf({ platform: host.platform, engine, caps: settings.microvm, facts: host.vm });
+  ctx.out(`INFO  sandbox_engine: ${text}`);
+  if (engine === "invalid") {
+    line("FAIL", "microvm", "sandbox_engine in the settings file is neither os_sandbox nor microvm; nothing is claimed. Fix it with: fx-runner config set sandbox_engine os_sandbox|microvm");
+    return;
+  }
+  if (engine !== "microvm") return;
+  const missing = missingCaps(settings.microvm);
+  if (missing.length > 0) line("FAIL", "microvm limits", `missing or invalid: ${missing.join(", ")}; nothing is claimed. Set each with: fx-runner config set <key> <value>`);
+  if (text !== ENGINE_LINES.microvm && text !== ENGINE_LINES.limitsMissing) line("FAIL", "microvm", `microvm_unavailable: ${text}; nothing is claimed and the runner does not fall back to os_sandbox`);
+  const caps = settings.microvm;
+  if (missing.length > 0 || caps === undefined) return;
+  const vm = host.vm;
+  const totalMb = vm?.totalMemMb;
+  const cpus = vm?.cpus;
+  if (totalMb === undefined || cpus === undefined || !Number.isFinite(totalMb) || !Number.isFinite(cpus)) {
+    line("FAIL", "microvm limits", "the host's total memory or core count could not be read, so the limits cannot be compared with it");
+  } else {
+    const over: string[] = [];
+    if ((caps.maxMemoryMb ?? 0) > totalMb) over.push(`max_memory_mb ${caps.maxMemoryMb} is over the host's ${totalMb} MiB`);
+    if ((caps.maxVcpus ?? 0) > cpus) over.push(`max_vcpus ${caps.maxVcpus} is over the host's ${cpus} cores`);
+    if (over.length > 0) line("FAIL", "microvm limits", over.join("; "));
+    else line("PASS", "microvm limits", `max_vms ${caps.maxVms}, max_vcpus ${caps.maxVcpus} (host ${cpus}), max_memory_mb ${caps.maxMemoryMb} (host ${totalMb}), snapshot_dir ${caps.snapshotDir}, snapshot_quota_bytes ${caps.snapshotQuotaBytes}`);
+  }
+  let available: number | undefined;
+  try {
+    available = vm?.readMemAvailableBytes();
+  } catch {
+    // fx-swallow-ok: a reader that throws is a reading that could not be made, reported below
+    available = undefined;
+  }
+  if (typeof available !== "number" || !Number.isFinite(available) || available < 0) line("FAIL", "Host memory", "available memory could not be read; every VM would be refused");
+  else line("INFO", "Host memory", `${Math.floor(available / MIB)} MiB available`);
 }
 
 /** The environment `loginctl` is started with: a fixed search path, no locale. */
@@ -286,6 +335,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
 
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
   await limitsCheck(host, line);
+  vmEngineCheck(ctx, host, line);
   await lingerCheck(host, line);
 
   // What a job's agent can run for a project's own tests (D#6 R4d-3), on the runner's own PATH. Missing node is a warning, not a failure: not every repository needs it.

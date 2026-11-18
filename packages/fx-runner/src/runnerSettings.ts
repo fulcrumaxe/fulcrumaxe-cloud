@@ -9,6 +9,7 @@ import { MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, type JobClass } from "@fulcruma
 import { CliError } from "./cliError.js";
 import { writePrivateFile } from "./config.js";
 import { parseBase } from "./verifyBrowser/pin.js";
+import { MICROVM_KEYS, SANDBOX_ENGINES, SANDBOX_ENGINE_KEY, capFieldOf, capRangeOf, isPlainAbsolutePath, parseCap, type MicrovmKey, type PartialMicrovmCaps, type SandboxEngine } from "./vm/limits.js";
 
 /** Jobs held at once, light and heavy together, never exceed the light maximum (8). */
 const MAX_TOTAL_CAPACITY = MAX_LIGHT_CAPACITY;
@@ -36,6 +37,10 @@ export interface RunnerSettings {
   verify?: VerifySettings;
   /** EB-12c: the hosted Team Lead's schedule. Present only when one of its two values is set. */
   engineHost?: EngineHostSettings;
+  /** D#587 B-6a: the sandbox engine. Absent is `os_sandbox`; `invalid` is a stored value that is neither, which claims nothing and which doctor fails. */
+  sandboxEngine?: SandboxEngine | "invalid";
+  /** D#587 B-6a: the microvm limits. Only the ones that are set and in range are here; `os_sandbox` ignores them. */
+  microvm?: PartialMicrovmCaps;
 }
 
 /**
@@ -122,7 +127,8 @@ export const ENGINE_START_DAY_KEY = "engine-host.start-day-at";
 const ENGINE_HOST_KEYS = [ENGINE_LOOP_MINUTES_KEY, ENGINE_START_DAY_KEY] as const;
 export const ENGINE_LOOP_MINUTES_RANGE: readonly [number, number] = [5, 60];
 const START_DAY_AT = /^([01]\d|2[0-3]):[0-5]\d$/;
-export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", ...BUDGET_KEYS, ...VERIFY_KEYS, ...ENGINE_HOST_KEYS];
+export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", ...BUDGET_KEYS, ...VERIFY_KEYS, ...ENGINE_HOST_KEYS, SANDBOX_ENGINE_KEY, ...MICROVM_KEYS];
+const isVmKey = (key: string): boolean => key === SANDBOX_ENGINE_KEY || (MICROVM_KEYS as readonly string[]).includes(key);
 
 const RANGES: Readonly<Record<string, readonly [number, number]>> = {
   "concurrency.total": [1, MAX_TOTAL_CAPACITY],
@@ -179,6 +185,15 @@ export function loadSettings(stateDir: string): RunnerSettings {
     const loopMin = whole(host?.["loopMin"], ...ENGINE_LOOP_MINUTES_RANGE);
     const startDayAt = typeof host?.["startDayAt"] === "string" && START_DAY_AT.test(host["startDayAt"]) ? host["startDayAt"] : undefined;
     if (loopMin !== undefined || startDayAt !== undefined) settings.engineHost = { ...(loopMin === undefined ? {} : { loopMin }), ...(startDayAt === undefined ? {} : { startDayAt }) };
+    if ("sandboxEngine" in parsed) settings.sandboxEngine = (SANDBOX_ENGINES as readonly unknown[]).includes(parsed["sandboxEngine"]) ? (parsed["sandboxEngine"] as SandboxEngine) : "invalid";
+    const savedVm = parsed["microvm"] as Record<string, unknown> | null | undefined;
+    const caps: Record<string, number | string> = {};
+    for (const key of MICROVM_KEYS) {
+      const field = capFieldOf(key);
+      const value = parseCap(field, savedVm?.[field]);
+      if (value !== undefined) caps[field] = value;
+    }
+    if (Object.keys(caps).length > 0) settings.microvm = caps as PartialMicrovmCaps;
     if (argv !== undefined || dir !== undefined || account !== undefined || Object.keys(browser).length > 0) settings.verify = { ...(argv === undefined ? {} : { deployArgv: argv }), ...(dir === undefined ? {} : { deployDir: dir }), ...(account === undefined ? {} : { testAccount: account }), ...(Object.keys(browser).length > 0 ? { browser } : {}) };
   } catch {
     // fx-swallow-ok: a missing or damaged settings file is the defaults
@@ -232,8 +247,47 @@ function setVerify(stateDir: string, key: (typeof VERIFY_KEYS)[number], text: st
   return `${key} set; it applies from the next claim`;
 }
 
+/** D#587 B-6a: saves the engine or one microvm limit. A value out of range is refused and nothing is written. */
+function setVm(stateDir: string, key: string, text: string): string {
+  const settings = loadSettings(stateDir);
+  if (key === SANDBOX_ENGINE_KEY) {
+    if (!(SANDBOX_ENGINES as readonly string[]).includes(text)) throw new CliError(`${key} takes ${SANDBOX_ENGINES.join(" or ")}`, 2);
+    settings.sandboxEngine = text as SandboxEngine;
+    writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
+    return `${key} set to ${text}; it applies from the next claim`;
+  }
+  const field = capFieldOf(key as MicrovmKey);
+  const caps: PartialMicrovmCaps = { ...settings.microvm };
+  if (field === "snapshotDir") {
+    if (!isPlainAbsolutePath(text)) throw new CliError(`${key} takes an absolute path, written plainly (no . or .. part, no trailing slash)`, 2);
+    caps.snapshotDir = text;
+  } else {
+    const [min, max] = capRangeOf(field);
+    const n = /^\d{1,16}$/.test(text) ? Number(text) : undefined;
+    if (n === undefined || parseCap(field, n) === undefined) throw new CliError(`${key} takes a whole number from ${min} to ${max}`, 2);
+    caps[field] = n;
+  }
+  settings.microvm = caps;
+  writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
+  return `${key} set; it applies from the next claim`;
+}
+
+function unsetVm(stateDir: string, key: string): string {
+  const settings = loadSettings(stateDir);
+  if (key === SANDBOX_ENGINE_KEY) delete settings.sandboxEngine;
+  else {
+    const caps: PartialMicrovmCaps = { ...settings.microvm };
+    delete caps[capFieldOf(key as MicrovmKey)];
+    if (Object.keys(caps).length === 0) delete settings.microvm;
+    else settings.microvm = caps;
+  }
+  writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
+  return `${key} is cleared; it applies from the next claim`;
+}
+
 /** Validates and saves one setting. A value out of range or not a whole number is refused with a message and nothing is written. */
 export function setSetting(stateDir: string, key: string, text: string): string {
+  if (isVmKey(key)) return setVm(stateDir, key, text);
   if ((VERIFY_KEYS as readonly string[]).includes(key)) return setVerify(stateDir, key as (typeof VERIFY_KEYS)[number], text);
   if ((ENGINE_HOST_KEYS as readonly string[]).includes(key)) {
     const settings = loadSettings(stateDir);
@@ -272,6 +326,7 @@ export function setSetting(stateDir: string, key: string, text: string): string 
 
 /** Returns one setting to its automatic default (the ceilings to their maxima, the reserve to 25% of RAM with a 2 GB minimum, the CPU reserve to 20% of the cores, the heavy memory budget to the one derived from measured footprints). */
 export function unsetSetting(stateDir: string, key: string): string {
+  if (isVmKey(key)) return unsetVm(stateDir, key);
   if (RANGES[key] === undefined && !(VERIFY_KEYS as readonly string[]).includes(key) && !(ENGINE_HOST_KEYS as readonly string[]).includes(key)) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
   if ((ENGINE_HOST_KEYS as readonly string[]).includes(key)) {
     const settings = loadSettings(stateDir);
