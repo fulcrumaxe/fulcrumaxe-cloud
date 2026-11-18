@@ -336,14 +336,18 @@ jobs:
       #    (read-only token, passed as environment data), never from the event payload: a re-run replays the
       #    payload as it was when the run started. If the read fails the answer is `full`.
       - name: CI scope
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
           # Empty on the public repository, so the classifier cannot answer `overlay` there.
-          CI_OVERLAY_LIST: ${{ github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}
+          CI_OVERLAY_LIST: ${{ github.event_name == 'pull_request' && github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}
           CI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          # A merge queue group is the range base_sha..head_sha; a pull request is HEAD^1..HEAD, as before.
+          CI_SCOPE_BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || 'HEAD^1' }}
+          CI_SCOPE_HEAD: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || 'HEAD' }}
+          CI_EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-        run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
+        run: nix develop .#ci --command node scripts/ci/affected.mjs --base "$CI_SCOPE_BASE" --head "$CI_SCOPE_HEAD" --force-full "$CI_FORCE_FULL" --labels-api --github --event "$CI_EVENT_NAME"
 
       - name: CI scope (push to main)
         if: github.event_name != 'pull_request' && !github.event.repository.private
@@ -507,8 +511,12 @@ jobs:
           # still ends success under its real name, as `check` and `e2e-runner` do. Empty elsewhere, so nothing else changes.
           CI_OVERLAY_LIST: ${{ github.event_name == 'pull_request' && github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}
           CI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          # A merge queue group is the range base_sha..head_sha; a pull request is HEAD^1..HEAD, as before.
+          CI_SCOPE_BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || 'HEAD^1' }}
+          CI_SCOPE_HEAD: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || 'HEAD' }}
+          CI_EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-        run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github --e2e-step
+        run: nix develop .#ci --command node scripts/ci/affected.mjs --base "$CI_SCOPE_BASE" --head "$CI_SCOPE_HEAD" --force-full "$CI_FORCE_FULL" --labels-api --github --e2e-step --event "$CI_EVENT_NAME"
 
       # Paired copy of a cloud-built item (private repository only, see PAIRED COPIES at the top of this file).
       # Sets CI_PAIRED_COPY for the heavy steps below; reads nothing from the pull request but the fields in the `if:`.

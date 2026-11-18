@@ -9,6 +9,17 @@
 // read fails for any reason the answer is `full`. `--labels` is for running the script by hand and is ignored
 // when `--labels-api` is given.
 //
+// `--event merge_group` (the merge queue) classifies a GROUP: --base and --head are the event's base_sha and head_sha,
+// but base_sha is only the group's parent commit (the head of the entry ahead, not the target branch's tip), so the
+// range is the one back to the merge base with the target branch named by GITHUB_REF
+// (refs/heads/gh-readonly-queue/<branch>/pr-<N>-<sha>), listed by the compare API. The pull requests are read from the
+// subject of each commit in it (a trailing `(#N)`; a queue commit has one parent), their labels are read the same
+// way as above, and the scope is the diff of the WHOLE range, so an entry is tested with everything ahead of it.
+// Anything it cannot establish is `full`: a GITHUB_REF of another shape, an event base that is not in the range, a commit with no `(#N)`, a
+// label read that fails, a SHA that cannot be resolved, a compare call that fails or is cut short, `ci:full` on any
+// pull request. A base_sha missing from the shallow checkout is fetched at depth 1 with the read-only token. See
+// classifyMergeGroup. Every other event behaves exactly as before.
+//
 // Prints one JSON object:
 //   {"mode":"full"|"affected"|"overlay","reason":"...","trigger":"<glob>"|null,"packages":["apps/web",...],"e2e":true|false,"lint":["scripts/ci"]|[]}
 //
@@ -535,7 +546,15 @@ export function classify(input) {
 }
 
 /** The one line a pull-request run shows for a result. */
-export function scopeLine(result) {
+export function scopeLine(result, opts = {}) {
+  // A merge-group answer names the pull requests it covered; with no package it says `docs`. `check` runs its full
+  // suite on queue runs (only workspace-e2e is narrowed), and its line says so; the e2e step's line does not.
+  if (result.mergeGroup && result.mode === "affected") {
+    const group = `merge group of ${result.mergeGroup.prs.map((n) => `#${n}`).join(", ")}`;
+    const suffix = opts.e2eStep ? "" : "; check runs its full suite on queue runs (only workspace-e2e is narrowed)";
+    if (result.packages.length === 0) return `CI scope: docs — 0 packages (ignored paths only); ${group}${suffix}`;
+    return `CI scope: affected — ${result.packages.length} packages: ${result.packages.join(", ")}; ${group}${suffix}`;
+  }
   if (result.mode === "overlay") return `CI scope: overlay-only — ${result.overlay.length} overlay files; product suites skipped (the code plane's main already ran them)`;
   if (result.mode === "full") return `CI scope: full (${result.trigger ?? result.reason})`;
   if (result.packages.length === 0) return "CI scope: affected — 0 packages (ignored paths only)";
@@ -588,6 +607,154 @@ export async function fetchPrLabels(env = process.env, fetchImpl = globalThis.fe
   }
 }
 
+const SHA_RE = /^[0-9a-f]{40}$/;
+const COMPARE_PAGE_SIZE = 100;
+const COMPARE_MAX_PAGES = 3;
+const BRANCH_RE = /^[A-Za-z0-9._\/-]{1,200}$/;
+// GITHUB_REF of a merge queue run: the queue branch, whose middle part is the target branch.
+const QUEUE_REF_RE = /^refs\/heads\/gh-readonly-queue\/(.+)\/pr-[1-9][0-9]{0,9}-[0-9a-f]{40}$/;
+
+/**
+ * The commits of `branch...head` from GitHub's compare endpoint (read-only GET): { commits: [{ sha, subject, parents }],
+ * mergeBase } with the commits oldest first, or { error }. A shallow checkout cannot list them; the API does not
+ * depend on how much history was fetched. A list that is cut short, empty, or does not end at head is an error, and
+ * so is a merge base that is not a full SHA.
+ */
+export async function fetchRangeCommits(branch, head, env = process.env, fetchImpl = globalThis.fetch) {
+  try {
+    const repo = env.GITHUB_REPOSITORY ?? "";
+    const token = env.GH_TOKEN ?? "";
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return { error: "GITHUB_REPOSITORY is missing or malformed" };
+    if (!token) return { error: "GH_TOKEN is missing" };
+    if (!BRANCH_RE.test(branch ?? "") || branch.includes("..")) return { error: "target branch name is malformed" };
+    const root = (env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
+    const commits = [];
+    let total = 0;
+    let mergeBase = null;
+    for (let page = 1; page <= COMPARE_MAX_PAGES; page++) {
+      const res = await fetchImpl(`${root}/repos/${repo}/compare/${branch.split("/").map(encodeURIComponent).join("/")}...${head}?per_page=${COMPARE_PAGE_SIZE}&page=${page}`, {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "fulcrumaxe-ci-scope",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return { error: `compare answered ${res.status}` };
+      const body = await res.json();
+      if (!body || !Array.isArray(body.commits) || !Number.isInteger(body.total_commits)) return { error: "unexpected compare response" };
+      const mb = body.merge_base_commit && body.merge_base_commit.sha;
+      if (typeof mb !== "string" || !SHA_RE.test(mb)) return { error: "compare gave no merge base" };
+      if (mergeBase !== null && mergeBase !== mb) return { error: "compare merge base changed between pages" };
+      mergeBase = mb;
+      total = body.total_commits;
+      for (const c of body.commits) {
+        const message = c && c.commit && typeof c.commit.message === "string" ? c.commit.message : null;
+        if (!c || typeof c.sha !== "string" || message === null || !Array.isArray(c.parents)) return { error: "unexpected compare response" };
+        commits.push({ sha: c.sha, subject: message.split("\n")[0].trim(), parents: c.parents.length });
+      }
+      if (commits.length >= total) break;
+    }
+    if (commits.length !== total) return { error: `compare listed ${commits.length} of ${total} commits` };
+    if (commits.length === 0) return { error: "compare listed no commits" };
+    if (commits[commits.length - 1].sha !== head) return { error: "compare range does not end at the head SHA" };
+    return { commits, mergeBase };
+  } catch (err) {
+    return { error: String(err && err.message).split("\n")[0] || "request failed" };
+  }
+}
+
+/**
+ * Fetches one commit at depth 1 into `repoRoot` (a base_sha that is not in the shallow checkout). The read-only
+ * token goes in the environment of the git process (GIT_CONFIG_*), never on its command line. `remote` is for
+ * tests (a local path); without it the remote is the GitHub server of this repository. Returns null or an error text.
+ */
+export function fetchCommitDepth1(repoRoot, sha, env = process.env, remote = null) {
+  if (!SHA_RE.test(sha)) return "not a full SHA";
+  const token = env.GH_TOKEN ?? "";
+  const repo = env.GITHUB_REPOSITORY ?? "";
+  if (remote === null && (!token || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))) return "token or repository missing";
+  const url = remote ?? `${(env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "")}/${repo}.git`;
+  const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
+  const res = spawnSync("git", ["-C", repoRoot, "fetch", "--no-tags", "--depth=1", "--quiet", url, sha], {
+    encoding: "utf8",
+    timeout: 120_000,
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+      GIT_TERMINAL_PROMPT: "0",
+      ...(remote === null ? { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraheader", GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${auth}` } : {}),
+    },
+  });
+  if (res.error || res.status !== 0) return `git fetch failed: ${String(res.error?.message ?? res.stderr ?? "").split("\n")[0]}`.slice(0, 200);
+  return null;
+}
+
+/** The pull request number a queue commit's subject ends with, `(#N)`, or null. */
+export function prNumberOfSubject(subject) {
+  const m = /\(#([1-9][0-9]{0,9})\)$/.exec(subject.trim());
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Classifies a merge-queue group. `input`: { repoRoot, base, head, forceFull, env, triggerFile } where base and head are
+ * the event's base_sha and head_sha; `deps` (tests): { fetchImpl, fetchBase(repoRoot, sha) -> error text | null }.
+ * Never throws; every doubt is `full`. A narrowed answer carries `mergeGroup: { prs }`. The overlay list is never
+ * used here: a queue run is a product run.
+ *
+ * The event's base_sha is the group's PARENT commit: for an entry queued behind another it is that entry's head, not the
+ * tip of the target branch, so base_sha..head_sha is one commit. The range used here is therefore the one back to
+ * the merge base with the target branch (named by GITHUB_REF), listed by the compare API: every commit ahead of this
+ * entry that is not yet on the branch. The event's base must be one of those commits or the merge base itself.
+ */
+export async function classifyMergeGroup(input, deps = {}) {
+  const { repoRoot = DEFAULT_REPO_ROOT, base, head, forceFull = "", env = process.env } = input;
+  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
+  const fetchBase = deps.fetchBase ?? ((root, sha) => fetchCommitDepth1(root, sha, env));
+  try {
+    if (forceFull === "true") return full("CI_FORCE_FULL");
+    if (!SHA_RE.test(base ?? "") || !SHA_RE.test(head ?? "")) return full("merge group: base or head SHA missing or not a full SHA");
+    const ref = QUEUE_REF_RE.exec(env.GITHUB_REF ?? "");
+    if (!ref) return full("merge group: GITHUB_REF is not a merge queue branch");
+    const branch = ref[1];
+    const has = (sha) => {
+      try {
+        git(repoRoot, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!has(head)) return full(`merge group: head SHA cannot be resolved: ${head}`);
+    const range = await fetchRangeCommits(branch, head, env, fetchImpl);
+    if (range.error) return full(`merge group: ${range.error}`);
+    // The event's own base must belong to this range, or the answer cannot be trusted.
+    if (base !== range.mergeBase && !range.commits.some((c) => c.sha === base)) return full("merge group: the event's base SHA is not in the range back to the target branch");
+    if (!has(range.mergeBase)) {
+      const err = fetchBase(repoRoot, range.mergeBase);
+      if (err || !has(range.mergeBase)) return full(`merge group: base SHA cannot be resolved: ${range.mergeBase}${err ? ` (${err})` : ""}`);
+    }
+    const prs = [];
+    for (const c of range.commits) {
+      if (c.parents !== 1) return full(`merge group: commit ${c.sha.slice(0, 12)} does not have exactly one parent`);
+      const n = prNumberOfSubject(c.subject);
+      if (n === null) return full(`merge group: commit ${c.sha.slice(0, 12)} has no (#N) pull request number`);
+      if (!prs.includes(n)) prs.push(n);
+    }
+    for (const n of prs) {
+      const got = await fetchPrLabels({ ...env, CI_PR_NUMBER: String(n) }, fetchImpl);
+      if (got.error) return full(`merge group: could not read the labels of #${n} (${got.error})`);
+      if (got.labels.includes("ci:full")) return full(`merge group: label ci:full on #${n}`);
+    }
+    // The whole range back to the merge base, through the same classifier and the same diff; the labels are settled above.
+    const result = classify({ ...input, base: range.mergeBase, forceFull: "", labels: [], labelsError: null, overlayList: "" });
+    return result.mode === "full" ? result : { ...result, mergeGroup: { prs } };
+  } catch (err) {
+    return full(`merge group classifier error: ${String(err && err.message).split("\n")[0]}`);
+  }
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -624,13 +791,13 @@ async function main() {
       // The API is the only source: a --labels value is never mixed in. With CI_FORCE_FULL on, the answer is
       // already full, so the request is not made.
       labels = [];
-      if (args["force-full"] !== "true") {
+      if (args["force-full"] !== "true" && args.event !== "merge_group") {
         const got = await fetchPrLabels();
         labels = got.labels ?? [];
         labelsError = got.error ?? null;
       }
     }
-    result = classify({
+    const input = {
       repoRoot: args.repo ?? DEFAULT_REPO_ROOT,
       base: args.base,
       head: args.head,
@@ -639,7 +806,10 @@ async function main() {
       labelsError,
       triggerFile: args.triggers ?? DEFAULT_TRIGGER_FILE,
       overlayList: args["overlay-list"] ?? process.env.CI_OVERLAY_LIST ?? "",
-    });
+    };
+    // The labels of a group are many and are read inside classifyMergeGroup, so the single-PR read above is
+    // skipped for it (CI_PR_NUMBER is empty on a merge_group event and would only produce a false error).
+    result = args.event === "merge_group" ? await classifyMergeGroup({ ...input, overlayList: "" }) : classify(input);
   } catch (err) {
     // Even a bad command line must not turn into a quiet "affected": say full and why.
     args = args ?? { github: process.argv.includes("--github") };
@@ -647,7 +817,7 @@ async function main() {
   }
   console.log(JSON.stringify(result));
   if (args.github) {
-    const line = scopeLine(result);
+    const line = scopeLine(result, { e2eStep: Boolean(args["e2e-step"]) });
     console.error(line);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${line}\n`);
     if (process.env.GITHUB_ENV) {

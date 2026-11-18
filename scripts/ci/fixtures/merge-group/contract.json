@@ -1,0 +1,35 @@
+{
+  "captured": "2026-11-18",
+  "note": "What a real merge-queue group looks like, captured from real queue runs (run-*.json, the GitHub API's run object, key order only changed). The merge_group event payload itself is not stored by GitHub. Read from the runs: head_sha is the run's head_sha, and the SHA that ends the queue branch name (gh-readonly-queue/<branch>/pr-<N>-<sha>) is the event's base_sha. IMPORTANT: base_sha is the group's PARENT commit. For an entry queued behind another it is the head of the entry ahead of it, NOT the tip of the target branch, so base_sha..head_sha is only the entry's own squash commit (one parent, subject ending ' (#N)'). A scope for the whole group has to start at the merge base of the target branch and the head: see two_entry_real. GITHUB_REF of a queue run is refs/heads/<queue branch name>.",
+  "queue_branch_pattern": "^gh-readonly-queue/main/pr-([1-9][0-9]*)-([0-9a-f]{40})$",
+  "github_ref_pattern": "^refs/heads/gh-readonly-queue/(.+)/pr-[1-9][0-9]*-[0-9a-f]{40}$",
+  "single_entry": {
+    "run": "run-44233460388.json",
+    "head_branch": "gh-readonly-queue/main/pr-1011-eff55ea56b91fce89f152b49da3522de23959234",
+    "base_sha": "eff55ea56b91fce89f152b49da3522de23959234",
+    "head_sha": "73a55799523e3b960293610ea3200eecf73c08d9",
+    "head_parents": ["eff55ea56b91fce89f152b49da3522de23959234"],
+    "head_subject": "Hosted Team Lead keeps its session, re-orients after compaction, and reads its real settings (#1011)"
+  },
+  "two_entry_real": {
+    "note": "Two real groups queued at the same minute. Entry 1 (run 44086789929, PR 1019) was built on the tip of main. Entry 2 (run 44086878602, PR 1015) was built on entry 1: its event base_sha is entry 1's head, not main's tip. The whole group for entry 2 is merge_base..head and lists both commits, oldest first.",
+    "first_run": "run-44086789929.json",
+    "second_run": "run-44086878602.json",
+    "merge_base": "ea37537c9d9787b5d9b784159bce654863521d52",
+    "second_event_base_sha": "c65ef998dcc23f52f0aa4af8522dcaaa4ba3ff73",
+    "second_head_sha": "2f2ba2c0b512191e57153f9e64db239eff8b100d",
+    "second_head_branch": "gh-readonly-queue/main/pr-1015-c65ef998dcc23f52f0aa4af8522dcaaa4ba3ff73",
+    "commits": [
+      {
+        "sha": "c65ef998dcc23f52f0aa4af8522dcaaa4ba3ff73",
+        "parents": ["ea37537c9d9787b5d9b784159bce654863521d52"],
+        "subject": "Halt UI: pending halt lock reason, clear wording, cancel test (#1019)"
+      },
+      {
+        "sha": "2f2ba2c0b512191e57153f9e64db239eff8b100d",
+        "parents": ["c65ef998dcc23f52f0aa4af8522dcaaa4ba3ff73"],
+        "subject": "Operate journeys for the Team app, with a dry run and a staging runbook (#1015)"
+      }
+    ]
+  }
+}
