@@ -71,9 +71,9 @@ Under `src/`:
   `stopped`) are derived on read, never stored, and a runner counts as live
   when it was heard within `LIVE_WITHIN_S` (180 seconds). Each repo row
   carries its halt state, read from `engine_repo_controls`: `halted`,
-  `halted_at`, `halt_epoch`, and `halt_pending`, which is true while halted
+  `halted_at`, `halted_by`, `halt_epoch`, and `halt_pending`, which is true while halted
   and the runner has not yet reported a `halt_applied` event at or above the
-  current epoch (#1027). A runner's liveness and the freshness envelope take
+  current epoch (#1027). `halted_by` is `{ id, display_name }` for the member of the repo's own account who set the halt (the member's name, else their GitHub login, else the fixed label "A team member"), or null when not halted, for a halt from before migration 1038, or when that person has left the account (#1046). A runner's liveness and the freshness envelope take
   the newer of its last upload and its last wake check, which the app injects
   through `engineSeen.reader`; the wake check counts only while the last upload
   is at most 420 seconds old (`WAKE_STAMP_MAX_DB_AGE_S`), and it can only make
