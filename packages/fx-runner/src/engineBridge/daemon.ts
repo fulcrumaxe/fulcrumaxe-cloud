@@ -280,7 +280,7 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
       // fx-swallow-ok: a refused cursor shows no acked seq in `status`; the tail itself refuses it again and says so once
     }
     const { tail, hostTail } = createBridgeTails({ stateDir: repo.state_dir, runnerStateDir: deps.runnerStateDir, repoGhId: repo.repo_gh_id, uid: deps.uid, secrets: deps.secrets, log });
-    const loop = new BridgeLoop({ tail, tails: [hostTail], send: deps.send, clock, repoGhId: repo.repo_gh_id, engineVersion, bridgeVersion: deps.runnerVersion, log, lastAckedSeq });
+    const loop = new BridgeLoop({ tail, tails: [hostTail], send: deps.send, clock, repoGhId: repo.repo_gh_id, engineVersion, bridgeVersion: deps.runnerVersion, log, lastAckedSeq, wakeEpoch: deps.wakeEpoch });
     const keeper = ports.ceiling.create(deps.cloud, { stateDir: repo.state_dir, uid: deps.uid, clock, repoGhId: repo.repo_gh_id, log });
     let lastControl: string | undefined;
     const puller = new CommandPuller({
