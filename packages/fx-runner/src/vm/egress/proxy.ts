@@ -61,7 +61,7 @@ export function egressSocketPath(vsockDir: string): string {
 }
 
 /** The vsock directory must be what the helper's contract says: absolute, normalised, named for the sandbox, a real directory (no symlink) of the runner's uid, mode exactly 01770 (owner and sandbox group, sticky, nobody else), D#587 Correction 8. The sticky bit keeps the sandbox uid from deleting or renaming the runner's listener sockets in it. */
-function assertVsockDir(dir: string, id: string, uid: number, sandboxGid?: number): void {
+export function assertVsockDir(dir: string, id: string, uid: number, sandboxGid?: number): void {
   if (typeof dir !== "string" || dir.includes("\0") || !path.isAbsolute(dir) || dir !== path.normalize(dir) || dir.split(path.sep).includes("..") || path.basename(dir) !== id || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) {
     throw new TypeError("egress proxy: the vsock directory is not a normalised absolute path named for the sandbox");
   }
@@ -76,7 +76,7 @@ function parseAuthority(url: string | undefined): { host: string; port: number }
   return m ? { host: m[1]!.toLowerCase(), port: Number(m[2]) } : undefined;
 }
 
-function plainHost(host: string): boolean {
+export function plainHost(host: string): boolean {
   try {
     assertPlainHost(host);
     return true;
@@ -87,11 +87,43 @@ function plainHost(host: string): boolean {
 }
 
 
-const withTimeout = <T>(work: Promise<T>, ms: number): Promise<T> =>
+export const withTimeout = <T>(work: Promise<T>, ms: number): Promise<T> =>
   new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("timeout")), ms);
     work.then(resolve, reject).finally(() => clearTimeout(timer));
   });
+
+/** One lookup through the proxy, every resolved address public and none this host's own. Shared by the tunnel and the reverse endpoint, so both refuse the same addresses. */
+export async function resolvePublic(host: string, lookup: Lookup, own: () => Set<string>): Promise<{ refusal: Refusal } | { addresses: string[] }> {
+  let found: Array<{ address: string; family: number }>;
+  try {
+    found = await withTimeout(lookup(host, { all: true, verbatim: true }), LOOKUP_TIMEOUT_MS);
+  } catch {
+    // fx-swallow-ok: a failed lookup is answered with a fixed refusal; the resolver's text is not passed on
+    return { refusal: "dns_failed" };
+  }
+  if (!Array.isArray(found) || found.length === 0) return { refusal: "dns_failed" };
+  const mine = own();
+  const addresses = found.map((f) => String(f.address).toLowerCase());
+  if (addresses.some((a) => isBlockedDestination(a) || mine.has(a))) return { refusal: "blocked_address" };
+  return { addresses };
+}
+
+/** Only a stale socket the runner itself owns is replaced (an lstat, which never follows a link); anything else at the name refuses the start. Then listen, mode 0666: who may reach it is decided by the 01770 directory. Shared by the tunnel and the reverse endpoint. */
+export async function listenOnSocket(server: http.Server, socketPath: string, uid: number): Promise<void> {
+  try {
+    const existing = lstatSync(socketPath);
+    if (!existing.isSocket() || existing.uid !== uid) throw new TypeError("egress proxy: something other than a socket of this user is at the socket path");
+    unlinkSync(socketPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  chmodSync(socketPath, 0o666);
+}
 
 export async function startEgressProxy(o: EgressProxyOptions): Promise<EgressProxy> {
   const policy: EgressPolicy = parseEgressPolicy(o.policy);
@@ -110,18 +142,7 @@ export async function startEgressProxy(o: EgressProxyOptions): Promise<EgressPro
     const mode = policy.hosts.get(authority.host);
     if (mode === undefined) return { refusal: "not_allowed" };
     if (mode !== "direct") return { refusal: "interception_required" };
-    let found: Array<{ address: string; family: number }>;
-    try {
-      found = await withTimeout(lookup(authority.host, { all: true, verbatim: true }), LOOKUP_TIMEOUT_MS);
-    } catch {
-      // fx-swallow-ok: a failed lookup is answered with a fixed refusal; the resolver's text is not passed on
-      return { refusal: "dns_failed" };
-    }
-    if (!Array.isArray(found) || found.length === 0) return { refusal: "dns_failed" };
-    const mine = own();
-    const addresses = found.map((f) => String(f.address).toLowerCase());
-    if (addresses.some((a) => isBlockedDestination(a) || mine.has(a))) return { refusal: "blocked_address" };
-    return { addresses };
+    return resolvePublic(authority.host, lookup, own);
   };
 
   const reach = async (addresses: string[]): Promise<net.Socket | undefined> => {
@@ -151,7 +172,9 @@ export async function startEgressProxy(o: EgressProxyOptions): Promise<EgressPro
     const logged = authority && plainHost(authority.host) ? authority.host : "-";
     const refuse = (reason: Refusal): void => {
       o.onDecision?.({ outcome: reason, host: logged });
-      client.end(`HTTP/1.1 ${reason === "dns_failed" || reason === "connect_failed" ? 502 : 403} ${reason}\r\nconnection: close\r\n\r\n`);
+      // A rewritten host cannot be tunnelled (no interception); the hint says where it is served instead.
+      const hint = reason === "interception_required" ? `x-egress-hint: use the reverse endpoint, vsock port 5254\r\n` : "";
+      client.end(`HTTP/1.1 ${reason === "dns_failed" || reason === "connect_failed" ? 502 : 403} ${reason}\r\n${hint}connection: close\r\n\r\n`);
     };
     void (async () => {
       const verdict = await decide(authority);
@@ -172,20 +195,7 @@ export async function startEgressProxy(o: EgressProxyOptions): Promise<EgressPro
     })().catch(() => client.destroy());
   });
 
-  // Only a stale socket the runner itself owns is replaced (an lstat, which never follows a link). Anything else at the listener name, whoever owns it, refuses the start and is left alone.
-  try {
-    const existing = lstatSync(socketPath);
-    if (!existing.isSocket() || existing.uid !== o.uid) throw new TypeError("egress proxy: something other than a socket of this user is at the socket path");
-    unlinkSync(socketPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socketPath, resolve);
-  });
-  // 0666: Firecracker runs as the sandbox uid and must connect. Who may reach the socket is decided by the 01770 directory, which no other uid can enter.
-  chmodSync(socketPath, 0o666);
+  await listenOnSocket(server, socketPath, o.uid);
   return {
     socketPath,
     close: () =>
