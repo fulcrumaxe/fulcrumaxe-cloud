@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PROBE_MARKER, bwrapArgs, probeSandbox, probeSettings, seatbeltProfile, type SandboxProbeInput, type SandboxProbeResult } from "../src/sandbox/probe.js";
+import { PROBE_MARKER, bwrapArgs, probeSandbox, probeSettings, sandboxLaunch, seatbeltProfile, type SandboxProbeInput, type SandboxProbeResult } from "../src/sandbox/probe.js";
 import { sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 import { PASSING, failing, fakeSandboxHost } from "./helpers/fakeSandboxHost.js";
 
@@ -35,6 +35,16 @@ function install(...names: string[]): void {
 }
 
 const reasonOf = (result: SandboxProbeResult): string => (result.ok ? "pass" : result.reason);
+
+describe("the launch is refused on WSL2 even with both tools installed", () => {
+  it("sandboxLaunch asks the host for the interop entry; without it the same machine launches", () => {
+    install("bwrap", "socat");
+    const refused = sandboxLaunch(INPUT, {}, tools, ["true"], fakeSandboxHost({ wsl: { interop: true } }));
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && !refused.result.ok ? refused.result.detail : "").toContain("wsl2_unsupported");
+    expect(sandboxLaunch(INPUT, {}, tools, ["true"], fakeSandboxHost()).ok).toBe(true);
+  });
+});
 
 describe("the probe builds its rules with the job's own function", () => {
   it("calls sandboxSettings once, and the sandbox tool's arguments come from what it returned", async () => {

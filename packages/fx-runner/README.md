@@ -194,11 +194,30 @@ A single executable built BEFORE this change has no digest baked in, so it never
 | macOS arm64 and x64 | supported as a **preview, not yet verified** (see below) |
 | Linux x64 and arm64 | supported |
 | Native Windows | not supported |
-| WSL2 | not supported |
+| WSL2 | refused until its safety checks ship (see below) |
 | WSL1 | not supported |
 
 macOS support is a preview, not yet verified: jobs run in Claude Code's own sandbox, which has not been proven on macOS yet.
-`fx-runner doctor` repeats this on macOS. Native Windows, WSL1 and WSL2 are not supported in v1, so the runner refuses to start there (`windows_unsupported`, `wsl1_unsupported`, `wsl2_unsupported`). Windows support is planned. The runner prints: "fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported."
+`fx-runner doctor` repeats this on macOS. Native Windows, WSL1 and WSL2 are not accepted in v1, so the runner refuses to start there (`windows_unsupported`, `wsl1_unsupported`, `wsl2_unsupported`). Windows support is planned. On native Windows and WSL2 the runner prints: "fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported."
+
+WSL1 cannot run the sandbox. The runner prints: "fx-runner does not support WSL1. Convert the distribution with: wsl --set-version <distro> 2 (WSL2 is itself refused until its safety checks ship). Linux and macOS are supported."
+
+WSL2 is detected by its kernel (`/proc/sys/kernel/osrelease` naming `microsoft-standard`) or by the `WSLInterop` entry in `binfmt_misc`, never by the `WSL_DISTRO_NAME` variable alone. It stays refused. Meanwhile `fx-runner doctor` on WSL2 checks what would have to change before it could be accepted, and names each failure with a closed code:
+
+- `wsl_interop_enabled`: Windows interop is on, so a job could start Windows programs.
+- `wsl_drvfs_exposed`: a 9p, drvfs or virtiofs mount reaches the Windows side and is not denied to jobs.
+- `wsl_mnt_path`: the state, workspace or mirrors directory is under the Windows drives' mount root (`/mnt`).
+- `wsl_append_windows_path`: the Windows `PATH` is added to the Linux one.
+
+The settings doctor looks for, in `/etc/wsl.conf` (then run `wsl --shutdown` from Windows):
+
+```
+[interop]
+enabled=false
+appendWindowsPath=false
+```
+
+The cost of the interop setting: no `.exe` launches from WSL2 while the runner is installed.
 
 There is one install path per OS: the installer script, which arrives with the release change, installs the macOS build on
 macOS and the Linux build on Linux. Claude Code itself must already be installed and signed in.

@@ -206,7 +206,7 @@ export function readyOrCode(refresh: () => void, ctx: CommandContext): string | 
 /** Where bubblewrap and socat are, as the directories to put on the agent's PATH. Empty when a tool is missing: the probe says so, and the gate holds. */
 function sandboxDirs(host: RunHost, searchPath: string): string[] {
   try {
-    return sandboxToolDirs(resolveSandboxTools(searchPath, { platform: host.platform }));
+    return sandboxToolDirs(resolveSandboxTools(searchPath, { platform: host.platform, wslInterop: host.sandbox.wsl?.interopEntry() }));
   } catch (error) {
     if (error instanceof SandboxRefused && (error.code === "bubblewrap_missing" || error.code === "socat_missing")) return [];
     throw error;
@@ -220,7 +220,7 @@ function sandboxDirs(host: RunHost, searchPath: string): string[] {
 export function localTools(host: RunHost, searchPath: string): { binaryPath: string; toolDirs: string[] } {
   try {
     try {
-      selectTier({ platform: host.platform, osrelease: host.osrelease, hasCommand: (name) => commandOnPath(name, searchPath) });
+      selectTier({ platform: host.platform, osrelease: host.osrelease, wslInterop: host.sandbox.wsl?.interopEntry(), hasCommand: (name) => commandOnPath(name, searchPath) });
     } catch (error) {
       if (!(error instanceof SandboxRefused && (error.code === "bubblewrap_missing" || error.code === "socat_missing"))) throw error;
     }
@@ -370,6 +370,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const sandbox = createHostSandbox({
       credentials,
       platform: host.platform,
+      wsl: host.sandbox.wsl,
       envOptions,
       home,
       tempRoot,

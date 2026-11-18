@@ -9,6 +9,7 @@ import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { applyNixView } from "./nixView.js";
 import { prepareCheckHome } from "./checkHome.js";
 import { sandboxLaunch } from "./probe.js";
+import type { WslMachine } from "./platform.js";
 import { unixSocketFilter } from "./checkSeccomp.js";
 import { checkProtected } from "./checkProtected.js";
 
@@ -74,6 +75,8 @@ export interface HostSandboxConfig {
   packageStoreRoot?: string;
   /** D#6 R-CHK-2: the platform whose sandbox tool the job's check is started under (bubblewrap or Seatbelt). Default linux. */
   platform?: NodeJS.Platform;
+  /** The WSL2 facts only the entry point can read (D#587 B-9): the file-system host asks them when it resolves the sandbox tools, so a WSL2 machine is refused here too. */
+  wsl?: WslMachine | undefined;
 }
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
@@ -150,7 +153,7 @@ function sameEnv(a: Record<string, string>, b: Record<string, string>): boolean 
 export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
   const sandboxes = new Map<string, Entry>();
   // Only the file-system questions of the launch are asked of this host; it starts nothing.
-  const fsHost = createSandboxHost(() => Promise.resolve({ code: null, stdout: "", stderr: "", timedOut: false }));
+  const fsHost = createSandboxHost(() => Promise.resolve({ code: null, stdout: "", stderr: "", timedOut: false }), config.wsl);
 
   const noop = (): void => {
     // fx-swallow-ok: this only marks a promise as handled; whoever awaits it still sees the rejection

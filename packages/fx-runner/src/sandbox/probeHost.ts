@@ -9,7 +9,7 @@ const READ_MAX_BYTES = 64 * 1024;
 const SYSCTL_PATH = "/usr/sbin:/sbin:/usr/bin:/bin:/run/current-system/sw/bin";
 const SYSCTL_TIMEOUT_MS = 5_000;
 
-export function createSandboxHost(run: SandboxHost["run"]): SandboxHost {
+export function createSandboxHost(run: SandboxHost["run"], wsl?: SandboxHost["wsl"]): SandboxHost {
   const stat = (target: string): ReturnType<typeof statSync> | undefined => {
     try {
       return statSync(target);
@@ -20,6 +20,7 @@ export function createSandboxHost(run: SandboxHost["run"]): SandboxHost {
   };
   return {
     run,
+    wsl,
     sysctl: async (name) => {
       if (!/^[a-z_]{1,32}(?:\.[a-z_]{1,48}){1,3}$/.test(name)) return undefined;
       // The settings are read with the system's own `sysctl` (never a path into the process table), from the directories it lives in.

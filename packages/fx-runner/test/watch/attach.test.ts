@@ -14,6 +14,7 @@ import { renderLogRecord } from "../../src/commands/logs.js";
 import { takeoverPaneCommand } from "../../src/commands/watchPane.js";
 import type { GitCapture } from "../../src/daemon/git.js";
 import { itNeedsHostSockets } from "../helpers/needsHostSockets.js";
+import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { takeoverCommand } from "../../src/engines/claude/takeover.js";
 import { recordSession } from "../../src/engines/claude/session.js";
 import { ensurePrivateDir, markTakeoverReady, readEntries, socketPath, takeoverState, tmuxDir, writeEntry } from "../../src/watch/layout.js";
@@ -69,6 +70,7 @@ function rig(over: { sessions?: string[]; ask?: string; foreground?: number | nu
     pid: 1,
     kill: () => true,
     term: "xterm",
+    sandbox: fakeSandboxHost(),
     interactive: true,
     ask: async (question: string) => {
       asked.push(question);

@@ -1,4 +1,4 @@
-import { WINDOWS_UNSUPPORTED_NOTICE } from "../platformSupport.js";
+import { WINDOWS_UNSUPPORTED_NOTICE, refusalNotice } from "../platformSupport.js";
 import { platform as osPlatform, release as osRelease } from "node:os";
 
 /** Why a machine cannot run jobs at all. Closed set; each is a reason the runner can report. */
@@ -15,25 +15,63 @@ export class SandboxRefused extends Error {
 /** The platforms a job can run on in v1. WSL2 is not among them: see `wsl2_unsupported`. */
 export type Platform = "macos" | "linux";
 
-/** What the runner tells a user on native Windows, WSL1 or WSL2: one copy for all three. */
+/** What the runner tells a user on native Windows or WSL2 (WSL1 has its own row in `platformSupport.ts`). */
 export const WINDOWS_REFUSAL = WINDOWS_UNSUPPORTED_NOTICE;
+
+/**
+ * The two things about WSL2 that only the machine can say. The program's entry point (`bin/fx-runner.mjs`) is the one place that names the
+ * kernel's files, so nothing in `src` builds a path into the process table.
+ */
+export interface WslMachine {
+  /** Whether the `WSLInterop` or `WSLInterop-late` binfmt entry exists (true when the machine cannot tell: fail closed): WSL2's init registers it so Windows programs can be started from Linux. A WSL2 kernel with a custom name still has it. */
+  interopEntry(): boolean;
+  /** The text of the kernel's mount table, or undefined when it cannot be read. */
+  mountinfo(): string | undefined;
+}
+
+/** The names WSL2's init gives the interop entry. Either one means WSL2 with interop on. */
+export const INTEROP_ENTRY_NAMES: readonly string[] = Object.freeze(["WSLInterop", "WSLInterop-late"]);
+
+/**
+ * Whether an interop entry is there, given a stat of one entry by name that throws when it cannot be done. Only "not there" (ENOENT, ENOTDIR)
+ * means absent: any other error cannot show the entry is absent, so it counts as present and the runner refuses (fail closed).
+ */
+export function interopEntryPresent(statEntry: (name: string) => void): boolean {
+  return INTEROP_ENTRY_NAMES.some((name) => {
+    try {
+      statEntry(name);
+      return true;
+    } catch (error) {
+      // fx-swallow-ok: the error decides the answer: only a missing entry is "absent"
+      return !(error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR"));
+    }
+  });
+}
 
 export interface PlatformProbe {
   /** The operating system as `os.platform()` names it; asked of the machine when left out. */
   platform?: string;
   /** The kernel release as `os.release()` gives it (on Linux, the kernel's own release string); asked of the machine when left out. */
   osrelease?: string;
+  /** Whether the `WSLInterop` or `WSLInterop-late` entry exists (`WslMachine.interopEntry`; true also when the machine could not tell). Left out, it is taken as absent. */
+  wslInterop?: boolean | undefined;
 }
 
 /**
- * What a Linux kernel release string says about Windows. WSL2 reports a "microsoft-standard" kernel (older builds omit
- * "WSL2" from the string); WSL1 reports a bare "Microsoft" kernel. Kept apart from the refusal so WSL2 support can
- * reuse it; v1 refuses both.
+ * What a Linux kernel says about Windows. WSL2 reports a "microsoft-standard" kernel (older builds omit "WSL2" from the string) or, on a
+ * custom-named kernel, still has the `WSLInterop` entry; WSL1 reports a bare "Microsoft" kernel and has no such entry. A bare "Microsoft"
+ * kernel that does have the entry is called WSL2: both are refused, and the stricter reading wins. `WSL_DISTRO_NAME` is never consulted:
+ * a variable anyone can set is no evidence of the kernel.
  */
-export function classifyLinuxKernel(release: string): "linux" | "wsl1" | "wsl2" {
-  if (/microsoft-standard|wsl2/i.test(release)) return "wsl2";
+export function classifyLinuxKernel(release: string, interopPresent = false): "linux" | "wsl1" | "wsl2" {
+  if (/microsoft-standard|wsl2/i.test(release) || interopPresent) return "wsl2";
   if (/microsoft/i.test(release)) return "wsl1";
   return "linux";
+}
+
+/** The kernel's own answer for a Linux machine: the probe's values where given, the machine's kernel string otherwise. */
+export function linuxKernel(probe: PlatformProbe): "linux" | "wsl1" | "wsl2" {
+  return classifyLinuxKernel(probe.osrelease ?? osRelease(), probe.wslInterop === true);
 }
 
 /**
@@ -43,11 +81,11 @@ export function classifyLinuxKernel(release: string): "linux" | "wsl1" | "wsl2" 
  */
 export function detectPlatform(probe: PlatformProbe): Platform {
   const platform = probe.platform ?? osPlatform();
-  if (platform === "win32") throw new SandboxRefused("windows_unsupported", WINDOWS_REFUSAL);
+  if (platform === "win32") throw new SandboxRefused("windows_unsupported", refusalNotice("windows"));
   if (platform === "darwin") return "macos";
   if (platform !== "linux") throw new SandboxRefused("unsupported_platform", platform);
-  const kernel = classifyLinuxKernel(probe.osrelease ?? osRelease());
-  if (kernel === "wsl2") throw new SandboxRefused("wsl2_unsupported", WINDOWS_REFUSAL);
-  if (kernel === "wsl1") throw new SandboxRefused("wsl1_unsupported", WINDOWS_REFUSAL);
+  const kernel = linuxKernel(probe);
+  if (kernel === "wsl2") throw new SandboxRefused("wsl2_unsupported", refusalNotice("wsl2"));
+  if (kernel === "wsl1") throw new SandboxRefused("wsl1_unsupported", refusalNotice("wsl1"));
   return "linux";
 }

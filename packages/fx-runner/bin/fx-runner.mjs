@@ -24,6 +24,7 @@ import { cleanEnv } from "../src/job/cleanEnv.js";
 import { haltDepsFrom, killEngineHost } from "../src/engineBridge/halt.js";
 import { createEngineBridgePorts } from "../src/engineBridge/ports.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
+import { interopEntryPresent } from "../src/sandbox/platform.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
 import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
@@ -44,6 +45,19 @@ const launchRoot = (() => {
 })();
 const launch = { root: launchRoot, home: process.env.HOME, processCwd: () => process.cwd(), uid: process.getuid?.() };
 const engine = createClaudeKit(spawn, { instructionCanary: true, launch });
+// D#587 B-9: the two things about WSL2 that only the kernel's own files can say. This is the one place that names them (src/ may not build a path into the process table).
+const wslMachine = {
+  // Either entry name means WSL2 with interop on; only a missing entry means absent, any other error counts as present (src/sandbox/platform.ts).
+  interopEntry: () => interopEntryPresent((name) => lstatSync(`/proc/sys/fs/binfmt_misc/${name}`)),
+  mountinfo: () => {
+    try {
+      return readFileSync("/proc/self/mountinfo", "utf8");
+    } catch {
+      // fx-swallow-ok: an unreadable mount table is undefined, and the drvfs check fails closed on it
+      return undefined;
+    }
+  },
+};
 const shellVars = [];
 if (process.env.ANTHROPIC_API_KEY) shellVars.push("ANTHROPIC_API_KEY");
 if (process.env.ANTHROPIC_AUTH_TOKEN) shellVars.push("ANTHROPIC_AUTH_TOKEN");
@@ -281,7 +295,7 @@ runCli({
     // `run` changes to its own empty directory under the launch root before it starts anything (D#6 RUNNER-CWD-1).
     chdir: (dir) => process.chdir(dir),
     engine,
-    sandbox: createSandboxHost(engine.captureWithStderr),
+    sandbox: createSandboxHost(engine.captureWithStderr, wslMachine),
     // How a tmux pane starts this program again (the watch and take-over panes), the terminal type, and the one question take-over asks.
     selfCommand: sea ? [process.execPath] : [process.execPath].concat(process.execArgv, [scriptPath()]),
     term: process.env.TERM,
@@ -305,7 +319,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts() },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts() },
   vmHost: vmBuildHost,
   // D#749 V2c-2b: the verify browser. The MCP server gets the process's own streams and ONLY the variables the browser may inherit (the driver allowlists again); `verify-login` gets a headed browser and the terminal.
   verifyServerHost: {
