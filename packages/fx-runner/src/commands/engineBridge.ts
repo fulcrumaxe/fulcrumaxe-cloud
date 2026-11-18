@@ -18,6 +18,7 @@ import { BYPASS_ENV_NAME, requireUsable } from "../protectionBypass.js";
 import { loadRunnerKey } from "../keys.js";
 import { PULL_PATH } from "../engineBridge/commands.js";
 import { PROBE_REPO_ID, parseAllowedRepos, readDaemonStatus } from "../engineBridge/daemon.js";
+import { removeBridgeState } from "../engineHost/hostFiles.js";
 import { readEngineVersion } from "../engineBridge/engineVersion.js";
 import { bindingRefusal, isPlainAbsolute, loadBridgeSettings, saveBridgeSettings, type BridgedRepo } from "../engineBridge/settings.js";
 
@@ -88,6 +89,17 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
     const left = repo === undefined ? [] : loaded.repos.filter((r) => r.full_name !== repo);
     if (repo !== undefined && left.length === loaded.repos.length) throw refusal("that repo is not enabled");
     saveBridgeSettings(ctx.stateDir, left);
+    // With the daemon down nothing else withdraws the file, and the host would keep reading "bridge on" until it aged out. Absent reads as off.
+    let notRemoved = false;
+    for (const gone of loaded.repos.filter((r) => repo === undefined || r.full_name === repo)) {
+      try {
+        removeBridgeState(gone.state_dir);
+      } catch {
+        // fx-swallow-ok: the error could name a path; a link or odd entry at the name is left alone, and a fixed line says so
+        notRemoved = true;
+      }
+    }
+    if (notRemoved) ctx.out("A bridge state file could not be removed; the engine host will stop using it once it is a few minutes old.");
     ctx.out(repo === undefined ? "No repo is bridged now. A running fx-runner stops its bridge within a few seconds." : "That repo is no longer bridged. A running fx-runner stops its bridge within a few seconds.");
     return 0;
   }

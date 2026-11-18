@@ -1,13 +1,14 @@
 /**
  * EB-12a: the host's local files besides `engine-host.json`. All of them live in the engine's state directory (0700), are opened without following a link and are
- * 0600: the stream log (rotated at 20 MB, never uploaded), the bridge state the last pull left (`engine-bridge-state.json`, read here, never written) and the
+ * 0600: the stream log (rotated at 20 MB, never uploaded), the bridge state the engine bridge's daemon writes after each successful cloud pull (`engine-bridge-state.json`, written by
+ * `writeBridgeState` for the daemon and read by `readBridgeState` for the host; a file older than `BRIDGE_STATE_MAX_AGE_MS` counts as no file) and the
  * supervisor's lifetime lock (`engine-host.lock`).
  */
 import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, linkSync, lstatSync, openSync, readSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 import { conventionalUnit } from "../engineBridge/halt.js";
-import { EngineStateError, ensurePrivateDir, readJsonNoFollow } from "../engineBridge/stateFiles.js";
+import { EngineStateError, ensurePrivateDir, readJsonNoFollow, removeStateFile, writeJsonAtomic } from "../engineBridge/stateFiles.js";
 
 export const HOST_LOG_FILE = "engine-host.log";
 export const HOST_LOG_MAX_BYTES = 20 * 1024 * 1024;
@@ -214,30 +215,58 @@ function readLockFile(target: string, uid: number): string | undefined {
 }
 
 /**
- * What the last cloud pull left for this repo. EB-8b's pull handler is the writer; this file only reads it, and anything that is not exactly this shape is
- * refused (the host then does not start). `repo_checkout` is the repo's main checkout, where the host runs.
+ * What the engine bridge's daemon last wrote for this repo, after a successful cloud pull. It is judged by `readBridgeState`: anything that is not exactly
+ * this shape, or is older than `BRIDGE_STATE_MAX_AGE_MS`, is refused (the host then does not start, or stops). `repo_checkout` is the repo's main checkout,
+ * where the host runs. The halt is not copied here: the halt file is its own file, read beside this one, so there is one source of truth for it.
  */
 export interface BridgeState {
   repo_gh_id: string;
   bridge_enabled: boolean;
   operate_enabled: boolean;
   repo_checkout: string;
+  /** When the daemon wrote it, in milliseconds since the epoch. */
+  written_at: number;
 }
 
-export function readBridgeState(dir: string, uid: number): BridgeState | undefined {
+/** The oldest a bridge state may be: the bridge's own freshness rule for the cloud's list (25 minutes: two safety pulls and some slack; a test pins it to `ALLOWED_MAX_AGE_MS`). */
+export const BRIDGE_STATE_MAX_AGE_MS = 25 * 60_000;
+/** A file stamped further ahead than this is not from a sane clock and counts as old. */
+const BRIDGE_STATE_MAX_AHEAD_MS = 60_000;
+
+/** The state, or undefined when there is none or it is too old (the same as "off" for every caller). Throws `EngineStateError` for a file that is not safe or not exactly the shape. */
+export function readBridgeState(dir: string, uid: number, nowMs: number = Date.now()): BridgeState | undefined {
   const raw = readJsonNoFollow(dir, BRIDGE_STATE_FILE, uid);
   if (raw === undefined) return undefined;
   const o = raw as Record<string, unknown> | null;
   if (o === null || typeof o !== "object" || Array.isArray(o)) throw new EngineStateError("engine-bridge-state.json is not an object");
   const ok =
-    Object.keys(o).sort().join(",") === "bridge_enabled,operate_enabled,repo_checkout,repo_gh_id" &&
+    Object.keys(o).sort().join(",") === "bridge_enabled,operate_enabled,repo_checkout,repo_gh_id,written_at" &&
     typeof o.repo_gh_id === "string" &&
     isRepoGhId(o.repo_gh_id) &&
     typeof o.bridge_enabled === "boolean" &&
     typeof o.operate_enabled === "boolean" &&
     typeof o.repo_checkout === "string" &&
     path.isAbsolute(o.repo_checkout) &&
-    !o.repo_checkout.includes("\0");
+    !o.repo_checkout.includes("\0") &&
+    typeof o.written_at === "number" &&
+    Number.isSafeInteger(o.written_at);
   if (!ok) throw new EngineStateError("engine-bridge-state.json has an unexpected shape");
-  return o as unknown as BridgeState;
+  const state = o as unknown as BridgeState;
+  const age = nowMs - state.written_at;
+  if (age > BRIDGE_STATE_MAX_AGE_MS || age < -BRIDGE_STATE_MAX_AHEAD_MS) return undefined;
+  return state;
+}
+
+/** Writes the state atomically (a fresh 0600 temp file, then a rename; a link at the name is refused). Refuses a state the reader would refuse. */
+export function writeBridgeState(dir: string, uid: number, state: Omit<BridgeState, "written_at">, nowMs: number): void {
+  if (!isRepoGhId(state.repo_gh_id) || !path.isAbsolute(state.repo_checkout) || state.repo_checkout.includes("\0") || !Number.isSafeInteger(nowMs)) {
+    throw new EngineStateError("the bridge state is not valid");
+  }
+  const body: BridgeState = { repo_gh_id: state.repo_gh_id, bridge_enabled: state.bridge_enabled, operate_enabled: state.operate_enabled, repo_checkout: state.repo_checkout, written_at: nowMs };
+  writeJsonAtomic(dir, BRIDGE_STATE_FILE, body, uid);
+}
+
+/** Removes the state file (the same as "off" for the host); absent is fine, a link is refused and left alone. */
+export function removeBridgeState(dir: string): void {
+  removeStateFile(dir, BRIDGE_STATE_FILE);
 }

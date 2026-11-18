@@ -88,6 +88,8 @@ export interface InboxLoopDeps {
   localHalted: (repoGhId: number) => boolean;
   /** Sends `halt_applied` through the bridge. */
   reportHalt: (repoGhId: number, report: HaltReport) => void;
+  /** Called after each successful pull, once its controls have been handled (the halt first). `haltFailed` is true when the pull asked for a halt and the kill path could not be completed: the hook must then withdraw the bridge state, never publish "operate on". A throw is ignored. */
+  onPulled?: (repoGhId: number, haltFailed: boolean) => void;
   /** Gets fixed text only. */
   log: (line: string) => void;
 }
@@ -217,6 +219,7 @@ export class CommandPuller {
     // The kill path comes before anything of this pull reaches the inbox.
     const haltFailed = new Set<number>();
     for (const [repoGhId, control] of this.controls) if (!(await this.applyControl(repoGhId, { halt_epoch: control.halt_epoch, halted: control.halted }))) haltFailed.add(repoGhId);
+    for (const repoGhId of repos) this.notePulled(repoGhId, haltFailed.has(repoGhId));
     const raws = [...parsed.commands].sort((a, b) => seqOf(a) - seqOf(b));
     for (const raw of raws) {
       const id = idOf(raw);
@@ -247,6 +250,14 @@ export class CommandPuller {
       this.deps.inbox.saveState(state);
     }
     await this.sendAcks();
+  }
+
+  private notePulled(repoGhId: number, haltFailed: boolean): void {
+    try {
+      this.deps.onPulled?.(repoGhId, haltFailed);
+    } catch {
+      // fx-swallow-ok: a hook that fails must not stop the pull; the hook logs its own fixed line
+    }
   }
 
   /** Handles one repo's control. False when a halt was asked for and the kill path could not be completed. */

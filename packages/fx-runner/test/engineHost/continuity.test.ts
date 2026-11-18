@@ -93,7 +93,7 @@ function setup(): World {
   const claude = path.join(dir, "fake-agent");
   writeFileSync(claude, FAKE);
   chmodSync(claude, 0o755);
-  writeFileSync(path.join(state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: "4242", bridge_enabled: true, operate_enabled: true, repo_checkout: checkout }), { mode: 0o600 });
+  writeFileSync(path.join(state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: "4242", bridge_enabled: true, operate_enabled: true, repo_checkout: checkout, written_at: Date.now() }), { mode: 0o600 });
   const record = path.join(dir, "record.jsonl");
   const world: World = {
     dir, state, runnerState, checkout, claude, record, pids: [], specs: [], timers: [], now: { t: START },
@@ -1027,7 +1027,7 @@ describe("EB-12c fx-runner engine-host start: every feed is wired to a real sour
     expect(out).toContain("Engine host started.");
   });
   it("a refused start leaves no spool and no session file behind", async () => {
-    writeFileSync(path.join(w.state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: "4242", bridge_enabled: true, operate_enabled: false, repo_checkout: w.checkout }), { mode: 0o600 });
+    writeFileSync(path.join(w.state, BRIDGE_STATE_FILE), JSON.stringify({ repo_gh_id: "4242", bridge_enabled: true, operate_enabled: false, repo_checkout: w.checkout, written_at: Date.now() }), { mode: 0o600 });
     const rt = { platform: "linux", locateClaude: () => w.claude, inspectClaude: async () => true, ownPid: process.pid, processStart: () => "T0", readCgroup: () => undefined, onProcessExit: () => undefined, launch: () => { throw new Error("no spawn"); }, env: {}, isAlive: alive, scopeAvailable: async () => true, killHost: async () => undefined, killScope: async () => undefined, now: () => w.now.t, after, shutdown: () => new Promise(() => undefined) } as EngineHostRuntime;
     expect(await engineHostCommand(["start"], { out: () => undefined, stateDir: w.runnerState } as never, { engineStateDirOverride: w.state, home: w.dir, deps: { platform: "linux", uid } as never, runtime: rt })).toBe(1);
     expect(existsSync(path.join(w.state, SPOOL_FILE))).toBe(false);

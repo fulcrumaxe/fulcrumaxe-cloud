@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { runCli } from "../../src/cli.js";
 import { saveRegistration } from "../../src/config.js";
 import { BRIDGE_STATUS_FILE } from "../../src/engineBridge/daemon.js";
 import { BRIDGE_SETTINGS_FILE, bindingRefusal, loadBridgeSettings, saveBridgeSettings } from "../../src/engineBridge/settings.js";
+import { BRIDGE_STATE_FILE, writeBridgeState } from "../../src/engineHost/hostFiles.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { VERCEL_PROTECTED_BODY } from "../helpers/vercelProtected.js";
 import { startFakeCommands, type FakeCommands } from "../helpers/strictEngineCommands.js";
@@ -87,6 +88,25 @@ describe("engine-bridge enable", () => {
     expect(await cli("engine-bridge", "disable", "--repo", "acme/widgets")).toBe(2);
     expect(await cli("engine-bridge", "disable")).toBe(0);
     expect(saved()).toEqual([]);
+  });
+
+  it("disable removes the bridge state file of the repo it disables, with no daemon running, and leaves another repo's file alone", async () => {
+    const dirA = path.join(root, "sa");
+    const dirB = path.join(root, "sb");
+    expect(await cli("engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot, "--state-dir", dirA)).toBe(0);
+    expect(await cli("engine-bridge", "enable", "--repo", "acme/gadgets", "--repo-root", repoRoot, "--state-dir", dirB)).toBe(0);
+    for (const [dir, id] of [
+      [dirA, "77"],
+      [dirB, "78"],
+    ] as const) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeBridgeState(dir, uid ?? 0, { repo_gh_id: id, bridge_enabled: true, operate_enabled: true, repo_checkout: repoRoot }, Date.now());
+    }
+    expect(await cli("engine-bridge", "disable", "--repo", "acme/widgets")).toBe(0);
+    expect(existsSync(path.join(dirA, BRIDGE_STATE_FILE))).toBe(false);
+    expect(existsSync(path.join(dirB, BRIDGE_STATE_FILE))).toBe(true);
+    expect(await cli("engine-bridge", "disable")).toBe(0);
+    expect(existsSync(path.join(dirB, BRIDGE_STATE_FILE))).toBe(false);
   });
 
   it("takes the engine's state directory from AUTONOMOUS_TEAM_STATE_DIR when --state-dir is not given", async () => {
