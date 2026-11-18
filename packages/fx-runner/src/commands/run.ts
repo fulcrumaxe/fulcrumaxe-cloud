@@ -30,6 +30,7 @@ import { createFootprintStore } from "../daemon/footprints.js";
 import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
 import { isDraining, isPaused, loadSettings, setDraining } from "../runnerSettings.js";
+import { limitsClaimBlock, type ClaimBlock } from "../vm/limits.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readVerifyAnswer } from "../daemon/answerFile.js";
@@ -167,6 +168,12 @@ export function openPushLog(stateDir: string, options: LedgerOptions, out: (line
   const log = createPushLog(file, options);
   if (log.closed) out(`fx-runner: the push log is damaged and closed (see ${PUSH_LOG_FILE}.damaged-* in the state directory); it reopens empty once that file is removed`);
   return log;
+}
+
+/** D#587 B-6a: why the configured engine and limits forbid claiming right now, read again at every claim. Undefined in `os_sandbox` mode, whatever the limits say. */
+export function vmLimitsBlock(stateDir: string): ClaimBlock | undefined {
+  const settings = loadSettings(stateDir);
+  return limitsClaimBlock(settings.sandboxEngine ?? "os_sandbox", settings.microvm);
 }
 
 export function pidIsAlive(kill: RunHost["kill"], pid: number): boolean {
@@ -596,7 +603,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           ...(limits?.peak === undefined ? {} : { scopePeak: (runId: string) => limits.peak?.(runId), releaseScope: (runId: string) => limits.release?.(runId) }),
           settings: () => capUnenforced(loadSettings(stateDir), enforced),
           heavyBudgetBytes: () => budgets().heavy.memoryBytes,
-          paused: () => isPaused(stateDir) || isDraining(stateDir) || claimBlockReason(stateDir) !== undefined,
+          paused: () => isPaused(stateDir) || isDraining(stateDir) || claimBlockReason(stateDir) !== undefined || vmLimitsBlock(stateDir) !== undefined,
           usage: () => usage.state(),
           now: () => clock.now().getTime(),
         }),

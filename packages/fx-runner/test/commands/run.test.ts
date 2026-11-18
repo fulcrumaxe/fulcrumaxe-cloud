@@ -882,6 +882,34 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     expect((await stop(run)).code).toBe(0);
   });
 
+  const partialMicrovm = (engine: "microvm" | "os_sandbox"): void => {
+    setSetting(stateDir, "sandbox_engine", engine);
+    for (const [key, value] of [["microvm.max_vms", "2"], ["microvm.max_vcpus", "4"], ["microvm.max_memory_mb", "4096"], ["microvm.snapshot_dir", path.join(home, "snaps")]] as const) setSetting(stateDir, key, value);
+  };
+
+  it("D#587 B-6a: microvm mode with a missing limit takes no job even with one queued: the claim says it is paused and nothing starts", async () => {
+    partialMicrovm("microvm");
+    cloud.enqueue(queuedJob());
+    fake.set("hang", "");
+    const run = start();
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toMatchObject({ capacity: { limited_by: "paused" } });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fake.spawnCount()).toBe(0);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
+  it("D#587 B-6a: the same incomplete limits in os_sandbox mode are ignored and the queued job is taken", async () => {
+    partialMicrovm("os_sandbox");
+    const job = queuedJob();
+    cloud.enqueue(job);
+    fake.set("hang", "");
+    const run = start();
+    await until(() => cloud.runs.has(job.job.run_id), 20_000);
+    expect(claimBodies()[0]).toMatchObject({ capacity: { light: { limit: 8, in_use: 0 } } });
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
   it("where per-job limits cannot be enforced the claim declares the held-back ceilings (2 jobs, 1 heavy) and the runner says why (D#6 C43-5)", async () => {
     const job = queuedJob();
     cloud.enqueue(job);
