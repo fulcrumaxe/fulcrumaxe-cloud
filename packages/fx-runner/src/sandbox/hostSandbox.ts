@@ -10,6 +10,7 @@ import { applyNixView } from "./nixView.js";
 import { prepareCheckHome } from "./checkHome.js";
 import { sandboxLaunch } from "./probe.js";
 import type { WslMachine } from "./platform.js";
+import { wslDenyPaths } from "./wslChecks.js";
 import { unixSocketFilter } from "./checkSeccomp.js";
 import { checkProtected } from "./checkProtected.js";
 
@@ -75,13 +76,17 @@ export interface HostSandboxConfig {
   packageStoreRoot?: string;
   /** D#6 R-CHK-2: the platform whose sandbox tool the job's check is started under (bubblewrap or Seatbelt). Default linux. */
   platform?: NodeJS.Platform;
-  /** The WSL2 facts only the entry point can read (D#587 B-9): the file-system host asks them when it resolves the sandbox tools, so a WSL2 machine is refused here too. */
+  /**
+   * The WSL2 facts only the entry point can read (D#587 B-9): the file-system host asks them when it resolves the sandbox tools, so a WSL2 machine is refused here too.
+   * B-9b: its `clearance` (set by the WSL2 gate, on a cleared machine only) carries the Windows-side paths every job is denied, and whether a loopback allowance may be granted
+   * (mirrored networking shares loopback with Windows).
+   */
   wsl?: WslMachine | undefined;
 }
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
 export class HostSandboxRefused extends Error {
-  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden" | "job_env_unsafe" | "no_publish_sandbox", detail?: string) {
+  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden" | "job_env_unsafe" | "no_publish_sandbox" | "wsl_machine_changed", detail?: string) {
     super(detail === undefined ? code : `${code}: ${detail}`);
     this.name = "HostSandboxRefused";
   }
@@ -191,6 +196,14 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     if (workdir === undefined || !path.isAbsolute(workdir)) throw new HostSandboxRefused("bad_workdir");
     if (entry.running) throw new HostSandboxRefused("sandbox_busy");
 
+    // WSL2 (D#587 B-9b): what was true when the gate cleared the machine is read again for every job. A mount table that cannot be read, or an interop entry that has come back,
+    // refuses the job; a drive mounted since start is denied too (the cleared list is only ever added to).
+    let wslDeny: readonly string[] | undefined;
+    if (config.wsl?.clearance !== undefined) {
+      const table = config.wsl.mountinfo();
+      if (config.wsl.interopEntry() || table === undefined || table.trim() === "") throw new HostSandboxRefused("wsl_machine_changed");
+      wslDeny = [...new Set([...config.wsl.clearance.denyPaths, ...wslDenyPaths(config.wsl)])];
+    }
     const toolchain = config.toolchainReadPaths ?? [];
     // The runner checks the floor itself, again, whatever the daemon already did: nothing below runs for a set that crosses it.
     // The entries are resolved once, floor-checked, and the very same resolved list is what gets bound (no second resolve, no swap window).
@@ -200,6 +213,8 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       const checked = checkedAllowances(allowances);
       if (!checked.ok) throw new HostSandboxRefused("sandbox_allowance_forbidden");
       grants = grantsOf(checked.entries);
+      // WSL2: in mirrored (or unknown) networking mode the loopback is the Windows host's too, so a job may not ask for a loopback bind.
+      if (grants.loopback && config.wsl?.clearance !== undefined && !config.wsl.clearance.loopback) throw new HostSandboxRefused("sandbox_allowance_forbidden");
     }
     let storeDir: string | undefined;
     if (allowances !== undefined && config.packageStoreRoot !== undefined) {
@@ -223,6 +238,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       ...(config.registries === undefined ? {} : { registries: config.registries }),
       ...(config.mirrorsRoot === undefined ? {} : { mirrorsRoot: config.mirrorsRoot }),
       ...(config.spillRoot === undefined ? {} : { spillRoot: config.spillRoot }),
+      ...(wslDeny === undefined ? {} : { wslDenyPaths: wslDeny }),
       ...(opts.extraReadPaths === undefined ? {} : { extraReadPaths: opts.extraReadPaths }),
       extraDomains: [...opts.networkPolicy.map((rule) => rule.host), ...(grants?.domains ?? [])],
       ...(grants === undefined ? {} : { allowanceReadPaths: grants.readPaths, allowanceWritePaths: grants.writePaths, allowLoopbackBind: grants.loopback }),

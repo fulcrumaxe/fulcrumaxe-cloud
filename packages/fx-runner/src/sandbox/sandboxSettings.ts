@@ -123,6 +123,8 @@ export interface SandboxInput {
    * allowance path, and it is the root an `extraReadPaths` grant under it is checked against.
    */
   spillRoot?: string;
+  /** D#587 B-9b: on a cleared WSL2 machine, the Windows-side places denied for both reads and writes: the drive mount root `/mnt`, every 9p, drvfs or virtiofs mount, and `/run/WSL`. Absolute paths; added after every grant is checked, so no grant can reopen one. */
+  wslDenyPaths?: readonly string[];
 }
 
 const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -277,6 +279,12 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   const toolchainDeny = [...new Set(toolchainRead.flatMap(toolchainCredentialFiles))];
   const domains = [...new Set([MODEL_HOST, ...(input.registries ?? []), ...(input.extraDomains ?? [])].map(assertPlainHost))];
   const unique = (values: string[]): string[] => [...new Set(values)];
+  const wslDeny = (input.wslDenyPaths ?? []).map((value) => {
+    if (!path.isAbsolute(value) || value !== path.normalize(value)) throw new TypeError("sandboxSettings: a WSL deny path must be a normalised absolute path");
+    return value;
+  });
+  // A grant under a WSL deny path would be a way back to the Windows side: refused, as a grant over a credential location is.
+  for (const grant of [workspace, tempDir, ...roots, ...extraRead, ...extraWrite, ...allowRead, ...allowWrite, ...toolchainRead]) if (wslDeny.some((denied) => pathsOverlap(denied, grant))) throw new SandboxGrantRefused("sandboxSettings: a grant overlaps a Windows-side location (WSL2)");
   return {
     enabled: true,
     failIfUnavailable: true,
@@ -288,10 +296,10 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
     filesystem: {
       disabled: false,
       allowWrite: unique([workspace, tempDir, ...extraWrite, ...allowWrite, ...(store === undefined ? [] : [store])]),
-      denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
+      denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...wslDeny]),
       // The workspace, temp and package-store roots are denied like the mirrors root and the home directory: a cache directory outside the home
       // directory would leave them readable. This job's own workspace, temp directory and store are re-allowed below (a narrower allow wins).
-      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...toolchainDeny, ...SHARED_TEMP_DIRS.flatMap((dir) => [dir, realOf(dir)])]),
+      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...toolchainDeny, ...SHARED_TEMP_DIRS.flatMap((dir) => [dir, realOf(dir)]), ...wslDeny]),
       allowRead: unique([workspace, tempDir, ...extraRead, ...toolchainRead, ...allowRead, ...allowWrite, ...(store === undefined ? [] : [store])]),
     },
     credentials: { files: [...floor, ...toolchainDeny].map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },

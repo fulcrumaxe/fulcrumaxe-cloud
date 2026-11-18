@@ -12,9 +12,10 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { runCli } from "../../src/cli.js";
-import { MACOS_PREVIEW_NOTICE, WINDOWS_UNSUPPORTED_NOTICE, WSL1_CONVERT_NOTICE } from "../../src/platformSupport.js";
+import { MACOS_PREVIEW_NOTICE, WSL1_CONVERT_NOTICE, WSL2_NOT_CLEARED_NOTICE } from "../../src/platformSupport.js";
 import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engines/claude/harness.js";
 import { failing, fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
+import { fakeWslMachine } from "../helpers/fakeWslMachine.js";
 import { findOnPath } from "../helpers/findOnPath.js";
 import { VERCEL_PROTECTED_ROOT_BODY, ownCloud401Response, vercelProtectedResponse } from "../helpers/vercelProtected.js";
 import type { ScopeSupport } from "../../src/sandbox/jobLimits.js";
@@ -410,7 +411,7 @@ describe("the sandbox check", () => {
   });
 
   it.each([
-    ["5.15.167.4-microsoft-standard-WSL2", "wsl2_unsupported", WINDOWS_UNSUPPORTED_NOTICE],
+    ["5.15.167.4-microsoft-standard-WSL2", "wsl2_unsupported", WSL2_NOT_CLEARED_NOTICE],
     ["4.4.0-19041-Microsoft", "wsl1_unsupported", WSL1_CONVERT_NOTICE],
   ])("a %s kernel FAILs with %s and the probe never runs", async (release, code, notice) => {
     register();
@@ -427,21 +428,29 @@ describe("the sandbox check", () => {
   it("a WSL2 machine gets one line per check, each FAIL with its closed code, and is still refused", async () => {
     register();
     const result = await doctor({ host: { sandbox: fakeSandboxHost({ wsl: { interop: true, mountinfo: "55 22 0:48 / /mnt/c rw - 9p C:\\134 rw\n" } }), osrelease: WSL2 } });
-    expect(wslLines(result.out).map((line) => line.slice(0, 4))).toEqual(["FAIL", "FAIL", "PASS", "FAIL"]);
-    for (const code of ["wsl_interop_enabled", "wsl_drvfs_exposed", "wsl_append_windows_path"]) expect(result.out).toMatch(new RegExp(`FAIL  WSL2: +${code}: `));
+    expect(wslLines(result.out).map((line) => line.slice(0, 4))).toEqual(["FAIL", "PASS", "PASS", "FAIL", "INFO"]);
+    expect(wslLines(result.out).at(-1)).toMatch(/INFO {2}WSL2: +VM mode not supported$/);
+    for (const code of ["wsl_interop_enabled", "wsl_append_windows_path"]) expect(result.out).toMatch(new RegExp(`FAIL  WSL2: +${code}: `));
     expect(result.out).not.toContain("wsl_mnt_path");
     expect(levelOf(result.out, "Sandbox")).toBe("FAIL");
     expect(result.code).not.toBe(0);
   });
 
-  it("a WSL2 machine with the README's wsl.conf passes the interop, /mnt and PATH lines, but its shared drive is still named and the sandbox line still refuses", async () => {
+  it("a WSL2 machine set up as the README says passes every check and both live probes, and the sandbox line passes too (the mount is denied now)", async () => {
     register();
-    const files = { "/etc/wsl.conf": "[interop]\nenabled=false\nappendWindowsPath=false\n" };
-    const result = await doctor({ host: { sandbox: fakeSandboxHost({ files, wsl: { mountinfo: "55 22 0:48 / /mnt/c rw - 9p C:\\134 rw\n" } }), osrelease: WSL2 } });
-    // The mount is not in the job sandbox's deny lists in this build, so the drvfs check still names it.
-    expect(wslLines(result.out).filter((line) => line.startsWith("PASS")).length).toBe(3);
-    expect(wslLines(result.out).find((line) => line.includes("wsl_drvfs_exposed"))).toContain("/mnt/c");
+    const result = await doctor({ host: { sandbox: fakeWslMachine(), osrelease: WSL2 } });
+    expect(wslLines(result.out).map((line) => line.slice(0, 4))).toEqual(["PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "INFO", "INFO"]);
+    expect(result.out).not.toContain("wsl_drvfs_exposed");
+    expect(wslLines(result.out).at(-1)).toMatch(/VM mode not supported$/);
+    expect(levelOf(result.out, "Sandbox")).toBe("PASS");
+  });
+
+  it("a WSL2 machine with no Windows drive to test with FAILs by name, and the sandbox line still refuses", async () => {
+    register();
+    const result = await doctor({ host: { sandbox: fakeWslMachine({ drive: false }), osrelease: WSL2 } });
+    expect(result.out).toMatch(/FAIL {2}WSL2: +wsl_no_windows_drive: no Windows drive to test with/);
     expect(levelOf(result.out, "Sandbox")).toBe("FAIL");
+    expect(result.code).not.toBe(0);
   });
 
   it("a WSL2 kernel with a custom name is found by the WSLInterop entry alone", async () => {
@@ -454,7 +463,7 @@ describe("the sandbox check", () => {
   it("with no kernel string given, the interop entry alone makes doctor refuse with wsl2_unsupported", async () => {
     register();
     const result = await doctor({ host: { sandbox: fakeSandboxHost({ wsl: { interop: true, mountinfo: "26 1 8:16 / / rw - ext4 /dev/sdb rw\n" } }) } });
-    expect(sandboxLines(result.out)).toEqual([`FAIL  Sandbox:           wsl2_unsupported: ${WINDOWS_UNSUPPORTED_NOTICE}`]);
+    expect(sandboxLines(result.out)).toEqual([`FAIL  Sandbox:           wsl2_unsupported: ${WSL2_NOT_CLEARED_NOTICE}`]);
     expect(result.out).toContain("wsl_interop_enabled");
   });
 

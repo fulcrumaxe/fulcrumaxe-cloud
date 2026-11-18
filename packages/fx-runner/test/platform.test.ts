@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WINDOWS_UNSUPPORTED_NOTICE, WSL1_CONVERT_NOTICE } from "../src/platformSupport.js";
+import { WINDOWS_UNSUPPORTED_NOTICE, WSL1_CONVERT_NOTICE, WSL2_NOT_CLEARED_NOTICE } from "../src/platformSupport.js";
 import { SandboxRefused, classifyLinuxKernel, detectPlatform, interopEntryPresent, linuxKernel } from "../src/sandbox/platform.js";
 
 function refusal(probe: Parameters<typeof detectPlatform>[0]): SandboxRefused {
@@ -22,7 +22,7 @@ describe("platform detection", () => {
   it.each(["5.15.167.4-microsoft-standard-WSL2", "4.19.128-microsoft-standard", "5.10.16.3-WSL2"])("WSL2 kernel %s is refused wsl2_unsupported, never returned as a platform", (osrelease) => {
     const error = refusal({ platform: "linux", osrelease });
     expect(error.code).toBe("wsl2_unsupported");
-    expect(error.message).toContain(WINDOWS_UNSUPPORTED_NOTICE);
+    expect(error.message).toContain(WSL2_NOT_CLEARED_NOTICE);
   });
 
   it("the WSL2 kernel is still classified (v2 reuses it)", () => {

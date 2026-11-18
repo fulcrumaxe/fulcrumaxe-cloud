@@ -28,6 +28,7 @@ import { readEntries, requestTakeover, takeoverState } from "../../src/watch/lay
 import { authText, fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
 import { manualClock, until } from "../helpers/manualClock.js";
 import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
+import { WSL2_KERNEL, fakeWslMachine, type WslMachineOptions } from "../helpers/fakeWslMachine.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { KEY_ID, KEYRING, OTHER_KEYRING, signedJob } from "../helpers/signedJob.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
@@ -505,6 +506,30 @@ describe("1a. the toolchain is found once at start (D#6 R4d-3)", () => {
     await stop(run);
   }, 60_000);
 
+  it.skipIf(process.platform !== "linux")("on a cleared WSL2 machine the claimed job's settings file denies the Windows side for reads and writes", async () => {
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    fake.set("hang", "");
+    register(cloud.origin);
+    cloud.enqueue(signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() }));
+    const run = start({ host: { sandbox: fakeWslMachine(), osrelease: WSL2_KERNEL }, hooks: { remoteUrl: () => pathToFileURL(remote).href } });
+    await until(() => existsSync(path.join(fake.dir, "argv.txt")), 20_000);
+    const argv = readFileSync(path.join(fake.dir, "argv.txt"), "utf8").split("\n");
+    const settingsFile = argv[argv.indexOf("--settings") + 1]!;
+    const filesystem = (JSON.parse(readFileSync(settingsFile, "utf8")) as { sandbox: { filesystem: { denyRead: string[]; denyWrite: string[] } } }).sandbox.filesystem;
+    for (const entry of ["/mnt", "/run/WSL"]) {
+      expect(filesystem.denyRead).toContain(entry);
+      expect(filesystem.denyWrite).toContain(entry);
+    }
+    await stop(run);
+  }, 60_000);
+
   it("with no node anywhere, it says projects that need it cannot run their tests", async () => {
     register(cloud.origin);
     const run = start();
@@ -860,7 +885,26 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     expect(() => localTools({ ...host, sandbox: fakeSandboxHost() }, "")).not.toThrow(/^wsl2_unsupported/);
   });
 
-  it.each([["5.15.167.4-microsoft-standard-WSL2", "wsl2_unsupported: fx-runner does not support Windows yet, including WSL2\\. Linux and macOS are supported\\."], ["4.4.0-19041-Microsoft", "wsl1_unsupported: fx-runner does not support WSL1\\. Convert the distribution with: wsl --set-version <distro> 2 "]])("a %s kernel refuses to start run by name: no claim, no probe, no stall", async (release, text) => {
+  it("a WSL2 machine whose checks and probes all pass starts, claims, and hands the jobs' sandbox the Windows-side denies", async () => {
+    const sandbox = fakeWslMachine({ networking: "nat" });
+    const run = start({ host: { sandbox, osrelease: WSL2_KERNEL } });
+    await until(() => claims() >= 1);
+    expect(sandbox.wsl?.clearance).toEqual({ denyPaths: ["/mnt", "/mnt/c", "/run/WSL"], loopback: true });
+    expect(sandbox.calls.some((call) => call.command === "wslinfo" || call.args[1]?.includes("wslinfo"))).toBe(true);
+    expect((await stop(run)).code).toBe(0);
+  });
+
+  it.each([["no Windows drive to test with", { drive: false }, "wsl_no_windows_drive"], ["a sandbox that does not hide the canary", { honoursDenies: false }, "wsl_canary_readable"], ["a probe that cannot run", { throws: true }, "wsl_probe_unrun"]] as Array<[string, WslMachineOptions, string]>)("a WSL2 machine with %s refuses to start: no claim, the failing code on the terminal", async (_name, options, code) => {
+    const sandbox = fakeWslMachine(options);
+    cloud.enqueue(queuedJob());
+    const result = await start({ host: { sandbox, osrelease: WSL2_KERNEL } }).done;
+    expect(result.message).toMatch(/^wsl2_unsupported: /);
+    expect(result.out.join("\n")).toContain(`fx-runner: WSL2 ${code}: `);
+    expect(claims()).toBe(0);
+    expect(sandbox.wsl?.clearance).toBeUndefined();
+  });
+
+  it.each([["5.15.167.4-microsoft-standard-WSL2", "wsl2_unsupported: fx-runner on WSL2 starts only when every safety check and live probe passes, and one has not\\. Run fx-runner doctor to see which, then fix it\\."], ["4.4.0-19041-Microsoft", "wsl1_unsupported: fx-runner does not support WSL1\\. Convert the distribution with: wsl --set-version <distro> 2 "]])("a %s kernel refuses to start run by name: no claim, no probe, no stall", async (release, text) => {
     const sandbox = fakeSandboxHost();
     cloud.enqueue(queuedJob());
     const result = await start({ host: { sandbox, osrelease: release } }).done;

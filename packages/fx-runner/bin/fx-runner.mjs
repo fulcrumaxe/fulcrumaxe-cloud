@@ -49,6 +49,21 @@ const engine = createClaudeKit(spawn, { instructionCanary: true, launch });
 const wslMachine = {
   // Either entry name means WSL2 with interop on; only a missing entry means absent, any other error counts as present (src/sandbox/platform.ts).
   interopEntry: () => interopEntryPresent((name) => lstatSync(`/proc/sys/fs/binfmt_misc/${name}`)),
+  // The path with every symlink in its existing part resolved; a part that is not there yet is kept as written (D#587 B-9b: a link into /mnt must be seen).
+  realPath: (target) => {
+    const rest = [];
+    for (let current = target; ; ) {
+      try {
+        return [realpathSync(current), ...rest.reverse()].join("/").replace(/\/+/g, "/");
+      } catch {
+        // fx-swallow-ok: this part does not exist yet; the nearest part that does is resolved instead
+        const up = current.slice(0, Math.max(current.lastIndexOf("/"), 0)) || "/";
+        if (up === current) return undefined;
+        rest.push(current.slice(current.lastIndexOf("/") + 1));
+        current = up;
+      }
+    }
+  },
   mountinfo: () => {
     try {
       return readFileSync("/proc/self/mountinfo", "utf8");

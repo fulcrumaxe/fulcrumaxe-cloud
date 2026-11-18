@@ -7,6 +7,7 @@ import path from "node:path";
 import { cacheRootsFor } from "../daemon/mirror.js";
 import { linuxKernel, type WslMachine } from "./platform.js";
 import { probeSettings } from "./probe.js";
+import { SandboxGrantRefused } from "./sandboxSettings.js";
 
 export const WSL_CODES = ["wsl_interop_enabled", "wsl_drvfs_exposed", "wsl_mnt_path", "wsl_append_windows_path"] as const;
 export type WslCode = (typeof WSL_CODES)[number];
@@ -16,7 +17,7 @@ export const WSL_CONF = "/etc/wsl.conf";
 const WINDOWS_FS_TYPES: ReadonlySet<string> = new Set(["9p", "drvfs", "virtiofs"]);
 const LISTED_MAX = 5;
 
-/** The part of the machine these checks read: a small file by path (`/etc/wsl.conf`) and the two WSL facts only the entry point can name. Without `wsl`, the interop entry reads as absent and the mount table as empty. */
+/** The part of the machine these checks read: a small file by path (`/etc/wsl.conf`) and the two WSL facts only the entry point can name. Without `wsl`, the machine cannot be read at all, so `wsl_drvfs_exposed` FAILs closed (an unreadable or missing mount table never counts as an empty one). */
 export interface WslFs {
   readText(target: string): string | undefined;
   wsl?: WslMachine | undefined;
@@ -29,6 +30,8 @@ export interface WslCheckInput {
   denyWrite: readonly string[];
   /** The directories a job uses or that hold runner data: [what it is, where]. */
   directories: ReadonlyArray<readonly [label: string, dir: string]>;
+  /** The PATH the runner started with (D#587 B-9b): an entry under /mnt means the Windows PATH is live, whatever `wsl.conf` says. Left out: not checked. */
+  searchPath?: string | undefined;
 }
 
 export interface WslFinding {
@@ -80,6 +83,17 @@ function isMnt(dir: string): boolean {
   return under(path.posix.normalize(dir), "/mnt") && path.posix.normalize(dir) !== "/mnt";
 }
 
+/** The Windows-side places a job is denied, for reads and writes: the drive mount root, the WSL host's socket directory, every 9p, drvfs or virtiofs mount, and where each really is once symlinks are followed. */
+export function wslDenyPaths(wsl: WslMachine | undefined): string[] {
+  const base = ["/mnt", "/run/WSL", ...windowsMounts(wsl?.mountinfo() ?? "")];
+  return [...new Set(base.flatMap((entry) => [entry, wsl?.realPath?.(entry) ?? entry]))].sort();
+}
+
+/** The entries of a PATH string that lie under /mnt: the Windows drives. Undefined (not asked) has none. */
+function windowsPathEntries(searchPath: string | undefined): string[] {
+  return (searchPath ?? "").split(":").filter((entry) => entry !== "" && isMnt(path.posix.normalize(entry)));
+}
+
 function listed(items: readonly string[]): string {
   const unique = [...new Set(items)].sort();
   return unique.length > LISTED_MAX ? `${unique.slice(0, LISTED_MAX).join(", ")} and ${unique.length - LISTED_MAX} more` : unique.join(", ");
@@ -89,20 +103,28 @@ function listed(items: readonly string[]): string {
  * The checks as doctor runs them, or nothing when this is not WSL2. The deny lists are the ones a job would get (`probeSettings`), the
  * directories are the state, workspace and mirrors directories. Without a home directory the deny lists are empty, which fails closed.
  */
-export function wslDoctorFindings(facts: { platform: NodeJS.Platform; osrelease: string | undefined; home: string | undefined; stateDir: string; binaryPath: string | undefined; xdgCacheHome: string | undefined; fs: WslFs }): WslFinding[] {
+export function wslDoctorFindings(facts: { platform: NodeJS.Platform; osrelease: string | undefined; home: string | undefined; stateDir: string; binaryPath: string | undefined; xdgCacheHome: string | undefined; searchPath: string | undefined; fs: WslFs }): WslFinding[] {
   if (facts.platform !== "linux" || linuxKernel({ osrelease: facts.osrelease, wslInterop: facts.fs.wsl?.interopEntry() }) !== "wsl2") return [];
   let denyRead: string[] = [];
   let denyWrite: string[] = [];
   const directories: Array<[string, string]> = [["state directory", facts.stateDir]];
   if (facts.home !== undefined) {
     const binaryDir = facts.binaryPath === undefined ? path.join(facts.stateDir, "engine") : path.dirname(facts.binaryPath);
-    const block = (probeSettings({ platform: facts.platform, home: facts.home, stateDir: facts.stateDir, binaryDir, xdgCacheHome: facts.xdgCacheHome }).filesystem ?? {}) as { denyRead?: string[]; denyWrite?: string[] };
-    denyRead = block.denyRead ?? [];
-    denyWrite = block.denyWrite ?? [];
+    const deny = wslDenyPaths(facts.fs.wsl);
+    try {
+      const block = (probeSettings({ platform: facts.platform, home: facts.home, stateDir: facts.stateDir, binaryDir, xdgCacheHome: facts.xdgCacheHome, wslDenyPaths: deny }).filesystem ?? {}) as { denyRead?: string[]; denyWrite?: string[] };
+      denyRead = block.denyRead ?? [];
+      denyWrite = block.denyWrite ?? [];
+    } catch (error) {
+      if (!(error instanceof SandboxGrantRefused)) throw error;
+      // A runner directory that sits on the Windows side cannot be granted: the settings are not built, `wsl_mnt_path` below names it, and the gate refuses.
+      denyRead = deny;
+      denyWrite = deny;
+    }
     const roots = cacheRootsFor({ home: facts.home, platform: facts.platform, xdgCacheHome: facts.xdgCacheHome });
     directories.push(["workspace directory", roots.workspaceRoot], ["mirrors directory", roots.mirrorsRoot]);
   }
-  return wslChecks({ fs: facts.fs, denyRead, denyWrite, directories });
+  return wslChecks({ fs: facts.fs, denyRead, denyWrite, directories, searchPath: facts.searchPath });
 }
 
 /** The four checks, in a fixed order, each answering PASS (`ok`) or a refusal with its code. */
@@ -126,11 +148,13 @@ export function wslChecks(input: WslCheckInput): WslFinding[] {
   else if (exposed.length > 0) findings.push({ code: "wsl_drvfs_exposed", ok: false, detail: `${listed(exposed)} (9p, drvfs or virtiofs) reach the Windows side and are not in both the sandbox's read and write deny lists, so a job could read or change Windows files. They must be denied before WSL2 is accepted.` });
   else findings.push({ code: "wsl_drvfs_exposed", ok: true, detail: "every 9p, drvfs and virtiofs mount is denied for reads and writes" });
 
-  const onWindowsDrive = input.directories.filter(([, dir]) => isMnt(dir));
-  if (onWindowsDrive.length > 0) findings.push({ code: "wsl_mnt_path", ok: false, detail: `${onWindowsDrive.map(([label, dir]) => `the ${label} (${dir})`).join(", ")} sits under /mnt, which is a Windows drive: it is slow, Windows programs can change it, and the sandbox cannot protect it. Move it into the Linux file system, for example under your home directory.` });
+  // A directory is on a Windows drive as written or where it really lands: a link from the home directory into /mnt counts.
+  const onWindowsDrive = input.directories.filter(([, dir]) => isMnt(dir) || isMnt(input.fs.wsl?.realPath?.(dir) ?? dir));
+  if (onWindowsDrive.length > 0) findings.push({ code: "wsl_mnt_path", ok: false, detail: `${onWindowsDrive.map(([label, dir]) => `the ${label} (${dir})`).join(", ")} sits under /mnt, which is a Windows drive: it is slow, Windows programs can change it, and the sandbox cannot protect it (a link into /mnt counts). Move it into the Linux file system, for example under your home directory.` });
   else findings.push({ code: "wsl_mnt_path", ok: true, detail: "no runner directory is under /mnt" });
 
   if (wslConfValue(conf, "interop", "appendwindowspath") !== "false") findings.push({ code: "wsl_append_windows_path", ok: false, detail: `${WSL_CONF} does not set [interop] appendWindowsPath=false, so the Windows PATH is added to a job's PATH and could start Windows programs. Set appendWindowsPath=false under [interop], then run "wsl --shutdown" and open the distribution again.` });
+  else if (windowsPathEntries(input.searchPath).length > 0) findings.push({ code: "wsl_append_windows_path", ok: false, detail: `${WSL_CONF} says appendWindowsPath=false, but the PATH this runner started with still holds Windows entries (${listed(windowsPathEntries(input.searchPath))}): the setting has not taken effect yet. Run "wsl --shutdown" from Windows, open the distribution again, and start the runner from a shell that has the new PATH.` });
   else findings.push({ code: "wsl_append_windows_path", ok: true, detail: "the Windows PATH is not added" });
 
   return findings;
