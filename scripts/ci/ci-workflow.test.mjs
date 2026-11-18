@@ -372,6 +372,11 @@ test("ci.yml: no step passes the event payload's labels to the classifier", () =
 
 // ---- the check job -----------------------------------------------------------
 const CLASSIFIER = /node scripts\/ci\/affected\.mjs --base HEAD\^1 --head HEAD --force-full "\$CI_FORCE_FULL" --labels-api --github/;
+// The two scope steps take the range and the event from the environment (D#848 R3): a pull request gets
+// HEAD^1..HEAD exactly as before, a merge queue group gets its base_sha..head_sha.
+const SCOPE_CMD = /node scripts\/ci\/affected\.mjs --base "\$CI_SCOPE_BASE" --head "\$CI_SCOPE_HEAD" --force-full "\$CI_FORCE_FULL" --labels-api --github( --e2e-step)? --event "\$CI_EVENT_NAME"/;
+const SCOPE_BASE_EXPR = "${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || 'HEAD^1' }}";
+const SCOPE_HEAD_EXPR = "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || 'HEAD' }}";
 
 // The label is read from the API with a read-only token, as data in the environment; the event payload's
 // label list is never used (a re-run replays it stale).
@@ -381,10 +386,13 @@ function assertReadsLabelsFromApi(text) {
   assert.doesNotMatch(text, /pull_request\.labels|CI_PR_LABELS/);
 }
 
-test("check job: a pull-request-only step runs the classifier on HEAD^1..HEAD with both kill-switch inputs", () => {
+test("check job: the scope step runs on pull requests and merge groups, on HEAD^1..HEAD or the group's range, with both kill-switch inputs", () => {
   const s = stepNamed(checkSteps, "CI scope");
-  assert.equal(ifOf(s), "github.event_name == 'pull_request'");
-  assert.match(s.text, CLASSIFIER);
+  assert.equal(ifOf(s), "github.event_name == 'pull_request' || github.event_name == 'merge_group'");
+  assert.match(s.text, SCOPE_CMD);
+  assert.ok(s.text.includes(`CI_SCOPE_BASE: ${SCOPE_BASE_EXPR}`));
+  assert.ok(s.text.includes(`CI_SCOPE_HEAD: ${SCOPE_HEAD_EXPR}`));
+  assert.ok(s.text.includes("CI_EVENT_NAME: ${{ github.event_name }}"));
   assert.match(s.text, /CI_FORCE_FULL: \$\{\{ vars\.CI_FORCE_FULL \}\}/);
   assertReadsLabelsFromApi(s.text);
   // the labels reach the script as data: never spliced into the shell text
@@ -412,7 +420,8 @@ test("check job: the scope tests run in the same step as the migration lint test
 });
 
 test("push to main: the classifier is not consulted and check.sh runs with no affected list", () => {
-  assert.equal(ifOf(stepNamed(checkSteps, "CI scope")), "github.event_name == 'pull_request'");
+  assert.equal(runs(stepNamed(checkSteps, "CI scope"), ctxFor("push", false)), false, "a push never reaches the classifier");
+  assert.equal(runs(stepNamed(checkSteps, "CI scope"), ctxFor("push", true)), false);
   const push = stepNamed(checkSteps, "CI scope (push to main)");
   assert.equal(ifOf(push), "github.event_name != 'pull_request' && !github.event.repository.private");
   assert.match(push.text, /CI scope: full \(push to main\)/);
@@ -473,8 +482,11 @@ test("e2e job: the first step after checkout (and the hosted-only Nix install) r
   const rest = e2eSteps.slice(1);
   const first = rest.find((s) => !/\(hosted\)$/.test(s.name));
   assert.equal(first.name, "E2E scope (${{ matrix.project }})");
-  assert.match(first.text, CLASSIFIER);
+  assert.match(first.text, SCOPE_CMD);
   assert.match(first.text, /--e2e-step/);
+  assert.ok(first.text.includes(`CI_SCOPE_BASE: ${SCOPE_BASE_EXPR}`));
+  assert.ok(first.text.includes(`CI_SCOPE_HEAD: ${SCOPE_HEAD_EXPR}`));
+  assert.ok(first.text.includes("CI_EVENT_NAME: ${{ github.event_name }}"));
   assert.match(first.text, /CI_FORCE_FULL: \$\{\{ vars\.CI_FORCE_FULL \}\}/);
   assertReadsLabelsFromApi(first.text);
   assert.equal(ifOf(first), null, "the scope step itself always runs");
@@ -1867,7 +1879,7 @@ test("microvm image: nothing is downloaded or piped into a shell by the workflow
 });
 
 // ---- overlay-only pull requests (private repository) -------------------------------------------------
-const OVERLAY_LIST_EXPR = "${{ github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}";
+const OVERLAY_LIST_EXPR = "${{ github.event_name == 'pull_request' && github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}";
 
 /** GitHub's `a && b || c` for the one shape used here: the list when private is true, '' otherwise. */
 const overlayListFor = (isPrivate) => (isPrivate ? "scripts/ci/publish-denylist.local" : "");
@@ -1877,8 +1889,10 @@ test("overlay-only: the check job's scope step gets the overlay list only on a p
   assert.ok(s.text.includes(`CI_OVERLAY_LIST: ${OVERLAY_LIST_EXPR}`));
   assert.equal(overlayListFor(false), "", "public: empty, so the classifier cannot answer overlay");
   assert.equal(overlayListFor(true), "scripts/ci/publish-denylist.local");
-  // the command line itself is unchanged: the list travels through the environment
-  assert.match(s.text, CLASSIFIER);
+  // a merge queue group is a product run: the list is for pull requests only
+  assert.match(OVERLAY_LIST_EXPR, /github\.event_name == 'pull_request' && github\.event\.repository\.private/);
+  // the command line is the scope command; the list travels through the environment
+  assert.match(s.text, SCOPE_CMD);
   assert.doesNotMatch(s.text.split("run:")[1], /overlay/i);
 });
 
@@ -2567,4 +2581,141 @@ test("same tree: required check names, timeouts and permissions are unchanged", 
   ]);
   for (const j of ["check", "workspace-e2e", "e2e-runner"]) assert.deepEqual(doc.jobs[j].permissions, { contents: "read", "pull-requests": "read" });
   assert.deepEqual(doc.permissions, { contents: "read" });
+});
+
+// ---- D#848 R3: the merge queue runs through the two scope steps, and nothing else moved ---------------------------
+import { compareWorkflows } from "./compare-ci-workflow.mjs";
+
+const SCOPE_NAME = "E2E scope (${{ matrix.project }})";
+
+/** ci.yml as it was before R3: the two scope steps put back, every other byte as it is now. */
+function workflowBeforeR3() {
+  const checkRaw = stepNamed(checkSteps, "CI scope").raw;
+  const e2eRaw = stepNamed(e2eSteps, SCOPE_NAME).raw;
+  const dropEnv = (t) => t.replace(/ {10}# A merge queue group[^\n]*\n {10}CI_SCOPE_BASE[^\n]*\n {10}CI_SCOPE_HEAD[^\n]*\n {10}CI_EVENT_NAME[^\n]*\n/, "");
+  const checkBefore = dropEnv(checkRaw)
+    .replace("if: github.event_name == 'pull_request' || github.event_name == 'merge_group'", "if: github.event_name == 'pull_request'")
+    .replace("CI_OVERLAY_LIST: ${{ github.event_name == 'pull_request' && github.event.repository.private &&", "CI_OVERLAY_LIST: ${{ github.event.repository.private &&")
+    .replace(/run: nix develop[^\n]*affected\.mjs[^\n]*/, 'run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github');
+  const e2eBefore = dropEnv(e2eRaw).replace(/run: nix develop[^\n]*affected\.mjs[^\n]*/, 'run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github --e2e-step');
+  assert.notEqual(checkBefore, checkRaw);
+  assert.notEqual(e2eBefore, e2eRaw);
+  return ci.replace(checkRaw, checkBefore).replace(e2eRaw, e2eBefore);
+}
+
+test("R3 before/after: the workflow differs from its pre-R3 form only in the allowed lines of the two scope steps", () => {
+  const res = compareWorkflows(workflowBeforeR3(), ci);
+  assert.deepEqual(res.problems, []);
+  assert.equal(res.ok, true);
+  // the before text really is the old one: it has no merge_group scope at all
+  assert.doesNotMatch(workflowBeforeR3(), /CI_SCOPE_BASE|CI_SCOPE_HEAD|--event "/);
+});
+
+test("R3 before/after: any other edit to the workflow is reported (triggers, permissions, concurrency, secrets, runs-on, timeouts, other steps, e2e-runner)", () => {
+  const before = workflowBeforeR3();
+  const mutate = (from, to, why) => {
+    assert.ok(ci.includes(from), `fixture text for "${why}" is in the workflow`);
+    const res = compareWorkflows(before, ci.replace(from, to));
+    assert.equal(res.ok, false, why);
+    assert.match(res.problems.join("\n"), /differs outside the two scope steps/, why);
+  };
+  mutate("types: [checks_requested]", "types: [checks_requested, destroyed]", "trigger");
+  mutate("  contents: read\n", "  contents: write\n", "permissions");
+  mutate("cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}", "cancel-in-progress: false", "concurrency");
+  mutate("&& 125 || 40 }}", "&& 125 || 41 }}", "timeout");
+  mutate(GUARD, "ubuntu-latest", "runs-on");
+  mutate("(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false')", "(env.CI_SCOPE_RUNNER_PROTOCOL != 'false')", "the Node 22 step");
+  mutate('echo "CI scope: full (push to main)"', 'echo "CI scope: full"', "the push-to-main summary");
+  mutate("name: Overlay scope", "name: Overlay scope x", "e2e-runner");
+  mutate("GH_TOKEN: ${{ github.token }}\n        run: nix develop .#ci --command node scripts/ci/same-tree.mjs", "GH_TOKEN: ${{ secrets.X }}\n        run: nix develop .#ci --command node scripts/ci/same-tree.mjs", "a secret");
+  // comments count too
+  mutate("# No `labeled` here, on purpose.", "# No `labeled` here.", "a comment");
+});
+
+test("R3 before/after: inside the two scope steps only the allowed lines may move", () => {
+  const before = workflowBeforeR3();
+  const e2eRaw = stepNamed(e2eSteps, SCOPE_NAME).raw;
+  const checkRaw = stepNamed(checkSteps, "CI scope").raw;
+  const bad = (raw, from, to) => compareWorkflows(before, ci.replace(raw, raw.replace(from, to)));
+  // the E2E step has no `if:` and may not get one
+  assert.equal(bad(e2eRaw, "        env:\n", "        if: github.event_name == 'merge_group'\n        env:\n").ok, false);
+  // neither step may gain a secret or another variable
+  assert.equal(bad(checkRaw, "GH_TOKEN: ${{ github.token }}", "GH_TOKEN: ${{ github.token }}\n          X: 1").ok, false);
+  assert.equal(bad(e2eRaw, "CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}", "CI_FORCE_FULL: ${{ vars.OTHER }}").ok, false);
+  // the e2e step's overlay list stays exactly as it was
+  assert.equal(bad(e2eRaw, "'scripts/ci/publish-denylist.local' || ''", "'' || ''").ok, false);
+  // a missing step is reported, not treated as no change
+  assert.equal(compareWorkflows(before, ci.replace("- name: CI scope\n", "- name: CI scope renamed\n")).ok, false);
+});
+
+test("R3: the compare script runs from the command line and exits non-zero on a difference", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "d848-wf-"));
+  try {
+    writeFileSync(path.join(dir, "before.yml"), workflowBeforeR3());
+    writeFileSync(path.join(dir, "after.yml"), ci);
+    const run = (b, a) => spawnSync(process.execPath, [path.join(here, "compare-ci-workflow.mjs"), path.join(dir, b), path.join(dir, a)], { encoding: "utf8" });
+    assert.equal(run("before.yml", "after.yml").status, 0);
+    writeFileSync(path.join(dir, "tampered.yml"), ci.replace("&& 125 || 40 }}", "&& 125 || 41 }}"));
+    const bad = run("before.yml", "tampered.yml");
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /differs outside the two scope steps/);
+    assert.equal(spawnSync(process.execPath, [path.join(here, "compare-ci-workflow.mjs")], { encoding: "utf8" }).status, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The value of `${{ cond && a || b }}` for the one shape used by CI_SCOPE_BASE / CI_SCOPE_HEAD. */
+const scopeRange = (event, mg) => {
+  const base = event === "merge_group" ? mg.base_sha : "HEAD^1";
+  const head = event === "merge_group" ? mg.head_sha : "HEAD";
+  return { base, head };
+};
+
+test("R3: a pull request's scope step arguments resolve to HEAD^1 and HEAD, as before; a merge group gets its own SHAs", () => {
+  for (const [steps, name] of [[checkSteps, "CI scope"], [e2eSteps, SCOPE_NAME]]) {
+    const s = stepNamed(steps, name);
+    assert.ok(s.text.includes(`CI_SCOPE_BASE: ${SCOPE_BASE_EXPR}`), name);
+    assert.ok(s.text.includes(`CI_SCOPE_HEAD: ${SCOPE_HEAD_EXPR}`), name);
+    // the expression is `event == merge_group && <sha> || <default>`: a merge group's SHA is never empty, so the default is for every other event
+    assert.match(SCOPE_BASE_EXPR, /github\.event_name == 'merge_group' && github\.event\.merge_group\.base_sha \|\| 'HEAD\^1'/);
+    assert.match(SCOPE_HEAD_EXPR, /github\.event_name == 'merge_group' && github\.event\.merge_group\.head_sha \|\| 'HEAD'/);
+  }
+  assert.deepEqual(scopeRange("pull_request", { base_sha: "b", head_sha: "h" }), { base: "HEAD^1", head: "HEAD" });
+  assert.deepEqual(scopeRange("merge_group", { base_sha: "b", head_sha: "h" }), { base: "b", head: "h" });
+});
+
+test("R3: the scope step runs for merge_group and pull_request in `check`, never for a push; the e2e scope step always runs", () => {
+  const s = stepNamed(checkSteps, "CI scope");
+  for (const [event, expected] of [["pull_request", true], ["merge_group", true], ["push", false]]) {
+    assert.equal(runs(s, ctxFor(event, false)), expected, event);
+    assert.equal(runs(s, ctxFor(event, true)), expected, `${event} (private)`);
+  }
+  assert.equal(ifOf(stepNamed(e2eSteps, SCOPE_NAME)), null);
+});
+
+test("R3: the push-to-main summary step, the Node 22 step and the e2e-runner job are as they were", () => {
+  const push = stepNamed(checkSteps, "CI scope (push to main)");
+  assert.equal(ifOf(push), "github.event_name != 'pull_request' && !github.event.repository.private");
+  assert.match(push.text, /echo "CI scope: full \(push to main\)" \| tee -a "\$GITHUB_STEP_SUMMARY"/);
+  assert.equal(ifOf(stepNamed(checkSteps, "Runner protocol tests on Node 22")), `(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(${PRIVATE_PUSH}) && env.CI_SAME_TREE != 'true'`);
+  // e2e-runner: no classifier step of this kind, no scope variable
+  assert.deepEqual(runnerE2eSteps.filter((x) => /CI_SCOPE_BASE|--event "/.test(x.text)), []);
+  assert.doesNotMatch(runnerE2eJob, /CI_SCOPE_E2E|CI_SCOPE_BASE/);
+  assert.match(String(ciDoc.jobs["e2e-runner"].if), /^vars\.CI_DISABLED != 'true'/);
+});
+
+test("R3: for a docs-only queue run every required context still ends success (no job is skipped, every heavy step is guarded)", () => {
+  // No job-level `if:` reads the scope answer, so no job can end `skipped`.
+  for (const [name, job] of Object.entries(ciDoc.jobs)) assert.doesNotMatch(String(job.if ?? ""), /CI_SCOPE|overlay/i, name);
+  // `workspace-e2e`: the answer for docs is CI_SCOPE_E2E=false, which turns every step after the scope step off (a skipped step is not a failed job)
+  const at = e2eSteps.findIndex((x) => x.name === SCOPE_NAME);
+  const guarded = e2eSteps.slice(at + 1).filter((x) => /env\.CI_SCOPE_E2E == 'true'/.test(ifOf(x) ?? ""));
+  assert.ok(guarded.length >= 4);
+  for (const x of guarded) assert.equal(runs(x, { ...ctxFor("merge_group", false), "env.CI_SCOPE_E2E": "false", "runner.environment": "self-hosted", "vars.CI_RUNS_ON": "" }), false, x.name);
+  // `check`: the safety steps have no `if:`, so they run and the job ends success without the product suites narrowing it
+  for (const n of ["Secret scan of the change", "Migration compatibility lint", "Migration lint and secret scan tests"]) assert.equal(ifOf(stepNamed(checkSteps, n)), null, n);
+  // the e2e-runner job has no scope step on a merge group (its `Overlay scope` is private pull request only), so its context is `success` as before
+  assert.equal(runs(stepNamed(runnerE2eSteps, "Overlay scope"), ctxFor("merge_group", true)), false);
+  // the same flag semantics as a pull request: affected.mjs sets CI_SCOPE_E2E=false for a docs-only answer (see affected.test.mjs, "merge group CLI")
 });

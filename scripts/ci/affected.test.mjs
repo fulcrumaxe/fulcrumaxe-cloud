@@ -13,7 +13,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { classify, e2eSkipLine, fetchPrLabels, globToRegExp, loadTriggers, scopeLine } from "./affected.mjs";
+import {
+  classify,
+  classifyMergeGroup,
+  e2eSkipLine,
+  fetchCommitDepth1,
+  fetchPrLabels,
+  fetchRangeCommits,
+  globToRegExp,
+  loadTriggers,
+  prNumberOfSubject,
+  scopeLine,
+} from "./affected.mjs";
 import { parseList, projectsFor } from "./vitest-projects.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1804,4 +1815,477 @@ test("--github: a product change on the private plane (list given) exports no ov
   assert.equal("CI_SCOPE_OVERLAY" in s.vars, false);
   // tests/ belongs to no package and is not ignored, so today's answer for the mixed set is full
   assert.equal(s.vars.CI_SCOPE_MODE, "full");
+});
+
+// ---- D#848 R3: merge queue groups ----------------------------------------
+// The event's base_sha is the group's PARENT commit (for an entry queued behind another, that entry's head), so the
+// group's scope is taken back to the merge base with the target branch, listed by the compare API. The API is stubbed
+// here with the shapes captured from real queue runs: see scripts/ci/fixtures/merge-group/contract.json.
+const MG_DIR = path.join(here, "fixtures", "merge-group");
+const MG_CONTRACT = JSON.parse(readFileSync(path.join(MG_DIR, "contract.json"), "utf8"));
+const MG_RUN = JSON.parse(readFileSync(path.join(MG_DIR, "run-44233460388.json"), "utf8"));
+const MG_ENV = { GITHUB_REPOSITORY: "o/r", GH_TOKEN: "t", GITHUB_API_URL: "http://api.invalid" };
+const queueRef = (sha, n = 7, branch = "main") => `refs/heads/gh-readonly-queue/${branch}/pr-${n}-${sha}`;
+
+/** A repository with the workspace manifests and a chain of single-parent commits: [{ subject, files }]. */
+function mgRepo(entries) {
+  const dir = mkdtempSync(path.join(tmpdir(), "d848-mg-"));
+  git(dir, "init", "-q", "-b", "main");
+  git(dir, "config", "gc.auto", "0"); // no background gc left writing into the directory while it is removed
+  copyFileSync(path.join(repoRoot, "pnpm-workspace.yaml"), path.join(dir, "pnpm-workspace.yaml"));
+  for (const d of WORKSPACE.keys()) {
+    mkdirSync(path.join(dir, d), { recursive: true });
+    copyFileSync(path.join(repoRoot, d, "package.json"), path.join(dir, d, "package.json"));
+  }
+  writeFileSync(path.join(dir, "pnpm-lock.yaml"), "lockfileVersion: 1\n");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "base (#1)");
+  const shas = [git(dir, "rev-parse", "HEAD")];
+  for (const e of entries) {
+    for (const [p, c] of Object.entries(e.files)) {
+      mkdirSync(path.dirname(path.join(dir, p)), { recursive: true });
+      writeFileSync(path.join(dir, p), c);
+    }
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", e.subject);
+    shas.push(git(dir, "rev-parse", "HEAD"));
+  }
+  return { dir, shas };
+}
+const mgDone = (repo) => rmSync(repo.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+
+/**
+ * The API as the workflow sees it. `compare` answers branch...head: the commits entries[0..to) (everything ahead of
+ * the target branch, whose tip is shas[0], the merge base) and each pull request's labels.
+ */
+function mgApi({ shas }, entries, { labels = {}, compare = 200, labelStatus = {}, mergeBase = undefined } = {}) {
+  const calls = [];
+  const impl = async (url) => {
+    calls.push(String(url));
+    const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+    if (String(url).includes("/compare/")) {
+      if (compare !== 200) return json({}, compare);
+      const commits = entries.map((e, i) => ({
+        sha: shas[i + 1],
+        parents: [{ sha: shas[i] }],
+        commit: { message: `${e.subject}\n\nCo-authored-by: a <a@example.invalid>` },
+      }));
+      const mb = mergeBase === undefined ? { sha: shas[0] } : mergeBase;
+      return json({ total_commits: commits.length, commits, ...(mb ? { merge_base_commit: mb } : {}) });
+    }
+    const m = /\/issues\/(\d+)\/labels/.exec(String(url));
+    if (m && labelStatus[m[1]]) return json({}, labelStatus[m[1]]);
+    return json((labels[m?.[1]] ?? []).map((name) => ({ name })));
+  };
+  return { impl, calls };
+}
+
+const WEB = { subject: "web change (#101)", files: { "apps/web/src/a.ts": "export const a = 1;\n" } };
+const DOC = { subject: "docs only (#102)", files: { "docs/ops/note.md": "note\n" } };
+/**
+ * Classify the group that ends at entries[to-1], as the event would describe it: base_sha = shas[eventBase] (the
+ * entry ahead's head when eventBase = to - 1), head_sha = shas[to], GITHUB_REF = the queue branch.
+ */
+const mgRun = async (repo, entries, eventBase, to, opts = {}, deps = {}, envExtra = {}) => {
+  const api = mgApi(repo, entries.slice(0, to), opts);
+  const result = await classifyMergeGroup(
+    { repoRoot: repo.dir, base: repo.shas[eventBase], head: repo.shas[to], env: { ...MG_ENV, GITHUB_REF: queueRef(repo.shas[eventBase]), ...envExtra } },
+    { fetchImpl: api.impl, ...deps },
+  );
+  return { result, api };
+};
+
+test("merge group: a docs-only group answers affected with 0 packages and the summary line says docs", async () => {
+  const repo = mgRepo([DOC]);
+  const { result, api } = await mgRun(repo, [DOC], 0, 1);
+  assert.equal(result.mode, "affected");
+  assert.deepEqual(result.packages, []);
+  assert.equal(result.e2e, false);
+  assert.deepEqual(result.mergeGroup, { prs: [102] });
+  assert.equal(scopeLine(result, { e2eStep: true }), "CI scope: docs — 0 packages (ignored paths only); merge group of #102");
+  assert.ok(api.calls.some((u) => u.includes("/compare/main...")), "the compare is against the target branch named by GITHUB_REF");
+  mgDone(repo);
+});
+
+test("merge group: a code change selects its packages and the line says affected", async () => {
+  const repo = mgRepo([WEB]);
+  const { result } = await mgRun(repo, [WEB], 0, 1);
+  assert.equal(result.mode, "affected");
+  assert.ok(result.packages.includes("apps/web"));
+  assert.ok(scopeLine(result, { e2eStep: true }).startsWith("CI scope: affected — "));
+  mgDone(repo);
+});
+
+test("merge group: the event's base_sha is the entry AHEAD, and the scope still covers the whole range back to the merge base", async () => {
+  const repo = mgRepo([WEB, DOC]);
+  // entry 2 (docs) queued behind entry 1 (web): the event says base_sha = entry 1's head, head_sha = entry 2's head
+  const { result } = await mgRun(repo, [WEB, DOC], 1, 2);
+  assert.ok(result.packages.includes("apps/web"), "entry 2 is tested with everything ahead of it");
+  assert.deepEqual(result.mergeGroup.prs, [101, 102]);
+  // what the event's own range would have said (base_sha..head_sha, one commit): docs. That is the defect this prevents.
+  const eventRange = classify({ repoRoot: repo.dir, base: repo.shas[1], head: repo.shas[2], labels: [] });
+  assert.deepEqual(eventRange.packages, []);
+  assert.notDeepEqual(result.packages, eventRange.packages);
+  mgDone(repo);
+});
+
+test("merge group: a GITHUB_REF that is not a merge queue branch is full", async () => {
+  const repo = mgRepo([WEB, DOC]);
+  const sha = repo.shas[1];
+  for (const ref of [
+    undefined,
+    "",
+    "refs/heads/main",
+    "refs/pull/101/merge",
+    `refs/heads/gh-readonly-queue/main/pr-7`,
+    `refs/heads/gh-readonly-queue/main/pr-x-${sha}`,
+    `refs/heads/gh-readonly-queue/main/pr-7-${sha}/extra`,
+    `refs/tags/gh-readonly-queue/main/pr-7-${sha}`,
+    `refs/heads/gh-readonly-queue//pr-7-${sha}`,
+  ]) {
+    const api = mgApi(repo, [WEB, DOC]);
+    const result = await classifyMergeGroup(
+      { repoRoot: repo.dir, base: sha, head: repo.shas[2], env: { ...MG_ENV, ...(ref === undefined ? {} : { GITHUB_REF: ref }) } },
+      { fetchImpl: api.impl },
+    );
+    assert.equal(result.mode, "full", String(ref));
+    assert.match(result.reason, /GITHUB_REF is not a merge queue branch/);
+    assert.equal(api.calls.length, 0, "nothing is read from the API");
+  }
+  // a target branch with a slash in it is read whole
+  const api = mgApi(repo, [WEB, DOC]);
+  const ok = await classifyMergeGroup(
+    { repoRoot: repo.dir, base: sha, head: repo.shas[2], env: { ...MG_ENV, GITHUB_REF: queueRef(sha, 7, "release/1.x") } },
+    { fetchImpl: api.impl },
+  );
+  assert.equal(ok.mode, "affected");
+  assert.ok(api.calls[0].includes("/compare/release/1.x..."));
+  mgDone(repo);
+});
+
+test("merge group: an event base_sha that is neither in the range nor the merge base is full", async () => {
+  const repo = mgRepo([WEB, DOC]);
+  const { result } = await mgRun(repo, [WEB, DOC], 1, 2, {}, {}, { GITHUB_REF: queueRef("2".repeat(40)) });
+  assert.equal(result.mode, "affected", "control: the same group with its real base is narrowed");
+  const bad = await classifyMergeGroup(
+    { repoRoot: repo.dir, base: "2".repeat(40), head: repo.shas[2], env: { ...MG_ENV, GITHUB_REF: queueRef("2".repeat(40)) } },
+    { fetchImpl: mgApi(repo, [WEB, DOC]).impl },
+  );
+  assert.equal(bad.mode, "full");
+  assert.match(bad.reason, /event's base SHA is not in the range/);
+  mgDone(repo);
+});
+
+test("merge group: ci:full on ANY pull request of the group is full", async () => {
+  const repo = mgRepo([WEB, DOC]);
+  const { result } = await mgRun(repo, [WEB, DOC], 1, 2, { labels: { 101: ["ci:full"] } });
+  assert.equal(result.mode, "full");
+  assert.match(result.reason, /label ci:full on #101/);
+  mgDone(repo);
+});
+
+test("merge group: a commit with no trailing (#N) is full", async () => {
+  for (const subject of ["no number here", "number in the middle (#7) and text after", "(#abc)", "Merge branch 'x'"]) {
+    const e = { subject, files: DOC.files };
+    const repo = mgRepo([e]);
+    const { result } = await mgRun(repo, [e], 0, 1);
+    assert.equal(result.mode, "full", subject);
+    assert.match(result.reason, /no \(#N\) pull request number/);
+    mgDone(repo);
+  }
+});
+
+test("merge group: a label read that fails is full, whichever pull request it was and however it failed", async () => {
+  const repo = mgRepo([WEB, DOC]);
+  for (const status of [403, 404, 500]) {
+    const { result } = await mgRun(repo, [WEB, DOC], 1, 2, { labelStatus: { 101: status } });
+    assert.equal(result.mode, "full");
+    assert.match(result.reason, /could not read the labels of #101/);
+  }
+  assert.equal((await mgRun(repo, [WEB, DOC], 1, 2, { labelStatus: { 102: 500 } })).result.mode, "full");
+  const boom = await classifyMergeGroup(
+    { repoRoot: repo.dir, base: repo.shas[1], head: repo.shas[2], env: { ...MG_ENV, GITHUB_REF: queueRef(repo.shas[1]) } },
+    { fetchImpl: async () => { throw new Error("socket hang up"); } },
+  );
+  assert.equal(boom.mode, "full");
+  mgDone(repo);
+});
+
+test("merge group: a SHA that cannot be resolved is full (head missing, merge base missing and not fetchable)", async () => {
+  const repo = mgRepo([DOC]);
+  const missing = "0".repeat(40);
+  const calls = [];
+  const noFetch = (root, sha) => (calls.push(sha), "unreachable");
+  const env = { ...MG_ENV, GITHUB_REF: queueRef(repo.shas[0]) };
+  const head = await classifyMergeGroup({ repoRoot: repo.dir, base: repo.shas[0], head: missing, env }, { fetchImpl: mgApi(repo, [DOC]).impl, fetchBase: noFetch });
+  assert.equal(head.mode, "full");
+  assert.match(head.reason, /head SHA cannot be resolved/);
+  // the compare names a merge base this checkout does not have, and it cannot be fetched
+  const api = mgApi(repo, [DOC], { mergeBase: { sha: missing } });
+  const base = await classifyMergeGroup({ repoRoot: repo.dir, base: missing, head: repo.shas[1], env: { ...env, GITHUB_REF: queueRef(missing) } }, { fetchImpl: api.impl, fetchBase: noFetch });
+  assert.equal(base.mode, "full");
+  assert.match(base.reason, /base SHA cannot be resolved/);
+  assert.deepEqual(calls, [missing], "only the merge base is ever fetched");
+  for (const bad of ["", "HEAD", "abc123", undefined]) {
+    const r = await classifyMergeGroup({ repoRoot: repo.dir, base: bad, head: repo.shas[1], env }, { fetchImpl: mgApi(repo, [DOC]).impl });
+    assert.equal(r.mode, "full", String(bad));
+  }
+  mgDone(repo);
+});
+
+test("merge group: a compare call that fails, is cut short, is empty, has no merge base or does not end at head is full", async () => {
+  const repo = mgRepo([DOC]);
+  const env = { ...MG_ENV, GITHUB_REF: queueRef(repo.shas[0]) };
+  const run = (impl) => classifyMergeGroup({ repoRoot: repo.dir, base: repo.shas[0], head: repo.shas[1], env }, { fetchImpl: impl });
+  for (const status of [401, 404, 500]) {
+    const { result } = await mgRun(repo, [DOC], 0, 1, { compare: status });
+    assert.equal(result.mode, "full", String(status));
+    assert.match(result.reason, new RegExp(`compare answered ${status}`));
+  }
+  const mb = { merge_base_commit: { sha: repo.shas[0] } };
+  const body = (b) => async () => new Response(JSON.stringify(b), { status: 200 });
+  const c = (sha, n) => ({ sha, parents: [{ sha: "p" }], commit: { message: `x (#${n})` } });
+  assert.match((await run(body({ ...mb, total_commits: 5, commits: [c(repo.shas[1], 1)] }))).reason, /compare listed \d+ of 5 commits/);
+  assert.match((await run(body({ ...mb, total_commits: 0, commits: [] }))).reason, /listed no commits/);
+  assert.match((await run(body({ ...mb, total_commits: 1, commits: [c("f".repeat(40), 1)] }))).reason, /does not end at the head/);
+  assert.match((await run(body({ total_commits: 1, commits: [c(repo.shas[1], 1)] }))).reason, /no merge base/);
+  assert.match((await run(body({ merge_base_commit: { sha: "nothex" }, total_commits: 1, commits: [c(repo.shas[1], 1)] }))).reason, /no merge base/);
+  assert.match((await run(body({ nope: true }))).reason, /unexpected compare response/);
+  assert.match((await run(async () => { throw new Error("socket hang up"); })).reason, /socket hang up/);
+  // two parents (a merge commit) is not a queue commit
+  const merge = { sha: repo.shas[1], parents: [{ sha: "a" }, { sha: "b" }], commit: { message: "x (#9)" } };
+  assert.match((await run(body({ ...mb, total_commits: 1, commits: [merge] }))).reason, /exactly one parent/);
+  mgDone(repo);
+});
+
+test("merge group: CI_FORCE_FULL, a missing token and a missing repository are full, and the force switch reads nothing", async () => {
+  const repo = mgRepo([DOC]);
+  const api = mgApi(repo, [DOC]);
+  const env = { ...MG_ENV, GITHUB_REF: queueRef(repo.shas[0]) };
+  const base = { repoRoot: repo.dir, base: repo.shas[0], head: repo.shas[1] };
+  const forced = await classifyMergeGroup({ ...base, forceFull: "true", env }, { fetchImpl: api.impl });
+  assert.equal(forced.reason, "CI_FORCE_FULL");
+  assert.equal(api.calls.length, 0);
+  for (const e of [{ ...env, GH_TOKEN: "" }, { ...env, GITHUB_REPOSITORY: "" }, { ...env, GITHUB_REPOSITORY: "a b" }]) {
+    assert.equal((await classifyMergeGroup({ ...base, env: e }, { fetchImpl: api.impl })).mode, "full");
+  }
+  mgDone(repo);
+});
+
+test("merge group: a trigger path in the range is full exactly as on a pull request", async () => {
+  const lock = { subject: "deps (#103)", files: { "pnpm-lock.yaml": "lockfileVersion: 2\n" } };
+  const repo = mgRepo([lock, DOC]);
+  // the trigger is in the entry AHEAD; the docs entry behind it is still full
+  const { result } = await mgRun(repo, [lock, DOC], 1, 2);
+  assert.equal(result.mode, "full");
+  assert.match(result.reason, /pnpm-lock\.yaml matches a full-run trigger/);
+  assert.equal("mergeGroup" in result, false);
+  mgDone(repo);
+});
+
+test("merge group: a merge base that is not in the shallow checkout is fetched at depth 1 and the group is still classified", async () => {
+  const src = mgRepo([WEB, DOC]);
+  git(src.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
+  const clone = path.join(mkdtempSync(path.join(tmpdir(), "d848-mg-shallow-")), "clone");
+  execFileSync("git", ["clone", "-q", "--depth=1", `file://${src.dir}`, clone]);
+  const has = (sha) => spawnSync("git", ["-C", clone, "cat-file", "-e", `${sha}^{commit}`]).status === 0;
+  assert.equal(has(src.shas[0]), false, "the merge base is absent before");
+  const fetched = [];
+  const fetchBase = (root, sha) => (fetched.push(sha), fetchCommitDepth1(root, sha, MG_ENV, `file://${src.dir}`));
+  const api = mgApi(src, [WEB, DOC]);
+  const env = { ...MG_ENV, GITHUB_REF: queueRef(src.shas[1]) };
+  const result = await classifyMergeGroup({ repoRoot: clone, base: src.shas[1], head: src.shas[2], env }, { fetchImpl: api.impl, fetchBase });
+  assert.deepEqual(fetched, [src.shas[0]]);
+  assert.equal(result.mode, "affected");
+  assert.ok(result.packages.includes("apps/web"), "the entry ahead is in the diff");
+  assert.equal(has(src.shas[0]), true, "the merge base is present after");
+  // a fetch that fails is full
+  const gone = await classifyMergeGroup(
+    { repoRoot: clone, base: "1".repeat(40), head: src.shas[2], env: { ...env, GITHUB_REF: queueRef("1".repeat(40)) } },
+    { fetchImpl: mgApi(src, [WEB, DOC], { mergeBase: { sha: "1".repeat(40) } }).impl, fetchBase },
+  );
+  assert.equal(gone.mode, "full");
+  assert.match(gone.reason, /base SHA cannot be resolved/);
+  mgDone(src);
+  rmSync(path.dirname(clone), { recursive: true, force: true });
+});
+
+test("fetchCommitDepth1: refuses what it cannot do, and the token goes through git's environment, not its arguments", () => {
+  assert.equal(fetchCommitDepth1("/nonexistent", "nothex", MG_ENV), "not a full SHA");
+  assert.equal(fetchCommitDepth1("/nonexistent", "a".repeat(40), { GITHUB_REPOSITORY: "o/r" }), "token or repository missing");
+  const text = fetchCommitDepth1.toString();
+  assert.match(text, /GIT_CONFIG_VALUE_0/);
+  assert.doesNotMatch(text, /"-c"/);
+});
+
+test("merge group contract: the captured run, the queue branch name and the single-parent commit shape", () => {
+  const one = MG_CONTRACT.single_entry;
+  assert.equal(MG_RUN.event, "merge_group");
+  assert.equal(MG_RUN.id, 44233460388);
+  assert.equal(MG_RUN.head_sha, one.head_sha);
+  assert.equal(MG_RUN.head_branch, one.head_branch);
+  const m = new RegExp(MG_CONTRACT.queue_branch_pattern).exec(MG_RUN.head_branch);
+  assert.ok(m, "the queue branch name has the captured form");
+  assert.equal(m[1], "1011");
+  assert.equal(m[2], one.base_sha, "base_sha is the SHA the branch name ends with");
+  assert.deepEqual(one.head_parents, [one.base_sha], "base_sha equals head^1");
+  assert.equal(MG_RUN.head_commit.message.split("\n")[0], one.head_subject);
+  assert.equal(prNumberOfSubject(one.head_subject), 1011);
+  // the GITHUB_REF of that run names the target branch
+  assert.equal(QUEUE_REF(`refs/heads/${MG_RUN.head_branch}`), "main");
+  // The parent list is the captured one, checked against the captured data only: a shallow checkout (CI) does not
+  // have this commit's history, so no live git history is read here.
+});
+const QUEUE_REF = (ref) => new RegExp(MG_CONTRACT.github_ref_pattern).exec(ref)?.[1];
+
+test("merge group contract: two real groups queued behind each other; the second's event base is the first's head, and its range lists both", async () => {
+  const two = MG_CONTRACT.two_entry_real;
+  const first = JSON.parse(readFileSync(path.join(MG_DIR, two.first_run), "utf8"));
+  const second = JSON.parse(readFileSync(path.join(MG_DIR, two.second_run), "utf8"));
+  assert.equal(second.head_sha, two.second_head_sha);
+  assert.equal(second.head_branch, two.second_head_branch);
+  // the real defect: the second event's base_sha is the FIRST entry's head, not the target branch's tip
+  assert.equal(new RegExp(MG_CONTRACT.queue_branch_pattern).exec(second.head_branch)[2], two.second_event_base_sha);
+  assert.equal(first.head_sha, two.second_event_base_sha);
+  assert.notEqual(two.second_event_base_sha, two.merge_base);
+  assert.deepEqual(two.commits[0].parents, [two.merge_base]);
+  assert.deepEqual(two.commits[1].parents, [two.second_event_base_sha]);
+  assert.equal(first.head_commit.message.split("\n")[0], two.commits[0].subject);
+  assert.equal(second.head_commit.message.split("\n")[0], two.commits[1].subject);
+  // the compare the classifier makes, answered as GitHub answers it, lists both pull requests and the merge base
+  const impl = async (url) => {
+    assert.ok(String(url).includes("/compare/main..."));
+    return new Response(
+      JSON.stringify({
+        merge_base_commit: { sha: two.merge_base },
+        total_commits: 2,
+        commits: two.commits.map((c) => ({ sha: c.sha, parents: c.parents.map((sha) => ({ sha })), commit: { message: `${c.subject}\n\nbody` } })),
+      }),
+      { status: 200 },
+    );
+  };
+  const got = await fetchRangeCommits("main", two.second_head_sha, MG_ENV, impl);
+  assert.equal(got.mergeBase, two.merge_base);
+  assert.deepEqual(got.commits.map((c) => prNumberOfSubject(c.subject)), [1019, 1015]);
+  assert.ok(got.commits.some((c) => c.sha === two.second_event_base_sha), "the event's base is in the list, so it is accepted");
+  assert.ok(got.commits.every((c) => c.parents === 1));
+});
+
+test("fetchRangeCommits: a malformed target branch is refused before any request", async () => {
+  let calls = 0;
+  const impl = async () => (calls++, new Response("{}", { status: 200 }));
+  for (const b of ["", "a..b", "a b", "a?x=1", "-x;y", undefined]) assert.match((await fetchRangeCommits(b, "a".repeat(40), MG_ENV, impl)).error, /target branch name is malformed/, String(b));
+  assert.equal(calls, 0);
+});
+
+test("prNumberOfSubject: only a trailing (#N) counts", () => {
+  assert.equal(prNumberOfSubject("Add a thing (#12)"), 12);
+  assert.equal(prNumberOfSubject("Add a thing (#12)  "), 12);
+  for (const s of ["Add (#12) a thing", "Add a thing", "Add a thing (#0)", "Add a thing (#12", "Add a thing #12", "Add a thing (#12345678901)"]) assert.equal(prNumberOfSubject(s), null, s);
+});
+
+test("scopeLine: on the check job a merge group's line says check runs its full suite; the e2e line does not; pull requests are unchanged", () => {
+  const docs = { mode: "affected", packages: [], reason: "x", e2e: false, lint: [], trigger: null, mergeGroup: { prs: [4, 5] } };
+  const web = { ...docs, packages: ["apps/web"] };
+  const tail = "; check runs its full suite on queue runs (only workspace-e2e is narrowed)";
+  assert.equal(scopeLine(docs), `CI scope: docs — 0 packages (ignored paths only); merge group of #4, #5${tail}`);
+  assert.equal(scopeLine(web), `CI scope: affected — 1 packages: apps/web; merge group of #4, #5${tail}`);
+  assert.equal(scopeLine(docs, { e2eStep: true }), "CI scope: docs — 0 packages (ignored paths only); merge group of #4, #5");
+  assert.equal(scopeLine(web, { e2eStep: true }), "CI scope: affected — 1 packages: apps/web; merge group of #4, #5");
+  assert.equal(scopeLine({ ...docs, mergeGroup: undefined }), "CI scope: affected — 0 packages (ignored paths only)");
+  assert.equal(scopeLine({ ...web, mergeGroup: undefined }), "CI scope: affected — 1 packages: apps/web");
+});
+
+// ---- the command line, against a local API ----
+async function mgCli(repo, entries, { opts = {}, e2eStep = true, ref } = {}) {
+  const api = mgApi(repo, entries, opts);
+  const server = createServer(async (req, res) => {
+    const r = await api.impl(`http://x${req.url}`);
+    res.writeHead(r.status, { "content-type": "application/json" });
+    res.end(await r.text());
+  });
+  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+  const envFile = path.join(aux, `mg-env-${Math.random().toString(36).slice(2)}`);
+  const summary = `${envFile}.summary`;
+  writeFileSync(envFile, "");
+  writeFileSync(summary, "");
+  const clean = { ...process.env };
+  for (const k of ["CI_OVERLAY_LIST", "GITHUB_API_URL", "GITHUB_REPOSITORY", "CI_PR_NUMBER", "GH_TOKEN", "GITHUB_REF"]) delete clean[k];
+  let out;
+  try {
+    out = await execFileAsync(
+      process.execPath,
+      [CLI, "--repo", repo.dir, "--base", repo.shas[0], "--head", repo.shas[entries.length], "--github", ...(e2eStep ? ["--e2e-step"] : []), "--event", "merge_group"],
+      {
+        encoding: "utf8",
+        env: { ...clean, GITHUB_ENV: envFile, GITHUB_STEP_SUMMARY: summary, GITHUB_REPOSITORY: "o/r", GH_TOKEN: "t", GITHUB_REF: ref ?? queueRef(repo.shas[0]), GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` },
+      },
+    );
+  } finally {
+    server.close();
+  }
+  const vars = Object.fromEntries(readFileSync(envFile, "utf8").split("\n").filter(Boolean).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+  return { json: JSON.parse(out.stdout), vars, summary: readFileSync(summary, "utf8"), stderr: out.stderr, requests: api.calls };
+}
+
+test("merge group CLI: a docs-only group exports CI_SCOPE_E2E=false and no package, and the summary says docs", async () => {
+  const repo = mgRepo([DOC]);
+  const r = await mgCli(repo, [DOC]);
+  assert.equal(r.json.mode, "affected");
+  assert.equal(r.vars.CI_SCOPE_MODE, "affected");
+  assert.equal(r.vars.CI_SCOPE_E2E, "false", "every later spec step skips and the job still ends success");
+  assert.equal(r.vars.FX_CHECK_AFFECTED, "none");
+  assert.equal(r.vars.CI_SCOPE_RUNNER_PROTOCOL, "false");
+  assert.equal(r.summary.trim(), "CI scope: docs — 0 packages (ignored paths only); merge group of #102");
+  assert.match(r.stderr, /skipped: not affected/, "the e2e step prints its skip line");
+  assert.ok(r.requests.some((u) => u.includes("/compare/main...")) && r.requests.some((u) => u.includes("/issues/102/labels")));
+  assert.equal(r.requests.some((u) => u.includes("/issues//labels")), false, "no single-pull-request label read on a merge group");
+  mgDone(repo);
+});
+
+test("merge group CLI: the check job's step (no --e2e-step) says check runs its full suite", async () => {
+  const repo = mgRepo([DOC]);
+  const r = await mgCli(repo, [DOC], { e2eStep: false });
+  assert.equal(r.summary.trim(), "CI scope: docs — 0 packages (ignored paths only); merge group of #102; check runs its full suite on queue runs (only workspace-e2e is narrowed)");
+  mgDone(repo);
+});
+
+test("merge group CLI: a GITHUB_REF that is not a queue branch exports full", async () => {
+  const repo = mgRepo([DOC]);
+  const r = await mgCli(repo, [DOC], { ref: "refs/heads/main" });
+  assert.equal(r.json.mode, "full");
+  assert.equal(r.vars.CI_SCOPE_E2E, "true");
+  mgDone(repo);
+});
+
+test("merge group CLI: a change to the e2e job's own paths keeps CI_SCOPE_E2E true", async () => {
+  const e2e = { subject: "shell spec (#104)", files: { "apps/workspace/e2e/a.spec.ts": "x\n" } };
+  const repo = mgRepo([e2e]);
+  const r = await mgCli(repo, [e2e]);
+  assert.equal(r.vars.CI_SCOPE_E2E, "true");
+  assert.ok(r.vars.FX_CHECK_AFFECTED.includes("apps/workspace"));
+  mgDone(repo);
+});
+
+test("merge group CLI: any doubt exports full, so every step runs", async () => {
+  const repo = mgRepo([DOC]);
+  const r = await mgCli(repo, [DOC], { opts: { labels: { 102: ["ci:full"] } } });
+  assert.equal(r.json.mode, "full");
+  assert.equal(r.vars.CI_SCOPE_MODE, "full");
+  assert.equal(r.vars.CI_SCOPE_E2E, "true");
+  assert.equal("FX_CHECK_AFFECTED" in r.vars, false);
+  mgDone(repo);
+});
+
+test("pull request runs are unchanged: --event pull_request and no --event give the same answer, and the line is the old one", () => {
+  const repo = mgRepo([WEB]);
+  const run = (extra) =>
+    spawnSync(process.execPath, [CLI, "--repo", repo.dir, "--base", repo.shas[0], "--head", repo.shas[1], "--labels", "", ...extra], { encoding: "utf8" });
+  const a = run([]);
+  const b = run(["--event", "pull_request"]);
+  assert.equal(a.stdout, b.stdout);
+  assert.equal(JSON.parse(a.stdout).mode, "affected");
+  assert.equal("mergeGroup" in JSON.parse(a.stdout), false);
+  assert.equal(scopeLine({ mode: "affected", packages: [], reason: "x", e2e: false, lint: [], trigger: null }), "CI scope: affected — 0 packages (ignored paths only)");
+  mgDone(repo);
 });
