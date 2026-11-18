@@ -40,6 +40,8 @@ export const WATCHED_COALESCE_MS = 10_000;
 /** Kinds that never wait: a decision the person is needed for, its clearing, and the halt's answer (the last is the runner's own and goes out through `reportHalt`). */
 export const URGENT_KINDS: ReadonlySet<string> = new Set(["ask_raised", "ask_cleared", "halt_applied"]);
 export const OFF_RETRY_S = 300;
+/** How often the wake epoch is looked at while paused because the switch is off (the command puller's tick). A local read, never a request. */
+export const OFF_WAKE_CHECK_MS = 1_000;
 export const BACKOFF_START_S = 2;
 export const BACKOFF_MAX_S = 300;
 export const HALT_REPORTS_MAX = 20;
@@ -76,6 +78,11 @@ export interface BridgeLoopDeps {
   lastAckedSeq?: number | null;
   /** The longest events other than asks may be held to go out together, in ms (default `UNWATCHED_COALESCE_MS`). A later row passes `WATCHED_COALESCE_MS` while someone watches. 0 sends everything at the next tick. */
   coalesceMs?: () => number;
+  /**
+   * The wake epoch the claim loop last saw (the same one the command puller watches); null before the first. While the cloud's switch is off, a change ends the pause
+   * early and the next pass tries the upload, so ticking the repo in settings does not wait for the 5-minute retry. Not a request: it reads a number the runner already holds.
+   */
+  wakeEpoch?: () => number | null;
 }
 
 const REASONS: readonly DropReason[] = ["schema", "oversize", "redaction", "partial_line"];
@@ -215,7 +222,39 @@ export class BridgeLoop {
         this.flight = null;
         wait = this.fail();
       }
-      if (wait > 0) await this.deps.clock.sleep(wait, signal);
+      if (wait > 0) await (this.state === "off" && this.deps.wakeEpoch !== undefined ? this.sleepOff(wait, signal) : this.deps.clock.sleep(wait, signal));
+    }
+  }
+
+  /**
+   * The 5-minute pause while the cloud's switch is off, in one-tick slices. A change in the wake epoch ends it at once (`holdUntil` is cleared so the next pass tries the
+   * upload); with no wake the whole wait is slept, as before. A wake that finds the switch still off costs one upload attempt, answered "off", and a new 5 minutes.
+   */
+  private async sleepOff(waitMs: number, signal: AbortSignal): Promise<void> {
+    const epochNow = (): number | null => {
+      try {
+        return this.deps.wakeEpoch!();
+      } catch {
+        // fx-swallow-ok: a wake source that throws is no wake; the full wait is slept
+        return null;
+      }
+    };
+    let baseline = epochNow();
+    let left = waitMs;
+    while (left > 0 && !signal.aborted) {
+      const slice = Math.min(OFF_WAKE_CHECK_MS, left);
+      await this.deps.clock.sleep(slice, signal);
+      left -= slice;
+      const current = epochNow();
+      if (current === null) continue;
+      if (baseline === null) {
+        baseline = current;
+        continue;
+      }
+      if (current !== baseline) {
+        this.holdUntil = 0;
+        return;
+      }
     }
   }
 
