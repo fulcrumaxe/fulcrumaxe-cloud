@@ -7,7 +7,7 @@
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import { createLive } from "../shell/core/cloud-live.js";
-import { REPOS_URL, SETTINGS_URL, commandsUrl, createTeamApi, dialsUrl, logUrl, panelUrl } from "../apps/team/team-api.js";
+import { REPOS_URL, SETTINGS_URL, commandsUrl, createTeamApi, dialsUrl, logUrl, panelUrl } from "../apps/team/team-model.js";
 import { DEBOUNCE_MS, NOTICE_PANELS, PANEL_GATE_MS, READ_NAMES, SAFETY_MS, createCoalescer, createTeam, describe as describeState, noticeNames } from "../apps/team/team-model.js";
 import { REPO_A, makeFixtures } from "./fixtures/team/fixtures.mjs";
 

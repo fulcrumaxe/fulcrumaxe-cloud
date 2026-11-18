@@ -63,6 +63,8 @@ interface Mock {
   haltStatus: number;
   haltCode: string;
   haltPends: boolean;
+  /** The answer to GET /api/runners (the fleet read), or null for a 500. */
+  runners: Obj | null;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -76,7 +78,7 @@ function fresh(over: Partial<Mock> = {}): Mock {
     log: F.envelope([F.logLine({ line_id: "aaaa000000000001", pr: 7 }), F.logLine({ line_id: "aaaa000000000002", actor_role: "executor", category: "spawned", pr: null }), F.logLine({ line_id: "aaaa000000000003", discussion: null, pr: 9, category: "gate_passed" })]),
     plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
-    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, ...over,
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, runners: F.fleet([F.runner()]), ...over,
   };
 }
 
@@ -129,6 +131,11 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
     if (mock.dialStatus !== 200) return json(route, mock.dialStatus, { error: { code: mock.dialCode, message: SERVER_TEXT, request_id: "r" } });
     mock.dials = { ...mock.dials, dials: mock.dials.dials.map((d: Obj) => (d.decision_type === body.decision_type ? { ...d, disposition: body.disposition } : d)) };
     return json(route, 200, mock.dials);
+  });
+  await page.route((u) => u.pathname === "/api/runners", async (route) => {
+    mock.reads.push("/api/runners");
+    if (mock.runners === null) return json(route, 500, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
+    return json(route, 200, mock.runners);
   });
   await page.route((u) => u.pathname.startsWith(BASE), async (route) => {
     const req = route.request();
@@ -1950,6 +1957,94 @@ test.describe("Team app", () => {
     expect(Object.entries(ringsAll).filter(([, v]) => v < 3), "focus rings under 3:1 (or missing)").toEqual([]);
     console.log("CONTRAST " + JSON.stringify({ project: test.info().project.name, ...ratios }));
     console.log("FOCUSRING " + JSON.stringify({ project: test.info().project.name, ...rings }));
+    await clean(page, errors);
+  });
+
+  // Which runner the watch switch means, and the Connect a runner list (owner feedback: "this machine" read like the phone).
+  const tv = (page: Page, id: string) => page.locator(`${WIN} [data-testid="${id}"]:visible`);
+  const RUNNER_A = "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66";
+  const RUNNER_B = "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e77";
+  const noSideways = async (page: Page) => expect(await page.evaluate(() => { const w = document.querySelector('#windows-container .fulc-window[data-app-id="team"] .tm-page') as HTMLElement; return w.scrollWidth - w.clientWidth; })).toBeLessThanOrEqual(1);
+
+  test("the switch names the runner and says online with its last seen time; the connect list shows the bridge state for the repo", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const settings = F.settings({ repos: [F.settingsRepo({ bridged_runner_id: RUNNER_A }), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: false, eligible: true })] });
+    const { errors } = await setup(page, fresh({ settings, runners: F.fleet([F.runner(), F.runner({ id: RUNNER_B, name: "Build box", state: "offline", last_seen_at: F.iso(7200) })]) }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(page.locator(`${WIN} label:has([data-testid="tm-watch"])`)).toHaveText("Watch the engine team on Workshop laptop");
+    await expect(tv(page, "tm-runner-status")).toHaveText("Online · last seen 2 min ago");
+    await expect(tv(page, "tm-runner-status")).toHaveAttribute("data-kind", "online");
+    await expect(t(page, "tm-connect-row")).toHaveCount(2);
+    await expect(t(page, "tm-connect-bridge").nth(0)).toHaveText("Bridge has reported for acme-labs/widgets");
+    await expect(t(page, "tm-connect-bridge").nth(1)).toHaveText("No report from this runner's bridge for acme-labs/widgets yet");
+    await expect(t(page, "tm-connect-row").nth(1)).toContainText("Offline");
+    await expect(t(page, "tm-connect-row").nth(1)).toContainText("last seen 2 h ago");
+    await expect(t(page, "tm-soon")).toHaveText("Coming soon: set this up from here.");
+    await expect(t(page, "tm-connect-command")).toHaveCount(0); // one runner is bridged, so there is nothing to set up
+    await expect(page.locator(`${WIN} label:has([data-testid="tm-watch"])`)).not.toContainText("this machine");
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("an offline runner reads offline before the box is ticked, and the choice between two runners renames the switch", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const settings = F.settings({ watch_enabled: false, repos: [F.settingsRepo({ bridged_runner_id: RUNNER_A, enabled: false }), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: false, bridged_runner_id: RUNNER_B })] });
+    const { errors } = await setup(page, fresh({ settings, runners: F.fleet([F.runner({ state: "offline", last_seen_at: F.iso(10800) }), F.runner({ id: RUNNER_B, name: "Build box" })]) }));
+    await open(page);
+    await expect(tv(page, "tm-runner-status")).toHaveText("Offline · last seen 3 h ago");
+    await expect(t(page, "tm-watch-off").locator("xpath=..")).toHaveText("Watch the engine team on Workshop laptop");
+    await tv(page, "tm-runner-pick").selectOption(RUNNER_B);
+    await expect(t(page, "tm-watch-off").locator("xpath=..")).toHaveText("Watch the engine team on Build box");
+    await expect(tv(page, "tm-runner-status")).toHaveText("Online · last seen 2 min ago");
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("bridge not set up on any runner: the one command with the repo filled in and placeholders for the folders, and no path from the server", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false }) }));
+    await open(page);
+    await expect(t(page, "tm-watch-off").locator("xpath=..")).toHaveText("Watch the engine team on your runner");
+    await expect(tv(page, "tm-runner-status")).toContainText("then turn the switch on");
+    await expect(tv(page, "tm-bridge-command")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root <path to the engine's checkout> --state-dir <the engine's state dir>");
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("no runner registered: says so with a button that opens the Runners app, and no command", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ runners: F.fleet([]) }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, "tm-connect-empty")).toHaveText("No runners yet. Use Add a runner to register your first machine.");
+    await expect(t(page, "tm-connect-command")).toHaveCount(0);
+    await press(t(page, "tm-open-runners"));
+    await expect(page.locator('#windows-container .fulc-window[data-app-id="runners"]')).toBeVisible();
+    await clean(page, errors);
+  });
+
+  test("a runner list that cannot be read is said in the app's words and the switch still works", async ({ page }) => {
+    const { errors } = await setup(page, fresh({ runners: null }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, "tm-connect-failed")).toHaveText("The runner list isn't available right now.");
+    await expect(t(page, "tm-watch")).toBeChecked();
+    await clean(page, errors);
+  });
+
+  test("real click: turning the switch on says Connecting to the runner while it has not reported in, and the chip is not Live", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const never = { runner_id: null, runner_name: null, session_id: null, last_event_at: null, last_heard_at: null, liveness: "never" };
+    const settings = F.settings({ watch_enabled: false, repos: [F.settingsRepo({ bridged_runner_id: RUNNER_A })] });
+    const { mock, errors } = await setup(page, fresh({ settings, repos: [F.repo(never)] }));
+    await open(page);
+    await press(t(page, "tm-watch-off"));
+    await expect(t(page, "tm-connecting-bar")).toHaveText("Connecting to Workshop laptop… waiting for it to report in.");
+    await expect(t(page, "tm-chip")).toContainText("Never connected");
+    await expect(t(page, "tm-chip")).not.toContainText("Live");
+    expect(mock.puts).toEqual([{ path: `${BASE}/settings`, body: { watch_enabled: true } }]);
+    await noSideways(page);
     await clean(page, errors);
   });
 });

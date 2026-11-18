@@ -103,13 +103,35 @@ function mountApp(contentEl) {
   function switchRow(testid, label, checked, enabled, why) {
     return h("label", { class: "tm-check" }, box({ "data-testid": testid, "data-focus": testid }, checked, enabled, why, (on) => team.setWatch(on)), h("span", null, label));
   }
+  // Which runner the switch means, its state before the box is ticked, the connecting state, and the one command when no bridge has reported.
+  const runnerNodes = (rv) => !rv.words ? [] : [
+    rv.choices.length > 1 ? h("label", { class: "tm-check" }, h("span", null, rv.words.pick + ": "),
+      h("select", { class: "tm-select", "data-testid": "tm-runner-pick", onChange: (e) => team.pickRunner(e.target.value) }, rv.choices.map((c) => h("option", { value: c.id, selected: c.id === rv.pickedId }, c.name)))) : null,
+    h("p", { class: "tm-muted", "data-testid": "tm-runner-status", "data-kind": rv.status.kind }, rv.status.text),
+    rv.connecting ? h("p", { class: "tm-muted", role: "status", "data-testid": "tm-connecting" }, rv.connecting) : null,
+    rv.command ? h("pre", { class: "tm-code", tabindex: "0", "aria-label": "Command to run", "data-testid": "tm-bridge-command" }, rv.command) : null,
+  ];
+  const connectNodes = (c, RUNNER_WORDS) => !RUNNER_WORDS ? [] : [
+    h("h3", { class: "tm-sub" }, RUNNER_WORDS.connectTitle),
+    c.failed ? h("p", { class: "tm-muted", "data-testid": "tm-connect-failed" }, RUNNER_WORDS.unknown) : null,
+    c.empty ? h("p", { class: "tm-muted", "data-testid": "tm-connect-empty" }, RUNNER_WORDS.noRunners) : null,
+    c.empty ? h("button", { type: "button", class: "tm-btn", "data-testid": "tm-open-runners", onClick: () => window.FULCWM && window.FULCWM.open("runners") }, RUNNER_WORDS.openRunners) : null,
+    c.rows.length ? h("ul", { class: "tm-list", role: "list", "data-testid": "tm-connect-rows" }, c.rows.map((r) =>
+      h("li", { class: "tm-item", "data-testid": "tm-connect-row", "data-bridged": r.bridged ? "true" : "false" },
+        h("bdi", { "data-testid": "tm-connect-name" }, r.name), " · ", r.state, " · ", r.seen, h("br"), h("span", { "data-testid": "tm-connect-bridge" }, r.bridge)))) : null,
+    c.rows.length && !c.rows.some((r) => r.bridged) ? h("p", { class: "tm-muted" }, RUNNER_WORDS.fillIn) : null,
+    c.rows.length && !c.rows.some((r) => r.bridged) ? h("pre", { class: "tm-code", tabindex: "0", "aria-label": "Command to run", "data-testid": "tm-connect-command" }, c.command) : null,
+    h("p", { class: "tm-muted", "data-testid": "tm-soon" }, RUNNER_WORDS.soon),
+  ];
   const closeConfirm = () => { want = "delete"; team.cancelDelete(); };
   function sheetNodes(s) {
     const can = s.canEdit && !s.saving;
     const ro = s.canEdit ? null : "tm-ro";
     return [
       s.readOnly ? h("p", { class: "tm-muted", id: "tm-ro", "data-testid": "tm-readonly" }, s.readOnly) : null,
-      switchRow("tm-watch", WORDS.watch, s.watch, can, ro),
+      switchRow("tm-watch", s.runner.label, s.watch, can, ro),
+      ...runnerNodes(s.runner),
+      ...connectNodes(s.runner.connect, s.runner.words),
       h("h3", { class: "tm-sub" }, WORDS.repos),
       s.repos.length === 0 ? h("p", { class: "tm-muted" }, WORDS.noSettingsRepos) : h("ul", { class: "tm-list", role: "list" }, s.repos.map((r) =>
         h("li", { class: "tm-item", "data-testid": "tm-repo-row", "data-refused": r.refused ? "true" : "false" },
@@ -310,7 +332,7 @@ function mountApp(contentEl) {
     if (hasRepos) {
       swap("repos", picker, d.repos, () => d.repos.map((r) => h("option", { value: r.id, selected: r.selected }, r.name)));
       picker.value = (d.repos.find((r) => r.selected) || d.repos[0]).id;
-      runner.replaceChildren(...(d.runner ? ["Runner: ", h("bdi", null, d.runner)] : []));
+      runner.replaceChildren(...(d.runner ? ["Runner: ", h("bdi", null, d.runner)] : []), ...(d.rv.connecting ? [d.runner ? " · " : "", h("span", { "data-testid": "tm-connecting-bar" }, d.rv.connecting)] : []));
     }
     setText(banner, hasRepos ? d.banner : "");
     banner.hidden = !(hasRepos && d.banner);
@@ -325,12 +347,12 @@ function mountApp(contentEl) {
     const broken = hasRepos ? Object.keys(TITLE).filter((k) => d[k].failed && d.failedKeys.includes(k)).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not
     const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
     if (msg) live.replaceChildren(h("span", null, msg));
-    swap("body", body, d.kind === "ready" ? { k: "ready" } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving }, () => {
+    swap("body", body, d.kind === "ready" ? { k: "ready" } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving, r: d.rv }, () => {
       if (d.kind === "ready") {
         for (const k of [...sig.keys()]) if (k.startsWith("p:")) sig.delete(k); // the panels are drawn into a fresh page, so every part draws again
         return h("div", { class: "tm-panels" }, ...Object.values(P).map((x) => x.el));
       }
-      if (d.kind === "off") return [h("p", { class: "tm-muted", "data-testid": "tm-off" }, d.text), d.sheet.canEdit ? switchRow("tm-watch-off", WORDS.watch, false, !d.sheet.saving) : null];
+      if (d.kind === "off") return [h("p", { class: "tm-muted", "data-testid": "tm-off" }, d.text), d.sheet.canEdit ? switchRow("tm-watch-off", d.rv.label, false, !d.sheet.saving) : null, ...runnerNodes(d.rv)];
       return h("p", { class: d.kind === "error" ? "tm-error" : "tm-muted", role: d.kind === "error" ? "alert" : "status", "data-testid": "tm-" + d.kind }, d.text);
     });
     if (d.kind === "ready") {

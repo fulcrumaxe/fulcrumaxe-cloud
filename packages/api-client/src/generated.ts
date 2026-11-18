@@ -5763,6 +5763,7 @@ export interface Operations {
         enabled: boolean;
         eligible: boolean;
         refusal: ("repo_not_runner_local" | "public_repo") | (null);
+        bridged_runner_id: (string) | (null);
       }>;
     };
   };
@@ -5784,6 +5785,7 @@ export interface Operations {
         enabled: boolean;
         eligible: boolean;
         refusal: ("repo_not_runner_local" | "public_repo") | (null);
+        bridged_runner_id: (string) | (null);
       }>;
     };
   };

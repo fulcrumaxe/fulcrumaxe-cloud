@@ -60,7 +60,7 @@ export interface EngineSettingsView {
   watch_enabled: boolean;
   operate_enabled: boolean;
   can_edit: boolean;
-  repos: Array<{ repo_id: string; full_name: string; enabled: boolean; eligible: boolean; refusal: 'repo_not_runner_local' | 'public_repo' | null }>;
+  repos: Array<{ repo_id: string; full_name: string; enabled: boolean; eligible: boolean; refusal: 'repo_not_runner_local' | 'public_repo' | null; bridged_runner_id: string | null }>;
 }
 
 /**
@@ -71,8 +71,14 @@ export interface EngineSettingsView {
  */
 export async function readEngineSettingsView(client: Pick<PoolClient, 'query'>, canEdit: boolean, publicRepoIds: ReadonlySet<string> = new Set()): Promise<EngineSettingsView> {
   const s = await readEngineBridgeSettings(client);
-  const { rows } = await client.query<{ id: string; full_name: string | null; execution_mode: string }>(
-    `SELECT id, CASE WHEN gh_owner IS NOT NULL AND gh_name IS NOT NULL THEN gh_owner || '/' || gh_name END AS full_name, execution_mode FROM repos ORDER BY gh_owner, gh_name, id`,
+  // `bridged_runner_id`: the runner whose bridge last reported for the repo (its newest engine session), or null when none ever has. The account's own
+  // `account_id` predicate is explicit on both tables, on top of RLS. Nothing else about the session leaves here: no instance id, no version, no path.
+  const { rows } = await client.query<{ id: string; full_name: string | null; execution_mode: string; bridged_runner_id: string | null }>(
+    `SELECT r.id, CASE WHEN r.gh_owner IS NOT NULL AND r.gh_name IS NOT NULL THEN r.gh_owner || '/' || r.gh_name END AS full_name, r.execution_mode, b.runner_id AS bridged_runner_id
+       FROM repos r
+       LEFT JOIN LATERAL (SELECT s.runner_id FROM engine_sessions s WHERE s.repo_id = r.id AND s.account_id = r.account_id ORDER BY s.created_at DESC, s.id LIMIT 1) b ON true
+      WHERE r.account_id = NULLIF(current_setting('app.account_id', true), '')::uuid
+      ORDER BY r.gh_owner, r.gh_name, r.id`,
   );
   const on = new Set(s.repo_ids);
   return {
@@ -81,7 +87,7 @@ export async function readEngineSettingsView(client: Pick<PoolClient, 'query'>, 
     can_edit: canEdit,
     repos: rows.map((r) => {
       const refusal = r.execution_mode !== 'runner_local' ? ('repo_not_runner_local' as const) : publicRepoIds.has(r.id) ? ('public_repo' as const) : null;
-      return { repo_id: r.id, full_name: r.full_name ?? `Unnamed repository (${r.id.slice(0, 8)})`, enabled: on.has(r.id), eligible: refusal === null, refusal };
+      return { repo_id: r.id, full_name: r.full_name ?? `Unnamed repository (${r.id.slice(0, 8)})`, enabled: on.has(r.id), eligible: refusal === null, refusal, bridged_runner_id: r.bridged_runner_id };
     }),
   };
 }

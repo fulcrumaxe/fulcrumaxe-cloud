@@ -12,10 +12,53 @@
 //  - The cloud sends facts; this file does no cost, rate or total maths: a dollar figure is drawn as sent, through the one shared formatter, and never added up here.
 //    The only arithmetic is ages, counts of rows on screen, and joining consecutive event numbers into ranges.
 // Every word that reaches the page is a string made here; nothing is null, undefined or NaN.
-import { isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
+import { api, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { usd as dollars } from "../_lib/dom.js";
-import { PANELS, createTeamApi } from "./team-api.js";
+import { readFleet } from "../runners/runners-fleet.js";
 import { NO_OP, agentWords, createOperate, describeHalt, describeOperate, isAgentId, stopOf } from "./team-operate.js";
+
+// The Team app's one door to the cloud, below: every URL and every request the app makes, written against the engine routes' documented shapes (the per-repo list envelope, the
+// settings read, the settings write, the command channel and the decision dials). The model and the page never build a path of their own. It lives in this file so the app stays
+// inside the boot budget's per-app file ceiling.
+export const REPOS_URL = "/api/v1/engine/repos";
+export const SETTINGS_URL = "/api/v1/engine/settings";
+export const RUNNERS_URL = "/api/runners";
+export const DELETE_URL = "/api/v1/engine/settings/delete-data";
+/** The per-repo panels this app reads. Gates are read without a PR so one call covers every PR in a lane. */
+export const PANELS = ["agents", "lanes", "gates", "log", "plan", "stats", "usage"];
+export const LOG_LIMIT = 100;
+const PANEL_PATH = { agents: "/agents?state=running", lanes: "/lanes", gates: "/gates", log: "/log?limit=" + LOG_LIMIT, plan: "/plan", stats: "/stats", usage: "/usage" };
+const enc = (v) => encodeURIComponent(String(v));
+export const panelUrl = (kind, repoId) => REPOS_URL + "/" + enc(repoId) + PANEL_PATH[kind];
+export const logUrl = (repoId, cursor) => panelUrl("log", repoId) + "&cursor=" + enc(cursor);
+export const lanesUrl = (repoId, cursor) => panelUrl("lanes", repoId) + "?cursor=" + enc(cursor);
+export const commandsUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/commands";
+export const commandUrl = (id) => "/api/v1/engine/commands/" + enc(id);
+export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
+export const clearHaltUrl = (repoId) => haltUrl(repoId) + "/clear";
+export const dialsUrl = (repoId) => "/api/v1/repos/" + enc(repoId) + "/decision-settings";
+export const dialUrl = (repoId) => dialsUrl(repoId) + "/dial";
+
+/** `call(method, path, body, signal)` is api() in the page; a test passes a fake with the same shape. */
+export function createTeamApi(call = api) {
+  return {
+    repos: (signal) => call("GET", REPOS_URL, undefined, signal),
+    runners: (signal) => call("GET", RUNNERS_URL, undefined, signal),
+    settings: (signal) => call("GET", SETTINGS_URL, undefined, signal),
+    panel: (kind, repoId, signal) => call("GET", panelUrl(kind, repoId), undefined, signal),
+    older: (repoId, cursor, signal) => call("GET", logUrl(repoId, cursor), undefined, signal),
+    lanesPage: (repoId, cursor, signal) => call("GET", lanesUrl(repoId, cursor), undefined, signal),
+    saveSettings: (body, signal) => call("PUT", SETTINGS_URL, body, signal),
+    deleteData: (signal) => call("PUT", DELETE_URL, undefined, signal),
+    commands: (repoId, signal) => call("GET", commandsUrl(repoId) + "?limit=50", undefined, signal),
+    issue: (repoId, kind, args, signal) => call("POST", commandsUrl(repoId), { kind, args }, signal),
+    cancel: (id, signal) => call("DELETE", commandUrl(id), undefined, signal),
+    halt: (repoId, signal) => call("POST", haltUrl(repoId), {}, signal),
+    clearHalt: (repoId, signal) => call("POST", clearHaltUrl(repoId), {}, signal),
+    dials: (repoId, signal) => call("GET", dialsUrl(repoId), undefined, signal),
+    setDial: (repoId, type, disposition, signal) => call("POST", dialUrl(repoId), { decision_type: type, disposition }, signal),
+  };
+}
 
 export const LIVE_EVENT = "engine.changed";
 /** A notice settles for this long before its panels are read (the server has already waited its own second). */
@@ -60,7 +103,9 @@ export const WORDS = {
   noData: "no data yet",
   mergedToday: "Merged today",
   settings: "Settings",
-  watch: "Watch the engine team on this machine",
+  watchAny: "Watch the engine team on your runner", // the switch before the runner words (team-runners.js, loaded by import()) have arrived; the same words as RUNNER_WORDS.watchAny
+  connecting: "Connecting to ",
+  connectingTail: "… waiting for it to report in.",
   readOnly: "Only an owner or admin can change these settings.",
   repos: "Repositories",
   noSettingsRepos: "No repositories are connected.",
@@ -215,7 +260,7 @@ export function readRepos(raw) {
 export function readSettings(raw) {
   if (!isObj(raw) || typeof raw.watch_enabled !== "boolean" || typeof raw.can_edit !== "boolean" || !Array.isArray(raw.repos)) return null;
   const repos = raw.repos.filter((r) => isObj(r) && idKey(r.repo_id) !== "" && typeof r.full_name === "string" && r.full_name !== "").map((r) => ({
-    sendId: r.repo_id, id: idKey(r.repo_id), name: r.full_name, enabled: r.enabled === true, eligible: r.eligible === true, refusal: typeof r.refusal === "string" ? r.refusal : r.eligible === true ? "" : "other",
+    sendId: r.repo_id, id: idKey(r.repo_id), name: r.full_name, enabled: r.enabled === true, eligible: r.eligible === true, runnerId: typeof r.bridged_runner_id === "string" ? r.bridged_runner_id : "", refusal: typeof r.refusal === "string" ? r.refusal : r.eligible === true ? "" : "other",
   }));
   return { watch: raw.watch_enabled, operate: raw.operate_enabled === true, canEdit: raw.can_edit, repos };
 }
@@ -375,6 +420,8 @@ export function failureSentence(e, forbidden = WORDS.forbidden) {
   return WORDS.saveFailed;
 }
 
+const NO_RUNNER_VIEW = Object.freeze({ words: null, label: WORDS.watchAny, runnerName: "", choices: [], pickedId: "", status: { kind: "unknown", text: "" }, command: "", connect: { failed: false, empty: false, command: "", rows: [] } });
+
 /** Everything the page draws for one moment. */
 export function describe(st, nowMs) {
   if (st.status === "loading") return { kind: "loading", text: WORDS.loading };
@@ -384,9 +431,14 @@ export function describe(st, nowMs) {
     repos: st.settings.repos.map((r) => ({ id: r.id, name: r.name, checked: st.draft && Object.hasOwn(st.draft.repos, r.id) ? st.draft.repos[r.id] : r.enabled, refused: !r.eligible && !r.enabled, reason: r.eligible || r.enabled ? "" : WORDS.refusals[r.refusal] || WORDS.refusalOther })),
   };
   const repo = st.repos.find((r) => r.id === st.selectedId);
+  // The runner words and the connect panel's data live in team-runners.js, fetched by import() only when a screen shows the runners; until it lands the switch says WORDS.watchAny and draws no runner lines.
+  const rv = st.runnersMod ? st.runnersMod.runnerView({ settings: st.settings, fleet: st.fleet, repoName: repo ? repo.name : "", pickId: st.runnerPick, nowMs }) : NO_RUNNER_VIEW;
+  // Asked for, not yet answered: the switch was just turned on (the save is out), or it is on and the runner has never reported in.
+  const connecting = (st.saving && st.draft && st.draft.watch === true) || (st.settings.watch && repo && repo.liveness === "never") ? WORDS.connecting + (repo && repo.runner ? repo.runner : rv.runnerName || "your runner") + WORDS.connectingTail : "";
+  sheet.runner = { ...rv, connecting };
   const shown = st.draft && st.draft.operate !== undefined ? { ...st, settings: { ...st.settings, operate: st.draft.operate } } : st; // the operate switch the person just chose, while its save is out
   const asOf = (iso) => asOfWords({ as_of: iso }, nowMs);
-  const base = { sheet, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", failedKeys: st.failedKeys, operate: describeOperate(shown, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
+  const base = { sheet, rv: sheet.runner, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", failedKeys: st.failedKeys, operate: describeOperate(shown, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
   if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   if (!repo) return { kind: "norepos", text: WORDS.noRepos, ...base };
   const { agents, lanes, gates, log, plan, stats, usage } = st.panels;
@@ -421,7 +473,7 @@ const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, fa
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
 export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval, now = Date.now } = {}) {
-  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null };
+  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null, fleet: null, runnerPick: "", runnersMod: null };
   let safetyTimer = null, started = false, retryTimer = null, busy = false, queued = new Set(), lastFull = -Infinity, pick = 0, stopFn = null, saveVer = 0, hiddenFn = () => false;
   // Which parts a notice asked for, and when each may be read again. Every read, whoever asked for it, is marked here, so no part is read twice inside the gate.
   const gate = createCoalescer({ now, setTimer, clearTimer, run: (names) => { if (!hiddenFn()) refresh(new Set(names)); } });
@@ -435,17 +487,27 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
    * `status` is the settings and the repo list; when settings are already known and watch is on, only the repo list is read (liveness, last heard, halt),
    * because a heartbeat cannot change the settings. `operate` is the commands and the dials, read only for a member who can edit.
    */
+  /** The runner list is a help, never a need: a read that fails leaves the app working and says so in the runner lines. */
+  async function readFleetSafe() {
+    const mod = import("./team-runners.js").then((m) => { st = { ...st, runnersMod: m }; }, () => {}); // a module that cannot be fetched leaves the switch on its plain words
+    try { const raw = await client.runners(signal); await mod; return readFleet(raw); } catch (e) {
+      await mod;
+      if (aborted(e, signal)) throw e;
+      return null;
+    }
+  }
   async function read(want) {
     const ver = saveVer;
     if (!st.settings || st.status !== "ready" || READ_NAMES.every((n) => want.has(n))) want = new Set(READ_NAMES);
     const everything = READ_NAMES.every((n) => want.has(n));
-    let settings = st.settings, repos = st.repos, selectedId = st.selectedId;
+    let settings = st.settings, repos = st.repos, selectedId = st.selectedId, fleet = st.fleet;
     if (everything || want.has("status")) {
       try {
         if (everything || !settings.watch) {
           settings = readSettings(await client.settings(signal));
           if (!settings) throw new Error("shape");
           repos = [];
+          if (!settings.watch || st.sheetOpen) fleet = await readFleetSafe(); // only a screen that shows the runners asks for them
           if (settings.watch) {
             repos = readRepos(await client.repos(signal));
             if (!repos) throw new Error("shape");
@@ -466,7 +528,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
       selectedId = repos.some((r) => r.id === st.selectedId) ? st.selectedId : repos.length ? repos[0].id : "";
       const changed = selectedId !== st.selectedId;
       if (changed) want = new Set(READ_NAMES); // another repo is shown now: all of it is read
-      set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op, ...(changed ? { log: NO_LOG, planPage: 0, provOpen: [] } : {}) }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
+      set({ status: "ready", settings, repos, fleet, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op, ...(changed ? { log: NO_LOG, planPage: 0, provOpen: [] } : {}) }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
     }
     if (!selectedId) return;
     const token = pick;
@@ -606,7 +668,11 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     newest: () => { set({ log: NO_LOG }); refresh(); },
     toggleProv: (id) => set({ provOpen: st.provOpen.includes(id) ? st.provOpen.filter((k) => k !== id) : st.provOpen.concat(id) }),
     planPage: (by) => set({ planPage: Math.max(0, st.planPage + by) }),
-    toggleSheet: () => set({ sheetOpen: !st.sheetOpen, confirmDelete: false, notice: "" }),
+    pickRunner: (id) => set({ runnerPick: id }),
+    toggleSheet: () => {
+      set({ sheetOpen: !st.sheetOpen, confirmDelete: false, notice: "" });
+      if (st.sheetOpen && st.settings && st.settings.watch) readFleetSafe().then((fleet) => { if (!(signal && signal.aborted)) set({ fleet }); }, () => {});
+    },
     setWatch: (on) => put(() => client.saveSettings({ watch_enabled: on }, signal), WORDS.saved, undefined, { watch: on, repos: {} }, (s) => ({ ...s, watch: on })),
     setRepo: (id, on) => put(() => client.saveSettings({ repo_ids: enabledIds(id, on) }, signal), WORDS.saved, undefined, { repos: { [id]: on } }, (s) => ({ ...s, repos: s.repos.map((r) => (r.id === id ? { ...r, enabled: on } : r)) })),
     askDelete: () => set({ confirmDelete: true }),
