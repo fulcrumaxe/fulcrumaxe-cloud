@@ -23,7 +23,7 @@ import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { PINNED_JOB_KEYS, keyringFor, originHash } from "../../src/keyring.js";
 import { runCli } from "../../src/cli.js";
 import type { ResourceProbe } from "../../src/daemon/resources.js";
-import { pidIsAlive, runCommand, type RunHooks, type RunHost } from "../../src/commands/run.js";
+import { localTools, pidIsAlive, runCommand, type RunHooks, type RunHost } from "../../src/commands/run.js";
 import { readEntries, requestTakeover, takeoverState } from "../../src/watch/layout.js";
 import { authText, fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
 import { manualClock, until } from "../helpers/manualClock.js";
@@ -838,12 +838,34 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     expect((await stop(run)).code).toBe(0);
   });
 
-  it.each(["5.15.167.4-microsoft-standard-WSL2", "4.4.0-19041-Microsoft"])("a %s kernel refuses to start run by name: no claim, no probe, no stall", async (release) => {
+  it("a custom-named kernel with the WSLInterop entry is WSL2: run refuses to start, with no claim", async () => {
+    const sandbox = fakeSandboxHost({ wsl: { interop: true } });
+    cloud.enqueue(queuedJob());
+    const result = await start({ host: { sandbox, osrelease: "6.6.0-custom" } }).done;
+    expect(result.message).toMatch(/^wsl2_unsupported: /);
+    expect(claims()).toBe(0);
+  });
+
+  it("with no kernel string given, the interop entry alone refuses run to start (the real os.release() path)", async () => {
+    const sandbox = fakeSandboxHost({ wsl: { interop: true } });
+    cloud.enqueue(queuedJob());
+    const result = await start({ host: { sandbox } }).done;
+    expect(result.message).toMatch(/^wsl2_unsupported: .*; fx-runner cannot run jobs here$/);
+    expect(claims()).toBe(0);
+  });
+
+  it("the tier check itself is given the interop entry: the refusal comes before the agent CLI is looked for", () => {
+    const host = { ...hostWith(process), sandbox: fakeSandboxHost({ wsl: { interop: true } }) };
+    expect(() => localTools(host, "")).toThrow(/^wsl2_unsupported: /);
+    expect(() => localTools({ ...host, sandbox: fakeSandboxHost() }, "")).not.toThrow(/^wsl2_unsupported/);
+  });
+
+  it.each([["5.15.167.4-microsoft-standard-WSL2", "wsl2_unsupported: fx-runner does not support Windows yet, including WSL2\\. Linux and macOS are supported\\."], ["4.4.0-19041-Microsoft", "wsl1_unsupported: fx-runner does not support WSL1\\. Convert the distribution with: wsl --set-version <distro> 2 "]])("a %s kernel refuses to start run by name: no claim, no probe, no stall", async (release, text) => {
     const sandbox = fakeSandboxHost();
     cloud.enqueue(queuedJob());
     const result = await start({ host: { sandbox, osrelease: release } }).done;
     expect(result.code).not.toBe(0);
-    expect(result.message).toMatch(/^wsl[12]_unsupported: fx-runner does not support Windows yet, including WSL2\. Linux and macOS are supported\.; fx-runner cannot run jobs here$/);
+    expect(result.message).toMatch(new RegExp(`^${text}.*; fx-runner cannot run jobs here$`));
     expect(claims()).toBe(0);
     expect(sandbox.calls).toEqual([]);
     expect(cloud.runs.size).toBe(0);

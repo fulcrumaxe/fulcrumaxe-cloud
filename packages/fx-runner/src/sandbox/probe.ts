@@ -13,7 +13,7 @@ import path from "node:path";
 import { printable } from "../commands/logs.js";
 import { cacheRootsFor } from "../daemon/mirror.js";
 import { cleanEnv } from "../job/cleanEnv.js";
-import { SandboxRefused } from "./platform.js";
+import { SandboxRefused, type WslMachine } from "./platform.js";
 import { sandboxSettings } from "./sandboxSettings.js";
 import { resolveSandboxTools } from "./select.js";
 
@@ -35,6 +35,8 @@ export interface SandboxHost {
   readText(target: string): string | undefined;
   /** The value of a kernel setting by its dotted name (`user.max_user_namespaces`), or undefined when the machine has no such setting or it cannot be read. */
   sysctl(name: string): Promise<string | undefined>;
+  /** What only the entry point can say about WSL2 (D#587 B-9). Absent in a host that has no way to ask: the interop entry then reads as absent. */
+  wsl?: WslMachine | undefined;
 }
 
 export interface SandboxProbeInput {
@@ -197,7 +199,7 @@ export function sandboxLaunch(input: SandboxProbeInput, settings: Record<string,
   }
   try {
     // Absolute paths found on the search path, and a refusal for a missing tool, exactly as the tier check gives them.
-    const tools = resolveSandboxTools(searchPath, { platform: input.platform });
+    const tools = resolveSandboxTools(searchPath, { platform: input.platform, wslInterop: host.wsl?.interopEntry() });
     if (tools === undefined) return { ok: false, result: failure("probe_failed_other", "no sandbox tool is needed here") };
     const binds = readFiles.flatMap((file) => ["--ro-bind-try", file, file]);
     return { ok: true, tool: tools.bwrap, kind: "bubblewrap", args: [...bwrapArgs(settings, (target) => host.isDir(target), coverDeniedFiles ? (target) => host.isFile(target) : undefined, coverDeniedFiles), ...binds, "--", ...command] };

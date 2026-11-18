@@ -22,6 +22,7 @@ import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
 import { UNENFORCED_LINE, detectScopeSupport, type ScopeSupport } from "../sandbox/jobLimits.js";
 import { SandboxRefused, detectPlatform } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
+import { wslDoctorFindings } from "../sandbox/wslChecks.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
@@ -72,7 +73,7 @@ type Level = "PASS" | "WARN" | "FAIL" | "INFO";
 /** The sandbox line, and under a failure the fix for this machine. A probe that cannot be set up is a failure too: there is no unsandboxed way to run. */
 async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<boolean> {
   try {
-    detectPlatform({ platform: host.platform, osrelease: host.osrelease });
+    detectPlatform({ platform: host.platform, osrelease: host.osrelease, wslInterop: host.sandbox.wsl?.interopEntry() });
   } catch (error) {
     if (!(error instanceof SandboxRefused)) throw error;
     line("FAIL", "Sandbox", `${error.code}: ${error.message.slice(error.code.length + 2)}`);
@@ -94,6 +95,14 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
   const distro = detectDistro({ platform: host.platform, osRelease: host.sandbox.readText(OS_RELEASE), nixosMarker: host.sandbox.isFile(NIXOS_MARKER) });
   for (const text of sandboxFixLines(distro, result.reason, result.bwrapPath)) ctx.out(text === "" ? "" : `      ${text}`);
   return false;
+}
+
+/**
+ * On WSL2 (still refused above), one line per check of what would have to change before it could be accepted (D#587 B-9): Windows interop,
+ * the drives the kernel shares in, runner directories on a Windows drive, and the Windows PATH. Each failure names its closed code and the fix.
+ */
+function wslCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): void {
+  for (const finding of wslDoctorFindings({ platform: host.platform, osrelease: host.osrelease, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, fs: host.sandbox })) line(finding.ok ? "PASS" : "FAIL", "WSL2", finding.ok ? finding.detail : `${finding.code}: ${finding.detail}`);
 }
 
 /** Whether each job can run under hard memory and process limits here (D#6 C43-5), tried with a real throw-away scope. When it cannot, the runner holds back and this says so. */
@@ -334,6 +343,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   cliStubsCheck(host, line);
 
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
+  wslCheck(ctx, host, binaryPath, line);
   await limitsCheck(host, line);
   vmEngineCheck(ctx, host, line);
   await lingerCheck(host, line);
