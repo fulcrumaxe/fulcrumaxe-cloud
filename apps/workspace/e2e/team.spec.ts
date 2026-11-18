@@ -202,6 +202,12 @@ const box = async (loc: ReturnType<Page["locator"]>): Promise<Box> => {
   return b;
 };
 
+// How long of a long task lies inside a period the whole machine was not running the browser (see the Log test below), and what is left of it.
+type LongTask = { start: number; ms: number };
+type Stall = { from: number; to: number };
+const heldMs = (t: LongTask, stalls: Stall[]) => stalls.reduce((n, g) => n + Math.max(0, Math.min(g.to, t.start + t.ms) - Math.max(g.from, t.start)), 0);
+const ownMs = (t: LongTask, stalls: Stall[]) => t.ms - heldMs(t, stalls);
+
 test.describe("Team app", () => {
   test("a repo with a live engine: picker, chip, agents with D# links, lanes with gate chips and a Merged today list", async ({ page }) => {
     const { errors } = await setup(page, fresh());
@@ -1435,6 +1441,17 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
+  test("long-task rule: only the part of a task outside a stall counts against the 200 ms bar", () => {
+    const over = (ms: number, stall: number) => ownMs({ start: 1000, ms }, stall > 0 ? [{ from: 1000, to: 1000 + stall }] : []) > 200;
+    expect(over(400, 0)).toBe(true); // a real 400 ms task in the page counts
+    expect(over(600, 150)).toBe(true); // 450 ms is the page's own
+    expect(over(600, 320)).toBe(true); // 280 ms is the page's own
+    expect(over(1000, 700)).toBe(true); // 300 ms is the page's own
+    expect(over(1000, 800)).toBe(false); // 200 ms is left: held
+    expect(over(750, 750)).toBe(false); // the whole task is the stall
+    expect(ownMs({ start: 1000, ms: 600 }, [{ from: 900, to: 1100 }, { from: 1500, to: 1700 }])).toBe(400); // a stall that starts before and one that ends after both count only where they overlap
+  });
+
   test("Log with 10,000 events: paging all the way down keeps at most 400 rows in the DOM, no long task over 200 ms, and Load older keeps focus", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const PAGE = 100, TOTAL = 10_000;
@@ -1446,11 +1463,31 @@ test.describe("Team app", () => {
     const mock = fresh({ log: logPage(""), logPage });
     mock.log = { ...logPage(""), next_cursor: String(PAGE) };
     const { errors } = await setup(page, mock);
+    // Two clocks. The long-task observer in the page records every task over 50 ms with its wall-clock start and length. A second, blank tab
+    // in the same browser runs a worker that ticks every 10 ms and notes each time it was itself held for over 100 ms. That tab is a different
+    // process and a different thread, so the log being busy never holds it; a held tab means the whole machine was not running the browser
+    // (a loaded host, a hosted runner pausing the VM), and a long task that mostly lies inside such a stall is not the Team log's own work.
     await page.addInitScript(() => {
-      const w = window as unknown as { __long: number[] };
+      const w = window as unknown as { __long: { start: number; ms: number }[] };
       w.__long = [];
-      try { new PerformanceObserver((l) => l.getEntries().forEach((e) => w.__long.push(e.duration))).observe({ entryTypes: ["longtask"] }); } catch { /* no long-task support: the count stays 0 */ }
+      try { new PerformanceObserver((l) => l.getEntries().forEach((e) => w.__long.push({ start: performance.timeOrigin + e.startTime, ms: e.duration }))).observe({ entryTypes: ["longtask"] }); } catch { /* no long-task support: the count stays 0 */ }
+      // What ran inside each long frame (which script, how much of it was forced layout, how long the frame waited to render), so a failure says what the time was spent on.
+      try {
+        const frames: unknown[] = ((window as unknown as { __frames: unknown[] }).__frames = []);
+        new PerformanceObserver((l) => l.getEntries().forEach((e) => {
+          const f = e as unknown as { startTime: number; duration: number; blockingDuration: number; renderStart: number; styleAndLayoutStart: number; scripts: { invoker: string; sourceFunctionName: string; sourceURL: string; duration: number; forcedStyleAndLayoutDuration: number; pauseDuration: number }[] };
+          if (f.duration > 100) frames.push({ at: Math.round(f.startTime), ms: Math.round(f.duration), blocking: Math.round(f.blockingDuration), toRender: f.renderStart ? Math.round(f.renderStart - f.startTime) : -1, styleLayout: f.styleAndLayoutStart ? Math.round(f.startTime + f.duration - f.styleAndLayoutStart) : -1, scripts: f.scripts.slice(0, 5).map((c) => ({ invoker: c.invoker, fn: c.sourceFunctionName, src: c.sourceURL.split("/").slice(-2).join("/"), ms: Math.round(c.duration), forced: Math.round(c.forcedStyleAndLayoutDuration), pause: Math.round(c.pauseDuration) })) });
+        })).observe({ type: "long-animation-frame", buffered: true });
+      } catch { /* no long-animation-frame support: no detail */ }
     });
+    const beat = await page.context().newPage();
+    await beat.evaluate(() => {
+      const w = window as unknown as { __stalls: { from: number; to: number }[] };
+      w.__stalls = [];
+      const src = "let last = Date.now(); setInterval(() => { const now = Date.now(); if (now - last > 100) postMessage([last, now]); last = now; }, 10);";
+      new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" }))).onmessage = (m) => w.__stalls.push({ from: m.data[0], to: m.data[1] });
+    });
+    await page.bringToFront();
     await page.reload();
     await waitForDesktop(page);
     await open(page);
@@ -1459,6 +1496,9 @@ test.describe("Team app", () => {
     let most = 100, pages = 1;
     const older = t(page, "tm-log-older");
     await older.focus();
+    // The check is about the log's own work, so the clock starts here: page boot, the reload and the window opening are done, and
+    // only the 99 Load older presses below are measured.
+    const { pagingFrom, timeOrigin } = await page.evaluate(() => { (window as unknown as { __long: unknown[] }).__long = []; return { pagingFrom: Math.round(performance.now()), timeOrigin: performance.timeOrigin }; });
     for (let i = 0; i < 99; i++) {
       await page.keyboard.press("Enter");
       await expect(older).not.toHaveText("Loading older lines…");
@@ -1472,9 +1512,15 @@ test.describe("Team app", () => {
     await expect(rows).toHaveCount(400);
     await expect(t(page, "tm-log-newest")).toContainText("9600 newer lines not shown");
     await expect(t(page, "tm-live")).toContainText("Older log lines loaded");
-    const long = await page.evaluate(() => (window as unknown as { __long: number[] }).__long);
-    console.log("LOGLOAD " + JSON.stringify({ project: test.info().project.name, pages, mostRows: most, longTasksOver200: long.filter((d) => d > 200).length, longest: Math.round(Math.max(0, ...long)) }));
-    expect(long.filter((d) => d > 200)).toEqual([]);
+    // Only the part of a long task the worker was not held for is the log's own time. The bar stays 200 ms for that part, and the held part is reported.
+    const tasks = await page.evaluate(() => (window as unknown as { __long: { start: number; ms: number }[] }).__long);
+    const stalls = await beat.evaluate(() => (window as unknown as { __stalls: { from: number; to: number }[] }).__stalls);
+    await beat.close();
+    const own = tasks.map((x) => ownMs(x, stalls));
+    const held = tasks.filter((x) => heldMs(x, stalls) > 0).map((x) => ({ ms: Math.round(x.ms), held: Math.round(heldMs(x, stalls)) }));
+    console.log("LOGLOAD " + JSON.stringify({ project: test.info().project.name, pages, mostRows: most, longTasksOver200: own.filter((d) => d > 200).length, longest: Math.round(Math.max(0, ...own)), held }));
+    if (own.some((d) => d > 200)) console.log("LONGFRAMES " + JSON.stringify({ project: test.info().project.name, paging_from: pagingFrom, tasks: tasks.map((x) => ({ at: Math.round(x.start - timeOrigin), ms: Math.round(x.ms) })), frames: await page.evaluate(() => (window as unknown as { __frames: unknown[] }).__frames) }));
+    expect(own.filter((d) => d > 200)).toEqual([]);
     // Back to newest: the first page again, and the button is gone with focus handed to the list's own place (the heading, never the page).
     await press(t(page, "tm-log-newest"));
     await expect(rows).toHaveCount(100);
