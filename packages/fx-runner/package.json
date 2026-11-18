@@ -24,6 +24,7 @@
     "tuf-js": "6.0.0"
   },
   "devDependencies": {
+    "@fx/net-guard": "workspace:*",
     "@fx/pipeline": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/runtime": "workspace:*",

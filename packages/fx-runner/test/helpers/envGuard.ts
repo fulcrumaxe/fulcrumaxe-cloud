@@ -165,6 +165,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/update/updater.ts": ["crypto", "fs", "path"],
   // D#587 B-1, the microVM image build (`fx-runner vm build-image`). It reads no environment and starts no process itself: crane, tar and mke2fs run through the injected host (scripts/vm-main.mjs).
   "src/vm/buildImage.ts": ["crypto", "fs", "path"], // SHA-256 of the root disk and the guest files, a work directory per architecture, a sparse disk file of the computed size, and the staged guest files
+  "src/vm/egress/address.ts": ["net", "os"], // B-4a: `net.BlockList` and `net.isIP` classify a resolved address (pure, opens no socket); `os.networkInterfaces()` reads this host's own addresses. No process is started and no environment is read
+  "src/vm/egress/proxy.ts": ["dns", "fs", "http", "net", "path"], // B-4a: an http server on one Unix socket inside the VM's vsock directory (lstat checks, chmod); `dns.promises.lookup` resolves a policy host; `net.connect` opens the upstream leg to an address already judged public. No process is started and no environment is read
   "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
   // D#749 V2c-2a, the verify browser server. No environment read (the host environment, streams and job directory arrive as arguments) and no process of its own: Chromium is started by playwright-core.
   "src/verifyBrowser/server.ts": ["fs", "path", "stream"], // the one answer.json in the job directory (exclusive create, 0600); stream is only the types of the injected input and output
