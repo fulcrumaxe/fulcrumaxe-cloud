@@ -11,6 +11,8 @@ import type { CommandContext } from "../context.js";
 import { readHaltFile, readHostHandle, resumeEngineHostLocally, stopEngineHostLocally, type EngineHostHandle, type HaltDeps } from "../engineBridge/halt.js";
 import { engineStateDir, EngineStateError } from "../engineBridge/stateFiles.js";
 import { acquireHostLock, openHostLog, readBridgeState } from "../engineHost/hostFiles.js";
+import { openHostInbox } from "../engineHost/hostInbox.js";
+import { createTicker, type AgentEvent, type CredentialMode, type TickEvent, type Ticker, type TickSettings } from "../engineHost/ticks.js";
 import { createSupervisor, type HostChild, type HostEvent, type HostSpawnSpec, type RefusalReason, type StopReason } from "../engineHost/supervisor.js";
 
 /** What `engine-host start` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
@@ -44,6 +46,16 @@ export interface EngineHostRuntime {
   shutdown: () => Promise<"stopped_by_person" | "machine_shutdown">;
   /** Where events go (EB-3a/EB-8b wire the real emitter); left out, started and stopped are printed. */
   emit?: ((event: HostEvent) => void) | undefined;
+  /** EB-12b. The ticks' settings (runner settings and the engine config's `cloud_bridge.ticks[]`), read when the host starts; left out, the loop tick runs at its default. */
+  tickSettings?: (() => TickSettings) | undefined;
+  /** The machine's local date and time; left out, the system clock. */
+  localClock?: (() => { date: string; hhmm: string }) | undefined;
+  /** How the host is paid for; left out, `subscription` (the host uses the person's own login: no credential is passed to it). */
+  credentialMode?: (() => CredentialMode) | undefined;
+  /** Where `tick_started` and `tick_ended` go; left out, they are not sent anywhere. */
+  emitTick?: ((event: TickEvent) => void) | undefined;
+  /** Hands the bridge's agent events to the ticker (it settles spawn and stop commands on them): called once with the function to feed. */
+  attachAgentEvents?: ((feed: (event: AgentEvent) => void) => void) | undefined;
 }
 
 export interface EngineHostOptions {
@@ -135,7 +147,9 @@ async function startHost(dir: string, ctx: CommandContext, deps: HaltDeps, rt: E
   }
   if (!(await rt.inspectClaude(claudePath, ctx.stateDir))) throw new CliError(NO_CLAUDE);
   const log = openHostLog(dir, deps.uid);
+  const live: { ticker?: Ticker } = {};
   const supervisor = createSupervisor({
+    observer: { onTurn: (turn) => live.ticker?.onTurn(turn), onExit: () => live.ticker?.onHostExit() },
     stateDir: dir,
     uid: deps.uid,
     platform: rt.platform,
@@ -176,7 +190,36 @@ async function startHost(dir: string, ctx: CommandContext, deps: HaltDeps, rt: E
     ctx.out(REFUSALS[started.reason]);
     return 1;
   }
+  const gate = (): "halted" | "operate_off" | undefined => {
+    try {
+      const state = readBridgeState(dir, deps.uid);
+      if (state === undefined || !state.bridge_enabled || !state.operate_enabled) return "operate_off";
+      return readHaltFile(dir, deps.uid)?.halted === true ? "halted" : undefined;
+    } catch {
+      // fx-swallow-ok: files that cannot be read safely count as halted (fail closed)
+      return "halted";
+    }
+  };
+  const repoGhId = Number(readBridgeState(dir, deps.uid)?.repo_gh_id);
+  const ticker = createTicker({
+    send: (text) => supervisor.send(text),
+    touch: () => supervisor.touch(),
+    emit: (e) => rt.emitTick?.(e),
+    now: rt.now,
+    after: rt.after,
+    settings: rt.tickSettings ?? (() => ({})),
+    localClock: rt.localClock ?? (() => ({ date: new Date().toLocaleDateString("sv-SE"), hhmm: new Date().toTimeString().slice(0, 5) })),
+    credentialMode: rt.credentialMode ?? (() => "subscription"),
+    repoGhId,
+    gate,
+    inbox: openHostInbox(dir, deps.uid),
+    log: (line) => log.write(`${line}\n`),
+  });
+  rt.attachAgentEvents?.((e) => ticker.noteAgentEvent(e));
+  live.ticker = ticker;
+  ticker.start();
   void rt.shutdown().then((reason) => supervisor.stop(reason));
   const reason = await supervisor.stopped;
+  ticker.close();
   return (reason === "stopped_by_person" || reason === "machine_shutdown") && supervisor.survivors() === 0 ? 0 : 1;
 }

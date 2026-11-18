@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ENGINE_HALT_FILE, ENGINE_HOST_FILE, readHostHandle, writeHaltFile } from "../../src/engineBridge/halt.js";
 import { engineHostCommand, type EngineHostRuntime } from "../../src/commands/engineHost.js";
 import { acquireHostLock, TAKEOVER_GUARD_MS, BRIDGE_STATE_FILE, HOST_LOCK_FILE, HOST_LOG_FILE, openHostLog, readBridgeState, isRepoGhId, type BridgeState, type HostLog } from "../../src/engineHost/hostFiles.js";
-import { assertHostArgv, BACKOFF_MS, createSupervisor, CRASH_LIMIT, HEARTBEAT_MS, HOST_ARGS, STOP_GRACE_MS, type HostChild, type HostEvent, type HostSpawnSpec, type StopReason, type Supervisor } from "../../src/engineHost/supervisor.js";
+import { CLAIMED_DIR, HOST_INBOX_DIR, openHostInbox } from "../../src/engineHost/hostInbox.js";
+import { createTicker, type TickEvent, type Ticker } from "../../src/engineHost/ticks.js";
+import { assertHostArgv, BACKOFF_MS, createSupervisor, CRASH_LIMIT, FILE_BEAT_MS, HEARTBEAT_MS, HOST_ARGS, STOP_GRACE_MS, type HostChild, type HostEvent, type HostSpawnSpec, type StopReason, type Supervisor, type SupervisorDeps } from "../../src/engineHost/supervisor.js";
 
 const uid = process.getuid?.() ?? -1;
 const SID = "e6a767e1-7e3f-44a4-bfb1-3c331803d4ee";
@@ -21,7 +23,7 @@ const log = (o) => fs.appendFileSync(rec, JSON.stringify(o) + "\\n");
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 log({ event: "start", argv: process.argv.slice(2), cwd: process.cwd() });
 const init = () => out({ type: "system", subtype: "init", cwd: process.cwd(), session_id: sid, tools: ["Agent", "Bash"] });
-const result = () => out({ type: "result", subtype: "success", is_error: false, stop_reason: "end_turn", session_id: sid });
+const result = () => out({ type: "result", subtype: "success", is_error: false, stop_reason: "end_turn", session_id: sid, usage: { input_tokens: 11, output_tokens: 22, cache_read_input_tokens: 33, cache_creation_input_tokens: 44 }, modelUsage: { "claude-haiku-4": {} } });
 init();
 process.stderr.write("${STREAM_CANARY}\\n");
 if (mode === "crash") process.exit(3);
@@ -35,6 +37,7 @@ process.stdin.on("data", (d) => {
     buf = buf.slice(i + 1);
     log({ event: "user", type: m.type, role: m.message.role });
     init();
+    if (mode === "badresult") { out({ type: "result", subtype: "error_max_turns", is_error: true, usage: { input_tokens: -5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: { "a": {}, "b": {} } }); continue; }
     result();
     if (++turns === 1) setTimeout(() => { out({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed", summary: "done" }); result(); log({ event: "autonomous_turn" }); }, 100);
   }
@@ -64,6 +67,7 @@ interface MakeOver {
   scope?: boolean;
   uid?: number;
   log?: HostLog;
+  observer?: SupervisorDeps["observer"];
 }
 
 interface World {
@@ -126,6 +130,7 @@ function setup(): World {
       readBridgeState: () => readBridgeState(state, uid),
       env: { PATH: process.env.PATH ?? "" },
       log: over.log ?? openHostLog(state, uid),
+      observer: over.observer,
       emit: (e) => world.events.push(e),
       now: () => world.now.t,
       after: (ms, fn) => {
@@ -266,7 +271,7 @@ describe("EB-12a how the host is started", () => {
     await w.make(["serve"]).start();
     const file = path.join(w.state, ENGINE_HOST_FILE);
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(readHostHandle(w.state, uid)).toEqual({ pid: w.pids[0], unit: "fx-engine-host-123.scope", start_time: `st-${w.pids[0]}` });
+    expect(readHostHandle(w.state, uid)).toEqual({ pid: w.pids[0], unit: "fx-engine-host-123.scope", start_time: `st-${w.pids[0]}`, heartbeat_at: new Date(w.now.t).toISOString() });
     await w.sup.stop("stopped_by_person");
     expect(existsSync(file)).toBe(false);
   });
@@ -573,7 +578,7 @@ describe("EB-12a the repo id and the handle", () => {
       w.setState({ repo_gh_id: id });
       await w.make(["serve"]).start();
       const h = readHostHandle(w.state, uid);
-      expect(h).toEqual({ pid: w.pids.at(-1), unit: `fx-engine-host-${id}.scope`, start_time: `st-${w.pids.at(-1)}` });
+      expect(h).toEqual({ pid: w.pids.at(-1), unit: `fx-engine-host-${id}.scope`, start_time: `st-${w.pids.at(-1)}`, heartbeat_at: new Date(w.now.t).toISOString() });
       expect(h?.unit).toMatch(/^fx-engine-host-[1-9][0-9]{0,18}\.scope$/);
       await w.sup.stop("stopped_by_person");
     }
@@ -889,5 +894,107 @@ describe("EB-12a two simultaneous takeovers of one stale lock", () => {
     expect(got).toBeDefined();
     got?.release();
     expect(readdirSync(w.state).filter((f) => f.includes("lock"))).toEqual([]);
+  });
+});
+
+describe("EB-12b what the supervisor gives the ticker", () => {
+  it("rewrites heartbeat_at every FILE_BEAT_MS while the host runs, well inside the reader's 60 s, and stops when the host does", async () => {
+    expect(await w.make(["serve"]).start()).toEqual({ ok: true });
+    const beatAt = (): number => Date.parse(readHostHandle(w.state, uid)?.heartbeat_at ?? "");
+    expect(beatAt()).toBe(w.now.t);
+    for (let i = 1; i <= 5; i++) {
+      w.now.t += FILE_BEAT_MS;
+      w.fire(FILE_BEAT_MS);
+      expect(beatAt()).toBe(w.now.t);
+    }
+    expect(FILE_BEAT_MS).toBeLessThanOrEqual(20_000);
+    expect(w.sup.touch()).toBe(true);
+    await w.sup.stop("stopped_by_person");
+    expect(w.sup.touch()).toBe(false);
+    expect(w.timers.filter((t) => t.live && t.ms === FILE_BEAT_MS)).toHaveLength(0);
+  });
+  it("ends the host with host_failed when a heartbeat cannot be written, instead of going on applying commands under a stale one", async () => {
+    expect(await w.make(["serve"]).start()).toEqual({ ok: true });
+    rmSync(path.join(w.state, ENGINE_HOST_FILE));
+    mkdirSync(path.join(w.state, ENGINE_HOST_FILE));
+    expect(w.sup.touch()).toBe(false);
+    await expect(w.sup.stopped).resolves.toBe("host_failed");
+  });
+  it("tells the observer each turn's outcome, model and four token totals, and each exit of the host process", async () => {
+    const turns: unknown[] = [];
+    let exits = 0;
+    expect(await w.make(["serve"], { observer: { onTurn: (t) => turns.push(t), onExit: () => exits++ } }).start()).toEqual({ ok: true });
+    await until(() => w.records().some((r) => r.event === "start"), "the host to start");
+    w.sup.send("hello");
+    await until(() => turns.length >= 1, "a result line");
+    expect(turns[0]).toEqual({ ok: true, model: "claude-haiku-4", usage: { input: 11, output: 22, cache_read: 33, cache_write: 44 } });
+    expect(exits).toBe(0);
+    await w.sup.stop("stopped_by_person");
+    expect(exits).toBe(1);
+  });
+  it("reads a failing result as a failed turn and a result with an invalid or incomplete usage as no usage, never as zero tokens", async () => {
+    const turns: unknown[] = [];
+    expect(await w.make(["badresult"], { observer: { onTurn: (t) => turns.push(t), onExit: () => undefined } }).start()).toEqual({ ok: true });
+    await until(() => w.records().some((r) => r.event === "start"), "the host to start");
+    w.sup.send("hello");
+    await until(() => turns.length >= 1, "a result line");
+    expect(turns[0]).toEqual({ ok: false });
+    await w.sup.stop("stopped_by_person");
+  });
+  it("tells the observer when the host crashes, and a throwing observer changes nothing", async () => {
+    let exits = 0;
+    expect(await w.make(["crash", "serve"], { observer: { onTurn: () => undefined, onExit: () => { exits++; throw new Error("boom"); } } }).start()).toEqual({ ok: true });
+    await until(() => exits === 1 && inBackoff(BACKOFF_MS[0]), "the crash to be seen and the back-off to be set");
+    await w.sup.stop("stopped_by_person");
+  });
+});
+
+describe("EB-12b ticker and supervisor on a fake CLI over stdin and stdout", () => {
+  it("sends a tick to the host's stdin, ends it on the stream's result line, and claims, applies and answers a command from the host inbox", async () => {
+    mkdirSync(path.join(w.state, "engine-inbox", "done"), { recursive: true, mode: 0o700 });
+    mkdirSync(path.join(w.state, HOST_INBOX_DIR), { mode: 0o700 });
+    const events: TickEvent[] = [];
+    const hold: { ticker?: Ticker } = {};
+    const sup = w.make(["serve"], { observer: { onTurn: (t) => hold.ticker?.onTurn(t), onExit: () => hold.ticker?.onHostExit() } });
+    expect(await sup.start()).toEqual({ ok: true });
+    const ticker = createTicker({
+      send: (t) => sup.send(t),
+      touch: () => sup.touch(),
+      emit: (e) => events.push(e),
+      now: () => w.now.t,
+      after: (ms, fn) => {
+        const t = { ms, fn, live: true };
+        w.timers.push(t);
+        return () => void (t.live = false);
+      },
+      settings: () => ({}),
+      localClock: () => ({ date: "2026-11-16", hhmm: "10:00" }),
+      credentialMode: () => "subscription",
+      repoGhId: 77,
+      gate: () => undefined,
+      inbox: openHostInbox(w.state, uid),
+    });
+    hold.ticker = ticker;
+    ticker.start();
+    w.now.t += 15 * 60_000;
+    ticker.poll();
+    await until(() => events.some((e) => e.kind === "tick_ended"), "the loop turn to end");
+    expect(events[0]).toEqual({ kind: "tick_started", tick_kind: "loop" });
+    expect(events[1]).toMatchObject({ kind: "tick_ended", tick_kind: "loop", outcome: "ok", credential_mode: "subscription", model: "claude-haiku-4", usage: { input: 11, output: 22, cache_read: 33, cache_write: 44 } });
+    expect(w.records().filter((r) => r.event === "user")).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 300)); // the fake host's own turn after its first message has ended
+    const id = "00000000-0000-4000-8000-0000000000c1";
+    const name = `1-${id}`;
+    const command = { v: 1, purpose: "engine_command_v1", command_id: id, command_seq: 1, runner_id: id, repo_gh_id: 77, issued_by: id, issued_at: new Date(w.now.t - 1000).toISOString(), expires_at: new Date(w.now.t + 60_000).toISOString(), halt_epoch: 0, kind: "start_day", args: {} };
+    writeFileSync(path.join(w.state, HOST_INBOX_DIR, `${name}.json`), JSON.stringify(command), { mode: 0o600 });
+    ticker.poll();
+    expect(existsSync(path.join(w.state, HOST_INBOX_DIR, CLAIMED_DIR, `${name}.json`))).toBe(true);
+    const outcomeFile = path.join(w.state, "engine-inbox", "done", `${name}.outcome.json`);
+    await until(() => existsSync(outcomeFile), "the outcome file");
+    expect(JSON.parse(readFileSync(outcomeFile, "utf8"))).toEqual({ outcome: "applied" });
+    expect(events.at(-1)).toMatchObject({ kind: "tick_ended", tick_kind: "start_day", outcome: "ok" });
+    expect(w.records().filter((r) => r.event === "user")).toHaveLength(2);
+    ticker.close();
+    await sup.stop("stopped_by_person");
   });
 });
