@@ -8,6 +8,7 @@ export function validValue(validation: Validation): string {
     case "any":
       return "some-value";
     case "base64-32":
+    case "base64-32-canonical":
       return Buffer.alloc(32, 7).toString("base64");
     case "min-chars":
     case "min-bytes":

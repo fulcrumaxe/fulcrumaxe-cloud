@@ -27,6 +27,7 @@ const FAKE_SECRETS: Record<string, string> = {
   'Anthropic API key (sk-ant-api03-)': 'sk-ant-api03-' + 'aB1-_cD2eF'.repeat(5),
   'Anthropic key (bare sk-ant-)': 'sk-ant-' + 'aB1cD2eF3g'.repeat(3),
   'AWS access key id (AKIA)': 'AKIAABCDEFGHIJKLMNOP',
+  'Hetzner Cloud token (64 letters and digits, D#845 MC-2)': 'Zk3Qm9Xv1Lp7Rt5Wy2Hn8Bc4Fd6Gs0JaTe1Ui3Ov5Pw7Yq9Mr2Nx4Cz6Ab8Dh0Kj',
   'JWT-shaped string': 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
 };
 
@@ -72,6 +73,18 @@ describe('events/redact (D#2 H11 criterion 2)', () => {
     expect(redacted.ok).toBe(true);
     expect(redacted.empty).toBeNull();
     expect(redacted.nested.deeper[1]).toBe('clean value');
+  });
+
+  it('redacts a Hetzner token that has no digit at all (the shape is 64 letters and digits, not "at least one of each")', () => {
+    const noDigit = 'Zk' + 'QmXvLpRt'.repeat(7) + 'WyHnBc';
+    expect(noDigit).toHaveLength(64);
+    expect(redactEventText(`id ${noDigit} end`)).toBe('id [redacted] end');
+  });
+
+  it('keeps what is not a Hetzner token: a sha-256 digest, a run of the wrong length', () => {
+    const token = FAKE_SECRETS['Hetzner Cloud token (64 letters and digits, D#845 MC-2)']!;
+    const kept = ['0123456789abcdef'.repeat(4), 'ABCDEF0123456789'.repeat(4), token.slice(0, 63), token + 'a'];
+    for (const text of kept) expect(redactEventText(`id ${text}`)).toBe(`id ${text}`);
   });
 
   it('a payload with no secret-shaped text is returned unchanged in content', () => {

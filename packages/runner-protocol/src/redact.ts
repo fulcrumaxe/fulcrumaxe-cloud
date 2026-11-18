@@ -125,6 +125,8 @@ function isProse(text: string): boolean {
 export const TELEMETRY_SHAPES: readonly TelemetryShape[] = [
   { name: "github_pat", source: "github_pat_[A-Za-z0-9_]{36,}", flags: "g", replacement: REDACTED },
   { name: "github_prefixed_token", source: "gh[pshour]_[A-Za-z0-9]{36,}", flags: "g", replacement: REDACTED },
+  // A Hetzner Cloud API token: exactly 64 letters and digits, no prefix. A run that is all hex (a sha-256 digest) is not one, so it is kept; a token with no digit is still redacted.
+  { name: "hetzner_token", source: "(?<![A-Za-z0-9])(?=[A-Za-z0-9]{0,63}[G-Zg-z])[A-Za-z0-9]{64}(?![A-Za-z0-9])", flags: "g", replacement: REDACTED },
   {
     // A bare 40-hex run is a git SHA, so the classic PAT form needs a token-context keyword before it.
     name: "classic_gh_pat",

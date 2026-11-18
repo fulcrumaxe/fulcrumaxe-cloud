@@ -14,7 +14,9 @@ import {
  */
 const A = "AbCdEf0123456789"; // 16 token-alphabet characters
 const alnum = (n: number): string => A.repeat(Math.ceil(n / A.length)).slice(0, n);
-const hex40 = "0123456789abcdef".repeat(3).slice(0, 40);
+/** A made-up 64-character token of the shape Hetzner issues (letters and digits; not a real one). */
+const HETZNER_TOKEN = ["Zk3Qm9Xv1Lp7Rt5Wy2Hn8Bc4Fd6Gs0Ja", "Te1Ui3Ov5Pw7Yq9Mr2Nx4Cz6Ab8Dh0Kj"].join("");
+const hex40 ="0123456789abcdef".repeat(3).slice(0, 40);
 
 interface Row {
   shape: string; // a TELEMETRY_SHAPES name, or "existing"
@@ -39,6 +41,8 @@ const ROWS: Row[] = [
   row("github_prefixed_token", "ghu" + "_" + alnum(40)),
   row("github_prefixed_token", "ghr" + "_" + alnum(40)),
   row("classic_gh_pat", hex40, "token: "),
+  row("hetzner_token", HETZNER_TOKEN, "the key ", " was added"),
+  row("hetzner_token", "Zk" + "QmXvLpRt".repeat(7) + "WyHnBc", "no digit: "),
   row("slack_token", "xox" + "b-" + "1234567890-" + alnum(12)),
   row("slack_token", "xox" + "p-" + "1234567890-" + alnum(12)),
   row("slack_token", "xox" + "a-" + "1234567890-" + alnum(12)),

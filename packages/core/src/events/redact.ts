@@ -78,6 +78,9 @@ export const ANTHROPIC_KEY_PATTERN_SOURCE = 'sk-ant-[A-Za-z0-9_-]{10,}';
 /** AWS access key id (long-term `AKIA`, temporary `ASIA`). */
 export const AWS_ACCESS_KEY_PATTERN_SOURCE = '(?:AKIA|ASIA)[0-9A-Z]{16}';
 
+/** D#845 MC-2: a Hetzner Cloud API token, exactly 64 letters and digits with no prefix. A run with no non-hex letter (a sha-256 digest) is not one, so it is kept; a token with no digit is still redacted. */
+export const HETZNER_TOKEN_PATTERN_SOURCE = '(?<![A-Za-z0-9])(?=[A-Za-z0-9]{0,63}[G-Zg-z])[A-Za-z0-9]{64}(?![A-Za-z0-9])';
+
 export const RUN_EVENT_SECRET_PATTERN_SOURCES: readonly string[] = [
   AI_GATEWAY_KEY_PATTERN_SOURCE,
   GH_INSTALLATION_TOKEN_PATTERN_SOURCE,
@@ -89,6 +92,7 @@ export const RUN_EVENT_SECRET_PATTERN_SOURCES: readonly string[] = [
   GH_FINE_GRAINED_PAT_PATTERN_SOURCE,
   ANTHROPIC_KEY_PATTERN_SOURCE,
   AWS_ACCESS_KEY_PATTERN_SOURCE,
+  HETZNER_TOKEN_PATTERN_SOURCE,
 ];
 
 function compileGlobal(source: string): RegExp {

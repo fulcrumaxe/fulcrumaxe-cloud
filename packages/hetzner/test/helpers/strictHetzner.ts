@@ -26,6 +26,8 @@ import { generateSelfSignedCert } from "../../../webhooks/test/helpers/selfSigne
  */
 export interface FakeWorld {
   tokens: Set<string>;
+  /** Tokens that read but cannot write: any method but GET answers 403 `forbidden` (Hetzner's read-only project token). */
+  readOnlyTokens?: Set<string>;
   clock: { t: number };
   limit: number;
   /** Requests left now (refills by limit/3600 a second on `clock`). */
@@ -56,7 +58,7 @@ export const newWorld = (tokens: string[]): FakeWorld => ({ tokens: new Set(toke
 
 const money = (n: string) => ({ net: n, gross: (Number(n) * 1.19).toFixed(4) });
 const price = (location: string, h: string, m: string) => ({ location, price_hourly: money(h), price_monthly: money(m), included_traffic: 21990232555520, price_per_tb_traffic: money("1.0000") });
-const LOCATIONS = [1, 2].map((id) => ({ id, name: ["fsn1", "nbg1"][id - 1], description: `loc ${id}`, country: "DE", city: "Test", latitude: 1.5, longitude: 2.5, network_zone: "eu-central" }));
+const LOCATIONS = [1, 2].map((id) => ({ id, name: ["fsn1", "nbg1"][id - 1]!, description: `loc ${id}`, country: "DE", city: "Test", latitude: 1.5, longitude: 2.5, network_zone: "eu-central" }));
 const TYPES = [
   { id: 22, name: "cx22", description: "CX22", cores: 2, memory: 4, disk: 40, storage_type: "local", cpu_type: "shared", architecture: "x86", category: "Cost-Optimized", deprecation: null, prices: LOCATIONS.map((l) => price(l.name, "0.0059", "3.7900")), locations: LOCATIONS.map((l) => ({ id: l.id, name: l.name, deprecation: null, recommended: true, available: true })) },
   { id: 23, name: "cx32", description: "CX32", cores: 4, memory: 8, disk: 80, storage_type: "local", cpu_type: "shared", architecture: "x86", category: "Cost-Optimized", deprecation: null, prices: LOCATIONS.map((l) => price(l.name, "0.0113", "6.8000")), locations: LOCATIONS.map((l) => ({ id: l.id, name: l.name, deprecation: null, recommended: false, available: l.name === "fsn1" })) },
@@ -280,6 +282,7 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
       if (!req.url?.startsWith("/v1/")) return send(err(404, "not_found", "not found"));
       const auth = headers["authorization"] ?? "";
       if (!auth.startsWith("Bearer ") || !world.tokens.has(auth.slice(7))) return send(err(401, "unauthorized", "unable to authenticate"));
+      if (method !== "GET" && world.readOnlyTokens?.has(auth.slice(7))) return send(err(403, "forbidden", "insufficient permissions"));
       let body: Body = {};
       if (method === "POST" || method === "PUT") {
         if (!injected?.after && !/^application\/json/i.test(headers["content-type"] ?? "")) return send(err(400, "json_error", "invalid JSON input"));

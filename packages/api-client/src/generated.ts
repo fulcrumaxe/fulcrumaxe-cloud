@@ -1650,6 +1650,26 @@ export interface Operations {
     body: undefined;
     response: null;
   };
+  connectHetznerCredential: {
+    path: undefined;
+    query: undefined;
+    body: {
+      token: string;
+    };
+    response: {
+      id: string;
+      status: "ok" | "invalid";
+      token_hint: string;
+      unlabelled_server_count: number;
+      created_at: string;
+    };
+  };
+  removeHetznerCredential: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: null;
+  };
   listRepos: {
     path: undefined;
     query: {
@@ -6472,6 +6492,28 @@ export const operations = {
   disconnectVercel: {
     method: "DELETE",
     path: "/api/v1/vercel-connection",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  connectHetznerCredential: {
+    method: "POST",
+    path: "/api/v1/machine-credentials/hetzner",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  removeHetznerCredential: {
+    method: "DELETE",
+    path: "/api/v1/machine-credentials/hetzner",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

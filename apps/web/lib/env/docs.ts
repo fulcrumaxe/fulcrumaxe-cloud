@@ -17,6 +17,8 @@ export function describeValidation(validation: Validation): string {
       return "any non-blank value";
     case "base64-32":
       return "base64 of exactly 32 bytes";
+    case "base64-32-canonical":
+      return "canonical base64 (padded, no spaces) of exactly 32 bytes";
     case "min-chars":
       return `at least ${validation.n} characters`;
     case "min-bytes":

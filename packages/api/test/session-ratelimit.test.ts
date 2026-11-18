@@ -334,6 +334,7 @@ describe('session rate limits', () => {
         testModelConnection: 'model-key-test',
         connectVercel: 'vercel-token-put',
         rotateVercelConnection: 'vercel-token-put',
+        connectHetznerCredential: 'machine-credential-put',
         createPortalSession: 'stripe',
         createCheckoutSession: 'stripe',
         createSiteSetupCheckout: 'stripe',

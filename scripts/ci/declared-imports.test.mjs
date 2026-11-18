@@ -23,6 +23,9 @@ const CYCLES = [
   // discussions may not depend on runner (packages/discussions/src/comments.ts), so this direction stays
   // undeclared and runner declares discussions instead.
   ["packages/discussions", "packages/runner"],
+  // model-connection's machineOps tests run against hetzner's strict fake (relative imports of its src and test helper). Declaring it would close a cycle:
+  // model-connection -> hetzner (dev) -> webhooks (dev) -> model-connection.
+  ["packages/model-connection", "packages/hetzner"],
   ["packages/pipeline", "packages/github"],
   ["packages/pipeline", "packages/worker"],
   ["packages/worker", "apps/web"],

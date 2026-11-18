@@ -329,6 +329,9 @@ importers:
       '@fx/discussions':
         specifier: workspace:*
         version: link:../discussions
+      '@fx/hetzner':
+        specifier: workspace:*
+        version: link:../hetzner
       '@fx/model-call':
         specifier: workspace:*
         version: link:../model-call
