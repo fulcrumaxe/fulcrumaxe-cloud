@@ -80,8 +80,32 @@ function fresh(over: Partial<Mock> = {}): Mock {
   };
 }
 
-async function setup(page: Page, mock: Mock, opts: { clock?: boolean } = {}) {
+/**
+ * `stream: true` replaces the account event stream with one the test writes to: a real fetch() Response whose body is a ReadableStream carrying real SSE
+ * frames (`id`, `event`, `data`, and `:` comments), read by the shell's own live client. window.__push(text) writes to the open stream, and
+ * window.__opened counts how many times the client has opened it.
+ */
+async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: boolean } = {}) {
   const errors: string[] = [];
+  if (opts.stream) {
+    await page.addInitScript(() => {
+      const w = window as unknown as { __push: (t: string) => void; __opened: number; __pulls: number };
+      const real = window.fetch.bind(window);
+      let ctrl: ReadableStreamDefaultController<Uint8Array> | null = null;
+      w.__opened = 0;
+      w.__pulls = 0; // the reader asks for the next chunk once it has taken the last: a frame pushed is consumed when this goes up
+      w.__push = (t) => { if (ctrl) ctrl.enqueue(new TextEncoder().encode(t)); };
+      window.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+        if (new URL(url, location.href).pathname !== "/api/v1/events") return real(input, init);
+        const body = new ReadableStream<Uint8Array>({
+          pull() { w.__pulls += 1; },
+          start(c) { ctrl = c; w.__opened += 1; init?.signal?.addEventListener("abort", () => { try { c.error(new DOMException("aborted", "AbortError")); } catch { /* closed */ } }); },
+        });
+        return Promise.resolve(new Response(body, { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" } }));
+      };
+    });
+  }
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
@@ -522,11 +546,11 @@ test.describe("Team app", () => {
     const before = mock.reads.length;
     mock.streamFrame = `id: c-1\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e1", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 9 } })}\n\n`;
     await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
-    await expect.poll(() => mock.reads.length, { timeout: 10_000 }).toBeGreaterThan(before);
+    await expect.poll(() => mock.reads.length, { timeout: 20_000 }).toBeGreaterThan(before);
     expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe(`tm-repo-${REPO_A}`);
   });
 
-  test("engine.changed refetches every panel for the repo, within 5 s, without a reload", async ({ page }) => {
+  test("engine.changed with no panels named refetches every panel for the repo within the 10 s gate, without a reload", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const { mock } = await setup(page, fresh({ streaming: true, agents: F.envelope([F.agent()]) }));
     await open(page);
@@ -536,18 +560,95 @@ test.describe("Team app", () => {
     mock.lanes = F.envelope([F.lane({ pr: 11, state: "queued" })]);
     mock.streamFrame = `id: c-2\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e2", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 10 } })}\n\n`;
     await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
-    await expect(t(page, "tm-agent")).toHaveCount(2, { timeout: 5000 });
-    await expect(t(page, "tm-pr")).toHaveText("PR #11", { timeout: 5000 });
+    await expect(t(page, "tm-agent")).toHaveCount(2, { timeout: 15_000 });
+    await expect(t(page, "tm-pr")).toHaveText("PR #11", { timeout: 15_000 });
     for (const kind of ["agents?state=running", "lanes", "gates", "log?limit=100", "plan", "stats", "usage"]) expect(mock.reads.filter((r) => r === `${BASE}/repos/${REPO_A}/${kind}`).length).toBeGreaterThanOrEqual(1);
   });
 
-  test("without a live stream the panels are read again every 15 s", async ({ page }) => {
+  test("without a live stream everything is read again after 120 s, and nothing before", async ({ page }) => {
     const { mock } = await setup(page, fresh(), { clock: true });
     await open(page);
     await expect(t(page, "tm-agent")).toHaveCount(2);
     mock.reads.length = 0;
-    await page.clock.runFor(15_500);
-    await expect.poll(() => mock.reads.filter((r) => r.endsWith("/lanes")).length).toBeGreaterThanOrEqual(1);
+    await page.clock.runFor(119_000);
+    await page.waitForTimeout(300);
+    expect(mock.reads).toEqual([]);
+    await page.clock.runFor(1_500);
+    await expect.poll(() => mock.reads.filter((r) => r.endsWith("/lanes")).length).toBe(1);
+  });
+
+  test.describe("on push: only the panels a notice names are read", () => {
+    let n = 0;
+    const frame = (panels?: string[]) => {
+      n += 1;
+      const data = { repo_id: REPO_A, session_id: "s", last_seq: n, ...(panels ? { panels } : {}) };
+      return `id: cur-${n}\nevent: engine.changed\ndata: ${JSON.stringify({ id: `ev${n}`, type: "engine.changed", created_at: new Date().toISOString(), data })}\n\n`;
+    };
+    const panelPath = (k: string) => `${BASE}/repos/${REPO_A}/${k}`;
+    /**
+     * A booted desktop, its stream open, then the page clock installed (the clock fakes performance.mark, and the live client starts on that mark, so it
+     * goes in after the stream is up), the Team window open and the 10 s gate of its first read past.
+     */
+    async function ready(page: Page) {
+      const { mock } = await setup(page, fresh(), { stream: true });
+      await expect.poll(() => page.evaluate(() => { window.dispatchEvent(new Event("pointerdown")); return (window as unknown as { __opened: number }).__opened; }), { timeout: 30_000 }).toBeGreaterThan(0);
+      await page.clock.install();
+      await open(page);
+      await expect(t(page, "tm-agent")).toHaveCount(2);
+      await page.clock.runFor(15_000);
+      mock.reads.length = 0;
+      return mock;
+    }
+    const pulls = (page: Page) => page.evaluate(() => (window as unknown as { __pulls: number }).__pulls);
+    const push = async (page: Page, text: string) => {
+      const before = await pulls(page);
+      await page.evaluate((x) => (window as unknown as { __push: (t: string) => void }).__push(x), text);
+      await expect.poll(() => pulls(page)).toBeGreaterThan(before); // wait for the client to take the frame, not for a fixed time
+    };
+    const count = (mock: Mock, p: string) => mock.reads.filter((r) => r === p).length;
+
+    test("a notice for lanes re-reads the lanes panel and nothing else", async ({ page }) => {
+      const mock = await ready(page);
+      await push(page, frame(["lanes"]));
+      await page.clock.runFor(1_200);
+      await expect.poll(() => count(mock, panelPath("lanes"))).toBe(1);
+      await page.clock.runFor(8_000);
+      await page.waitForTimeout(300);
+      expect(mock.reads).toEqual([panelPath("lanes")]); // no other panel, no settings, no repo list, no commands, no dials
+    });
+
+    test("a burst of 20 notices in 2 s re-reads each named panel once, and the rest of the window once more", async ({ page }) => {
+      const mock = await ready(page);
+      for (let i = 0; i < 20; i++) { await push(page, frame(["lanes", "log"])); await page.clock.runFor(100); }
+      await page.clock.runFor(1_300);
+      await expect.poll(() => count(mock, panelPath("lanes"))).toBe(1);
+      await expect.poll(() => count(mock, panelPath("log?limit=100"))).toBe(1);
+      await page.waitForTimeout(300);
+      expect(mock.reads).toHaveLength(2);
+      await page.clock.runFor(10_000); // the notices of the second half of the burst were held behind the gate: one more read each, and then no more
+      await expect.poll(() => count(mock, panelPath("lanes"))).toBe(2);
+      await page.clock.runFor(30_000);
+      await page.waitForTimeout(300);
+      expect(mock.reads).toHaveLength(4);
+    });
+
+    test("a notice that names no panels, or an unknown one, re-reads every panel, once", async ({ page }) => {
+      const mock = await ready(page);
+      await push(page, frame());
+      await push(page, frame(["lanes", "cost"]));
+      await page.clock.runFor(1_500);
+      await expect.poll(() => count(mock, `${BASE}/settings`)).toBe(1);
+      for (const k of ["agents?state=running", "lanes", "gates", "log?limit=100", "plan", "stats", "usage"]) await expect.poll(() => count(mock, panelPath(k))).toBe(1);
+    });
+
+    test("idle: no request while nothing arrives, then the one 120 s safety read", async ({ page }) => {
+      const mock = await ready(page);
+      for (let i = 0; i < 4; i++) { await push(page, ": hb\n\n"); await page.clock.runFor(25_000); } // the server's heartbeat keeps the stream alive
+      await page.waitForTimeout(300);
+      expect(mock.reads).toEqual([]);
+      await page.clock.runFor(21_000);
+      await expect.poll(() => count(mock, `${BASE}/settings`)).toBe(1);
+    });
   });
 
   test("a refresh that lands while a save is out does not put the ticked box back; the box and the saved value agree after a reload", async ({ page }) => {
@@ -565,7 +666,7 @@ test.describe("Team app", () => {
     const before = settingsReads();
     mock.streamFrame = `id: c-2\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e2", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 11 } })}\n\n`;
     await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
-    await expect.poll(settingsReads, { timeout: 10_000 }).toBeGreaterThan(before); // the refresh read the old, ticked value while the save was out
+    await expect.poll(settingsReads, { timeout: 20_000 }).toBeGreaterThan(before); // the refresh read the old, ticked value while the save was out
     await expect(t(page, `tm-repo-${REPO_A}`)).not.toBeChecked();
     release();
     await expect.poll(() => mock.puts.length).toBe(1);
@@ -587,7 +688,7 @@ test.describe("Team app", () => {
     const before = mock.reads.length;
     mock.streamFrame = `id: c-3\nevent: engine.changed\ndata: ${JSON.stringify({ id: "e3", type: "engine.changed", created_at: new Date().toISOString(), data: { repo_id: REPO_A, session_id: "s", last_seq: 12 } })}\n\n`;
     await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
-    await expect.poll(() => mock.reads.length, { timeout: 10_000 }).toBeGreaterThan(before);
+    await expect.poll(() => mock.reads.length, { timeout: 20_000 }).toBeGreaterThan(before);
     await expect.poll(() => mock.reads.filter((r) => r === `${BASE}/settings`).length).toBeGreaterThan(1);
     expect(await page.evaluate((id) => (document.querySelector(`[data-testid="tm-repo-${id}"]`) as (HTMLElement & { mark?: number }) | null)?.mark, REPO_A)).toBe(7);
     expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe(`tm-repo-${REPO_A}`);
@@ -679,6 +780,7 @@ test.describe("Team app", () => {
   });
 
   test("the banner and the refresh note are announced when they change and not on every poll", async ({ page }) => {
+    test.setTimeout(240_000); // six safety reads of 120 s of page time each
     const F = makeFixtures(Date.now());
     const gap = (n: number) => ({ missing_events: n, gaps: [{ from_seq: 1, to_seq: n, before_ts: F.iso(900) }] });
     const ALL = ["/agents", "/lanes", "/gates", "/log", "/plan", "/stats", "/usage"]; // the note is for the whole view failing, so every panel read fails together
@@ -699,7 +801,7 @@ test.describe("Team app", () => {
     const count = () => page.evaluate(() => (window as unknown as { __said: number }).__said);
     const poll = async () => {
       const before = mock.reads.filter((r) => r.endsWith("/gates")).length;
-      await page.clock.runFor(15_500);
+      await page.clock.runFor(121_000);
       await expect.poll(() => mock.reads.filter((r) => r.endsWith("/gates")).length).toBeGreaterThan(before);
       await page.waitForTimeout(300);
     };
@@ -936,10 +1038,28 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-stop-confirm")).toBeVisible();
     expect(await activeId(page)).toBe("tm-stop-cancel");
     mockData.agents = { ...mockData.agents, items: mockData.agents.items.slice(1) };
-    await page.clock.runFor(61_000);
+    await page.clock.runFor(121_000);
     await expect(t(page, "tm-stop-confirm")).toHaveCount(0);
     expect(await activeId(page)).toBe("agents-head");
     await expect(t(page, "tm-stop")).toHaveCount(1);
+    await clean(page, errors);
+  });
+
+  test("a command waiting for the machine is read again within 15 s with no notice, and the reads stop once nothing waits", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const mockData = operateOn({ commands: { commands: [F.command({ state: "pending" })] } });
+    const { errors } = await setup(page, mockData, { clock: true });
+    await open(page);
+    await expect(t(page, "tm-cmd")).toHaveCount(1);
+    const reads = () => mockData.reads.filter((r) => r.includes("/commands")).length;
+    const before = reads();
+    mockData.commands = { commands: [F.command({ state: "applied", acked_at: new Date().toISOString() })] };
+    await page.clock.runFor(15_000);
+    await expect.poll(reads).toBeGreaterThan(before);
+    await expect(t(page, "tm-cmd-state")).toHaveText("Applied");
+    const settled = reads();
+    await page.clock.runFor(60_000);
+    expect(reads()).toBe(settled); // nothing waits any more: no read of the commands until the next safety read
     await clean(page, errors);
   });
 
@@ -952,11 +1072,11 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-live")).toHaveText("");
     await watchSaid(page);
     mockData.commands = { commands: [mockData.commands.commands[0], { ...mockData.commands.commands[1], state: "applied", acked_at: new Date().toISOString() }] };
-    await page.clock.runFor(61_000);
+    await page.clock.runFor(15_000); // no notice: the command that was waiting is read again every 10 s
     await expect(t(page, "tm-live")).toHaveText("Pause the loop: Applied. The engine did it.");
     const once = await said(page);
-    await page.clock.runFor(61_000);
-    await page.clock.runFor(61_000);
+    await page.clock.runFor(31_000);
+    await page.clock.runFor(31_000);
     expect(await said(page)).toBe(once); // nothing changed, nothing said again
     await expect(t(page, "tm-live")).toHaveText("Pause the loop: Applied. The engine did it.");
     await clean(page, errors);
@@ -1064,7 +1184,7 @@ test.describe("Team app", () => {
     // A choice not yet applied is kept while the panels are read again, even across a minute.
     await t(page, "tm-dial-select").first().selectOption("act");
     const before = mock.reads.filter((r) => r.endsWith("/lanes")).length;
-    await page.clock.runFor(61_000);
+    await page.clock.runFor(121_000);
     await expect.poll(() => mock.reads.filter((r) => r.endsWith("/lanes")).length).toBeGreaterThan(before);
     await expect(t(page, "tm-dial-select").first()).toHaveValue("act");
     // Apply the middle one.
@@ -1112,7 +1232,7 @@ test.describe("Team app", () => {
     await watchSaid(page);
     const poll = async () => {
       const before = mock.reads.filter((r) => r.endsWith("/gates")).length;
-      await page.clock.runFor(15_500);
+      await page.clock.runFor(121_000);
       await expect.poll(() => mock.reads.filter((r) => r.endsWith("/gates")).length).toBeGreaterThan(before);
       await page.waitForTimeout(300);
     };
@@ -1173,15 +1293,15 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-halt-chip")).toHaveText("Halting…");
     mock.repos = mock.repos.map((r) => ({ ...r, halt_pending: false }));
     await watchSaid(page);
-    await page.clock.runFor(15_500);
+    await page.clock.runFor(121_000);
     await expect(t(page, "tm-halt-chip")).toHaveText("Halted");
     await expect(t(page, "tm-live")).toHaveText("The engine is halted.");
     await expect(t(page, "tm-halt-text")).toHaveText("The engine is halted. It is stopped on the machine and every command is refused until a person clears the halt.");
     await expect(t(page, "tm-op-why")).toHaveText("The engine is halted.");
     await expect(t(page, "tm-op-pause")).toHaveAttribute("aria-disabled", "true");
     const said1 = await said(page);
-    await page.clock.runFor(15_500);
-    await page.clock.runFor(15_500);
+    await page.clock.runFor(121_000);
+    await page.clock.runFor(121_000);
     await page.waitForTimeout(300);
     expect(await said(page)).toBe(said1); // a poll that finds the same state says nothing
     const confirm = t(page, "tm-halt-confirm");
@@ -1333,7 +1453,7 @@ test.describe("Team app", () => {
     await press(t(page, "tm-halt-btn"));
     await expect(t(page, "tm-halt-confirm")).toBeVisible();
     mock.repos = mock.repos.map((r) => ({ ...r, halted: true, halt_pending: false }));
-    await page.clock.runFor(15_500);
+    await page.clock.runFor(121_000);
     await expect(t(page, "tm-halt-confirm")).toHaveCount(0);
     await expect(t(page, "tm-clear-btn")).toBeVisible();
     expect(await activeId(page)).toBe("tm-clear-btn");
@@ -1643,7 +1763,7 @@ test.describe("Team app", () => {
     const before = await t(page, "tm-plan-asof").innerText();
     mock.plan = { ...mock.plan, as_of: F.iso(600) }; // ten minutes earlier: the header text must change
     mock.reads.length = 0;
-    await page.clock.runFor(15_500);
+    await page.clock.runFor(121_000);
     await expect.poll(() => mock.reads.filter((r) => r.endsWith("/plan")).length).toBeGreaterThanOrEqual(1);
     await expect(t(page, "tm-plan-asof")).not.toHaveText(before);
     expect(mock.reads.some((r) => r.endsWith("/plan"))).toBe(true);

@@ -3,10 +3,12 @@
 // Rules this file holds, from the engine-bridge lessons:
 //  - A gap is never silent: an envelope that reports missing events puts a banner on the app, and the banner has no way to be dismissed.
 //  - Every panel carries its data age ("as of HH:MM (N min ago)"). A stale heartbeat adds "last seen N min ago" and the data stays on screen.
-//  - An agent is "running" only while the session is live (the bridge heard from the engine in the last 180 s) and its start is under 3 h old;
+//  - An agent is "running" only while the session is live (the bridge heard from the engine in the last 450 s) and its start is under 3 h old;
 //    otherwise it reads "unknown", whatever the server said. Both the bridge session and the engine session count: the list's liveness chip
 //    is the bridge's view, heard_age_s is the engine's own last word.
 //  - A reply that does not have the documented shape is a failed read, never an empty list (fail closed).
+//  - Reads follow notices, not a timer: a notice names the parts that changed (createCoalescer, noticeNames), each part is read at most once in 10 s, a missing or unknown
+//    name reads everything, a 120 s safety read covers a notice that never came, and a hidden tab reads nothing. The data age follows the status read's last-heard time with the clock.
 //  - The cloud sends facts; this file does no cost, rate or total maths: a dollar figure is drawn as sent, through the one shared formatter, and never added up here.
 //    The only arithmetic is ages, counts of rows on screen, and joining consecutive event numbers into ranges.
 // Every word that reaches the page is a string made here; nothing is null, undefined or NaN.
@@ -16,9 +18,24 @@ import { PANELS, createTeamApi } from "./team-api.js";
 import { NO_OP, agentWords, createOperate, describeHalt, describeOperate, isAgentId, stopOf } from "./team-operate.js";
 
 export const LIVE_EVENT = "engine.changed";
-export const REFRESH_MS = 15000;
+/** A notice settles for this long before its panels are read (the server has already waited its own second). */
 export const DEBOUNCE_MS = 1000;
-export const STALE_HEARD_S = 180;
+/** A panel is read again at most once in this long, however many notices name it; the names that arrive inside the window are read together. */
+export const PANEL_GATE_MS = 10000;
+/** The safety read: every part is read this often while the tab is visible, whatever has or has not arrived. */
+export const SAFETY_MS = 120000;
+/** The closed set of names a notice may carry (`data.panels`). `asks` is a name the Team app has no reader for. */
+export const NOTICE_PANELS = ["agents", "lanes", "gates", "asks", "log", "plan", "stats", "usage", "status"];
+/** What this app can read: the seven panels, the status (settings, repos, halt) and the operate half (commands and dials). */
+export const READ_NAMES = [...PANELS, "status", "operate"];
+/**
+ * A repo is stale when it was last heard from longer ago than this. An idle bridge sends only a slim "alive" status every HEARTBEAT_MS (300 s,
+ * packages/fx-runner/src/engineBridge/loop.ts), so the threshold is 1.5 of those intervals: a live, idle engine is never marked stale between two of them.
+ */
+export const STALE_HEARD_S = 450;
+/** While a command is waiting for the machine, its answer is read this often (the runner's report raises no notice). */
+export const OP_POLL_MS = 10000;
+export const RETRY_MS = 10000;
 export const UNKNOWN_AFTER_MS = 3 * 3600 * 1000;
 export const SOURCE_ORDER = ["loop", "team_log", "plan", "merge_queue"];
 export const SOURCE_LIMIT_S = { loop: 3600, team_log: 7200, plan: 26 * 3600, merge_queue: 6 * 3600 };
@@ -132,6 +149,59 @@ export function readStats(raw) {
   };
 }
 
+/**
+ * The parts a notice asks for. Only a non-empty list made of names from the closed set narrows the read; a missing, empty, mistyped or unknown entry
+ * means everything (a forged or future notice costs one more read, never a stale screen). `asks` has no reader in this app, so it names nothing here.
+ */
+export function noticeNames(data) {
+  const p = isObj(data) ? data.panels : undefined;
+  if (!Array.isArray(p) || p.length === 0 || p.some((n) => typeof n !== "string" || !NOTICE_PANELS.includes(n))) return READ_NAMES.slice();
+  return [...new Set(p)].filter((n) => READ_NAMES.includes(n));
+}
+
+/**
+ * Decides when a part may be read again. `note(names)` says a part has changed; `run(names)` is called with every part that is due, together. A part
+ * is due `settleMs` after it was first named, and never less than `gateMs` after its own last read, so any number of notices make at most one read of a
+ * part in each window, and the names that arrive inside the window are read in the one call at its end. `mark(names)` records a read made some other
+ * way (a full read) and drops those parts from the queue, because that read covered them.
+ */
+export function createCoalescer({ run, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, settleMs = DEBOUNCE_MS, gateMs = PANEL_GATE_MS } = {}) {
+  const last = new Map();
+  const ready = new Map(); // name -> the time it may be read
+  let timer = null, timerAt = Infinity;
+  function arm() {
+    const next = ready.size ? Math.min(...ready.values()) : Infinity;
+    if (next === timerAt && timer !== null) return;
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+    timerAt = next;
+    if (next !== Infinity) timer = setTimer(fire, Math.max(0, next - now()));
+  }
+  function fire() {
+    timer = null;
+    timerAt = Infinity;
+    const t = now();
+    const due = [...ready].filter(([, at]) => at <= t).map(([n]) => n);
+    for (const n of due) { ready.delete(n); last.set(n, t); }
+    arm();
+    if (due.length) run(due);
+  }
+  return {
+    note(names) {
+      const t = now();
+      for (const n of names) if (!ready.has(n)) ready.set(n, Math.max(t + settleMs, last.has(n) ? last.get(n) + gateMs : 0));
+      arm();
+    },
+    mark(names) {
+      const t = now();
+      for (const n of names) { last.set(n, t); ready.delete(n); }
+      arm();
+    },
+    cancel() { ready.clear(); arm(); },
+    pending: () => [...ready.keys()],
+  };
+}
+
 const idKey = (v) => (typeof v === "string" || Number.isInteger(v) ? String(v) : "");
 export function readRepos(raw) {
   const list = Array.isArray(raw) ? raw : isObj(raw) && Array.isArray(raw.items) ? raw.items : null;
@@ -160,9 +230,11 @@ export function asOfWords(env, nowMs) {
   const m = env ? minutesSince(env.as_of, nowMs) : null;
   return m === null ? WORDS.noData : "as of " + hm(env.as_of) + " (" + m + " min ago)";
 }
-/** The envelope says the engine has not been heard from within 180 s (or ever), or the list says the session is not live. */
-export const isStale = (repo, env) => repo.liveness !== "live" || !env || env.heard_age_s === null || env.heard_age_s > STALE_HEARD_S;
-const lastSeenWords = (env) => (!env || env.heard_age_s === null ? "last seen: never" : "last seen " + Math.floor(env.heard_age_s / 60) + " min ago");
+/** The envelope says the engine has not been heard from within 450 s (or ever), or the list says the session is not live. */
+/** The list's own word (the status read) ages with the clock: a repo last heard long ago reads stale even when no panel has been read since. */
+const unheardS = (repo, nowMs) => { const at = stamp(repo.lastHeard); return Number.isFinite(nowMs) && at !== null ? Math.max(0, Math.floor((nowMs - at) / 1000)) : null; };
+export const isStale = (repo, env, nowMs) => repo.liveness !== "live" || !env || env.heard_age_s === null || env.heard_age_s > STALE_HEARD_S || (unheardS(repo, nowMs) ?? 0) > STALE_HEARD_S;
+const lastSeenWords = (env, repo, nowMs) => (!env || env.heard_age_s === null ? "last seen: never" : "last seen " + Math.floor(Math.max(env.heard_age_s, repo ? unheardS(repo, nowMs) ?? 0 : 0) / 60) + " min ago");
 
 /** One agent row. `live` is false when the session is stale; `running` is then never shown, nor after 3 h without a stop. */
 export function agentRow(a, live, nowMs, repoName) {
@@ -318,8 +390,8 @@ export function describe(st, nowMs) {
   if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   if (!repo) return { kind: "norepos", text: WORDS.noRepos, ...base };
   const { agents, lanes, gates, log, plan, stats, usage } = st.panels;
-  const stale = (env) => isStale(repo, env);
-  const head = (env) => ({ asOf: asOfWords(env, nowMs), warn: stale(env) ? lastSeenWords(env) : "" });
+  const stale = (env) => isStale(repo, env, nowMs);
+  const head = (env) => ({ asOf: asOfWords(env, nowMs), warn: stale(env) ? lastSeenWords(env, repo, nowMs) : "" });
   const live = !stale(agents);
   const envs = [agents, lanes, gates, log, plan, stats, usage].filter(isObj); // plan is the word "none" when the route answered 204
   const lg = st.log;
@@ -348,55 +420,79 @@ const NO_PANELS = { agents: null, lanes: null, gates: null, log: null, plan: nul
 const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, failed: false, said: "" };
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
-export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval } = {}) {
+export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval, now = Date.now } = {}) {
   let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null };
-  let busy = false, again = false, pick = 0, debounce = null, stopFn = null, saveVer = 0, hiddenFn = () => false;
+  let safetyTimer = null, started = false, retryTimer = null, busy = false, queued = new Set(), lastFull = -Infinity, pick = 0, stopFn = null, saveVer = 0, hiddenFn = () => false;
+  // Which parts a notice asked for, and when each may be read again. Every read, whoever asked for it, is marked here, so no part is read twice inside the gate.
+  const gate = createCoalescer({ now, setTimer, clearTimer, run: (names) => { if (!hiddenFn()) refresh(new Set(names)); } });
   // A save starting or ending moves saveVer. A read remembers it when it starts; if it has moved, or a save is out, by the time the answer lands
   // the answer was asked before the save changed things and is dropped (the read that follows the save shows the server's answer).
   const set = (patch) => { if (("saving" in patch && patch.saving !== st.saving) || (patch.op && patch.op.saving !== st.op.saving)) saveVer += 1; st = { ...st, ...patch }; onChange(); };
   const operate = createOperate({ client, signal, get: () => st, set, refresh: () => refresh(), aborted: (e) => aborted(e, signal) });
 
-  async function read() {
+  /**
+   * Reads the parts named in `want` (a Set of READ_NAMES); everything when it holds them all, or when nothing has been loaded yet.
+   * `status` is the settings and the repo list; when settings are already known and watch is on, only the repo list is read (liveness, last heard, halt),
+   * because a heartbeat cannot change the settings. `operate` is the commands and the dials, read only for a member who can edit.
+   */
+  async function read(want) {
     const ver = saveVer;
-    let settings, repos = [];
-    try {
-      settings = readSettings(await client.settings(signal));
-      if (!settings) throw new Error("shape");
-      if (settings.watch) {
-        repos = readRepos(await client.repos(signal));
-        if (!repos) throw new Error("shape");
+    if (!st.settings || st.status !== "ready" || READ_NAMES.every((n) => want.has(n))) want = new Set(READ_NAMES);
+    const everything = READ_NAMES.every((n) => want.has(n));
+    let settings = st.settings, repos = st.repos, selectedId = st.selectedId;
+    if (everything || want.has("status")) {
+      try {
+        if (everything || !settings.watch) {
+          settings = readSettings(await client.settings(signal));
+          if (!settings) throw new Error("shape");
+          repos = [];
+          if (settings.watch) {
+            repos = readRepos(await client.repos(signal));
+            if (!repos) throw new Error("shape");
+          }
+        } else {
+          repos = readRepos(await client.repos(signal));
+          if (!repos) throw new Error("shape");
+        }
+      } catch (e) {
+        if (aborted(e, signal)) return;
+        set(st.settings ? { refreshFailed: true } : { status: "error" });
+        return;
       }
-    } catch (e) {
-      if (aborted(e, signal)) return;
-      set(st.settings ? { refreshFailed: true } : { status: "error" });
-      return;
+      if (ver !== saveVer || st.saving || st.op.saving) return;
+      // The same answer as the last one keeps the same objects, so nothing that shows them is redrawn.
+      if (st.settings && JSON.stringify(st.settings) === JSON.stringify(settings)) settings = st.settings;
+      if (JSON.stringify(st.repos) === JSON.stringify(repos)) repos = st.repos;
+      selectedId = repos.some((r) => r.id === st.selectedId) ? st.selectedId : repos.length ? repos[0].id : "";
+      const changed = selectedId !== st.selectedId;
+      if (changed) want = new Set(READ_NAMES); // another repo is shown now: all of it is read
+      set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op, ...(changed ? { log: NO_LOG, planPage: 0, provOpen: [] } : {}) }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
     }
-    if (ver !== saveVer || st.saving || st.op.saving) return;
-    // The same answer as the last one keeps the same objects, so nothing that shows them is redrawn.
-    if (st.settings && JSON.stringify(st.settings) === JSON.stringify(settings)) settings = st.settings;
-    if (JSON.stringify(st.repos) === JSON.stringify(repos)) repos = st.repos;
-    const selectedId = repos.some((r) => r.id === st.selectedId) ? st.selectedId : repos.length ? repos[0].id : "";
-    const changed = selectedId !== st.selectedId;
-    set({ status: "ready", settings, repos, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op, ...(changed ? { log: NO_LOG, planPage: 0, provOpen: [] } : {}) }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
     if (!selectedId) return;
     const token = pick;
     const stale = () => token !== pick || (signal && signal.aborted); // another repo was chosen, or the window closed, while a read was out
-    const opRead = settings.canEdit ? operate.read(selectedId, stale) : Promise.resolve();
-    const results = await Promise.allSettled(PANELS.map((k) => client.panel(k, selectedId, signal)));
+    const names = PANELS.filter((k) => want.has(k));
+    const opRead = want.has("operate") && settings.canEdit ? operate.read(selectedId, stale) : Promise.resolve();
+    const results = await Promise.allSettled(names.map((k) => client.panel(k, selectedId, signal)));
     await opRead;
     if (stale()) return;
+    if (names.length === 0) { // only the status (or the operate half) was read: the note says what the last panel reads said
+      if (st.refreshFailed !== (st.failedKeys.length === PANELS.length)) set({ refreshFailed: st.failedKeys.length === PANELS.length });
+      return;
+    }
     const next = { ...st.panels };
-    let failedKeys = [], first = null;
-    for (const [i, k] of PANELS.entries()) {
+    let failedNow = [], first = null;
+    for (const [i, k] of names.entries()) {
       const v = results[i].status === "fulfilled" ? results[i].value : undefined;
       let env = k === "plan" ? (v === null ? "none" : readPlan(v)) : k === "stats" ? readStats(v) : k === "usage" ? readUsage(v) : readEnvelope(v);
       if (k === "lanes" && env) env = await moreLanes(env, selectedId);
       if (env) next[k] = env;
-      else failedKeys.push(k);
+      else failedNow.push(k);
       if (k === "log" && env && st.log.pages <= 1) first = { ...NO_LOG, rows: env.items, cursor: env.cursor, pages: 1 }; // once older pages are open, a refresh leaves the list where the person is
     }
     if (token !== pick || (signal && signal.aborted)) return;
     // One panel that cannot be read marks that panel only (its own failed note, said aloud). The view-wide note is for the reads the whole view stands on: settings and the repo list fail it in read() above, and every panel failing at once fails it here.
+    const failedKeys = PANELS.filter((k) => (names.includes(k) ? failedNow.includes(k) : st.failedKeys.includes(k))); // a part not read this time keeps what it said last time
     set({ panels: next, failedKeys, refreshFailed: failedKeys.length === PANELS.length, ...(first ? { log: first } : {}) });
   }
   /** The merged count needs every lane the server has, so up to LANE_PAGES pages are read, following the cursor. A page that cannot be read leaves its cursor in place, so the count still says "at least". */
@@ -423,11 +519,26 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     const over = Math.max(0, all.length - LOG_WINDOW); // the newest rows leave the window, so the list never holds more than LOG_WINDOW
     set({ log: { rows: all.slice(over), cursor: env.cursor, pages: st.log.pages + 1, released: st.log.released + over, loading: false, failed: false, said: "Older log lines loaded (page " + (st.log.pages + 1) + ")." } });
   }
-  async function refresh() {
-    if (busy) { again = true; return; }
+  /** A read that failed is tried once more after RETRY_MS, for the parts that failed, rather than waiting for the next notice or the safety read. */
+  function retryFailed(names, wasRetry) {
+    if (wasRetry || retryTimer !== null || hiddenFn()) return;
+    const failed = new Set(PANELS.filter((k) => names.has(k) && st.failedKeys.includes(k)));
+    if (st.refreshFailed && failed.size === 0) for (const n of names) failed.add(n); // the status read itself failed: everything asked for again
+    if (failed.size === 0) return;
+    retryTimer = setTimer(() => { retryTimer = null; if (!hiddenFn()) refresh(failed, true); }, RETRY_MS);
+  }
+  /** A command is unsettled until the runner has reported back (applied with its acknowledgement) or it has ended another way. */
+  const unsettled = () => !!st.settings && st.settings.canEdit && (st.op.commands || []).some((c) => c.state === "pending" || c.state === "delivered" || (c.state === "applied" && c.ackedAt === ""));
+  /** Reads the parts in `want` (a Set of READ_NAMES), or everything. A read asked for while another is out is queued, and the names asked for meanwhile are read together afterwards. */
+  async function refresh(want, retry = false) {
+    const names = want instanceof Set ? want : new Set(READ_NAMES);
+    if (busy) { for (const n of names) queued.add(n); return; }
     busy = true;
-    try { await read(); } finally { busy = false; }
-    if (again) { again = false; await refresh(); }
+    gate.mark(names); // these parts are read now, so none of them is read again inside the gate
+    if (READ_NAMES.every((n) => names.has(n))) { lastFull = now(); armSafety(); }
+    try { await read(names); } finally { busy = false; }
+    retryFailed(names, retry);
+    if (queued.size) { const next = queued; queued = new Set(); await refresh(next); }
   }
   function select(id) {
     if (id === st.selectedId || !st.repos.some((r) => r.id === id)) return;
@@ -451,24 +562,44 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
   function onChanged(dto) {
     const rid = dto && isObj(dto.data) ? idKey(dto.data.repo_id) : "";
     if (rid !== "" && st.selectedId !== "" && rid !== st.selectedId) return; // another repo's event: nothing here changed
-    if (debounce !== null) clearTimer(debounce);
-    debounce = setTimer(() => { debounce = null; refreshVisible(); }, DEBOUNCE_MS);
+    if (hiddenFn()) return; // a hidden tab ignores notices; one catch-up read follows when it is shown again
+    const names = noticeNames(dto && dto.data);
+    if (unsettled() && !names.includes("operate")) names.push("operate"); // the runner's report on a command raises no notice of its own
+    gate.note(names);
   }
-  const refreshVisible = () => { if (!hiddenFn()) refresh(); }; // a hidden tab reads nothing; one read follows when it is shown again
+  const opPoll = () => { if (!hiddenFn() && unsettled() && !busy) refresh(new Set(["operate"])); };
+  const refreshVisible = () => { if (!hiddenFn()) refresh(); };
+  /** The safety read is one timer, set SAFETY_MS after each full read whatever caused it, so the gap between full reads never passes SAFETY_MS. A hidden tab holds none; showing it reads everything, which sets it again. */
+  function armSafety() {
+    if (safetyTimer !== null) { clearTimer(safetyTimer); safetyTimer = null; }
+    if (!started || hiddenFn()) return;
+    safetyTimer = setTimer(() => { safetyTimer = null; if (!hiddenFn()) refresh(); }, SAFETY_MS);
+  }
+  // The live stream's own nudge (the fallback poll, or the shell's backstop on a click) names nothing, so it asks for everything, and only when
+  // no full read has been made for a safety interval: the shell sends one at most every 10 s while the person is working, which would otherwise be a poll.
+  // A resync (the server says events were missed, or the stream came back) is read in full at once, not after a settle: nothing is queued behind a notice that may
+  // never come, and the shell lets one through at most every 10 s. The read starts its parts' windows, so a notice right behind it is read when they end.
+  const nudged = (why) => {
+    if (hiddenFn()) return;
+    if (why === "resync") refresh();
+    else if (now() - lastFull >= SAFETY_MS) gate.note(READ_NAMES);
+  };
   function start({ subscribe, listen, hidden = () => false, visibility } = {}) {
     stop();
     hiddenFn = hidden;
-    const offs = [typeof subscribe === "function" ? subscribe(refreshVisible) : () => {}, typeof listen === "function" ? listen(LIVE_EVENT, onChanged) : () => {},
+    const offs = [typeof subscribe === "function" ? subscribe(nudged) : () => {}, typeof listen === "function" ? listen(LIVE_EVENT, onChanged) : () => {},
       typeof visibility === "function" ? visibility(refreshVisible) : () => {}];
-    const timer = setRepeat(refreshVisible, REFRESH_MS);
-    stopFn = () => { offs.forEach((off) => off()); clearRepeat(timer); };
+    started = true;
+    armSafety();
+    const poll = setRepeat(opPoll, OP_POLL_MS);
+    stopFn = () => { offs.forEach((off) => off()); clearRepeat(poll); started = false; armSafety(); };
   }
   function stop() {
     if (stopFn) stopFn();
     stopFn = null;
-    if (debounce !== null) clearTimer(debounce);
-    debounce = null;
-    again = false;
+    gate.cancel();
+    if (retryTimer !== null) { clearTimer(retryTimer); retryTimer = null; }
+    queued = new Set();
   }
   return {
     load: refresh, refresh, select, start, stop, loadOlder,

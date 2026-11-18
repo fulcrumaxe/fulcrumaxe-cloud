@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { DELETE_URL, LOG_LIMIT, REPOS_URL, SETTINGS_URL, clearHaltUrl, commandUrl, commandsUrl, createTeamApi, dialUrl, dialsUrl, haltUrl, lanesUrl, logUrl, panelUrl } from "../apps/team/team-api.js";
 import { DIAL_CLASSES, ENGINE_DIALS, HALT_WORDS, OP_WORDS, REFUSALS, ROLES, TTL, agentWords, cancelFailure, commandRow, dialFailure, haltFailure, lockReason, readCommands, readDials, sendFailure } from "../apps/team/team-operate.js";
-import { DEBOUNCE_MS, LANE_PAGES, LOG_WINDOW, REFRESH_MS, ROADMAP_PAGE, SOURCE_LIMIT_S, WORDS, agentRow, asOfWords, chipOf, createTeam, describe as describeState, failureSentence, gapBanner, githubLink, hm, isStale, laneRows, logRow, planView, readEnvelope, readPlan, readRepos, readSettings, readStats, readUsage, sourceNotices, statsView, usageView } from "../apps/team/team-model.js";
+import { DEBOUNCE_MS, LANE_PAGES, LOG_WINDOW, ROADMAP_PAGE, SAFETY_MS, SOURCE_LIMIT_S, WORDS, agentRow, asOfWords, chipOf, createTeam, describe as describeState, failureSentence, gapBanner, githubLink, hm, isStale, laneRows, logRow, planView, readEnvelope, readPlan, readRepos, readSettings, readStats, readUsage, sourceNotices, statsView, usageView } from "../apps/team/team-model.js";
 import { HOSTILE, REPO_A, REPO_B, makeFixtures } from "./fixtures/team/fixtures.mjs";
 
 const NOW = Date.parse("2026-11-16T15:00:00.000Z");
@@ -57,9 +57,11 @@ function fakeCall(over = {}) {
 }
 /** Timers the test moves by hand. */
 function clock() {
-  let id = 0;
+  let id = 0, time = 0;
   const timers = new Map();
   return {
+    now: () => time,
+    setTime: (ms) => { time = ms; },
     setTimer: (fn, ms) => { timers.set(++id, { fn, ms, repeat: false }); return id; },
     clearTimer: (i) => timers.delete(i),
     setRepeat: (fn, ms) => { timers.set(++id, { fn, ms, repeat: true }); return id; },
@@ -69,10 +71,10 @@ function clock() {
   };
 }
 /** `now` is the moment the view is drawn at: t.view() is describe() of the current state at that time (the controller itself keeps no clock). */
-function team({ now = NOW, ...over } = {}, routes = {}) {
+function team({ now = NOW, clockNow, ...over } = {}, routes = {}) {
   const f = fakeCall(routes);
   const clk = clock();
-  const t = createTeam({ client: createTeamApi(f.call), ...clk, ...over });
+  const t = createTeam({ client: createTeamApi(f.call), ...clk, ...(clockNow ? { now: clockNow } : {}), ...over });
   t.view = () => describeState(t.state, now);
   return { t, f, clk };
 }
@@ -130,11 +132,11 @@ describe("agent state (L3): never running after a crash or after 3 h, or when th
     expect(agentRow(F.agent({ state: "banana" }), true, NOW, "acme-labs/widgets").state).toBe("unknown");
   });
   it("a stale engine heartbeat turns every running agent in the rendered panel into unknown, with its data kept", async () => {
-    const { t } = team({}, { ["GET " + panelUrl("agents", REPO_A)]: F.envelope([F.agent()], { heard_age_s: 181 }) });
+    const { t } = team({}, { ["GET " + panelUrl("agents", REPO_A)]: F.envelope([F.agent()], { heard_age_s: 451 }) });
     await t.load();
     const v = t.view();
     expect(v.agents.rows.map((r) => r.state)).toEqual(["unknown"]);
-    expect(v.agents.warn).toBe("last seen 3 min ago");
+    expect(v.agents.warn).toBe("last seen 7 min ago");
   });
   it("the bridge session counts too: the repo list saying stale makes a freshly heard panel not live", async () => {
     const { t } = team({}, { ["GET " + REPOS_URL]: F.list([F.repo({ liveness: "stale" })]) });
@@ -156,10 +158,11 @@ describe("data age and liveness (L2)", () => {
     expect(asOfWords(env, NOW)).toBe("as of " + hm(F.iso(7 * 60 + 5)) + " (7 min ago)");
     expect(asOfWords(null, NOW)).toBe(WORDS.noData);
   });
-  it("stale means: not live, no heartbeat age, or more than 180 s", () => {
+  it("stale means: not live, no heartbeat age, or more than 450 s (1.5 times the bridge's 300 s status interval)", () => {
     const repo = readRepos(F.list([F.repo()]))[0];
-    expect(isStale(repo, readEnvelope(F.envelope([], { heard_age_s: 180 })))).toBe(false);
-    expect(isStale(repo, readEnvelope(F.envelope([], { heard_age_s: 181 })))).toBe(true);
+    expect(isStale(repo, readEnvelope(F.envelope([], { heard_age_s: 299 })))).toBe(false); // an idle bridge's status is up to 300 s apart
+    expect(isStale(repo, readEnvelope(F.envelope([], { heard_age_s: 450 })))).toBe(false);
+    expect(isStale(repo, readEnvelope(F.envelope([], { heard_age_s: 451 })))).toBe(true);
     expect(isStale(repo, readEnvelope(F.envelope([], { heard_age_s: null })))).toBe(true);
     expect(isStale({ ...repo, liveness: "never" }, readEnvelope(F.envelope([])))).toBe(true);
     expect(isStale(repo, null)).toBe(true);
@@ -485,34 +488,58 @@ describe("a hidden tab", () => {
     await t.load();
     t.start({ hidden: () => hidden, subscribe: (fn) => { nudge = fn; return () => {}; }, listen: (type, fn) => { on = fn; return () => {}; }, visibility: (fn) => { shown = fn; return () => {}; } });
     f.log.length = 0;
-    clk.fire((x) => x.ms === REFRESH_MS);
+    clk.setTime(60000);
+    clk.fire((x) => x.ms === SAFETY_MS);
     on({ type: "engine.changed", data: { repo_id: REPO_A, session_id: "s", last_seq: 3 } });
     clk.fire((x) => x.ms === DEBOUNCE_MS);
     nudge();
+    clk.fire(() => true);
     await flush(); await flush();
     expect(f.log).toHaveLength(0);
     hidden = false;
     shown();
     await flush(); await flush(); await flush();
     expect(f.log.filter(([, p]) => p === SETTINGS_URL)).toHaveLength(1);
-    expect(REFRESH_MS).toBe(15000);
+    expect(SAFETY_MS).toBe(120000);
   });
 });
 
 describe("refresh", () => {
-  it("engine.changed for the open repo refetches every panel once, 1 s after the last event in a burst", async () => {
+  it("engine.changed with no panels named refetches every panel once, 1 s after it arrives, however many notices come in a burst", async () => {
     const { t, f, clk } = team();
     await t.load();
+    clk.setTime(60000); // long after the first read, so the 10 s gate is open
     let on;
     t.start({ subscribe: () => () => {}, listen: (type, fn) => { if (type === "engine.changed") on = fn; return () => {}; } });
     f.log.length = 0;
     const dto = { type: "engine.changed", data: { repo_id: REPO_A, session_id: "s", last_seq: 5 } };
     on(dto); on(dto); on(dto);
     expect(f.log).toHaveLength(0);
+    clk.setTime(61000);
     clk.fire((x) => x.ms === DEBOUNCE_MS);
     await flush(); await flush();
     expect(f.log.map(([, p]) => p).filter((p) => p.includes(REPO_A + "/") && !p.includes("/commands") && !p.includes("decision-settings"))).toEqual(["agents", "lanes", "gates", "log", "plan", "stats", "usage"].map((k) => panelUrl(k, REPO_A)));
+    expect(f.log.filter(([, p]) => p === SETTINGS_URL || p === REPOS_URL)).toHaveLength(2); // the status too, and the operate half
     expect(DEBOUNCE_MS).toBe(1000);
+  });
+  it("a notice read while a command is waiting includes the commands and the dials, with no command poll to cover for it; with none waiting it does not", async () => {
+    for (const [state, expectOp] of [["pending", true], ["delivered", true], ["applied", false]]) {
+      const cmd = F.command({ state, ...(state === "applied" ? { acked_at: F.iso(5) } : {}) });
+      const { t, f, clk } = team({}, { ["GET " + commandsUrl(REPO_A) + "?limit=50"]: F.commands([cmd]) });
+      await t.load();
+      let on;
+      t.start({ listen: (type, fn) => { on = fn; return () => {}; } });
+      f.log.length = 0;
+      clk.setTime(100_000); // past the 10 s gate of the first read
+      on({ type: "engine.changed", data: { repo_id: REPO_A, session_id: "s", last_seq: 1, panels: ["lanes"] } });
+      clk.setTime(100_000 + DEBOUNCE_MS);
+      clk.fire((x) => x.ms === DEBOUNCE_MS); // the settle only: the 10 s command repeat is never fired here
+      await flush(); await flush();
+      const paths = f.log.map(([, p]) => p);
+      expect(paths).toContain(panelUrl("lanes", REPO_A));
+      expect(paths.includes(commandsUrl(REPO_A) + "?limit=50")).toBe(expectOp);
+      expect(paths.includes(dialsUrl(REPO_A))).toBe(expectOp);
+    }
   });
   it("an event for another repo reads nothing", async () => {
     const { t, f, clk } = team();
@@ -521,23 +548,28 @@ describe("refresh", () => {
     t.start({ listen: (type, fn) => { on = fn; return () => {}; } });
     f.log.length = 0;
     on({ type: "engine.changed", data: { repo_id: REPO_B, session_id: "s", last_seq: 1 } });
-    expect(clk.count()).toBe(1); // only the 15 s repeat
+    expect(clk.count()).toBe(2); // only the safety and the command-read repeats: no notice is waiting
     expect(f.log).toHaveLength(0);
   });
-  it("without a live stream it still reads every 15 s, not while the page is hidden, and stop() leaves no timer", async () => {
-    let hidden = true;
+  it("without a live stream it still reads everything 120 s after the last full read, not while the page is hidden, and stop() leaves no timer", async () => {
+    let hidden = false, shown = () => {};
     const { t, f, clk } = team();
     await t.load();
-    t.start({ hidden: () => hidden });
+    t.start({ hidden: () => hidden, visibility: (fn) => { shown = fn; return () => {}; } });
     f.log.length = 0;
-    clk.fire((x) => x.ms === REFRESH_MS);
+    hidden = true;
+    clk.fire((x) => x.ms === SAFETY_MS);
     await flush();
-    expect(f.log).toHaveLength(0);
+    expect(f.log).toHaveLength(0); // a hidden tab reads nothing and holds no timer
     hidden = false;
-    clk.fire((x) => x.ms === REFRESH_MS);
+    shown(); // showing it reads everything, and that read sets the timer again
     await flush(); await flush();
     expect(f.log.length).toBeGreaterThanOrEqual(8);
-    expect(REFRESH_MS).toBe(15000);
+    f.log.length = 0;
+    clk.fire((x) => x.ms === SAFETY_MS);
+    await flush(); await flush();
+    expect(f.log.length).toBeGreaterThanOrEqual(8);
+    expect(SAFETY_MS).toBe(120000);
     t.stop();
     expect(clk.count()).toBe(0);
   });

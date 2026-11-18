@@ -166,8 +166,9 @@ export function createLive(env = {}) {
   function dispatch(dto) {
     for (const h of [...(subs.get(dto.type) || [])]) safeCall(h, dto);
   }
-  function emitRefresh() {
-    for (const h of [...refreshSubs]) safeCall(h);
+  /** `why` is "resync" when changes may have been missed (the server said so, or the stream came back), so a subscriber may read everything. */
+  function emitRefresh(why) {
+    for (const h of [...refreshSubs]) safeCall(h, why);
   }
   function post(msg) {
     try { if (channel) channel.postMessage(msg); } catch (e) { /* best-effort */ }
@@ -241,11 +242,11 @@ export function createLive(env = {}) {
   }
 
   // ── backstop (D5) ─────────────────────────────────────────────────────
-  function backstop() {
+  function backstop(why) {
     const now = Date.now();
     if (now - lastBackstop < BACKSTOP_MS) return;
     lastBackstop = now;
-    emitRefresh();
+    emitRefresh(why);
     confirmSession("backstop");
   }
 
@@ -260,7 +261,7 @@ export function createLive(env = {}) {
       timers.clear(deadTimer);
       return;
     }
-    if (f.event === "resync") return void emitRefresh();
+    if (f.event === "resync") return void emitRefresh("resync");
     if (f.event === "error") return void (ctl && ctl.close());
     let dto;
     try { dto = JSON.parse(f.data); } catch (e) { return; }
@@ -286,7 +287,7 @@ export function createLive(env = {}) {
       onOpen: () => {
         setOffline(false);
         armDeadTimer(mine);
-        if (!first) backstop();
+        if (!first) backstop("resync");
         healthyTimer = timers.set(() => { if (gotBytes) markHealthy(); }, HEALTHY_MS);
       },
       onBytes: () => {
@@ -329,7 +330,7 @@ export function createLive(env = {}) {
         if (res.ok) {
           const page = await res.json();
           if (validId(page.next_cursor)) lastId = page.next_cursor;
-          if (page.resync) emitRefresh();
+          if (page.resync) emitRefresh("resync");
           for (const dto of Array.isArray(page.data) ? page.data : []) if (dto && typeof dto.type === "string") dispatch(dto);
         }
       } catch (e) { /* next tick */ }
