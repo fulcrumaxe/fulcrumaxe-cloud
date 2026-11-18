@@ -33,7 +33,7 @@ describe("command line", () => {
   });
 
   it("refuses an unknown command, an unknown or repeated option, a stray argument, and a missing value, all with exit 2", async () => {
-    for (const argv of [["frobnicate"], ["constructor"], ["status", "--verbose"], ["status", "extra"], ["revoke", "--reason"], ["revoke", "--local=yes"], ["revoke", "--local", "--local"], ["register", "--code"]]) {
+    for (const argv of [["frobnicate"], ["constructor"], ["status", "--verbose"], ["status", "extra"], ["revoke", "--reason"], ["revoke", "--local=yes"], ["revoke", "--local", "--local"], ["register", "--code"], ["register", "--code-file"]]) {
       const result = await run(argv);
       expect(result.code, argv.join(" ")).toBe(2);
       expect(result.out).toBe("");
@@ -51,10 +51,14 @@ describe("command line", () => {
     expect(result.err).toContain("home directory");
   });
 
-  it("keeps the registration code out of argv-derived error text", async () => {
-    const result = await run(["register", "--code", "fxrr_secretsecretsecretsecretsecretsecret", "--credential-mode", "nope", "--cloud-url", "https://example.com"]);
-    expect(result.code).toBe(2);
-    expect(result.err).not.toContain("secretsecret");
+  it("keeps the registration code out of argv-derived error text, and refuses --code outright", async () => {
+    for (const code of ["--code", "--code=fxrr_secretsecretsecretsecretsecretsecret"]) {
+      const result = await run(["register", ...(code === "--code" ? [code, "fxrr_secretsecretsecretsecretsecretsecret"] : [code]), "--credential-mode", "nope", "--cloud-url", "https://example.com"]);
+      expect(result.code).toBe(2);
+      expect(result.err).not.toContain("secretsecret");
+      expect(result.err).toContain("--code-stdin");
+      expect(result.err).toContain("--code-file");
+    }
   });
 });
 

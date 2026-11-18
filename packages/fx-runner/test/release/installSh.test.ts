@@ -369,7 +369,7 @@ describe.each(shells)("install.sh under %s", (shellName, shellPath) => {
       expect(statSync(installed(f)).mode & 0o777).toBe(0o755);
       expect(readlinkSync(link(f))).toBe(`../versions/${VERSION}/fx-runner`);
       expect(statSync(path.join(f.home, ".fx-runner")).mode & 0o777).toBe(0o700);
-      expect(r.stdout).toContain("Next: fx-runner register --code <code> --credential-mode <subscription|api_key> --cloud-url <url>");
+      expect(r.stdout).toContain("Next: fx-runner register --code-stdin --credential-mode <subscription|api_key> --cloud-url <url>");
       // the real curl flags were used, one request to the release path followed the redirect, and nothing else was fetched
       const curl = log(f, "curl");
       expect(curl).toHaveLength(1);

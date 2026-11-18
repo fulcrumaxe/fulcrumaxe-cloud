@@ -20,7 +20,7 @@ describe("the reply is read through a byte cap", () => {
       },
     });
     const fetchFn = (async () => new Response(body, { status: 500 })) as unknown as typeof fetch;
-    const result = await rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn });
+    const result = await rig.run(["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn });
     expect(result.code).toBe(1);
     expect(pulled).toBeLessThanOrEqual(64 * 1024 + 2 * chunk.length);
     expect(stateFiles()).toEqual([]);
@@ -59,7 +59,7 @@ describe("temporary files", () => {
 
 describe("one register at a time", () => {
   it("two runs started together register once; the other is refused and sends nothing", async () => {
-    const argv = ["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin];
+    const argv = ["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin];
     const [a, b] = await Promise.all([rig.run(argv), rig.run(argv)]);
     expect([a.code, b.code].sort()).toEqual([0, 1]);
     expect(rig.cloud.runners.size).toBe(1);

@@ -7,7 +7,7 @@ import { PassThrough } from "node:stream";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCli, type CliIo } from "../../src/cli.js";
-import { CODE_DEPRECATION, CODE_MAX_BYTES } from "../../src/codeSource.js";
+import { CODE_ARGV_REFUSED, CODE_MAX_BYTES } from "../../src/codeSource.js";
 import { loadRegistration } from "../../src/config.js";
 import { readSecret } from "../../src/secretInput.js";
 import { useRig } from "./harness.js";
@@ -188,21 +188,18 @@ describe.skipIf(!existsSync("/proc/self/cmdline"))("the real bin/fx-runner.mjs",
     expect(result.out + result.err).not.toContain(TOKEN);
   });
 
-  it("the same snapshot sees the token when the real bin is given it as --code (control for the check above)", async (ctx) => {
+  it("the real bin refuses --code with exit 2, names the safe options and never prints the value", async (ctx) => {
     if (buildError !== undefined) {
       process.stderr.write(`[skip] the bin could not be bundled here: ${buildError}\n`);
       return ctx.skip();
     }
     allow(TOKEN);
-    let snapshot: string[] = [];
-    rig.cloud.beforeReply = () => {
-      snapshot = processList();
-    };
     const result = await startBin(argsFor(["--code", TOKEN]), undefined);
-    expect(result.code, result.err).toBe(0);
-    expect(snapshot.some((line) => line.includes("fx-runner.mjs") && line.includes(TOKEN))).toBe(true);
+    expect(result.code).toBe(2);
     expect(result.err).toContain("--code-stdin");
-    expect(result.err).not.toContain(TOKEN);
+    expect(result.err).toContain("--code-file");
+    expect(result.err + result.out).not.toContain(TOKEN);
+    expect(rig.cloud.seen).toEqual([]);
   });
 });
 
@@ -256,21 +253,29 @@ describe("the token in a file", () => {
 });
 
 describe("--code on the command line", () => {
-  it("still works for this release and prints the deprecation line to the error stream", async () => {
+  it("is refused, naming the two safe options, and the value is never echoed or sent", async () => {
     allow(TOKEN);
-    const result = await register(["--code", TOKEN]);
-    expect(result.code, result.err).toBe(0);
-    expect(result.err).toContain(CODE_DEPRECATION);
-    expect(result.err).toContain("--code-stdin");
-    expect(result.err).not.toContain(TOKEN);
-    expect(result.out).not.toContain("deprecat");
+    for (const argv of [["--code", TOKEN], [`--code=${TOKEN}`]]) {
+      const result = await register(argv);
+      expect(result.code).toBe(2);
+      expect(result.err).toContain(CODE_ARGV_REFUSED);
+      expect(result.err).toContain("--code-stdin");
+      expect(result.err).toContain("--code-file");
+      expect(result.err + result.out).not.toContain(TOKEN);
+    }
+    expect(rig.cloud.seen).toEqual([]);
   });
 
-  it("is refused together with another source, and when no source is given", async () => {
+  it("is refused even when a safe source is also given", async () => {
     allow(TOKEN);
     expect((await register(["--code", TOKEN, "--code-stdin"], { readCode: async () => TOKEN })).code).toBe(2);
+    expect((await register(["--code-stdin", "--code", TOKEN], { readCode: async () => TOKEN })).code).toBe(2);
+    expect(rig.cloud.seen).toEqual([]);
+  });
+
+  it("two safe sources together, and no source at all, are refused", async () => {
+    allow(TOKEN);
     expect((await register(["--code-stdin", "--code-file", "/x"], { readCode: async () => TOKEN })).code).toBe(2);
-    expect((await register(["--code", TOKEN, "--code-file", "/x"])).code).toBe(2);
     const none = await register([]);
     expect(none.code).toBe(2);
     expect(none.err).toContain("--code-stdin");

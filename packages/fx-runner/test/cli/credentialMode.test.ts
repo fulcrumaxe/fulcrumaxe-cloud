@@ -7,7 +7,7 @@ import { CODE, useRig } from "./harness.js";
 /** D#6 C20 section 1: the local credential mode comes from the cloud's reply, and a mismatch is undone. */
 const rig = useRig();
 const stateFiles = (): string[] => (existsSync(rig.dir) ? readdirSync(rig.dir).sort() : []);
-const ARGV = (): string[] => ["register", "--code", CODE, "--credential-mode", "subscription", "--cloud-url", rig.cloud.origin];
+const ARGV = (): string[] => ["register", "--code-stdin", "--credential-mode", "subscription", "--cloud-url", rig.cloud.origin];
 const RUNNER = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
 const ACCOUNT = "6b1e2f30-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 

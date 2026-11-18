@@ -4,6 +4,7 @@
  * host environment; `bin/fx-runner.mjs` is the one place that reads it.
  */
 import { CliError } from "./cliError.js";
+import { CODE_ARGV_REFUSED } from "./codeSource.js";
 import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
 import { assistantCommand } from "./commands/assistant.js";
@@ -86,7 +87,7 @@ const USAGE = `Usage: fx-runner <command> [options]
 Commands:
   register (--code-stdin | --code-file <path>) [--name <name>] --credential-mode <subscription|api_key> --cloud-url <url>
                      Register this machine as a runner. The code (fxrr_) or provisioning token (fxrp_) comes from the workspace; read it from standard input or
-                     from a file at mode 0600 that you own. --name sets the runner's name. --code <value> still works for one release but is deprecated: it shows in the process list.
+                     from a file at mode 0600 that you own. --name sets the runner's name. --code <value> is refused because it would show in the process list.
   status             Show this machine's registration. Makes no network call.
   run                Claim and run jobs from the cloud on this machine until stopped (Ctrl-C).
   attach [<run|short id>|--latest] [--take-over]
@@ -140,7 +141,7 @@ Commands:
 
 /** Which flags each command takes, and which of them are switches. */
 const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: readonly string[]; positionals?: number }>> = {
-  register: { flags: ["code", "code-file", "name", "credential-mode", "cloud-url"], switches: ["code-stdin"] },
+  register: { flags: ["code-file", "name", "credential-mode", "cloud-url"], switches: ["code-stdin"] },
   status: { flags: [], switches: [] },
   run: { flags: [], switches: [] },
   revoke: { flags: ["reason"], switches: ["local"] },
@@ -187,6 +188,7 @@ function parseFlags(command: string, rest: readonly string[]): { flags: Flags; p
     const eq = arg.indexOf("=");
     const name = arg.slice(2, eq === -1 ? undefined : eq);
     const isSwitch = spec.switches.includes(name);
+    if (command === "register" && name === "code") throw new CliError(CODE_ARGV_REFUSED, 2);
     if (!isSwitch && !spec.flags.includes(name)) throw new CliError(`unknown option --${name} for ${command}`, 2);
     if (flags.has(name)) throw new CliError(`--${name} was given twice`, 2);
     if (isSwitch) {

@@ -357,9 +357,9 @@ describe("the command line", () => {
   const io = (argv: string[], bypassFile: string | undefined, over: { uid?: number | undefined; fetchFn?: typeof fetch } = {}) => {
     let out = "";
     let err = "";
-    return runCli({ argv, home, stateDirOverride: rig.dir, stdout: (t) => (out += t), stderr: (t) => (err += t), protectionBypassFile: bypassFile, uid: "uid" in over ? over.uid : uid, ...(over.fetchFn === undefined ? {} : { fetchFn: over.fetchFn }) }).then((code) => ({ code, out, err }));
+    return runCli({ argv, home, stateDirOverride: rig.dir, stdout: (t) => (out += t), stderr: (t) => (err += t), protectionBypassFile: bypassFile, readCode: async () => CODE, uid: "uid" in over ? over.uid : uid, ...(over.fetchFn === undefined ? {} : { fetchFn: over.fetchFn }) }).then((code) => ({ code, out, err }));
   };
-  const register = (file: string | undefined, over: Parameters<typeof io>[2] = {}) => io(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], file, over);
+  const register = (file: string | undefined, over: Parameters<typeof io>[2] = {}) => io(["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], file, over);
 
   it("register sends the header to the cloud and prints nothing of the value", async () => {
     const result = await register(secretFile());
@@ -403,7 +403,7 @@ describe("the command line", () => {
         file = path.join(dir, "outside", "bypass");
         writeFileSync(file, `${SECRET}\n`, { mode: 0o600 });
       }
-      for (const argv of [["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], ["revoke"], ["run"]]) {
+      for (const argv of [["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], ["revoke"], ["run"]]) {
         const result = await io(argv, file, over);
         expect(result.code, `${kind} ${argv[0]}`).toBe(1);
         expect(result.err).toContain(code);
