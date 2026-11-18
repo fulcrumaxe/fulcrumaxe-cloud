@@ -5,8 +5,8 @@
  *  - it refuses to start unless the bridge is enabled, the cloud's operate switch is on, no halt file says halted, and a scope can be used to prove a kill;
  *  - the host's stdin stays open for the whole life of the session (closing it ends the session and stops the subagents' shells), and is closed only by `stop`;
  *  - a crash restarts it with `--resume <session_id>` after 1, 2, then 5 minutes; a sixth crash within an hour stops it for good (`crash_loop`);
- *  - the stream (stdout and stderr) goes only to a local 0600 log. It is never parsed beyond the session id of an `init` line, never sent anywhere and never
- *    written into an event, and the text sent to the host is never logged. A log write that fails stops the host cleanly (`log_failed`);
+ *  - the stream (stdout and stderr) goes only to a local 0600 log. It is never parsed beyond the session id of an `init` line and, since EB-12b, the outcome,
+ *    model and four token totals of a `result` line (what ends a turn); it is never sent anywhere and never written into an event, and the text sent to the host is never logged. A log write that fails stops the host cleanly (`log_failed`);
  *  - a halt always stops the host: the halt file and the bridge state are read again right before the spawn, right after the handle is written and on every
  *    heartbeat, and a host that is halted (or whose operate switch went off, or whose files can no longer be read) is ended through the kill path with
  *    `host_stopped`, whether or not a kill path ran in between. This closes the window where a halt lands after the first check and before there is a handle
@@ -21,6 +21,7 @@
  * the variables would only be friction, since the agent can rebuild them, so this is a known limit of the scope-based proof and not a boundary. The kill
  * path reports what it could count (`survivors`), and `host_stopped` carries that number after a forced stop.
  */
+import { MODEL_ID_PATTERN, USAGE_TOKENS_MAX } from "@fulcrumaxe/runner-protocol";
 import { EngineStateError, removeStateFile, writeJsonAtomic } from "../engineBridge/stateFiles.js";
 import { ENGINE_HOST_FILE, readHaltFile, readHostHandle, type EngineHostHandle } from "../engineBridge/halt.js";
 import type { BridgeState, HostLock, HostLog } from "./hostFiles.js";
@@ -34,11 +35,14 @@ export const BACKOFF_MS: readonly number[] = [60_000, 120_000, 300_000];
 export const CRASH_LIMIT = 6;
 export const CRASH_WINDOW_MS = 3_600_000;
 export const HEARTBEAT_MS = 60_000;
+/** How often `engine-host.json` gets a fresh `heartbeat_at`. The engine's reader trusts a host for 60 s, so this stays well inside it. */
+export const FILE_BEAT_MS = 15_000;
 /** After stdin is closed for a clean stop, how long the host gets to leave before the kill path ends it. */
 export const STOP_GRACE_MS = 10_000;
 const SESSION_LINE_MAX = 1 << 20;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const INIT_PREFIX = '{"type":"system","subtype":"init"';
+const RESULT_PREFIX = '{"type":"result"';
 
 /** The host's argument vector after the program. Fixed: no model, tool or permission flag is added, so the repo's and the user's own settings apply. */
 export const HOST_ARGS: readonly string[] = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
@@ -59,6 +63,13 @@ export interface HostSpawnSpec {
   cwd: string;
   /** A fixed allowlist of variables, built by the caller; never a copy of the environment, never a credential. */
   env: Record<string, string>;
+}
+
+/** What the end of one turn tells the ticker (EB-12b), read from the stream's `result` line and nothing else of it. `usage` is left out unless all four totals are safe ints. */
+export interface TurnResult {
+  ok: boolean;
+  model?: string;
+  usage?: { input: number; output: number; cache_read: number; cache_write: number };
 }
 
 /** The part of the started host the supervisor uses (a structural type: no child-process import here). */
@@ -101,6 +112,8 @@ export interface SupervisorDeps {
   killHost: (handle: EngineHostHandle) => Promise<unknown>;
   /** SIGKILL to what is left in a scope, by unit name only (no pid: a dead host's pid may be reused). */
   killScope: (unit: string) => Promise<void>;
+  /** EB-12b: told when a turn ends (a `result` line) and when the running host process exits (a crash restart is a new process). */
+  observer?: { onTurn(turn: TurnResult): void; onExit(): void } | undefined;
 }
 
 export interface Supervisor {
@@ -118,6 +131,8 @@ export interface Supervisor {
   survivors(): number;
   /** Log writes that failed; the first one stops the host. */
   logFailures(): number;
+  /** Rewrites the handle's `heartbeat_at` now (the ticker calls it before it claims a command). False when there is no host or the file could not be written (the host is then ended). */
+  touch(): boolean;
   /** Removes the handle file and releases the lock and the log, without a kill: the last step of a process that is exiting. Idempotent. */
   cleanup(): void;
 }
@@ -137,6 +152,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   let logFails = 0;
   let cancelTimer: (() => void) | undefined;
   let cancelBeat: (() => void) | undefined;
+  let cancelFileBeat: (() => void) | undefined;
   const exitWaiters: Array<() => void> = [];
   let resolveStopped!: (r: StopReason) => void;
   const stopped = new Promise<StopReason>((resolve) => (resolveStopped = resolve));
@@ -183,6 +199,20 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
   }
 
+  /** Writes the handle with a fresh `heartbeat_at`. Throws what `writeJsonAtomic` throws. */
+  function writeHandle(): void {
+    if (handle === undefined) return;
+    handle = { ...handle, heartbeat_at: new Date(deps.now()).toISOString() };
+    writeJsonAtomic(deps.stateDir, ENGINE_HOST_FILE, handle, deps.uid);
+  }
+
+  function fileBeat(): void {
+    cancelFileBeat = deps.after(FILE_BEAT_MS, () => {
+      if (current === undefined || finished || stopping) return;
+      if (api.touch()) fileBeat();
+    });
+  }
+
   function release(): void {
     lock?.release();
     lock = undefined;
@@ -193,6 +223,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     finished = true;
     cancelTimer?.();
     cancelBeat?.();
+    cancelFileBeat?.();
     removeHandle();
     deps.log.close();
     release();
@@ -214,6 +245,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     stopping = true;
     cancelTimer?.();
     cancelBeat?.();
+    cancelFileBeat?.();
     const target = handle ?? (current?.pid === undefined ? undefined : { pid: current.pid, unit });
     try {
       if (target !== undefined) noteKill(await deps.killHost(target));
@@ -249,6 +281,27 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     if (logFails === 1) void api.stop("log_failed");
   }
 
+  /** One `result` line: only its outcome, model and token totals are read; nothing of its text is kept. */
+  function turnEnded(line: string): void {
+    let turn: TurnResult = { ok: false };
+    try {
+      const r = JSON.parse(line) as { subtype?: unknown; is_error?: unknown; usage?: Record<string, unknown>; modelUsage?: Record<string, unknown> };
+      turn = { ok: r.subtype === "success" && r.is_error !== true };
+      const n = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= USAGE_TOKENS_MAX ? v : undefined);
+      const [input, output, cache_read, cache_write] = [n(r.usage?.input_tokens), n(r.usage?.output_tokens), n(r.usage?.cache_read_input_tokens), n(r.usage?.cache_creation_input_tokens)];
+      if (input !== undefined && output !== undefined && cache_read !== undefined && cache_write !== undefined) turn.usage = { input, output, cache_read, cache_write };
+      const models = Object.keys(r.modelUsage ?? {});
+      if (models.length === 1 && MODEL_ID_PATTERN.test(models[0]!)) turn.model = models[0]!;
+    } catch {
+      // fx-swallow-ok: a result line that cannot be read still ends the turn, as a failed one with no usage ("not recorded", never zero)
+    }
+    try {
+      deps.observer?.onTurn(turn);
+    } catch {
+      // fx-swallow-ok: a ticker that throws must not stop the stream from being read or the host from running
+    }
+  }
+
   /** Starts one host. A reason is returned (and nothing is started) when the files already say it must not run. */
   function launch(): StopReason | undefined {
     const args = [...HOST_ARGS, ...(session === undefined ? [] : ["--resume", session])];
@@ -275,6 +328,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
             // fx-swallow-ok: a line that is not JSON is not an init line; the session id is simply not updated
           }
         }
+        if (!skipping && line.startsWith(RESULT_PREFIX)) turnEnded(line);
         skipping = false;
         nl = tail.indexOf("\n");
       }
@@ -293,7 +347,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     const startTime = deps.startTimeOf(child.pid);
     handle = { pid: child.pid, unit, ...(startTime === undefined ? {} : { start_time: startTime }) };
     try {
-      writeJsonAtomic(deps.stateDir, ENGINE_HOST_FILE, handle, deps.uid);
+      writeHandle();
     } catch {
       // fx-swallow-ok: a host that has no handle cannot be found by the kill path later, so it is ended now (through the kill path, by its pid and scope) with a fixed reason
       void haltStop("host_failed");
@@ -307,6 +361,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
     deps.emit({ kind: "host_started" });
     beat();
+    fileBeat();
     return undefined;
   }
 
@@ -314,6 +369,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     if (child !== current) return;
     current = undefined;
     cancelBeat?.();
+    cancelFileBeat?.();
+    try {
+      deps.observer?.onExit();
+    } catch {
+      // fx-swallow-ok: a ticker that throws must not keep the restart from happening
+    }
     for (const w of exitWaiters.splice(0)) w();
     if (stopping) return;
     void afterCrash();
@@ -355,6 +416,17 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     sessionId: () => session,
     survivors: () => survivorCount,
     logFailures: () => logFails,
+    touch() {
+      if (current === undefined || finished || stopping || handle === undefined) return false;
+      try {
+        writeHandle();
+        return true;
+      } catch {
+        // fx-swallow-ok: a heartbeat that cannot be written means the reader will take commands back, so the host must not go on applying them: it is ended with a fixed reason
+        void haltStop("host_failed");
+        return false;
+      }
+    },
     cleanup() {
       removeHandle();
       deps.log.close();
@@ -397,6 +469,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       }
       stopping = true;
       cancelTimer?.();
+      cancelFileBeat?.();
       const child = current;
       if (child !== undefined) {
         const gone = new Promise<void>((resolve) => exitWaiters.push(resolve));
