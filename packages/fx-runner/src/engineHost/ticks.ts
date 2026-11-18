@@ -11,13 +11,19 @@
  * queued as `refused` (`host_not_running`) and the one in flight as `not_confirmed`. The expiry and the gate are checked again when a command is about to be sent,
  * not only when it is claimed. While halted only `answer_ask`, `pause_loop` and `stop_agent` are applied.
  * Known limits:
- *  - a `result` line carries nothing that ties it to the message that caused it, so a turn the host starts by itself (a finished background task) and ends while a tick
- *    is in flight is counted as that tick's turn;
+ *  - a `result` line carries nothing that ties it to the message that caused it (the host's argument vector is fixed and has no flag that would echo the input), so a
+ *    turn the host starts by itself (a finished background task) and ends while a tick is in flight is counted as that tick's turn. That is accepted, because the
+ *    alternative (guessing) is worse, and it is bounded two ways: a `result` that arrives with no tick in flight is ignored, and every tick has a turn timeout
+ *    (`TURN_MAX_MS`): a turn that has not ended by then ends the tick as `error` (its command, if it is one, as `not_confirmed`), the host is not sent anything else
+ *    until the abandoned turn's own `result` arrives (consumed, not counted as any tick's) or one more timeout has passed, so a late `result` can never end the
+ *    next tick early;
  *  - an `agent_started` carries no command id, so a spawn is matched by (role, discussion) alone: one event settles the oldest waiting request for that pair, and an
  *    agent the Team Lead spawned for the same pair on its own can settle an owner's request. A request for a pair that is already running is `not_confirmed`.
+ * EB-12c adds the `reorient` tick: sent first (before queued ticks, and even while paused) after the host's context was compacted.
  */
 import { EngineCommand, ROW_KEY_PATTERN, type EngineCommandAck } from "@fulcrumaxe/runner-protocol";
 import { EngineStateError } from "../engineBridge/stateFiles.js";
+import type { AnsweredStore } from "./answered.js";
 import type { Claimed, HostInbox } from "./hostInbox.js";
 import { renderPrompt } from "./prompts.js";
 import type { TurnResult } from "./supervisor.js";
@@ -27,13 +33,13 @@ export const LOOP_MIN_DEFAULT = 15;
 export const LOOP_MIN_BOUNDS = { min: 5, max: 60 } as const;
 /** How long a requested spawn or stop has to show up as `agent_started` / `agent_stopped` before its command is `not_confirmed`. */
 export const CONFIRM_MS = 10 * 60_000;
-/** A turn that has sent no `result` this long is given up: its tick ends as an error and the queue moves on. (EB-12c owns the per-tick timeout; this is only the guard.) */
+/** A turn that has sent no `result` this long is given up: its tick ends as an error and the queue moves on. */
 export const TURN_MAX_MS = 30 * 60_000;
 /** The kinds a halt does not stop: they only answer, pause or stop. */
 const WHILE_HALTED: ReadonlySet<string> = new Set(["answer_ask", "pause_loop", "stop_agent"]);
 
 type CommandRefusal = NonNullable<EngineCommandAck["refusal"]>;
-export type TickKind ="loop" | "checkin" | "start_day" | "command";
+export type TickKind = "loop" | "checkin" | "start_day" | "command" | "reorient";
 export type CredentialMode = "subscription" | "api_key";
 /** The wire shapes of EB-1's `tick_started` and `tick_ended` (the emitter adds the envelope). */
 export type TickEvent =
@@ -48,7 +54,7 @@ export type AgentEvent =
 export interface TickSettings {
   /** The runner setting: minutes between `loop` ticks. Out of bounds is clamped. */
   loopMin?: number | undefined;
-  /** `cloud_bridge.ticks[]` of the engine config; an entry whose name is not a row key or whose interval is not 1 to 1440 is ignored. */
+  /** `cloud_bridge.ticks[]` of the engine config; an entry whose name is not a row key or whose interval is not 5 to 1440 minutes (the loop's own floor) is ignored. */
   checkins?: ReadonlyArray<{ name: string; every_min: number }> | undefined;
   /** `HH:MM` local time of the daily `start_day` tick; left out, there is none. */
   startDayAt?: string | undefined;
@@ -70,8 +76,14 @@ export interface TickerDeps {
   /** Why no command may be applied right now (`halted`, or the cloud's operate switch is off), or undefined. */
   gate: () => "halted" | "operate_off" | undefined;
   inbox: HostInbox;
+  /** The asks already answered (EB-12c); left out, they are remembered for this process only. */
+  answered?: AnsweredStore | undefined;
   /** One fixed line for the host log; never an error's text. Left out, nothing is logged. */
   log?: ((line: string) => void) | undefined;
+  /** How long a tick's turn may take; default `TURN_MAX_MS`. */
+  turnTimeoutMs?: number | undefined;
+  /** The agent events seen since the last call (the engine's `agent_started` / `agent_stopped`); read at every poll and handed to `noteAgentEvent`. Never throws. */
+  agentEvents?: (() => AgentEvent[]) | undefined;
 }
 
 export interface Ticker {
@@ -82,16 +94,18 @@ export interface Ticker {
   onTurn(turn: TurnResult): void;
   /** The supervisor's `observer.onExit`: the turn in flight is over, interrupted. */
   onHostExit(): void;
+  /** The supervisor's `observer.onCompaction` (EB-12c): the next tick sent is the `reorient` one. */
+  onCompaction(): void;
   noteAgentEvent(event: AgentEvent): void;
   /** Ends the ticker: queued commands are refused (`host_not_running`), a command in flight or waiting to be confirmed is `not_confirmed`. */
   close(): void;
-  counts(): { dropped: number; queued: number; paused: boolean; outcomeWriteFailures: number };
+  counts(): { dropped: number; queued: number; paused: boolean; outcomeWriteFailures: number; timedOut: number };
 }
 
 interface Confirm {
   match: (e: AgentEvent) => boolean;
-  /** An event that says the request will not happen; settles it as `refused`. */
-  blocked?: ((e: AgentEvent) => CommandRefusal | undefined) | undefined;
+  /** An event that says the request will not happen: settles it as `refused`, or as `not_confirmed` when the reason says nothing about the owner's request itself. */
+  blocked?: ((e: AgentEvent) => CommandRefusal | "not_confirmed" | undefined) | undefined;
   /** True when one event settles every waiting request that matches it, false when only the oldest. */
   all: boolean;
 }
@@ -100,14 +114,36 @@ interface Tick {
   key: string;
   kind: TickKind;
   prompt: string;
-  command?: { name: string; kind: string; expiresAt: number; confirm?: Confirm } | undefined;
+  command?: { name: string; kind: string; askId?: string; expiresAt: number; confirm?: Confirm } | undefined;
 }
+
+/**
+ * What a `spawn_blocked` reason means for the owner's request. A halt is `halted`; a limit the spawn checks enforce (breaker, budget, planned PRs, the cloud's denial)
+ * is `ceiling`. A reason that is no limit at all (no Spec to build from, the cloud not reachable, an unnamed one) says the request was not carried out and not why,
+ * so it is `not_confirmed`, never a ceiling the owner would go and raise.
+ */
+function blockedOutcome(reason: string | undefined): CommandRefusal | "not_confirmed" {
+  if (reason === "halted") return "halted";
+  if (reason === "no_spec" || reason === "cloud_unreachable" || reason === "other") return "not_confirmed";
+  return "ceiling";
+}
+
+const ANSWERED_UNREADABLE = "the answered-asks record could not be read; answers are held until it is fixed";
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
 
 export function createTicker(deps: TickerDeps): Ticker {
+  const memoryAnswered = new Map<string, number>();
+  const answered: AnsweredStore = deps.answered ?? { has: (id) => memoryAnswered.has(id), mark: (id, at) => void memoryAnswered.set(id, at) };
   const queue: Tick[] = [];
   let inFlight: { tick: Tick; at: number } | undefined;
+  let cancelTurn: (() => void) | undefined;
+  /** A turn was abandoned at its timeout and its own `result` has not come yet: nothing is sent until it does (or one more timeout passes). */
+  let orphan = false;
+  let cancelOrphan: (() => void) | undefined;
+  let orphanAt = 0;
+  let timedOut = 0;
+  const turnMs = deps.turnTimeoutMs ?? TURN_MAX_MS;
   const waiting = new Map<string, { confirm: Confirm; cancel: () => void }>();
   let paused = false;
   let closed = false;
@@ -118,6 +154,7 @@ export function createTicker(deps: TickerDeps): Ticker {
   const due: Array<{ key: string; kind: TickKind; every: number; next: number; make: () => Tick }> = [];
   let startDayDate = "";
 
+  const loopMsOf = (s: TickSettings): number => clamp(Math.floor(s.loopMin ?? LOOP_MIN_DEFAULT) || LOOP_MIN_DEFAULT, LOOP_MIN_BOUNDS.min, LOOP_MIN_BOUNDS.max) * 60_000;
   const loopTick = (): Tick => ({ key: "loop", kind: "loop", prompt: renderPrompt("loop") });
 
   function settle(name: string, ack: EngineCommandAck): void {
@@ -150,7 +187,7 @@ export function createTicker(deps: TickerDeps): Ticker {
   }
 
   function pump(): void {
-    while (inFlight === undefined && queue.length > 0 && !closed) {
+    while (inFlight === undefined && !orphan && queue.length > 0 && !closed) {
       const tick = queue[0]!;
       const cmd = tick.command;
       if (cmd !== undefined) {
@@ -162,10 +199,30 @@ export function createTicker(deps: TickerDeps): Ticker {
           else refuse(cmd.name, why);
           continue;
         }
+        // Two answers for one ask may both have been queued before either went out: the second one never does.
+        const seen = cmd.askId === undefined ? false : answered.has(cmd.askId, deps.now());
+        if (seen === "unknown") {
+          queue.shift();
+          settle(cmd.name, { outcome: "not_confirmed" });
+          logFixed(ANSWERED_UNREADABLE);
+          continue;
+        }
+        if (seen) {
+          queue.shift();
+          refuse(cmd.name, "already_answered");
+          logFixed("a second answer to an ask that was already answered was refused");
+          continue;
+        }
       }
       if (!deps.send(tick.prompt)) return;
+      // Marked when it is sent, not when the engine records it: if the host dies in between, the ask stays answered and the owner's second answer is refused. That is the safe direction, since a second answer could only record twice.
+      if (cmd?.askId !== undefined) answered.mark(cmd.askId, deps.now());
       queue.shift();
-      inFlight = { tick, at: deps.now() };
+      const flight = { tick, at: deps.now() };
+      inFlight = flight;
+      cancelTurn = deps.after(turnMs, () => {
+        if (inFlight === flight) timeOut();
+      });
       deps.emit({ kind: "tick_started", tick_kind: tick.kind });
       const name = tick.command?.name;
       if (name !== undefined && tick.command?.confirm !== undefined) {
@@ -175,10 +232,31 @@ export function createTicker(deps: TickerDeps): Ticker {
     }
   }
 
+  /** The turn in flight has not ended in time: the tick ends as `error`, its command is `not_confirmed`, and the turn's own `result` is waited for before anything else is sent. */
+  function timeOut(): void {
+    timedOut++;
+    orphan = true;
+    orphanAt = deps.now();
+    cancelOrphan?.();
+    cancelOrphan = deps.after(turnMs, releaseOrphan);
+    endTurn("error");
+  }
+
+  /** One more timeout has passed since the abandoned turn: nothing more is waited for. Taken by the orphan's own timer and, as a backstop, by the poll. */
+  function releaseOrphan(): void {
+    if (!orphan) return;
+    orphan = false;
+    cancelOrphan?.();
+    cancelOrphan = undefined;
+    pump();
+  }
+
   function endTurn(outcome: "ok" | "error" | "interrupted", turn?: TurnResult): void {
     if (inFlight === undefined) return;
     const { tick, at } = inFlight;
     inFlight = undefined;
+    cancelTurn?.();
+    cancelTurn = undefined;
     deps.emit({
       kind: "tick_ended",
       tick_kind: tick.kind,
@@ -201,7 +279,16 @@ export function createTicker(deps: TickerDeps): Ticker {
     if (!parsed.success || `${parsed.data.command_seq}-${parsed.data.command_id}` !== c.name.toLowerCase()) return refuse(c.name, "signature_invalid");
     const cmd = parsed.data;
     // An outcome already on disk means this command was answered (a restart, or a copy the reader handed over again): it is never sent a second time.
-    if (deps.inbox.hasOutcome(c.name)) return;
+    if (deps.inbox.hasOutcome(c.name)) {
+      // Answered already: its claimed copy has nothing left to guard, so it goes (a copy handed over again would be skipped here the same way).
+      try {
+        deps.inbox.dropClaimed(c.name);
+      } catch {
+        // fx-swallow-ok: a claimed copy that cannot be removed only stays where it is; the command is not applied either way
+        logFixed("a claimed command that was already answered could not be removed");
+      }
+      return;
+    }
     if (c.seq <= lastSeq) return refuse(c.name, "seq_not_increasing");
     lastSeq = c.seq;
     if (cmd.repo_gh_id !== deps.repoGhId) return refuse(c.name, "wrong_repo");
@@ -220,12 +307,21 @@ export function createTicker(deps: TickerDeps): Ticker {
         case "start_day":
           return enqueue({ key: c.name, kind: "start_day", prompt: renderPrompt("start_day", common), command: own() });
         case "answer_ask":
-          return enqueue({ key: c.name, kind: "command", prompt: renderPrompt("answer_ask", { ...common, issued_by: cmd.issued_by, ask_id: cmd.args.ask_id, choice: cmd.args.choice, note: cmd.args.note }), command: own() });
+          const seen = answered.has(cmd.args.ask_id, deps.now());
+          if (seen === "unknown") {
+            logFixed(ANSWERED_UNREADABLE);
+            return settle(c.name, { outcome: "not_confirmed" });
+          }
+          if (seen) {
+            logFixed("a second answer to an ask that was already answered was refused");
+            return refuse(c.name, "already_answered");
+          }
+          return enqueue({ key: c.name, kind: "command", prompt: renderPrompt("answer_ask", { ...common, issued_by: cmd.issued_by, ask_id: cmd.args.ask_id, choice: cmd.args.choice, note: cmd.args.note }), command: { ...own(), askId: cmd.args.ask_id } as NonNullable<Tick["command"]> });
         case "set_dial":
           return enqueue({ key: c.name, kind: "command", prompt: renderPrompt("set_dial", { ...common, ...cmd.args }), command: own() });
         case "request_spawn": {
           const { role, discussion } = cmd.args;
-          return enqueue({ key: c.name, kind: "command", prompt: renderPrompt("request_spawn", { ...common, role, discussion }), command: own({ all: false, match: (e) => e.kind === "agent_started" && e.role === role && e.discussion === discussion, blocked: (e) => (e.kind === "spawn_blocked" && e.role === role && e.discussion === discussion ? (e.reason === "halted" ? "halted" : "ceiling") : undefined) }) });
+          return enqueue({ key: c.name, kind: "command", prompt: renderPrompt("request_spawn", { ...common, role, discussion }), command: own({ all: false, match: (e) => e.kind === "agent_started" && e.role === role && e.discussion === discussion, blocked: (e) => (e.kind === "spawn_blocked" && e.role === role && e.discussion === discussion ? blockedOutcome(e.reason) : undefined) }) });
         }
         case "stop_agent": {
           const { agent_id } = cmd.args;
@@ -269,10 +365,10 @@ export function createTicker(deps: TickerDeps): Ticker {
 
   function scheduleFromSettings(): void {
     const s = deps.settings();
-    const loopMs = clamp(Math.floor(s.loopMin ?? LOOP_MIN_DEFAULT) || LOOP_MIN_DEFAULT, LOOP_MIN_BOUNDS.min, LOOP_MIN_BOUNDS.max) * 60_000;
+    const loopMs = loopMsOf(s);
     due.push({ key: "loop", kind: "loop", every: loopMs, next: deps.now() + loopMs, make: loopTick });
     for (const c of s.checkins ?? []) {
-      if (!ROW_KEY_PATTERN.test(c.name) || !Number.isInteger(c.every_min) || c.every_min < 1 || c.every_min > 1440) continue;
+      if (!ROW_KEY_PATTERN.test(c.name) || !Number.isInteger(c.every_min) || c.every_min < LOOP_MIN_BOUNDS.min || c.every_min > 1440) continue;
       due.push({ key: `checkin:${c.name}`, kind: "checkin", every: c.every_min * 60_000, next: deps.now() + c.every_min * 60_000, make: () => ({ key: `checkin:${c.name}`, kind: "checkin", prompt: renderPrompt("checkin", { name: c.name }) }) });
     }
     // A start-of-day time that has already passed today is not caught up: the first one is tomorrow's.
@@ -288,17 +384,40 @@ export function createTicker(deps: TickerDeps): Ticker {
       const arm = (): void => {
         cancelPoll = deps.after(POLL_MS, () => {
           if (closed) return;
-          api.poll();
-          arm();
+          try {
+            api.poll();
+          } catch {
+            // fx-swallow-ok: a poll that throws (a settings or clock source that failed) must not end the ticker or reach the timer; the next round tries again, said once in the log in fixed words
+            logFixed("a poll failed");
+          } finally {
+            if (!closed) arm();
+          }
         });
       };
       arm();
     },
     poll() {
       if (closed) return;
-      if (inFlight !== undefined && deps.now() - inFlight.at >= TURN_MAX_MS) endTurn("error"); // no `result` in time: give the turn up and let the queue move on
+      // The turn's own timer ends it too; this is the same step taken from the poll, so a timer that never fired still cannot hold the queue.
+      if (inFlight !== undefined && deps.now() - inFlight.at >= turnMs) timeOut();
+      // The same for the abandoned turn's wait: one more timeout after it began releases the queue even if its own timer never fired.
+      if (orphan && inFlight === undefined && deps.now() - orphanAt >= turnMs) releaseOrphan();
+      try {
+        for (const e of deps.agentEvents?.() ?? []) api.noteAgentEvent(e);
+      } catch {
+        // fx-swallow-ok: a feed that throws must not stop the inbox scan or the ticks; a spawn or stop it would have settled ends as not_confirmed after its own timeout
+      }
       scanInbox();
       const t = deps.now();
+      // The runner's loop minutes are read again here: a change made while the host runs applies from the last loop tick on (one that is already overdue goes out now).
+      const loop = due.find((d) => d.key === "loop");
+      if (loop !== undefined) {
+        const wanted = loopMsOf(deps.settings());
+        if (wanted !== loop.every) {
+          loop.next = loop.next - loop.every + wanted;
+          loop.every = wanted;
+        }
+      }
       for (const item of due) {
         if (t < item.next) continue;
         item.next = t + item.every;
@@ -313,6 +432,14 @@ export function createTicker(deps: TickerDeps): Ticker {
       pump();
     },
     onTurn(turn) {
+      if (inFlight === undefined && orphan) {
+        // The abandoned turn has now ended: this `result` is its own and ends no tick.
+        orphan = false;
+        cancelOrphan?.();
+        cancelOrphan = undefined;
+        pump();
+        return;
+      }
       endTurn(turn.ok ? "ok" : "error", turn);
     },
     onHostExit() {
@@ -323,14 +450,29 @@ export function createTicker(deps: TickerDeps): Ticker {
         queue.splice(i, 1);
         refuse(cmd.name, "host_not_running");
       }
+      // A new host process has no abandoned turn.
+      orphan = false;
+      cancelOrphan?.();
+      cancelOrphan = undefined;
       endTurn("interrupted");
+    },
+    onCompaction() {
+      if (closed) return;
+      if (queue.some((q) => q.key === "reorient")) {
+        dropped++;
+        return;
+      }
+      // First in line, and not held back by `pause_loop`: the host lost its context, whatever the loop is doing.
+      queue.unshift({ key: "reorient", kind: "reorient", prompt: renderPrompt("reorient") });
+      pump();
     },
     noteAgentEvent(event) {
       // `waiting` is in the order the requests were sent: the first match is the oldest.
       for (const [name, w] of [...waiting]) {
         const refusal = w.confirm.blocked?.(event);
         if (refusal !== undefined) {
-          refuse(name, refusal);
+          if (refusal === "not_confirmed") settle(name, { outcome: "not_confirmed" });
+          else refuse(name, refusal);
           return;
         }
         if (!w.confirm.match(event)) continue;
@@ -342,12 +484,14 @@ export function createTicker(deps: TickerDeps): Ticker {
       if (closed) return;
       closed = true;
       cancelPoll?.();
+      cancelTurn?.();
+      cancelOrphan?.();
       for (const tick of queue.splice(0)) if (tick.command !== undefined) refuse(tick.command.name, "host_not_running");
       if (inFlight?.tick.command !== undefined) settle(inFlight.tick.command.name, { outcome: "not_confirmed" });
       for (const name of [...waiting.keys()]) settle(name, { outcome: "not_confirmed" });
       inFlight = undefined;
     },
-    counts: () => ({ dropped, queued: queue.length, paused, outcomeWriteFailures: writeFailures }),
+    counts: () => ({ dropped, queued: queue.length, paused, outcomeWriteFailures: writeFailures, timedOut }),
   };
   return api;
 }

@@ -11,8 +11,12 @@ import type { CommandContext } from "../context.js";
 import { readHaltFile, readHostHandle, resumeEngineHostLocally, stopEngineHostLocally, type EngineHostHandle, type HaltDeps } from "../engineBridge/halt.js";
 import { engineStateDir, EngineStateError } from "../engineBridge/stateFiles.js";
 import { acquireHostLock, openHostLog, readBridgeState } from "../engineHost/hostFiles.js";
+import { credentialModeOf, tickSettingsFor } from "../engineHost/hostConfig.js";
+import { createAgentFeed, createEventSpool, type EventSpool } from "../engineHost/hostFeeds.js";
+import { openAnsweredStore } from "../engineHost/answered.js";
 import { openHostInbox } from "../engineHost/hostInbox.js";
-import { createTicker, type AgentEvent, type CredentialMode, type TickEvent, type Ticker, type TickSettings } from "../engineHost/ticks.js";
+import { openSessionStore } from "../engineHost/session.js";
+import { createTicker, type CredentialMode, type TickEvent, type Ticker, type TickSettings } from "../engineHost/ticks.js";
 import { createSupervisor, type HostChild, type HostEvent, type HostSpawnSpec, type RefusalReason, type StopReason } from "../engineHost/supervisor.js";
 
 /** What `engine-host start` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
@@ -44,18 +48,16 @@ export interface EngineHostRuntime {
   after: (ms: number, fn: () => void) => () => void;
   /** Resolves when the person or the machine asks the host to end (Ctrl-C, SIGTERM, or the terminal closing: SIGHUP). */
   shutdown: () => Promise<"stopped_by_person" | "machine_shutdown">;
-  /** Where events go (EB-3a/EB-8b wire the real emitter); left out, started and stopped are printed. */
+  /** Where host events go; left out (the real run), started and stopped are printed and every event is also written to the event spool (`hostFeeds.ts`). Tests set it. */
   emit?: ((event: HostEvent) => void) | undefined;
-  /** EB-12b. The ticks' settings (runner settings and the engine config's `cloud_bridge.ticks[]`), read when the host starts; left out, the loop tick runs at its default. */
+  /** EB-12b/12c. The ticks' settings; left out (the real run), they are the runner settings' loop minutes and start-of-day time and the engine config's `cloud_bridge.ticks[]` (`hostConfig.ts`). Tests set it. */
   tickSettings?: (() => TickSettings) | undefined;
   /** The machine's local date and time; left out, the system clock. */
   localClock?: (() => { date: string; hhmm: string }) | undefined;
-  /** How the host is paid for; left out, `subscription` (the host uses the person's own login: no credential is passed to it). */
+  /** How the host is paid for; left out (the real run), read from the `apiKeySource` of the host's own `init` line (`credentialModeOf`). Tests set it. */
   credentialMode?: (() => CredentialMode) | undefined;
-  /** Where `tick_started` and `tick_ended` go; left out, they are not sent anywhere. */
+  /** Where `tick_started` and `tick_ended` go; left out (the real run), the event spool. Tests set it. */
   emitTick?: ((event: TickEvent) => void) | undefined;
-  /** Hands the bridge's agent events to the ticker (it settles spawn and stop commands on them): called once with the function to feed. */
-  attachAgentEvents?: ((feed: (event: AgentEvent) => void) => void) | undefined;
 }
 
 export interface EngineHostOptions {
@@ -147,9 +149,19 @@ async function startHost(dir: string, ctx: CommandContext, deps: HaltDeps, rt: E
   }
   if (!(await rt.inspectClaude(claudePath, ctx.stateDir))) throw new CliError(NO_CLAUDE);
   const log = openHostLog(dir, deps.uid);
-  const live: { ticker?: Ticker } = {};
+  const live: { ticker?: Ticker; spool?: EventSpool } = {};
+  // The spool is opened by the first event, so a start that is refused leaves no file behind. One that cannot be opened loses its events, never the host.
+  const spoolWrite = (e: HostEvent | TickEvent): void => {
+    try {
+      live.spool ??= createEventSpool({ dir, uid: deps.uid, now: rt.now });
+      live.spool.write(e);
+    } catch {
+      // fx-swallow-ok: events that cannot be spooled are lost (the cloud shows the gap in the host's sequence); the host and its ticks go on
+    }
+  };
   const supervisor = createSupervisor({
-    observer: { onTurn: (turn) => live.ticker?.onTurn(turn), onExit: () => live.ticker?.onHostExit() },
+    observer: { onTurn: (turn) => live.ticker?.onTurn(turn), onExit: () => live.ticker?.onHostExit(), onCompaction: () => live.ticker?.onCompaction() },
+    sessionStore: openSessionStore(dir, deps.uid),
     stateDir: dir,
     uid: deps.uid,
     platform: rt.platform,
@@ -161,6 +173,7 @@ async function startHost(dir: string, ctx: CommandContext, deps: HaltDeps, rt: E
     emit:
       rt.emit ??
       ((e) => {
+        spoolWrite(e);
         if (e.kind === "host_started") ctx.out("Engine host started.");
         else if (e.kind === "host_stopped") ctx.out(e.survivors !== undefined && e.survivors > 0 ? SURVIVORS(e.survivors) : STOPS[e.reason]);
       }),
@@ -170,6 +183,7 @@ async function startHost(dir: string, ctx: CommandContext, deps: HaltDeps, rt: E
     // The pid must be alive and its cgroup must end in the recorded scope: a pid reused by an unrelated process is not our host.
     isOurHost: (handle) => handle.unit !== undefined && (rt.readCgroup(handle.pid) ?? "").split("\n").some((line) => line.endsWith(`/${handle.unit}`)),
     startTimeOf: rt.processStart,
+    claimer: { pid: rt.ownPid, start: rt.processStart(rt.ownPid) },
     acquireLock: () => acquireHostLock(dir, deps.uid, { ownPid: rt.ownPid, isAlive: rt.isAlive, startOf: rt.processStart }),
     scopeAvailable: rt.scopeAvailable,
     killHost: rt.killHost,
@@ -196,30 +210,35 @@ async function startHost(dir: string, ctx: CommandContext, deps: HaltDeps, rt: E
       if (state === undefined || !state.bridge_enabled || !state.operate_enabled) return "operate_off";
       return readHaltFile(dir, deps.uid)?.halted === true ? "halted" : undefined;
     } catch {
-      // fx-swallow-ok: files that cannot be read safely count as halted (fail closed)
-      return "halted";
+      // fx-swallow-ok: files that cannot be read safely stop the commands that need the host to be up, and nothing else. It must not say "halted": a halt lets
+      // answer_ask, pause_loop and stop_agent through, so reporting a read error as one would let them run exactly when the state cannot be read (fail open).
+      return "operate_off";
     }
   };
-  const repoGhId = Number(readBridgeState(dir, deps.uid)?.repo_gh_id);
+  const bridge = readBridgeState(dir, deps.uid);
+  const repoGhId = Number(bridge?.repo_gh_id);
+  const feed = createAgentFeed({ dir, uid: deps.uid });
   const ticker = createTicker({
     send: (text) => supervisor.send(text),
     touch: () => supervisor.touch(),
-    emit: (e) => rt.emitTick?.(e),
+    emit: (e) => (rt.emitTick ?? spoolWrite)(e),
     now: rt.now,
     after: rt.after,
-    settings: rt.tickSettings ?? (() => ({})),
+    settings: rt.tickSettings ?? (() => tickSettingsFor(ctx.stateDir, bridge?.repo_checkout ?? "", deps.uid)),
     localClock: rt.localClock ?? (() => ({ date: new Date().toLocaleDateString("sv-SE"), hhmm: new Date().toTimeString().slice(0, 5) })),
-    credentialMode: rt.credentialMode ?? (() => "subscription"),
+    credentialMode: rt.credentialMode ?? (() => credentialModeOf(supervisor.keySource())),
     repoGhId,
     gate,
     inbox: openHostInbox(dir, deps.uid),
+    answered: openAnsweredStore(dir, deps.uid, (line) => void log.write(`engine host ticker: ${line}\n`)),
     log: (line) => log.write(`${line}\n`),
+    agentEvents: feed.poll,
   });
-  rt.attachAgentEvents?.((e) => ticker.noteAgentEvent(e));
   live.ticker = ticker;
   ticker.start();
   void rt.shutdown().then((reason) => supervisor.stop(reason));
   const reason = await supervisor.stopped;
   ticker.close();
+  live.spool?.close();
   return (reason === "stopped_by_person" || reason === "machine_shutdown") && supervisor.survivors() === 0 ? 0 : 1;
 }

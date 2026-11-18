@@ -61,7 +61,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#597 CC-7a-1, the assistant link and its local tool proxy.
   "src/assistant/tokenFile.ts": ["crypto", "fs", "path"], // the token file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   "src/engineBridge/stateFiles.ts": ["crypto", "fs", "path"], // EB-11b: the engine bridge's local files (halt file, host handle): lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
-  "src/engineHost/hostInbox.ts": ["crypto", "fs", "path"], // EB-12b: the host's side of the command hand-off: lstat on the directories, no-follow opens judged by the handle, a random temp-file name, an exclusive 0600 create, one rename into claimed/ and one link for the outcome
+  "src/engineHost/hostConfig.ts": ["fs", "path"], // EB-12c: the host's settings read: lstat, a no-follow open judged by the open handle, one bounded read
+  "src/engineHost/hostFeeds.ts": ["crypto", "fs", "path"], // EB-12c: the feeds the host reads: lstat, no-follow opens judged by the handle, bounded reads, a random id
+  "src/engineHost/hostInbox.ts": ["crypto", "fs", "path"], // EB-12c: the host's inbox writes: lstat, no-follow opens, a random temp-file name, an exclusive create, one rename
   "src/engineHost/hostFiles.ts": ["fs", "path", "crypto"], // EB-12a: the host stream log (O_NOFOLLOW append at 0600, rotated at 20 MB) and the read of the bridge state file; no process is started
   "src/assistant/cloudCall.ts": [], // the one cloud call: the injected fetch, a fixed User-Agent, no redirect
   "src/assistant/fence.ts": [], // pure text work: the untrusted-content fence over a reply

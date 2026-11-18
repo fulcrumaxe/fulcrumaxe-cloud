@@ -25,11 +25,13 @@ import { MODEL_ID_PATTERN, USAGE_TOKENS_MAX } from "@fulcrumaxe/runner-protocol"
 import { EngineStateError, removeStateFile, writeJsonAtomic } from "../engineBridge/stateFiles.js";
 import { ENGINE_HOST_FILE, readHaltFile, readHostHandle, type EngineHostHandle } from "../engineBridge/halt.js";
 import type { BridgeState, HostLock, HostLog } from "./hostFiles.js";
+import type { SessionStore } from "./session.js";
 
 export type RefusalReason = "bridge_disabled" | "operate_off" | "halted" | "platform_kill_unverified" | "state_unreadable" | "running_as_root" | "already_running";
 export type StopReason = "stopped_by_person" | "halted" | "crash_loop" | "operate_off" | "machine_shutdown" | "log_failed" | "host_failed";
 /** `survivors` is present when the kill path ran: processes of the host's tree it found still alive afterwards. */
-export type HostEvent = { kind: "host_started" } | { kind: "host_stopped"; reason: StopReason; survivors?: number } | { kind: "host_heartbeat" };
+/** `compaction_detected` (EB-12c): the stream said the host's context was compacted; the event's own `ts` is the time. */
+export type HostEvent = { kind: "host_started" } | { kind: "host_stopped"; reason: StopReason; survivors?: number } | { kind: "host_heartbeat" } | { kind: "compaction_detected" };
 
 export const BACKOFF_MS: readonly number[] = [60_000, 120_000, 300_000];
 export const CRASH_LIMIT = 6;
@@ -39,10 +41,20 @@ export const HEARTBEAT_MS = 60_000;
 export const FILE_BEAT_MS = 15_000;
 /** After stdin is closed for a clean stop, how long the host gets to leave before the kill path ends it. */
 export const STOP_GRACE_MS = 10_000;
+/**
+ * A resume counts as failed only when the host process exits within this long of its launch, before it printed an `init` line and before any message was sent
+ * to it. Whether the installed claude prints `init` before its first input in stream-json input mode is not settled by anything in this repo (every captured
+ * stream here comes from a run with a prompt argument, which gets its `init` together with its first output), so "no init yet" alone cannot mean "the resume
+ * failed": a host that was resumed fine and is simply waiting for its first message prints nothing, and a crash minutes later must not wipe a good session.
+ * A resume of a session that is gone or unreadable ends at once, so 30 seconds is far beyond it and far short of a healthy host's first message.
+ */
+export const RESUME_FAIL_WITHIN_MS = 30_000;
 const SESSION_LINE_MAX = 1 << 20;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const INIT_PREFIX = '{"type":"system","subtype":"init"';
 const RESULT_PREFIX = '{"type":"result"';
+const SYSTEM_PREFIX = '{"type":"system"';
+const COMPACT_MARK = '"compact_boundary"';
 
 /** The host's argument vector after the program. Fixed: no model, tool or permission flag is added, so the repo's and the user's own settings apply. */
 export const HOST_ARGS: readonly string[] = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
@@ -112,8 +124,12 @@ export interface SupervisorDeps {
   killHost: (handle: EngineHostHandle) => Promise<unknown>;
   /** SIGKILL to what is left in a scope, by unit name only (no pid: a dead host's pid may be reused). */
   killScope: (unit: string) => Promise<void>;
-  /** EB-12b: told when a turn ends (a `result` line) and when the running host process exits (a crash restart is a new process). */
-  observer?: { onTurn(turn: TurnResult): void; onExit(): void } | undefined;
+  /** EB-12b: told when a turn ends (a `result` line) and when the running host process exits (a crash restart is a new process). EB-12c: and when the host's context was compacted. */
+  observer?: { onTurn(turn: TurnResult): void; onExit(): void; onCompaction?(): void } | undefined;
+  /** EB-12c: where the session id lives between processes (and across a reboot). Left out, it lives only as long as this supervisor. */
+  sessionStore?: SessionStore | undefined;
+  /** EB-12c: this supervisor's own process (pid and start time), written into `engine-host.json` next to the host's pid as `claimer_pid` and `claimer_start`. */
+  claimer?: { pid: number; start: string | undefined } | undefined;
 }
 
 export interface Supervisor {
@@ -127,10 +143,14 @@ export interface Supervisor {
   stopped: Promise<StopReason>;
   /** The session id read from the host's last `init` line, once there is one. */
   sessionId(): string | undefined;
+  /** The `apiKeySource` of the host's last `init` line (`none` is a login; anything else is a key), or undefined until there is one or when the line had none. */
+  keySource(): string | undefined;
   /** How many processes of the host's tree the kill path found still alive (0 when it did not run). */
   survivors(): number;
   /** Log writes that failed; the first one stops the host. */
   logFailures(): number;
+  /** Session ids that could not be saved (EB-12c); the host runs on. */
+  sessionSaveFailures(): number;
   /** Rewrites the handle's `heartbeat_at` now (the ticker calls it before it claims a command). False when there is no host or the file could not be written (the host is then ended). */
   touch(): boolean;
   /** Removes the handle file and releases the lock and the log, without a kill: the last step of a process that is exiting. Idempotent. */
@@ -143,7 +163,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   let lock: HostLock | undefined;
   let unit = "";
   let checkout = "";
-  let session: string | undefined;
+  let session: string | undefined = deps.sessionStore?.load();
+  let sessionSaveFails = 0;
+  let keySource: string | undefined;
+  /** The process now running was started with `--resume`, has not yet printed its `init` line and has been sent no message. A resume that fails ends the process then, soon after its launch. */
+  let resumePending = false;
+  let launchedAt = 0;
   let stopping = false;
   let finished = false;
   let crashes: number[] = [];
@@ -302,10 +327,54 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
   }
 
+  /** The session id of an `init` line, kept and, when it changed, saved. A save that fails is counted and the host runs on: it just cannot be resumed after a reboot. */
+  function rememberSession(id: string): void {
+    if (session === id) return;
+    session = id;
+    try {
+      deps.sessionStore?.save(id);
+    } catch {
+      // fx-swallow-ok: a session id that cannot be saved only costs the resume after a reboot; the running host is not touched and no error text is kept
+      sessionSaveFails++;
+    }
+  }
+
+  /** Drops the stored session id (and its file) and says so in the host log in fixed words. */
+  function forgetSession(): void {
+    resumePending = false;
+    session = undefined;
+    try {
+      deps.sessionStore?.clear();
+    } catch {
+      // fx-swallow-ok: a session file that cannot be removed is judged again by the next load; the in-memory id is already dropped so this supervisor starts fresh
+    }
+    logWrite("engine host: the stored session could not be resumed; the next start is a fresh session\n");
+  }
+
+  /** One `system` line that names a `compact_boundary`: the host's context was compacted. Only the type and subtype are read. */
+  function compacted(line: string): void {
+    try {
+      const o = JSON.parse(line) as { type?: unknown; subtype?: unknown };
+      if (o.type !== "system" || o.subtype !== "compact_boundary") return;
+    } catch {
+      // fx-swallow-ok: a line that is not JSON is not a compact boundary
+      return;
+    }
+    try {
+      deps.emit({ kind: "compaction_detected" });
+      deps.observer?.onCompaction?.();
+    } catch {
+      // fx-swallow-ok: a sink or ticker that throws must not stop the stream from being read or the host from running
+    }
+  }
+
   /** Starts one host. A reason is returned (and nothing is started) when the files already say it must not run. */
   function launch(): StopReason | undefined {
     const args = [...HOST_ARGS, ...(session === undefined ? [] : ["--resume", session])];
     assertHostArgv(args);
+    resumePending = session !== undefined;
+    launchedAt = deps.now();
+    keySource = undefined;
     const before = mustStop();
     if (before !== undefined) return before;
     const child = deps.launch({ file: "systemd-run", args: ["--user", "--scope", "--quiet", `--unit=${unit.replace(/\.scope$/, "")}`, "--", deps.claudePath, ...args], cwd: checkout, env: deps.env });
@@ -321,14 +390,18 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         const line = tail.slice(0, nl);
         tail = tail.slice(nl + 1);
         if (!skipping && line.startsWith(INIT_PREFIX)) {
+          resumePending = false;
           try {
-            const id = (JSON.parse(line) as { session_id?: unknown }).session_id;
-            if (typeof id === "string" && UUID.test(id)) session = id;
+            const parsed = JSON.parse(line) as { session_id?: unknown; apiKeySource?: unknown };
+            keySource = typeof parsed.apiKeySource === "string" && parsed.apiKeySource.length > 0 && parsed.apiKeySource.length <= 64 ? parsed.apiKeySource : undefined;
+            const id = parsed.session_id;
+            if (typeof id === "string" && UUID.test(id)) rememberSession(id);
           } catch {
             // fx-swallow-ok: a line that is not JSON is not an init line; the session id is simply not updated
           }
         }
         if (!skipping && line.startsWith(RESULT_PREFIX)) turnEnded(line);
+        else if (!skipping && line.startsWith(SYSTEM_PREFIX) && line.includes(COMPACT_MARK)) compacted(line);
         skipping = false;
         nl = tail.indexOf("\n");
       }
@@ -345,7 +418,13 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
     // The start time goes in the handle so the kill path never signals a pid that has since been reused (it is left out only when the host is already gone).
     const startTime = deps.startTimeOf(child.pid);
-    handle = { pid: child.pid, unit, ...(startTime === undefined ? {} : { start_time: startTime }) };
+    const claimer = deps.claimer;
+    handle = {
+      pid: child.pid,
+      unit,
+      ...(startTime === undefined ? {} : { start_time: startTime }),
+      ...(claimer === undefined ? {} : { claimer_pid: claimer.pid, ...(claimer.start === undefined ? {} : { claimer_start: claimer.start }) }),
+    };
     try {
       writeHandle();
     } catch {
@@ -377,6 +456,11 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
     for (const w of exitWaiters.splice(0)) w();
     if (stopping) return;
+    // A host started with `--resume` that ended soon after its launch, before its `init` line and before it was sent anything, could not resume that session (it is
+    // gone or unreadable): the stored id is dropped, so the next start is a fresh session instead of the same failing resume every time until the crash limit.
+    // A host that ran longer, or had been sent a message, is an ordinary crash: its session stays and is resumed again.
+    if (resumePending && deps.now() - launchedAt < RESUME_FAIL_WITHIN_MS) forgetSession();
+    resumePending = false;
     void afterCrash();
   }
 
@@ -414,8 +498,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   const api: Supervisor = {
     stopped,
     sessionId: () => session,
+    keySource: () => keySource,
     survivors: () => survivorCount,
     logFailures: () => logFails,
+    sessionSaveFailures: () => sessionSaveFails,
     touch() {
       if (current === undefined || finished || stopping || handle === undefined) return false;
       try {
@@ -458,6 +544,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     },
     send(text) {
       if (current === undefined || stopping) return false;
+      resumePending = false; // a message went in: from here on an exit is an ordinary crash, not a failed resume
       current.write(`${JSON.stringify({ type: "user", message: { role: "user", content: text } })}\n`);
       return true;
     },

@@ -16,7 +16,7 @@ export const SETTABLE_DIAL_CLASSES = ["docs.write", "tests.add", "deps.bump", "a
 export const SPAWNABLE_ROLES = ["executor", "code-reviewer", "security-reviewer", "acceptance-tester", "browser-tester", "project-manager", "technical-architect", "product-owner", "cost-analyst", "performance-expert", "security-expert"] as const;
 export const ENGINE_COMMAND_KINDS = ["start_day", "pause_loop", "resume_loop", "answer_ask", "set_dial", "request_spawn", "stop_agent"] as const;
 export const ENGINE_ASK_CHOICES = ["approve", "decline", "defer"] as const;
-export const COMMAND_REFUSALS = ["signature_invalid", "wrong_runner", "wrong_repo", "expired", "seq_not_increasing", "halted", "operate_off", "host_not_running", "unknown_ask", "unknown_agent", "ceiling"] as const;
+export const COMMAND_REFUSALS = ["signature_invalid", "wrong_runner", "wrong_repo", "expired", "seq_not_increasing", "halted", "operate_off", "host_not_running", "unknown_ask", "unknown_agent", "ceiling", "already_answered"] as const;
 export const ENGINE_COMMAND_OUTCOMES = ["applied", "refused", "expired", "not_confirmed"] as const;
 /** The longest a command lives, in seconds. */
 export const ENGINE_COMMAND_MAX_LIFE_S = 600;

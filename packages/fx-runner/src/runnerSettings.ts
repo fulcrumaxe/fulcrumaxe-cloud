@@ -34,6 +34,8 @@ export interface RunnerSettings {
   budget: Record<JobClass, JobBudget>;
   /** D#749 V2b: the post-merge verify stage's local half. Present only when one of its two values is set. */
   verify?: VerifySettings;
+  /** EB-12c: the hosted Team Lead's schedule. Present only when one of its two values is set. */
+  engineHost?: EngineHostSettings;
 }
 
 /**
@@ -107,7 +109,20 @@ export const BUDGET_TASKS: readonly [number, number] = [64, 65_536];
 
 export const DEFAULT_SETTINGS: RunnerSettings = { ceilingTotal: MAX_TOTAL_CAPACITY, ceilingHeavy: MAX_HEAVY_CAPACITY, budget: DEFAULT_BUDGET };
 const BUDGET_KEYS = ["budget.light.memory", "budget.light.tasks", "budget.heavy.memory", "budget.heavy.tasks"] as const;
-export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", ...BUDGET_KEYS, ...VERIFY_KEYS];
+/**
+ * EB-12c: the hosted Team Lead's schedule, the person's own: minutes between loop ticks (5 to 60, default 15 when unset) and an optional local `HH:MM` for the daily
+ * start-of-day tick. `engine-host start` reads them again at every poll.
+ */
+export interface EngineHostSettings {
+  loopMin?: number;
+  startDayAt?: string;
+}
+export const ENGINE_LOOP_MINUTES_KEY = "engine-host.loop-minutes";
+export const ENGINE_START_DAY_KEY = "engine-host.start-day-at";
+const ENGINE_HOST_KEYS = [ENGINE_LOOP_MINUTES_KEY, ENGINE_START_DAY_KEY] as const;
+export const ENGINE_LOOP_MINUTES_RANGE: readonly [number, number] = [5, 60];
+const START_DAY_AT = /^([01]\d|2[0-3]):[0-5]\d$/;
+export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", ...BUDGET_KEYS, ...VERIFY_KEYS, ...ENGINE_HOST_KEYS];
 
 const RANGES: Readonly<Record<string, readonly [number, number]>> = {
   "concurrency.total": [1, MAX_TOTAL_CAPACITY],
@@ -160,6 +175,10 @@ export function loadSettings(stateDir: string): RunnerSettings {
     const storageState = isCheckoutPath(saved?.["storageState"]) ? saved["storageState"] : undefined;
     const baseUrl = parseBaseUrlSetting(saved?.["baseUrl"]);
     const browser: BrowserSettings = { ...(executable === undefined ? {} : { executable }), ...(storageState === undefined ? {} : { storageState }), ...(baseUrl === undefined ? {} : { baseUrl }) };
+    const host = parsed["engineHost"] as Record<string, unknown> | null | undefined;
+    const loopMin = whole(host?.["loopMin"], ...ENGINE_LOOP_MINUTES_RANGE);
+    const startDayAt = typeof host?.["startDayAt"] === "string" && START_DAY_AT.test(host["startDayAt"]) ? host["startDayAt"] : undefined;
+    if (loopMin !== undefined || startDayAt !== undefined) settings.engineHost = { ...(loopMin === undefined ? {} : { loopMin }), ...(startDayAt === undefined ? {} : { startDayAt }) };
     if (argv !== undefined || dir !== undefined || account !== undefined || Object.keys(browser).length > 0) settings.verify = { ...(argv === undefined ? {} : { deployArgv: argv }), ...(dir === undefined ? {} : { deployDir: dir }), ...(account === undefined ? {} : { testAccount: account }), ...(Object.keys(browser).length > 0 ? { browser } : {}) };
   } catch {
     // fx-swallow-ok: a missing or damaged settings file is the defaults
@@ -216,6 +235,21 @@ function setVerify(stateDir: string, key: (typeof VERIFY_KEYS)[number], text: st
 /** Validates and saves one setting. A value out of range or not a whole number is refused with a message and nothing is written. */
 export function setSetting(stateDir: string, key: string, text: string): string {
   if ((VERIFY_KEYS as readonly string[]).includes(key)) return setVerify(stateDir, key as (typeof VERIFY_KEYS)[number], text);
+  if ((ENGINE_HOST_KEYS as readonly string[]).includes(key)) {
+    const settings = loadSettings(stateDir);
+    const host: EngineHostSettings = { ...settings.engineHost };
+    if (key === ENGINE_LOOP_MINUTES_KEY) {
+      const n = /^\d{1,3}$/.test(text) ? Number(text) : undefined;
+      if (n === undefined || n < ENGINE_LOOP_MINUTES_RANGE[0] || n > ENGINE_LOOP_MINUTES_RANGE[1]) throw new CliError(`${key} takes a whole number of minutes from ${ENGINE_LOOP_MINUTES_RANGE[0]} to ${ENGINE_LOOP_MINUTES_RANGE[1]}`, 2);
+      host.loopMin = n;
+    } else {
+      if (!START_DAY_AT.test(text)) throw new CliError(`${key} takes a local time as HH:MM, for example 08:30`, 2);
+      host.startDayAt = text;
+    }
+    settings.engineHost = host;
+    writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
+    return `${key} set; the engine host reads it at its next poll`;
+  }
   const range = RANGES[key];
   if (range === undefined) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
   if ((key === "reserve-gb" || key === "cpu-reserve") && text === "auto") return unsetSetting(stateDir, key);
@@ -238,7 +272,17 @@ export function setSetting(stateDir: string, key: string, text: string): string 
 
 /** Returns one setting to its automatic default (the ceilings to their maxima, the reserve to 25% of RAM with a 2 GB minimum, the CPU reserve to 20% of the cores, the heavy memory budget to the one derived from measured footprints). */
 export function unsetSetting(stateDir: string, key: string): string {
-  if (RANGES[key] === undefined && !(VERIFY_KEYS as readonly string[]).includes(key)) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
+  if (RANGES[key] === undefined && !(VERIFY_KEYS as readonly string[]).includes(key) && !(ENGINE_HOST_KEYS as readonly string[]).includes(key)) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
+  if ((ENGINE_HOST_KEYS as readonly string[]).includes(key)) {
+    const settings = loadSettings(stateDir);
+    const host: EngineHostSettings = { ...settings.engineHost };
+    if (key === ENGINE_LOOP_MINUTES_KEY) delete host.loopMin;
+    else delete host.startDayAt;
+    if (host.loopMin === undefined && host.startDayAt === undefined) delete settings.engineHost;
+    else settings.engineHost = host;
+    writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
+    return `${key} is cleared; the engine host reads it at its next poll`;
+  }
   const target = budgetKey(key);
   const settings = loadSettings(stateDir);
   if ((VERIFY_KEYS as readonly string[]).includes(key)) {
