@@ -77,6 +77,7 @@ Sources:
 `bash scripts/check.sh` is the one command a developer, CI and the platform's own check step run.
 It stops at the first failure. In order it runs: install, the declared-imports test, lint,
 typecheck, `scripts/check-globalsetup-env.sh`, `scripts/check-agent-run-columns.sh`, `pnpm test`,
+`go vet` and `go test` for the VM helper (when `packages/fx-runner` is in the run),
 the site kit's browser tier, the migration shape and order checks, the `apps/web` build with its
 trace and baked-path checks, and `pnpm test:guard`.
 
