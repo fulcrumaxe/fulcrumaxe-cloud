@@ -16,6 +16,23 @@ export {
   type ProvisioningTokenEntry,
 } from "./provisioningTokens.js";
 export { REGISTER_PATH, registerRunner } from "./register.js";
+export {
+  DEVICE_CODE_KEY_MIN_BYTES,
+  DEVICE_START_GLOBAL_PER_HOUR_DEFAULT,
+  DEVICE_START_PER_IP_PER_HOUR,
+  approveDeviceCode,
+  denyDeviceCode,
+  ed25519Thumbprint,
+  hashDeviceCode,
+  hashUserCode,
+  lookupDeviceCode,
+  newDeviceCode,
+  newUserCode,
+  pollDevice,
+  readDeviceCodeKey,
+  readDeviceGlobalLimit,
+  startDevice,
+} from "./deviceFlow.js";
 export { ROTATE_PATH, rotateRunnerKey } from "./rotate.js";
 export { REVOKE_PATH, revokeAllRunners, revokeRunner, selfRevokeRunner } from "./revoke.js";
 export { FLEET_SETTING_ACTIONS, applyRunnerSetting, checkRunner, removeRunner, setRunnerRepos, type FleetSettingAction } from "./fleetControls.js";
