@@ -48,4 +48,24 @@ test.describe("D#37 DOCK-PREVIEW-CLONE", () => {
     await expect(page.locator(".dock-preview .fulc-window")).toHaveCount(0);
     await expect(page.locator('.dock-preview [data-app-id="themes"]')).toHaveCount(0);
   });
+
+  test("a long list marked data-preview-keep is cut to that many children in the preview, and the live list is untouched", async ({ page }) => {
+    await bootToDesktop(page);
+    await page.locator('.dock-icon[data-app-id="themes"]').click();
+    await expect(page.locator('.fulc-window[data-app-id="themes"]')).toBeVisible();
+    await page.evaluate(() => {
+      const live = document.querySelector('.fulc-window[data-app-id="themes"]')!;
+      const ul = document.createElement("ul");
+      ul.setAttribute("data-preview-keep", "3");
+      ul.id = "long-probe";
+      for (let i = 0; i < 12; i++) { const li = document.createElement("li"); li.textContent = "row " + i; ul.appendChild(li); }
+      live.appendChild(ul);
+    });
+    await page.locator('.dock-icon[data-app-id="themes"]').hover();
+    await page.clock.runFor(PREVIEW_DELAY_PAST_MS);
+    await expect(page.locator(".dock-preview .fulc-window-clone")).toHaveCount(1);
+    await expect(page.locator(".dock-preview #long-probe > li")).toHaveCount(3);
+    await expect(page.locator(".dock-preview #long-probe > li").last()).toHaveText("row 2");
+    await expect(page.locator('.fulc-window[data-app-id="themes"] #long-probe > li')).toHaveCount(12);
+  });
 });

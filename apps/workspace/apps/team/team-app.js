@@ -180,7 +180,8 @@ function mountApp(contentEl) {
       v.more ? h("p", { class: "tm-muted", "data-testid": "tm-usage-more" }, v.more) : null];
   }
   // The log: one scrolling list kept for good (its rows are swapped in place), with the note, the failure line and the two buttons around it.
-  const logList = h("ul", { class: "tm-list tm-scroll", role: "list", tabindex: "0", "data-testid": "tm-log-list" });
+  // data-preview-keep: a window preview (dock hover, Alt+Tab) keeps only the first 30 of the up to 400 rows.
+  const logList = h("ul", { class: "tm-list tm-scroll", role: "list", tabindex: "0", "data-testid": "tm-log-list", "data-preview-keep": "30" });
   const logTop = h("div"), logBar = h("div", { class: "tm-pager" });
   P.log.body.replaceChildren(logTop, logList, logBar);
   const logItem = (l) => h("li", { class: "tm-item", "data-testid": "tm-log-line", "data-id": l.id },
@@ -190,10 +191,10 @@ function mountApp(contentEl) {
   // time with a turn given back to the page between groups, so no single task is long on a slow phone (the list holds up to 400 rows). The first group is drawn at once,
   // so a short list is complete the moment the call returns. A newer call stops the one still adding rows and works from whatever is drawn by then.
   const LOG_CHUNK = 40;
-  const rowSig = new WeakMap(); // a drawn row -> the text of the line it shows
+  // A drawn row carries the text of the line it shows as a plain property (fxSig). A WeakMap keyed by 400 DOM nodes made every full garbage collection mark ephemerons for them, which was most of the longest task on a slow machine.
   let logSig = "", logJob = 0;
   const giveTurn = () => (globalThis.scheduler && typeof globalThis.scheduler.yield === "function" ? globalThis.scheduler.yield() : new Promise((r) => setTimeout(r, 0)));
-  const drawRow = (l, sig) => { const li = logItem(l); rowSig.set(li, sig); return li; };
+  const drawRow = (l, sig) => { const li = logItem(l); li.fxSig = sig; return li; };
   function syncLogRows(rows, kept) {
     const sigs = rows.map((r) => JSON.stringify(r));
     const all = sigs.join("\n");
@@ -204,10 +205,12 @@ function mountApp(contentEl) {
     // Drawn rows that stay: a run of `keep` rows from drawn row `drop`, the same lines in the same order as the new list from its row `front` on. Drawn rows outside
     // the run are removed; rows before `front` are new lines at the top (put in before the kept ones); the rows after the run are added in groups below.
     let drop = -1, front = 0, keep = 0;
+    const firstAt = new Map(); // a line's text -> its first row in the new list, so each drawn row is looked up once instead of scanning the whole list for it
+    for (let i = sigs.length - 1; i >= 0; i--) firstAt.set(sigs[i], i);
     for (let d = 0; d < have.length && drop < 0; d++) {
-      const f = sigs.indexOf(rowSig.get(have[d]));
+      const sig = have[d].fxSig, f = firstAt.has(sig) ? firstAt.get(sig) : -1;
       const run = Math.min(have.length - d, sigs.length - f);
-      if (f >= 0 && f <= LOG_CHUNK && have.slice(d, d + run).every((li, i) => rowSig.get(li) === sigs[f + i])) { drop = d; front = f; keep = run; }
+      if (f >= 0 && f <= LOG_CHUNK && have.slice(d, d + run).every((li, i) => li.fxSig === sigs[f + i])) { drop = d; front = f; keep = run; }
     }
     const hadFocus = logList.contains(document.activeElement);
     for (const li of drop < 0 ? have : [...have.slice(0, drop), ...have.slice(drop + keep)]) li.remove();
