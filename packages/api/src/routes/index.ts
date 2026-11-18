@@ -35,6 +35,7 @@ import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
 import { runLimitRoutes } from "./run-limits.js";
 import { runnerConcurrencyRoutes } from "./runner-concurrency.js";
+import { runnerDeviceRoutes } from "./runnerDevice.js";
 import { buildConcurrencyRoutes } from "./build-concurrency.js";
 import { verifySettingsRoutes } from "./verify-settings.js";
 import { runnerRoutingRoutes } from "./runner-routing.js";
@@ -116,6 +117,7 @@ export const ROUTES: RouteEntry[] = [
   ...billingRoutes,
   ...runLimitRoutes,
   ...runnerConcurrencyRoutes,
+  ...runnerDeviceRoutes,
   ...buildConcurrencyRoutes,
   ...verifySettingsRoutes,
   ...runnerRoutingRoutes,
