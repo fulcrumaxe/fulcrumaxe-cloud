@@ -6,13 +6,15 @@ import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import { cleanEnv, type CleanEnvOptions } from "../src/job/cleanEnv.js";
 import { AgentRunFailed, HostSandboxRefused, createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import type { NetworkRule, StartDetachedOptions } from "../src/sandbox/port.js";
+import type { WslMachine } from "../src/sandbox/platform.js";
 
 type Block = { filesystem: { allowWrite: string[]; denyWrite: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
 const HOME = "/home/jane";
+const ROOT_TABLE = "26 1 8:16 / / rw,relatime - ext4 /dev/sdb rw\n";
 /** The runner state directory must be writable: the per-job env file is made under it (D#6 C44-1). */
 const STATE = mkdtempSync(path.join(tmpdir(), "r4b13_state-"));
 
-function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envOptions?: CleanEnvOptions; mirrorsRoot?: string } = {}) {
+function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envOptions?: CleanEnvOptions; mirrorsRoot?: string; wsl?: { denyPaths: readonly string[]; loopback: boolean }; machine?: WslMachine } = {}) {
   const blocks: Block[] = [];
   const runIds: unknown[] = [];
   const starts: unknown[] = [];
@@ -47,6 +49,7 @@ function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envO
     binaryDir: `${HOME}/.local/bin`,
     registries: ["registry.npmjs.org"],
     ...(over.mirrorsRoot === undefined ? {} : { mirrorsRoot: over.mirrorsRoot }),
+    wsl: over.machine ?? (over.wsl === undefined ? undefined : { interopEntry: () => false, mountinfo: () => ROOT_TABLE, clearance: over.wsl }),
     tempRoot,
     workspaceRoot: tmpdir(),
   });
@@ -116,6 +119,81 @@ describe("hostSandbox: refusals happen before anything is built or started", () 
   it("starting a sandbox that was never created or is deleted throws not-found", async () => {
     const t = setup();
     expect(() => t.host.startDetached({ runId: "", sandboxName: "nope" }, t.opts())).toThrow("sandbox not found");
+  });
+});
+
+describe("hostSandbox: WSL2 (D#587 B-9b)", () => {
+  const loopback = { entries: [{ kind: "loopback" as const, value: "127.0.0.1", access: "bind" as const, reason: "dev server" }], commandTimeoutS: 600, storeKey: "acme__widgets" };
+  const WSL = { denyPaths: ["/mnt", "/mnt/c", "/run/WSL"], loopback: false };
+
+  it("puts every Windows-side path in both deny lists of the job's block", async () => {
+    const t = setup({ wsl: WSL });
+    await t.host.startDetached(await t.create(), t.opts()).hookFired;
+    const fs = t.blocks[0]!.filesystem as unknown as { denyRead: string[]; denyWrite: string[] };
+    for (const entry of WSL.denyPaths) {
+      expect(fs.denyRead).toContain(entry);
+      expect(fs.denyWrite).toContain(entry);
+    }
+  });
+
+  it("refuses a loopback allowance where the networking mode is mirrored or unknown, before any runtime is built", async () => {
+    const t = setup({ wsl: WSL });
+    const handle = await t.create();
+    expect(() => t.host.startDetached(handle, t.opts({ allowances: loopback }))).toThrow("sandbox_allowance_forbidden");
+    expect(t.blocks).toEqual([]);
+  });
+
+  it("grants it where the mode is NAT, and grants it anywhere that is not WSL2", async () => {
+    for (const wsl of [{ ...WSL, loopback: true }, undefined]) {
+      const t = setup({ wsl });
+      await t.host.startDetached(await t.create(), t.opts({ allowances: loopback })).hookFired;
+      expect((t.blocks[0]!.network as unknown as { allowLocalBinding: boolean }).allowLocalBinding).toBe(true);
+    }
+  });
+
+  it("the machine handed to the host sandbox reaches the check launch: a WSL2 machine without a clearance cannot start one, a cleared one can (the wiring at hostSandbox's file-system host)", async () => {
+    const launches = async (machine: WslMachine | undefined): Promise<boolean> => {
+      const t = setup({ machine });
+      const handle = await t.create();
+      await t.host.startDetached(handle, t.opts()).hookFired;
+      return t.host.checkLaunch?.(handle, ["true"], false) !== undefined;
+    };
+    // The control: where the check can start at all (bubblewrap, socat and the socket filter are here), an ordinary machine starts one. Without it the refusal below would prove nothing.
+    if (!(await launches(undefined))) return;
+    const uncleared: WslMachine = { interopEntry: () => true, mountinfo: () => ROOT_TABLE, clearance: undefined };
+    expect(await launches(uncleared)).toBe(false);
+    expect(await launches({ ...uncleared, interopEntry: () => false, clearance: { denyPaths: ["/mnt"], loopback: false } })).toBe(true);
+  });
+
+  it("re-reads the machine for every job: a drive mounted after start is denied, an interop entry that came back or an unreadable mount table refuses the job", async () => {
+    let table: string | undefined = ROOT_TABLE;
+    let interop = false;
+    const machine: WslMachine = { interopEntry: () => interop, mountinfo: () => table, clearance: { denyPaths: ["/mnt", "/run/WSL"], loopback: false } };
+    const t = setup({ machine });
+    const deny = (): string[] => (t.blocks.at(-1)!.filesystem as unknown as { denyRead: string[] }).denyRead;
+    await t.host.startDetached(await t.create("rn-a"), t.opts({ runId: "a" })).hookFired;
+    expect(deny()).not.toContain("/srv/winshare");
+    table = `${ROOT_TABLE}55 22 0:48 / /srv/winshare rw - 9p C:\\134 rw\n`;
+    await t.host.startDetached(await t.create("rn-b"), t.opts({ runId: "b" })).hookFired;
+    expect(deny()).toEqual(expect.arrayContaining(["/mnt", "/run/WSL", "/srv/winshare"]));
+    const before = t.blocks.length;
+    interop = true;
+    interop = false;
+    table = undefined;
+    const handle = await t.create("rn-d");
+    expect(() => t.host.startDetached(handle, t.opts({ runId: "d" }))).toThrow("wsl_machine_changed");
+    table = "";
+    expect(() => t.host.startDetached(handle, t.opts({ runId: "e" }))).toThrow("wsl_machine_changed");
+    interop = true;
+    table = ROOT_TABLE;
+    expect(() => t.host.startDetached(handle, t.opts({ runId: "f" }))).toThrow("wsl_machine_changed");
+    expect(t.blocks).toHaveLength(before);
+  });
+
+  it("leaves the lists alone without the WSL input", async () => {
+    const t = setup();
+    await t.host.startDetached(await t.create(), t.opts()).hookFired;
+    expect(JSON.stringify(t.blocks[0]!.filesystem)).not.toContain("/run/WSL");
   });
 });
 

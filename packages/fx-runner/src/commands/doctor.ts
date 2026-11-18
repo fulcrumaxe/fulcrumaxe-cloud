@@ -18,11 +18,11 @@ import { cleanEnv } from "../job/cleanEnv.js";
 import { isProtectedDeployment, readCapped } from "../cloud.js";
 import { loadRunnerKey } from "../keys.js";
 import { BYPASS_ENV_NAME, bypassHeaders, bypassSecret, bypassRefusalText } from "../protectionBypass.js";
-import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
+import { MACOS_PREVIEW_NOTICE, platformRow } from "../platformSupport.js";
 import { UNENFORCED_LINE, detectScopeSupport, type ScopeSupport } from "../sandbox/jobLimits.js";
-import { SandboxRefused, detectPlatform } from "../sandbox/platform.js";
+import { SandboxRefused, detectPlatform, wslFacts } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
-import { wslDoctorFindings } from "../sandbox/wslChecks.js";
+import { clearWsl } from "../sandbox/wslGate.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
@@ -73,7 +73,7 @@ type Level = "PASS" | "WARN" | "FAIL" | "INFO";
 /** The sandbox line, and under a failure the fix for this machine. A probe that cannot be set up is a failure too: there is no unsandboxed way to run. */
 async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<boolean> {
   try {
-    detectPlatform({ platform: host.platform, osrelease: host.osrelease, wslInterop: host.sandbox.wsl?.interopEntry() });
+    detectPlatform({ platform: host.platform, osrelease: host.osrelease, ...wslFacts(host.sandbox.wsl) });
   } catch (error) {
     if (!(error instanceof SandboxRefused)) throw error;
     line("FAIL", "Sandbox", `${error.code}: ${error.message.slice(error.code.length + 2)}`);
@@ -98,11 +98,15 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
 }
 
 /**
- * On WSL2 (still refused above), one line per check of what would have to change before it could be accepted (D#587 B-9): Windows interop,
- * the drives the kernel shares in, runner directories on a Windows drive, and the Windows PATH. Each failure names its closed code and the fix.
+ * On WSL2, the gate (D#587 B-9b): one line per check and live probe, each failure with its closed code and the fix, then the VM-mode line. It runs before the
+ * sandbox line because a cleared machine is what lets that line pass; anywhere else it prints nothing.
  */
-function wslCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): void {
-  for (const finding of wslDoctorFindings({ platform: host.platform, osrelease: host.osrelease, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, fs: host.sandbox })) line(finding.ok ? "PASS" : "FAIL", "WSL2", finding.ok ? finding.detail : `${finding.code}: ${finding.detail}`);
+async function wslCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  const gate = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath: cleanEnv({ mode: "subscription" }).PATH ?? "", host: host.sandbox });
+  if (!gate.wsl2) return;
+  for (const item of gate.items) line(item.ok ? "PASS" : "FAIL", "WSL2", item.ok ? item.detail : `${item.code}: ${item.detail}`);
+  if (gate.cleared) line("INFO", "WSL2", gate.loopback ? "networking mode is NAT: loopback allowances are granted as asked" : "networking mode is mirrored or not known: jobs may not ask for a loopback bind");
+  line("INFO", "WSL2", platformRow("wsl2").vmNotice ?? "");
 }
 
 /** Whether each job can run under hard memory and process limits here (D#6 C43-5), tried with a real throw-away scope. When it cannot, the runner holds back and this says so. */
@@ -232,6 +236,7 @@ async function sandboxOnly(ctx: CommandContext, host: DoctorHost, line: (level: 
     // fx-swallow-ok: the probe runs without the Claude CLI's folder; a missing CLI is the full doctor's finding, not this check's
     if (!(error instanceof Error) || error.name !== "EngineRefusal") throw error;
   }
+  await wslCheck(ctx, host, binaryPath, line);
   await sandboxCheck(ctx, host, binaryPath, line);
 }
 
@@ -342,8 +347,8 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   apiKeyCheck(ctx, mode, line);
   cliStubsCheck(host, line);
 
+  await wslCheck(ctx, host, binaryPath, line);
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
-  wslCheck(ctx, host, binaryPath, line);
   await limitsCheck(host, line);
   vmEngineCheck(ctx, host, line);
   await lingerCheck(host, line);

@@ -27,6 +27,25 @@ export interface WslMachine {
   interopEntry(): boolean;
   /** The text of the kernel's mount table, or undefined when it cannot be read. */
   mountinfo(): string | undefined;
+  /** The path with every symlink in its existing part resolved (a part that is not there yet is kept as written), or undefined when that cannot be done. Absent: the path stands as written. */
+  realPath?(target: string): string | undefined;
+  /**
+   * Set by `clearWsl` (wslGate.ts) and nowhere else, when every WSL2 check and live probe passed on this machine in this process.
+   * Absent means not cleared, and `detectPlatform` refuses WSL2.
+   */
+  clearance?: WslClearance | undefined;
+}
+
+export interface WslClearance {
+  /** Paths added to both the read and the write deny list of every job. */
+  denyPaths: readonly string[];
+  /** Whether a `loopback` allowance may be granted: only when the networking mode is known to be NAT (mirrored mode shares loopback with Windows). */
+  loopback: boolean;
+}
+
+/** The WSL2 facts of `PlatformProbe`, read from the machine object in one place, so no caller can forget the clearance. */
+export function wslFacts(wsl: WslMachine | undefined): { wslInterop: boolean | undefined; wslCleared: boolean } {
+  return { wslInterop: wsl?.interopEntry(), wslCleared: wsl?.clearance !== undefined };
 }
 
 /** The names WSL2's init gives the interop entry. Either one means WSL2 with interop on. */
@@ -55,6 +74,8 @@ export interface PlatformProbe {
   osrelease?: string;
   /** Whether the `WSLInterop` or `WSLInterop-late` entry exists (`WslMachine.interopEntry`; true also when the machine could not tell). Left out, it is taken as absent. */
   wslInterop?: boolean | undefined;
+  /** Whether `clearWsl` found every WSL2 check and live probe passing (`WslMachine.clearance`). Left out, WSL2 is refused. */
+  wslCleared?: boolean | undefined;
 }
 
 /**
@@ -75,9 +96,9 @@ export function linuxKernel(probe: PlatformProbe): "linux" | "wsl1" | "wsl2" {
 }
 
 /**
- * Which supported platform this is, or a refusal. Native Windows, WSL1 and WSL2 are refused: v1 supports macOS and
- * Linux only, and there is never an unsandboxed path. (WSL2 has bubblewrap, but the automounted Windows drives are
- * readable and Windows programs can be started from inside it, which the job sandbox does not cover yet.)
+ * Which supported platform this is, or a refusal. Native Windows and WSL1 are refused, and so is WSL2 until its checks and live
+ * probes have passed on this machine (`wslCleared`): its Windows drives are readable and Windows programs can be started from
+ * inside it unless those are shut. There is never an unsandboxed path.
  */
 export function detectPlatform(probe: PlatformProbe): Platform {
   const platform = probe.platform ?? osPlatform();
@@ -85,7 +106,8 @@ export function detectPlatform(probe: PlatformProbe): Platform {
   if (platform === "darwin") return "macos";
   if (platform !== "linux") throw new SandboxRefused("unsupported_platform", platform);
   const kernel = linuxKernel(probe);
-  if (kernel === "wsl2") throw new SandboxRefused("wsl2_unsupported", refusalNotice("wsl2"));
+  if (kernel === "wsl2" && probe.wslCleared !== true) throw new SandboxRefused("wsl2_unsupported", refusalNotice("wsl2"));
   if (kernel === "wsl1") throw new SandboxRefused("wsl1_unsupported", refusalNotice("wsl1"));
+  // WSL2 only gets here cleared: it runs as Linux in the OS sandbox, never in a VM.
   return "linux";
 }

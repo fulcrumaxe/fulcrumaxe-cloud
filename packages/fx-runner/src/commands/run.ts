@@ -76,7 +76,9 @@ import { createWorkspaceStore } from "../job/workspace.js";
 import { loadRunnerKey } from "../keys.js";
 import { gitProxyHashFor, keyringFor, type PinnedGitProxies, type PinnedKeyrings } from "../keyring.js";
 import { createHostSandbox } from "../sandbox/hostSandbox.js";
-import { SandboxRefused } from "../sandbox/platform.js";
+import { SandboxRefused, wslFacts } from "../sandbox/platform.js";
+import { clearWsl } from "../sandbox/wslGate.js";
+import { refusalNotice } from "../platformSupport.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { commandOnPath, resolveSandboxTools, sandboxToolDirs, selectTier } from "../sandbox/select.js";
@@ -207,7 +209,7 @@ export function readyOrCode(refresh: () => void, ctx: CommandContext): string | 
 /** Where bubblewrap and socat are, as the directories to put on the agent's PATH. Empty when a tool is missing: the probe says so, and the gate holds. */
 function sandboxDirs(host: RunHost, searchPath: string): string[] {
   try {
-    return sandboxToolDirs(resolveSandboxTools(searchPath, { platform: host.platform, wslInterop: host.sandbox.wsl?.interopEntry() }));
+    return sandboxToolDirs(resolveSandboxTools(searchPath, { platform: host.platform, ...wslFacts(host.sandbox.wsl) }));
   } catch (error) {
     if (error instanceof SandboxRefused && (error.code === "bubblewrap_missing" || error.code === "socat_missing")) return [];
     throw error;
@@ -221,13 +223,24 @@ function sandboxDirs(host: RunHost, searchPath: string): string[] {
 export function localTools(host: RunHost, searchPath: string): { binaryPath: string; toolDirs: string[] } {
   try {
     try {
-      selectTier({ platform: host.platform, osrelease: host.osrelease, wslInterop: host.sandbox.wsl?.interopEntry(), hasCommand: (name) => commandOnPath(name, searchPath) });
+      selectTier({ platform: host.platform, osrelease: host.osrelease, ...wslFacts(host.sandbox.wsl), hasCommand: (name) => commandOnPath(name, searchPath) });
     } catch (error) {
       if (!(error instanceof SandboxRefused && (error.code === "bubblewrap_missing" || error.code === "socat_missing"))) throw error;
     }
     return { binaryPath: host.engine.locate(searchPath), toolDirs: sandboxDirs(host, searchPath) };
   } catch (error) {
     if (error instanceof SandboxRefused || (error instanceof Error && error.name === "EngineRefusal")) throw new CliError(`${error.message}; fx-runner cannot run jobs here`);
+    throw error;
+  }
+}
+
+/** The agent CLI's path when it can be found; the WSL2 checks only use it to name the directory they keep clear. */
+function locateOrUndefined(host: RunHost, searchPath: string): string | undefined {
+  try {
+    return host.engine.locate(searchPath);
+  } catch (error) {
+    // fx-swallow-ok: a missing CLI is refused by localTools right after, with its own message
+    if (error instanceof Error && error.name === "EngineRefusal") return undefined;
     throw error;
   }
 }
@@ -298,6 +311,12 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   }
 
   const searchPath = hooks.searchPath ?? cleanEnv(credentials).PATH ?? "";
+  // D#587 B-9b: on WSL2 every check and live probe runs now, before any claim; a probe that cannot run is a refusal. A no-op anywhere else.
+  // Failures are said one per line; the refusal itself is the one `localTools` gives next, because the machine is then not cleared.
+  const wsl = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home, stateDir: ctx.stateDir, binaryPath: locateOrUndefined(host, searchPath), xdgCacheHome: host.xdgCacheHome, searchPath, host: host.sandbox });
+  for (const item of wsl.items) if (!item.ok) ctx.out(`fx-runner: WSL2 ${item.code}: ${item.detail}`);
+  // An explicit refusal, not left to `detectPlatform` alone: a WSL2 machine that is not cleared starts nothing.
+  if (wsl.wsl2 && !wsl.cleared) throw new CliError(`wsl2_unsupported: ${refusalNotice("wsl2")}; fx-runner cannot run jobs here`);
   const { binaryPath, toolDirs } = localTools(host, searchPath);
   // The minimum toolchain for a project's own tests (D#6 R4d-3): found once here, its directories at the end of the agent's PATH, and the
   // install prefixes under the home directory as read-only grants. A tool that is not found is skipped; one that may not be granted is left out.

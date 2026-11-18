@@ -194,20 +194,29 @@ A single executable built BEFORE this change has no digest baked in, so it never
 | macOS arm64 and x64 | supported as a **preview, not yet verified** (see below) |
 | Linux x64 and arm64 | supported |
 | Native Windows | not supported |
-| WSL2 | refused until its safety checks ship (see below) |
+| WSL2 | supported as a **preview, not yet verified**, OS sandbox only (see below) |
 | WSL1 | not supported |
 
 macOS support is a preview, not yet verified: jobs run in Claude Code's own sandbox, which has not been proven on macOS yet.
-`fx-runner doctor` repeats this on macOS. Native Windows, WSL1 and WSL2 are not accepted in v1, so the runner refuses to start there (`windows_unsupported`, `wsl1_unsupported`, `wsl2_unsupported`). Windows support is planned. On native Windows and WSL2 the runner prints: "fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported."
+`fx-runner doctor` repeats this on macOS. Native Windows and WSL1 are not accepted, so the runner refuses to start there (`windows_unsupported`, `wsl1_unsupported`). WSL2 starts only when every check and live probe below passes, and is refused by name (`wsl2_unsupported`) until then. `install.sh` still refuses Windows and WSL; install on WSL2 by hand until the release change. On native Windows the installer prints: "fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported."
 
-WSL1 cannot run the sandbox. The runner prints: "fx-runner does not support WSL1. Convert the distribution with: wsl --set-version <distro> 2 (WSL2 is itself refused until its safety checks ship). Linux and macOS are supported."
+WSL1 cannot run the sandbox. The runner prints: "fx-runner does not support WSL1. Convert the distribution with: wsl --set-version <distro> 2 (WSL2 is a preview that runs only when its safety checks pass). Linux and macOS are supported."
 
-WSL2 is detected by its kernel (`/proc/sys/kernel/osrelease` naming `microsoft-standard`) or by the `WSLInterop` entry in `binfmt_misc`, never by the `WSL_DISTRO_NAME` variable alone. It stays refused. Meanwhile `fx-runner doctor` on WSL2 checks what would have to change before it could be accepted, and names each failure with a closed code:
+WSL2 is detected by its kernel (`/proc/sys/kernel/osrelease` naming `microsoft-standard`) or by the `WSLInterop` entry in `binfmt_misc`, never by the `WSL_DISTRO_NAME` variable alone. It is a preview, not yet verified, and jobs run in the OS sandbox only: `fx-runner doctor` prints `WSL2: VM mode not supported`. At every `run` start (before any claim) and in `fx-runner doctor`, the runner checks, and names each failure with a closed code:
 
 - `wsl_interop_enabled`: Windows interop is on, so a job could start Windows programs.
 - `wsl_drvfs_exposed`: a 9p, drvfs or virtiofs mount reaches the Windows side and is not denied to jobs.
-- `wsl_mnt_path`: the state, workspace or mirrors directory is under the Windows drives' mount root (`/mnt`).
-- `wsl_append_windows_path`: the Windows `PATH` is added to the Linux one.
+- `wsl_mnt_path`: the state, workspace or mirrors directory is under the Windows drives' mount root (`/mnt`), as written or through a symlink.
+- `wsl_append_windows_path`: the Windows `PATH` is added to the Linux one, by the setting or because the `PATH` the runner started with still holds a `/mnt` entry (the setting has not taken effect yet).
+
+Jobs are also denied `/mnt`, every Windows mount and `/run/WSL` for reads and writes. Then the runner runs live probes, each with a control, and refuses to start if any cannot run:
+
+- `wsl_no_windows_drive`: there is no Windows drive to test with (`/mnt/c/Users` cannot be read outside the sandbox, or `cmd.exe` is not at its real path), so a denial would prove nothing. Turn `[automount] enabled=true` on.
+- `wsl_canary_readable`: a job in the sandbox could read `/mnt/c/Users`.
+- `wsl_exe_launchable`: a job in the sandbox could start `cmd.exe`. The sandbox hides `/mnt`, so this probe cannot see live interop by itself: it only shows that `cmd.exe` is out of a job's reach. What covers a live interop state that differs from `wsl.conf` (no `wsl --shutdown` since the change) is the `binfmt_misc` entry check behind `wsl_interop_enabled`, which looks at the running kernel's entry (`WSLInterop` or `WSLInterop-late`) at every start and again at every job.
+- `wsl_probe_unrun`: a probe or its control could not run (the sandbox tool, the mount table or the home directory), or `ls` gave no usable answer (a canary read counts as denied only when `ls` itself answered "cannot access", status 2).
+
+Mirrored networking shares loopback with Windows. The runner asks `wslinfo --networking-mode`; unless it answers `nat`, a job may not ask for a loopback bind (the request is refused), and the allowed hosts are plain DNS names only, never an address literal. Known limit: the runner does not resolve those names, because the proxy that connects is Claude Code's own and not the runner's, so an allowed name that resolves to loopback or to the shared host address is not refused here. That check needs the proxy's resolver, and is left for the next change in this series (the proof run). The `.wslconfig` file is on the Windows side and is not read: `wslinfo` is the only source, and an answer that cannot be had counts as mirrored.
 
 The settings doctor looks for, in `/etc/wsl.conf` (then run `wsl --shutdown` from Windows):
 

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { MACOS_PREVIEW_LABEL, MACOS_PREVIEW_NOTICE, PLATFORM_SUPPORT, WINDOWS_UNSUPPORTED_NOTICE, WSL1_CONVERT_NOTICE } from "../src/platformSupport.js";
+import { MACOS_PREVIEW_LABEL, MACOS_PREVIEW_NOTICE, PLATFORM_SUPPORT, WINDOWS_UNSUPPORTED_NOTICE, platformRow, WSL1_CONVERT_NOTICE } from "../src/platformSupport.js";
 import { SandboxRefused, detectPlatform } from "../src/sandbox/platform.js";
 import { WSL_CODES } from "../src/sandbox/wslChecks.js";
 import { PACKAGE_DIR, srcFiles } from "./helpers/srcFiles.js";
@@ -36,8 +36,14 @@ describe("the README's support matrix", () => {
     expect(matrix).toEqual(PLATFORM_SUPPORT.map((row): [string, string] => [row.name, row.label]));
   });
 
-  it("states macOS and Linux as supported, WSL2 as refused, and native Windows and WSL1 as not supported", () => {
-    expect(PLATFORM_SUPPORT.map((row) => [row.id, row.status])).toEqual([["macos", "preview"], ["linux", "supported"], ["windows", "not_supported"], ["wsl2", "refused"], ["wsl1", "not_supported"]]);
+  it("states macOS and WSL2 as previews, Linux as supported, and native Windows and WSL1 as not supported", () => {
+    expect(PLATFORM_SUPPORT.map((row) => [row.id, row.status])).toEqual([["macos", "preview"], ["linux", "supported"], ["windows", "not_supported"], ["wsl2", "preview"], ["wsl1", "not_supported"]]);
+    expect(matrix.find(([platform]) => platform === "WSL2")?.[1]).toContain(`**${MACOS_PREVIEW_LABEL}**`);
+  });
+
+  it("WSL2 says VM mode is not offered, once, in the row; doctor and the README read it", () => {
+    expect(platformRow("wsl2").vmNotice).toBe("VM mode not supported");
+    expect(PLATFORM_SUPPORT.filter((row) => row.vmNotice !== undefined).map((row) => row.id)).toEqual(["wsl2"]);
   });
 
   it("never shows a platform as supported before it is: only Linux says plain 'supported'", () => {

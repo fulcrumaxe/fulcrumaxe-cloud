@@ -13,7 +13,7 @@ import path from "node:path";
 import { printable } from "../commands/logs.js";
 import { cacheRootsFor } from "../daemon/mirror.js";
 import { cleanEnv } from "../job/cleanEnv.js";
-import { SandboxRefused, type WslMachine } from "./platform.js";
+import { SandboxRefused, wslFacts, type WslMachine } from "./platform.js";
 import { sandboxSettings } from "./sandboxSettings.js";
 import { resolveSandboxTools } from "./select.js";
 
@@ -46,6 +46,8 @@ export interface SandboxProbeInput {
   /** The directory holding the agent binary; the state directory's `engine` subdirectory stands in when there is no binary. */
   binaryDir: string;
   xdgCacheHome?: string | undefined;
+  /** D#587 B-9b: the Windows-side paths a job on WSL2 is denied (`wslDenyPaths` in wslChecks.ts); left out everywhere else. */
+  wslDenyPaths?: readonly string[] | undefined;
   /** Where bubblewrap and socat are looked for. Default: the search path of the clean environment (what `run` uses too, unless a test sets one). */
   searchPath?: string | undefined;
 }
@@ -67,6 +69,7 @@ export function probeSettings(input: SandboxProbeInput): Record<string, unknown>
     workspaceRoot,
     tempRoot,
     mirrorsRoot,
+    ...(input.wslDenyPaths === undefined ? {} : { wslDenyPaths: input.wslDenyPaths }),
   });
 }
 
@@ -199,7 +202,7 @@ export function sandboxLaunch(input: SandboxProbeInput, settings: Record<string,
   }
   try {
     // Absolute paths found on the search path, and a refusal for a missing tool, exactly as the tier check gives them.
-    const tools = resolveSandboxTools(searchPath, { platform: input.platform, wslInterop: host.wsl?.interopEntry() });
+    const tools = resolveSandboxTools(searchPath, { platform: input.platform, ...wslFacts(host.wsl) });
     if (tools === undefined) return { ok: false, result: failure("probe_failed_other", "no sandbox tool is needed here") };
     const binds = readFiles.flatMap((file) => ["--ro-bind-try", file, file]);
     return { ok: true, tool: tools.bwrap, kind: "bubblewrap", args: [...bwrapArgs(settings, (target) => host.isDir(target), coverDeniedFiles ? (target) => host.isFile(target) : undefined, coverDeniedFiles), ...binds, "--", ...command] };
