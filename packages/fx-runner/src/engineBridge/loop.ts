@@ -55,8 +55,13 @@ export interface BridgeStatus {
   reason: RetryWhy | null;
 }
 
+export type TailLike = Pick<EngineTail, "poll" | "ack" | "rewind">;
+
 export interface BridgeLoopDeps {
-  tail: Pick<EngineTail, "poll" | "ack" | "rewind">;
+  /** The engine's own events file. The first tail is the engine's: `status` shows its acked seq. */
+  tail?: TailLike;
+  /** More tails (the engine host's events file), each with its own cursor. Their events are merged into the one ordered stream of the repo. */
+  tails?: readonly TailLike[];
   send: (message: EngineEventsMessage) => Promise<SendOutcome>;
   clock: Clock;
   repoGhId: number;
@@ -78,10 +83,15 @@ type Session = EngineEventsMessage["session"];
 interface Chunk {
   events: EngineEvent[];
 }
+interface TailAck {
+  index: number;
+  /** The last seq of this tail's events in the batch; null when it held only lines that were dropped or skipped. */
+  seq: number | null;
+}
 interface EngineFlight {
   chunks: Chunk[];
-  /** The last engine seq of the batch; null when it held only lines that were dropped or skipped. */
-  ackSeq: number | null;
+  /** One ack per tail the batch took from, each moved only past its own events. */
+  acks: TailAck[];
   drops: DropCounts;
   full: boolean;
 }
@@ -107,7 +117,51 @@ export function splitBatch(session: Session, events: readonly EngineEvent[]): Ch
   return chunks;
 }
 
+/**
+ * Cuts `events` into requests: a request has one session, so the events are grouped by engine instance (in order of first appearance, each session in its own order),
+ * then cut for size. That is one request per session plus size splits, however the sources' times interleave; the cloud keeps each session's seq apart, so the order
+ * between sessions inside one upload means nothing to it.
+ */
+export function splitRuns(repoGhId: number, engineVersion: string, events: readonly EngineEvent[]): Chunk[] {
+  const bySession = new Map<string, EngineEvent[]>();
+  for (const event of events) {
+    const list = bySession.get(event.engine_instance_id);
+    if (list === undefined) bySession.set(event.engine_instance_id, [event]);
+    else list.push(event);
+  }
+  const chunks: Chunk[] = [];
+  for (const [instance, list] of bySession) chunks.push(...splitBatch({ engine_instance_id: instance, repo_gh_id: repoGhId, engine_version: engineVersion }, list));
+  return chunks;
+}
+
+const countSessions = (events: readonly EngineEvent[]): number => new Set(events.map((e) => e.engine_instance_id)).size;
+
+/**
+ * Merges each source's events into one stream by the event's own time. Each source keeps its own order (only the heads are compared, so a source whose clock went back is
+ * not reordered); when two heads have the same time the lower source index goes first, so the same input always gives the same output.
+ */
+export function mergeByTs(sources: readonly (readonly EngineEvent[])[]): Array<{ event: EngineEvent; src: number }> {
+  const at = sources.map(() => 0);
+  const out: Array<{ event: EngineEvent; src: number }> = [];
+  const time = (event: EngineEvent): number => {
+    const t = Date.parse(event.ts);
+    return Number.isFinite(t) ? t : 0;
+  };
+  for (;;) {
+    let best = -1;
+    for (let i = 0; i < sources.length; i++) {
+      const head = sources[i]![at[i]!];
+      if (head === undefined) continue;
+      if (best < 0 || time(head) < time(sources[best]![at[best]!]!)) best = i;
+    }
+    if (best < 0) return out;
+    out.push({ event: sources[best]![at[best]!]!, src: best });
+    at[best]!++;
+  }
+}
+
 export class BridgeLoop {
+  private readonly tails: readonly TailLike[];
   private state: BridgeState = "uploading";
   private failures = 0;
   private reason: RetryWhy | null = null;
@@ -131,6 +185,8 @@ export class BridgeLoop {
     // A version that is not a dotted number would make every request of the session a 400; refuse it before anything is read.
     if (!ENGINE_VERSION_PATTERN.test(deps.engineVersion)) throw new Error("engine-bridge: engineVersion is not a dotted number");
     if (!ENGINE_VERSION_PATTERN.test(deps.bridgeVersion)) throw new Error("engine-bridge: bridgeVersion is not a dotted number");
+    this.tails = [...(deps.tail === undefined ? [] : [deps.tail]), ...(deps.tails ?? [])];
+    if (this.tails.length === 0) throw new Error("engine-bridge: no tail");
     this.bridgeInstance = (deps.newInstanceId ?? randomUUID)();
     this.lastAcked = deps.lastAckedSeq ?? null;
   }
@@ -155,7 +211,7 @@ export class BridgeLoop {
       } catch {
         // fx-swallow-ok: the error text could hold a line of the engine's file; a fixed line is logged and the pass is tried again after a wait
         this.deps.log("engine-bridge: an upload pass failed; trying again later");
-        this.deps.tail.rewind();
+        this.rewindAll();
         this.flight = null;
         wait = this.fail();
       }
@@ -172,22 +228,43 @@ export class BridgeLoop {
     const nowMs = this.deps.clock.now().getTime();
     if (nowMs < this.holdUntil) return this.holdUntil - nowMs;
     if (this.flight === null) {
-      const polled = this.deps.tail.poll();
-      // Every poll that read is acked (an idle one writes nothing): the tail wants an ack or a rewind before it is polled again.
-      if (polled.status === "ok") {
-        const first = polled.events[0];
-        const session: Session | null = first === undefined ? null : { engine_instance_id: first.engine_instance_id, repo_gh_id: this.deps.repoGhId, engine_version: this.deps.engineVersion };
-        const chunks = session === null ? [] : splitBatch(session, polled.events);
-        if (this.shouldHold(polled.events, polled.more, chunks.length, nowMs)) {
-          // Held: the next tick reads these lines (and any that follow) again from the saved cursor. Nothing is lost, nothing is acked, nothing is counted twice.
-          this.deps.tail.rewind();
+      // Each tail is read from its own saved cursor; one that refuses its file (or has no file yet) adds nothing and never stops the others.
+      const polls = this.tails.map((tail, index) => ({ tail, index, polled: tail.poll() }));
+      // Every poll that read is acked (an idle one writes nothing): a tail wants an ack or a rewind before it is polled again.
+      const reads = polls.filter((p) => p.polled.status === "ok");
+      if (reads.length > 0) {
+        const merged = mergeByTs(reads.map((p) => p.polled.events));
+        let take = merged.map((m) => ({ event: m.event, tail: reads[m.src]!.index }));
+        let events = take.map((t) => t.event);
+        let used = reads;
+        // A batch of nothing but "alive" from more than one session would be a request each, and two sessions each heard every 5 minutes do not fit the idle budget. The engine's
+        // session (the first tail with events) is the one agents' liveness is read from, so it goes alone, every time it is due; the host's "alive" events wait for the next batch
+        // that is not only "alive", and go on their own only when the engine has none or the host's poll is full (`more`). Chosen by source, never by time, so a clock that is
+        // wrong in one file cannot starve the other.
+        if (events.length > 0 && events.every((e) => SLIM_KINDS.has(e.kind)) && countSessions(events) > 1) {
+          const first = reads.find((p) => p.polled.events.length > 0)!;
+          if (!reads.some((p) => p.index !== first.index && p.polled.more)) {
+            take = take.filter((t) => t.tail === first.index);
+            used = reads.filter((p) => p.index === first.index || p.polled.events.length === 0);
+            for (const p of reads) if (!used.includes(p)) p.tail.rewind();
+            events = take.map((t) => t.event);
+          }
+        }
+        const more = used.some((p) => p.polled.more);
+        const chunks = splitRuns(this.deps.repoGhId, this.deps.engineVersion, events);
+        // Two sessions are two requests however few the events: only a request cut for size makes a batch one that goes at once.
+        if (this.shouldHold(events, more, chunks.length > countSessions(events) ? 2 : 1, nowMs)) {
+          // Held: the next tick reads these lines (and any that follow) again from the saved cursors. Nothing is lost, nothing is acked, nothing is counted twice.
+          this.rewindAll();
         } else {
           this.heldSince = null;
+          const drops = emptyDrops();
+          for (const p of used) for (const reason of REASONS) drops[reason] += p.polled.dropped[reason];
           this.flight = {
             chunks,
-            ackSeq: polled.events.length > 0 ? polled.events[polled.events.length - 1]!.seq : null,
-            drops: polled.dropped,
-            full: polled.more,
+            acks: used.map((p) => ({ index: p.index, seq: p.polled.events.length > 0 ? p.polled.events[p.polled.events.length - 1]!.seq : null })),
+            drops,
+            full: used.some((p) => p.polled.more),
           };
         }
       }
@@ -200,23 +277,28 @@ export class BridgeLoop {
         if (wait !== null) return wait;
         flight.chunks.shift();
       }
-      // Every request of the batch is stored: only now does the cursor move, and only past this batch.
+      // Every request of the batch is stored: only now do the cursors move, each past its own events.
       try {
-        this.deps.tail.ack(flight.ackSeq);
+        for (const a of flight.acks) this.tails[a.index]!.ack(a.seq);
       } catch {
         // fx-swallow-ok: a cursor that cannot be saved is a failed pass; the batch is read again and the cloud drops the repeats by their seq
         this.deps.log("engine-bridge: the cursor could not be saved; trying again later");
-        this.deps.tail.rewind();
+        this.rewindAll();
         this.flight = null;
         return this.fail();
       }
-      if (flight.ackSeq !== null) this.lastAcked = Math.max(this.lastAcked ?? -1, flight.ackSeq);
+      const own = flight.acks.find((a) => a.index === 0);
+      if (own !== undefined && own.seq !== null) this.lastAcked = Math.max(this.lastAcked ?? -1, own.seq);
       for (const reason of REASONS) this.pendingDrops[reason] += flight.drops[reason];
       this.flight = null;
     }
     const bridgeWait = await this.sendOwn();
     if (bridgeWait !== null) return bridgeWait;
     return flight !== null && flight.full ? 0 : FLUSH_MS;
+  }
+
+  private rewindAll(): void {
+    for (const tail of this.tails) tail.rewind();
   }
 
   /** Whether a poll's events wait for company. Only a batch that holds events, none of them an ask, that is not full and still fits one request, and whose window is open. */

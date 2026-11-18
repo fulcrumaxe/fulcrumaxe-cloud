@@ -414,6 +414,17 @@ describe('engine bridge tables [pg]', () => {
       expect((await fresh())!.as_of).toBe('2026-11-16T10:50:00.000Z');
     });
 
+    it("a host-spool session (an engine-kind session with no source ages) heard more recently never hides the engine's source ages", async () => {
+      await admin.query(`DELETE FROM engine_sessions WHERE repo_id = $1`, [a.repoId]);
+      const eng = await mk('engine', '3 hours', { event: '2026-11-16T10:00:00Z', heard: '60 seconds', ages: { loop: 10800 } });
+      await mk('engine', '2 hours', { event: '2026-11-16T10:30:00Z', beat: '2026-11-16T10:30:00Z', heard: '10 seconds' });
+      const f = (await fresh())!;
+      expect(f.source_ages_s).toEqual({ loop: 10800 });
+      // Heard age is still the newest of all sessions.
+      expect(f.heard_age_s).toBe(10);
+      expect(eng).toBeTruthy();
+    });
+
     it('orders sessions by the server clock: a session whose client-sent first event is far in the future does not stay the newest', async () => {
       await admin.query(`DELETE FROM engine_sessions WHERE repo_id = $1`, [a.repoId]);
       const future = await mk('engine', '5 hours', { event: '2026-11-16T10:00:00Z', heard: '5 hours', ages: { loop: 99 }, firstEvent: '2099-01-01T00:00:00Z' });
