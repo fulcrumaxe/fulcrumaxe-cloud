@@ -30,6 +30,10 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
   // to decide whether its deferred focus is still wanted.
   let externalFocusCount = 0;
   let inRestoreFocus = false;
+  // The window a person opened or focused themselves (a trusted dock tap, key
+  // or click) while the saved layout was still waiting to be restored at boot.
+  // restoreLayout() reads it so the late restore cannot take that window back.
+  let userWindowId = null;
   let cascadeOffset = 0;
   const CASCADE_STEP = 30;
   const CASCADE_MAX = 210;
@@ -273,7 +277,20 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
     removeItem(PERSIST_KEY);
   }
 
+  // Called from open() and focus(). Only a real user action counts: the event
+  // being dispatched is trusted. Boot code, restores and scripted calls are not.
+  function _noteUserWindow(appId) {
+    if (restoringLayout || inRestoreFocus) return;
+    var ev;
+    try { ev = window.event; } catch (e) { ev = null; }
+    if (ev && ev.isTrusted) userWindowId = appId;
+  }
+
   function restoreLayout() {
+    // Taken before anything below can change it. Cleared so a later call (a
+    // layout reload) starts from what the person does after this point.
+    var keepId = userWindowId;
+    userWindowId = null;
     try {
       // The current workspace comes back first, so windows restored with a
       // membership of 2..4 are hidden or shown against the right one.
@@ -292,6 +309,10 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
       } finally {
         restoringLayout = false;
       }
+      // The person opened a window before this restore ran. The other saved
+      // windows are back, but each open() above focused its own window; give
+      // the focus (and, on a phone, the one visible slot) back to theirs.
+      if (keepId && windows[keepId]) _restoreFocus(keepId);
     } catch (e) {}
   }
 
@@ -430,6 +451,7 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
   }
 
   function open(appId, launchArg) {
+    _noteUserWindow(appId);
     if (windows[appId]) {
       // C27 decision 4: launching a running app goes to it, wherever it is.
       // Phones have no workspaces, so there it is the plain restore + focus.
@@ -1065,6 +1087,7 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
 
   function focus(appId) {
     if (!inRestoreFocus) externalFocusCount++;
+    _noteUserWindow(appId);
     const ws = windows[appId];
     if (!ws) return;
 
