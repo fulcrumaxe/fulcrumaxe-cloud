@@ -221,7 +221,18 @@ async function boot(page: Page) {
   await page.goto("/");
   await waitForDesktop(page);
 }
-async function openMemory(page: Page) {
+// After a reload the shell puts the saved windows back about 200 ms after the desktop is up, and a dock press on an open window in front minimizes it.
+// So after a reload this waits for the restored window and presses the dock only when there is none or it came back minimized.
+async function openMemory(page: Page, afterReload = false) {
+  const win = page.locator(WIN);
+  if (afterReload) {
+    await win.waitFor({ state: "attached", timeout: 10_000 }).catch(() => undefined);
+    if ((await win.count()) > 0 && !(await win.evaluate((el) => el.classList.contains("minimized")))) {
+      await expect(win).toBeVisible();
+      await expect(win).not.toHaveClass(/opening/);
+      return;
+    }
+  }
   await page.locator('.dock-icon[data-app-id="memory"]').click();
   await expect(page.locator(WIN)).toBeVisible();
   await expect(page.locator(WIN)).not.toHaveClass(/opening/);
@@ -329,7 +340,7 @@ test.describe("D#601 MEM-4a3: Memory app (mocked routes)", () => {
     // after a reload of the whole page the badges are the route's number again
     await page.reload();
     await waitForDesktop(page);
-    await openMemory(page);
+    await openMemory(page, true);
     await expect(tid(page, "mem-card")).toHaveCount(4);
     expect(await badges()).toEqual({ queueRepo: "3", queueItem: "1", listRepo: "3", listItem: "1" });
     const counts = mock.requests.filter((r) => r.startsWith("GET /api/v1/memory/pending-counts"));
@@ -350,7 +361,7 @@ test.describe("D#601 MEM-4a3: Memory app (mocked routes)", () => {
     expect(mock.requests).toContain(`POST /api/v1/memory/${uuid(4)}/decide {"to":"rejected"}`);
     await page.reload();
     await waitForDesktop(page);
-    await openMemory(page);
+    await openMemory(page, true);
     await expect(tid(page, "mem-card")).toHaveCount(3);
     await expect(cardOf(page, uuid(3))).toHaveCount(0);
   });

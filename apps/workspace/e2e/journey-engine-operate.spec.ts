@@ -42,9 +42,16 @@ test.afterEach(async ({}, info) => {
   }
   if (failures.length > 0) throw new Error(`${failures.length} undo step(s) failed, so the state may be left changed (see "Failed undo recovery" in engine-operate-journeys.md):\n- ${failures.join("\n- ")}`);
 });
-/** Opens the Team window (a reload may restore it) on the journey's repo. */
-async function team(page: Page): Promise<void> {
-  if (!(await page.locator(WIN).isVisible())) await page.locator('.dock-icon[data-app-id="team"]').click();
+/**
+ * Opens the Team window on the journey's repo. After a reload the shell puts the saved windows back about 200 ms after it reaches the desktop, and a
+ * dock press on a window that is open and in front minimizes it. So a window that is merely not visible yet must never be pressed: after a reload this
+ * waits for the restore to bring the window back, and presses the dock only when there is none or when it came back minimized.
+ */
+async function team(page: Page, afterReload = false): Promise<void> {
+  const win = page.locator(WIN);
+  if (afterReload) await win.waitFor({ state: "attached", timeout: 10_000 }).catch(() => undefined);
+  const minimized = (await win.count()) > 0 && (await win.evaluate((el) => el.classList.contains("minimized")));
+  if ((await win.count()) === 0 || minimized) await page.locator('.dock-icon[data-app-id="team"]').click();
   await expect(page.locator(WIN)).toBeVisible();
   await expect(page.locator(WIN)).not.toHaveClass(/opening/);
   await expect(t(page, "tm-loading")).toHaveCount(0);
@@ -54,7 +61,7 @@ async function team(page: Page): Promise<void> {
 async function reload(page: Page): Promise<void> {
   await page.reload();
   await waitForDesktop(page);
-  await team(page);
+  await team(page, true);
 }
 const cmdRow = (page: Page, text: RegExp) => page.locator(`${WIN} [data-testid="tm-cmd"]`).filter({ hasText: text }).first();
 /** Waits for a command row to reach a state and returns the seconds it took. */
@@ -111,7 +118,10 @@ test("O3 answer an engine ask from Needs-you with a note", async ({ page }) => {
   await expect(row).toHaveCount(0, { timeout: WAIT }); // applied: the ask is gone
   await page.reload();
   await waitForDesktop(page);
-  await page.locator('.dock-icon[data-app-id="needs-you"]').click();
+  // The saved window comes back about 200 ms after the desktop; a dock press on it then would minimize it, so press only when it is missing or minimized.
+  const ny = page.locator(NY);
+  await ny.waitFor({ state: "attached", timeout: 10_000 }).catch(() => undefined);
+  if ((await ny.count()) === 0 || (await ny.evaluate((el) => el.classList.contains("minimized")))) await page.locator('.dock-icon[data-app-id="needs-you"]').click();
   await expect(page.locator(`${NY} [data-testid="ny-row"][data-kind="engine"]`)).toHaveCount(0);
   ledger("O3", "ask_rows_after_reload", 0);
   machine("O3", "command_state_applied", 1);
