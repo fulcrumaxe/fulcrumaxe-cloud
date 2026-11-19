@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "engine_instance_id": "0b9b3a52-6c1e-4c53-9d5f-1f3f2a6f7a10",
+  "seq": 0,
+  "ts": "2026-11-16T15:00:00.000Z",
+  "kind": "usage_tick",
+  "model_tier": "sonnet-5",
+  "input_tokens": 1,
+  "output_tokens": 1,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0
+}

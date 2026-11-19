@@ -56,7 +56,7 @@ describe("schema/engine-events.v1.json against the zod schemas", () => {
     const hash = createHash("sha256").update(readFileSync(SCHEMA_PATH)).digest("hex");
     console.log(`engine-events.v1.json sha256 ${hash}`);
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(hash).toBe("b75a90d72b63dd00aa6de64c05e03dcf2b1478c091f39b733370e22dad624204");
+    expect(hash).toBe("996aaa828cd0dbfda10c67e9fc22ed297796d4b2b48cfea5715d703503ff4730");
   });
 
   it("names one option per kind, with the closed envelope", () => {

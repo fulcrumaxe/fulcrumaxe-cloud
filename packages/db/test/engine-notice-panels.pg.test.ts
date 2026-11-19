@@ -20,7 +20,12 @@ const MIGRATION_1032 = read('../migrations/1032_engine_plan.sql');
 const MIGRATION_1039 = read('../migrations/1039_engine_notice_panels.sql');
 
 const ALL = [...ENGINE_NOTICE_PANELS];
-const KINDS: readonly string[] = ENGINE_EVENT_KINDS;
+/**
+ * Kinds the protocol accepts before the cloud's ingest knows them (D#845 ON-1 added `usage_tick`; the migration that teaches `engine_kind_spec` and the panel map is a later row).
+ * They are left out of the SQL comparisons below. A test at the end fails the moment the SQL names one, so the migration that adds it must also delete it from this list.
+ */
+const PENDING_INGEST: readonly string[] = ['usage_tick'];
+const KINDS: readonly string[] = ENGINE_EVENT_KINDS.filter((k) => !PENDING_INGEST.includes(k));
 
 /** The `WHEN '<kind>'` literals of one SQL function body. */
 function whenKinds(sql: string, fn: string): string[] {
@@ -232,5 +237,12 @@ describe('engine notice panels: the kind map (migration 1039)', () => {
     await expect(app.query(`SELECT engine_panels_union(ARRAY['merged'], false)`)).rejects.toThrow(/permission denied/);
     // The definer has no CREATE on the schema left over from the ownership transfer.
     expect((await admin.query(`SELECT has_schema_privilege('engine_bridge_definer', 'public', 'CREATE') AS c`)).rows[0].c).toBe(false);
+  });
+
+  it('a kind the protocol accepts before ingest knows it is named by no SQL yet, so the migration that adds it removes it from the pending list', () => {
+    for (const kind of PENDING_INGEST) {
+      expect(ENGINE_EVENT_KINDS as readonly string[], kind).toContain(kind);
+      for (const sql of [MIGRATION_1027, MIGRATION_1032, MIGRATION_1039, newestIngestMigration()]) expect(sql.includes(`'${kind}'`), kind).toBe(false);
+    }
   });
 });

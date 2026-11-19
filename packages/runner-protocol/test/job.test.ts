@@ -107,7 +107,7 @@ describe("job schema", () => {
   });
 
   it("task.kind is closed, and task and role_card are required", () => {
-    expect([...TASK_KINDS]).toEqual(["implement", "fix", "review", "advise"]);
+    expect([...TASK_KINDS]).toEqual(["implement", "fix", "review", "advise", "survey"]);
     for (const kind of TASK_KINDS) expect(JobSchema.safeParse(sampleJob({ task: { kind, prompt: "p", prompt_sha256: sha256Text("p") } })).success, kind).toBe(true);
     for (const kind of ["", "exec", "IMPLEMENT"]) expect(JobSchema.safeParse(sampleJob({ task: { kind, prompt: "p", prompt_sha256: sha256Text("p") } })).success, kind).toBe(false);
     expect(JobSchema.safeParse(sampleJob({ task: undefined })).success).toBe(false);
