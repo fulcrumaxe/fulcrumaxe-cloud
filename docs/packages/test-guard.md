@@ -40,7 +40,7 @@ None — this package only patches global `fetch` and `child_process` internals 
 
 ## Security notes
 
-See `../security.md`. `FX_FORBID_MODEL_CALLS=1` is set by `scripts/check.sh`'s test step (`env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN FX_FORBID_MODEL_CALLS=1 pnpm test`) and by `.github/workflows/ci.yml`, so every automated test run — locally via `scripts/check.sh` and in CI — runs with the guard active; see `../operations.md` for how CI invokes it.
+See `../security.md`. `FX_FORBID_MODEL_CALLS=1` is set by `scripts/check.sh`'s test step (`env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN FX_FORBID_MODEL_CALLS=1 pnpm test`) and by `.github/workflows/ci.yml`, so every automated test run — locally via `scripts/check.sh` and in CI — runs with the guard active (the one thing `scripts/check.sh` runs outside Vitest, `go vet` and `go test` for the VM helper under `GOTOOLCHAIN=local`, is not covered by it; that Go code makes no model call); see `../operations.md` for how CI invokes it.
 
 ## Tests
 

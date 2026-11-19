@@ -79,6 +79,7 @@ API routes under `apps/web/app/api/` (also enumerated in
 | `/api/runner/engine/commands/{id}/ack` | POST | The runner reports what became of one command: applied, refused, expired or not confirmed (#998). |
 | `/api/runner/engine/decide` | POST | The engine's decision request, forwarded by the runner (#993). The cloud answers from the repo's dial and the halt marker, and refuses when the bridge or operate is off. |
 | `/api/runner/engine/dials` | GET | The runner reads what the repo's engine decisions currently resolve to, to write the engine's ceiling file (#1002). |
+| `/api/runners/{id}/sandbox-commands` (#1079) | POST | Session only: an owner or admin queues a signed `stop_sandbox`, `delete_sandbox` or `reap_sandboxes` command for one runner, body `{kind, name?}` (`apps/web/app/api/runners/[id]/controls.ts`, `enqueueSandboxCommand` in `packages/runner-cloud`). The fleet page offers the buttons only for a runner that is not removed, listed the `sandbox_commands_v1` capability at protocol 21 or later and has a current inventory; the route re-checks the runner itself, and the database decides the role. |
 | `/api/shell/session` | GET, POST | The one route module every rewritten shell-session path lands on — see How it works. |
 | `/api/stripe/webhook` | POST | Stripe webhook receiver; signature verification and event handling live in `@fx/billing`. |
 | `/api/system/mode` | GET | Static `{cloud: true}`. |

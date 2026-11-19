@@ -232,6 +232,8 @@ handling and role assertions, the RLS inventory check, and per-table
 privilege/RLS coverage for most tables the migrations create) -- roughly
 9.1k of the package's ~14.7k lines are test code.
 
+`@fulcrumaxe/runner-protocol` is a dev dependency only: `test/engine-notice-panels.pg.test.ts` reads the protocol's `ENGINE_EVENT_KINDS` so that the notice migration's list of event kinds is checked against the wire list. The package's own source has no runtime dependency on it.
+
 `pnpm test` runs `bash scripts/test-pg.sh`, which execs `vitest run`.
 Vitest's own `globalSetup` (`test/globalSetup.ts`) is what actually
 provisions the database the suite runs against: unless `DATABASE_URL_TEST`

@@ -105,7 +105,10 @@ label forces one too. A push to the default branch always runs full. A merge-que
 The same file also lists `extra_edges` of kind `test` (a package whose tests read another package's
 files is selected with it, without its own dependents) and `repo_wide_scans` (a package whose test
 walks other packages' files is selected when a changed file matches its `watch` globs), so a
-change can select packages you did not edit (#974). In the merge queue a dormant `Rollup` step
+change can select packages you did not edit (#974). If you add a test that walks the whole tree
+for a name (a table, a field, an import), add its package to `repo_wide_scans` in the same change, as
+`packages/runner-cloud` does for the sandbox inventory (#1066); otherwise a change far from it never
+runs it. In the merge queue a dormant `Rollup` step
 (`scripts/ci/rollup-position.mjs`, on only while the repository variable `ROLLUP_ENABLED` is
 `true`) can make an entry wait for the one on top of it instead of running the suites (#939).
 
