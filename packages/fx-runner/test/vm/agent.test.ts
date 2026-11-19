@@ -56,7 +56,7 @@ describe.skipIf(!hasPython || unixSocketsRefusedHere)("agent.py over a Unix sock
   });
 
   it("answers ping and counters", async () => {
-    expect(await client.ping()).toEqual({ ok: true, proto: 1 });
+    expect(await client.ping()).toEqual({ ok: true, proto: 1, caps: ["exec_stream", "kill"] });
     const c = (await client.counters()) as { ok: boolean; uptime_s: number; mem_kb: Record<string, number>; cpu_ticks: number[]; nics: string[]; agent: { requests: number } };
     expect(c).toMatchObject({ ok: true });
     expect(c.uptime_s).toBeGreaterThan(0);

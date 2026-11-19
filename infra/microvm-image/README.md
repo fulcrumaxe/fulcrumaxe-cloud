@@ -7,7 +7,27 @@ The guest side of the Firecracker microVM engine: what runs inside the VM, and t
 | `lock.json` | Every download (guest kernel, Firecracker, the agent CLI, node, pnpm, and the build tools), by URL and sha256, for amd64 and arm64. |
 | `Dockerfile` | The template image: the sandbox image's user and home, plus pnpm, Postgres 18, Chromium (Playwright, with its own sandbox on), Python, jq, bubblewrap and iproute2. It reads `lock.json`; it holds no URL of its own. |
 | `guest/init` | PID 1 of the guest. Mounts the pseudo file systems, writes `/etc/hosts`, brings up loopback, starts the agent. The guest has no network device. |
-| `guest/agent.py` | The in-guest agent: ping, exec, put, get and counters over vsock, for the host only. |
+| `guest/agent.py` | The in-guest agent: ping, exec, put, get and counters over vsock, for the host only; plus `exec_stream` and `kill` (below). |
+
+## Streaming exec and kill
+
+`ping` answers `caps: ["exec_stream", "kill"]`; the protocol number is still 1, and a daemon that does not look at `caps` is unaffected. A
+daemon checks `caps` before it uses either op. The frame shapes, the flow control and the closed error codes are written in the header of
+`guest/agent.py`. In short: `exec_stream` (caller-chosen `id`) answers with ordered `data` frames and exactly one `exit` frame, and reads
+the child's pipes only as fast as the host reads the frames; `kill` (by `id`) signals the command's process group, answers `unknown_id`
+for an id the agent never ran, and returns the recorded result for a command that already ended. The old one-shot `exec` is unchanged.
+
+A streaming client must treat any frame other than `data` or `exit` as fatal, and a stream that closes without an `exit` frame as a
+lost command. After the leader exits the agent ends the stream within 5 s whatever output still arrives; before that it kills the
+command's remaining processes, including ones that left the process group with `setsid`. They are found by a marker variable
+(`FX_CMD_ID`, set last in the command's environment), not by cgroup or subreaper: the guest's init mounts no cgroup2, and a subreaper
+would have to reap strangers' children. A process that clears its environment escapes the sweep; the guest treats code it runs as
+root-equivalent, so this is cleanup, not a boundary.
+
+The guest files are inside the root disk, so a change to `agent.py` changes the agent digest in `build.json`, the root disk digest, and the
+image's entry in the signed update metadata. No digest of the agent is committed to the repo: the release workflow computes it from the
+checked-in file, checks it against the build, and signs it in `microvm-image-release.yml`. A new image is therefore published by a release
+run of that workflow, not by this change.
 
 ## Building a root disk
 

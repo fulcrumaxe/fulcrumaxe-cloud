@@ -121,4 +121,70 @@ export class AgentClient {
     if (header["ok"] !== true) throw new Error(`get refused: ${String(header["error"])}`);
     return blobs[0] ?? Buffer.alloc(0);
   }
+
+  /** `kill` on its own connection; the agent's whole reply, `ok` or not. */
+  kill = async (id: string, signal?: string): Promise<Record<string, unknown>> => (await this.request({ op: "kill", id, ...(signal === undefined ? {} : { signal }) })).header;
+}
+
+export type StreamEvent = { ev: "data"; stream: "stdout" | "stderr"; seq: number; data: Buffer } | { ev: "exit"; seq: number; exit: number | null; signal: number | null; timed_out: boolean; error?: string };
+export type StreamItem = StreamEvent | { ev: "error"; header: Record<string, unknown> };
+
+/**
+ * A streaming exec (`exec_stream`) read one frame at a time: the socket is read on demand, so a caller that is slow to ask
+ * for the next frame really does leave bytes in the kernel buffer and the agent blocked on its send. `next` is null after the agent closes.
+ */
+export class ExecStream {
+  private readonly chunks: AsyncIterator<Buffer>;
+  private rest: Buffer = Buffer.alloc(0);
+  private constructor(readonly socket: net.Socket) {
+    // the async iterator reads from the socket only when asked for the next chunk, which is what lets a slow caller stall the agent
+    this.chunks = socket[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
+  }
+
+  static async open(connect: Connect, header: Record<string, unknown>, stdin: Buffer = Buffer.alloc(0)): Promise<ExecStream> {
+    const socket = await connect();
+    const json = Buffer.from(JSON.stringify({ ...header, op: "exec_stream", stdin_size: stdin.length }));
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(json.length);
+    socket.write(Buffer.concat([length, json, stdin]));
+    return new ExecStream(socket);
+  }
+
+  private async take(n: number): Promise<Buffer | null> {
+    while (this.rest.length < n) {
+      let step: IteratorResult<Buffer>;
+      try {
+        step = await this.chunks.next();
+      } catch {
+        return null; // fx-swallow-ok: a reset connection reads as closed
+      }
+      if (step.done === true) return null;
+      this.rest = Buffer.concat([this.rest, step.value]);
+    }
+    const out = this.rest.subarray(0, n);
+    this.rest = this.rest.subarray(n);
+    return out;
+  }
+
+  async next(): Promise<StreamItem | null> {
+    const len = await this.take(4);
+    if (len === null) return null;
+    const body = await this.take(len.readUInt32BE(0));
+    if (body === null) throw new Error("the agent closed in the middle of a frame");
+    const head = JSON.parse(body.toString("utf8")) as Record<string, unknown>;
+    if (head["ev"] === "data") {
+      const data = await this.take(Number(head["size"]));
+      if (data === null) throw new Error("the agent closed in the middle of a data frame");
+      return { ev: "data", stream: head["stream"] as "stdout" | "stderr", seq: head["seq"] as number, data };
+    }
+    if (head["ev"] === "exit") return head as unknown as StreamEvent;
+    return { ev: "error", header: head };
+  }
+
+  async all(): Promise<StreamItem[]> {
+    const out: StreamItem[] = [];
+    for (let e = await this.next(); e !== null; e = await this.next()) out.push(e);
+    this.socket.destroy(); // the agent waits for the host to end its side before it closes
+    return out;
+  }
 }
