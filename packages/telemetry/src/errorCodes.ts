@@ -585,6 +585,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "engine_not_connected",
   "halted",
   "too_many_pending",
+  "too_many",
   "already_cancelled",
   "expired",
   "already_delivered",

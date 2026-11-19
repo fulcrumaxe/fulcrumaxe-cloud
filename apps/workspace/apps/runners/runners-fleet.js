@@ -57,6 +57,7 @@ export function readRunner(r) {
     repos: (Array.isArray(r.repos) ? r.repos : []).map((x) => text(x && x.name)).filter(Boolean),
     labels: (Array.isArray(r.labels) ? r.labels : []).map(text).filter(Boolean),
     facts: r.facts && typeof r.facts === "object" ? { os: text(r.facts.os), arch: text(r.facts.arch), engine: text(r.facts.engine) } : null,
+    sandboxes: readSandboxes(r.sandboxes),
     paused: r.paused === true,
     draining: r.draining === true,
     controls: r.controls && typeof r.controls === "object" ? r.controls : null,
@@ -172,9 +173,9 @@ export function createFleet({ call = api, signal, onChange = () => {}, schedule 
   let polling = false;
   // Runners whose check was waiting when a read failed: the re-reads stop and the row says so until the next press or the next good read.
   const readFailedFor = new Set();
-  // One timer at a time, and only while some runner's check is still waiting: an idle page never polls.
+  // One timer at a time, and only while some runner's check or sandbox command is still waiting: an idle page never polls.
   function pollWhileChecking() {
-    if (polling || (signal && signal.aborted) || !st.fleet || !st.fleet.runners.some((r) => r.check === "checking")) return;
+    if (polling || (signal && signal.aborted) || !st.fleet || !st.fleet.runners.some((r) => r.check === "checking" || sandboxCommandWaiting(r))) return;
     polling = true;
     schedule(() => {
       polling = false;
@@ -220,7 +221,7 @@ export function createFleet({ call = api, signal, onChange = () => {}, schedule 
         pending.delete(id);
         return "";
       }
-      result = sentence(ACTION_SENTENCES, e);
+      result = action === SANDBOX_ACTION ? sandboxSentence(e) : sentence(ACTION_SENTENCES, e);
     }
     pending.delete(id);
     await load();
@@ -228,6 +229,131 @@ export function createFleet({ call = api, signal, onChange = () => {}, schedule 
   }
   return { load, act, isPending: (id) => pending.has(id), readFailed: (id) => readFailedFor.has(id), get state() { return st; } };
 }
+
+// ── Sandboxes (D#587 B-7b-ii) ───────────────────────────────────────────
+// What a runner reports about its sandboxes is its own claim, shown as such: every list says how old it is and reads "out of date" once the runner no longer
+// reports. The buttons send a typed command (stop, delete or reap); the answer comes back through the same read, one state per command.
+
+export const SANDBOX_ACTION = "sandbox-commands";
+export const SANDBOX_STATE_WORDS = { creating: "Starting", running: "Running", stopped: "Stopped", snapshotted: "Saved as a snapshot", error: "Error" };
+export const SANDBOX_STATUS_WORDS = {
+  never: "This runner hasn't reported any sandboxes.",
+  current: "",
+  stale_older: "Out of date: this runner no longer reports sandboxes (it is on an older version).",
+  stale_engine: "Out of date: this runner has gone back to the standard sandbox and no longer reports these.",
+  removed: "Runner removed. These were its last reported sandboxes.",
+};
+export const SANDBOX_COMMAND_STATE_WORDS = {
+  pending: "Waiting for the runner",
+  delivered: "Sent, waiting for the runner's answer",
+  applied: "Done",
+  refused: "Refused",
+  expired: "Expired before the runner took it",
+  unanswered: "Unanswered: the runner never replied",
+  cancelled: "Cancelled",
+};
+export const SANDBOX_REFUSAL_WORDS = { name_unknown: "the runner has no such sandbox", in_use: "it is in use", unsupported: "this runner can't do that yet", failed: "it failed on the runner" };
+export const SANDBOX_NOT_ADMIN = "Only owners and admins can change a runner's sandboxes.";
+const SANDBOX_SENTENCES = {
+  400: "That sandbox request isn't valid.",
+  403: SANDBOX_NOT_ADMIN,
+  404: "That runner isn't there any more.",
+  429: "Too many sandbox requests are waiting for this runner. Try again once they finish.",
+  other: "That request couldn't be sent. Try again.",
+};
+const SANDBOX_CONFLICTS = { runner_revoked: "That runner was removed.", not_supported: "This runner doesn't take sandbox commands." };
+export const sandboxSentence = (e) => (statusOf(e) === 409 ? (e && Object.hasOwn(SANDBOX_CONFLICTS, e.code) ? SANDBOX_CONFLICTS[e.code] : SANDBOX_SENTENCES.other) : sentence(SANDBOX_SENTENCES, e));
+
+const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const when = (v) => (typeof v === "string" ? v : "");
+
+/** The sandbox part of one runner of the read, or null when the cloud sent none. */
+export function readSandboxes(s) {
+  if (!s || typeof s !== "object" || !Object.hasOwn(SANDBOX_STATUS_WORDS, s.status)) return null;
+  const lim = s.limits && typeof s.limits === "object" ? s.limits : {};
+  return {
+    status: s.status,
+    seenAt: when(s.seen_at),
+    canCommand: s.can_command === true,
+    limits: { vms: num(lim.vms), vcpus: num(lim.vcpus), memoryMb: num(lim.memory_mb) },
+    boxes: (Array.isArray(s.sandboxes) ? s.sandboxes : []).filter((b) => b && typeof b.name === "string").map((b) => ({ name: b.name, state: text(b.state), created: when(b.created_at), lastUsed: when(b.last_used_at), diskBytes: num(b.disk_bytes) || 0, snapshots: num(b.snapshot_count) || 0, snapshotAgeS: num(b.snapshot_newest_secs) })),
+    commands: (Array.isArray(s.commands) ? s.commands : []).filter((c) => c && typeof c.id === "string" && Object.hasOwn(SANDBOX_COMMAND_STATE_WORDS, c.state)).map((c) => ({ id: c.id, kind: text(c.kind), name: text(c.name), state: c.state, refusal: text(c.refusal), issued: when(c.issued_at) })),
+  };
+}
+
+/** True while a command of this runner waits for the runner or its answer: the page reads again on its own until none does. */
+export const sandboxCommandWaiting = (r) => r.sandboxes !== null && r.sandboxes.commands.some((c) => c.state === "pending" || c.state === "delivered");
+
+export function bytesText(n) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return (i === 0 || v >= 100 ? Math.round(v) : Math.round(v * 10) / 10) + " " + units[i];
+}
+const mbText = (mb) => (mb >= 1024 ? Math.round((mb / 1024) * 10) / 10 + " GB" : mb + " MB");
+/** "5 min", "3 h", "2 days" for a number of seconds. */
+export function spanText(secs) {
+  if (secs < 90) return secs + " s";
+  const mins = Math.floor(secs / 60);
+  if (mins < 90) return mins + " min";
+  const hours = Math.floor(mins / 60);
+  return hours < 48 ? hours + " h" : Math.floor(hours / 24) + " days";
+}
+
+/** The line above the list: how old it is, and the reason when it is out of date. */
+export function sandboxStatusText(s, nowMs) {
+  const age = s.seenAt ? "Reported " + agoText(s.seenAt, nowMs) : "";
+  return [age, SANDBOX_STATUS_WORDS[s.status]].filter(Boolean).join(" · ");
+}
+
+/** The quota lines: sandboxes running against the VM limit, the other limits as the runner gave them, and the disk the listed sandboxes hold. */
+export function sandboxQuotaLines(s) {
+  const live = s.boxes.filter((b) => b.state === "running" || b.state === "creating").length;
+  return [
+    s.limits.vms === null ? "Running: " + live + " (limit not reported)" : "Running: " + live + " of " + s.limits.vms + " allowed",
+    "Disk in use: " + bytesText(s.boxes.reduce((n, b) => n + b.diskBytes, 0)),
+    "vCPU limit: " + (s.limits.vcpus === null ? "not reported" : s.limits.vcpus) + " · Memory limit: " + (s.limits.memoryMb === null ? "not reported" : mbText(s.limits.memoryMb)),
+  ];
+}
+
+/** One sandbox as { name, state, ages, disk }; a missing field reads "not reported", never blank. */
+export function sandboxLine(b, nowMs) {
+  const created = b.created ? "Created " + agoText(b.created, nowMs) : "Created: not reported";
+  const used = b.lastUsed ? "Last used " + agoText(b.lastUsed, nowMs) : "Never used";
+  const snaps = b.snapshots === 0 ? "No snapshots" : b.snapshots + (b.snapshots === 1 ? " snapshot" : " snapshots") + (b.snapshotAgeS === null ? "" : ", newest " + spanText(b.snapshotAgeS) + " old");
+  return { name: b.name, state: SANDBOX_STATE_WORDS[b.state] || "Unknown", ages: [created, used].join(" · "), disk: bytesText(b.diskBytes) + " · " + snaps };
+}
+
+/** The buttons a sandbox row shows, and the Reap button: [{ action, label, allowed, reason }]. The cloud checks all of it again when the request arrives. */
+export function sandboxControls(s, isAdmin, box) {
+  const why = !isAdmin ? SANDBOX_NOT_ADMIN : !s.canCommand ? SANDBOX_STATUS_WORDS[s.status] || "This runner doesn't take sandbox commands." : "";
+  if (box === undefined) {
+    const none = !s.boxes.some((b) => b.state === "stopped" || b.state === "snapshotted");
+    return { action: "reap_sandboxes", label: "Reap stopped sandboxes", allowed: why === "" && !none, reason: why || (none ? "No sandbox is stopped." : "") };
+  }
+  const live = box.state === "running" || box.state === "creating";
+  return [
+    { action: "stop_sandbox", label: "Stop", allowed: why === "" && live, reason: why || (live ? "" : "Not running.") },
+    { action: "delete_sandbox", label: "Delete", allowed: why === "", reason: why },
+  ];
+}
+
+/** One command as a sentence: "Delete sandbox web-1: Refused (it is in use)". */
+export function sandboxCommandText(c) {
+  const what = c.kind === "reap_sandboxes" ? "Reap stopped sandboxes" : (c.kind === "stop_sandbox" ? "Stop" : "Delete") + " sandbox " + c.name;
+  const refused = c.state === "refused" && c.refusal ? " (" + (SANDBOX_REFUSAL_WORDS[c.refusal] || "no reason given") + ")" : "";
+  return what + ": " + SANDBOX_COMMAND_STATE_WORDS[c.state] + refused;
+}
+
+/** The confirmation a delete or a reap asks for, in words. */
+export const sandboxConfirm = (action, name) =>
+  action === "delete_sandbox"
+    ? { title: "Delete " + name + "?", body: "The sandbox and its snapshots are removed from the runner's machine. This can't be undone.", button: "Delete sandbox" }
+    : { title: "Reap stopped sandboxes?", body: "Every stopped sandbox on this runner, with its snapshots, is removed from the machine. This can't be undone.", button: "Reap sandboxes" };
 
 // ── Add a runner ────────────────────────────────────────────────────────
 

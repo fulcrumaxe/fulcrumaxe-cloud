@@ -7,7 +7,7 @@
 import { h, timeNode } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import {
-  CHECK_READ_FAILED, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, heldBackText, loadRepoChoices, provText, runnerLimitText, stateParts, versionText,
+  CHECK_READ_FAILED, SANDBOX_ACTION, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, heldBackText, loadRepoChoices, provText, runnerLimitText, sandboxCommandText, sandboxConfirm, sandboxControls, sandboxLine, sandboxQuotaLines, sandboxStatusText, stateParts, versionText,
 } from "./runners-fleet.js";
 
 const FULC = window.FULC;
@@ -117,6 +117,57 @@ function mountApp(contentEl) {
       actions: [yes, button("Cancel", null, closeDialog)],
     });
     focusId("runners-remove-confirm");
+  }
+
+  // ── sandboxes (D#587 B-7b-ii): each button enqueues a command; Delete and Reap ask in the page first, never with a browser dialog ──
+  function confirmSandbox(r, body, from) {
+    const words = sandboxConfirm(body.kind, body.name);
+    const err = h("p", { class: "runners-error", role: "alert", tabindex: "-1" });
+    const yes = button(words.button, { "data-testid": "runners-sandbox-confirm" }, async () => {
+      if (yes.getAttribute("aria-disabled") === "true") return;
+      yes.setAttribute("aria-disabled", "true");
+      const said = await fleet.act(r.id, SANDBOX_ACTION, body);
+      if (said === "") return closeDialog();
+      yes.setAttribute("aria-disabled", "false");
+      err.textContent = said;
+      err.focus();
+    });
+    openDialog({ title: words.title, from, labelId: "runners-sandbox-h", body: h("div", null, h("p", null, words.body), err), actions: [yes, button("Cancel", { "data-testid": "runners-sandbox-cancel" }, closeDialog)] });
+    focusId("runners-sandbox-cancel");
+  }
+  function sandboxButton(r, c, body, id, pending, label) {
+    const off = !c.allowed || pending;
+    return h("span", { class: "runners-control" },
+      h("button", {
+        type: "button", class: "runners-btn", id, "aria-disabled": off ? "true" : "false", "aria-describedby": !c.allowed && c.reason ? id + "-why" : null, "aria-label": label, "data-testid": "runners-sandbox-" + c.action,
+        onClick: async () => {
+          if (!c.allowed || fleet.isPending(r.id)) return;
+          if (c.action !== "stop_sandbox") return confirmSandbox(r, body, id);
+          rowErrors.delete(r.id);
+          const said = await fleet.act(r.id, SANDBOX_ACTION, body);
+          if (said) rowErrors.set(r.id, said);
+          paint();
+        },
+      }, c.label),
+      !c.allowed && c.reason ? h("span", { class: "runners-reason runners-muted", id: id + "-why", "data-testid": "runners-reason" }, c.reason) : null);
+  }
+  function sandboxSection(r, isAdmin, pending) {
+    const s = r.sandboxes;
+    const now = Date.now();
+    const reap = sandboxControls(s, isAdmin);
+    return h("section", { class: "runners-sandboxes", "data-testid": "runners-sandboxes", "data-status": s.status, "aria-label": "Sandboxes of " + r.name },
+      h("h4", { class: "runners-subtitle" }, "Sandboxes"),
+      h("p", { class: "runners-muted", "data-testid": "runners-sandbox-status" }, sandboxStatusText(s, now) || "Not reported yet"),
+      s.status === "never" ? null : h("ul", { class: "runners-quota", "data-testid": "runners-sandbox-quota" }, sandboxQuotaLines(s).map((l) => h("li", null, l))),
+      s.boxes.length === 0 ? null : h("ul", { class: "runners-boxes", "data-testid": "runners-sandbox-list" }, s.boxes.map((b) => {
+        const line = sandboxLine(b, now);
+        return h("li", { class: "runners-box", "data-testid": "runners-sandbox" },
+          h("strong", null, h("bdi", null, line.name)), " · ", h("span", { "data-testid": "runners-sandbox-state" }, line.state),
+          h("div", { class: "runners-muted" }, line.ages), h("div", { class: "runners-muted" }, line.disk),
+          h("div", { class: "runners-controls" }, sandboxControls(s, isAdmin, b).map((c) => sandboxButton(r, c, { kind: c.action, name: b.name }, "runners-" + r.id + "-sb-" + b.name + "-" + c.action, pending, c.label + " " + b.name))));
+      })),
+      s.boxes.length === 0 && s.commands.length === 0 ? null : h("div", { class: "runners-controls" }, sandboxButton(r, reap, { kind: "reap_sandboxes" }, "runners-" + r.id + "-sb-reap", pending, reap.label)),
+      s.commands.length === 0 ? null : h("ul", { class: "runners-commands", "data-testid": "runners-sandbox-commands" }, s.commands.map((c) => h("li", { "data-testid": "runners-sandbox-command", "data-state": c.state }, sandboxCommandText(c), " ", c.issued ? [timeNode(c.issued, true)] : ""))));
   }
 
   // ── the "Add a runner" sheet ──
@@ -239,6 +290,7 @@ function mountApp(contentEl) {
         ...line("Labels", r.labels.length === 0 ? "None" : h("bdi", null, r.labels.join(", "))),
         ...line("Machine", factsText(r))),
       provText(r) ? h("p", { class: "runners-muted", "data-testid": "runners-prov" }, provText(r)) : null,
+      r.sandboxes ? sandboxSection(r, isAdmin, pending) : null,
       controls.length ? h("div", { class: "runners-controls" }, controls) : null,
       r.again && isAdmin ? button("Register this machine again", { id: "runners-" + r.id + "-again", "data-testid": "runners-again" }, () => openSheet("runners-" + r.id + "-again", r.again)) : null,
       said ? h("p", { class: "runners-error", role: "alert", "data-testid": "runners-row-error" }, said) : null);

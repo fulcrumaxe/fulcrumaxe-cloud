@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import type { RunnerCloudDeps, RunnerHttpResponse, SessionPrincipal } from "./http.js";
+import { readSandboxViews } from "./fleetSandboxes.js";
 import { readFleet, type ReportedFactsLoader } from "./readModel.js";
 
 /**
@@ -23,10 +24,12 @@ const readReportedFacts: ReportedFactsLoader = async (client: PoolClient, accoun
  */
 export async function listRunners(deps: RunnerCloudDeps, principal: SessionPrincipal): Promise<RunnerHttpResponse> {
   const { runners, viewer, account } = await readFleet(deps, principal.accountId, principal.userId, readReportedFacts);
+  // D#587 B-7b-ii: each runner's sandboxes, host limits and recent sandbox commands, for display. Read apart from the fleet so nothing about them reaches a decision.
+  const sandboxes = await readSandboxViews(deps, principal.accountId, principal.userId);
   return {
     status: 200,
     body: {
-      runners,
+      runners: runners.map((r) => ({ ...r, sandboxes: sandboxes.get(r.id) ?? null })),
       viewer,
       account,
       copy: {

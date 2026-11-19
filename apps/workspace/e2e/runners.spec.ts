@@ -38,6 +38,13 @@ const REPOS = {
   next_cursor: null,
 };
 
+const sbBox = (name: string, over: Record<string, unknown> = {}) => ({ name, state: "stopped", created_at: "2026-10-13T12:00:00.000Z", last_used_at: null, disk_bytes: 1500000000, snapshot_count: 2, snapshot_newest_secs: 7200, ...over });
+const cmd = (n: number, state: string, over: Record<string, unknown> = {}) => ({ id: `77777777-7777-4777-8777-77777777770${n}`, kind: "delete_sandbox", name: "web-2", state, refusal: null, issued_at: "2026-10-15T11:58:00.000Z", expires_at: "2026-10-15T12:03:00.000Z", ...over });
+const sandboxView = (over: Record<string, unknown> = {}) => ({
+  status: "current", seen_at: "2026-10-15T11:55:00.000Z", can_command: true, limits: { vms: 4, vcpus: 16, memory_mb: 32768, templates: ["base-a"] },
+  sandboxes: [sbBox("web-1", { state: "running", last_used_at: "2026-10-15T11:00:00.000Z" }), sbBox("web-2")], commands: [], ...over,
+});
+
 interface Mock {
   runners: unknown[];
   role: "owner" | "admin" | "member";
@@ -54,6 +61,8 @@ interface Mock {
   getFails: boolean;
   /** PING-UX: what the runner reads after a Check runner now press (and after each later read). */
   checkReplies: Array<Record<string, unknown>>;
+  /** D#587 B-7b-ii: when set, a POST to a sandbox-commands route is refused with this status and code instead of queuing a command. */
+  sandboxRefusal: { status: number; code: string } | null;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -63,7 +72,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
   const mock: Mock = {
-    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, gets: 0, getFails: false, checkReplies: [], ...tweak,
+    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, gets: 0, getFails: false, checkReplies: [], sandboxRefusal: null, ...tweak,
   };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
@@ -110,6 +119,19 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     if (/^\/api\/runners\/[^/]+\/check$/.test(p) && req.method() === "POST") {
       mock.posts.push({ path: p, body: JSON.parse(req.postData() ?? "{}") });
       return json(route, 200, { runner_id: p.split("/")[3], sent_at: "2026-10-15T12:00:00.000Z" });
+    }
+    const sbx = p.match(/^\/api\/runners\/([^/]+)\/sandbox-commands$/);
+    if (sbx && req.method() === "POST") {
+      const body = JSON.parse(req.postData() ?? "{}");
+      mock.posts.push({ path: p, body });
+      await new Promise((r) => setTimeout(r, 150)); // long enough that a second click lands while the first is in flight
+      if (mock.sandboxRefusal) return json(route, mock.sandboxRefusal.status, { error: { code: mock.sandboxRefusal.code, message: SERVER_TEXT, request_id: "r" } });
+      mock.runners = mock.runners.map((r) => {
+        const v = r as { id: string; sandboxes?: { commands: unknown[] } };
+        if (v.id !== sbx[1] || !v.sandboxes) return r;
+        return { ...(r as object), sandboxes: { ...v.sandboxes, commands: [{ id: "77777777-7777-4777-8777-77777777777" + v.sandboxes.commands.length, kind: body.kind, name: body.name ?? null, state: "pending", refusal: null, issued_at: "2026-10-15T12:00:00.000Z", expires_at: "2026-10-15T12:05:00.000Z" }, ...v.sandboxes.commands] } };
+      });
+      return json(route, 200, { command_id: "77777777-7777-4777-8777-777777777770", runner_id: sbx[1], kind: body.kind, state: "pending", expires_at: "2026-10-15T12:05:00.000Z" });
     }
     const act = p.match(/^\/api\/runners\/([^/]+)\/(pause|drain|resume|rename|remove)$/);
     if (act && req.method() === "POST") {
@@ -462,5 +484,129 @@ test.describe("D#605 FL-9: the fleet page", () => {
     await page.keyboard.press("Escape");
     await expect(page.locator("dialog[open]")).toHaveCount(0);
     await expect(t(page, "runners-add")).toBeFocused();
+  });
+});
+
+// D#587 B-7b-ii: each runner's sandboxes, the host quota, and Stop, Delete and Reap. The words are in runners-fleet.js and tested in test/runners-sandboxes.test.mjs.
+test.describe("D#587 B-7b-ii: the sandboxes of a runner", () => {
+  const sb = (page: Page) => t(page, "runners-sandboxes");
+  const noBrowserDialog = (page: Page) => page.on("dialog", (d) => { throw new Error("a browser " + d.type() + " dialog opened: " + d.message()); });
+
+  test("shows each sandbox with its state, ages and disk, the quota against the limits, how old the report is, and every command state in words", async ({ page }) => {
+    noBrowserDialog(page);
+    const { errors } = await setup(page, {
+      runners: [
+        runner({ sandboxes: sandboxView({ commands: [cmd(1, "pending"), cmd(2, "delivered", { kind: "stop_sandbox", name: "web-1" }), cmd(3, "applied", { kind: "reap_sandboxes", name: null }), cmd(4, "refused", { refusal: "in_use" }), cmd(5, "expired"), cmd(6, "unanswered")] }) }),
+        runner({ id: R2, name: "Back on the host sandbox", sandboxes: sandboxView({ status: "stale_engine", can_command: false }) }),
+        runner({ id: R3, name: "Never reported", sandboxes: sandboxView({ status: "never", seen_at: null, can_command: false, sandboxes: [], limits: { vms: null, vcpus: null, memory_mb: null, templates: [] } }) }),
+      ],
+    });
+    await open(page);
+    const first = sb(page).nth(0);
+    await expect(first.locator('[data-testid="runners-sandbox"]')).toHaveCount(2);
+    await expect(first.locator('[data-testid="runners-sandbox"]').nth(0)).toContainText("web-1");
+    await expect(first.locator('[data-testid="runners-sandbox-state"]').nth(0)).toHaveText("Running");
+    await expect(first.locator('[data-testid="runners-sandbox"]').nth(1)).toContainText("1.5 GB · 2 snapshots, newest 2 h old");
+    await expect(first.locator('[data-testid="runners-sandbox"]').nth(1)).toContainText("Never used");
+    await expect(first.locator('[data-testid="runners-sandbox-quota"]')).toContainText("Running: 1 of 4 allowed");
+    await expect(first.locator('[data-testid="runners-sandbox-quota"]')).toContainText("vCPU limit: 16 · Memory limit: 32 GB");
+    await expect(first.locator('[data-testid="runners-sandbox-status"]')).toContainText("Reported");
+    const lines = first.locator('[data-testid="runners-sandbox-command"]');
+    await expect(lines).toHaveCount(6);
+    for (const [n, words] of [[0, "Waiting for the runner"], [1, "Sent, waiting for the runner's answer"], [2, "Done"], [3, "Refused (it is in use)"], [4, "Expired before the runner took it"], [5, "Unanswered: the runner never replied"]] as const) await expect(lines.nth(n)).toContainText(words);
+    // A list the runner no longer reports says it is out of date, and its buttons are off with that reason.
+    const stale = sb(page).nth(1);
+    await expect(stale.locator('[data-testid="runners-sandbox-status"]')).toContainText("Out of date");
+    await expect(stale.locator('[data-testid="runners-sandbox-delete_sandbox"]').first()).toHaveAttribute("aria-disabled", "true");
+    await expect(stale.locator('[data-testid="runners-reason"]').first()).toContainText("Out of date");
+    await expect(sb(page).nth(2).locator('[data-testid="runners-sandbox-status"]')).toHaveText("This runner hasn't reported any sandboxes.");
+    await clean(page, errors);
+  });
+
+  test("a member sees the list and every button off with the reason, and a click sends nothing", async ({ page }) => {
+    noBrowserDialog(page);
+    const { mock, errors } = await setup(page, { role: "member", runners: [runner({ sandboxes: sandboxView() })] });
+    await open(page);
+    const buttons = sb(page).locator("button");
+    await expect(buttons).toHaveCount(5); // Stop and Delete for web-1, Stop and Delete for web-2, Reap
+    for (let n = 0; n < 5; n++) {
+      await expect(buttons.nth(n)).toHaveAttribute("aria-disabled", "true");
+      await buttons.nth(n).click({ force: true });
+    }
+    await expect(sb(page).locator('[data-testid="runners-reason"]').first()).toHaveText("Only owners and admins can change a runner's sandboxes.");
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    expect(mock.posts).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("Stop sends one request on a double click and the command reads Waiting for the runner after the refresh; Stop is off on a stopped sandbox", async ({ page }) => {
+    noBrowserDialog(page);
+    const { mock, errors } = await setup(page, { runners: [runner({ sandboxes: sandboxView() })] });
+    await open(page);
+    const stop = sb(page).locator('[data-testid="runners-sandbox-stop_sandbox"]');
+    await expect(stop.nth(1)).toHaveAttribute("aria-disabled", "true"); // web-2 is stopped
+    // Two presses in the same tick on every device (two taps one after the other can land after the first answer, and are then two honest requests).
+    await stop.nth(0).evaluate((el: HTMLElement) => { el.click(); el.click(); });
+    await expect(sb(page).locator('[data-testid="runners-sandbox-command"]')).toHaveText(/Stop sandbox web-1: Waiting for the runner/);
+    expect(mock.posts.filter((p) => p.path.endsWith("/sandbox-commands")).map((p) => p.body)).toEqual([{ kind: "stop_sandbox", name: "web-1" }]);
+    await clean(page, errors);
+  });
+
+  test("Delete and Reap ask in the page first: Cancel and Escape send nothing and return focus, Confirm sends one request", async ({ page }) => {
+    noBrowserDialog(page);
+    const { mock, errors } = await setup(page, { runners: [runner({ sandboxes: sandboxView() })] });
+    await open(page);
+    const posts = () => mock.posts.filter((p) => p.path.endsWith("/sandbox-commands")).map((p) => p.body);
+    const del = sb(page).locator('[data-testid="runners-sandbox-delete_sandbox"]').nth(1);
+    await press(del);
+    await expect(page.locator("dialog[open]")).toContainText("Delete web-2?");
+    await press(page.locator('[data-testid="runners-sandbox-cancel"]'));
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await expect(del).toBeFocused();
+    await press(del);
+    await page.keyboard.press("Escape");
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    expect(posts()).toEqual([]);
+    await press(del);
+    await press(page.locator('[data-testid="runners-sandbox-confirm"]'));
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await expect(sb(page).locator('[data-testid="runners-sandbox-command"]')).toHaveText(/Delete sandbox web-2: Waiting for the runner/);
+    expect(posts()).toEqual([{ kind: "delete_sandbox", name: "web-2" }]);
+    const reap = sb(page).locator('[data-testid="runners-sandbox-reap_sandboxes"]');
+    await press(reap);
+    await expect(page.locator("dialog[open]")).toContainText("Reap stopped sandboxes?");
+    await press(page.locator('[data-testid="runners-sandbox-confirm"]'));
+    await expect(sb(page).locator('[data-testid="runners-sandbox-command"]').first()).toHaveText(/Reap stopped sandboxes: Waiting for the runner/);
+    expect(posts()).toEqual([{ kind: "delete_sandbox", name: "web-2" }, { kind: "reap_sandboxes" }]);
+    await clean(page, errors);
+  });
+
+  test("a refusal keeps the confirmation open with its own sentence and never the server's text: 429 too many, 409 removed", async ({ page }) => {
+    noBrowserDialog(page);
+    const { mock, errors } = await setup(page, { runners: [runner({ sandboxes: sandboxView() })], sandboxRefusal: { status: 429, code: "too_many" } });
+    await open(page);
+    const del = sb(page).locator('[data-testid="runners-sandbox-delete_sandbox"]').nth(1);
+    await press(del);
+    await press(page.locator('[data-testid="runners-sandbox-confirm"]'));
+    await expect(page.locator("dialog[open] [role=alert]")).toContainText("Too many sandbox requests are waiting for this runner");
+    mock.sandboxRefusal = { status: 409, code: "runner_revoked" };
+    await press(page.locator('[data-testid="runners-sandbox-confirm"]'));
+    await expect(page.locator("dialog[open] [role=alert]")).toHaveText("That runner was removed.");
+    await press(page.locator('[data-testid="runners-sandbox-cancel"]'));
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("the sandboxes section and its confirmation pass axe under two themes", async ({ page }) => {
+    const { errors } = await setup(page, { runners: [runner({ sandboxes: sandboxView({ commands: [cmd(1, "refused", { refusal: "in_use" }), cmd(2, "unanswered")] }) })] });
+    await open(page);
+    for (const theme of ["classic-crt", "nord"]) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page, WIN), theme).toEqual([]);
+    }
+    await press(sb(page).locator('[data-testid="runners-sandbox-delete_sandbox"]').nth(0));
+    expect(await axeSeriousOrCritical(page, "dialog[open]"), "confirmation").toEqual([]);
+    await press(page.locator('[data-testid="runners-sandbox-cancel"]'));
+    await clean(page, errors);
   });
 });
