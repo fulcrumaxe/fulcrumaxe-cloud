@@ -1,11 +1,13 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { socketTmpRoot } from "../../helpers/tmpRoot.js";
 import { vmAssetName, type BootDigests, type TargetListing } from "../../../src/vm/bootGate.js";
 import { agentAtVsockDir, type GuestAgent } from "../../../src/vm/sandboxd/guestAgent.js";
 import { createHelperClient } from "../../../src/vm/sandboxd/helperClient.js";
+import { fdInspectDir, hasForeignListener, realFdOps, type HostFacts } from "../../../src/vm/sandboxd/vsockFd.js";
+import { TeardownError, type ProcessLister } from "../../../src/vm/sandboxd/teardown.js";
 import { Sandboxd, type SandboxdDeps } from "../../../src/vm/sandboxd/sandboxd.js";
 
 /** Test doubles for B-2b-iii: a helper that speaks the real frames over a real Unix socket, and a guest agent that speaks the real agent protocol. */
@@ -13,7 +15,8 @@ const cleanups: Array<() => void> = [];
 export const runCleanups = (): void => {
   for (const fn of cleanups.splice(0).reverse()) fn();
 };
-export const scratch = (): string => {
+export const onCleanup = (fn: () => void): void => void cleanups.push(fn);
+export const scratch =(): string => {
   const dir = mkdtempSync(path.join(socketTmpRoot(), "fxd-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
@@ -21,18 +24,26 @@ export const scratch = (): string => {
 
 /** Reads length-prefixed frames off a socket. */
 function frames(sock: net.Socket, onFrame: (header: Record<string, unknown>, body: Buffer) => void): void {
-  let buf = Buffer.alloc(0);
+  // chunks are joined only once a whole frame can be present: a 64 MiB body must not be re-copied for every 64 KiB that arrives
+  let chunks: Buffer[] = [];
+  let have = 0;
+  let need = 4;
   sock.on("data", (c) => {
-    buf = Buffer.concat([buf, c]);
-    for (;;) {
-      if (buf.length < 4) return;
+    chunks.push(c);
+    have += c.length;
+    while (have >= need) {
+      const buf = chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks);
+      chunks = [buf];
       const n = buf.readUInt32BE(0);
-      if (buf.length < 4 + n) return;
+      if (buf.length < 4 + n) return void (need = 4 + n);
       const header = JSON.parse(buf.subarray(4, 4 + n).toString()) as Record<string, unknown>;
       const size = Number(header["size"] ?? header["stdin_size"] ?? 0);
-      if (buf.length < 4 + n + size) return;
+      if (buf.length < 4 + n + size) return void (need = 4 + n + size);
       const body = buf.subarray(4 + n, 4 + n + size);
-      buf = buf.subarray(4 + n + size);
+      const rest = buf.subarray(4 + n + size);
+      chunks = rest.length > 0 ? [rest] : [];
+      have = rest.length;
+      need = 4;
       onFrame(header, body);
     }
   });
@@ -42,6 +53,14 @@ export interface FakeAgent {
   /** argv of every exec the agent was asked to run, in order. */
   execs: string[][];
   pings: number;
+  /** The op of every request, in order: a refused path must leave this empty. */
+  ops: string[];
+  /** Files `put` stored, as agent.py would write them (mode already masked to 0o777). */
+  files: Map<string, { data: Buffer; mode: number }>;
+  /** The newest connection, so a test can look at its write buffer. */
+  lastSock?: net.Socket;
+  /** Replaces the `get` reply: raw bytes after a frame that names `size`. */
+  getReply?: (path: string) => { header: object; blobs: Buffer[] } | undefined;
   /** Holds every accepted connection until released: a guest that is slow to answer. */
   gate?: Promise<void>;
   close(): void;
@@ -50,9 +69,10 @@ export interface FakeAgent {
 /** A guest agent on `<dir>/v.sock`, behind Firecracker's `CONNECT` handshake. It runs exec for real (a new session, as agent.py does) and answers when the process ends. */
 export function startFakeAgent(dir: string): FakeAgent {
   const children = new Set<ChildProcess>();
-  const agent: FakeAgent = { execs: [], pings: 0, close: () => undefined };
+  const agent: FakeAgent = { execs: [], pings: 0, ops: [], files: new Map(), close: () => undefined };
   const server = net.createServer((sock) => {
     sock.on("error", () => undefined);
+    agent.lastSock = sock;
     let pre = "";
     const onHello = (c: Buffer): void => {
       pre += c.toString("latin1");
@@ -73,10 +93,26 @@ export function startFakeAgent(dir: string): FakeAgent {
     if (!sock.destroyed) sock.write(Buffer.concat([len, body, ...blobs]));
   };
   async function serve(sock: net.Socket, header: Record<string, unknown>, body: Buffer): Promise<void> {
+    agent.ops.push(String(header["op"]));
     await agent.gate;
     if (header["op"] === "ping") {
       agent.pings++;
       return send(sock, { ok: true, proto: 1 });
+    }
+    // agent.py's put and get: the whole body is held, the path must be absolute, the mode is masked, and a body over MAX_BYTES is not read
+    if (header["op"] === "put") {
+      const p = String(header["path"]);
+      if (!p.startsWith("/")) return send(sock, { ok: false, error: "ValueError: path must be absolute" });
+      agent.files.set(p, { data: Buffer.from(body), mode: Number(header["mode"] ?? 0o644) & 0o777 });
+      return send(sock, { ok: true });
+    }
+    if (header["op"] === "get") {
+      const p = String(header["path"]);
+      const custom = agent.getReply?.(p);
+      if (custom !== undefined) return send(sock, custom.header, ...custom.blobs);
+      const file = agent.files.get(p);
+      if (file === undefined) return send(sock, { ok: false, error: "FileNotFoundError" });
+      return send(sock, { ok: true, size: file.data.length }, file.data);
     }
     if (header["op"] !== "exec") return send(sock, { ok: false, error: "unknown op" });
     const argv = header["argv"] as string[];
@@ -158,7 +194,7 @@ export function startFakeHelper(root: string, gid = process.getgid?.() ?? 1000):
       const dir = dirOf(id);
       if (verb === "prepare") {
         mkdirSync(dir, { recursive: true });
-        chmodSync(dir, 0o710);
+        chmodSync(dir, 0o1770);
         h.entries.set(id, { dir });
       } else {
         if (!h.entries.has(id)) return `${JSON.stringify({ ok: false, protocol: 1, code: "unknown_sandbox" })}\n`;
@@ -211,15 +247,9 @@ export function makeRig(over: { listing?: TargetListing; euid?: number; agentFor
     euid: over.euid ?? process.geteuid?.(),
     helper: createHelperClient(connectUnix(helper.sock), 5000),
     boot: { listTargets: async () => over.listing ?? listing(), facts: () => ({ arch: "amd64", digests: DIGESTS }) },
-    inspectDir: (dir) => {
-      try {
-        const st = lstatSync(dir);
-        return { isDirectory: st.isDirectory(), isSymbolicLink: st.isSymbolicLink(), uid: st.uid, gid: st.gid, mode: st.mode };
-      } catch {
-        return undefined;
-      }
-    },
-    agentFor: over.agentFor ?? agentAtVsockDir,
+    inspectDir: (dir) => fdInspectDir(dir, realOps()),
+    hasForeignListener: (dir) => hasForeignListener(dir, realOps()),
+    agentFor: over.agentFor ?? ((dir: string) => agentAtVsockDir(dir, realOps())),
     now: () => 1_700_000_000,
     bootTimeoutMs: 3000,
     pollMs: 20,
@@ -236,3 +266,51 @@ export function startSilentProxy(): string {
   cleanups.push(() => server.close());
   return file;
 }
+
+/**
+ * Runs `run` with setTimeout/clearTimeout wrapped, and reports the timers made with one of the (distinctive) delays `ms` and how many of
+ * them were never cleared: a timer left pending after its race was decided is a leak the suite would otherwise not see.
+ */
+export async function trackTimers(ms: number[], run: () => Promise<unknown>): Promise<{ made: number; uncleared: number }> {
+  const made = new Set<unknown>();
+  const cleared = new Set<unknown>();
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  globalThis.setTimeout = ((fn: () => void, delay?: number, ...rest: unknown[]) => {
+    const handle = (realSet as (...a: unknown[]) => NodeJS.Timeout)(fn, delay, ...rest);
+    if (delay !== undefined && ms.includes(delay)) made.add(handle);
+    return handle;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+    cleared.add(handle);
+    return realClear(handle);
+  }) as typeof clearTimeout;
+  try {
+    await run();
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+    for (const handle of made) if (!cleared.has(handle)) realClear(handle as NodeJS.Timeout); // never leave one behind, whatever the assertion says
+  }
+  return { made: made.size, uncleared: [...made].filter((h) => !cleared.has(h)).length };
+}
+
+/** What the daemon's caller reads once from the process and passes in. */
+export const HOST: HostFacts = { euid: process.geteuid?.(), platform: process.platform };
+export const realOps = () => realFdOps(HOST);
+
+/** `pgrep -c <name>`: its exit status 1 with a count of 0 means none; any other failure is a failure of the check, never "none". */
+export const makePgrepLister = (bin = "pgrep"): ProcessLister => ({
+  count: (name) =>
+    new Promise((resolve, reject) => {
+      execFile(bin, ["-c", name], { timeout: 5000, env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin" } }, (err, stdout) => {
+        const text = String(stdout).trim();
+        const none = err !== null && (err as { code?: unknown }).code === 1;
+        // a missing binary or a crash prints nothing: an empty answer is a failed check, never a count of 0
+        if ((err === null || none) && /^\d+$/.test(text)) return resolve(Number(text));
+        reject(new TeardownError([], -1));
+      });
+    }),
+});
+export const pgrepLister: ProcessLister = makePgrepLister();
+

@@ -112,9 +112,9 @@ describe("the daemon is not root", () => {
 });
 
 describe("the vsock directory the helper names is checked again", () => {
-  const facts = { isDirectory: true, isSymbolicLink: false, uid: 1000, gid: 2000, mode: 0o40710 };
+  const facts = { isDirectory: true, isSymbolicLink: false, uid: 1000, gid: 2000, mode: 0o41770 };
   const ok = (dir = "/j/vsock/a", f = facts, gid = 2000) => checkVsockDir(dir, "a", gid, 1000, f);
-  it("accepts exactly the shape the helper builds", () => expect(ok()).toBe("/j/vsock/a"));
+  it("accepts exactly the shape the helper builds: 01770 (runner owner, sandbox group, sticky)", () => expect(ok()).toBe("/j/vsock/a"));
   it.each([
     ["relative", () => ok("j/vsock/a")],
     ["dot-dot", () => ok("/j/../vsock/a")],
@@ -126,6 +126,9 @@ describe("the vsock directory the helper names is checked again", () => {
     ["not a directory", () => ok("/j/vsock/a", { ...facts, isDirectory: false })],
     ["another owner", () => ok("/j/vsock/a", { ...facts, uid: 0 })],
     ["another group", () => ok("/j/vsock/a", facts, 2001)],
+    ["mode 0710 (the superseded one)", () => ok("/j/vsock/a", { ...facts, mode: 0o40710 })],
+    ["mode 0770 without the sticky bit", () => ok("/j/vsock/a", { ...facts, mode: 0o40770 })],
+    ["mode 01777", () => ok("/j/vsock/a", { ...facts, mode: 0o41777 })],
     ["mode 0750", () => ok("/j/vsock/a", { ...facts, mode: 0o40750 })],
     ["mode 0711", () => ok("/j/vsock/a", { ...facts, mode: 0o40711 })],
   ])("refuses %s", (_label, run) => expect(run).toThrow(SandboxdError));
@@ -166,5 +169,35 @@ describe("list never waits on prepare", () => {
     release();
     await creating;
     expect(rig.daemon.list()[0]?.state).toBe("running");
+  });
+});
+
+describe("stop leaves no timer pending", () => {
+  it("the start-wait and settle timers that race the commands are cleared once the race is decided", async () => {
+    const rig = makeRig({ extra: { startWaitMs: 31_000, pollMs: 7_001 } });
+    const sb = await rig.daemon.create(params("alpha"));
+    const cmd = await sb.runCommand({ cmd: "sleep", args: ["31.2"] });
+    const made = new Map<unknown, number>();
+    const cleared = new Set<unknown>();
+    const realSet = globalThis.setTimeout;
+    const realClear = globalThis.clearTimeout;
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      const handle = realSet(fn, ms);
+      if (ms === 31_000 || ms === 7_001) made.set(handle, ms);
+      return handle;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+      cleared.add(handle);
+      return realClear(handle);
+    }) as typeof clearTimeout;
+    try {
+      await sb.stop();
+    } finally {
+      globalThis.setTimeout = realSet;
+      globalThis.clearTimeout = realClear;
+    }
+    await cmd.wait().catch(() => undefined);
+    expect(made.size).toBeGreaterThanOrEqual(2); // both races armed a timer
+    expect([...made.keys()].filter((h) => !cleared.has(h))).toEqual([]);
   });
 });

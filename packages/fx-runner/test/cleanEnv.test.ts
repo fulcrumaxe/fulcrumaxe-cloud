@@ -169,6 +169,28 @@ describe("cleanEnv allowlist", () => {
     }
   });
 
+  it("the guard exempts `/proc/self/fd/${...}` as a template start in the vsock file only, and no other /proc path there", () => {
+    const file = "src/vm/sandboxd/vsockFd.ts";
+    const ok = ["const a = `/proc/self/fd/${dirFd}/${name}`;", "const b = `/proc/self/fd/${sockFd}`;"];
+    for (const good of ok) expect(envAccessViolations(good, file), good).toEqual([]);
+    const bad = [
+      "const a = `/proc/self/${x}`;", "const a = `/proc/1/fd/${x}`;", "const a = `/proc/self/fdx/${x}`;", "const a = `/proc/self/fd/info/${x}`;",
+      "const a = `/proc/self/environ`;", "const a = `/proc/self/fd/x`;", 'const a = "/proc/self/fd/" + x;', 'const a = "/proc/self/fd/${x}";',
+      "const a = `/proc/self/fdinfo/${x}`;",
+      "const a = `/proc/self/fd/${x}/../../cmdline`;", "const a = `/proc/self/fd/${x}/../../../1/cmdline`;", 'const a = `/proc/self/fd/${x}/env${""}iron`;',
+      'const a = `/proc/self/fd/${"../../cmdline"}`;', "const a = '`/proc/self/fd/${x}`';", "const a = '`/proc/self/fd/${x}/../cmdline`';",
+      "const a = String.raw`/proc/self/fd/${x}`;", "const a = tag`/proc/self/fd/${x}`;", "const a = `/proc/self/fd/${`${x}`}`;", "const a = `/proc/self/fd/${`/../${x}`}`;",
+      "const a = `/proc/self/fd/${x}${y}`;", "const a = `/proc/self/fd/${x}/${y}/${z}`;", "const a = `/proc/self/fd/${x}/${y}/`;", "const a = `/proc/self/fd/${x.y}`;",
+      "const a = `/proc/self/fd/${f(x)}`;", "const a = `/proc/self/fd/${x}\\n`;", "const a = `/proc/self/fd/${x}/`;",
+      "const a = `/proc/self/fd/${x}`; const b = `/proc/self/fd/${y}/../..`;",
+      "// `/proc/self/fd/${x}`\nconst a = 1;", "const a = `/proc/${x}/fd/1`;", "const a = `/proc/self/fd/${x}/environ`;", "const a = `/proc/self/fd`;",
+    ];
+    for (const b of bad) expect(envAccessViolations(b, file), b).not.toEqual([]);
+    for (const other of ["src/vm/sandboxd/files.ts", "src/vm/sandboxd/guestAgent.ts", "src/vm/command.ts", "src/daemon/workspaceStubs.ts", "src/job/cleanEnv.ts"]) {
+      expect(envAccessViolations(ok[0] ?? "", other), other).not.toEqual([]);
+    }
+  });
+
   it("the guard lets processGroup.ts name process only as process.kill or process.platform", () => {
     const file = "src/engines/claude/processGroup.ts";
     expect(envAccessViolations("process.kill(-pid, 'SIGTERM'); const w = process.platform !== 'win32';", file)).toEqual([]);
