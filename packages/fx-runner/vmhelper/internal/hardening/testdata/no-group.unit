@@ -1,0 +1,34 @@
+[Unit]
+Description=fx-vmhelper: root service for the local runner's microVM sandboxes
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/libexec/fx/helper -config /etc/fx/helper.json
+Restart=on-failure
+RuntimeDirectory=fx-vmhelper
+RuntimeDirectoryMode=0750
+StateDirectory=fx-vmhelper
+StateDirectoryMode=0700
+ReadWritePaths=/sys/fs/cgroup /srv/jails /srv/snapshots
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_MKNOD
+Delegate=yes
+DeviceAllow=/dev/kvm rwm
+DeviceAllow=/dev/net/tun m
+DeviceAllow=/dev/userfaultfd m
+DevicePolicy=closed
+IPAddressDeny=any
+LockPersonality=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @mount seccomp
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
