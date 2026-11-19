@@ -16,17 +16,20 @@ import { SandboxdCommand, type CommandSpec } from "./command.js";
 import { HelperError, SANDBOX_ID, type Helper, type PreparedReply } from "./helperClient.js";
 import type { GuestAgent } from "./guestAgent.js";
 import { FileError, MAX_FILE_BYTES, checkGuestPath, guestFileMode, type FileContent } from "./files.js";
+import { DEFAULT_KEEP_LAST, DEFAULT_SNAPSHOT_TTL_SECONDS, MAX_KEEP_LAST, MIB, admitSnapshot, loadStore, newSnapshotId, saveStore, snapshotNeedBytes, type SnapshotDeps, type SnapshotMeta } from "./snapshots.js";
 
 export type SandboxState = "creating" | "running" | "stopping" | "stopped";
-export interface CreateParams { name: string; template: string; vcpus: number; memMb: number }
+/** `retention` is the port's: a persistent sandbox is snapshotted by `stop` and restored by `get(name, {resume})`; the default is not persistent. */
+export interface CreateParams { name: string; template: string; vcpus: number; memMb: number; retention?: { persistent: boolean; keepLastSnapshots?: number } }
 /** One file to write; `size` is required (and exact) when `content` is not a Buffer. */
 export interface WriteFile { path: string; mode?: number; size?: number; content: FileContent }
 export interface InventoryRow { name: string; state: SandboxState; createdAt: number }
 
 /** `status` is the HTTP status the overlay's contract names (a taken name is 400 `bad_request`); `code` is fixed text. */
 export class SandboxdError extends Error {
-  constructor(readonly status: number, readonly code: "bad_request" | "not_found" | "conflict" | "not_running" | "vsock_dir_refused" | "agent_not_ready" | "helper_failed") {
-    super(`fx-sandboxd: ${code}`);
+  /** `detail` is numbers only (a snapshot refusal names the two it compared); it never carries a path or anything the helper sent. */
+  constructor(readonly status: number, readonly code: "bad_request" | "not_found" | "conflict" | "not_running" | "vsock_dir_refused" | "agent_not_ready" | "helper_failed" | "snapshot_refused" | "snapshot_mismatch", readonly detail?: string) {
+    super(detail === undefined ? `fx-sandboxd: ${code}` : `fx-sandboxd: ${code}: ${detail}`);
     this.name = "SandboxdError";
   }
 }
@@ -44,6 +47,10 @@ export interface SandboxdDeps {
   /** True when the directory holds a `v.sock_<port>` entry the runner does not own (or one that cannot be examined): the sandbox is then not started. */
   hasForeignListener(vsockDir: string): boolean;
   agentFor(vsockDir: string): GuestAgent;
+  /** Removes the runner's own `v.sock` left in a stopped sandbox's vsock directory (see `removeOwnVsockSocket`); throws when it is not the runner's. */
+  removeVsockSocket(vsockDir: string): void;
+  /** Absent: no sandbox may be persistent. */
+  snapshots?: SnapshotDeps;
   now(): number;
   bootTimeoutMs?: number;
   pollMs?: number;
@@ -70,10 +77,14 @@ interface Record_ {
   state: SandboxState;
   createdAt: number;
   params: CreateParams;
+  /** Oldest first. Only a persistent sandbox has any. */
+  snapshots: SnapshotMeta[];
   agent?: GuestAgent;
   commands: Set<SandboxdCommand>;
   starting: Set<Promise<unknown>>;
   stopping?: Promise<void>;
+  /** The resume in flight: a second `get(name, { resume })` shares it instead of starting another. */
+  resuming?: Promise<void>;
   /** The boot in flight (create or resume), so a teardown can wait for it instead of racing it. */
   bringing?: Promise<void>;
 }
@@ -105,8 +116,74 @@ export class Sandboxd {
   /** Every id the helper may hold a VM for, added before `prepare` is asked: the teardown's list. */
   readonly registered = new Set<string>();
 
+  /** Snapshots whose `snapshot_delete` the helper has not confirmed: they still use disk, so they still count against the quota. */
+  private orphans: SnapshotMeta[] = [];
+  /** Bytes admitted for snapshots that are not yet on the helper's side (set in the same step as the admission), by snapshot id. They count against the quota. */
+  private readonly reserved = new Map<string, number>();
+  /** Ids of snapshots being written right now: they are on `orphans` (so a crash leaves a trace) but the retry of unconfirmed deletes must not touch them. */
+  private readonly writing = new Set<string>();
+
+  /** Sandboxes with snapshots come back from the state file as stopped records; a malformed file stops the daemon rather than forgetting snapshots it holds. */
   constructor(private readonly deps: SandboxdDeps) {
     assertNotRoot(deps.euid);
+    if (deps.snapshots === undefined) return;
+    const stored = loadStore(deps.snapshots.stateDir, deps.euid as number);
+    this.orphans = stored.orphans;
+    for (const s of stored.sandboxes) {
+      const params: CreateParams = { name: s.name, template: s.template, vcpus: s.vcpus, memMb: s.memMb, retention: { persistent: true, keepLastSnapshots: s.keepLast } };
+      this.records.set(s.name, { name: s.name, state: "stopped", createdAt: s.createdAt, params, snapshots: s.snapshots, commands: new Set(), starting: new Set() });
+      this.registered.add(s.name); // the helper may still hold it prepared; the teardown asks it to let go
+    }
+  }
+
+  private persistent(rec: Record_): boolean { return rec.params.retention?.persistent === true; }
+
+  private persist(): void {
+    const snaps = this.deps.snapshots;
+    if (snaps === undefined) return;
+    const sandboxes = [...this.records.values()].filter((r) => r.snapshots.length > 0).map((r) => ({ name: r.name, template: r.params.template, vcpus: r.params.vcpus, memMb: r.params.memMb, createdAt: r.createdAt, keepLast: r.params.retention?.keepLastSnapshots ?? DEFAULT_KEEP_LAST, snapshots: r.snapshots }));
+    saveStore(snaps.stateDir, this.deps.euid as number, { version: 1, sandboxes, orphans: this.orphans });
+  }
+
+  private usedBytes(): number {
+    let sum = 0;
+    for (const r of this.records.values()) for (const s of r.snapshots) sum += s.bytes;
+    for (const s of this.orphans) sum += s.bytes;
+    for (const bytes of this.reserved.values()) sum += bytes;
+    return sum;
+  }
+
+  /**
+   * Takes the snapshots in `gone` out of the records first and writes the state file, then asks the helper to delete them; one the helper does not
+   * confirm stays in `orphans` (still counted, tried again on the next pass). The record list is never ahead of the disk in the dangerous direction:
+   * a snapshot is forgotten only once the helper says it is gone or never had it.
+   */
+  private async dropSnapshots(rec: Record_ | undefined, gone: SnapshotMeta[]): Promise<void> {
+    if (rec !== undefined) rec.snapshots = rec.snapshots.filter((s) => !gone.includes(s));
+    this.orphans.push(...gone);
+    this.persist();
+    for (const s of [...this.orphans]) {
+      if (this.writing.has(s.id)) continue; // being written by a stop that has not heard back yet
+      try {
+        await this.deps.helper.snapshotDelete(s.id);
+      } catch (err) {
+        // fx-swallow-ok: not confirmed means it stays an orphan and is counted; only "unknown" is a confirmation
+        if (!(err instanceof HelperError && err.code === "unknown_snapshot")) continue;
+      }
+      this.orphans = this.orphans.filter((o) => o !== s);
+    }
+    this.persist();
+  }
+
+  /** Evicts every snapshot older than the lifetime: what a resume would find expired on Vercel. */
+  async sweep(): Promise<void> {
+    if (this.orphans.length > 0) await this.dropSnapshots(undefined, []); // deletes the helper did not confirm are asked again before anything is counted
+    const ttl = this.deps.snapshots?.ttlSeconds ?? DEFAULT_SNAPSHOT_TTL_SECONDS;
+    const now = this.deps.now();
+    for (const rec of this.records.values()) {
+      const old = rec.snapshots.filter((s) => s.takenAt + ttl <= now);
+      if (old.length > 0) await this.dropSnapshots(rec, old);
+    }
   }
 
   stateOf(name: string): SandboxState { return this.get_(name).state; }
@@ -119,7 +196,10 @@ export class Sandboxd {
   async create(params: CreateParams): Promise<Sandbox> {
     if (!SANDBOX_ID.test(params.name)) throw new SandboxdError(400, "bad_request");
     if (this.records.has(params.name)) throw new SandboxdError(400, "bad_request"); // a taken name, as the overlay's contract has it
-    const rec: Record_ = { name: params.name, state: "creating", createdAt: this.deps.now(), params, commands: new Set(), starting: new Set() };
+    const keep = params.retention?.keepLastSnapshots;
+    if (keep !== undefined && (!Number.isSafeInteger(keep) || keep < 1 || keep > MAX_KEEP_LAST)) throw new SandboxdError(400, "bad_request");
+    if (params.retention?.persistent === true && this.deps.snapshots === undefined) throw new SandboxdError(400, "bad_request"); // nowhere to keep a snapshot: never silently non-persistent
+    const rec: Record_ = { name: params.name, state: "creating", createdAt: this.deps.now(), params, snapshots: [], commands: new Set(), starting: new Set() };
     this.records.set(params.name, rec); // synchronously: a second create of the same name, in the same turn, finds it taken
     try {
       await (rec.bringing = this.bring(rec).finally(() => (rec.bringing = undefined)));
@@ -131,14 +211,19 @@ export class Sandboxd {
   }
 
   /** The signed-metadata gate first, then the helper: a digest that is not listed never reaches `prepare`. */
-  private async bring(rec: Record_): Promise<void> {
+  private async bring(rec: Record_, from?: SnapshotMeta): Promise<void> {
     const { name, params } = rec;
     const { arch, digests } = this.deps.boot.facts(params.template);
     assertBootable(await this.deps.boot.listTargets(), params.template, arch, digests);
     this.registered.add(name);
     try {
-      await this.deps.helper.prepare({ sandboxId: name, template: params.template, vcpus: params.vcpus, memMb: params.memMb });
-      const started: PreparedReply = await this.deps.helper.start(name);
+      let started: PreparedReply;
+      if (from === undefined) {
+        await this.deps.helper.prepare({ sandboxId: name, template: params.template, vcpus: params.vcpus, memMb: params.memMb });
+        started = await this.deps.helper.start(name);
+      } else {
+        started = await this.resumeFrom(rec, from);
+      }
       const dir = checkVsockDir(started.vsockDir, name, started.sandboxGid, this.deps.euid as number, this.deps.inspectDir(started.vsockDir));
       if (this.deps.hasForeignListener(dir)) throw new SandboxdError(502, "vsock_dir_refused");
       rec.agent = this.deps.agentFor(dir);
@@ -146,7 +231,29 @@ export class Sandboxd {
       rec.state = "running";
     } catch (err) {
       await this.destroyQuietly(name);
+      if (err instanceof HelperError && err.code === "unknown_snapshot") throw new SandboxdError(404, "not_found"); // evicted behind our back: what an expired snapshot is on Vercel
+      if (err instanceof HelperError && err.code === "snapshot_mismatch") throw new SandboxdError(409, "snapshot_mismatch"); // the snapshot is kept: the template may be put back
       throw err instanceof HelperError ? new SandboxdError(502, "helper_failed") : err;
+    }
+  }
+
+  /** Makes sure the helper holds the sandbox prepared (it may have restarted, or the daemon may have), clears the dead VM's `v.sock`, then resumes. */
+  private async resumeFrom(rec: Record_, snap: SnapshotMeta): Promise<PreparedReply> {
+    const { name, params } = rec;
+    const listed = (await this.deps.helper.list()).find((e) => e.sandboxId === name);
+    const held: PreparedReply = listed ?? (await this.deps.helper.prepare({ sandboxId: name, template: params.template, vcpus: params.vcpus, memMb: params.memMb }));
+    checkVsockDir(held.vsockDir, name, held.sandboxGid, this.deps.euid as number, this.deps.inspectDir(held.vsockDir));
+    try {
+      this.deps.removeVsockSocket(held.vsockDir);
+    } catch {
+      // fx-swallow-ok: replaced by one fixed refusal; the entry stays where it is
+      throw new SandboxdError(502, "vsock_dir_refused");
+    }
+    try {
+      return await this.deps.helper.resume(name, snap.id);
+    } catch (err) {
+      if (err instanceof HelperError && err.code === "unknown_snapshot") await this.dropSnapshots(rec, [snap]); // gone from the helper: forget it, and the next resume is "not found"
+      throw err;
     }
   }
 
@@ -179,16 +286,26 @@ export class Sandboxd {
 
   async get(name: string, opts: { resume?: boolean } = {}): Promise<Sandbox> {
     const rec = this.get_(name);
-    if (rec.state === "stopped" && opts.resume === true) {
-      rec.state = "creating";
-      try {
-        await (rec.bringing = this.bring(rec).finally(() => (rec.bringing = undefined)));
-      } catch (err) {
-        rec.state = "stopped";
-        throw err;
-      }
-    }
+    // the state changes in this same step (the async body runs to its first await), so a second caller finds the resume in flight and waits for it
+    if (rec.state === "stopped" && opts.resume === true) rec.resuming = this.resumeNow(rec).finally(() => (rec.resuming = undefined));
+    if (rec.resuming !== undefined) await rec.resuming;
     return new Sandbox(this, name);
+  }
+
+  private async resumeNow(rec: Record_): Promise<void> {
+    rec.state = "creating";
+    try {
+      let from: SnapshotMeta | undefined;
+      if (this.persistent(rec)) {
+        await this.sweep();
+        from = rec.snapshots[rec.snapshots.length - 1];
+        if (from === undefined) throw new SandboxdError(404, "not_found"); // evicted or expired: the caller's fallback starts a fresh sandbox
+      }
+      await (rec.bringing = this.bring(rec, from).finally(() => (rec.bringing = undefined)));
+    } catch (err) {
+      rec.state = "stopped";
+      throw err;
+    }
   }
 
   /** Reads this process's registry only. */
@@ -266,10 +383,13 @@ export class Sandboxd {
   async teardown(name: string): Promise<boolean> {
     await this.records.get(name)?.bringing?.catch(() => undefined); // fx-swallow-ok: the create's own caller has the error; this only waits for it to end
     const rec = this.records.get(name);
-    if (rec !== undefined && rec.state !== "creating") await this.stop(name).catch(() => undefined); // fx-swallow-ok: the destroy below is the real attempt, and the result is what is returned
+    if (rec !== undefined && rec.state !== "creating" && rec.state !== "stopped") {
+      rec.stopping ??= this.stopNow(rec, false).finally(() => (rec.stopping = undefined)); // never a snapshot: nobody asked for one, and it would write the guest's whole RAM
+      await rec.stopping.catch(() => undefined); // fx-swallow-ok: the destroy below is the real attempt, and the result is what is returned
+    }
     if (this.registered.has(name)) await this.destroyQuietly(name);
     if (this.registered.has(name)) return false;
-    this.records.delete(name);
+    if (rec === undefined || rec.snapshots.length === 0) this.records.delete(name); // a sandbox that holds snapshots stays (stopped): they are what a restart resumes from
     return true;
   }
 
@@ -281,11 +401,35 @@ export class Sandboxd {
     const rec = this.get_(name);
     if (rec.state === "stopped") return Promise.resolve();
     if (rec.state === "creating") return Promise.reject(new SandboxdError(409, "conflict"));
-    rec.stopping ??= this.stopNow(rec).finally(() => (rec.stopping = undefined));
+    rec.stopping ??= this.stopNow(rec, this.persistent(rec)).finally(() => (rec.stopping = undefined));
     return rec.stopping;
   }
 
-  private async stopNow(rec: Record_): Promise<void> {
+  /**
+   * Refuses (and changes nothing) when the snapshot would not fit: the sandbox keeps running. The admission and the reservation of its bytes are
+   * one synchronous step (nothing is awaited between them), so two stops at once cannot both be admitted against the same free quota.
+   */
+  private async admitStop(rec: Record_): Promise<{ id: string; bytes: number }> {
+    const snaps = this.deps.snapshots as SnapshotDeps;
+    await this.sweep(); // expired ones free their room first
+    const guestRamBytes = rec.params.memMb * MIB;
+    const verdict = admitSnapshot({ guestRamBytes, usedBytes: this.usedBytes(), quotaBytes: snaps.quotaBytes, freeBytes: snaps.freeBytes(snaps.dir) });
+    if (!verdict.admit) throw new SandboxdError(507, "snapshot_refused", verdict.detail);
+    const reservation = { id: newSnapshotId(), bytes: snapshotNeedBytes(guestRamBytes) };
+    this.reserved.set(reservation.id, reservation.bytes);
+    return reservation;
+  }
+
+  private async stopNow(rec: Record_, snapshot: boolean): Promise<void> {
+    const reservation = snapshot ? await this.admitStop(rec) : undefined;
+    try {
+      await this.stopAdmitted(rec, reservation);
+    } finally {
+      if (reservation !== undefined) this.reserved.delete(reservation.id); // released on every way out; a written snapshot is by now a record or an orphan
+    }
+  }
+
+  private async stopAdmitted(rec: Record_, reservation: { id: string; bytes: number } | undefined): Promise<void> {
     const name = rec.name;
     rec.state = "stopping";
     // bounded: a start stuck on a silent guest must not hold the stop; destroying the VM below ends it
@@ -293,6 +437,7 @@ export class Sandboxd {
     await Promise.allSettled([...rec.commands].map((c) => c.kill("SIGKILL")));
     await within(Promise.allSettled([...rec.commands].map((c) => c.wait())), this.deps.pollMs ?? 100);
     rec.commands.clear();
+    if (reservation !== undefined) return this.snapshotNow(rec, reservation);
     await this.destroyQuietly(name);
     if (this.registered.has(name)) {
       rec.state = "running"; // the helper still holds the VM: say so, and let the caller try again
@@ -301,10 +446,59 @@ export class Sandboxd {
     rec.state = "stopped";
   }
 
+  /**
+   * The helper writes the snapshot and kills the VM, also when it fails. A new snapshot is recorded (and the state file written) before the old
+   * ones beyond `keepLastSnapshots` are evicted, so a failed write never costs the snapshot that was already there. A sandbox stays prepared
+   * on the helper after a good snapshot, which is what `resume` needs.
+   */
+  private async snapshotNow(rec: Record_, reservation: { id: string; bytes: number }): Promise<void> {
+    const name = rec.name;
+    const id = reservation.id;
+    // Written down BEFORE the helper is asked, as an orphan of the size the admission expected: a lost reply, the client's timeout or a crash then
+    // leaves a trace, and the next sweep deletes the snapshot (or confirms it never existed). It counts against the quota from here on.
+    const pending: SnapshotMeta = { id, bytes: reservation.bytes, takenAt: this.deps.now() };
+    this.orphans.push(pending);
+    this.writing.add(id);
+    try {
+      this.persist();
+    } catch (err) {
+      this.orphans = this.orphans.filter((o) => o !== pending);
+      this.writing.delete(id);
+      rec.state = "running"; // nothing was asked of the helper: the VM is still up; the reservation is released by the caller's `finally`
+      throw err;
+    }
+    this.reserved.delete(id); // the orphan now carries the same bytes
+    let bytes: number;
+    try {
+      bytes = (await this.deps.helper.snapshot(name, id)).snapshotBytes;
+    } catch {
+      // fx-swallow-ok: replaced by the fixed error below, once the VM is made sure to be gone; the orphan stays so the snapshot is deleted if it exists
+      this.writing.delete(id);
+      await this.destroyQuietly(name);
+      rec.state = this.registered.has(name) ? "running" : "stopped"; // still held by the helper: say so, and let the caller try again
+      throw new SandboxdError(502, "helper_failed");
+    }
+    this.writing.delete(id);
+    this.orphans = this.orphans.filter((o) => o !== pending);
+    rec.state = "stopped";
+    rec.snapshots.push({ id, bytes, takenAt: pending.takenAt });
+    this.persist();
+    const keep = rec.params.retention?.keepLastSnapshots ?? DEFAULT_KEEP_LAST;
+    if (rec.snapshots.length > keep) await this.dropSnapshots(rec, rec.snapshots.slice(0, rec.snapshots.length - keep));
+  }
+
+  /** Ends the sandbox and its snapshots for good (a persistent sandbox is not snapshotted on the way out). */
   async delete(name: string): Promise<void> {
     const rec = this.records.get(name);
     if (rec === undefined) return; // idempotent, as on Vercel
-    await this.stop(name);
+    if (rec.state === "creating") throw new SandboxdError(409, "conflict");
+    if (rec.state !== "stopped") {
+      rec.stopping ??= this.stopNow(rec, false).finally(() => (rec.stopping = undefined));
+      await rec.stopping;
+    }
+    if (this.registered.has(name)) await this.destroyQuietly(name); // a persistent one is still prepared on the helper
+    if (this.registered.has(name)) throw new SandboxdError(502, "helper_failed");
     this.records.delete(name);
+    await this.dropSnapshots(rec, [...rec.snapshots]);
   }
 }

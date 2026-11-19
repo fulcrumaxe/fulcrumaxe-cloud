@@ -7,7 +7,8 @@ import type { Duplex } from "node:stream";
 import { agentAtVsockDir } from "./guestAgent.js";
 import { createHelperClient } from "./helperClient.js";
 import { Sandboxd, type SandboxdDeps } from "./sandboxd.js";
-import { fdInspectDir, hasForeignListener, realFdOps, type FdOps, type HostFacts } from "./vsockFd.js";
+import type { SnapshotDeps } from "./snapshots.js";
+import { fdInspectDir, hasForeignListener, realFdOps, removeOwnVsockSocket, type FdOps, type HostFacts } from "./vsockFd.js";
 
 const connectUnix = (file: string) => (): Promise<Duplex> =>
   new Promise((resolve, reject) => {
@@ -39,6 +40,9 @@ export const REFUSING_OPS: FdOps = {
     throw new Error("no descriptor operations on this host");
   },
   close: () => undefined,
+  unlink: () => {
+    throw new Error("no descriptor operations on this host");
+  },
   dial: () => {
     throw new Error("no descriptor operations on this host");
   },
@@ -53,6 +57,8 @@ export interface ProductionConfig {
   boot: SandboxdDeps["boot"];
   bootTimeoutMs?: number;
   helperTimeoutMs?: number;
+  /** `microvm.snapshot_dir` and `microvm.snapshot_quota_bytes`, the caller's free-space reader (statfs, built outside `src`) and the daemon's 0700 state directory. Absent: no sandbox may be persistent. */
+  snapshots?: SnapshotDeps;
 }
 
 /** The dependency set a daemon process builds: the real euid, the O_PATH fd inspection, helper socket, Firecracker vsock and clock. */
@@ -70,6 +76,8 @@ export function productionDeps(config: ProductionConfig): SandboxdDeps {
       return ops === undefined ? true : hasForeignListener(dir, ops);
     },
     agentFor: (dir) => agentAtVsockDir(dir, fdOps(config.host) ?? REFUSING_OPS),
+    removeVsockSocket: (dir) => removeOwnVsockSocket(dir, fdOps(config.host) ?? REFUSING_OPS),
+    ...(config.snapshots === undefined ? {} : { snapshots: config.snapshots }),
     now: () => Math.floor(Date.now() / 1000),
     ...(config.bootTimeoutMs === undefined ? {} : { bootTimeoutMs: config.bootTimeoutMs }),
   };
