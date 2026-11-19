@@ -39,6 +39,7 @@ export { FLEET_SETTING_ACTIONS, applyRunnerSetting, checkRunner, removeRunner, s
 export { RUNNER_CHECK_REPLY_MS, checkStatusOf, runnerReplyOf, type RunnerCheckStatus, type RunnerReply } from "./runnerReply.js";
 export { CLAIM_PATH, claimRun } from "./claim.js";
 export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
+export { SANDBOX_COMMAND_LIFE_SECONDS, SANDBOX_COMMAND_MAX_OPEN, enqueueSandboxCommand, exchangeSandboxCommands } from "./sandboxCommands.js";
 export { ENGINE_COMMANDS_PULL_PATH, ackEngineCommand, engineCommandAckPath, pullEngineCommands, type EngineCommandSigner } from "./engineCommands.js";
 export { ENGINE_DECIDE_PATH, engineDecide, parseEngineDecide, pgEngineDecidePorts, type EngineDecideAuditEntry, type EngineDecidePorts, type EngineGate } from "./engineDecide.js";
 export { eventsPath, ingestEvents } from "./ingestEvents.js";

@@ -10,7 +10,8 @@ import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { DeployOrderClaimMessage, DeployOrderReportMessage } from "./deployOrder.js";
-import { ENGINE_BRIDGE_CAPABILITY, RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
+import { ENGINE_BRIDGE_CAPABILITY, RUNNER_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, SESSION_ID_PATTERN } from "./job.js";
+import { SandboxCommandAcks } from "./sandboxCommands.js";
 
 /** The isolation tiers a runner can report. Display only. There is no "none". */
 export const ISOLATION_TIERS = ["microvm", "vm_container", "container", "host_sandbox"] as const;
@@ -451,6 +452,9 @@ export const HelloMessage = z
     if (hello.capabilities?.includes(ENGINE_BRIDGE_CAPABILITY) && hello.protocol_version < ENGINE_BRIDGE_MIN_PROTOCOL) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "engine_bridge_v1 needs a protocol version that speaks the engine bridge", path: ["capabilities"] });
     }
+    if (hello.capabilities?.includes(SANDBOX_COMMAND_CAPABILITY) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "sandbox_commands_v1 needs a protocol version that speaks sandbox commands", path: ["capabilities"] });
+    }
     const f = hello.facts;
     if (f && (f.max_vms !== undefined || f.max_vcpus !== undefined || f.max_memory_mb !== undefined || f.bootable_templates !== undefined) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "host limits need a protocol version that speaks them", path: ["facts"] });
@@ -511,7 +515,7 @@ export function capacityFreeSlots(capacity: ClaimCapacity, running: { light: num
   return { light: Math.min(freeLight, headroom), heavy: Math.min(freeHeavy, headroom), total: Math.min(freeLight + freeHeavy, headroom) };
 }
 
-export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional(), sandboxes: SandboxInventory.optional() }).strict();
+export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional(), sandboxes: SandboxInventory.optional(), sandbox_acks: SandboxCommandAcks.optional() }).strict();
 
 export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
 
