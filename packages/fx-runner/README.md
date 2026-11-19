@@ -65,7 +65,7 @@ It only calls out (no listening socket).
 
 ## Command line
 
-`bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME`, `FX_RUNNER_PROTECTION_BYPASS_FILE` and `XDG_CACHE_HOME` by name and hands everything else to
+`bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME`, `FX_RUNNER_PROTECTION_BYPASS_FILE`, `FX_RUNNER_SEARCH_ROOTS` (extra colon-separated, absolute roots that `engine-bridge enable` searches for the engine's checkout; the current directory is looked up too) and `XDG_CACHE_HOME` by name and hands everything else to
 `runCli` in `src/cli.ts`. It runs from a build of `src/`, not from the TypeScript directly: see "Build from source".
 
 - `fx-runner register --code-stdin --credential-mode subscription|api_key --cloud-url <url>` (the code is read from standard input; see

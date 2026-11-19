@@ -21,6 +21,7 @@ import { PULL_PATH } from "../engineBridge/commands.js";
 import { PROBE_REPO_ID, parseAllowedRepos, readDaemonStatus } from "../engineBridge/daemon.js";
 import { removeBridgeState } from "../engineHost/hostFiles.js";
 import { readEngineVersion } from "../engineBridge/engineVersion.js";
+import { conventionStateDir, discoverCheckout, parseProjectFile, PROJECT_FILE_MAX_BYTES, readCapped, stateDirProblem, type DiscoveryOps, type ProjectFile } from "../engineBridge/discover.js";
 import { bindingRefusal, isPlainAbsolute, loadBridgeSettings, saveBridgeSettings, type BridgedRepo } from "../engineBridge/settings.js";
 
 const FULL_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
@@ -31,6 +32,8 @@ export interface EngineBridgeCommandOptions {
   home: string | undefined;
   /** `AUTONOMOUS_TEAM_STATE_DIR`, looked up by name by the caller: the engine's own state directory when `--state-dir` is not given. */
   engineStateDirOverride: string | undefined;
+  /** What discovery needs from the machine, taken by `bin/fx-runner.mjs`: the current directory and `FX_RUNNER_SEARCH_ROOTS`. Tests set them; `ops` replaces the directory lister. */
+  discovery?: { cwd: string | undefined; searchRoots: string | undefined; ops?: DiscoveryOps | undefined } | undefined;
 }
 
 const refusal = (reason: string): CliError => new CliError(`engine-bridge: ${reason}`, 2);
@@ -46,8 +49,8 @@ export function engineStateDirFor(flag: string | undefined, override: string | u
  * Says which state directory the bridge will read and where that choice came from. `--repo-root` never decides it: with neither `--state-dir` nor the environment
  * variable it is the engine's shared default, which is not where an engine run with its own AUTONOMOUS_TEAM_STATE_DIR writes.
  */
-export function stateDirNote(stateDir: string, source: "flag" | "env" | "default", uid: number | undefined): string {
-  const from = source === "flag" ? "from --state-dir" : source === "env" ? "from AUTONOMOUS_TEAM_STATE_DIR" : "the engine's default: neither --state-dir nor AUTONOMOUS_TEAM_STATE_DIR was given, and --repo-root does not choose it";
+export function stateDirNote(stateDir: string, source: "flag" | "project" | "env" | "default", uid: number | undefined): string {
+  const from = source === "flag" ? "from --state-dir" : source === "project" ? "from the checkout's .autonomous-team/project.json, the engine's own convention" : source === "env" ? "from AUTONOMOUS_TEAM_STATE_DIR" : "the engine's default: neither --state-dir nor AUTONOMOUS_TEAM_STATE_DIR was given, and --repo-root does not choose it";
   const events = plainFileExists(path.join(stateDir, "engine-events.jsonl"), uid);
   return `The bridge will read the engine's events from ${stateDir} (${from}).${events ? "" : " There is no engine-events.jsonl there yet: if your engine writes its events to another directory, run enable again with --state-dir <that directory>; nothing will upload until they match."}`;
 }
@@ -57,6 +60,37 @@ function networkCodeOf(error: unknown): string {
   const e = error as { code?: unknown; name?: unknown; cause?: { code?: unknown } } | null;
   for (const v of [e?.cause?.code, e?.code, e?.name]) if (typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(v)) return v;
   return "unknown";
+}
+
+/**
+ * The repository root to bridge. An explicit `--repo-root` skips the scan (no directory is listed); its project file, when usable, still gives the engine's state
+ * directory. Without it the scan runs, and exactly one engine checkout of the repo is accepted: none, an unusable clone, or several is a refusal that writes nothing.
+ */
+function pickCheckout(repo: string, rootFlag: string | undefined, ctx: CommandContext, options: EngineBridgeCommandOptions): { root: string; project: ProjectFile | undefined; discovered: boolean } {
+  if (rootFlag !== undefined) {
+    const file = readCapped(path.join(rootFlag, ".autonomous-team", "project.json"), PROJECT_FILE_MAX_BYTES, ctx.uid);
+    return { root: rootFlag, project: file.ok ? (parseProjectFile(file.text) ?? undefined) : undefined, discovered: false };
+  }
+  const d = options.discovery;
+  const found = discoverCheckout({ repo, home: options.home, cwd: d?.cwd, extraRoots: d?.searchRoots, runnerStateDir: ctx.stateDir, uid: ctx.uid, nowMs: () => ctx.now().getTime(), ops: d?.ops });
+  if (found.ignoredRoots > 0) ctx.out(`Ignored ${found.ignoredRoots} entr${found.ignoredRoots === 1 ? "y" : "ies"} of FX_RUNNER_SEARCH_ROOTS (each must be an absolute path to a directory).`);
+  const cut = found.limit === null ? "" : ` The search stopped at its ${found.limit === "time" ? "5 second" : "20000 entry"} limit, so it may be incomplete.`;
+  ctx.out(`Searched ${found.visited} directories under ${found.roots.length} root${found.roots.length === 1 ? "" : "s"}; ${found.matches.length} engine checkout${found.matches.length === 1 ? "" : "s"} of that repo.${cut}`);
+  const list = (paths: readonly string[]): string => `${paths.slice(0, 10).map((p) => `\n  ${p}`).join("")}${paths.length > 10 ? `\n  and ${paths.length - 10} more` : ""}`;
+  const skippedNote =
+    found.unsafe === 0
+      ? ""
+      : ` ${found.unsafe} director${found.unsafe === 1 ? "y" : "ies"} with a .git ${found.unsafe === 1 ? "was" : "were"} skipped because ${found.unsafe === 1 ? "it, its .git or a directory above it is" : "they, their .git or a directory above them is"} not yours or writable by group or others. If one is the checkout, run chmod go-w <path> (on it and on any directory above it that is group-writable) and try again, or give --repo-root <path> yourself:${list(found.unsafePaths)}${found.unsafe > found.unsafePaths.length ? `\n  and ${found.unsafe - found.unsafePaths.length} more` : ""}\n`;
+  if (found.matches.length === 0 && found.unexpected.length > 0) {
+    throw refusal(`checkout_layout_unexpected: a clone of that repo has no usable .autonomous-team/project.json, so it is not an engine checkout:${list(found.unexpected)}\n${skippedNote === "" ? "" : `${skippedNote.trim()}\n`}coldstart it, or give --repo-root <path>; nothing was changed`);
+  }
+  if (found.matches.length === 0) {
+    throw refusal(`checkout_not_found: no engine checkout of ${repo} under ${found.roots.join(", ") || "any search root"}.${cut}${skippedNote} Give --repo-root <path> (and --state-dir <dir> if the engine uses its own); nothing was changed`);
+  }
+  if (found.matches.length > 1) {
+    throw refusal(`checkout_ambiguous: ${found.matches.length} checkouts of ${repo}:${list(found.matches.map((m) => m.root).sort())}\nrun again with --repo-root <one of these>; nothing was changed`);
+  }
+  return { root: found.matches[0]!.root, project: found.matches[0]!.project, discovered: true };
 }
 
 const OWN_KEY_REFUSED = "the runner's key was refused; run: fx-runner doctor, and if it says the key is revoked or too old, run: fx-runner revoke --local, then register again";
@@ -88,7 +122,7 @@ const str = (flags: Flags, name: string): string | undefined => {
 
 export async function engineBridgeCommand(positionals: readonly string[], flags: Flags, ctx: CommandContext, options: EngineBridgeCommandOptions): Promise<number> {
   const action = positionals[0];
-  if (action !== "enable" && action !== "disable" && action !== "status") throw new CliError("usage: fx-runner engine-bridge enable --repo <owner/name> --repo-root <dir> [--state-dir <dir>] | disable [--repo <owner/name>] | status", 2);
+  if (action !== "enable" && action !== "disable" && action !== "status") throw new CliError("usage: fx-runner engine-bridge enable --repo <owner/name> [--repo-root <dir>] [--state-dir <dir>] | disable [--repo <owner/name>] | status", 2);
   const allowedFlags = action === "enable" ? ["repo", "repo-root", "state-dir"] : action === "disable" ? ["repo"] : [];
   for (const name of flags.keys()) if (!allowedFlags.includes(name)) throw new CliError(`--${name} does not go with engine-bridge ${action}`, 2);
   if (action === "status") return status(ctx, options);
@@ -115,8 +149,8 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
     return 0;
   }
   if (repo === undefined) throw new CliError("engine-bridge enable needs --repo <owner/name>", 2);
-  const root = str(flags, "repo-root");
-  if (root === undefined || !isPlainAbsolute(root)) throw refusal("--repo-root must be the engine repository's absolute path");
+  const rootFlag = str(flags, "repo-root");
+  if (rootFlag !== undefined && !isPlainAbsolute(rootFlag)) throw refusal("--repo-root must be the engine repository's absolute path");
   const registration = loadRegistration(ctx.stateDir);
   const key = loadRunnerKey(ctx.stateDir);
   if (!registration || !key || key.jkt !== registration.jkt) throw new CliError("not registered, or the runner key does not match; run: fx-runner status", 1);
@@ -141,7 +175,18 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
   if (list === undefined) throw refusal("the cloud did not list this runner's repos (it may not support the engine bridge yet); nothing was changed");
   const found = list.find((r) => r.full_name === repo);
   if (found === undefined) throw refusal("that repo is not one this runner is paired with in the workspace; nothing was changed");
-  const stateDir = engineStateDirFor(str(flags, "state-dir"), options.engineStateDirOverride, options.home);
+  const stateFlag = str(flags, "state-dir");
+  const picked = pickCheckout(repo, rootFlag, ctx, options);
+  const root = picked.root;
+  const fromProject = stateFlag === undefined && picked.project !== undefined ? conventionStateDir(picked.project, options.home, options.engineStateDirOverride) : undefined;
+  let stateDir: string;
+  if (fromProject !== undefined) {
+    stateDir = fromProject.dir;
+    const problem = stateDirProblem(stateDir, ctx.uid);
+    if (problem !== null) throw refusal(`${problem}: ${stateDir} ${problem === "state_dir_missing" ? "does not exist; the runner never creates the engine's state directory. Start the engine once, or give --state-dir <dir>" : "is not a directory this user can read; fix its owner or mode, or give --state-dir <dir>"}; nothing was changed`);
+  } else {
+    stateDir = engineStateDirFor(stateFlag, options.engineStateDirOverride, options.home);
+  }
   const version = readEngineVersion(root, ctx.uid);
   if (!version.ok) throw refusal(`the engine repository has no usable engine/manifest.json version (${version.why}); nothing was changed`);
   const entry: BridgedRepo = { repo_gh_id: found.repo_gh_id, full_name: found.full_name, state_dir: stateDir, repo_root: root };
@@ -151,7 +196,8 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
   if (why === "state_dir_unchecked") throw refusal("that state directory could not be checked against the others; nothing was changed");
   if (why === "too_many_repos") throw refusal("too many repos are bridged on this machine; nothing was changed");
   saveBridgeSettings(ctx.stateDir, [...loaded.repos.filter((r) => r.repo_gh_id !== entry.repo_gh_id), entry]);
-  ctx.out(stateDirNote(stateDir, str(flags, "state-dir") !== undefined ? "flag" : options.engineStateDirOverride !== undefined && options.engineStateDirOverride !== "" ? "env" : "default", ctx.uid));
+  if (picked.discovered || fromProject !== undefined) ctx.out(`Chose ${picked.root} and the engine's state directory ${stateDir}. If that checkout is ever moved or deleted, run: fx-runner engine-bridge disable --repo ${repo}, then enable again.`);
+  ctx.out(stateDirNote(stateDir, stateFlag !== undefined ? "flag" : fromProject !== undefined ? "project" : options.engineStateDirOverride !== undefined && options.engineStateDirOverride !== "" ? "env" : "default", ctx.uid));
   ctx.out("That repo is bridged. A running fx-runner starts its bridge within a few seconds once the workspace's switch for it is on; check: fx-runner engine-bridge status");
   return 0;
 }
@@ -163,7 +209,7 @@ function status(ctx: CommandContext, options: EngineBridgeCommandOptions): numbe
     return 1;
   }
   if (loaded.repos.length === 0) {
-    ctx.out("Engine bridge: no repo is enabled. Run: fx-runner engine-bridge enable --repo <owner/name> --repo-root <dir>");
+    ctx.out("Engine bridge: no repo is enabled. Run: fx-runner engine-bridge enable --repo <owner/name>");
     return 0;
   }
   const live = readDaemonStatus(ctx.stateDir, ctx.now().getTime());

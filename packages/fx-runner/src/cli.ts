@@ -31,6 +31,7 @@ import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
 import { purgeChildCommand } from "./commands/purgeChild.js";
 import { configCommand, updateCommand } from "./commands/update.js";
 import { engineHostCommand, type EngineHostRuntime } from "./commands/engineHost.js";
+import type { DiscoveryOps } from "./engineBridge/discover.js";
 import type { HaltDeps } from "./engineBridge/halt.js";
 import type { UpdateHost } from "./update/updater.js";
 
@@ -45,6 +46,8 @@ export interface CliIo {
   protectionBypassFile?: string | undefined;
   /** `AUTONOMOUS_TEAM_STATE_DIR`, looked up by name by the caller: the engine's state directory, where `engine-bridge enable` binds a repo when `--state-dir` is not given and `engine-host stop` writes the halt file. */
   engineStateDirOverride?: string | undefined;
+  /** What `engine-bridge enable` discovery needs from the machine, looked up by the caller: the current directory, `FX_RUNNER_SEARCH_ROOTS`, and (tests only) a directory lister. */
+  engineDiscovery?: { cwd: string | undefined; searchRoots: string | undefined; ops?: DiscoveryOps | undefined } | undefined;
   /** What the engine kill path needs from the machine; the real one when left out. Tests set it. */
   engineHaltDeps?: HaltDeps | undefined;
   /** What `engine-host start` needs from the machine (the supervised headless Team Lead). Only `bin/fx-runner.mjs` supplies it. */
@@ -129,8 +132,9 @@ Commands:
   assistant link     Connect this machine's assistant to a workspace: prints a code a signed-in person approves, then stores the short-lived token (mode 0600) here.
   drain [--no-wait]  The upgrade path. The running runner finishes the jobs it holds, claims nothing more and exits 0; this returns once it has, so replacing the program
                      loses no run (a plain restart can kill a job claimed a second earlier). With a service manager it stays down until you start it again. --no-wait only asks.
-  engine-bridge enable --repo <owner/name> --repo-root <dir> [--state-dir <dir>] | disable [--repo <owner/name>] | status
-                     Bridge an engine repo to the workspace's team app. enable asks the cloud whether this runner is paired with the repo and refuses one that is not; the engine's state
+  engine-bridge enable --repo <owner/name> [--repo-root <dir>] [--state-dir <dir>] | disable [--repo <owner/name>] | status
+                     Bridge an engine repo to the workspace's team app. With only --repo, enable finds the one clone of it under your home, code, src, projects, work, dev or current directory (and FX_RUNNER_SEARCH_ROOTS)
+                     and takes the engine's state directory from its .autonomous-team/project.json; several clones are listed and --repo-root picks one. enable asks the cloud whether this runner is paired with the repo and refuses one that is not; the engine's state
                      directory belongs to that one repo. status shows what the running daemon last said, per repo, with no event content. A running fx-runner picks changes up within seconds.
   engine-host start | stop | status | resume
                      start: run the engine's Team Lead headless under supervision until stopped. Refuses unless the bridge and operate are on, nothing is halted and a systemd user scope works.
@@ -270,7 +274,7 @@ export async function runCli(io: CliIo): Promise<number> {
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
     }
     if (command === "assistant") return await assistantCommand(positionals, ctx);
-    if (command === "engine-bridge") return await engineBridgeCommand(positionals, flags, ctx, { home: io.home, engineStateDirOverride: io.engineStateDirOverride });
+    if (command === "engine-bridge") return await engineBridgeCommand(positionals, flags, ctx, { home: io.home, engineStateDirOverride: io.engineStateDirOverride, discovery: io.engineDiscovery });
     if (command === "engine-host") return await engineHostCommand(positionals, ctx, { engineStateDirOverride: io.engineStateDirOverride, home: io.home, deps: io.engineHaltDeps, runtime: io.engineHostRuntime });
     if (command === "pause" || command === "resume") return claimingCommand(command, ctx);
     if (command === "drain") {

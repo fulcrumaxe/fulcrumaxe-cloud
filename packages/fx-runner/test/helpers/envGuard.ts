@@ -53,6 +53,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engineBridge/ceiling.ts": ["crypto", "fs", "path"], // the dial ceiling file: a random temp-file name, a no-follow exclusive 0600 create judged by lstat of the directory and name, one rename
   "src/engineBridge/inbox.ts": ["crypto", "fs", "path"], // the engine inbox: lstat on the directories, no-follow opens judged by the handle, a random temp-file name, an exclusive 0600 create, one rename
   "src/engineBridge/decideSocket.ts": ["fs", "http", "path"], // the decide socket: lstat on its 0700 directory, an http server on that Unix socket only, chmod 0600
+  "src/engineBridge/discover.ts": ["fs", "path"], // ON-BR-1: finds the engine checkout: realpath and lstat of directories, a directory listing that reports a link as a link, a no-follow open of two files through cursor.ts, and path joins; the home, the current directory, the clock and the lister arrive from the caller
   "src/engineBridge/engineVersion.ts": ["fs", "path"], // EB-3c: the engine's manifest version: lstat on its directory, a no-follow open judged by the handle, one positioned read
   "src/engineBridge/settings.ts": ["fs", "path"], // EB-3c: the bridged repos' file, through config.ts's private-file helpers; realpath and stat of the state directories, to tell one directory from another by identity
   "src/engineBridge/daemon.ts": ["path"], // EB-3c: the cursor's and the events file's names below the state directories
@@ -199,6 +200,12 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
  * (`/proc/`), the process table's environment files and a `proc` segment anywhere else stay banned in every file.
  */
 export const EXACT_PROC_TOKEN_FILES: readonly string[] = ["src/sandbox/probe.ts", "src/sandbox/nixView.ts"];
+
+/**
+ * The checkout search's list of places it never enters (ON-BR-1): the exact token `/proc` as an element of the array `SKIPPED_PATHS` in this one file, and
+ * nowhere else. It is never joined onto, listed or opened: it is only compared against a path to refuse it.
+ */
+export const SKIP_LIST_FILE = "src/engineBridge/discover.ts";
 
 /**
  * D#6 RUNNER-CWD-1: the one file that may name this process's descriptor table, and only as the whole name `/proc/self/fd` (not `fdinfo`, not
@@ -428,7 +435,9 @@ export function envAccessViolations(source0: string, file: string = ENV_READER_F
           const before = parent.elements[parent.elements.indexOf(node as ts.Expression) - 1];
           return before !== undefined && ts.isStringLiteralLike(before) && before.text === "--proc";
         })();
-      if (/environ(?!ment)/i.test(node.text) || (!exactProc && node.text.split(/[\\/]/).includes("proc"))) found.add("proc path segment or environ file");
+      const inSkipList =
+        node.text === "/proc" && file === SKIP_LIST_FILE && ts.isArrayLiteralExpression(parent) && ts.isVariableDeclaration(parent.parent) && parent.parent.name.getText(source) === "SKIPPED_PATHS";
+      if (/environ(?!ment)/i.test(node.text) || (!exactProc && !inSkipList && node.text.split(/[\\/]/).includes("proc"))) found.add("proc path segment or environ file");
     }
     const load = loadedSpecifier(node);
     if (load) {

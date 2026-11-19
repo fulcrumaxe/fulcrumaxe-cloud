@@ -251,6 +251,16 @@ describe("cleanEnv allowlist", () => {
     }
   });
 
+  it("the exact token /proc is allowed as an element of SKIPPED_PATHS in the checkout search's file only", () => {
+    const file = "src/engineBridge/discover.ts";
+    expect(envAccessViolations("const SKIPPED_PATHS = ['/proc', '/sys', '/dev'];", file)).toEqual([]);
+    expect(envAccessViolations("const SKIPPED_PATHS = ['/proc', '/sys', '/dev'];", "src/engineBridge/settings.ts")).not.toEqual([]);
+    expect(envAccessViolations("const SKIPPED_PATHS = ['/proc'];")).not.toEqual([]);
+    for (const sample of ["const OTHER = ['/proc'];", "const p = '/proc';", "const SKIPPED_PATHS = ['/proc/self'];", "const SKIPPED_PATHS = ['/proc/self/environ'];", "const p = path.join('/proc', 'x');"]) {
+      expect(envAccessViolations(sample, file), sample).not.toEqual([]);
+    }
+  });
+
   it("the descriptor table's exact name is allowed in the workspace cleanup's file only; anything longer, other /proc paths and any other file are still refused", () => {
     const stubs = "src/daemon/workspaceStubs.ts";
     const exact = 'const PROC_FD = "/proc/self/fd"; const at = (fd: number, leaf: string) => `${PROC_FD}/${fd}/${leaf}`;';
