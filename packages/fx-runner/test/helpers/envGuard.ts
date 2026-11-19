@@ -180,6 +180,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/vm/sandboxd/vsockFd.ts": ["fs", "net"], // D#587 B-2b-iii-b: O_PATH|O_NOFOLLOW opens judged by fstat, and the connect through the checked socket fd; the euid and platform arrive from the caller
   "src/vm/sandboxd/snapshots.ts": ["crypto"], // D#587 B-3b: a random snapshot id; the state file is read and written through the engine bridge's file helpers, and no process is started
   "src/vm/sandboxd/sandboxd.ts": ["path"], // D#587 B-2b-iii: joins the per-sandbox directory and socket names below the state directory
+  "src/vm/sandboxd/sdkAdapter.ts": ["crypto"], // D#587 B-5: names are hashed into daemon ids; no process, file or environment is touched
+  "src/vm/sandboxd/sdkSlice.ts": [], // D#587 B-5: types only
   // D#749 V2c-2a, the verify browser server. No environment read (the host environment, streams and job directory arrive as arguments) and no process of its own: Chromium is started by playwright-core.
   "src/verifyBrowser/server.ts": ["fs", "path", "stream"], // the one answer.json in the job directory (exclusive create, 0600); stream is only the types of the injected input and output
   "src/commands/verifyBrowserServer.ts": ["path"], // D#749 V2c-2b: the server entry checks its path flags are plain absolute paths; nothing is read or written here
