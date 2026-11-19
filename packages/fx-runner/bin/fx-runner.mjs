@@ -283,6 +283,8 @@ runCli({
   home: process.env.HOME,
   stateDirOverride: process.env.FX_RUNNER_HOME,
   engineStateDirOverride: process.env.AUTONOMOUS_TEAM_STATE_DIR,
+  // Host facts for `engine-bridge enable` discovery: the current directory and the extra search roots (colon separated, absolute).
+  engineDiscovery: { cwd: process.cwd(), searchRoots: process.env.FX_RUNNER_SEARCH_ROOTS },
   engineHaltDeps,
   engineHostRuntime,
   // A file holding the Vercel protection bypass secret, for a staging or protected-preview cloud. Only the path is read here; src/protectionBypass.ts reads the file.
