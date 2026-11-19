@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { applyRunnerSetting, checkRunner, removeRunner, setRunnerRepos, type FleetSettingAction } from "@fx/runner-cloud";
+import { applyRunnerSetting, checkRunner, enqueueSandboxCommand, removeRunner, setRunnerRepos, type FleetSettingAction } from "@fx/runner-cloud";
 import { handleSessionRequest } from "../../../../lib/runnerRoutes";
 
 /**
@@ -21,3 +21,6 @@ export const fleetCheckHandler = (req: NextRequest, runnerId: string) =>
 
 /** POST /api/runners/:id/remove. */
 export const fleetRemoveHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => removeRunner(deps, principal, runnerId));
+
+/** POST /api/runners/:id/sandbox-commands (D#587 B-7b-ii) with { kind, name? }: stop or delete a named sandbox, or reap the stopped ones. Owners and admins only; the database decides. */
+export const fleetSandboxCommandHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal, body) => enqueueSandboxCommand(deps, principal, runnerId, body), { json: true });

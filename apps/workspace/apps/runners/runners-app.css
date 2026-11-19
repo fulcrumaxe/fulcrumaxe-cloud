@@ -48,6 +48,11 @@
 .runners-facts dt { color: var(--text-primary, #1aff80); }
 .runners-facts dd { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; }
 .runners-controls { margin-top: 8px; }
+.runners-sandboxes { margin: 8px 0; padding: 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.runners-sandboxes[data-status="stale_older"], .runners-sandboxes[data-status="stale_engine"], .runners-sandboxes[data-status="removed"] { border-style: dashed; }
+.runners-sandboxes h4 { margin: 0 0 4px; }
+.runners-quota, .runners-boxes, .runners-commands { margin: 4px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.runners-box { padding: 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); overflow-wrap: anywhere; }
 
 .runners-dialog { max-width: min(560px, 92vw); max-height: 90vh; overflow: auto; padding: 0; background: var(--bg-surface, #0a0a0a); color: var(--text-primary, #1aff80); border: 1px solid var(--accent, #1aff80); font-family: var(--font-mono, monospace); font-size: 0.85rem; }
 .runners-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }

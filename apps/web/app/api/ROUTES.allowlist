@@ -65,6 +65,7 @@ runners/[id]/rename/route.ts
 runners/[id]/repos/route.ts
 runners/[id]/resume/route.ts
 runners/[id]/revoke/route.ts
+runners/[id]/sandbox-commands/route.ts
 runners/approvals/route.ts
 runners/registration-codes/route.ts
 runners/provisioning-tokens/[id]/route.ts
