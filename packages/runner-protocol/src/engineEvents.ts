@@ -14,6 +14,7 @@ export const ENGINE_COUNT_MAX = 2_147_483_647;
 const count = z.number().int().min(0).max(ENGINE_COUNT_MAX);
 /** Longest duration an event may report, in seconds (31 days). */
 export const ENGINE_DURATION_S_MAX = 2_678_400;
+const usageTokens = safeInt.min(0).max(USAGE_TOKENS_MAX);
 const seconds = z.number().int().min(0).max(ENGINE_DURATION_S_MAX);
 
 export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -22,6 +23,8 @@ export const ASK_ID_PATTERN = /^[0-9a-f]{16}$/;
 export const LINE_ID_PATTERN = /^[0-9a-f]{16}$/;
 export const SHA40_PATTERN = /^[0-9a-f]{40}$/;
 export const ROW_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
+/** The shape of a model tier on a `usage_tick`: the same text as the CHECK on `machine_usage_daily.model_tier`. */
+export const MODEL_TIER_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 export const MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9.-]{0,63}$/;
 export const ENGINE_VERSION_PATTERN = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
 export const AgentId = z.string().regex(AGENT_ID_PATTERN);
@@ -90,9 +93,11 @@ const KIND_SCHEMAS = [
   kind("halt_applied", { halt_epoch: count, method: z.enum(["scope", "group_only"]), survivors: count }),
   BridgeEvent("bridge_heartbeat"),
   BridgeEvent("bridge_dropped"),
+  // D#845 ON-1: raw token counts for one window of an engine session's model use, from the in-guest supervisor. The cloud prices it, never the engine. `model_tier` has the shape of `machine_usage_daily.model_tier`.
+  kind("usage_tick", { model_tier: z.string().regex(MODEL_TIER_PATTERN), input_tokens: usageTokens, output_tokens: usageTokens, cache_read_tokens: usageTokens, cache_write_tokens: usageTokens, window_s: seconds }),
 ] as const;
 
-export const ENGINE_EVENT_KINDS = ["agent_started", "agent_linked", "agent_stopped", "spawn_blocked", "merge_lane", "merged", "gate_receipt", "team_log_line", "loop_tick", "checkin_tick", "engine_heartbeat", "plan_snapshot", "ask_raised", "ask_cleared", "host_started", "host_stopped", "host_heartbeat", "tick_started", "tick_ended", "compaction_detected", "halt_applied", "bridge_heartbeat", "bridge_dropped"] as const;
+export const ENGINE_EVENT_KINDS = ["agent_started", "agent_linked", "agent_stopped", "spawn_blocked", "merge_lane", "merged", "gate_receipt", "team_log_line", "loop_tick", "checkin_tick", "engine_heartbeat", "plan_snapshot", "ask_raised", "ask_cleared", "host_started", "host_stopped", "host_heartbeat", "tick_started", "tick_ended", "compaction_detected", "halt_applied", "bridge_heartbeat", "bridge_dropped", "usage_tick"] as const;
 export type EngineEventKind = (typeof ENGINE_EVENT_KINDS)[number];
 
 /** Keys no event may carry at any depth: free text, and every figure the cloud computes. Matched case-insensitively; `total_` is a prefix. */

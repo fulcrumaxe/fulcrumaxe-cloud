@@ -73,9 +73,24 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1"] as const;
 /** D#587 B-7b: a runner that lists it can receive signed sandbox commands on its claim reply and ack them on its next claim (sandboxCommands.ts). It gates no role and needs protocol 21. */
 export const SANDBOX_COMMAND_CAPABILITY = "sandbox_commands_v1" as const;
+/**
+ * D#845 ON-1: the six capabilities of machine onboarding. Each gates one family of signed work, and a runner that did not list it on its latest hello is never offered that work (machineJobs.ts, `machineWorkAllowed`). All need protocol 22 or later.
+ *  - `device_register_v1`: the runner can register through the device flow (its shapes arrive with the rows that build the flow; only the flag is here).
+ *  - `project_setup_v1`: `project_setup`, `engine_update` and `project_remove` jobs.
+ *  - `survey_v1`: a task of kind `survey`.
+ *  - `engine_session_v1`: `engine_session_start`, `engine_session_stop` and `engine_session_delete` jobs.
+ *  - `machine_login_v1`: the `claude_login_start` and `claude_login_code` machine commands.
+ *  - `repo_token_refresh_v1`: the runner may ask for a repo-scoped installation token for a session it runs.
+ */
+export const DEVICE_REGISTER_CAPABILITY = "device_register_v1" as const;
+export const PROJECT_SETUP_CAPABILITY = "project_setup_v1" as const;
+export const SURVEY_CAPABILITY = "survey_v1" as const;
+export const ENGINE_SESSION_CAPABILITY = "engine_session_v1" as const;
+export const MACHINE_LOGIN_CAPABILITY = "machine_login_v1" as const;
+export const REPO_TOKEN_REFRESH_CAPABILITY = "repo_token_refresh_v1" as const;
 /** The engine bridge: a runner that lists it sends engine events, pulls signed engine commands and asks for decisions (engineEvents.ts, engineCommands.ts). It gates no role. */
 export const ENGINE_BRIDGE_CAPABILITY = "engine_bridge_v1" as const;
 /** D#6 PUBLIC-MERGE PR2a: `plane_merge_v1` gates no role either. A runner that lists it can claim and execute a merge order (messages.ts, plane-merge-*). */
@@ -162,8 +177,13 @@ export const jobClassOfRole = (role: string): JobClass => (Object.hasOwn(JOB_CLA
 export const JOB_MODES =["local", "verified"] as const;
 
 /** What the run is for. Closed. The runner picks its tools from the role, never from this. */
-export const TASK_KINDS = ["implement", "fix", "review", "advise"] as const;
+export const TASK_KINDS = ["implement", "fix", "review", "advise", "survey"] as const;
 export const TaskKind = z.enum(TASK_KINDS);
+/**
+ * D#845 ON-1: a task kind a runner runs only when its hello listed the capability. An older runner's strict parse refuses the kind, so the claim leaves such a job out for a runner
+ * without the capability (and below protocol 22), the same way it leaves out a role (`RUNNER_CAPABILITY_FOR_ROLE`). A kind not named here needs none.
+ */
+export const TASK_KIND_CAPABILITY: Readonly<Partial<Record<(typeof TASK_KINDS)[number], RunnerCapability>>> = Object.freeze({ survey: SURVEY_CAPABILITY });
 
 const uuid = z.string().uuid();
 const memoryText = z.string().refine((value) => Buffer.byteLength(value, "utf8") <= MAX_JOB_MEMORY_BYTES, { message: `a memory string is at most ${MAX_JOB_MEMORY_BYTES} bytes` });
