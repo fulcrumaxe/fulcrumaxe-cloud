@@ -288,7 +288,8 @@ describe("the cloud's list: its identity, its age, and the hello", () => {
     cmds.allowedRepos = undefined;
     await passTime(ALLOWED_MAX_AGE_MS - 120_000);
     expect(running(b)).toBe(true);
-    await advanceUntil(() => !running(b), 10_000, 40);
+    // The repo leaves "running" first; the pass then closes the decide socket, which is real socket IO, so the socket reads "off" a moment later. Wait for both.
+    await advanceUntil(() => !running(b) && b.status().socket === "off", 10_000, 40);
     expect(b.status().repos[0]).toMatchObject({ run: "waiting", reason: "cloud_list", upload: null, pull: null });
     expect(b.status().socket).toBe("off");
     // It asks again (a probe pull) and stays stopped while the answers hold no list.
