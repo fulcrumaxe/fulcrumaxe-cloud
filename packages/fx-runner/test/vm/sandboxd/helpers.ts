@@ -123,6 +123,9 @@ export function startFakeAgent(dir: string): FakeAgent {
     const err: Buffer[] = [];
     child.stdout.on("data", (c: Buffer) => out.push(c));
     child.stderr.on("data", (c: Buffer) => err.push(c));
+    // A command that exits (or never reads) before its stdin is written closes the pipe: the write then fails with EPIPE
+    // on this stream, which has no other listener. agent.py ignores the same error, so the fake does too.
+    child.stdin.on("error", () => undefined);
     child.stdin.end(body);
     child.on("error", () => send(sock, { ok: true, exit: 127 }));
     child.on("close", (code, signal) => {
