@@ -46,8 +46,13 @@ async function watch(page: Page) {
 }
 
 // ── Repos ───────────────────────────────────────────────────────────────
-async function openRepo(page: Page) {
-  if (!(await page.locator(REPO_APP).isVisible())) await page.locator('.dock-icon[data-app-id="repos"]').click();
+// After a reload the shell puts the saved windows back about 200 ms after the desktop is up, and a dock press on an open window in front minimizes it.
+// So after a reload this waits for the restored window and presses the dock only when there is none or it came back minimized.
+async function openRepo(page: Page, afterReload = false) {
+  const win = page.locator(REPO_APP);
+  if (afterReload) await win.waitFor({ state: "attached", timeout: 10_000 }).catch(() => undefined);
+  const gone = (await win.count()) === 0 || (await win.evaluate((el) => el.classList.contains("minimized")));
+  if (afterReload ? gone : !(await win.isVisible())) await page.locator('.dock-icon[data-app-id="repos"]').click();
   await expect(page.locator(REPO_APP)).toBeVisible();
   await page.locator(`${REPO_APP} [data-testid="repos-open"]`).first().click();
   await expect(t(page, REPO_APP, "ctx-applies")).toBeVisible();
@@ -66,7 +71,7 @@ async function setupRepos(page: Page, m: ContextMock) {
 async function reloadRepos(page: Page) {
   await page.reload();
   await stepToDesktop(page);
-  await openRepo(page);
+  await openRepo(page, true);
 }
 const add = async (page: Page, app: string, path: string, kind: "pin" | "exclude" = "pin") => {
   await t(page, app, "ctx-kind").selectOption(kind);
@@ -782,7 +787,10 @@ test.describe("D#600 CX-12: an item's budget in the Pipeline item pane (mocked A
   async function reopenItem(page: Page) {
     await page.reload();
     await waitForDesktop(page);
-    await page.locator('.dock-icon[data-app-id="pipeline"]').click();
+    // The saved window comes back about 200 ms after the desktop; a dock press on it then would minimize it, so press only when it is missing or minimized.
+    const win = page.locator(PL_APP);
+    await win.waitFor({ state: "attached", timeout: 10_000 }).catch(() => undefined);
+    if ((await win.count()) === 0 || (await win.evaluate((el) => el.classList.contains("minimized")))) await page.locator('.dock-icon[data-app-id="pipeline"]').click();
     await expect(page.locator(PL_APP)).toBeVisible();
     await page.locator(`${PL_APP} [data-testid="pl-card"]`).first().click();
     await expect(t(page, PL_APP, "ctx-applies")).toBeVisible();
