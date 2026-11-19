@@ -2064,6 +2064,22 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
+  test("Open Settings still works after Settings was opened and closed with watch on and no repository (the button is not redrawn)", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false }), repos: [] }));
+    await open(page);
+    await press(t(page, "tm-settings-btn")); // open Settings, turn watch on there, close it again
+    await press(t(page, "tm-watch"));
+    await expect(tv(page, "tm-open-settings")).toBeVisible();
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, "tm-settings-btn")).toHaveAttribute("aria-expanded", "false");
+    await press(tv(page, "tm-open-settings"));
+    await expect(t(page, "tm-settings-btn")).toHaveAttribute("aria-expanded", "true");
+    await press(tv(page, "tm-open-settings")); // already open: stays open
+    await expect(t(page, "tm-settings-btn")).toHaveAttribute("aria-expanded", "true");
+    await clean(page, errors);
+  });
+
   test("watch on with no repository enabled: the switch stays on the page, says no repository is enabled, and Open Settings opens the sheet", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const { mock, errors } = await setup(page, fresh({ repos: [] }));
