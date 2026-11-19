@@ -7,7 +7,7 @@ import type { Duplex } from "node:stream";
 
 export const HELPER_PROTOCOL = 1;
 export const SANDBOX_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
-export const HELPER_CODES = ["bad_peer", "too_busy", "frame_timeout", "frame_too_large", "bad_frame", "unknown_verb", "bad_field", "bad_id", "bad_number", "over_cap", "unknown_sandbox", "unknown_template", "unavailable", "internal"] as const;
+export const HELPER_CODES = ["bad_peer", "too_busy", "frame_timeout", "frame_too_large", "bad_frame", "unknown_verb", "bad_field", "bad_id", "bad_number", "over_cap", "unknown_sandbox", "unknown_template", "unknown_snapshot", "snapshot_mismatch", "unavailable", "internal"] as const;
 export type HelperCode = (typeof HELPER_CODES)[number];
 
 /** A refusal, or a reply that was not the protocol's. `code` is from the closed list, or one of the daemon's own for a reply that never came right. */
@@ -27,6 +27,11 @@ export interface Helper {
   prepare(params: PrepareParams): Promise<PreparedReply>;
   start(sandboxId: string): Promise<PreparedReply>;
   destroy(sandboxId: string): Promise<void>;
+  /** Writes a full snapshot and kills the VM (also when it fails); the sandbox stays prepared. Resolves with the bytes stored. */
+  snapshot(sandboxId: string, snapshotId: string): Promise<{ snapshotBytes: number }>;
+  /** Starts a prepared, stopped sandbox from a stored snapshot; answers like `start`. */
+  resume(sandboxId: string, snapshotId: string): Promise<PreparedReply>;
+  snapshotDelete(snapshotId: string): Promise<void>;
   list(): Promise<HelperEntry[]>;
 }
 
@@ -98,6 +103,13 @@ export function createHelperClient(connect: () => Promise<Duplex>, timeoutMs = 3
     prepare: async (p) => located(await call({ verb: "prepare", sandbox_id: p.sandboxId, template: p.template, vcpus: p.vcpus, mem_mb: p.memMb })),
     start: async (id) => located(await call({ verb: "start", sandbox_id: id })),
     destroy: async (id) => void (await call({ verb: "destroy", sandbox_id: id })),
+    snapshot: async (id, snap) => {
+      const bytes = (await call({ verb: "snapshot", sandbox_id: id, snapshot_id: snap }))["snapshot_bytes"];
+      if (!isPositiveInt(bytes)) throw new HelperError("bad_reply");
+      return { snapshotBytes: bytes };
+    },
+    resume: async (id, snap) => located(await call({ verb: "resume", sandbox_id: id, snapshot_id: snap })),
+    snapshotDelete: async (snap) => void (await call({ verb: "snapshot_delete", snapshot_id: snap })),
     list: async () => {
       const rows = (await call({ verb: "list" }))["sandboxes"];
       if (!Array.isArray(rows)) throw new HelperError("bad_reply");

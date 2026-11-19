@@ -1,12 +1,12 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { socketTmpRoot } from "../../helpers/tmpRoot.js";
 import { vmAssetName, type BootDigests, type TargetListing } from "../../../src/vm/bootGate.js";
 import { agentAtVsockDir, type GuestAgent } from "../../../src/vm/sandboxd/guestAgent.js";
 import { createHelperClient } from "../../../src/vm/sandboxd/helperClient.js";
-import { fdInspectDir, hasForeignListener, realFdOps, type HostFacts } from "../../../src/vm/sandboxd/vsockFd.js";
+import { fdInspectDir, hasForeignListener, realFdOps, removeOwnVsockSocket, type HostFacts } from "../../../src/vm/sandboxd/vsockFd.js";
 import { TeardownError, type ProcessLister } from "../../../src/vm/sandboxd/teardown.js";
 import { Sandboxd, type SandboxdDeps } from "../../../src/vm/sandboxd/sandboxd.js";
 
@@ -166,11 +166,22 @@ export interface FakeHelper {
   onStart: (id: string, dir: string) => void;
   /** Chmod/replace hooks so a test can make the vsock directory wrong. */
   mangle: (id: string, dir: string) => string;
-  entries: Map<string, { dir: string }>;
+  entries: Map<string, { dir: string; running?: boolean }>;
+  /** Snapshots the fake helper holds, by id. */
+  snapshots: Map<string, { sandbox: string; bytes: number }>;
+  /** What a `snapshot` reports as `snapshot_bytes`. */
+  snapshotBytes: number;
+  /** Called when a snapshot is taken (the VM is gone) and when one is resumed, once the dir is ready. */
+  onSnapshot: (id: string, snap: string, dir: string) => void;
+  onResume: (id: string, snap: string, dir: string) => void;
+  /** Verbs whose reply is dropped after they have been carried out. */
+  dropReply: Set<string>;
+  /** Holds a `snapshot` until this resolves, before anything is stored. */
+  holdSnapshot?: Promise<void>;
 }
 
 export function startFakeHelper(root: string, gid = process.getgid?.() ?? 1000): FakeHelper {
-  const h: FakeHelper = { sock: path.join(root, "helper.sock"), frames: [], refuse: new Map(), raw: new Map(), onStart: () => undefined, mangle: (_id, dir) => dir, entries: new Map() };
+  const h: FakeHelper = { sock: path.join(root, "helper.sock"), frames: [], refuse: new Map(), raw: new Map(), onStart: () => undefined, mangle: (_id, dir) => dir, entries: new Map(), snapshots: new Map(), snapshotBytes: 4096, onSnapshot: () => undefined, onResume: () => undefined, dropReply: new Set() };
   const dirOf = (id: string): string => path.join(root, "vsock", id);
   const server = net.createServer((sock) => {
     sock.on("error", () => undefined);
@@ -182,7 +193,7 @@ export function startFakeHelper(root: string, gid = process.getgid?.() ?? 1000):
       const frame = JSON.parse(buf.slice(0, end)) as Record<string, unknown>;
       buf = "";
       h.frames.push(frame);
-      void answer(frame).then((line) => sock.end(line));
+      void answer(frame).then((line) => sock.end(h.dropReply.has(String(frame["verb"])) ? "" : line)); // the verb ran; the answer is lost on the way back
     });
   });
   async function answer(f: Record<string, unknown>): Promise<string> {
@@ -204,6 +215,31 @@ export function startFakeHelper(root: string, gid = process.getgid?.() ?? 1000):
         h.onStart(id, dir);
       }
       return `${JSON.stringify({ ok: true, protocol: 1, vsock_dir: h.mangle(id, dir), sandbox_gid: gid })}\n`;
+    }
+    const refusal = (code: string): string => `${JSON.stringify({ ok: false, protocol: 1, code })}\n`;
+    if (verb === "snapshot") {
+      await h.holdSnapshot;
+      const e = h.entries.get(id);
+      if (e === undefined) return refusal("unknown_sandbox");
+      const snap = String(f["snapshot_id"]);
+      if (h.snapshots.has(snap)) return refusal("bad_id");
+      h.snapshots.set(snap, { sandbox: id, bytes: h.snapshotBytes });
+      e.running = false; // the VM is killed, and the sandbox stays prepared
+      h.onSnapshot(id, snap, e.dir);
+      return `${JSON.stringify({ ok: true, protocol: 1, snapshot_bytes: h.snapshotBytes })}\n`;
+    }
+    if (verb === "resume") {
+      const e = h.entries.get(id);
+      if (e === undefined) return refusal("unknown_sandbox");
+      const snap = String(f["snapshot_id"]);
+      if (!h.snapshots.has(snap)) return refusal("unknown_snapshot");
+      if (existsSync(path.join(e.dir, "v.sock"))) return refusal("internal"); // Firecracker cannot bind over a stale socket
+      e.running = true;
+      h.onResume(id, snap, e.dir);
+      return `${JSON.stringify({ ok: true, protocol: 1, vsock_dir: h.mangle(id, e.dir), sandbox_gid: gid })}\n`;
+    }
+    if (verb === "snapshot_delete") {
+      return h.snapshots.delete(String(f["snapshot_id"])) ? `${JSON.stringify({ ok: true, protocol: 1 })}\n` : refusal("unknown_snapshot");
     }
     if (verb === "destroy") {
       if (!h.entries.delete(id)) return `${JSON.stringify({ ok: false, protocol: 1, code: "unknown_sandbox" })}\n`;
@@ -236,15 +272,24 @@ export interface Rig {
   agents: Map<string, FakeAgent>;
   /** Delays every guest connection of one sandbox until released. */
   deps: SandboxdDeps;
+  /** Bytes the snapshot directory reports free, and the daemon's clock in seconds. */
+  free: { bytes: number };
+  clock: { t: number };
+  /** A new daemon over the same helper and state directory: what a restart of the process is. */
+  restart(): Sandboxd;
 }
 
 export function makeRig(over: { listing?: TargetListing; euid?: number; agentFor?: (dir: string) => GuestAgent; gid?: number; extra?: Partial<SandboxdDeps> } = {}): Rig {
+  const free = { bytes: 1024 ** 4 };
+  const clock = { t: 1_700_000_000 };
   const root = scratch();
   mkdirSync(path.join(root, "vsock"));
   const helper = startFakeHelper(root, over.gid);
   const agents = new Map<string, FakeAgent>();
   helper.onStart = (id, dir) => {
-    if (!agents.has(id)) agents.set(id, startFakeAgent(dir));
+    if (agents.has(id)) return;
+    rmSync(path.join(dir, "v.sock"), { force: true }); // a fresh boot replaces whatever a dead VM left
+    agents.set(id, startFakeAgent(dir));
   };
   const deps: SandboxdDeps = {
     euid: over.euid ?? process.geteuid?.(),
@@ -253,13 +298,29 @@ export function makeRig(over: { listing?: TargetListing; euid?: number; agentFor
     inspectDir: (dir) => fdInspectDir(dir, realOps()),
     hasForeignListener: (dir) => hasForeignListener(dir, realOps()),
     agentFor: over.agentFor ?? ((dir: string) => agentAtVsockDir(dir, realOps())),
-    now: () => 1_700_000_000,
+    removeVsockSocket: (dir) => removeOwnVsockSocket(dir, realOps()),
+    snapshots: { dir: "/fictional/snapshots", quotaBytes: 1024 ** 3, freeBytes: () => free.bytes, stateDir: path.join(scratch(), "state") },
+    now: () => clock.t,
     bootTimeoutMs: 3000,
     pollMs: 20,
     ...over.extra,
   };
-  const daemon = new Sandboxd(deps);
-  return { daemon, helper, agents, deps };
+  // a stopped VM leaves its runner-owned v.sock behind; its memory comes back from the snapshot
+  const savedFiles = new Map<string, FakeAgent["files"]>();
+  helper.onSnapshot = (id, snap, dir) => {
+    const old = agents.get(id);
+    savedFiles.set(snap, new Map(old?.files));
+    old?.close();
+    agents.delete(id);
+    const stale = net.createServer().listen(path.join(dir, "v.sock"));
+    cleanups.push(() => stale.close());
+  };
+  helper.onResume = (id, snap, dir) => {
+    const agent = startFakeAgent(dir);
+    for (const [p, f] of savedFiles.get(snap) ?? []) agent.files.set(p, f);
+    agents.set(id, agent);
+  };
+  return { daemon: new Sandboxd(deps), helper, agents, deps, free, clock, restart: () => new Sandboxd(deps) };
 }
 
 /** A vsock proxy that accepts and never answers CONNECT: a guest that is not booted, or wedged. */

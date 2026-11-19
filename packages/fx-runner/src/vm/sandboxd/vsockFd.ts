@@ -27,6 +27,8 @@ export interface FdOps {
   open(path: string, flags: number): number;
   fstat(fd: number): FdStat;
   close(fd: number): void;
+  /** Removes the entry `path` names (an unlink: a final symlink is removed, never followed). */
+  unlink(path: string): void;
   /** Starts the connect to `path` (what `net.createConnection` does); the caller waits for it. */
   dial(path: string): net.Socket;
 }
@@ -47,7 +49,7 @@ export interface HostFacts {
 export function realFdOps(host: HostFacts): FdOps {
   const euid = host.euid;
   if (host.platform !== "linux" || typeof euid !== "number") throw new VsockRefused(); // no O_PATH here: never fall back to plain paths
-  return { euid, open: (p, flags) => fs.openSync(p, flags), fstat: (fd) => fs.fstatSync(fd), close: (fd) => fs.closeSync(fd), dial: (p) => net.createConnection(p) };
+  return { euid, open: (p, flags) => fs.openSync(p, flags), fstat: (fd) => fs.fstatSync(fd), close: (fd) => fs.closeSync(fd), unlink: (p) => fs.unlinkSync(p), dial: (p) => net.createConnection(p) };
 }
 
 const NO_FOLLOW = fs.constants.O_NOFOLLOW;
@@ -133,6 +135,40 @@ export function hasForeignListener(dir: string, ops: FdOps): boolean {
   } catch {
     // fx-swallow-ok: what cannot be examined cannot be vouched for, so the answer is "foreign"
     return true;
+  } finally {
+    for (const fd of fds) closeQuietly(ops, fd);
+  }
+}
+
+/**
+ * Before `resume` (D#587 B-3b): the stopped VM's host-side `v.sock` still belongs to the runner, the helper cannot remove it (the directory is the
+ * runner's) and Firecracker cannot bind over it, so the runner removes it. The directory and the entry are opened O_PATH|O_NOFOLLOW and the unlink
+ * goes through the directory's fd. The entry goes only when it is a socket owned by the runner's own euid; nothing there is fine; a link, a plain
+ * file or another owner's socket is refused with `VsockRefused` and left in place, so a planted entry is neither deleted on the runner's authority
+ * nor resumed over.
+ */
+export function removeOwnVsockSocket(dir: string, ops: FdOps): void {
+  const fds: number[] = [];
+  try {
+    const dirFd = ops.open(dir, O_PATH | NO_FOLLOW | fs.constants.O_DIRECTORY);
+    fds.push(dirFd);
+    const d = ops.fstat(dirFd);
+    if (!d.isDirectory() || d.uid !== ops.euid) throw new VsockRefused();
+    const entry = `/proc/self/fd/${dirFd}/${VSOCK_SOCKET_NAME}`;
+    let sockFd: number;
+    try {
+      sockFd = ops.open(entry, O_PATH | NO_FOLLOW);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // nothing left behind
+      throw err;
+    }
+    fds.push(sockFd);
+    const s = ops.fstat(sockFd);
+    if (!s.isSocket() || s.isSymbolicLink() || s.uid !== ops.euid) throw new VsockRefused();
+    ops.unlink(entry);
+  } catch {
+    // fx-swallow-ok: one fixed refusal for every failure; the system's message could name a path
+    throw new VsockRefused();
   } finally {
     for (const fd of fds) closeQuietly(ops, fd);
   }

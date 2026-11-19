@@ -41,7 +41,7 @@ export function ensurePrivateDir(dir: string, uid: number): void {
  * Writes `value` as JSON to `<dir>/<name>` atomically at mode 0600 (temp file, fsync, rename). A link at the name is refused, unless `replaceLink` is set: the
  * rename then replaces the link itself and nothing is written through it (a directory or other non-file at the name is still refused).
  */
-export function writeJsonAtomic(dir: string, name: string, value: unknown, uid: number, options: { replaceLink?: boolean } = {}): void {
+export function writeJsonAtomic(dir: string, name: string, value: unknown, uid: number, options: { replaceLink?: boolean; maxBytes?: number } = {}): void {
   ensurePrivateDir(dir, uid);
   const target = path.join(dir, name);
   const existing = lstatSync(target, { throwIfNoEntry: false });
@@ -49,7 +49,7 @@ export function writeJsonAtomic(dir: string, name: string, value: unknown, uid: 
     throw new EngineStateError("a file of the bridge is a link or not a plain file");
   }
   const body = Buffer.from(`${JSON.stringify(value)}\n`);
-  if (body.length > JSON_MAX_BYTES) throw new EngineStateError("file too large");
+  if (body.length > (options.maxBytes ?? JSON_MAX_BYTES)) throw new EngineStateError("file too large");
   const tmp = path.join(dir, `${name}.${randomBytes(6).toString("hex")}.tmp`);
   const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try {
@@ -79,7 +79,7 @@ export function removeStateFile(dir: string, name: string): void {
 }
 
 /** Reads `<dir>/<name>` as JSON, or undefined when it is absent. A link, a file of another owner, a file open to others or an oversized one is refused. */
-export function readJsonNoFollow(dir: string, name: string, uid: number): unknown {
+export function readJsonNoFollow(dir: string, name: string, uid: number, maxBytes: number = JSON_MAX_BYTES): unknown {
   const target = path.join(dir, name);
   const dirStat = lstatSync(dir, { throwIfNoEntry: false });
   if (dirStat === undefined) return undefined;
@@ -96,7 +96,7 @@ export function readJsonNoFollow(dir: string, name: string, uid: number): unknow
   }
   try {
     const open = fstatSync(fd);
-    if (!open.isFile() || open.uid !== uid || (open.mode & 0o077) !== 0 || open.size > JSON_MAX_BYTES) throw new EngineStateError("a file of the bridge is not safe to read");
+    if (!open.isFile() || open.uid !== uid || (open.mode & 0o077) !== 0 || open.size > maxBytes) throw new EngineStateError("a file of the bridge is not safe to read");
     const buf = Buffer.alloc(open.size);
     readSync(fd, buf, 0, open.size, 0);
     try {
