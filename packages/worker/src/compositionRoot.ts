@@ -237,7 +237,7 @@ export interface CreateWorkerOptions {
 export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate" | "wakeConflictingSiblings">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
   registry: ExecutionTargetRegistry;
   /** EB-8a: signs an engine bridge command with the job-signing key; null while that key is not configured (the pull route then answers 503). */
-  engineCommandSigner: Pick<JobSigner, "keyId" | "signEngineCommand"> | null;
+  engineCommandSigner: Pick<JobSigner, "keyId" | "signEngineCommand" | "signSandboxCommand"> | null;
   /** D#2 H14c-3-2d-2: resolves one run's card, model, limits, sandbox timeout and spend facts, or refuses with a fixed reason. Starts nothing. */
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
   /**
@@ -638,7 +638,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       sweepSandboxReap: runSweepSandboxReap,
       sandboxInventory: runSandboxInventory,
       registry,
-      engineCommandSigner: jobSigner ? { keyId: jobSigner.keyId, signEngineCommand: (command) => jobSigner.signEngineCommand(command) } : null,
+      engineCommandSigner: jobSigner ? { keyId: jobSigner.keyId, signEngineCommand: (command) => jobSigner.signEngineCommand(command), signSandboxCommand: (command) => jobSigner.signSandboxCommand(command) } : null,
       pools,
       sandboxPort,
       githubForward,

@@ -1,4 +1,4 @@
-import { ENGINE_COMMAND_PURPOSE, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand } from "@fulcrumaxe/runner-protocol";
 import { START_LIKE_KINDS, readHaltStates } from "@fx/db/src/engineCommands.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import type { PoolClient } from "pg";
@@ -15,6 +15,8 @@ const NO_STORE = { "cache-control": "no-store" };
 export interface EngineCommandSigner {
   readonly keyId: string;
   signEngineCommand(command: EngineCommand): SignedEngineCommand;
+  /** D#587 B-7b: the same key and `key_id`, signing a sandbox command (its own purpose string). Absent in a deployment that signs none. */
+  signSandboxCommand?(command: SandboxCommand): SignedSandboxCommand;
 }
 
 interface CoveredRepo {

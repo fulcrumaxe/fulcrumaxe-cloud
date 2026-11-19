@@ -4,7 +4,7 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
-  CURRENT_PROTOCOL_VERSION, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
+  CURRENT_PROTOCOL_VERSION, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
@@ -13,6 +13,7 @@ import {
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
 import { WAKE_PATH, parseWakeReply } from "./wake.js";
+import type { SandboxCommandReceiver } from "./sandboxCommands.js";
 import type { InventoryReporter } from "./sandboxInventory.js";
 import type { RunnerKey } from "../keys.js";
 
@@ -151,6 +152,11 @@ export interface RunnerClientConfig {
    * reporter says it is due (the list changed, or ten minutes passed). It counts as sent once the cloud answered 200.
    */
   sandboxInventory?: InventoryReporter;
+  /**
+   * D#587 B-7b: receives the signed sandbox commands a claim reply carries and holds their acks for the next claim. Wired only by a runner whose hello lists `sandbox_commands_v1`;
+   * like the inventory it is used only at protocol 21 or later, and never on a status poll. The acks count as sent once the cloud answered 200.
+   */
+  sandboxCommands?: SandboxCommandReceiver;
   protocolVersion?: number;
 }
 
@@ -185,7 +191,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // D#749 V2b/V2c-1: `browser_playwright_v1`, `browser_chrome_v1` and `deploy_order_v1` are the newest of all, so they go first: a cloud without them keeps every other capability.
       // D#842 EB-3c: `engine_bridge_v1` is the newest build capability, so it goes first after those three (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability and the bridge stays off.
       // D#483 S5-j2e-RUNNER: `overlap_facts_v1` is the newest build capability, so it goes first after the three browser/deploy ones: a cloud without it keeps every other capability.
-      for (const drop of [BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
+      for (const drop of [SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -216,11 +222,15 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // A status poll (closed sandbox) takes no job, so it declares no capacity; every other claim says what the runner could take now (D#6 C43-4).
       const signIn = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= VERIFY_SIGN_IN_MIN_PROTOCOL ? config.verifySignIn?.() : undefined;
       const inventory = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= SANDBOX_INVENTORY_MIN_PROTOCOL ? await config.sandboxInventory?.next() : undefined;
-      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : { ...(capacity === undefined ? {} : { capacity }), ...(signIn === undefined ? {} : { verify_sign_in: signIn }), ...(inventory === undefined ? {} : { sandboxes: inventory.rows }) }));
+      const commands = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= SANDBOX_INVENTORY_MIN_PROTOCOL ? config.sandboxCommands : undefined;
+      const sentAcks = commands?.pendingAcks() ?? [];
+      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : { ...(capacity === undefined ? {} : { capacity }), ...(signIn === undefined ? {} : { verify_sign_in: signIn }), ...(inventory === undefined ? {} : { sandboxes: inventory.rows }), ...(sentAcks.length === 0 ? {} : { sandbox_acks: sentAcks }) }));
       if (reply?.status === 200) {
         inventory?.commit();
+        commands?.committed(sentAcks);
         const parsed = ClaimReply.safeParse(reply.body);
         if (!parsed.success) return fail(reply, "invalid_reply");
+        if (commands !== undefined && parsed.data.sandbox_commands !== undefined) commands.receive(parsed.data.sandbox_commands);
         // A status poll takes no job: a reply with one is refused here, so no code path past this point can run it.
         if (sandboxUnavailable !== undefined && "signed_job" in parsed.data) return fail(reply, "invalid_reply");
         // The reply schema also refuses a claim whose `run_id` differs from the signed job's own.

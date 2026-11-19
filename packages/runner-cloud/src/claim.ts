@@ -1,7 +1,8 @@
-import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS } from "@fulcrumaxe/runner-protocol";
+import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS, type SignedSandboxCommand } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { deployOrderWaiting } from "./deployOrder.js";
+import { exchangeSandboxCommands } from "./sandboxCommands.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 import { configuredWakeKey, wakeGrantFor, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
@@ -63,6 +64,10 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // D#587 B-7a: the sandbox inventory, when the runner sent one (it does so only when its list changed, or every 10 minutes). Replaced whole through the
       // definer, which refuses unknown keys, a protocol below 21 and more than 200 rows. Routing and display only; nothing below reads it.
       if (waited <= 0 && message.sandboxes !== undefined) await client.query("SELECT runner_sandboxes_record($1::jsonb)", [JSON.stringify(message.sandboxes)]);
+      // D#587 B-7b: the acks this claim carried are stored, and the signed sandbox commands waiting for this runner are handed over (an ordinary claim only; none for a runner
+      // that did not list `sandbox_commands_v1`). Delivery reads nothing about the inventory.
+      let sandboxCommands: SignedSandboxCommand[] = [];
+      if (waited <= 0 && message.sandbox_unavailable === undefined) sandboxCommands = await exchangeSandboxCommands(client, runner, message.sandbox_acks ?? [], async () => (deps.engineCommandSigner ? await deps.engineCommandSigner() : null));
       // D#6 C43-6: how long this runner is still held back by its plan's usage limit, in whole seconds rounded up (0: not at all). Worked out from the
       // stored end time against the database clock on every claim, so a pause that has ended needs no cleanup and the next claim just goes ahead.
       let pausedFor = 0;
@@ -107,7 +112,7 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // (`DEPLOY_ORDER_ELIGIBLE_SQL`), and it joins the runner's latest hello, so a runner without `deploy_order_v1` finds none and is never sent the key.
       let deployOrder = false;
       if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) deployOrder = await deployOrderWaiting(client, runner);
-      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder };
+      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, sandboxCommands };
     }),
   ));
   const wait = gate.waited;
@@ -125,6 +130,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     ...(gate.mergeOrder ? { merge_order: true as const } : {}),
     // Only ever `true`, and only for a runner whose own rows say a deploy order waits for it; the runner then calls deploy-order-claim.
     ...(gate.deployOrder ? { deploy_order: true as const } : {}),
+    // D#587 B-7b: only a runner that listed `sandbox_commands_v1` is ever handed any (the query joins its latest hello); absent when there are none.
+    ...(gate.sandboxCommands.length > 0 ? { sandbox_commands: gate.sandboxCommands } : {}),
   };
   // D#6 RUNNER-WAKE R3b: the allow record the wake check requires, written only for a runner this claim just verified in the database and granted.
   if (wakeGrant) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());
