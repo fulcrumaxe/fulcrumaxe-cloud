@@ -9,8 +9,10 @@ import tls from "node:tls";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { startEgressProxy, type Decision, type EgressProxy, type EgressProxyOptions, type Lookup } from "../../../src/vm/egress/proxy.js";
 import { generateSelfSignedCert } from "../../helpers/selfSignedCert.js";
+import { canBindAsSubordinateUid } from "../../helpers/subordinateUid.js";
 
 const UID = process.getuid!();
+const canUseOtherUid = canBindAsSubordinateUid();
 const PUBLIC_A = "93.184.216.34";
 const PUBLIC_B = "93.184.216.35";
 const NAMES = ["pkg.example.com", "other.example.com"];
@@ -305,7 +307,8 @@ describe("egress proxy: fails closed at start", () => {
     stale.close();
     expect(p.socketPath).toBe(path.join(dir, "v.sock_5253"));
   });
-  it("leaves a socket the runner does not own where it is and refuses to start", async () => {
+  // Skips only where the host cannot run a child as a subordinate uid and bind as it (SUBORDINATE_UID_SKIP_REASON); hosted CI can, so it runs there.
+  it.skipIf(!canUseOtherUid)("leaves a socket the runner does not own where it is and refuses to start", async () => {
     const dir = path.join(root, "sb4");
     mkdirSync(dir, { mode: 0o1770 });
     chmodSync(dir, 0o1777);
@@ -320,7 +323,13 @@ describe("egress proxy: fails closed at start", () => {
     const after = lstatSync(path.join(dir, "v.sock_5253"));
     expect(after.ino).toBe(before.ino);
   });
-  it("listens at mode 0666 inside the 01770 directory: the owner connects, another uid in a user namespace cannot enter", async () => {
+  it("listens at mode 0666 inside the 01770 directory, and the owner connects", async () => {
+    const h = await start({ allow: ["pkg.example.com"] }, { "pkg.example.com": [[PUBLIC_A]] }, {}, "sb5");
+    expect(lstatSync(h.proxy.socketPath).mode & 0o7777).toBe(0o666);
+    expect(lstatSync(path.dirname(h.proxy.socketPath)).mode & 0o7777).toBe(0o1770);
+    expect(await fetchThrough(h.proxy.socketPath, "pkg.example.com")).toContain("hello");
+  });
+  it.skipIf(!canUseOtherUid)("another uid in a user namespace cannot enter the 01770 directory to connect to the 0666 socket", async () => {
     const h = await start({ allow: ["pkg.example.com"] }, { "pkg.example.com": [[PUBLIC_A]] }, {}, "sb5");
     expect(lstatSync(h.proxy.socketPath).mode & 0o7777).toBe(0o666);
     expect(lstatSync(path.dirname(h.proxy.socketPath)).mode & 0o7777).toBe(0o1770);
@@ -328,8 +337,8 @@ describe("egress proxy: fails closed at start", () => {
     // A child in a user namespace whose uid is a subordinate uid of this user: no owner, no group, so only the directory's other bits (none) apply.
     const script = `const s=require("node:net").connect(process.argv[1]);s.on("connect",()=>{console.log("CONNECTED");process.exit(0)});s.on("error",(e)=>{console.log(e.code);process.exit(0)});`;
     const out = spawnSync("unshare", ["--map-users=auto", "--map-groups=auto", "--setuid=1", "--setgid=1", process.execPath, "-e", script, h.proxy.socketPath], { encoding: "utf8", timeout: 20_000 });
-    if (out.status === 0 && out.stdout.trim() !== "") expect(out.stdout.trim()).toBe("EACCES");
-    else expect.soft(out.error?.message ?? out.stderr, "no unprivileged user namespace on this host").toBe("unavailable");
+    expect(out.status, out.error?.message ?? out.stderr).toBe(0);
+    expect(out.stdout.trim()).toBe("EACCES");
   });
   it("close() ends open tunnels and stops listening", async () => {
     const h = await start({ allow: ["pkg.example.com"] }, { "pkg.example.com": [[PUBLIC_A]] });

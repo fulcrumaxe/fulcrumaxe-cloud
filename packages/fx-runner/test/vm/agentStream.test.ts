@@ -20,6 +20,8 @@ const bin = (name: string): string => {
   return found;
 };
 const hasPython = spawnSync("python3", ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"]).status === 0;
+const hasSetsid = (process.env["PATH"] ?? "").split(path.delimiter).some((d) => d !== "" && existsSync(path.join(d, "setsid")));
+if (!hasSetsid) console.info("[skip] setsid is not on PATH here (util-linux): the case that starts a descendant in its own session skips; hosted CI has it");
 const skip = !hasPython || unixSocketsRefused();
 const HOST_PATH = { PATH: process.env["PATH"] ?? "" };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -120,7 +122,8 @@ describe.skipIf(skip)("agent.py streaming exec and kill", () => {
     expect(["gone", "Z"]).toContain(await waitGone(readFileSync(pidFile, "utf8").trim()));
   });
 
-  it("a descendant that left the process group is still ended by the timeout, by a kill and by the leader's exit, and the stream ends within a bound", async () => {
+  // `setsid` (util-linux) is what puts the descendant in its own session. A host whose PATH lacks it cannot make that descendant at all, so the case skips there and says so.
+  it.skipIf(!hasSetsid)("a descendant that left the process group is still ended by the timeout, by a kill and by the leader's exit, and the stream ends within a bound", async () => {
     const setsid = bin("setsid");
     const trickle = (pidFile: string): string => `${setsid} ${bin("sh")} -c 'trap "" PIPE; echo $$ > ${pidFile}; while :; do printf x 2>/dev/null; ${bin("sleep")} 0.1; done'`;
     const pidOf = async (file: string): Promise<string> => {

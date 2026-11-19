@@ -11,8 +11,10 @@ import type { Lookup } from "../../../src/vm/egress/proxy.js";
 import { startEgressProxy } from "../../../src/vm/egress/proxy.js";
 import { startReverseEndpoint, TEST_HOOKS, type ReverseDecision, type ReverseEndpoint, type ReverseOptions } from "../../../src/vm/egress/reverse.js";
 import { generateSelfSignedCert } from "../../helpers/selfSignedCert.js";
+import { canBindAsSubordinateUid } from "../../helpers/subordinateUid.js";
 
 const UID = process.getuid!();
+const canUseOtherUid = canBindAsSubordinateUid();
 const PUBLIC_A = "93.184.216.34";
 const SECRET = "sk-test-secret-value";
 const NAMES = ["api.example.com", "fwd.example.com", "pkg.example.com"];
@@ -493,7 +495,7 @@ describe("reverse endpoint: lifecycle and the tunnel's refusal", () => {
     chmodSync(other, 0o1770);
     await expect(startReverseEndpoint({ uid: UID, vsockDir: other, sandboxId: "gid", policy: POLICY, sandboxGid: (process.getgid?.() ?? 0) + 12345 })).rejects.toThrow(/mode 1770/);
   });
-  it("replaces a stale socket of this user, and leaves a non-socket or another user's socket alone and refuses to start", async () => {
+  it("replaces a stale socket of this user, and leaves a non-socket alone and refuses to start", async () => {
     const dir = path.join(root, "sb3");
     mkdirSync(dir, { mode: 0o1770 });
     chmodSync(dir, 0o1770);
@@ -507,6 +509,9 @@ describe("reverse endpoint: lifecycle and the tunnel's refusal", () => {
     endpoints.push(e);
     stale.close();
     expect(e.socketPath).toBe(file);
+  });
+  // Skips only where the host cannot run a child as a subordinate uid and bind as it (SUBORDINATE_UID_SKIP_REASON); hosted CI can, so it runs there.
+  it.skipIf(!canUseOtherUid)("leaves another user's socket alone and refuses to start", async () => {
     // Another uid's socket: the runner's uid is read as different after the directory check.
     const dir2 = path.join(root, "sb4");
     mkdirSync(dir2, { mode: 0o1770 });
