@@ -367,7 +367,7 @@ function mountApp(contentEl) {
       if (d.kind === "off") return [h("p", { class: "tm-muted", "data-testid": "tm-off" }, d.text), d.sheet.canEdit ? switchRow("tm-watch-off", d.rv.label, false, !d.sheet.saving) : null, ...runnerNodes(d.rv)];
       if (d.kind === "norepos") return [h("p", { class: "tm-muted", "data-testid": "tm-norepos" }, d.text), h("p", { class: "tm-muted", "data-testid": "tm-watch-on-note" }, WORDS.noReposOn),
         d.sheet.canEdit ? switchRow("tm-watch-off", d.rv.label, true, !d.sheet.saving) : null,
-        h("button", { type: "button", class: "tm-btn", "data-testid": "tm-open-settings", onClick: () => { if (!d.sheet.open) team.toggleSheet(); } }, WORDS.openSettings), ...runnerNodes(d.rv)];
+        h("button", { type: "button", class: "tm-btn", "data-testid": "tm-open-settings", onClick: () => { if (!team.state.sheetOpen) team.toggleSheet(); /* live state: this node is not rebuilt when Settings opens or closes */ } }, WORDS.openSettings), ...runnerNodes(d.rv)];
       return h("p", { class: d.kind === "error" ? "tm-error" : "tm-muted", role: d.kind === "error" ? "alert" : "status", "data-testid": "tm-" + d.kind }, d.text);
     });
     if (d.kind === "ready") {
