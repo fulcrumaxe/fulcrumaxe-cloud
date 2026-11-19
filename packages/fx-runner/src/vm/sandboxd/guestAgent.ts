@@ -5,24 +5,37 @@
  */
 import net from "node:net";
 import type { Duplex } from "node:stream";
+import { VSOCK_SOCKET_NAME, dialVsockDir, type FdOps } from "./vsockFd.js";
+import { FILE_PIECE, MAX_FILE_BYTES, checkGuestPath, guestFileMode, type FileContent } from "./files.js";
 
 export const AGENT_PORT = 5252;
 const MAX_HEADER = 1 << 20;
+/** The most bytes the agent keeps of one output stream (MAX_OUTPUT in agent.py). */
+export const MAX_OUTPUT = 16 << 20;
 
 export type Connect = () => Promise<Duplex>;
 
 export class AgentError extends Error {
-  constructor(readonly code: "unreachable" | "bad_reply" | "refused" | "timeout") {
+  constructor(readonly code: "unreachable" | "bad_reply" | "refused" | "timeout" | "bad_request") {
     super(`the guest agent failed: ${code}`);
     this.name = "AgentError";
   }
 }
 
-/** Connects to a Firecracker vsock Unix socket and finishes the `CONNECT` handshake; nothing past the `OK <port>` line has been read. */
-export function viaFirecrackerVsock(udsPath: string, port = AGENT_PORT, handshakeMs = 10_000): Connect {
-  return () =>
-    new Promise((resolve, reject) => {
-      const socket = net.createConnection(udsPath);
+/**
+ * Connects to a Firecracker vsock Unix socket and finishes the `CONNECT` handshake; nothing past the `OK <port>` line has been read. `target` is
+ * a socket path (tests), or a function that returns the connected socket (production: `dialVsockDir`, which connects through checked fds).
+ */
+export function viaFirecrackerVsock(target: string | (() => Promise<net.Socket>), port = AGENT_PORT, handshakeMs = 10_000): Connect {
+  return async () => {
+    let socket: net.Socket;
+    try {
+      socket = typeof target === "string" ? net.createConnection(target) : await target();
+    } catch {
+      // fx-swallow-ok: the refusal's own text could name a path; the caller gets one fixed error
+      throw new AgentError("unreachable");
+    }
+    return await new Promise<Duplex>((resolve, reject) => {
       // a guest that is not booted, or wedged, never answers `CONNECT`: the handshake has its own deadline
       const timer = setTimeout(() => {
         socket.destroy();
@@ -50,14 +63,20 @@ export function viaFirecrackerVsock(udsPath: string, port = AGENT_PORT, handshak
       socket.on("data", onData);
       socket.write(`CONNECT ${port}\n`);
     });
+  };
 }
+
+/** Bytes the reader holds before it stops reading the socket; a reader that is never taken from stops the guest at this bound. */
+const HIGH_WATER = 4 << 20;
 
 class Reader {
   private chunks: Buffer[] = [];
   private have = 0;
   private ended = false;
+  /** Only a streaming read pauses the socket; `take` must wait for as many bytes as the reply names (up to the agent's output cap). */
+  private bounded = false;
   private wake: (() => void) | undefined;
-  constructor(socket: Duplex) {
+  constructor(private readonly socket: Duplex) {
     const end = (): void => {
       this.ended = true;
       this.wake?.();
@@ -65,21 +84,99 @@ class Reader {
     socket.on("data", (chunk: Buffer) => {
       this.chunks.push(chunk);
       this.have += chunk.length;
+      if (this.bounded && this.have >= HIGH_WATER) socket.pause();
       this.wake?.();
     });
     socket.on("end", end);
     socket.on("close", end);
     socket.on("error", end);
   }
-  async take(n: number): Promise<Buffer> {
+  private async until(n: number): Promise<void> {
     while (this.have < n) {
       if (this.ended) throw new AgentError("bad_reply");
       await new Promise<void>((resolve) => (this.wake = resolve));
     }
-    const all = Buffer.concat(this.chunks);
-    this.chunks = [all.subarray(n)];
-    this.have = all.length - n;
-    return all.subarray(0, n);
+  }
+  /** Removes `n` held bytes (n <= have) from the head, copying only what it hands out. */
+  private consume(n: number): Buffer {
+    const parts: Buffer[] = [];
+    let left = n;
+    while (left > 0) {
+      const head = this.chunks[0] as Buffer;
+      if (head.length <= left) {
+        parts.push(head);
+        left -= head.length;
+        this.chunks.shift();
+      } else {
+        parts.push(head.subarray(0, left));
+        this.chunks[0] = head.subarray(left);
+        left = 0;
+      }
+    }
+    this.have -= n;
+    if (this.have < HIGH_WATER / 2) this.socket.resume();
+    return parts.length === 1 ? (parts[0] as Buffer) : Buffer.concat(parts);
+  }
+  async take(n: number): Promise<Buffer> {
+    await this.until(n);
+    return this.consume(n);
+  }
+  /** Hands `n` bytes to `sink` in pieces of at most `piece`, holding no more than HIGH_WATER at a time; a slow sink slows the socket. */
+  async stream(n: number, sink: (chunk: Buffer) => void | Promise<void>, piece: number, progress: () => void): Promise<void> {
+    this.bounded = true;
+    for (let left = n; left > 0; ) {
+      await this.until(1);
+      const chunk = this.consume(Math.min(left, this.have, piece));
+      left -= chunk.length;
+      progress();
+      await sink(chunk);
+    }
+  }
+}
+
+/** One reply frame's JSON, checked: an object with `ok: true`. Raw bytes it names are still unread. */
+async function readReply(reader: Reader): Promise<Record<string, unknown>> {
+  const size = (await reader.take(4)).readUInt32BE(0);
+  if (size > MAX_HEADER) throw new AgentError("bad_reply");
+  let head: unknown;
+  try {
+    head = JSON.parse((await reader.take(size)).toString("utf8"));
+  } catch (err) {
+    if (err instanceof AgentError) throw err;
+    // fx-swallow-ok: the parser's message could echo guest bytes
+    throw new AgentError("bad_reply");
+  }
+  if (typeof head !== "object" || head === null || Array.isArray(head)) throw new AgentError("bad_reply");
+  if ((head as Record<string, unknown>)["ok"] !== true) throw new AgentError("refused");
+  return head as Record<string, unknown>;
+}
+
+/** Resolves when the bytes are flushed, so a sender never has more than one piece in flight; a socket that dies meanwhile rejects. */
+function writeAll(socket: Duplex, data: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const done = (): void => {
+      socket.off("error", fail);
+      socket.off("close", fail);
+    };
+    const fail = (): void => {
+      done();
+      reject(new AgentError("unreachable"));
+    };
+    socket.once("error", fail);
+    socket.once("close", fail);
+    socket.write(data, (err) => {
+      if (err) return fail();
+      done();
+      resolve();
+    });
+  });
+}
+
+/** `content` in pieces of at most FILE_PIECE bytes, never copied. */
+async function* pieces(content: FileContent): AsyncGenerator<Buffer> {
+  const parts: AsyncIterable<Uint8Array> | Iterable<Uint8Array> = Buffer.isBuffer(content) ? [content] : content.chunks;
+  for await (const part of parts) {
+    for (let at = 0; at < part.length; at += FILE_PIECE) yield Buffer.from(part.buffer, part.byteOffset + at, Math.min(FILE_PIECE, part.length - at));
   }
 }
 
@@ -110,21 +207,31 @@ export interface ExecResult {
 export interface GuestAgent {
   ping(): Promise<void>;
   runInGuest(req: ExecRequest): Promise<ExecResult>;
+  /** Writes one file; `size` is the exact byte count of `content` (the agent needs it before the first byte). */
+  put(req: { path: string; mode?: number; size: number; content: FileContent }): Promise<void>;
+  /** Reads one file into `sink` in pieces, awaiting it between pieces; resolves with the byte count. */
+  get(path: string, sink: (chunk: Buffer) => void | Promise<void>): Promise<number>;
 }
+
+/** A transfer ends after this long in all; it also ends when `ioTimeoutMs` passes with no progress. */
+const TRANSFER_MAX_MS = 600_000;
 
 /**
  * `ioTimeoutMs` bounds every answer except `runInGuest` (the "exec" op on the wire), which the agent answers only when the process has ended and so waits its own `timeout_s`
  * (600 s by default in the agent) plus this slack.
  */
-export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000): GuestAgent {
-  async function request(header: Record<string, unknown>, body: Buffer, blobKeys: readonly string[], timeoutMs: number, onSent?: () => void): Promise<AgentReply> {
-    // `connect` is bounded here as well, so a Connect without a deadline of its own cannot leave a request pending for ever
+export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000, transferMaxMs = TRANSFER_MAX_MS): GuestAgent {
+  /** `connect` is bounded here as well, so a Connect without a deadline of its own cannot leave a request pending for ever. */
+  async function open(): Promise<Duplex> {
     let connectTimer: NodeJS.Timeout | undefined;
     const connecting = connect();
-    const socket = await Promise.race([connecting, new Promise<never>((_, reject) => (connectTimer = setTimeout(() => reject(new AgentError("timeout")), ioTimeoutMs)))]).catch((err: unknown) => {
+    return await Promise.race([connecting, new Promise<never>((_, reject) => (connectTimer = setTimeout(() => reject(new AgentError("timeout")), ioTimeoutMs)))]).catch((err: unknown) => {
       connecting.then((late) => late.destroy(), () => undefined);
       throw err;
     }).finally(() => clearTimeout(connectTimer));
+  }
+  async function request(header: Record<string, unknown>, body: Buffer, blobKeys: readonly string[], timeoutMs: number, onSent?: () => void): Promise<AgentReply> {
+    const socket = await open();
     let timer: NodeJS.Timeout | undefined;
     try {
       const reader = new Reader(socket);
@@ -134,23 +241,12 @@ export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000): GuestA
       socket.write(Buffer.concat([length, json, body]));
       onSent?.();
       const answer = (async (): Promise<AgentReply> => {
-        const size = (await reader.take(4)).readUInt32BE(0);
-        if (size > MAX_HEADER) throw new AgentError("bad_reply");
-        let head: unknown;
-        try {
-          head = JSON.parse((await reader.take(size)).toString("utf8"));
-        } catch (err) {
-          if (err instanceof AgentError) throw err;
-          // fx-swallow-ok: the parser's message could echo guest bytes
-          throw new AgentError("bad_reply");
-        }
-        if (typeof head !== "object" || head === null || Array.isArray(head)) throw new AgentError("bad_reply");
-        const header = head as Record<string, unknown>;
-        if (header["ok"] !== true) throw new AgentError("refused");
+        const header = await readReply(reader);
         const blobs: Buffer[] = [];
         for (const key of blobKeys) {
           const n = header[key] ?? 0; // the agent names no size on a timeout or a program it could not start, and sends no bytes
-          if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) throw new AgentError("bad_reply");
+          // each stream is capped on its own, as the agent caps each: a guest naming more is lying, and `take` would buffer it all
+          if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > MAX_OUTPUT) throw new AgentError("bad_reply");
           blobs.push(await reader.take(n));
         }
         return { header, blobs };
@@ -162,9 +258,62 @@ export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000): GuestA
       socket.destroy();
     }
   }
+  /** One connection for a file transfer: bounded by an idle timer that `progress` re-arms, and by TRANSFER_MAX_MS overall. */
+  async function transfer<T>(run: (socket: Duplex, reader: Reader, progress: () => void) => Promise<T>): Promise<T> {
+    const socket = await open();
+    let idle: NodeJS.Timeout | undefined;
+    let reject: (err: AgentError) => void = () => undefined;
+    const expired = new Promise<never>((_, rej) => (reject = rej));
+    const arm = (): void => {
+      clearTimeout(idle);
+      idle = setTimeout(() => reject(new AgentError("timeout")), ioTimeoutMs);
+    };
+    const cap = setTimeout(() => reject(new AgentError("timeout")), transferMaxMs);
+    arm();
+    try {
+      return await Promise.race([run(socket, new Reader(socket), arm), expired]);
+    } finally {
+      clearTimeout(idle);
+      clearTimeout(cap);
+      socket.destroy();
+    }
+  }
+  const frame = (header: Record<string, unknown>): Buffer => {
+    const json = Buffer.from(JSON.stringify(header));
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(json.length);
+    return Buffer.concat([length, json]);
+  };
   const intOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
   return {
     ping: async () => void (await request({ op: "ping" }, Buffer.alloc(0), [], ioTimeoutMs)),
+    put: async (req) => {
+      const path = checkGuestPath(req.path);
+      const mode = guestFileMode(req.mode);
+      if (!Number.isSafeInteger(req.size) || req.size < 0 || req.size > MAX_FILE_BYTES) throw new AgentError("bad_request");
+      await transfer(async (socket, reader, progress) => {
+        await writeAll(socket, frame({ op: "put", path, mode, size: req.size }));
+        let sent = 0;
+        for await (const piece of pieces(req.content)) {
+          sent += piece.length;
+          if (sent > req.size) throw new AgentError("bad_request"); // the agent is told a size and waits for exactly that many bytes
+          await writeAll(socket, piece);
+          progress();
+        }
+        if (sent !== req.size) throw new AgentError("bad_request");
+        await readReply(reader);
+      });
+    },
+    get: async (rawPath, sink) => {
+      const path = checkGuestPath(rawPath);
+      return await transfer(async (socket, reader, progress) => {
+        await writeAll(socket, frame({ op: "get", path }));
+        const n = (await readReply(reader))["size"];
+        if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > MAX_FILE_BYTES) throw new AgentError("bad_reply");
+        await reader.stream(n, sink, FILE_PIECE, progress);
+        return n;
+      });
+    },
     runInGuest: async (req) => {
       const stdin = req.stdin ?? Buffer.alloc(0);
       const timeoutS = req.timeoutS ?? 600;
@@ -177,7 +326,8 @@ export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000): GuestA
 
 /**
  * The agent of the VM whose verified vsock directory is `dir`. The host-side Firecracker socket is `v.sock` inside it; the helper's launcher
- * (B-2b-ii) must configure that name, and the one constant is here so the two cannot drift apart unseen.
+ * (B-2b-ii) must configure that name, and the one constant (in vsockFd.ts) is shared so the two cannot drift apart unseen. Every connection
+ * goes through O_PATH|O_NOFOLLOW fds and an fd path (decision Correction 8), never through the plain path of the socket.
  */
-export const VSOCK_SOCKET_NAME = "v.sock";
-export const agentAtVsockDir = (dir: string): GuestAgent => createGuestAgent(viaFirecrackerVsock(`${dir}/${VSOCK_SOCKET_NAME}`));
+export { VSOCK_SOCKET_NAME };
+export const agentAtVsockDir = (dir: string, ops: FdOps): GuestAgent => createGuestAgent(viaFirecrackerVsock(() => dialVsockDir(dir, ops)));

@@ -128,6 +128,8 @@ describe("kill during start, scripted", () => {
     const held: Array<{ req: Parameters<GuestAgent["runInGuest"]>[0]; resolve: (r: ExecResult) => void; reject: (e: unknown) => void }> = [];
     const agent: GuestAgent = {
       ping: async () => undefined,
+      put: async () => undefined,
+      get: async () => 0,
       runInGuest: (req) => {
         calls.push(req.argv);
         return new Promise((resolve, reject) => held.push({ req, resolve, reject }));

@@ -173,6 +173,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/vm/sandboxd/command.ts": ["crypto"], // D#587 B-2b-iii: a random command id and pid-file name; no process is started here, the command runs in the guest through the agent
   "src/vm/sandboxd/guestAgent.ts": ["net", "stream"], // D#587 B-2b-iii: the guest agent client: a Unix-socket connection to the sandbox's vsock proxy and the Duplex type it is handed; no process is started
   "src/vm/sandboxd/helperClient.ts": ["stream"], // D#587 B-2b-iii: the helper client takes an injected Duplex and speaks framed JSON over it; only the stream type is named
+  "src/vm/sandboxd/files.ts": ["path"], // D#587 B-2b-iii-b: the guest path rules of file transfer (joins and normalises names); no file on this host is opened here
+  "src/vm/sandboxd/production.ts": ["net", "stream"], // D#587 B-2b-iii-b: the Unix-socket connection to the helper and the Duplex type; the euid and platform arrive from the caller
+  "src/vm/sandboxd/teardown.ts": [], // D#587 B-2b-iii-b: the teardown logic only; the process counter is an injected port, built outside src
+  "src/vm/sandboxd/vsockFd.ts": ["fs", "net"], // D#587 B-2b-iii-b: O_PATH|O_NOFOLLOW opens judged by fstat, and the connect through the checked socket fd; the euid and platform arrive from the caller
   "src/vm/sandboxd/sandboxd.ts": ["path"], // D#587 B-2b-iii: joins the per-sandbox directory and socket names below the state directory
   // D#749 V2c-2a, the verify browser server. No environment read (the host environment, streams and job directory arrive as arguments) and no process of its own: Chromium is started by playwright-core.
   "src/verifyBrowser/server.ts": ["fs", "path", "stream"], // the one answer.json in the job directory (exclusive create, 0600); stream is only the types of the injected input and output
@@ -201,6 +205,38 @@ export const EXACT_PROC_TOKEN_FILES: readonly string[] = ["src/sandbox/probe.ts"
  */
 export const PROC_FD_FILES: readonly string[] = ["src/daemon/workspaceStubs.ts"];
 const PROC_FD_NAME = /\/proc\/self\/fd(?![\w/.-])/g;
+
+/**
+ * D#587 B-2b-iii-b: the one file that may name `/proc/self/fd/` as the start of a template literal, as in `/proc/self/fd/${fd}`. The sandbox daemon
+ * connects to a VM's vsock socket, and inspects its directory, through descriptors it opened with O_PATH|O_NOFOLLOW and checked, never through a path
+ * a sandbox could re-point (the reviewed security property of Corrections 8 and 9). Only whole template shapes are exempt, matched on the syntax tree (see vsockFdTemplateHeads);
+ * `/proc/self/fdx/`, `/proc/1/fd/`, `/proc/self/`, a plain string, a tagged or nested template and every other `/proc` path stay banned, here and everywhere else.
+ */
+export const VSOCK_FD_TEMPLATE_FILES: readonly string[] = ["src/vm/sandboxd/vsockFd.ts"];
+const VSOCK_FD_PREFIX = "/proc/self/fd/";
+
+/**
+ * The template heads the vsock-file exemption covers, by AST shape. A template qualifies only when it is untagged, starts with exactly
+ * `/proc/self/fd/`, and is one of the two shapes the file uses: `` `/proc/self/fd/${a}` `` or `` `/proc/self/fd/${a}/${b}` ``, where each substitution is a
+ * bare identifier and no other literal text appears (the middle is exactly `/`, the tail is empty). Anything else, and every other `/proc` text,
+ * stays banned.
+ */
+function vsockFdTemplateHeads(source: ts.SourceFile): Set<ts.Node> {
+  const heads = new Set<ts.Node>();
+  const walk = (node: ts.Node): void => {
+    if (ts.isTemplateExpression(node) && !ts.isTaggedTemplateExpression(node.parent) && node.head.text === VSOCK_FD_PREFIX) {
+      const spans = node.templateSpans;
+      const bare = spans.every((span) => ts.isIdentifier(span.expression));
+      const [one, two] = spans;
+      const shapeOne = spans.length === 1 && one !== undefined && one.literal.text === "";
+      const shapeTwo = spans.length === 2 && one !== undefined && two !== undefined && one.literal.text === "/" && two.literal.text === "";
+      if (bare && (shapeOne || shapeTwo)) heads.add(node.head);
+    }
+    ts.forEachChild(node, walk);
+  };
+  walk(source);
+  return heads;
+}
 
 const BUILTINS = new Set(builtinModules.flatMap((name) => [name, name.replace(/^node:/, "")]));
 const BANNED_EXEC_NAMES = new Set(["exec", "execSync", "execFile", "execFileSync", "fork", "spawnSync"]);
@@ -335,11 +371,19 @@ function spawnCallProblem(call: ts.CallExpression): boolean {
 /** Every rule the text breaks, by name. Empty means the text reads the environment only by name, and only where that is allowed. */
 export function envAccessViolations(source0: string, file: string = ENV_READER_FILE): string[] {
   // The descriptor table's exact name, in the one file allowed it, is read as a neutral word; anything longer or different is still checked below.
-  const text = PROC_FD_FILES.includes(file) ? source0.replace(PROC_FD_NAME, "fd-table") : source0;
+  const named = PROC_FD_FILES.includes(file) ? source0.replace(PROC_FD_NAME, "fd-table") : source0;
+  const text = named;
   const found = new Set<string>();
   const allowed = new Set(ALLOWED_BUILTINS[file] ?? []);
   const mayUseChildProcess = ENGINE_FILES.includes(file) && allowed.has("child_process");
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const exemptHeads = VSOCK_FD_TEMPLATE_FILES.includes(file) ? vsockFdTemplateHeads(source) : new Set<ts.Node>();
+  // The exempt prefix is read as a neutral word of the same length in the raw-text checks at the end; everything else in the text is checked as written.
+  let rawText = text;
+  for (const head of exemptHeads) {
+    const at = head.getStart(source) + 1;
+    rawText = rawText.slice(0, at) + "x".repeat(VSOCK_FD_PREFIX.length) + rawText.slice(at + VSOCK_FD_PREFIX.length);
+  }
 
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node)) {
@@ -369,7 +413,7 @@ export function envAccessViolations(source0: string, file: string = ENV_READER_F
     if ((ts.isParameter(node) || ts.isPropertySignature(node) || ts.isPropertyDeclaration(node) || ts.isVariableDeclaration(node)) && node.type && isSpawnType(node.type)) {
       if (!SPAWN_NAME.test(node.name.getText(source))) found.add("a spawn-typed name that does not start with spawn");
     }
-    if (isTextToken(node)) {
+    if (isTextToken(node) && !exemptHeads.has(node)) {
       if (/^(?:node:)?process$/.test(node.text)) found.add("import of the process module");
       if (node.text.includes("/proc/")) found.add("/proc/ path");
       if (node.text === "constructor") found.add("constructor member");
@@ -406,8 +450,8 @@ export function envAccessViolations(source0: string, file: string = ENV_READER_F
   };
   visit(source);
 
-  if (/["'`](?:node:)?process["'`]/.test(text)) found.add("import of the process module");
-  if (/\b(?:globalThis|global)\b/.test(text)) found.add("globalThis or global");
-  if (/\/proc\//.test(text)) found.add("/proc/ path");
+  if (/["'`](?:node:)?process["'`]/.test(rawText)) found.add("import of the process module");
+  if (/\b(?:globalThis|global)\b/.test(rawText)) found.add("globalThis or global");
+  if (/\/proc\//.test(rawText)) found.add("/proc/ path");
   return [...found];
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentError, agentAtVsockDir, createGuestAgent, viaFirecrackerVsock } from "../../../src/vm/sandboxd/guestAgent.js";
-import { makeRig, runCleanups, startSilentProxy } from "./helpers.js";
+import { makeRig, realOps, runCleanups, startSilentProxy } from "./helpers.js";
 
 afterEach(runCleanups);
 const params = (name: string) => ({ name, template: "fx-agent", vcpus: 2, memMb: 512 });
@@ -42,7 +42,7 @@ describe("a guest that never answers the vsock CONNECT", () => {
     const proxy = startSilentProxy();
     const silent = createGuestAgent(viaFirecrackerVsock(proxy, 5252, 60_000), 60_000);
     let swapped = false;
-    const rig = makeRig({ agentFor: (dir) => (swapped ? silent : agentAtVsockDir(dir)), extra: { startWaitMs: 300 } });
+    const rig = makeRig({ agentFor: (dir) => (swapped ? silent : agentAtVsockDir(dir, realOps())), extra: { startWaitMs: 300 } });
     const sb = await rig.daemon.create(params("a"));
     swapped = true;
     (rig.daemon as unknown as { records: Map<string, { agent: unknown }> }).records.get("a")!.agent = silent;
