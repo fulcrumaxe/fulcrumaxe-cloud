@@ -302,13 +302,24 @@ describe.skipIf(skip)("agent.py streaming exec and kill", () => {
     const s = await open(a, { id: "gone1", argv: [bin("sh"), "-c", `echo $$ > ${pidFile}; exec ${bin("yes")}`] });
     await s.next();
     s.socket.destroy();
-    for (let i = 0; i < 200; i++) {
-      const r = await a.client.kill("gone1");
-      if (r["signalled"] === false) break;
-      await sleep(50);
+    // Wait on the real event (the command's process ends) without sending it anything: a poll by `kill` would itself
+    // deliver SIGTERM and could win the race against the agent's own SIGKILL, so the recorded signal would be 15, not 9.
+    const pid = readFileSync(pidFile, "utf8").trim();
+    const deadline = Date.now() + 30_000;
+    let state = stateOf(pid);
+    while (!["gone", "Z"].includes(state) && Date.now() < deadline) {
+      await sleep(25);
+      state = stateOf(pid);
     }
-    expect(await a.client.kill("gone1")).toMatchObject({ ok: true, signalled: false, signal: 9 });
-    expect(["gone", "Z"]).toContain(await waitGone(readFileSync(pidFile, "utf8").trim()));
+    expect(["gone", "Z"]).toContain(state);
+    // Now only the agent's record is awaited; the command is already dead, so these kills signal nothing live.
+    let last: Record<string, unknown> = {};
+    while (Date.now() < deadline) {
+      last = await a.client.kill("gone1");
+      if (last["signalled"] === false) break;
+      await sleep(25);
+    }
+    expect(last).toMatchObject({ ok: true, signalled: false, signal: 9 });
   });
 
   it("refuses malformed frames with an error and no process, and keeps serving", async () => {
