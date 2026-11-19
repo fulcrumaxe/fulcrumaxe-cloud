@@ -54,6 +54,7 @@ type Spec struct {
 	JailDir, VsockDir string
 	VCPUs, MemMB      int64
 	RunnerUID         uint32 // who gets the host-side vsock socket once the VM has made it
+	Resume            bool   // load the snapshot staged in the jail's root instead of configuring a fresh VM
 }
 
 // Instance is a started sandbox.
@@ -76,7 +77,8 @@ type box struct {
 	spec    Spec
 	created time.Time
 	inst    Instance
-	busy    chan struct{} // non-nil while one start or destroy of this id is under way: the id's reservation
+	staged  map[string]string // the manifest digests of the files staged for the running VM: what a snapshot is bound to
+	busy    chan struct{}     // non-nil while one start or destroy of this id is under way: the id's reservation
 }
 
 // Manager implements server.Backend. It is safe for concurrent use. The lock covers the registry map only and
@@ -99,6 +101,8 @@ type Manager struct {
 	maxMemMB  int64
 	jailsFd   int
 	vsockFd   int
+	snapFd    int                                      // the snapshot directory, -1 when none is configured
+	statfs    func(fd int, st *syscall.Statfs_t) error // tests only: the free-space probe
 	stg       stager
 	remap     func(uid, gid uint32) (uint32, uint32) // tests only: map a nominal owner onto one the test can really chown to
 	mu        sync.Mutex
@@ -116,7 +120,7 @@ func newManager(cfg config.Config, l Launcher, rootUID uint32, remap func(uint32
 		uidFirst: cfg.UIDFirst, uidCount: cfg.UIDCount, gidFirst: cfg.GIDFirst, gidCount: cfg.GIDCount,
 		maxBoxes: cfg.MaxSandboxes, maxVCPUs: cfg.MaxVCPUs, maxMemMB: cfg.MaxMemMB, remap: remap,
 		stg:   stager{manifest: cfg.ManifestPath, dir: cfg.TemplateDir, exec: path.Base(cfg.FirecrackerPath)},
-		boxes: map[string]*box{}, jailsFd: -1, vsockFd: -1}
+		boxes: map[string]*box{}, jailsFd: -1, vsockFd: -1, snapFd: -1}
 	rfd, err := openAbs(m.root)
 	if err != nil {
 		return nil, errors.New("sandbox: jail_root cannot be opened as a plain directory path")
@@ -133,11 +137,23 @@ func newManager(cfg config.Config, l Launcher, rootUID uint32, remap func(uint32
 		closeFd(m.jailsFd)
 		return nil, errors.New("sandbox: the vsock directory is not a root-owned 0711 directory without an ACL")
 	}
+	if cfg.SnapshotDir != "" {
+		if m.snapFd, err = m.openSnapshotDir(cfg.SnapshotDir); err != nil {
+			m.Close()
+			return nil, errors.New("sandbox: snapshot_dir must be an existing directory owned by root with mode 0700 and no ACL")
+		}
+	}
 	return m, nil
 }
 
 // Close releases the directory descriptors.
-func (m *Manager) Close() { closeFd(m.jailsFd); closeFd(m.vsockFd) }
+func (m *Manager) Close() {
+	for _, fd := range []int{m.jailsFd, m.vsockFd, m.snapFd} {
+		if fd >= 0 {
+			closeFd(fd)
+		}
+	}
+}
 
 func (m *Manager) effUID(u uint32) uint32 {
 	if m.remap != nil {
@@ -371,7 +387,7 @@ func (m *Manager) Start(id string) (server.Reply, protocol.Code) {
 	if code != protocol.OK {
 		return server.Reply{}, code
 	}
-	if err := m.stage(b.spec, digests); err != nil {
+	if err := m.stage(b.spec, digests, nil); err != nil {
 		return server.Reply{}, protocol.Internal
 	}
 	inst, err := m.Launcher.Launch(b.spec)
@@ -382,7 +398,7 @@ func (m *Manager) Start(id string) (server.Reply, protocol.Code) {
 		}
 		return server.Reply{}, protocol.Internal
 	}
-	b.inst = inst
+	b.inst, b.staged = inst, digests
 	return ok, protocol.OK
 }
 

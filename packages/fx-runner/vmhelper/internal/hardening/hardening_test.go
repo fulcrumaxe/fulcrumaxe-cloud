@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-var params = UnitParams{HelperPath: "/opt/example/fx-vmhelper", ConfigPath: "/etc/example/vmhelper.json", JailRoot: "/srv/example-jails", Group: "example-runner"}
+var params = UnitParams{HelperPath: "/opt/example/fx-vmhelper", ConfigPath: "/etc/example/vmhelper.json", JailRoot: "/srv/example-jails", SnapshotDir: "/srv/example-snapshots", Group: "example-runner"}
 
 func unitMap(t *testing.T, text string) map[string]string {
 	t.Helper()
@@ -60,7 +60,7 @@ func TestUnitCarriesEveryPinnedValue(t *testing.T) {
 	if u["User"] != "root" || u["Group"] != "example-runner" || u["ExecStart"] != "/opt/example/fx-vmhelper -config /etc/example/vmhelper.json" {
 		t.Errorf("%v", u)
 	}
-	if u["ReadWritePaths"] != "/sys/fs/cgroup /srv/example-jails" {
+	if u["ReadWritePaths"] != "/sys/fs/cgroup /srv/example-jails /srv/example-snapshots" {
 		t.Errorf("ReadWritePaths %q", u["ReadWritePaths"])
 	}
 }
@@ -218,16 +218,18 @@ func TestCheckStatus(t *testing.T) {
 func TestUnitRefusesInjection(t *testing.T) {
 	p := Load()
 	for name, u := range map[string]UnitParams{
-		"newline in config":  {HelperPath: "/a", ConfigPath: "/b\nExecStartPre=/bin/sh", JailRoot: "/c"},
-		"space in helper":    {HelperPath: "/a b", ConfigPath: "/b", JailRoot: "/c"},
-		"specifier in jail":  {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/c%h"},
-		"relative path":      {HelperPath: "a", ConfigPath: "/b", JailRoot: "/c"},
-		"dotdot":             {HelperPath: "/a/../b", ConfigPath: "/b", JailRoot: "/c"},
-		"root as jail":       {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/"},
-		"group with newline": {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/c", Group: "g\nUser=x"},
+		"newline in config":  {HelperPath: "/a", ConfigPath: "/b\nExecStartPre=/bin/sh", JailRoot: "/c", SnapshotDir: "/d"},
+		"space in helper":    {HelperPath: "/a b", ConfigPath: "/b", JailRoot: "/c", SnapshotDir: "/d"},
+		"specifier in jail":  {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/c%h", SnapshotDir: "/d"},
+		"relative path":      {HelperPath: "a", ConfigPath: "/b", JailRoot: "/c", SnapshotDir: "/d"},
+		"dotdot":             {HelperPath: "/a/../b", ConfigPath: "/b", JailRoot: "/c", SnapshotDir: "/d"},
+		"root as jail":       {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/", SnapshotDir: "/d"},
+		"no snapshot dir":    {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/c"},
+		"root as snapshots":  {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/c", SnapshotDir: "/"},
+		"group with newline": {HelperPath: "/a", ConfigPath: "/b", JailRoot: "/c", Group: "g\nUser=x", SnapshotDir: "/d"},
 		"empty":              {},
-		"nul":                {HelperPath: "/a\x00", ConfigPath: "/b", JailRoot: "/c"},
-		"quote":              {HelperPath: "/a\"", ConfigPath: "/b", JailRoot: "/c"},
+		"nul":                {HelperPath: "/a\x00", ConfigPath: "/b", JailRoot: "/c", SnapshotDir: "/d"},
+		"quote":              {HelperPath: "/a\"", ConfigPath: "/b", JailRoot: "/c", SnapshotDir: "/d"},
 	} {
 		if _, err := p.RenderUnit(u); err == nil {
 			t.Errorf("%s accepted", name)

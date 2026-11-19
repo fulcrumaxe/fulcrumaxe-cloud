@@ -67,6 +67,16 @@ type Entry struct {
 type Reply struct {
 	VsockDir   string
 	SandboxGID uint32
+	// SnapshotBytes is the size of the stored memory and state files, set by a snapshot.
+	SnapshotBytes int64
+}
+
+// SnapshotBackend is the part of a Backend that serves the snapshot verbs. A Backend that does not
+// implement it answers them with "unavailable".
+type SnapshotBackend interface {
+	Snapshot(id, snap string) (Reply, protocol.Code)
+	Resume(id, snap string) (Reply, protocol.Code)
+	SnapshotDelete(snap string) protocol.Code
 }
 
 // Backend is what a validated request is handed to. Each call returns protocol.OK or one refusal code.
@@ -96,6 +106,7 @@ type response struct {
 	Code      protocol.Code `json:"code,omitempty"`
 	VsockDir  string        `json:"vsock_dir,omitempty"`
 	GID       uint32        `json:"sandbox_gid,omitempty"` // never 0: a sandbox gid is at least config.MinID
+	Snapshot  int64         `json:"snapshot_bytes,omitempty"`
 	Sandboxes *[]Entry      `json:"sandboxes,omitempty"`
 }
 
@@ -269,11 +280,23 @@ func (s *Server) dispatch(req protocol.Request) (resp response, code protocol.Co
 			}
 			return response{OK: true, Protocol: protocol.Version, Sandboxes: &entries}, code
 		}
+	case protocol.Snapshot, protocol.Resume, protocol.SnapshotDelete:
+		sb, ok := s.Backend.(SnapshotBackend)
+		switch {
+		case !ok:
+			code = protocol.Unavailable
+		case req.Verb == protocol.Snapshot:
+			reply, code = sb.Snapshot(req.SandboxID, req.SnapshotID)
+		case req.Verb == protocol.Resume:
+			reply, code = sb.Resume(req.SandboxID, req.SnapshotID)
+		default:
+			code = sb.SnapshotDelete(req.SnapshotID)
+		}
 	default:
 		code = protocol.UnknownVerb
 	}
 	if code == protocol.OK {
-		return response{OK: true, Protocol: protocol.Version, VsockDir: reply.VsockDir, GID: reply.SandboxGID}, code
+		return response{OK: true, Protocol: protocol.Version, VsockDir: reply.VsockDir, GID: reply.SandboxGID, Snapshot: reply.SnapshotBytes}, code
 	}
 	return refusal(code), code
 }

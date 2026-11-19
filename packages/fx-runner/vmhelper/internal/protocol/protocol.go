@@ -1,7 +1,7 @@
 // Package protocol is the typed request schema of fx-vmhelper's socket API.
 //
 // One request is one frame: a single JSON object followed by a newline, at most MaxFrame bytes
-// including the newline. The decoder is strict. It accepts only the four verbs and only the fields
+// including the newline. The decoder is strict. It accepts only its verbs and only the fields
 // each verb names; it rejects an unknown or repeated key, a "__proto__" key, any value that is not a
 // plain string or a plain non-negative integer, and trailing bytes. Every refusal is a Code from a
 // fixed list. A Code never holds input bytes.
@@ -30,31 +30,38 @@ const (
 	Start   Verb = "start"
 	Destroy Verb = "destroy"
 	List    Verb = "list"
+	// The snapshot verbs (additive to protocol 1): snapshot stops a running sandbox into a stored snapshot,
+	// resume starts a prepared one from it, and snapshot_delete removes one.
+	Snapshot       Verb = "snapshot"
+	Resume         Verb = "resume"
+	SnapshotDelete Verb = "snapshot_delete"
 )
 
 // Code is the result of a request. The values below are the whole closed list.
 type Code string
 
 const (
-	OK              Code = "ok"
-	BadPeer         Code = "bad_peer"         // the kernel peer uid is not the configured runner uid
-	TooBusy         Code = "too_busy"         // all connection slots are in use
-	FrameTimeout    Code = "frame_timeout"    // the frame did not complete in time
-	FrameTooLarge   Code = "frame_too_large"  // more than MaxFrame bytes without a newline
-	BadFrame        Code = "bad_frame"        // not one strict JSON object (syntax, duplicate or __proto__ key, trailing bytes)
-	UnknownVerb     Code = "unknown_verb"     // missing, non-string or not one of the four verbs
-	BadField        Code = "bad_field"        // an unknown, missing or wrongly typed field
-	BadID           Code = "bad_id"           // a sandbox or template id outside the id pattern
-	BadNumber       Code = "bad_number"       // not a plain integer in range
-	OverCap         Code = "over_cap"         // vcpus or mem_mb above the root-config cap, or the sandbox cap
-	UnknownSandbox  Code = "unknown_sandbox"  // start or destroy for an id that is not prepared
-	UnknownTemplate Code = "unknown_template" // a template id that is not in the signed metadata
-	Unavailable     Code = "unavailable"      // the verb is valid but this build cannot serve it yet
-	Internal        Code = "internal"         // a failure inside the helper; nothing of it is sent
+	OK               Code = "ok"
+	BadPeer          Code = "bad_peer"          // the kernel peer uid is not the configured runner uid
+	TooBusy          Code = "too_busy"          // all connection slots are in use
+	FrameTimeout     Code = "frame_timeout"     // the frame did not complete in time
+	FrameTooLarge    Code = "frame_too_large"   // more than MaxFrame bytes without a newline
+	BadFrame         Code = "bad_frame"         // not one strict JSON object (syntax, duplicate or __proto__ key, trailing bytes)
+	UnknownVerb      Code = "unknown_verb"      // missing, non-string or not one of the verbs
+	BadField         Code = "bad_field"         // an unknown, missing or wrongly typed field
+	BadID            Code = "bad_id"            // a sandbox or template id outside the id pattern
+	BadNumber        Code = "bad_number"        // not a plain integer in range
+	OverCap          Code = "over_cap"          // vcpus or mem_mb above the root-config cap, or the sandbox cap; snapshot or resume with too little free disk space
+	UnknownSandbox   Code = "unknown_sandbox"   // start or destroy for an id that is not prepared
+	UnknownTemplate  Code = "unknown_template"  // a template id that is not in the signed metadata
+	Unavailable      Code = "unavailable"       // the verb is valid but this build cannot serve it yet
+	UnknownSnapshot  Code = "unknown_snapshot"  // resume or snapshot_delete for a snapshot id that is not stored
+	SnapshotMismatch Code = "snapshot_mismatch" // the snapshot was taken with other disk files, template or size than this sandbox has
+	Internal         Code = "internal"          // a failure inside the helper; nothing of it is sent
 )
 
 // Codes is the closed list.
-var Codes = []Code{OK, BadPeer, TooBusy, FrameTimeout, FrameTooLarge, BadFrame, UnknownVerb, BadField, BadID, BadNumber, OverCap, UnknownSandbox, UnknownTemplate, Unavailable, Internal}
+var Codes = []Code{OK, BadPeer, TooBusy, FrameTimeout, FrameTooLarge, BadFrame, UnknownVerb, BadField, BadID, BadNumber, OverCap, UnknownSandbox, UnknownTemplate, Unavailable, UnknownSnapshot, SnapshotMismatch, Internal}
 
 // idPattern starts with a letter or digit: an id that began with "-" could be read as an option by any
 // program it is ever handed to.
@@ -63,16 +70,17 @@ var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 // ValidID reports whether s matches the one id pattern, used for sandbox ids and template ids.
 func ValidID(s string) bool { return idPattern.MatchString(s) }
 
-// KnownVerb reports whether v is one of the four verbs.
+// KnownVerb reports whether v is one of the verbs.
 func KnownVerb(v Verb) bool { _, ok := schema[v]; return ok }
 
 // Request is a validated request. Only the fields its verb names are set.
 type Request struct {
-	Verb      Verb
-	SandboxID string
-	Template  string
-	VCPUs     int64
-	MemMB     int64
+	Verb       Verb
+	SandboxID  string
+	SnapshotID string
+	Template   string
+	VCPUs      int64
+	MemMB      int64
 }
 
 // Caps are the per-sandbox ceilings from the root-owned config.
@@ -93,10 +101,14 @@ var schema = map[Verb]map[string]kind{
 	Start:   {"sandbox_id": kString},
 	Destroy: {"sandbox_id": kString},
 	List:    {},
+
+	Snapshot:       {"sandbox_id": kString, "snapshot_id": kString},
+	Resume:         {"sandbox_id": kString, "snapshot_id": kString},
+	SnapshotDelete: {"snapshot_id": kString},
 }
 
 // Error is a refusal. It carries a Code and, once they are validated, the verb and the sandbox id for the
-// log: Verb is set only when the frame named one of the four verbs, SandboxID only when it matched the pattern.
+// log: Verb is set only when the frame named one of the verbs, SandboxID only when it matched the pattern.
 type Error struct {
 	Code      Code
 	Verb      Verb
@@ -153,6 +165,12 @@ func Parse(frame []byte, caps Caps) (Request, *Error) {
 	}
 	if !idOK {
 		return Request{}, refuse(BadID, req.Verb, "")
+	}
+	if _, has := want["snapshot_id"]; has {
+		req.SnapshotID = fields["snapshot_id"].(string)
+		if !ValidID(req.SnapshotID) {
+			return Request{}, refuse(BadID, req.Verb, req.SandboxID)
+		}
 	}
 	if req.Verb != Prepare {
 		return req, nil

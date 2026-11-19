@@ -56,15 +56,28 @@ func TestRealJailer(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := &JailerLauncher{Jailer: os.Getenv("FX_VM_JAILER"), Firecracker: os.Getenv("FX_VM_FIRECRACKER"), CgroupRoot: "/sys/fs/cgroup", CgroupParent: parent, AmbientCaps: pinned.JailerOnlyCaps()}
-	cfg := config.Config{JailRoot: os.Getenv("FX_VM_JAIL_ROOT"), RunnerUID: 1001, RunnerGID: 1001, UIDFirst: 200000, UIDCount: 4, GIDFirst: 200000, GIDCount: 4,
-		MaxSandboxes: 2, MaxVCPUs: 2, MaxMemMB: 512, FirecrackerPath: l.Firecracker}
+	// The helper's own config parser builds the Config, so the paths are ones it accepts: snapshot_dir lies outside jail_root
+	// (the workflow makes it, root-owned 0700, and lists it in the unit's ReadWritePaths next to jail_root, as RenderUnit does).
+	snapDir := os.Getenv("FX_VM_SNAPSHOT_DIR")
+	if snapDir == "" {
+		t.Fatal("FX_VM_SNAPSHOT_DIR is not set")
+	}
+	cfgJSON := fmt.Sprintf(`{"jail_root":%q,"runner_uid":1001,"runner_gid":1001,"uid_first":200000,"uid_count":4,"gid_first":200000,"gid_count":4,`+
+		`"max_sandboxes":2,"max_vcpus":2,"max_mem_mb":512,"jailer_path":%q,"firecracker_path":%q,`+
+		`"template_manifest_path":"/opt/example/templates/manifest.json","template_dir":"/opt/example/templates","snapshot_dir":%q}`,
+		os.Getenv("FX_VM_JAIL_ROOT"), l.Jailer, l.Firecracker, snapDir)
+	cfg, err := config.Parse([]byte(cfgJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ll := &logLauncher{t: t, inner: l}
 	m, err := New(cfg, ll)
 	if err != nil {
 		t.Fatal(err)
 	}
-	realFixture(t, cfg.JailRoot).use(m) // the staged tree holds a real kernel and a root disk that answers the agent's ping
-	useRealMounts(t)                    // and the vsock bind mount is real here
+	fx := realFixture(t, cfg.JailRoot)
+	fx.use(m)        // the staged tree holds a real kernel and a root disk that answers the agent's ping
+	useRealMounts(t) // and the vsock bind mount is real here
 	defer m.Close()
 	a, b := "real-a", "real-b"
 	// No VM may outlive the test, whatever fails below (destroy is a no-op for an id that is already gone).
@@ -170,6 +183,7 @@ func TestRealJailer(t *testing.T) {
 	if err := os.Remove(jailA + "/stranger"); err != nil {
 		t.Fatal(err)
 	}
+	realSnapshotPhase(t, m, cfg, fx, b, vdirs[b], pb) // b: the destroy that must refuse above stopped a
 	for _, id := range []string{a, b} {
 		assertNoOverride(t, "destroy of "+id)
 		if c := m.Destroy(id); c != protocol.OK {
@@ -225,6 +239,38 @@ func vsockHello(t *testing.T, uid, gid uint32, sock string) (err error) {
 		}
 	}
 	return fmt.Errorf("%v: %s", err, out)
+}
+
+// guestCall sends one request frame to the guest agent port through the host-side socket and returns the reply body.
+func guestCall(sock, req string) (string, error) {
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("CONNECT 5252\n")); err != nil {
+		return "", err
+	}
+	br := bufio.NewReader(conn)
+	if line, err := br.ReadString('\n'); err != nil || !strings.HasPrefix(line, "OK ") {
+		return "", fmt.Errorf("handshake: %q %v", line, err)
+	}
+	if _, err := conn.Write(append(binary.BigEndian.AppendUint32(nil, uint32(len(req))), req...)); err != nil {
+		return "", err
+	}
+	var n [4]byte
+	if _, err := io.ReadFull(br, n[:]); err != nil {
+		return "", err
+	}
+	body := make([]byte, min(binary.BigEndian.Uint32(n[:]), 4096))
+	if _, err := io.ReadFull(br, body); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(string(body), `{"ok":true`) {
+		return "", fmt.Errorf("reply %q", body)
+	}
+	return string(body), nil
 }
 
 // pingOnce connects to sock (the caller's own uid is the one that matters), asks for the agent's port and pings it.
@@ -383,6 +429,25 @@ func TestAsSandboxHelper(t *testing.T) {
 		if _, err := os.Stat(args[0]); err != nil {
 			t.Fatal(err)
 		}
+	case "remove": // the runner removes the stale host-side socket of a stopped VM (it owns the directory)
+		if err := os.Remove(args[0]); err != nil {
+			t.Fatal(err)
+		}
+	case "noopen": // neither the runner nor a sandbox uid can open or search a snapshot
+		if f, err := os.Open(args[0]); err == nil {
+			f.Close()
+			t.Errorf("opened %s", args[0])
+		}
+	case "gput": // write a value into the guest's tmpfs
+		if _, err := guestCall(args[0], `{"op":"put","v":"`+args[1]+`"}`); err != nil {
+			t.Fatal(err)
+		}
+	case "gget": // read it back
+		body, err := guestCall(args[0], `{"op":"get"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("GUEST-REPLY=%s\n", body)
 	case "write": // the runner makes a file in its vsock directory
 		if err := os.WriteFile(args[0], []byte("x"), 0o600); err != nil {
 			t.Fatal(err)

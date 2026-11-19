@@ -50,7 +50,11 @@ func (l *JailerLauncher) boot(in *instance, s Spec) error {
 		}
 	}
 	defer conn.Close()
-	if err := fcapi.Configure(conn, fcapi.VM{VCPUs: s.VCPUs, MemMB: s.MemMB}); err != nil {
+	if s.Resume { // the snapshot carries the machine, the drives and the vsock device
+		if err := fcapi.Load(conn); err != nil {
+			return err
+		}
+	} else if err := fcapi.Configure(conn, fcapi.VM{VCPUs: s.VCPUs, MemMB: s.MemMB}); err != nil {
 		return err
 	}
 	handover := l.Handover

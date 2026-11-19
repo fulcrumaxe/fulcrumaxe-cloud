@@ -20,6 +20,8 @@
 //	               absolute, clean path of the root-owned template manifest (id -> kind -> sha256) that the
 //	               install writes from the signed release metadata; the helper only reads it
 //	template_dir   absolute, clean path of the root-owned directory holding <id>/<kind> template files
+//	snapshot_dir   absolute, clean path of the root-owned 0700 directory the snapshots are stored in (guest
+//	               memory: secret). It lies outside jail_root and does not hold it
 package config
 
 import (
@@ -49,6 +51,7 @@ type Config struct {
 	FirecrackerPath string
 	ManifestPath    string
 	TemplateDir     string
+	SnapshotDir     string
 }
 
 // Caps returns the per-sandbox ceilings for the request schema.
@@ -70,7 +73,7 @@ const Nobody = 65534
 // NoID is 2^32-1, which is (uid_t)-1 and (gid_t)-1: "no change" to chown and setresuid, never a real id.
 const NoID = 1<<32 - 1
 
-var keys = []string{"jail_root", "runner_uid", "runner_gid", "uid_first", "uid_count", "gid_first", "gid_count", "max_sandboxes", "max_vcpus", "max_mem_mb", "jailer_path", "firecracker_path", "template_manifest_path", "template_dir"}
+var keys = []string{"jail_root", "runner_uid", "runner_gid", "uid_first", "uid_count", "gid_first", "gid_count", "max_sandboxes", "max_vcpus", "max_mem_mb", "jailer_path", "firecracker_path", "template_manifest_path", "template_dir", "snapshot_dir"}
 
 // Load reads path, which must be a regular file owned by ownerUID (0 in production) that no one else can
 // write. The open does not follow a symlink in the last component.
@@ -127,8 +130,8 @@ func Parse(data []byte) (Config, error) {
 			return Config{}, fmt.Errorf("config: required key %q is missing (there is no default)", k)
 		}
 	}
-	var paths [5]string
-	for i, k := range []string{"jail_root", "jailer_path", "firecracker_path", "template_manifest_path", "template_dir"} {
+	var paths [6]string
+	for i, k := range []string{"jail_root", "jailer_path", "firecracker_path", "template_manifest_path", "template_dir", "snapshot_dir"} {
 		v, ok := f[k].(string)
 		if !ok {
 			return Config{}, fmt.Errorf("config: %s must be a string", k)
@@ -140,7 +143,7 @@ func Parse(data []byte) (Config, error) {
 	}
 	root := paths[0]
 	n := map[string]int64{}
-	for _, k := range keys[1 : len(keys)-4] {
+	for _, k := range keys[1 : len(keys)-5] {
 		v, ok := protocol.PlainInt(f[k])
 		if !ok {
 			return Config{}, fmt.Errorf("config: %s must be a plain integer", k)
@@ -149,7 +152,7 @@ func Parse(data []byte) (Config, error) {
 	}
 	c := Config{JailRoot: root, RunnerUID: uint32(n["runner_uid"]), RunnerGID: uint32(n["runner_gid"]), UIDFirst: uint32(n["uid_first"]), UIDCount: uint32(n["uid_count"]),
 		GIDFirst: uint32(n["gid_first"]), GIDCount: uint32(n["gid_count"]), MaxSandboxes: n["max_sandboxes"], MaxVCPUs: n["max_vcpus"], MaxMemMB: n["max_mem_mb"], JailerPath: paths[1], FirecrackerPath: paths[2],
-		ManifestPath: paths[3], TemplateDir: paths[4]}
+		ManifestPath: paths[3], TemplateDir: paths[4], SnapshotDir: paths[5]}
 	switch {
 	case c.RunnerUID == 0:
 		return Config{}, errors.New("config: runner_uid must not be 0")
@@ -161,6 +164,8 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("config: gid range holds %d ids but max_sandboxes is %d", c.GIDCount, c.MaxSandboxes)
 	case c.RunnerGID == 0:
 		return Config{}, errors.New("config: runner_gid must not be 0")
+	case c.SnapshotDir == c.JailRoot || strings.HasPrefix(c.SnapshotDir, c.JailRoot+"/") || strings.HasPrefix(c.JailRoot, c.SnapshotDir+"/"):
+		return Config{}, errors.New("config: snapshot_dir must be outside jail_root and must not hold it")
 	}
 	if err := checkRange("uid", c.UIDFirst, c.UIDCount, MinID); err != nil {
 		return Config{}, err

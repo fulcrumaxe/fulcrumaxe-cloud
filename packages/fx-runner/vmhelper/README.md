@@ -71,11 +71,53 @@ line per request. Verbs and their only fields:
 | `prepare` | `sandbox_id`, `template`, `vcpus`, `mem_mb` |
 | `start`, `destroy` | `sandbox_id` |
 | `list` | none |
+| `snapshot`, `resume` | `sandbox_id`, `snapshot_id` |
+| `snapshot_delete` | `snapshot_id` |
 
 Ids match `^[a-z0-9][a-z0-9-]{0,39}$` (no leading dash, so an id can never be read as an option). Integers are plain digits. Duplicate keys, `__proto__`, unknown fields,
 nulls, booleans, arrays and nested objects are refused. A response is
 `{"ok":true,"protocol":1,...}` or `{"ok":false,"protocol":1,"code":"<code>"}`; the code is from the
 closed list in `internal/protocol`, and no input is ever echoed. A refused frame ends the connection.
+
+## Snapshots
+
+`snapshot` pauses a running sandbox, has Firecracker write a **full** snapshot (its device state and the whole
+guest memory; no diff or compressed snapshot is taken, none has a measured size or restore time), kills the VM and
+moves the two files into `snapshot_dir` as `<snapshot_dir>/<snapshot_id>/{mem,state,meta.json}`. The VM is
+always stopped, also when the snapshot fails (nothing stays paused), and the sandbox stays prepared, with its staged
+tree removed. The reply carries `snapshot_bytes` (memory plus state). A snapshot id that exists answers `bad_id`.
+`resume` starts a prepared, stopped sandbox from a stored snapshot: it stages and verifies the template files as `start`
+does, copies the snapshot files into the jail root (0400, the sandbox uid), starts the jailer, has Firecracker load and
+resume, and deletes the copies at once. It answers like `start`. `snapshot_delete` removes one snapshot. The helper
+keeps no list of snapshots and takes no decision about how many to keep, or for how long: the daemon does.
+
+- **Secret.** A snapshot is guest memory. `snapshot_dir` (config key; an existing root-owned `0700` directory without an
+  ACL, outside `jail_root`) holds `0700` directories of `0600` root-owned files. Neither the runner's uid nor a sandbox
+  uid can open or list them. The one place the sandbox uid sees a copy is the jail root while a resume loads it.
+- **No capability raised.** None of this calls `hardening.WithCaps`. The files Firecracker writes sit in the sandbox's
+  jail, so the sandbox process is killed first; then each directory down to the jail root is taken back to root with
+  `CAP_CHOWN` (as destroy does), each file is opened `O_PATH|O_NOFOLLOW`, checked on the descriptor (a regular file,
+  one link, the sandbox's uid), given to root, set to `0600` and read through `/proc/self/fd`. After a load the jail
+  root is taken to root for the unlink of the two copies and given back at once. The API socket is reached by the
+  existing dial.
+- **Bound to its disk.** `meta.json` holds the template id, vcpus, memory and the manifest's kernel and root-disk
+  digests as staged (nothing is hashed again at snapshot time). `resume` answers `snapshot_mismatch` when the sandbox
+  has another template, vcpu count or memory, when the manifest's digests are not those, or when the template files
+  on disk no longer match the manifest (the copy-and-hash of staging). Nothing is launched and nothing stays staged.
+  The meta, memory and state files must be single-link, root-owned `0600` files of the recorded size, else `internal`.
+- **Sizes and space.** What the sandbox's VMM writes is not trusted: `snap.mem` must be exactly `mem_mb` MiB and `snap.state` at most 4 MiB, checked
+  on the descriptor before the file is given to root, and the copy reads at most that many bytes, else `internal` and nothing is stored.
+  Before it writes as root, `snapshot` (into `snapshot_dir`) and `resume` (into the jail's filesystem) check that the filesystem has the bytes
+  plus 64 MiB free for an unprivileged writer (`f_bavail`), else `over_cap`. `snapshot_dir` must be writable at start-up (a probe mkdir),
+  and `RenderUnit` lists it in `ReadWritePaths` next to `jail_root`, so it is writable under `ProtectSystem=strict`.
+- A snapshot id is not bound to a sandbox id: it resumes into any prepared sandbox with the same template, size and digests.
+- **Tmpfs state.** The root disk is read-only and the guest's writable state is tmpfs, so a resume brings back
+  guest memory, tmpfs files included.
+- **The runner removes `v.sock`.** The stopped VM's host-side socket is the runner's file in a directory the
+  helper cannot search. Firecracker cannot bind over it, so the runner must remove `vsock/<id>/v.sock` before
+  `resume`, else the load fails and `resume` answers `internal`.
+- New codes (additive): `unknown_snapshot`, `snapshot_mismatch`. A frame for a snapshot verb to a helper with no
+  `snapshot_dir` backend answers `unavailable`.
 
 ## Replies and the vsock directory
 

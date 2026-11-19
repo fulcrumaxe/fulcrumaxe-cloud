@@ -40,6 +40,15 @@ var (
 	RequestTimeout = 5 * time.Second
 	MaxHead        = 8 << 10
 	MaxBody        = 64 << 10
+	// SnapshotTimeout bounds one snapshot request: Firecracker writes the whole guest memory before it answers.
+	SnapshotTimeout = 120 * time.Second
+)
+
+// Snapshot files, inside the jail (the chroot is its root): Firecracker writes them there as the sandbox uid,
+// and the helper moves them out once the sandbox process is gone. A runner supplies none of these names.
+const (
+	SnapStatePath = "/snap.state"
+	SnapMemPath   = "/snap.mem"
 )
 
 // ErrBadResponse is what a response that is not Firecracker's plain answer is refused with.
@@ -50,9 +59,10 @@ type VM struct{ VCPUs, MemMB int64 }
 
 // Client sends requests one at a time over one connection.
 type Client struct {
-	conn   net.Conn
-	br     *bufio.Reader
-	closed bool // the server said it would close the connection
+	timeout time.Duration // 0 means RequestTimeout
+	conn    net.Conn
+	br      *bufio.Reader
+	closed  bool // the server said it would close the connection
 }
 
 // New wraps conn. The caller keeps ownership of it and closes it.
@@ -82,8 +92,35 @@ func Configure(conn net.Conn, vm VM) error {
 	return nil
 }
 
+// Snapshot pauses the VM and writes a full snapshot (state and memory) to the two paths above. The VM stays
+// paused: the caller stops it. Only full snapshots are taken; no diff or compressed snapshot is requested.
+func Snapshot(conn net.Conn) error {
+	c := &Client{conn: conn, br: bufio.NewReaderSize(conn, 4<<10), timeout: SnapshotTimeout}
+	if err := c.send("PATCH", "/vm", map[string]any{"state": "Paused"}); err != nil {
+		return fmt.Errorf("PATCH /vm: %w", err)
+	}
+	return wrap("PUT /snapshot/create", c.send("PUT", "/snapshot/create", map[string]any{"snapshot_type": "Full", "snapshot_path": SnapStatePath, "mem_file_path": SnapMemPath}))
+}
+
+// Load restores a VM from the two files and resumes it. It must be the first thing sent to a fresh
+// Firecracker: the snapshot carries the machine, drive and vsock configuration.
+func Load(conn net.Conn) error {
+	c := &Client{conn: conn, br: bufio.NewReaderSize(conn, 4<<10), timeout: SnapshotTimeout}
+	return wrap("PUT /snapshot/load", c.send("PUT", "/snapshot/load", map[string]any{"snapshot_path": SnapStatePath,
+		"mem_backend": map[string]any{"backend_path": SnapMemPath, "backend_type": "File"}, "resume_vm": true}))
+}
+
+func wrap(what string, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return nil
+}
+
 // Put sends a PUT with a JSON body and requires the answer 204.
-func (c *Client) Put(path string, body any) error {
+func (c *Client) Put(path string, body any) error { return c.send("PUT", path, body) }
+
+func (c *Client) send(method, path string, body any) error {
 	if c.closed {
 		return errors.New("fcapi: the server closed the connection")
 	}
@@ -91,10 +128,14 @@ func (c *Client) Put(path string, body any) error {
 	if err != nil {
 		return err
 	}
-	if err := c.conn.SetDeadline(time.Now().Add(RequestTimeout)); err != nil {
+	timeout := c.timeout
+	if timeout == 0 {
+		timeout = RequestTimeout
+	}
+	if err := c.conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return err
 	}
-	req := fmt.Sprintf("PUT %s HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", path, len(b))
+	req := fmt.Sprintf(method+" %s HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", path, len(b))
 	if _, err := c.conn.Write(append([]byte(req), b...)); err != nil {
 		return err
 	}
