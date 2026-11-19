@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-const good = `{"jail_root":"/srv/fx-jails","runner_uid":4242,"runner_gid":4243,"uid_first":200000,"uid_count":16,"gid_first":200000,"gid_count":16,"max_sandboxes":8,"max_vcpus":4,"max_mem_mb":8192,"jailer_path":"/opt/fx/jailer","firecracker_path":"/opt/fx/firecracker","template_manifest_path":"/etc/fx/templates.json","template_dir":"/var/lib/fx/templates"}`
+const good = `{"jail_root":"/srv/fx-jails","runner_uid":4242,"runner_gid":4243,"uid_first":200000,"uid_count":16,"gid_first":200000,"gid_count":16,"max_sandboxes":8,"max_vcpus":4,"max_mem_mb":8192,"jailer_path":"/opt/fx/jailer","firecracker_path":"/opt/fx/firecracker","template_manifest_path":"/etc/fx/templates.json","template_dir":"/var/lib/fx/templates","snapshot_dir":"/var/lib/fx/snapshots"}`
 
 func TestGoodConfig(t *testing.T) {
 	c, err := Parse([]byte(good))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RunnerUID != 4242 || c.MaxSandboxes != 8 || c.JailRoot != "/srv/fx-jails" || c.Caps().MaxMemMB != 8192 {
+	if c.SnapshotDir != "/var/lib/fx/snapshots" || c.RunnerUID != 4242 || c.MaxSandboxes != 8 || c.JailRoot != "/srv/fx-jails" || c.Caps().MaxMemMB != 8192 {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -38,22 +38,26 @@ func TestEveryKeyIsRequired(t *testing.T) {
 func TestRefusals(t *testing.T) {
 	sub := func(from, to string) string { return strings.Replace(good, from, to, 1) }
 	cases := map[string]string{
-		"unknown key":         sub(`"max_vcpus":4`, `"max_vcpus":4,"shell":"sh"`),
-		"duplicate key":       sub(`"max_vcpus":4`, `"max_vcpus":4,"max_vcpus":5`),
-		"relative jail root":  sub("/srv/fx-jails", "jails"),
-		"dotdot jail root":    sub("/srv/fx-jails", "/srv/../fx-jails"),
-		"trailing slash":      sub("/srv/fx-jails", "/srv/fx-jails/"),
-		"root as jail root":   sub("/srv/fx-jails", "/"),
-		"runner uid 0":        sub(`"runner_uid":4242`, `"runner_uid":0`),
-		"float":               sub(`"max_vcpus":4`, `"max_vcpus":4.0`),
-		"uid range too small": sub(`"uid_count":16`, `"uid_count":7`),
-		"gid range too small": sub(`"gid_count":16`, `"gid_count":7`),
-		"range includes 0":    sub(`"uid_first":200000`, `"uid_first":0`),
-		"range holds runner":  sub(`"uid_first":200000`, `"uid_first":4240`),
-		"cap of 0":            sub(`"max_mem_mb":8192`, `"max_mem_mb":0`),
-		"too many sandboxes":  sub(`"max_sandboxes":8`, `"max_sandboxes":5000`),
-		"jail root not str":   sub(`"/srv/fx-jails"`, `7`),
-		"nul in path":         sub("/srv/fx-jails", `/srv/a\u0000b`),
+		"unknown key":          sub(`"max_vcpus":4`, `"max_vcpus":4,"shell":"sh"`),
+		"duplicate key":        sub(`"max_vcpus":4`, `"max_vcpus":4,"max_vcpus":5`),
+		"relative jail root":   sub("/srv/fx-jails", "jails"),
+		"dotdot jail root":     sub("/srv/fx-jails", "/srv/../fx-jails"),
+		"trailing slash":       sub("/srv/fx-jails", "/srv/fx-jails/"),
+		"root as jail root":    sub("/srv/fx-jails", "/"),
+		"runner uid 0":         sub(`"runner_uid":4242`, `"runner_uid":0`),
+		"float":                sub(`"max_vcpus":4`, `"max_vcpus":4.0`),
+		"uid range too small":  sub(`"uid_count":16`, `"uid_count":7`),
+		"gid range too small":  sub(`"gid_count":16`, `"gid_count":7`),
+		"range includes 0":     sub(`"uid_first":200000`, `"uid_first":0`),
+		"range holds runner":   sub(`"uid_first":200000`, `"uid_first":4240`),
+		"cap of 0":             sub(`"max_mem_mb":8192`, `"max_mem_mb":0`),
+		"too many sandboxes":   sub(`"max_sandboxes":8`, `"max_sandboxes":5000`),
+		"jail root not str":    sub(`"/srv/fx-jails"`, `7`),
+		"nul in path":          sub("/srv/fx-jails", `/srv/a\u0000b`),
+		"snapshots in jails":   sub("/var/lib/fx/snapshots", "/srv/fx-jails/snapshots"),
+		"snapshots are jails":  sub("/var/lib/fx/snapshots", "/srv/fx-jails"),
+		"snapshots hold jails": sub("/var/lib/fx/snapshots", "/srv"),
+		"relative snapshots":   sub("/var/lib/fx/snapshots", "snapshots"),
 	}
 	for name, in := range cases {
 		if _, err := Parse([]byte(in)); err == nil {

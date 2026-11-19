@@ -74,6 +74,7 @@ jobs:
           sudo install -m 0644 -o root -g root "$W/vmlinux" "$D/vmlinux"
           sudo install -m 0644 -o root -g root "$W/rootfs.ext4" "$D/rootfs.ext4"
           sudo install -d -m 0711 -o root -g root /var/lib/fx-vmhelper-test
+          sudo install -d -m 0700 -o root -g root /var/lib/fx-vmhelper-test-snapshots
           namei -l "$D/jailer"
       - name: Run the real jailer test inside a service with the pinned properties
         run: |
@@ -81,11 +82,11 @@ jobs:
           props=()
           while IFS= read -r line; do props+=(-p "$line"); done < <(jq -r '.directives | to_entries[] | .key as $k | (.value | if type == "array" then .[] else . end) | "\($k)=\(.)"' "$H")
           props+=(-p "CapabilityBoundingSet=$(jq -r '[.capabilities[].name] | join(" ")' "$H")")
-          props+=(-p "ReadWritePaths=$(jq -r '.read_write_paths | join(" ")' "$H") /var/lib/fx-vmhelper-test")
+          props+=(-p "ReadWritePaths=$(jq -r '.read_write_paths | join(" ")' "$H") /var/lib/fx-vmhelper-test /var/lib/fx-vmhelper-test-snapshots")
           printf '%s\n' "${props[@]}" | grep -v '^-p$'
           sudo systemd-run --collect --wait --pipe --quiet "${props[@]}" \
             -E FX_VMHELPER_REAL_ROOT=1 -E FX_VM_JAILER=/usr/libexec/fx-vmhelper-test/jailer -E FX_VM_FIRECRACKER=/usr/libexec/fx-vmhelper-test/firecracker \
-            -E FX_VM_JAIL_ROOT=/var/lib/fx-vmhelper-test -E FX_VM_KERNEL=/usr/libexec/fx-vmhelper-test/vmlinux -E FX_VM_ROOTFS=/usr/libexec/fx-vmhelper-test/rootfs.ext4 \
+            -E FX_VM_JAIL_ROOT=/var/lib/fx-vmhelper-test -E FX_VM_SNAPSHOT_DIR=/var/lib/fx-vmhelper-test-snapshots -E FX_VM_KERNEL=/usr/libexec/fx-vmhelper-test/vmlinux -E FX_VM_ROOTFS=/usr/libexec/fx-vmhelper-test/rootfs.ext4 \
             /usr/libexec/fx-vmhelper-test/sandbox.test -test.run '^TestRealJailer$' -test.v
       - name: Kernel messages (seccomp kills, out of memory)
         if: failure()

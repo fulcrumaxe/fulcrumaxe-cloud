@@ -44,7 +44,7 @@ func newFakeFC(t *testing.T, dir string) *fakeFC {
 		b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if r.Method != "PUT" || r.URL.Path == f.fail {
+		if (r.Method != "PUT" && !(r.Method == "PATCH" && r.URL.Path == "/vm")) || r.URL.Path == f.fail {
 			w.WriteHeader(400)
 			_, _ = w.Write([]byte(`{"fault_message":"refused"}`))
 			return

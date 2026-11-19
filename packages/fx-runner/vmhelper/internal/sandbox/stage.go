@@ -101,8 +101,9 @@ func (m *Manager) copyTemplate(rootFd int, s Spec, kind, want string) (err error
 }
 
 // stage builds the tree above for s. On any error it has removed what it built (and unmounted), or says
-// that it could not.
-func (m *Manager) stage(s Spec, digests map[string]string) (err error) {
+// that it could not. extra, when not nil, runs after the template files are copied and before the vsock
+// mount, with the descriptor of the jail's root directory (a resume puts the snapshot files there).
+func (m *Manager) stage(s Spec, digests map[string]string, extra func(rootFd int) error) (err error) {
 	jfd, err := takeOver(m.jailsFd, s.ID, m.mayTake) // root-owned, 0700, readable: the sandbox owned it
 	if err != nil {
 		return err
@@ -129,6 +130,11 @@ func (m *Manager) stage(s Spec, digests map[string]string) (err error) {
 	defer closeFd(dir)
 	for _, kind := range templateKinds {
 		if err := m.copyTemplate(dir, s, kind, digests[kind]); err != nil {
+			return err
+		}
+	}
+	if extra != nil {
+		if err := extra(dir); err != nil {
 			return err
 		}
 	}

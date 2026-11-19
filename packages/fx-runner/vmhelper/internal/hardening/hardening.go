@@ -186,10 +186,11 @@ func statusNum(status, field string, base int) (uint64, bool) {
 
 // UnitParams are the values that differ per machine.
 type UnitParams struct {
-	HelperPath string // absolute path of the root-owned binary
-	ConfigPath string // absolute path of the root-owned config
-	JailRoot   string // the config's jail_root; the unit may write there and nowhere else on disk
-	Group      string // optional: the group that owns the RuntimeDirectory (the runner's group)
+	HelperPath  string // absolute path of the root-owned binary
+	ConfigPath  string // absolute path of the root-owned config
+	JailRoot    string // the config's jail_root; the unit may write there and in SnapshotDir, and nowhere else on disk
+	SnapshotDir string // the config's snapshot_dir; under ProtectSystem=strict it is read-only unless listed here
+	Group       string // optional: the group that owns the RuntimeDirectory (the runner's group)
 }
 
 func safeToken(s string) bool {
@@ -200,7 +201,7 @@ func safePath(s string) bool { return safeToken(s) && path.IsAbs(s) && path.Clea
 
 // RenderUnit generates the systemd unit text. It refuses a parameter that could add a directive.
 func (p Pinned) RenderUnit(u UnitParams) (string, error) {
-	if !safePath(u.HelperPath) || !safePath(u.ConfigPath) || !safePath(u.JailRoot) || (u.Group != "" && !safeToken(u.Group)) {
+	if !safePath(u.HelperPath) || !safePath(u.ConfigPath) || !safePath(u.JailRoot) || !safePath(u.SnapshotDir) || (u.Group != "" && !safeToken(u.Group)) {
 		return "", errors.New("unit parameters must be clean absolute paths and a plain group name")
 	}
 	var b strings.Builder
@@ -210,7 +211,7 @@ func (p Pinned) RenderUnit(u UnitParams) (string, error) {
 	}
 	b.WriteString("ExecStart=" + u.HelperPath + " -config " + u.ConfigPath + "\nRestart=on-failure\n")
 	fmt.Fprintf(&b, "RuntimeDirectory=%s\nRuntimeDirectoryMode=%s\nStateDirectory=%s\nStateDirectoryMode=%s\n", p.RuntimeDirectory, p.RuntimeDirectoryMode, p.StateDirectory, p.StateDirectoryMode)
-	fmt.Fprintf(&b, "ReadWritePaths=%s\n", strings.Join(append(append([]string{}, p.ReadWritePaths...), u.JailRoot), " "))
+	fmt.Fprintf(&b, "ReadWritePaths=%s\n", strings.Join(append(append([]string{}, p.ReadWritePaths...), u.JailRoot, u.SnapshotDir), " "))
 	b.WriteString("CapabilityBoundingSet=" + p.CapabilityBoundingSet() + "\n")
 	keys := make([]string, 0, len(p.Directives))
 	for k := range p.Directives {

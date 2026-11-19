@@ -170,6 +170,7 @@ func (l *JailerLauncher) handOver(dir string) error {
 type instance struct {
 	l    *JailerLauncher
 	id   string
+	spec Spec
 	pid  int
 	done chan struct{}
 	out  *headBuf
@@ -246,7 +247,7 @@ func (l *JailerLauncher) Launch(s Spec) (Instance, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, errors.New("launch: the jailer did not start")
 	}
-	in := &instance{l: l, id: s.ID, pid: cmd.Process.Pid, done: make(chan struct{}), out: out}
+	in := &instance{l: l, id: s.ID, spec: s, pid: cmd.Process.Pid, done: make(chan struct{}), out: out}
 	go func() { in.exit = fmt.Sprint(cmd.Wait()); close(in.done) }() // exit is read only after done is closed
 	// Dropped, then configured and started through the API socket; a failure of either kills the whole cgroup.
 	err = l.waitDropped(in, s)
