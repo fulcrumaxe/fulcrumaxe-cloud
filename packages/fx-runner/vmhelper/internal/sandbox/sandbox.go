@@ -10,12 +10,13 @@
 //	<jail_root>          0711 root:root   traversable, so a runner can reach its own vsock directory
 //	<jail_root>/jails    0700 root:root   one directory per sandbox, 0700, owner = the sandbox uid:gid
 //	<jail_root>/vsock    0711 root:root
-//	<jail_root>/vsock/<id>   0710, owner = runner uid, group = the sandbox's gid
-//	<jail_root>/vsock/<id>/<uds>_<port>   0660, same owner and group (made by the launcher; the
-//	                                       launcher change checks it)
+//	<jail_root>/vsock/<id>   01770, owner = runner uid, group = the sandbox's gid; the sticky bit keeps the sandbox uid from
+//	                          deleting or renaming the runner's own files (Firecracker, as the sandbox uid, makes v.sock in it)
+//	<jail_root>/vsock/<id>/v.sock   made by Firecracker as the sandbox uid, then chowned to the runner uid by the
+//	                                launcher (0700, runner-owned); the runner's own listeners v.sock_<port> are its files
 //
-// The sandbox's own uid reaches its directory through the group's x bit; another sandbox (other gid) has
-// neither x nor r, so it can neither traverse nor list. The runner (the owner) can list its own.
+// The sandbox's own uid reaches its directory through the group's rwx bits; another sandbox (other gid) has
+// no bit at all, so it can neither traverse nor list. The runner (the owner) can list its own.
 //
 // The registry is the in-memory map; it is derived, not stamped: ids in use are whatever the map holds, and
 // start-up reaping removes any on-disk directory that the (empty) map does not know.
@@ -40,7 +41,7 @@ const (
 	RootMode      os.FileMode = 0o711
 	JailsMode     os.FileMode = 0o700
 	VsockRootMode os.FileMode = 0o711
-	VsockDirMode  os.FileMode = 0o710
+	VsockDirMode  os.FileMode = 0o1770 // raw unix bits (sticky, rwxrwx---), not os.ModeSticky
 	JailDirMode   os.FileMode = 0o700
 	SocketMode    os.FileMode = 0o660
 )
@@ -52,6 +53,7 @@ type Spec struct {
 	UID, GID          uint32
 	JailDir, VsockDir string
 	VCPUs, MemMB      int64
+	RunnerUID         uint32 // who gets the host-side vsock socket once the VM has made it
 }
 
 // Instance is a started sandbox.
@@ -318,7 +320,7 @@ func (m *Manager) Prepare(r protocol.Request) (server.Reply, protocol.Code) {
 		return server.Reply{}, protocol.Internal
 	}
 	m.boxes[r.SandboxID] = &box{created: m.Now(), spec: Spec{ID: r.SandboxID, Template: r.Template, UID: uid, GID: gid,
-		JailDir: m.jailDir(r.SandboxID), VsockDir: vdir, VCPUs: r.VCPUs, MemMB: r.MemMB}}
+		JailDir: m.jailDir(r.SandboxID), VsockDir: vdir, VCPUs: r.VCPUs, MemMB: r.MemMB, RunnerUID: m.runnerUID}}
 	return server.Reply{VsockDir: vdir, SandboxGID: gid}, protocol.OK
 }
 

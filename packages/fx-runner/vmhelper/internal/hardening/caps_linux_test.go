@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -146,5 +148,105 @@ func TestEffectiveSetAfterTheDrop(t *testing.T) {
 	}
 	if got["CapPrm"]&(1<<dacBit) == 0 || got["CapInh"]&(1<<dacBit) == 0 {
 		t.Errorf("CapPrm %016x or CapInh %016x lost CAP_DAC_OVERRIDE", got["CapPrm"], got["CapInh"])
+	}
+}
+
+// fakeThread is a fake kernel for WithCaps: one thread with an effective and a permitted word, and a log
+// of every set made on it.
+func fakeThread(t *testing.T, eff, perm uint32) *[]uint32 {
+	t.Helper()
+	og, ot := capget, threadCapset
+	t.Cleanup(func() { capget, threadCapset = og, ot })
+	cur := eff
+	var log []uint32
+	capget = func(h *capHeader, d *[2]capData) error { d[0] = capData{effective: cur, permitted: perm}; return nil }
+	threadCapset = func(h *capHeader, d *[2]capData) error { cur = d[0].effective; log = append(log, cur); return nil }
+	return &log
+}
+
+func TestWithCapsRaisesOnlyForTheCallAndRestores(t *testing.T) {
+	sets := fakeThread(t, 0x82000c1, 0x82000c3)
+	var during []uint32
+	called := 0
+	err := WithCaps([]uintptr{dacBit}, func() error { called++; during = append(during, *sets...); return errors.New("f") })
+	if err == nil || err.Error() != "f" || called != 1 {
+		t.Fatalf("%v %d", err, called)
+	}
+	if len(during) != 1 || during[0] != 0x82000c3 {
+		t.Fatalf("raised set %x", during)
+	}
+	if got := *sets; len(got) != 2 || got[1] != 0x82000c1 {
+		t.Fatalf("not restored: %x", got)
+	}
+}
+
+func TestWithCapsRestoresAfterAPanic(t *testing.T) {
+	sets := fakeThread(t, 0x1, 0x3)
+	func() {
+		defer func() { _ = recover() }()
+		_ = WithCaps([]uintptr{dacBit}, func() error { panic("boom") })
+	}()
+	if got := *sets; len(got) != 2 || got[1] != 0x1 {
+		t.Fatalf("not restored after a panic: %x", got)
+	}
+}
+
+func TestWithCapsRefusesWhatIsNotPermittedAndReportsAFailedRestore(t *testing.T) {
+	sets := fakeThread(t, 0x1, 0x1) // CAP_DAC_OVERRIDE (bit 1) is not permitted
+	if err := WithCaps([]uintptr{dacBit}, func() error { t.Fatal("f ran"); return nil }); err == nil || len(*sets) != 0 {
+		t.Fatalf("%v %x", err, *sets)
+	}
+	if err := WithCaps([]uintptr{64}, func() error { return nil }); err == nil {
+		t.Fatal("a capability number out of range was accepted")
+	}
+	fakeThread(t, 0x1, 0x3)
+	n := 0
+	threadCapset = func(*capHeader, *[2]capData) error {
+		if n++; n == 2 {
+			return errors.New("no")
+		}
+		return nil
+	}
+	var lines []string
+	og := fatal
+	defer func() { fatal = og }()
+	fatal = func(l string) { lines = append(lines, l) }
+	_ = WithCaps([]uintptr{dacBit}, func() error { return nil })
+	if len(lines) != 1 || strings.Contains(lines[0], "\n") || !strings.Contains(lines[0], "fatal") {
+		t.Fatalf("a failed restore must end the process with one fatal line: %q", lines)
+	}
+}
+
+// Only the API dial and the v.sock handover raise the capability: every other call of WithCaps in the helper's
+// source is a failure of this test, and so is either of the two going missing.
+func TestWithCapsIsCalledOnlyByTheTwoAllowedOperations(t *testing.T) {
+	var found []string
+	err := filepath.Walk("../..", func(p string, fi os.FileInfo, err error) error {
+		if err != nil || fi.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		b, _ := os.ReadFile(p)
+		fn := ""
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "func ") {
+				fn = line
+			}
+			if strings.Contains(line, "WithCaps(") && !strings.HasPrefix(strings.TrimSpace(line), "//") && !strings.HasPrefix(line, "func WithCaps") {
+				found = append(found, filepath.Base(p)+": "+fn)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"vmapi.go: func (l *JailerLauncher) dialAPI(s Spec, pid int) (net.Conn, error) {",
+		"vmapi.go: func (l *JailerLauncher) handOverSocket(s Spec) error {",
+	}
+	sort.Strings(found)
+	sort.Strings(want)
+	if strings.Join(found, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("WithCaps is called from %q, want exactly %q", found, want)
 	}
 }

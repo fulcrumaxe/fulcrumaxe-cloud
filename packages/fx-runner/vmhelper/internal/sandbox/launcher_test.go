@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,7 +43,9 @@ mkdir -p "$cg"
 echo $$ > "$cg/cgroup.procs"
 for f in %[1]s/cg-*; do n=${f##*/cg-}; cp "$f" "$cg/$n"; done
 touch %[1]s/ready
-while [ -e "$cg/cgroup.kill" ] && [ "$(cat "$cg/cgroup.kill")" != 1 ]; do sleep 0.02; done
+parent=$PPID
+# also ends when the test process is gone (killed by a timeout, so t.Cleanup never ran): an orphan holds the shared test lock
+while [ -e "$cg/cgroup.kill" ] && [ "$(cat "$cg/cgroup.kill")" != 1 ] && kill -0 "$parent" 2>/dev/null; do sleep 0.02; done
 rm -rf "$cg"
 `
 
@@ -88,6 +91,7 @@ type rig struct {
 	dir, cgroupRoot string
 	l               *JailerLauncher
 	spec            Spec
+	fc              *fakeFC
 }
 
 const noCaps = "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\n"
@@ -122,6 +126,8 @@ func newRig(t *testing.T) *rig {
 		CgroupRoot: filepath.Join(dir, "cg"), CgroupParent: "fx/vms", OwnerUID: u, OwnerGID: g, Remap: toMe,
 		chainBase: dir}
 	l.Status = r0.ready(goodStatus(u, g, ""))
+	fc := newFakeFC(t, dir)
+	l.Dial, l.Handover = fc.dial, fc.handover
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
 	t.Cleanup(func() { reapFakes(t, dir) }) // runs first: no fake jailer or child may outlive the test
@@ -141,7 +147,7 @@ func newRig(t *testing.T) *rig {
 			}
 		}
 	}()
-	return &rig{dir: dir, cgroupRoot: filepath.Join(dir, "cg"), l: l,
+	return &rig{dir: dir, cgroupRoot: filepath.Join(dir, "cg"), l: l, fc: fc,
 		spec: Spec{ID: "sb-1", Template: "fx-agent", UID: 200001, GID: 200002, JailDir: filepath.Join(dir, "jail/jails/sb-1"),
 			VsockDir: filepath.Join(dir, "jail/vsock/sb-1"), VCPUs: 2, MemMB: 512}}
 }
@@ -270,7 +276,7 @@ func TestLaunchFailsClosedOnDropAndGroups(t *testing.T) {
 			t.Errorf("%s: launched", name)
 			continue
 		}
-		if name == "keeps a group" && err != errDrop {
+		if name == "keeps a group" && !errors.Is(err, errDrop) {
 			t.Errorf("%s: %v", name, err)
 		}
 		if _, err := os.Stat(filepath.Join(r.cgroupRoot, "fx/vms/sb-1")); err == nil {

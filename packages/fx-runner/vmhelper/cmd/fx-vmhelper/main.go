@@ -160,8 +160,9 @@ func serve(args []string) int {
 	}
 	pinned := hardening.Load()
 	// The first thing: CAP_DAC_OVERRIDE (held for the jailer only) leaves the effective set, so none of the
-	// helper's own file operations can run with it. It stays permitted and inheritable, to be raised into the
-	// jailer child's ambient set.
+	// helper's own file operations run with it, except the two that raise it through hardening.WithCaps on one
+	// locked thread (the dial of the Firecracker API socket and the v.sock handover). It stays permitted and
+	// inheritable, to be raised there and into the jailer child's ambient set.
 	if err := dropCaps(pinned); err != nil {
 		return fail("process differs from the pinned set: %v", err)
 	}
