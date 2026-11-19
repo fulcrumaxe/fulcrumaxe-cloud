@@ -96,6 +96,7 @@ export const WORDS = {
   error: "The Team app isn't available right now.",
   watchOff: "Engine watch is off",
   noRepos: "No repositories are enabled for engine watch.",
+  noReposOn: "Choose a repository in Settings to start watching.", openSettings: "Open Settings",
   noAgents: "No agents running",
   noLanes: "No pull requests in the merge lane",
   panelFailed: "This panel couldn't be read.",

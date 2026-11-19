@@ -21,6 +21,8 @@ export const RUNNER_WORDS = {
   noneBridged: "No runner's bridge has reported yet. Run this on the computer that runs your engine, then turn the switch on:",
   fillIn: "Run this on that computer, then turn the switch on. Replace the two placeholders with the engine's checkout folder and its state folder.",
   never: "never seen",
+  copy: "Copy command", copied: "Copied", copyFailed: "Couldn't copy. Select the command and copy it by hand.",
+  unnamed: "This runner has no name yet. You can name it in Runners.", rename: "Name it in Runners",
 };
 export const REPO_PLACEHOLDER = "<owner/name>";
 const OWNER_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/; // a name that is not owner/name (an unnamed repository) is never pasted into the command
@@ -55,11 +57,11 @@ export function runnerView({ settings, fleet, repoName, pickId, nowMs }) {
     label: picked ? RUNNER_WORDS.watchOn + picked.name : RUNNER_WORDS.watchAny,
     runnerName: picked ? picked.name : "",
     choices: choices.length > 1 ? choices : [], pickedId: picked ? picked.id : "",
-    status, command: status.kind === "unset" && runners.length > 0 ? command : "",
+    unnamed: picked ? !picked.hasName : false, status, command: status.kind === "unset" && runners.length > 0 ? command : "",
     connect: {
       failed: !fleet, empty: !!fleet && runners.length === 0, command,
       rows: runners.map((r) => ({
-        id: r.id, name: r.name, state: stateParts(r).words, online: ONLINE.includes(r.state), seen: seen(r, nowMs),
+        id: r.id, name: r.name, unnamed: !r.hasName, state: stateParts(r).words, online: ONLINE.includes(r.state), seen: seen(r, nowMs),
         bridge: (repoRunner(r.id) ? RUNNER_WORDS.setUpFor : RUNNER_WORDS.notSetUpFor) + (target || "this repository") + (repoRunner(r.id) ? "" : RUNNER_WORDS.yet), bridged: repoRunner(r.id),
       })),
     },

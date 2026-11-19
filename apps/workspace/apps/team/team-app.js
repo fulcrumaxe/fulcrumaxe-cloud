@@ -103,13 +103,24 @@ function mountApp(contentEl) {
   function switchRow(testid, label, checked, enabled, why) {
     return h("label", { class: "tm-check" }, box({ "data-testid": testid, "data-focus": testid }, checked, enabled, why, (on) => team.setWatch(on)), h("span", null, label));
   }
+  // The command, with a button that copies it. The answer (Copied, or why not) is spoken in a status line next to the button.
+  const copyBlock = (rw, command, testid) => {
+    const say = h("span", { class: "tm-muted", role: "status", "data-testid": "tm-copy-note" });
+    const btn = h("button", { type: "button", class: "tm-btn", "data-testid": "tm-copy", onClick: async () => {
+      try { await navigator.clipboard.writeText(command); say.textContent = rw.copied; } catch { say.textContent = rw.copyFailed; } // fx-swallow-ok: no clipboard here (an insecure page or a refusal); the command stays selectable and the note says so
+    } }, rw.copy);
+    return [h("pre", { class: "tm-code", tabindex: "0", "aria-label": "Command to run", "data-testid": testid }, command), btn, say];
+  };
+  const renameNodes = (rw) => [h("p", { class: "tm-muted", "data-testid": "tm-unnamed" }, rw.unnamed, " "),
+    h("button", { type: "button", class: "tm-btn", "data-testid": "tm-rename-runner", onClick: () => window.FULCWM && window.FULCWM.open("runners") }, rw.rename)];
   // Which runner the switch means, its state before the box is ticked, the connecting state, and the one command when no bridge has reported.
   const runnerNodes = (rv) => !rv.words ? [] : [
     rv.choices.length > 1 ? h("label", { class: "tm-check" }, h("span", null, rv.words.pick + ": "),
       h("select", { class: "tm-select", "data-testid": "tm-runner-pick", onChange: (e) => team.pickRunner(e.target.value) }, rv.choices.map((c) => h("option", { value: c.id, selected: c.id === rv.pickedId }, c.name)))) : null,
     h("p", { class: "tm-muted", "data-testid": "tm-runner-status", "data-kind": rv.status.kind }, rv.status.text),
     rv.connecting ? h("p", { class: "tm-muted", role: "status", "data-testid": "tm-connecting" }, rv.connecting) : null,
-    rv.command ? h("pre", { class: "tm-code", tabindex: "0", "aria-label": "Command to run", "data-testid": "tm-bridge-command" }, rv.command) : null,
+    ...(rv.command ? copyBlock(rv.words, rv.command, "tm-bridge-command") : []),
+    ...(rv.unnamed ? renameNodes(rv.words) : []),
   ];
   const connectNodes = (c, RUNNER_WORDS) => !RUNNER_WORDS ? [] : [
     h("h3", { class: "tm-sub" }, RUNNER_WORDS.connectTitle),
@@ -120,7 +131,8 @@ function mountApp(contentEl) {
       h("li", { class: "tm-item", "data-testid": "tm-connect-row", "data-bridged": r.bridged ? "true" : "false" },
         h("bdi", { "data-testid": "tm-connect-name" }, r.name), " · ", r.state, " · ", r.seen, h("br"), h("span", { "data-testid": "tm-connect-bridge" }, r.bridge)))) : null,
     c.rows.length && !c.rows.some((r) => r.bridged) ? h("p", { class: "tm-muted" }, RUNNER_WORDS.fillIn) : null,
-    c.rows.length && !c.rows.some((r) => r.bridged) ? h("pre", { class: "tm-code", tabindex: "0", "aria-label": "Command to run", "data-testid": "tm-connect-command" }, c.command) : null,
+    ...(c.rows.length && !c.rows.some((r) => r.bridged) ? copyBlock(RUNNER_WORDS, c.command, "tm-connect-command") : []),
+    ...(c.rows.some((r) => r.unnamed) ? renameNodes(RUNNER_WORDS) : []),
     h("p", { class: "tm-muted", "data-testid": "tm-soon" }, RUNNER_WORDS.soon),
   ];
   const closeConfirm = () => { want = "delete"; team.cancelDelete(); };
@@ -353,6 +365,9 @@ function mountApp(contentEl) {
         return h("div", { class: "tm-panels" }, ...Object.values(P).map((x) => x.el));
       }
       if (d.kind === "off") return [h("p", { class: "tm-muted", "data-testid": "tm-off" }, d.text), d.sheet.canEdit ? switchRow("tm-watch-off", d.rv.label, false, !d.sheet.saving) : null, ...runnerNodes(d.rv)];
+      if (d.kind === "norepos") return [h("p", { class: "tm-muted", "data-testid": "tm-norepos" }, d.text), h("p", { class: "tm-muted", "data-testid": "tm-watch-on-note" }, WORDS.noReposOn),
+        d.sheet.canEdit ? switchRow("tm-watch-off", d.rv.label, true, !d.sheet.saving) : null,
+        h("button", { type: "button", class: "tm-btn", "data-testid": "tm-open-settings", onClick: () => { if (!d.sheet.open) team.toggleSheet(); } }, WORDS.openSettings), ...runnerNodes(d.rv)];
       return h("p", { class: d.kind === "error" ? "tm-error" : "tm-muted", role: d.kind === "error" ? "alert" : "status", "data-testid": "tm-" + d.kind }, d.text);
     });
     if (d.kind === "ready") {

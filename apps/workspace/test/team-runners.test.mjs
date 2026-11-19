@@ -5,7 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFleet } from "../apps/runners/runners-fleet.js";
 import { REPOS_URL, RUNNERS_URL, SETTINGS_URL, createTeamApi, panelUrl, commandsUrl, dialsUrl } from "../apps/team/team-model.js";
-import { createTeam, describe as describeState, readSettings } from "../apps/team/team-model.js";
+import { WORDS, createTeam, describe as describeState, readSettings } from "../apps/team/team-model.js";
 import { RUNNER_WORDS, commandFor, runnerView } from "../apps/team/team-runners.js";
 import { HOSTILE, REPO_A, REPO_B, RUNNER_A, RUNNER_B, makeFixtures } from "./fixtures/team/fixtures.mjs";
 
@@ -20,6 +20,27 @@ const fleetOf = (...runners) => readFleet(F.fleet(runners));
 const live = (o = {}) => view({ fleet: fleetOf(F.runner(o)) });
 const two = () => F.settings({ repos: [F.settingsRepo({ bridged_runner_id: RUNNER_A }), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", bridged_runner_id: RUNNER_B })] });
 const twoRunners = () => fleetOf(F.runner(), F.runner({ id: RUNNER_B, name: "Build box", state: "offline" }));
+
+describe("connect panel: copy words, and a runner without a name", () => {
+  it("the copy words are plain and never claim a state", () => {
+    expect([RUNNER_WORDS.copy, RUNNER_WORDS.copied]).toEqual(["Copy command", "Copied"]);
+    expect(RUNNER_WORDS.copyFailed).toMatch(/copy it by hand/);
+    expect(RUNNER_WORDS.copyLabel).toBeUndefined(); // the visible text is the name (WCAG 2.5.3)
+  });
+  it("a runner with no name is marked, in its row and as the picked runner; a named one is not", () => {
+    const un = view({ fleet: fleetOf(F.runner({ has_name: false, name: null })) });
+    expect(un.unnamed).toBe(true);
+    expect(un.connect.rows[0].unnamed).toBe(true);
+    expect(un.connect.rows[0].name).toMatch(/^Unnamed runner/);
+    const named = live();
+    expect([named.unnamed, named.connect.rows[0].unnamed]).toEqual([false, false]);
+    expect(view({ fleet: null }).unnamed).toBe(false); // nothing is claimed before the list arrives
+  });
+  it("the rename hint points at the Runners app, not at a flag that may not exist", () => {
+    expect(RUNNER_WORDS.unnamed).toMatch(/Runners/);
+    expect(RUNNER_WORDS.rename).toBe("Name it in Runners");
+  });
+});
 
 describe("the watch switch names its runner", () => {
   it("names the runner in the label, never 'this machine'", () => {
@@ -138,6 +159,17 @@ describe("the settings read and the controller", () => {
     await flush();
     expect(t.state.status).toBe("ready");
     expect(t.view().sheet.runner.status.kind).toBe("unknown");
+  });
+  it("watch on with no repository enabled: the view says so and still carries the switch state and the wording to fix it", async () => {
+    const { t } = team({ ["GET " + REPOS_URL]: F.list([]) });
+    await t.load();
+    const v = t.view();
+    expect(v.kind).toBe("norepos");
+    expect(v.sheet.watch).toBe(true);
+    expect(v.sheet.canEdit).toBe(true);
+    expect(v.rv.label).toMatch(/^Watch the engine team on /);
+    expect(WORDS.noReposOn).toMatch(/Settings/);
+    expect(WORDS.openSettings).toBe("Open Settings");
   });
   it("watch off: the off screen names the runner", async () => {
     const { t } = team({ ["GET " + SETTINGS_URL]: { ...paired(), watch_enabled: false } });
