@@ -220,12 +220,20 @@ jobs:
         if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
         timeout-minutes: 10
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          # If the Actions-cache substituter is throttled (HTTP 418) and disables itself, build or fetch
+          # from cache.nixos.org instead of failing with 'no substituter that can build it'.
+          extra-conf: |
+            fallback = true
 
       - name: Nix store cache (hosted)
         if: runner.environment == 'github-hosted' && !startsWith(vars.CI_RUNS_ON, 'ubicloud')
         continue-on-error: true
         timeout-minutes: 5
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          # We have no FlakeHub account; skip the login attempt and its error annotation.
+          use-flakehub: false
 
       - name: pnpm store cache (hosted)
         if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
@@ -499,6 +507,11 @@ jobs:
         if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
         timeout-minutes: 10
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          # If the Actions-cache substituter is throttled (HTTP 418) and disables itself, build or fetch
+          # from cache.nixos.org instead of failing with 'no substituter that can build it'.
+          extra-conf: |
+            fallback = true
 
       # Decides whether the specs can be affected by this change (same classifier, same inputs as the
       # check job). When they cannot, this step prints the skip line and every later step is guarded on
@@ -579,6 +592,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          # We have no FlakeHub account; skip the login attempt and its error annotation.
+          use-flakehub: false
 
       - name: pnpm store cache (hosted)
         if: env.CI_SCOPE_E2E == 'true' && (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
@@ -658,12 +674,20 @@ jobs:
         if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
         timeout-minutes: 10
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          # If the Actions-cache substituter is throttled (HTTP 418) and disables itself, build or fetch
+          # from cache.nixos.org instead of failing with 'no substituter that can build it'.
+          extra-conf: |
+            fallback = true
 
       - name: Nix store cache (hosted)
         if: runner.environment == 'github-hosted' && !startsWith(vars.CI_RUNS_ON, 'ubicloud')
         continue-on-error: true
         timeout-minutes: 5
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          # We have no FlakeHub account; skip the login attempt and its error annotation.
+          use-flakehub: false
 
       - name: pnpm store cache (hosted)
         if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
