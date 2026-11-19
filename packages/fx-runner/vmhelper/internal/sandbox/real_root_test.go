@@ -66,8 +66,8 @@ func TestRealRootPermissions(t *testing.T) {
 		if _, err := os.Stat(a.VsockDir + "/v.sock_52"); err != nil {
 			t.Errorf("A cannot reach its own socket path: %v", err)
 		}
-		if _, err := os.ReadDir(a.VsockDir); err == nil {
-			t.Error("A listed its own directory")
+		if _, err := os.ReadDir(a.VsockDir); err != nil { // the group holds rwx: Firecracker makes v.sock here
+			t.Errorf("A cannot list its own directory: %v", err)
 		}
 	})
 }

@@ -23,9 +23,13 @@ own cgroup below this unit's `vms` subtree and drops to the sandbox's uid and gi
 - Capabilities. The pinned set is `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_SETGID`, `CAP_SETUID`, `CAP_SYS_ADMIN`
   and `CAP_MKNOD`. `CAP_DAC_OVERRIDE` is for the jailer: the jailer chowns the chroot root to the sandbox uid
   (0700) and then creates `/dev` and more inside it, which root cannot do without it. The helper holds it
-  permitted and inheritable but never effective: `serve` drops it from the effective set of every thread
+  permitted and inheritable and not effective: `serve` drops it from the effective set of every thread
   first, before anything else, and the start-up check reads the status of the process and of each thread.
-  What this does and does not do: it keeps the helper's own file operations from ever running with the
+  Exactly two operations raise it, through `hardening.WithCaps` on one locked thread and no other: the dial of
+  the Firecracker API socket and the handover of `v.sock` (a test lists the callers). Both open their last
+  path component `O_PATH|O_NOFOLLOW`, check type and owner on the descriptor and act through
+  `/proc/self/fd/N`. If the thread's set cannot be restored the helper exits at once with one fatal line.
+  What this does and does not do: it keeps the helper's other file operations from ever running with the
   override (a bug in them fails instead of reaching through permissions). It does not stop the jailer from
   having it: an exec at euid 0 gets the whole bounding set whatever the parent's effective set was, so the
   jailer child runs with the override until it drops to the sandbox uid, as Firecracker's supported production
@@ -85,7 +89,7 @@ lexical part (absolute, clean so no `..`, no NUL, basename equals the id). `sand
 sandbox_gid)` is the full one and returns the verified descriptor: the path must be exactly
 `<jail_root>/vsock/<id>`; `jail_root` is opened one component at a time with `O_NOFOLLOW`; `jail_root` and `vsock`
 must be `0711` with the policy's root owner and no ACL; `vsock/<id>` must be a real directory owned by the runner
-uid, group `sandbox_gid` (from the reply), mode `0710`, no ACL. All later access goes through `openat` on the
+uid, group `sandbox_gid` (from the reply), mode `01770` (sticky), no ACL. All later access goes through `openat` on the
 returned descriptor, never through the path again.
 
 | path | mode | owner |
@@ -94,11 +98,11 @@ returned descriptor, never through the path again.
 | `<jail_root>/jails` | 0700 | root:root |
 | `<jail_root>/jails/<id>` | 0700 | sandbox uid:gid |
 | `<jail_root>/vsock` | 0711 | root:root |
-| `<jail_root>/vsock/<id>` | 0710 | runner uid : sandbox gid |
-| `<jail_root>/vsock/<id>/<uds>_<port>` (made by the launcher) | 0660 | runner uid : sandbox gid |
+| `<jail_root>/vsock/<id>` | 01770 | runner uid : sandbox gid |
+| `<jail_root>/vsock/<id>/v.sock` (made by Firecracker, then handed over by the helper) | 0700 | runner uid : sandbox gid |
+| `<jail_root>/vsock/<id>/v.sock_<port>` (runner-side listeners, made by the runner) | runner's | runner uid |
 
-The sandbox's own uid reaches its directory through the group's `x` bit. Another sandbox has neither `x` nor
-`r`; the runner (the owner) can list its own directories. The jail root is 0711 rather than 0700 so that the
+The sandbox's own uid reaches its directory through the group's `rwx` bits (Firecracker, running as that uid, makes `v.sock` there); the sticky bit stops it deleting or renaming the runner's own files. Another sandbox has no bits at all; the runner (the owner) can list its own directories. The jail root is 0711 rather than 0700 so that the
 runner can reach its vsock directory; the per-sandbox jail directories sit under the 0700 `jails` directory.
 Each sandbox gets the lowest free uid and gid of the configured ranges; none free answers `over_cap`. The
 registry is in memory only: at start-up `Reap` removes any entry in `jails` or `vsock` that is named like an id

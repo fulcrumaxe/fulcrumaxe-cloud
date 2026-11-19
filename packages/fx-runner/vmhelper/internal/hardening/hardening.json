@@ -18,12 +18,12 @@
     "RestrictAddressFamilies": "AF_UNIX",
     "RestrictSUIDSGID": "yes",
     "SystemCallArchitectures": "native",
-    "SystemCallFilter": "@system-service @mount",
+    "SystemCallFilter": "@system-service @mount seccomp",
     "UMask": "0077"
   },
   "capabilities": [
     { "name": "CAP_CHOWN", "number": 0, "reason": "give each jail's files to the sandbox's own uid and gid" },
-    { "name": "CAP_DAC_OVERRIDE", "number": 1, "jailer_only": true, "reason": "the jailer chowns the chroot root to the sandbox uid (0700) and then creates /dev and the other directories inside it; root without this is refused there (real-root runs 44348324152 failed on the pinned set without it, 44348802212 passed with it). The helper holds it in the permitted and inheritable sets only and drops it from the effective set at start-up; it is raised into the ambient set in the jailer child between fork and exec" },
+    { "name": "CAP_DAC_OVERRIDE", "number": 1, "jailer_only": true, "reason": "the jailer chowns the chroot root to the sandbox uid (0700) and then creates /dev and the other directories inside it; root without this is refused there (real-root runs 44348324152 failed on the pinned set without it, 44348802212 passed with it). The helper holds it in the permitted and inheritable sets and drops it from the effective set at start-up. It is raised into the ambient set in the jailer child between fork and exec, and into the effective set of one locked thread for exactly two operations (the dial of the Firecracker API socket and the v.sock handover); if that set cannot be restored the helper exits at once" },
     { "name": "CAP_SETGID", "number": 6, "reason": "the jailer switches to the sandbox's gid before it execs Firecracker" },
     { "name": "CAP_SETUID", "number": 7, "reason": "the jailer switches to the sandbox's uid before it execs Firecracker" },
     { "name": "CAP_SYS_ADMIN", "number": 21, "reason": "the jailer's mount namespace, bind mounts and pivot_root" },
@@ -31,6 +31,7 @@
   ],
   "notes": [
     "DeviceAllow: the jailer mknods /dev/kvm, /dev/net/tun and (when the host lists userfaultfd in /proc/misc) /dev/userfaultfd inside each jail, and it fails the launch if one mknod is refused, so each needs m. The VMM opens only /dev/kvm (rw). tun and userfaultfd get m alone: no guest NIC exists and no snapshot is restored through userfaultfd, so nothing may open them. /dev/urandom is in systemd's closed-policy default list.",
+    "SystemCallFilter has seccomp(2) on top of @system-service and @mount: the unit's filter is inherited by the jailer and by Firecracker, whose API thread installs its own seccomp filter with seccomp(2), which @system-service does not allow. Without it the kernel killed fc_api with SIGSYS (audit type=1326 syscall=317) right after Firecracker logged that it was listening, and the helper saw a reset connection. Found by the real-root run that boots a VM.",
     "Delegate=yes: the unit owns its cgroup subtree. The helper moves itself into a leaf of it at start and the jailer's cgroups sit under the unit's vms subtree, so the device policy above covers the VMM.",
     "CAP_SYS_CHROOT is absent on purpose: the jailer enters the jail with pivot_root (covered by CAP_SYS_ADMIN), not chroot(2). The jailer source (v1.16) calls pivot_root, never chroot(2); the real-root run under this capability set confirms it.",
     "CAP_KILL and CAP_FOWNER are absent on purpose. The helper is designed to this set: it stops a sandbox by writing cgroup.kill (kernel 5.14 or later), sets a file's mode before it chowns it, and takes each directory of a sandbox-owned tree back to root before it descends (chown with an empty path on an O_PATH descriptor, which needs only CAP_CHOWN), so the helper's own file operations never need CAP_DAC_OVERRIDE; that capability is for the jailer child.",

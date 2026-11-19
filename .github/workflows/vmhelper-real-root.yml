@@ -6,7 +6,8 @@ name: vmhelper real root
 #
 # The test (internal/sandbox/real_jailer_test.go) runs inside a transient systemd service that carries the helper's pinned capability
 # set, device policy, system call filter and cgroup delegation, all read from hardening.json, so a pass also shows the pinned set is
-# enough (no CAP_SYS_CHROOT, DAC_OVERRIDE, FOWNER or KILL). It starts two sandboxes and checks the dropped uid and gid and the empty
+# enough (no CAP_SYS_CHROOT, FOWNER or KILL). It starts two sandboxes, each booting the pinned guest kernel and a small fixture root disk
+# under Firecracker (configured through its API socket), and pings the guest over vsock as the runner's uid. It also checks the dropped uid and gid and the empty
 # supplementary group list, the cgroup limits, that destroy leaves no process, cgroup or jail directory, and that reaping does not
 # follow a planted symlink. sudo is used on the throwaway hosted VM only; there are no secrets, a read-only token and no inputs.
 # Every download is checked against the sha256 in infra/microvm-image/lock.json. To undo, delete this file.
@@ -54,13 +55,24 @@ jobs:
           mkdir -p "$W"
           bash infra/microvm-image/fetch-pin.sh .firecracker.amd64 "$W/firecracker.tgz"
           tar -xzf "$W/firecracker.tgz" -C "$W"
-          (cd packages/fx-runner/vmhelper && go test -c -o "$W/sandbox.test" ./internal/sandbox)
+          (cd packages/fx-runner/vmhelper && go test -c -o "$W/sandbox.test" ./internal/sandbox && go build -o "$W/guestinit" ./internal/sandbox/testdata/guestinit)
+          # The pinned guest kernel (checked against lock.json) and a small root disk whose init answers the agent's ping on vsock
+          # port 5252 (the signed image is not a pinned download: the image workflow builds and boots that one).
+          bash infra/microvm-image/fetch-pin.sh .kernel.amd64 "$W/vmlinux"
+          R="$W/rootdir"
+          mkdir -p "$R/usr/lib/fx" "$R/dev"
+          install -m 0755 "$W/guestinit" "$R/usr/lib/fx/init"
+          sudo mknod -m 0666 "$R/dev/null" c 1 3
+          sudo mknod -m 0600 "$R/dev/console" c 5 1
+          sudo mke2fs -q -t ext4 -L fxroot -E root_owner=0:0 -d "$R" "$W/rootfs.ext4" 16M
           D=/usr/libexec/fx-vmhelper-test
           namei -l /usr/libexec || true
           sudo install -d -m 0755 -o root -g root "$D"
           sudo install -m 0755 -o root -g root "$W"/release-v*-x86_64/jailer-v*-x86_64 "$D/jailer"
           sudo install -m 0755 -o root -g root "$W"/release-v*-x86_64/firecracker-v*-x86_64 "$D/firecracker"
           sudo install -m 0755 -o root -g root "$W/sandbox.test" "$D/sandbox.test"
+          sudo install -m 0644 -o root -g root "$W/vmlinux" "$D/vmlinux"
+          sudo install -m 0644 -o root -g root "$W/rootfs.ext4" "$D/rootfs.ext4"
           sudo install -d -m 0711 -o root -g root /var/lib/fx-vmhelper-test
           namei -l "$D/jailer"
       - name: Run the real jailer test inside a service with the pinned properties
@@ -73,5 +85,8 @@ jobs:
           printf '%s\n' "${props[@]}" | grep -v '^-p$'
           sudo systemd-run --collect --wait --pipe --quiet "${props[@]}" \
             -E FX_VMHELPER_REAL_ROOT=1 -E FX_VM_JAILER=/usr/libexec/fx-vmhelper-test/jailer -E FX_VM_FIRECRACKER=/usr/libexec/fx-vmhelper-test/firecracker \
-            -E FX_VM_JAIL_ROOT=/var/lib/fx-vmhelper-test \
+            -E FX_VM_JAIL_ROOT=/var/lib/fx-vmhelper-test -E FX_VM_KERNEL=/usr/libexec/fx-vmhelper-test/vmlinux -E FX_VM_ROOTFS=/usr/libexec/fx-vmhelper-test/rootfs.ext4 \
             /usr/libexec/fx-vmhelper-test/sandbox.test -test.run '^TestRealJailer$' -test.v
+      - name: Kernel messages (seccomp kills, out of memory)
+        if: failure()
+        run: sudo dmesg | tail -n 60 || true

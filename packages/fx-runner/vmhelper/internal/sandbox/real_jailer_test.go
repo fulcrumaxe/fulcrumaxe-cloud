@@ -3,7 +3,11 @@
 package sandbox
 
 import (
+	"bufio"
+	"encoding/binary"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"fx-vmhelper/internal/config"
 	"fx-vmhelper/internal/hardening"
@@ -53,21 +58,51 @@ func TestRealJailer(t *testing.T) {
 	l := &JailerLauncher{Jailer: os.Getenv("FX_VM_JAILER"), Firecracker: os.Getenv("FX_VM_FIRECRACKER"), CgroupRoot: "/sys/fs/cgroup", CgroupParent: parent, AmbientCaps: pinned.JailerOnlyCaps()}
 	cfg := config.Config{JailRoot: os.Getenv("FX_VM_JAIL_ROOT"), RunnerUID: 1001, RunnerGID: 1001, UIDFirst: 200000, UIDCount: 4, GIDFirst: 200000, GIDCount: 4,
 		MaxSandboxes: 2, MaxVCPUs: 2, MaxMemMB: 512, FirecrackerPath: l.Firecracker}
-	m, err := New(cfg, &logLauncher{t: t, inner: l})
+	ll := &logLauncher{t: t, inner: l}
+	m, err := New(cfg, ll)
 	if err != nil {
 		t.Fatal(err)
 	}
-	newFixtureIn(t, cfg.JailRoot).use(m) // the staged tree holds the fixture's template files
-	useRealMounts(t)                     // and the vsock bind mount is real here
+	realFixture(t, cfg.JailRoot).use(m) // the staged tree holds a real kernel and a root disk that answers the agent's ping
+	useRealMounts(t)                    // and the vsock bind mount is real here
 	defer m.Close()
 	a, b := "real-a", "real-b"
+	// No VM may outlive the test, whatever fails below (destroy is a no-op for an id that is already gone).
+	t.Cleanup(func() {
+		for _, id := range []string{a, b} {
+			m.Destroy(id)
+		}
+	})
+	vdirs := map[string]string{}
 	for _, id := range []string{a, b} {
-		if _, c := m.Prepare(protocol.Request{Verb: protocol.Prepare, SandboxID: id, Template: "fx-agent", VCPUs: 2, MemMB: 256}); c != protocol.OK {
+		r, c := m.Prepare(protocol.Request{Verb: protocol.Prepare, SandboxID: id, Template: "fx-agent", VCPUs: 2, MemMB: 256})
+		if c != protocol.OK {
 			t.Fatal("prepare", id, c)
 		}
+		vdirs[id] = r.VsockDir
 		if _, c := m.Start(id); c != protocol.OK {
 			t.Fatal("start", id, c)
 		}
+	}
+	// The VM boots and the agent port answers, reached the way the runner reaches it: as the runner's uid, through
+	// <vsock_dir>/v.sock, with the proxy's CONNECT line and then a ping frame.
+	for _, id := range []string{a, b} {
+		if err := vsockHello(t, cfg.RunnerUID, cfg.RunnerGID, vdirs[id]+"/v.sock"); err != nil {
+			t.Errorf("vsock hello with %s: %v\nconsole of %s:\n%s", id, err, id, ll.console(id))
+		}
+	}
+	// The sticky bit: the sandbox uid can make entries in its vsock directory but cannot delete or rename a file
+	// the runner owns (the runner's listener sockets live there).
+	listener := vdirs[a] + "/v.sock_5253"
+	if out, err := runAsUID(cfg.RunnerUID, cfg.RunnerGID, "write", listener); err != nil {
+		t.Errorf("the runner cannot make a listener file: %v\n%s", err, out)
+	}
+	if out, err := runAsUID(200000, 200000, "sticky", listener, vdirs[a]+"/mine", vdirs[a]+"/moved"); err != nil { // sandbox A
+		t.Errorf("sticky bit: %v\n%s", err, out)
+	}
+	// (the directory is closed to root without the override: the runner looks)
+	if out, err := runAsUID(cfg.RunnerUID, cfg.RunnerGID, "stat", listener); err != nil {
+		t.Errorf("the runner's file is gone: %v\n%s", err, out)
 	}
 	pid := func(id string) int {
 		b, err := os.ReadFile("/sys/fs/cgroup/" + parent + "/" + id + "/cgroup.procs")
@@ -162,18 +197,96 @@ func TestRealJailer(t *testing.T) {
 	}
 }
 
+// realFixture is a manifest and template directory holding the real kernel (FX_VM_KERNEL, the pinned guest
+// kernel) and root disk (FX_VM_ROOTFS) the workflow made.
+func realFixture(t *testing.T, dir string) *fixture {
+	t.Helper()
+	f := newFixtureIn(t, dir)
+	var err error
+	if f.kernel, err = os.ReadFile(os.Getenv("FX_VM_KERNEL")); err != nil {
+		t.Fatal(err)
+	}
+	if f.rootfs, err = os.ReadFile(os.Getenv("FX_VM_ROOTFS")); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, f.dir+"/fx-agent/kernel", f.kernel, 0o644)
+	mustWrite(t, f.dir+"/fx-agent/rootfs", f.rootfs, 0o644)
+	mustWrite(t, f.manifest, manifestFor("fx-agent", f.kernel, f.rootfs), 0o644)
+	return f
+}
+
+// vsockHello connects to Firecracker's host-side socket as uid:gid, asks for the agent's port and pings it,
+// retrying until the guest is up. It answers nil only for the agent's {"ok":true,"proto":1}.
+func vsockHello(t *testing.T, uid, gid uint32, sock string) (err error) {
+	var out string
+	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
+		if out, err = runAsUID(uid, gid, "hello", sock); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%v: %s", err, out)
+}
+
+// pingOnce connects to sock (the caller's own uid is the one that matters), asks for the agent's port and pings it.
+func pingOnce(sock string) error {
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("CONNECT 5252\n")); err != nil {
+		return err
+	}
+	br := bufio.NewReader(conn)
+	if line, err := br.ReadString('\n'); err != nil || !strings.HasPrefix(line, "OK ") {
+		return fmt.Errorf("handshake: %q %v", line, err)
+	}
+	req := []byte(`{"op":"ping"}`)
+	frame := binary.BigEndian.AppendUint32(nil, uint32(len(req)))
+	if _, err := conn.Write(append(frame, req...)); err != nil {
+		return err
+	}
+	var n [4]byte
+	if _, err := io.ReadFull(br, n[:]); err != nil {
+		return err
+	}
+	body := make([]byte, min(binary.BigEndian.Uint32(n[:]), 4096))
+	if _, err := io.ReadFull(br, body); err != nil {
+		return err
+	}
+	if string(body) != `{"ok":true,"proto":1}` {
+		return fmt.Errorf("reply %q", body)
+	}
+	return nil
+}
+
 // logLauncher shows why a launch failed: the manager answers only "internal".
 type logLauncher struct {
 	t     *testing.T
 	inner Launcher
+	ins   map[string]*instance
 }
 
 func (l *logLauncher) Launch(s Spec) (Instance, error) {
 	in, err := l.inner.Launch(s)
 	if err != nil {
 		l.t.Logf("launch of %s failed: %v", s.ID, err)
+	} else if i, ok := in.(*instance); ok {
+		if l.ins == nil {
+			l.ins = map[string]*instance{}
+		}
+		l.ins[s.ID] = i
 	}
 	return in, err
+}
+
+// console is what the VM's serial console printed (Firecracker's stdout), when a hello fails.
+func (l *logLauncher) console(id string) string {
+	if i := l.ins[id]; i != nil {
+		return "head: " + i.out.Head() + "\ntail: " + i.out.Tail()
+	}
+	return "no instance"
 }
 
 // assertNoOverride fails if any thread of this process holds CAP_DAC_OVERRIDE effective, and logs what each
@@ -224,16 +337,22 @@ func assertNoOverride(t *testing.T, when string) {
 // have root's effective capabilities restored.
 func asSandboxUID(t *testing.T, id uint32, op string, args ...string) {
 	t.Helper()
+	if out, err := runAsUID(id, id, op, args...); err != nil {
+		t.Errorf("as uid %d, %s %v: %v\n%s", id, op, args, err, out)
+	}
+}
+
+// runAsUID is asSandboxUID that returns the child's output and error instead of failing the test.
+func runAsUID(uid, gid uint32, op string, args ...string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
-		t.Fatal(err)
+		return "", err
 	}
 	cmd := exec.Command(self, "-test.run=^TestAsSandboxHelper$")
 	cmd.Env = []string{"FX_VM_HELPER_OP=" + op, "FX_VM_HELPER_ARGS=" + strings.Join(args, "\x1f")}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: id, Gid: id, Groups: []uint32{}}}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Errorf("as uid %d, %s %v: %v\n%s", id, op, args, err, out)
-	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: []uint32{}}}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // TestAsSandboxHelper is the child of asSandboxUID; it does nothing otherwise.
@@ -255,6 +374,28 @@ func TestAsSandboxHelper(t *testing.T) {
 		}
 		if _, err := os.ReadDir(args[1]); err == nil {
 			t.Error("listed another sandbox's jail")
+		}
+	case "hello": // the runner reaches the guest agent through the vsock socket
+		if err := pingOnce(args[0]); err != nil {
+			t.Fatal(err)
+		}
+	case "stat":
+		if _, err := os.Stat(args[0]); err != nil {
+			t.Fatal(err)
+		}
+	case "write": // the runner makes a file in its vsock directory
+		if err := os.WriteFile(args[0], []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	case "sticky": // the sandbox uid makes an entry, and cannot delete or rename the runner's file
+		if err := os.WriteFile(args[1], nil, 0o600); err != nil {
+			t.Errorf("the sandbox cannot make an entry in its vsock directory: %v", err)
+		}
+		if err := os.Remove(args[0]); err == nil {
+			t.Error("the sandbox uid deleted the runner's file")
+		}
+		if err := os.Rename(args[0], args[2]); err == nil {
+			t.Error("the sandbox uid renamed the runner's file")
 		}
 	default:
 		t.Fatal("unknown operation")

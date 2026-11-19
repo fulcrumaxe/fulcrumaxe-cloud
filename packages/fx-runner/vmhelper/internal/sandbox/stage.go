@@ -193,7 +193,7 @@ func (m *Manager) mkdirChild(parent int, name string) (int, error) {
 
 // openPathChild opens name below parent as a directory with O_PATH and no symlink following. O_PATH needs
 // no permission on the directory itself, which matters at and below the vsock mount point: it then shows
-// the sandbox's 0710 directory, closed to root (the helper holds no CAP_DAC_OVERRIDE). The descriptor
+// the sandbox's 01770 directory, closed to root (the helper's effective set holds no CAP_DAC_OVERRIDE here). The descriptor
 // serves fstat, further O_PATH steps and the /proc/self/fd unmount.
 func openPathChild(parent int, name string) (int, error) {
 	if !plainName(name) {

@@ -106,7 +106,7 @@ func openChild(parent int, name string) (int, error) {
 // ---- POSIX ACLs ----------------------------------------------------------------------------------------
 //
 // A default ACL on a parent is inherited by every directory made below it, and an access ACL grants named
-// users and groups bits that the 0710 mode does not show. Either would break the isolation between
+// users and groups bits that the 01770 mode does not show. Either would break the isolation between
 // sandboxes, so a directory that carries one is refused, and a directory the helper creates is stripped of
 // both before any owner or mode is set.
 
@@ -525,8 +525,8 @@ func OpenVsockDir(pol Policy, p, id string, sandboxGID uint32) (int, error) {
 }
 
 // openVsockDirAs is OpenVsockDir. With pathOnly the last component is opened O_PATH and checked from fstat
-// alone, which needs no read access: that is how the helper checks its own directory, which (0710, the
-// runner as owner, the sandbox gid) is closed to root without CAP_DAC_OVERRIDE. The ACL of that directory
+// alone, which needs no read access: that is how the helper checks its own directory, which (01770, the
+// runner as owner, the sandbox gid) is closed to root unless CAP_DAC_OVERRIDE is raised. The ACL of that directory
 // was stripped and checked by mkdirOwned on its own descriptor. A consumer running as the runner uid uses
 // OpenVsockDir, which opens it for reading and checks the ACL too.
 func openVsockDirAs(pol Policy, p, id string, sandboxGID uint32, pathOnly bool) (int, error) {

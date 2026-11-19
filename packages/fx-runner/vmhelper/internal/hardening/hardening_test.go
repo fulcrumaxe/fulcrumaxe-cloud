@@ -140,7 +140,7 @@ func TestExtraDirectivesAndRuntimeMode(t *testing.T) {
 	p := Load()
 	for k, v := range map[string]string{
 		"SystemCallArchitectures": "native", "LockPersonality": "yes", "RestrictSUIDSGID": "yes",
-		"DevicePolicy": "closed", "SystemCallFilter": "@system-service @mount", "Delegate": "yes",
+		"DevicePolicy": "closed", "SystemCallFilter": "@system-service @mount seccomp", "Delegate": "yes",
 		"DeviceAllow": "/dev/kvm rwm\n/dev/net/tun m\n/dev/userfaultfd m",
 	} {
 		if strings.Join(p.Directives[k], "\n") != v {
@@ -242,6 +242,9 @@ func TestSyscallGroupsExist(t *testing.T) {
 		t.Skip("systemd-analyze is not installed")
 	}
 	for _, g := range strings.Fields(Load().Directives["SystemCallFilter"][0]) {
+		if !strings.HasPrefix(g, "@") {
+			continue // a single syscall name (seccomp): systemd checks it when the unit starts
+		}
 		if out, err := exec.Command(bin, "syscall-filter", g).CombinedOutput(); err != nil {
 			t.Errorf("%s: %v: %s", g, err, out)
 		}

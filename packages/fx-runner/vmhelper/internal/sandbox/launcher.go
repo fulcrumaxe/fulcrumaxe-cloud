@@ -5,6 +5,7 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -42,9 +43,11 @@ type JailerLauncher struct {
 	AmbientCaps         []uintptr // capabilities raised into the jailer child's ambient set, between fork and exec
 
 	// Tests only.
-	Remap     func(uid, gid uint32) (uint32, uint32) // nominal sandbox ids -> the ids a non-root test can have
-	Status    func(pid int) (string, error)          // the process's /proc status text
-	chainBase string                                 // where the root-owned chain check starts: "/" unless a test says otherwise
+	Remap     func(uid, gid uint32) (uint32, uint32)  // nominal sandbox ids -> the ids a non-root test can have
+	Status    func(pid int) (string, error)           // the process's /proc status text
+	Dial      func(s Spec, pid int) (net.Conn, error) // the Firecracker API socket (default: dialAPI)
+	Handover  func(s Spec) error                      // gives the vsock socket to the runner (default: handOverSocket)
+	chainBase string                                  // where the root-owned chain check starts: "/" unless a test says otherwise
 }
 
 func (l *JailerLauncher) eff(u, g uint32) (uint32, uint32) {
@@ -170,31 +173,47 @@ type instance struct {
 	pid  int
 	done chan struct{}
 	out  *headBuf
+	exit string // how the process ended (set before done is closed)
 }
 
 // headBuf keeps the first bytes written to it and discards the rest, so a chatty process cannot fill memory
 // or block on a full pipe.
 type headBuf struct {
-	mu sync.Mutex
-	b  []byte
+	mu   sync.Mutex
+	b    []byte // the first bytes
+	tail []byte // the last bytes after those (a guest's console ends with its panic)
 }
 
 func (h *headBuf) Write(p []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if room := 1024 - len(h.b); room > 0 {
-		h.b = append(h.b, p[:min(room, len(p))]...)
+	n := min(max(2048-len(h.b), 0), len(p))
+	h.b = append(h.b, p[:n]...)
+	if h.tail = append(h.tail, p[n:]...); len(h.tail) > 2048 {
+		h.tail = h.tail[len(h.tail)-2048:]
 	}
 	return len(p), nil
 }
 
-// Head is what the process printed first, as one printable line (anything else becomes '?').
-func (h *headBuf) Head() string {
+// Head is what the process printed first, as one printable line (anything else becomes '?'); Tail is the
+// last of what it printed, when that was more than Head holds.
+func (h *headBuf) Head() string { return h.line(false) }
+func (h *headBuf) Tail() string { return h.line(true) }
+
+func (h *headBuf) line(tail bool) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	line := strings.Join(strings.Fields(string(h.b)), " ")
-	if len(line) > 400 {
-		line = line[:400]
+	raw := h.b
+	if tail {
+		raw = h.tail
+	}
+	line := strings.Join(strings.Fields(string(raw)), " ")
+	if len(line) > 1500 {
+		if tail {
+			line = line[len(line)-1500:]
+		} else {
+			line = line[:1500]
+		}
 	}
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r >= 0x7f {
@@ -228,11 +247,25 @@ func (l *JailerLauncher) Launch(s Spec) (Instance, error) {
 		return nil, errors.New("launch: the jailer did not start")
 	}
 	in := &instance{l: l, id: s.ID, pid: cmd.Process.Pid, done: make(chan struct{}), out: out}
-	go func() { _ = cmd.Wait(); close(in.done) }()
-	if err := l.waitDropped(in, s); err != nil {
+	go func() { in.exit = fmt.Sprint(cmd.Wait()); close(in.done) }() // exit is read only after done is closed
+	// Dropped, then configured and started through the API socket; a failure of either kills the whole cgroup.
+	err = l.waitDropped(in, s)
+	if err == nil {
+		err = l.boot(in, s)
+	}
+	if err != nil {
+		ended := "it had not ended" // looked at before the kill below, which would end it
+		select {
+		case <-in.done:
+			ended = "it ended: " + in.exit
+		case <-time.After(300 * time.Millisecond): // a process that just died is reaped a moment later
+		}
 		_ = cmd.Process.Kill() // a jailer that has not dropped yet is still root's own child; cgroup.kill covers the rest
-		_ = in.Stop()
-		return nil, err
+		if serr := in.Stop(); serr != nil {
+			err = fmt.Errorf("%w; and the sandbox could not be stopped: %v", err, serr)
+		}
+		// After the stop the pipe is drained: this is everything the process said before it ended.
+		return nil, fmt.Errorf("%w (the sandbox process printed %q; %s)", err, in.out.Head(), ended)
 	}
 	return in, nil
 }

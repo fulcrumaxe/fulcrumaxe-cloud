@@ -102,16 +102,22 @@ func TestPrepareBuildsLayoutWithContractModes(t *testing.T) {
 		root + "/jails":       os.ModeDir | 0o700,
 		root + "/vsock":       os.ModeDir | 0o711,
 		root + "/jails/box-a": os.ModeDir | 0o700,
-		root + "/vsock/box-a": os.ModeDir | 0o710,
+		root + "/vsock/box-a": os.ModeDir | 0o770,
 	} {
 		if got := mode(t, p); got != want {
 			t.Errorf("%s: mode %v, want %v", p, got, want)
 		}
 	}
+	// the sticky bit (which mode() leaves out) is on the sandbox's vsock directory and on no other
+	for p, want := range map[string]bool{root + "/vsock/box-a": true, root + "/vsock": false, root + "/jails/box-a": false} {
+		if fi, err := os.Lstat(p); err != nil || (fi.Mode()&os.ModeSticky != 0) != want {
+			t.Errorf("%s: sticky bit want %v: %v %v", p, want, fi, err)
+		}
+	}
 }
 
 func TestCheckedModesAreTheContractValues(t *testing.T) {
-	if RootMode != 0o711 || JailsMode != 0o700 || VsockRootMode != 0o711 || VsockDirMode != 0o710 || JailDirMode != 0o700 || SocketMode != 0o660 {
+	if RootMode != 0o711 || JailsMode != 0o700 || VsockRootMode != 0o711 || VsockDirMode != 0o1770 || JailDirMode != 0o700 || SocketMode != 0o660 {
 		t.Fatal("a contract mode constant changed")
 	}
 }
@@ -139,8 +145,10 @@ func TestOtherSandboxCannotTraverseOrList(t *testing.T) {
 	if !Permits(dirMode, runnerUID, a.GID, a.UID, []uint32{a.GID}, x) {
 		t.Error("sandbox A cannot traverse its own directory")
 	}
-	if Permits(dirMode, runnerUID, a.GID, a.UID, []uint32{a.GID}, r) {
-		t.Error("sandbox A can list its own directory (group must not hold r)")
+	// Firecracker, as sandbox A's uid, makes v.sock here, so the group holds w and x (and r: the rule only has to
+	// keep the other sandboxes out).
+	if !Permits(dirMode, runnerUID, a.GID, a.UID, []uint32{a.GID}, 2|x) {
+		t.Error("sandbox A cannot make its socket in its own directory")
 	}
 	if Permits(dirMode, runnerUID, a.GID, b.UID, []uint32{b.GID}, x) {
 		t.Error("sandbox B can traverse A's directory")
@@ -323,7 +331,7 @@ func TestCheckVsockDirRefusesSymlinksWrongModeAndOwner(t *testing.T) {
 		t.Error("a wrong owner or group was accepted")
 	}
 	// wrong mode, in both directions
-	for _, bad := range []os.FileMode{0o711, 0o750, 0o700, 0o770} {
+	for _, bad := range []os.FileMode{0o711, 0o750, 0o700, 0o710, 0o770, os.ModeSticky | 0o700, os.ModeSticky | 0o775} {
 		if err := os.Chmod(reply.VsockDir, bad); err != nil {
 			t.Fatal(err)
 		}
@@ -331,7 +339,7 @@ func TestCheckVsockDirRefusesSymlinksWrongModeAndOwner(t *testing.T) {
 			t.Errorf("mode %04o accepted", bad)
 		}
 	}
-	if err := os.Chmod(reply.VsockDir, 0o710); err != nil {
+	if err := os.Chmod(reply.VsockDir, os.ModeSticky|0o770); err != nil {
 		t.Fatal(err)
 	}
 	// the final component is a symlink to a good directory
@@ -678,10 +686,10 @@ func TestPermitsModel(t *testing.T) {
 		want    uint32
 		allowed bool
 	}{
-		{0o710, 1, []uint32{9}, 7, true},  // owner rwx
-		{0o710, 2, []uint32{5}, 1, true},  // group x
-		{0o710, 2, []uint32{5}, 4, false}, // group has no r
-		{0o710, 3, []uint32{6}, 1, false}, // other has nothing
+		{0o770, 1, []uint32{9}, 7, true},  // owner rwx
+		{0o770, 2, []uint32{5}, 3, true},  // group w and x: the sandbox makes its socket
+		{0o770, 2, []uint32{5}, 7, true},  // group rwx
+		{0o770, 3, []uint32{6}, 1, false}, // other has nothing: another sandbox cannot traverse it
 		{0o660, 2, []uint32{5}, 6, true},  // group rw
 		{0o660, 3, []uint32{6}, 2, false}, // other
 		{0o711, 3, []uint32{6}, 1, true},  // other x
