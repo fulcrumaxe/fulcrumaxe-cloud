@@ -2047,6 +2047,51 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
+  test("the connect command has a Copy button: labelled, reachable by keyboard, says Copied, and puts the exact command on the clipboard", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false }) }));
+    await open(page);
+    const cmd = "fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root <path to the engine's checkout> --state-dir <the engine's state dir>";
+    const btn = page.locator(`${WIN} [data-testid="tm-copy"]:visible`).first();
+    await expect(btn).toHaveAccessibleName("Copy command");
+    await btn.focus();
+    await expect(btn).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(`${WIN} [data-testid="tm-copy-note"]:visible`).first()).toHaveText("Copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(cmd);
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("watch on with no repository enabled: the switch stays on the page, says no repository is enabled, and Open Settings opens the sheet", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { mock, errors } = await setup(page, fresh({ repos: [] }));
+    await open(page);
+    await expect(tv(page, "tm-norepos")).toHaveText("No repositories are enabled for engine watch.");
+    await expect(tv(page, "tm-watch-on-note")).toContainText("Settings");
+    await expect(tv(page, "tm-watch-off")).toBeChecked();
+    await press(tv(page, "tm-open-settings"));
+    await expect(t(page, "tm-settings-btn")).toHaveAttribute("aria-expanded", "true");
+    await expect(t(page, "tm-watch")).toBeChecked();
+    expect(mock.puts).toEqual([]);
+    await noSideways(page);
+    await clean(page, errors);
+    void F;
+  });
+
+  test("a runner with no name says so and links to the Runners app, where it can be named", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ runners: F.fleet([F.runner({ has_name: false, name: null })]) }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(tv(page, "tm-unnamed").first()).toContainText("no name yet");
+    await press(tv(page, "tm-rename-runner").first());
+    await expect(page.locator('#windows-container .fulc-window[data-app-id="runners"]')).toBeVisible();
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
   test("real click: turning the switch on says Connecting to the runner while it has not reported in, and the chip is not Live", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const never = { runner_id: null, runner_name: null, session_id: null, last_event_at: null, last_heard_at: null, liveness: "never" };
