@@ -4,7 +4,7 @@
  * and nothing carries a figure the cloud computes (cost, totals, rates): the engine sends raw facts and the cloud's own spend and stats code does the arithmetic.
  */
 import { z } from "zod";
-import { CREDENTIAL_MODES, USAGE_TOKENS_MAX } from "./messages.js";
+import { CREDENTIAL_MODES, USAGE_TOKENS_MAX, WATCH_MIN_PROTOCOL } from "./messages.js";
 
 const safeInt = z.number().int().safe();
 /** GitHub issue, discussion and pull request numbers: positive and small enough for an integer column. */
@@ -56,6 +56,10 @@ export const EngineUsage = z.object({ input: safeInt.min(0).max(USAGE_TOKENS_MAX
 export type EngineUsage = z.infer<typeof EngineUsage>;
 const CredentialMode = z.enum(CREDENTIAL_MODES);
 
+export const SLIM_AGE_S_MAX = 86_400;
+export const SLIM_STATUS_REASONS = ["unwatched"] as const;
+const SlimAge = z.number().int().min(0).max(SLIM_AGE_S_MAX).nullable();
+
 const kind = <K extends string, S extends z.ZodRawShape>(name: K, shape: S) => z.object({ v: z.literal(1), engine_instance_id: z.string().uuid(), seq: safeInt.min(0), ts: z.string().datetime(), kind: z.literal(name), ...shape }).strict();
 
 const HostEvent = (name: "host_started" | "host_stopped" | "host_heartbeat") => kind(name, { reason: HostReason });
@@ -94,11 +98,24 @@ const KIND_SCHEMAS = [
   BridgeEvent("bridge_heartbeat"),
   BridgeEvent("bridge_dropped"),
   // D#845 ON-1: raw token counts for one window of an engine session's model use, from the in-guest supervisor. The cloud prices it, never the engine. `model_tier` has the shape of `machine_usage_daily.model_tier`.
+  // D#845 ON-24a: while nobody watches the repo the runner sends this in place of the three heartbeats, at most once a minute. `age_s` is whole seconds since that source was last seen, null for never.
+  kind("slim_status", { sources: z.object({ bridge: SlimAge, host: SlimAge, engine: SlimAge }).strict(), reason: z.enum(SLIM_STATUS_REASONS) }),
   kind("usage_tick", { model_tier: z.string().regex(MODEL_TIER_PATTERN), input_tokens: usageTokens, output_tokens: usageTokens, cache_read_tokens: usageTokens, cache_write_tokens: usageTokens, window_s: seconds }),
 ] as const;
 
-export const ENGINE_EVENT_KINDS = ["agent_started", "agent_linked", "agent_stopped", "spawn_blocked", "merge_lane", "merged", "gate_receipt", "team_log_line", "loop_tick", "checkin_tick", "engine_heartbeat", "plan_snapshot", "ask_raised", "ask_cleared", "host_started", "host_stopped", "host_heartbeat", "tick_started", "tick_ended", "compaction_detected", "halt_applied", "bridge_heartbeat", "bridge_dropped", "usage_tick"] as const;
+export const ENGINE_EVENT_KINDS = ["agent_started", "agent_linked", "agent_stopped", "spawn_blocked", "merge_lane", "merged", "gate_receipt", "team_log_line", "loop_tick", "checkin_tick", "engine_heartbeat", "plan_snapshot", "ask_raised", "ask_cleared", "host_started", "host_stopped", "host_heartbeat", "tick_started", "tick_ended", "compaction_detected", "halt_applied", "bridge_heartbeat", "bridge_dropped", "usage_tick", "slim_status"] as const;
 export type EngineEventKind = (typeof ENGINE_EVENT_KINDS)[number];
+
+/**
+ * How each kind is sent while a repo is unwatched. `always_on` kinds are never held back (a figure or a fact the cloud cannot get another way, `usage_tick` among them), `on_demand` kinds go
+ * only while someone watches the repo, and `replaced_by_slim` kinds are the three heartbeats a `slim_status` stands in for (they stay valid for runners below 23, which still send them).
+ */
+export const ENGINE_EVENT_CLASSES = {
+  always_on: ["agent_started", "agent_linked", "agent_stopped", "spawn_blocked", "merge_lane", "merged", "gate_receipt", "ask_raised", "ask_cleared", "halt_applied", "host_started", "host_stopped", "tick_ended", "bridge_dropped", "usage_tick", "slim_status"],
+  on_demand: ["team_log_line", "loop_tick", "checkin_tick", "plan_snapshot", "tick_started", "compaction_detected"],
+  replaced_by_slim: ["bridge_heartbeat", "host_heartbeat", "engine_heartbeat"],
+} as const satisfies Record<string, readonly EngineEventKind[]>;
+export type EngineEventClass = keyof typeof ENGINE_EVENT_CLASSES;
 
 /** Keys no event may carry at any depth: free text, and every figure the cloud computes. Matched case-insensitively; `total_` is a prefix. */
 export const ENGINE_FORBIDDEN_KEYS = ["text", "message", "content", "output", "prompt", "description", "title", "body", "branch", "path", "usd", "cost", "cost_usd", "price"] as const;
@@ -188,14 +205,18 @@ export function parseEngineEventsMessage(body: unknown): { ok: true; message: En
   return { ok: false, error: onlyOrder ? "seq_order" : "invalid_message" };
 }
 
-/** The replies to an events request. `last_accepted_seq` is null until the session has had an event accepted. */
+/** The replies to an events request. `watch_until` (D#845 ON-24a) is how long the repo stays watched; the cloud sends it only to a runner whose hello is at `WATCH_MIN_PROTOCOL` or later. `last_accepted_seq` is null until the session has had an event accepted. */
 const lastSeq = safeInt.min(0).nullable();
-export const EngineEventsAcceptedReply = z.object({ accepted: count, duplicates: count, last_accepted_seq: lastSeq }).strict();
+export const EngineEventsAcceptedReply = z.object({ accepted: count, duplicates: count, last_accepted_seq: lastSeq, watch_until: z.string().datetime().optional() }).strict();
 export const EngineEventsErrorReply = z.union([
   z.object({ error: z.literal("seq_not_increasing"), last_accepted_seq: lastSeq }).strict(),
   z.object({ error: z.enum(["engine_bridge_off", "engine_repo_not_enabled"]) }).strict(),
   z.object({ error: z.literal("engine_event_quota"), retry_after_s: seconds }).strict(),
   z.object({ error: z.enum(["seq_order", "invalid_message"]) }).strict(),
 ]);
+/** The accepted reply for a runner whose hello said `helloProtocol`: `watch_until` is dropped below `WATCH_MIN_PROTOCOL`, because a strict parse that predates the key would refuse the reply and the runner would retry the batch. */
+export function buildEventsAcceptedReply(reply: { accepted: number; duplicates: number; last_accepted_seq: number | null }, watchUntil: string | undefined, helloProtocol: number): EngineEventsAcceptedReply {
+  return EngineEventsAcceptedReply.parse(watchUntil !== undefined && helloProtocol >= WATCH_MIN_PROTOCOL ? { ...reply, watch_until: watchUntil } : reply);
+}
 export type EngineEventsAcceptedReply = z.infer<typeof EngineEventsAcceptedReply>;
 export type EngineEventsErrorReply = z.infer<typeof EngineEventsErrorReply>;

@@ -1205,6 +1205,66 @@
           "$ref": "#/$defs/seconds"
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "engine_instance_id",
+        "seq",
+        "ts",
+        "kind",
+        "sources",
+        "reason"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "slim_status"
+        },
+        "sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bridge",
+            "host",
+            "engine"
+          ],
+          "properties": {
+            "bridge": {
+              "$ref": "#/$defs/slim_age"
+            },
+            "host": {
+              "$ref": "#/$defs/slim_age"
+            },
+            "engine": {
+              "$ref": "#/$defs/slim_age"
+            }
+          }
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "unwatched"
+          ]
+        }
+      }
     }
   ],
   "$defs": {
@@ -1393,6 +1453,18 @@
           "$ref": "#/$defs/tokens"
         }
       }
+    },
+    "slim_age": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400
+        },
+        {
+          "const": null
+        }
+      ]
     }
   }
 }

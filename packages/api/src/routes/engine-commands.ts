@@ -22,8 +22,10 @@ function probe(kind: string, args: unknown): unknown {
   return { v: 1, purpose: ENGINE_COMMAND_PURPOSE, command_id: id, command_seq: 1, runner_id: id, repo_gh_id: 1, kind, args, issued_by: id, issued_at: new Date(nowMs).toISOString(), expires_at: new Date(nowMs + 600_000).toISOString(), halt_epoch: 0 };
 }
 
+/** The kinds a person sends. `watch` is the cloud's own (D#845 ON-24a): a reader's page opens it, never a request body, and its table has no row for it yet. */
+const PERSON_COMMAND_KINDS = ENGINE_COMMAND_KINDS.filter((kind) => kind !== "watch") as unknown as [Exclude<(typeof ENGINE_COMMAND_KINDS)[number], "watch">, ...Exclude<(typeof ENGINE_COMMAND_KINDS)[number], "watch">[]];
 const issueBodySchema = z
-  .object({ kind: z.enum(ENGINE_COMMAND_KINDS), args: z.record(z.string(), z.unknown()).default({}) })
+  .object({ kind: z.enum(PERSON_COMMAND_KINDS), args: z.record(z.string(), z.unknown()).default({}) })
   .strict()
   .superRefine((body, ctx) => {
     if (!EngineCommand.safeParse(probe(body.kind, body.args)).success) ctx.addIssue({ code: "custom", message: "args do not match the command kind", path: ["args"] });
