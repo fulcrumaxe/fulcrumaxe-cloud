@@ -406,6 +406,8 @@ function fakeHost(opts: { existing?: readonly string[] | "all"; reply?: { code: 
       asked.push(q);
       return opts.confirm ?? true;
     },
+    helper: { list: async () => [], destroy: async () => undefined },
+    snapshots: async () => ({ dir: "/fx-test/snaps", summary: { count: 2, bytes: 4096 } }),
   };
   return { host, rootCalls, asked };
 }
@@ -432,7 +434,7 @@ describe("fx-runner vm uninstall", () => {
     expect(r.code).toBe(0);
     expect(w.rootCalls).toHaveLength(0);
     expect(w.asked).toEqual([]);
-    for (const part of ["stop and disable fx-vmhelper.service\n  release          the sandbox uid and gid ranges named in the config", "remove file      /etc/fx-vmhelper/config.json  root:root 0600", "Root steps, in order", "remove directory /opt/fx-vmhelper  (only if it is root:root 0755, with what is in it", "Not touched: sandbox data. The snapshot directory install made is removed only if it is empty", "WARNING: stopping the helper stops every sandbox that is running", "no root call was made"]) expect(r.text).toContain(part);
+    for (const part of ["stop and disable fx-vmhelper.service\n  release          the sandbox uid and gid ranges named in the config", "remove file      /etc/fx-vmhelper/config.json  root:root 0600", "Root steps, in order", "remove directory /opt/fx-vmhelper  (only if it is root:root 0755, with what is in it", "Kept, not touched: your snapshot_dir /fx-test/snaps holds 2 snapshots, 4096 bytes in all.", "WARNING: stopping the helper stops every sandbox that is running", "no root call was made"]) expect(r.text).toContain(part);
     expect(r.text).not.toMatch(/null|undefined/);
   });
 
@@ -495,7 +497,7 @@ describe("fx-runner vm uninstall", () => {
 
   it("no report from the root side is an error, and unknown or repeated options are refused with the usage line", async () => {
     await expect(run(["--yes"], fakeHost({ existing: "all", reply: { code: 1, stdout: "" } }).host)).rejects.toThrow(/did not run \(exit 1\)/);
-    for (const args of [["--force"], ["--yes", "--yes"], ["x"]]) await expect(run(args, fakeHost().host)).rejects.toThrow(UNINSTALL_USAGE);
+    for (const args of [["--force", "--force"], ["--yes", "--yes"], ["x"]]) await expect(run(args, fakeHost().host)).rejects.toThrow(UNINSTALL_USAGE);
   });
 
   const good = { version: 1, runnerUid: UID, runnerUser: "alice", actions: buildUninstallActions(plan, { user: "alice" }) };
@@ -525,7 +527,7 @@ describe("fx-runner vm uninstall", () => {
   });
 
   it("vm root-remove runs its programs through the host's fixed-PATH runner: no LD_* and no inherited search path", async () => {
-    const hosts = createVmInstallHosts({ selfCommand: ["/x"], tuf: {}, confirm: async () => false, buildRootArgv, buildRemoveArgv, hostRefusal, hostRefusalRemove: () => undefined });
+    const hosts = createVmInstallHosts({ selfCommand: ["/x"], tuf: {}, confirm: async () => false, stateDir: "/fx-test/state", buildRootArgv, buildRemoveArgv, hostRefusal, hostRefusalRemove: () => undefined });
     const saved = { ld: process.env.LD_LIBRARY_PATH, pre: process.env.LD_PRELOAD };
     process.env.LD_LIBRARY_PATH = "/nonexistent-lib";
     process.env.LD_PRELOAD = "/nonexistent.so";
