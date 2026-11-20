@@ -148,6 +148,30 @@ describe("the origin proxy", () => {
     expect(spyHits).toEqual([]);
   });
 
+  // A browser that gives up on a refused tunnel resets the connection. With no error listener on that socket the reset was an uncaught exception that crashed the process.
+  it("a refused tunnel whose client then resets the connection does not raise an uncaught error", async () => {
+    const uncaught: Error[] = [];
+    const onUncaught = (e: Error): void => void uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    try {
+      for (let i = 0; i < 20; i += 1) {
+        await new Promise<void>((resolve, reject) => {
+          const socket = connect(proxy.port, "127.0.0.1", () => socket.write("CONNECT example.test:443 HTTP/1.1\r\nhost: example.test:443\r\n\r\n"));
+          socket.once("data", () => {
+            socket.once("close", () => resolve());
+            socket.resetAndDestroy();
+          });
+          socket.on("error", reject);
+        });
+      }
+      // The server's side of the reset is read on a later turn of the event loop; give it a few.
+      for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+    expect(uncaught.map((e) => e.message)).toEqual([]);
+  });
+
   it("streams a large body: it does not hold it", { timeout: 60_000 }, async () => {
     const before = process.memoryUsage().rss;
     let peak = before;
