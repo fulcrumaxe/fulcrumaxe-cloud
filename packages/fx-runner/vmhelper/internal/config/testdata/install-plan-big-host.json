@@ -1,0 +1,17 @@
+{
+  "jail_root": "/var/lib/fx-vm",
+  "runner_uid": 1000,
+  "runner_gid": 1000,
+  "uid_first": 165536,
+  "uid_count": 8,
+  "gid_first": 165536,
+  "gid_count": 8,
+  "max_sandboxes": 8,
+  "max_vcpus": 64,
+  "max_mem_mb": 1048576,
+  "jailer_path": "/opt/fx-vmhelper/bin/jailer",
+  "firecracker_path": "/opt/fx-vmhelper/bin/firecracker",
+  "template_manifest_path": "/opt/fx-vmhelper/template-manifest.json",
+  "template_dir": "/opt/fx-vmhelper/templates",
+  "snapshot_dir": "/var/lib/fx-vm-snapshots"
+}

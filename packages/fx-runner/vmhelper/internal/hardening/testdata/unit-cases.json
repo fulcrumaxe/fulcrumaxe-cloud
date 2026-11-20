@@ -1,0 +1,21 @@
+[
+  {
+    "name": "with-group",
+    "params": {
+      "helperPath": "/opt/fx-vmhelper/bin/fx-vmhelper",
+      "configPath": "/etc/fx-vmhelper/config.json",
+      "jailRoot": "/var/lib/fx-vm",
+      "group": "fx-vmhelper",
+      "snapshotDir": "/var/lib/fx-vm-snapshots"
+    }
+  },
+  {
+    "name": "no-group",
+    "params": {
+      "helperPath": "/usr/libexec/fx/helper",
+      "configPath": "/etc/fx/helper.json",
+      "jailRoot": "/srv/jails",
+      "snapshotDir": "/srv/snapshots"
+    }
+  }
+]

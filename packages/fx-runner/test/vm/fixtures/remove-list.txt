@@ -1,0 +1,13 @@
+  stop and disable fx-vmhelper.service
+  release          gid 165536-165543
+  release          uid 165536-165543
+  remove directory /run/fx-vmhelper  root:fx-vmhelper 0750
+  remove directory /var/lib/fx-vmhelper  root:root 0700
+  remove directory /var/lib/fx-vm-snapshots  root:root 0700
+  remove directory /var/lib/fx-vm  root:root 0711
+  remove unit      /etc/systemd/system/fx-vmhelper.service  root:root 0644
+  remove file      /etc/fx-vmhelper/config.json  root:root 0600
+  remove directory /etc/fx-vmhelper  root:root 0755
+  remove directory /opt/fx-vmhelper  root:root 0755
+  remove member    alice in fx-vmhelper
+  remove group     fx-vmhelper
