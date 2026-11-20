@@ -130,8 +130,8 @@ function mountApp(contentEl) {
     c.rows.length ? h("ul", { class: "tm-list", role: "list", "data-testid": "tm-connect-rows" }, c.rows.map((r) =>
       h("li", { class: "tm-item", "data-testid": "tm-connect-row", "data-bridged": r.bridged ? "true" : "false" },
         h("bdi", { "data-testid": "tm-connect-name" }, r.name), " · ", r.state, " · ", r.seen, h("br"), h("span", { "data-testid": "tm-connect-bridge" }, r.bridge)))) : null,
-    c.rows.length && !c.rows.some((r) => r.bridged) ? h("p", { class: "tm-muted" }, RUNNER_WORDS.fillIn) : null,
-    ...(c.rows.length && !c.rows.some((r) => r.bridged) ? copyBlock(RUNNER_WORDS, c.command, "tm-connect-command") : []),
+    c.rows.length && !c.rows.some((r) => r.bridged) ? h("p", { class: "tm-muted", "data-testid": "tm-connect-fill" }, c.command ? RUNNER_WORDS.fillIn : RUNNER_WORDS.noRepoName) : null,
+    ...(c.command && c.rows.length && !c.rows.some((r) => r.bridged) ? copyBlock(RUNNER_WORDS, c.command, "tm-connect-command") : []),
     ...(c.rows.some((r) => r.unnamed) ? renameNodes(RUNNER_WORDS) : []),
     h("p", { class: "tm-muted", "data-testid": "tm-soon" }, RUNNER_WORDS.soon),
   ];

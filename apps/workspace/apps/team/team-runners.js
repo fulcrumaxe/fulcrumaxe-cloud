@@ -2,8 +2,9 @@
 //
 // What the cloud can tell: the account's runners (GET /api/runners: name, state, last seen) and, per repo, the runner whose bridge last reported for it
 // (settings repos[].bridged_runner_id). It cannot see the setup file on the computer, and a bridge can only report once the watch is on and the repo is
-// ticked, so "not set up" below means "no runner has reported for the bridge yet", and the words say that. No path is ever shown: the command's
-// placeholders are for the person to fill in.
+// ticked, so "not set up" below means "no runner has reported for the bridge yet", and the words say that. The command is complete as shown: the repo name
+// is filled in and nothing is left to edit. The runner finds its own checkout and state folder from `--repo` alone. A folder the runner itself discovered
+// may be added (`commandFor`'s second argument), but nothing reports one yet, so no caller passes it.
 import { agoText, stateParts } from "../runners/runners-fleet.js";
 
 export const RUNNER_WORDS = {
@@ -19,14 +20,21 @@ export const RUNNER_WORDS = {
   yet: " yet",
   soon: "Coming soon: set this up from here.",
   noneBridged: "No runner's bridge has reported yet. Run this on the computer that runs your engine, then turn the switch on:",
-  fillIn: "Run this on that computer, then turn the switch on. Replace the two placeholders with the engine's checkout folder and its state folder.",
+  fillIn: "Run this on that computer, then turn the switch on.",
+  noRepoName: "This repository has no owner/name yet, so there is no command to show.",
   never: "never seen",
   copy: "Copy command", copied: "Copied", copyFailed: "Couldn't copy. Select the command and copy it by hand.",
   unnamed: "This runner has no name yet. You can name it in Runners.", rename: "Name it in Runners",
 };
-export const REPO_PLACEHOLDER = "<owner/name>";
-const OWNER_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/; // a name that is not owner/name (an unnamed repository) is never pasted into the command
-export const commandFor = (repoName) => "fx-runner engine-bridge enable --repo " + (OWNER_NAME.test(repoName || "") ? repoName : REPO_PLACEHOLDER) + " --repo-root <path to the engine's checkout> --state-dir <the engine's state dir>";
+const OWNER_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/; // a name that is not owner/name (an unnamed repository) gives no command at all
+/** One shell word: bare when plain, else single-quoted with each ' written as '\'' . */
+export const shellQuote = (s) => (/^[A-Za-z0-9/._+:@-]+$/.test(s) ? s : "'" + s.replace(/'/g, "'\\''") + "'");
+/** The command for the runner's computer, or "" when the repo has no owner/name. `root` is a folder the runner itself found; it is added only as an absolute path. */
+export const commandFor = (repoName, root = "") => {
+  if (!OWNER_NAME.test(repoName || "")) return "";
+  const rooted = typeof root === "string" && root.startsWith("/") && !/[\0\r\n]/.test(root);
+  return "fx-runner engine-bridge enable --repo " + repoName + (rooted ? " --repo-root " + shellQuote(root) : "");
+};
 
 const ONLINE = ["online_idle", "busy", "paused", "draining"];
 const seen = (r, nowMs) => (r.lastSeen ? "last seen " + (agoText(r.lastSeen, nowMs) || "unknown") : RUNNER_WORDS.never);
@@ -35,7 +43,7 @@ const seen = (r, nowMs) => (r.lastSeen ? "last seen " + (agoText(r.lastSeen, now
  * `settings.repos[].runnerId`, `fleet` (readFleet's answer or null when it could not be read), `repoName` (the repo the person is looking at, or ""),
  * `pickId` (the runner chosen in the picker). Returns everything the watch switch and the connect panel draw.
  */
-export function runnerView({ settings, fleet, repoName, pickId, nowMs }) {
+export function runnerView({ settings, fleet, repoName, pickId, nowMs, root = "" }) {
   const runners = fleet ? fleet.runners.filter((r) => r.state !== "revoked") : [];
   const byId = new Map(runners.map((r) => [r.id, r]));
   const repos = settings.repos.filter((r) => r.enabled || r.eligible);
@@ -44,7 +52,7 @@ export function runnerView({ settings, fleet, repoName, pickId, nowMs }) {
   for (const r of repos) if (r.runnerId && byId.has(r.runnerId) && !bridgedIds.includes(r.runnerId)) bridgedIds.push(r.runnerId);
   const choices = bridgedIds.map((id) => ({ id, name: byId.get(id).name }));
   const picked = byId.get(bridgedIds.includes(pickId) ? pickId : bridgedIds[0]) || null;
-  const command = commandFor(target);
+  const command = commandFor(target, settings.canEdit ? root : ""); // only an owner or admin may see a path; a member gets the bare --repo form
   let status;
   if (!fleet) status = { kind: "unknown", text: RUNNER_WORDS.unknown };
   else if (picked) {
