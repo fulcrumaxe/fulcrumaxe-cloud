@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { ENGINE_COMMAND_KINDS, ENGINE_COMMAND_PURPOSE, EngineCommand } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_COMMAND_KINDS, ENGINE_COMMAND_PURPOSE, EngineCommand, isBridgeCommandKind } from "@fulcrumaxe/runner-protocol";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import { EngineCommandsBacklog, NOT_CONFIRMED_AFTER_S, findEngineTarget, insertEngineCommand, isHaltedRefusal, readHaltStates } from "@fx/db/src/engineCommands.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -22,8 +22,9 @@ function probe(kind: string, args: unknown): unknown {
   return { v: 1, purpose: ENGINE_COMMAND_PURPOSE, command_id: id, command_seq: 1, runner_id: id, repo_gh_id: 1, kind, args, issued_by: id, issued_at: new Date(nowMs).toISOString(), expires_at: new Date(nowMs + 600_000).toISOString(), halt_epoch: 0 };
 }
 
-/** The kinds a person sends. `watch` is the cloud's own (D#845 ON-24a): a reader's page opens it, never a request body, and its table has no row for it yet. */
-const PERSON_COMMAND_KINDS = ENGINE_COMMAND_KINDS.filter((kind) => kind !== "watch") as unknown as [Exclude<(typeof ENGINE_COMMAND_KINDS)[number], "watch">, ...Exclude<(typeof ENGINE_COMMAND_KINDS)[number], "watch">[]];
+/** The kinds a person sends here. `watch` is the cloud's own (D#845 ON-24a): a reader's page opens it, never a request body, and its table has no row for it yet. The bridge kinds go to a runner, through their own route (ON-BR-2). */
+type SessionKind = Exclude<(typeof ENGINE_COMMAND_KINDS)[number], "watch" | "bridge_enable" | "bridge_disable">;
+const PERSON_COMMAND_KINDS = ENGINE_COMMAND_KINDS.filter((kind) => kind !== "watch" && !isBridgeCommandKind(kind)) as unknown as [SessionKind, ...SessionKind[]];
 const issueBodySchema = z
   .object({ kind: z.enum(PERSON_COMMAND_KINDS), args: z.record(z.string(), z.unknown()).default({}) })
   .strict()
@@ -202,6 +203,7 @@ export const engineCommandRoutes: RouteEntry[] = [
                        ELSE state END AS state,
                   refusal, issued_by, issued_at, expires_at, delivered_at, acked_at, halt_epoch_at_issue
              FROM engine_commands WHERE repo_id = $1 AND account_id = $5
+              AND kind NOT IN ('bridge_enable', 'bridge_disable')
               AND ($4::text IS NULL OR (kind = 'answer_ask' AND args ->> 'ask_id' = $4))
             ORDER BY issued_at DESC, command_seq DESC LIMIT $2`,
           [repoId, limit, NOT_CONFIRMED_AFTER_S, askId ?? null, accountId],

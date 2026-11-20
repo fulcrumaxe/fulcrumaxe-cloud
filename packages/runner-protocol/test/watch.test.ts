@@ -70,8 +70,8 @@ describe("watch command", () => {
     expect(commandSendableTo("watch", 1)).toBe(false);
     expect(commandSendableTo("watch", 23)).toBe(true);
     expect(commandSendableTo("watch", 24)).toBe(true);
-    for (const kind of ENGINE_COMMAND_KINDS.filter((k) => k !== "watch")) expect(commandSendableTo(kind, 20), kind).toBe(true);
-    expect(Object.keys(ENGINE_COMMAND_MIN_PROTOCOL)).toEqual(["watch"]);
+    for (const kind of ENGINE_COMMAND_KINDS.filter((k) => k !== "watch" && !k.startsWith("bridge_"))) expect(commandSendableTo(kind, 20), kind).toBe(true);
+    expect(Object.keys(ENGINE_COMMAND_MIN_PROTOCOL)).toEqual(["watch", "bridge_enable", "bridge_disable"]);
     const hello = (protocol_version: number) => HelloMessage.safeParse({ protocol_version, binary_version: "0.1.0", model_auth_present: true, isolation: "host_sandbox" }).success;
     expect(hello(22)).toBe(true);
     expect(hello(23)).toBe(true);
