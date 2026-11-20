@@ -183,6 +183,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/vm/sandboxd/sandboxd.ts": ["path"], // D#587 B-2b-iii: joins the per-sandbox directory and socket names below the state directory
   "src/vm/sandboxd/sdkAdapter.ts": ["crypto"], // D#587 B-5: names are hashed into daemon ids; no process, file or environment is touched
   "src/vm/sandboxd/sdkSlice.ts": [], // D#587 B-5: types only
+  "src/vm/sandboxd/management.ts": [], // D#587 B-5b: the runner's inventory and lifecycle over the adapter; no built-in
+  "src/vm/sandboxd/policyPort.ts": [], // D#587 B-5b: starts and closes the egress listeners; the egress code is injected
   // D#749 V2c-2a, the verify browser server. No environment read (the host environment, streams and job directory arrive as arguments) and no process of its own: Chromium is started by playwright-core.
   "src/verifyBrowser/server.ts": ["fs", "path", "stream"], // the one answer.json in the job directory (exclusive create, 0600); stream is only the types of the injected input and output
   "src/commands/verifyBrowserServer.ts": ["path"], // D#749 V2c-2b: the server entry checks its path flags are plain absolute paths; nothing is read or written here
