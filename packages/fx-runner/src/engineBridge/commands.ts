@@ -14,7 +14,7 @@
  * The pull and the acks back off on their own: an ack the cloud will not take is kept and sent again later, and it never keeps the pull, or the halt controls in the
  * reply, from being handled. A permanent 400 from the cloud backs off at 300 seconds and drops nothing; other failures wait 2, 4, 8 ... 300 seconds. Log lines are fixed text.
  */
-import { EngineControl, JobSignatureError, MAX_CLOCK_SKEW_S, verifyEngineCommand, type EngineCommand, type EngineCommandAck, type JobKeyring } from "@fulcrumaxe/runner-protocol";
+import { EngineControl, JobSignatureError, MAX_CLOCK_SKEW_S, isBridgeCommandKind, verifyEngineCommand, type EngineCommand, type EngineCommandAck, type JobKeyring } from "@fulcrumaxe/runner-protocol";
 import { signedPost, type CloudReply, type SignedPost } from "../cloud.js";
 import type { Clock } from "../daemon/lease.js";
 import { Inbox, InboxRefused, notConfirmedDueMs } from "./inbox.js";
@@ -135,6 +135,8 @@ export function judge(raw: unknown, deps: Pick<InboxLoopDeps, "keyring" | "runne
     }
   }
   if (command.runner_id !== deps.runnerId) return { ok: false, refusal: "wrong_runner" };
+  // A bridge command is the runner's own (bridgeCommands.ts) and never goes to an engine inbox.
+  if (isBridgeCommandKind(command.kind)) return { ok: false, refusal: "wrong_repo" };
   if (!bridged.has(command.repo_gh_id)) return { ok: false, refusal: "wrong_repo" };
   const control = controls.get(command.repo_gh_id);
   if (control?.operate_enabled !== true) return { ok: false, refusal: "operate_off" };

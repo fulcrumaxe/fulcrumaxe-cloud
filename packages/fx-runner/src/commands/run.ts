@@ -41,6 +41,7 @@ import { chooseEngine, selectSandbox } from "../vm/engineGate.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createSandboxCommandReceiver } from "../daemon/sandboxCommands.js";
 import { createInventoryReporter, emptyInventorySource } from "../daemon/sandboxInventory.js";
+import { createBridgeApply, type EngineBridgeCommandOptions } from "./engineBridge.js";
 import { startEngineBridge, type EngineBridge, type EngineBridgePorts } from "../engineBridge/daemon.js";
 import { createEventsUploader } from "../engineBridge/upload.js";
 import { createRunnerClient } from "../daemon/client.js";
@@ -132,6 +133,8 @@ export interface RunHost {
   env?: Readonly<Record<string, string | undefined>> | undefined;
   /** D#842 EB-3c: the engine bridge's halt path and ceiling keeper, bound by the entry point (`engineBridge/ports.ts`). Absent: the bridge never starts. */
   engineBridge?: EngineBridgePorts | undefined;
+  /** D#845 ON-BR-2: what the machine gives the runner's own Connect handling (home, the engine's state directory variable, discovery roots). Absent: `bridge_enable` and `bridge_disable` are not pulled. */
+  engineBridgeOptions?: EngineBridgeCommandOptions | undefined;
 }
 
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
@@ -614,6 +617,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           xdgRuntimeDir: host.xdgRuntimeDir,
           secrets: () => (credentials.mode === "api_key" ? [credentials.apiKey] : []),
           ports: host.engineBridge,
+          ...(host.engineBridgeOptions === undefined ? {} : { bridgeApply: createBridgeApply({ stateDir, uid: host.uid, now: ctx.now, options: host.engineBridgeOptions }) }),
           log: (line) => ctx.out(`fx-runner: ${line}`),
         });
       }

@@ -15,7 +15,7 @@ export const SCAN_MAX_DEPTH = 4;
 export const SCAN_MAX_MS = 5000;
 export const SCAN_MAX_ENTRIES = 20000;
 export const PROJECT_FILE_MAX_BYTES = 64 * 1024;
-const GIT_CONFIG_MAX_BYTES = 256 * 1024;
+export const GIT_CONFIG_MAX_BYTES = 256 * 1024;
 /** Directories the scan never enters, by name. */
 export const SKIPPED_NAMES: ReadonlySet<string> = new Set(["node_modules", ".cache", ".git", "target", "dist"]);
 /** Directories the scan never enters or starts in, by path. */
@@ -401,4 +401,35 @@ export function stateDirProblem(dir: string, uid: number | undefined): "state_di
   if (uid !== undefined && stat.uid !== uid) return "state_dir_unreadable";
   if ((stat.mode & 0o500) !== 0o500) return "state_dir_unreadable";
   return null;
+}
+
+export type CarriedRoot =
+  | { ok: true; project: ProjectFile }
+  | { ok: false; code: "repo_root_invalid" | "checkout_mismatch" | "checkout_unsafe" | "checkout_layout_unexpected"; why: string };
+
+/**
+ * Whether a folder the cloud carried (D#845 ON-BR-2) may be taken as the checkout of `repo` (`owner/name`). It gets every guard the scan gives a clone it finds, because the cloud's word is only a request: a plain absolute
+ * path with no link anywhere in it; every directory above it a real directory of this user or root, with no group or other write unless sticky (`aboveSafe`); the folder and its `.git` real directories of this user that no
+ * group or other can write in; `.git/config` and `.autonomous-team/project.json` read through `readInside` (no link followed, the open handle checked); and the `origin` remote naming `repo`. A clone the scan skipped as
+ * unsafe is refused `checkout_unsafe` here too: the person fixes it with `chmod go-w` or runs `engine-bridge enable --repo-root` themselves. Returns the project file it read, so nothing is read a second time through a path.
+ */
+export function inspectCarriedRoot(repo: string, root: string, uid: number | undefined): CarriedRoot {
+  const bad = (code: "repo_root_invalid" | "checkout_mismatch" | "checkout_unsafe" | "checkout_layout_unexpected", why: string): CarriedRoot => ({ ok: false, code, why });
+  if (!isPlainAbsolute(root)) return bad("repo_root_invalid", "the folder is not a plain absolute path");
+  let real: string;
+  try {
+    real = realpathSync(root);
+  } catch {
+    // fx-swallow-ok: a folder that cannot be resolved is a fixed sentence; the error could name a path
+    return bad("repo_root_invalid", "the folder cannot be found");
+  }
+  if (real !== root) return bad("repo_root_invalid", "the folder is, or lies inside, a link");
+  if (!isRealDir(root) || !isRealDir(path.join(root, ".git"))) return bad("repo_root_invalid", "the folder is not a clone");
+  if (!aboveSafe(real, uid)) return bad("checkout_unsafe", "a folder above it can be changed by others");
+  const [owner, name] = repo.toLowerCase().split("/");
+  const verdict = judge(root, { owner: owner!, name: name! }, uid, real, realOps);
+  if (verdict.kind === "match") return { ok: true, project: verdict.project };
+  if (verdict.kind === "unsafe") return bad("checkout_unsafe", "the folder or its .git is not yours alone");
+  if (verdict.kind === "none") return bad("checkout_mismatch", "not a clone of that repo");
+  return bad("checkout_layout_unexpected", "no usable .autonomous-team/project.json");
 }

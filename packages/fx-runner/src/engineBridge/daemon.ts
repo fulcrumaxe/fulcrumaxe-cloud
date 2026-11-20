@@ -17,6 +17,7 @@ import { ENGINE_VERSION_PATTERN, type EngineEventsMessage, type JobKeyring } fro
 import { readPrivateFile, writePrivateFile } from "../config.js";
 import type { CloudReply } from "../cloud.js";
 import type { Clock } from "../daemon/lease.js";
+import { BridgeCommandPuller, type BridgeApply } from "./bridgeCommands.js";
 import { CommandPuller, PULL_PATH, createCloudPost, type HaltOutcome, type PullStatus } from "./commands.js";
 import { loadCursor } from "./cursor.js";
 import { serveDecideSocket, socketPathFor, type DecideSocket } from "./decideSocket.js";
@@ -97,6 +98,8 @@ export interface EngineBridgeDeps {
   /** The runner's secrets, for the redaction every uploaded event goes through. */
   secrets: () => readonly string[];
   ports: EngineBridgePorts;
+  /** D#845 ON-BR-2: what the runner can do to its own bridge settings when the cloud sends `bridge_enable` or `bridge_disable`. Absent: those commands are not pulled. */
+  bridgeApply?: BridgeApply | undefined;
   /** Gets fixed text only. */
   log: (line: string) => void;
   /** Test seam: the supervisor's period. */
@@ -465,11 +468,26 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
     }
   })();
 
+  // The runner's own bridge commands (Connect and Disconnect): one puller for the machine, whether or not any repo is enabled.
+  const bridgeRun =
+    deps.bridgeApply === undefined
+      ? Promise.resolve()
+      : new BridgeCommandPuller({
+          post: post(undefined), keyring: deps.keyring, runnerId: deps.runnerId, clock, wakeEpoch: deps.wakeEpoch, accepted: deps.accepted, runnerStateDir: deps.runnerStateDir,
+          allowed: () => (listFresh() ? allowed : undefined), apply: deps.bridgeApply, log: deps.log,
+        })
+          .run(root.signal)
+          .catch(() => {
+            // fx-swallow-ok: the error could name a path; a fixed line is logged and the other loops go on
+            deps.log("engine-bridge: the bridge command loop stopped");
+          });
+
   return {
     status,
     async stop() {
       root.abort();
       await main;
+      await bridgeRun;
       for (const id of [...units.keys()]) await stopUnit(id, "stopped");
       if (socket !== undefined) await socket.close();
       socket = undefined;

@@ -259,7 +259,7 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "revoke") return await revokeCommand(flags, ctx);
     if (command === "run") {
       if (io.host === undefined) throw new CliError("run is only available from the fx-runner program");
-      return await runCommand(ctx, io.host, {}, io.updateHost);
+      return await runCommand(ctx, { ...io.host, engineBridgeOptions: { home: io.home, engineStateDirOverride: io.engineStateDirOverride, discovery: io.engineDiscovery } }, {}, io.updateHost);
     }
     if (command === "attach" || command === "__takeover" || command === "__watch") {
       if (io.host === undefined) throw new CliError(`${command} is only available from the fx-runner program`);
