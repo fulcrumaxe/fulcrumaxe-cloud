@@ -46,7 +46,9 @@ touch %[1]s/ready
 parent=$PPID
 # also ends when the test process is gone (killed by a timeout, so t.Cleanup never ran): an orphan holds the shared test lock
 while [ -e "$cg/cgroup.kill" ] && [ "$(cat "$cg/cgroup.kill")" != 1 ] && kill -0 "$parent" 2>/dev/null; do sleep 0.02; done
-rm -rf "$cg"
+mkdir -p %[1]s/trash
+mv "$cg" "%[1]s/trash/$id.$$" 2>/dev/null
+rm -rf "%[1]s/trash/$id.$$"
 `
 
 // fakePIDs lists the processes whose command line names this test's directory (the fake jailer, which
@@ -142,7 +144,13 @@ func newRig(t *testing.T) *rig {
 			for _, e := range ents {
 				p := filepath.Join(dir, "cg/fx/vms", e.Name())
 				if b, _ := os.ReadFile(filepath.Join(p, "cgroup.kill")); string(b) == "1" {
-					_ = os.RemoveAll(p)
+					// rmdir is atomic: the cgroup is gone from its path before any of its files is. Deleting it
+					// in place would let cgroup.procs vanish while the directory still stands, which the kernel
+					// never does.
+					away := filepath.Join(dir, "trash", e.Name()+".k")
+					if os.MkdirAll(filepath.Dir(away), 0o755) == nil && os.Rename(p, away) == nil {
+						_ = os.RemoveAll(away)
+					}
 				}
 			}
 		}
