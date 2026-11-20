@@ -3,7 +3,7 @@
  *
  *  - `enable --repo <owner/name> --repo-root <dir> [--state-dir <dir>]` asks the cloud which repos this runner is paired with and refuses (exit 2, fixed reason) any that
  *    is not on that list: the runner keeps no list of its own. It also refuses a state directory another bridged repo already uses (the engine's default directory
- *    shared by two projects is the usual case), and a repository root with no readable `engine/manifest.json` version. It writes `engine-bridge.json`; a running
+ *    shared by two projects is the usual case), and a repository root with no readable engine version (`engine/manifest.json`, or `.autonomous-team/engine-install.json` in a project with the engine installed). It writes `engine-bridge.json`; a running
  *    `fx-runner run` picks it up within seconds.
  *  - `disable [--repo <owner/name>]` removes one repo (or all of them). It makes no cloud call.
  *  - `status` prints, per repo, what the running daemon last said about it: the upload state, the last acked seq, the last success time, and the command pull. It shows no
@@ -244,7 +244,7 @@ export function enableRepo(
     stateDir = engineStateDirFor(stateFlag, options.engineStateDirOverride, options.home);
   }
   const version = readEngineVersion(root, ctx.uid);
-  if (!version.ok) throw refusal(`the engine repository has no usable engine/manifest.json version (${version.why}); nothing was changed`, "engine_version_unusable");
+  if (!version.ok) throw refusal(`the engine repository has no usable engine version in engine/manifest.json or .autonomous-team/engine-install.json (${version.why}); nothing was changed`, "engine_version_unusable");
   const entry: BridgedRepo = { repo_gh_id: found.repo_gh_id, full_name: found.full_name, state_dir: stateDir, repo_root: root };
   const why = bindingRefusal(input.loaded, entry, ctx.stateDir);
   if (why === "state_dir_shared") throw refusal("that state directory already belongs to another bridged repo; give this one its own with --state-dir (the engine reads AUTONOMOUS_TEAM_STATE_DIR); nothing was changed", "state_dir_shared");
