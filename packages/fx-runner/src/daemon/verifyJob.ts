@@ -10,6 +10,7 @@
  *    verifier's job names its pinned commit the same way (D#483 S4-b2c, `jobCarriesPinnedCommit`), and must;
  *  - a job's sandbox allowances (D#6 R7b) must clear the protocol's floor, checked here by the runner itself even though the cloud signed them and
  *    checked them too: a job that crosses it is refused as `sandbox_allowance_forbidden`, before any process or directory exists;
+ *  - a job that requires a microVM (`requires_engine`, signed by the cloud) is refused as `engine_required` by a runner whose engine is not `microvm`: no downgrade;
  *  - a `continues.branch` must have the shape of a run branch (`fx/<uuid>-g<n>`, C25 section 1.3) or of the item's pull request branch (`fx/issue-<n>`,
  *    D#599 PL-2b), checked again here before anything is made. The item branch needs a `pr_number` and a null `session_id`; a run branch has no `pr_number`.
  */
@@ -17,9 +18,11 @@ import { jobCarriesPinnedCommit, ITEM_PR_BRANCH, JobSignatureError, verifyJob as
 import { allowanceRefusal } from "../sandbox/allowances.js";
 import { jobHashRefusals, type HashRefusal } from "../job/verifyHashes.js";
 import { CONTINUES_BRANCH } from "./push.js";
+import { engineRefusal } from "../vm/engineGate.js";
+import type { SandboxEngine } from "../vm/limits.js";
 
 /** Why a job was refused. Closed codes: the reason never carries job content. */
-export type JobRefusal = "job_signature_invalid" | "repo_not_private" | "run_id_mismatch" | "continues_wrong_role" | "continues_branch_invalid" | "review_sha_missing" | "review_wrong_role" | "sandbox_allowance_forbidden" | HashRefusal;
+export type JobRefusal = "job_signature_invalid" | "repo_not_private" | "run_id_mismatch" | "continues_wrong_role" | "continues_branch_invalid" | "review_sha_missing" | "review_wrong_role" | "sandbox_allowance_forbidden" | "engine_required" | HashRefusal;
 
 export type VerifiedJob = { ok: true; job: Job } | { ok: false; reason: JobRefusal };
 
@@ -34,7 +37,7 @@ function continuesShapeValid(continues: Record<string, unknown>): boolean {
 }
 
 /** Checks a signed job taken from a claim reply. `keyring` holds the pinned public keys by `key_id`. */
-export function verifyJob(signed: unknown, keyring: JobKeyring, now: Date): VerifiedJob {
+export function verifyJob(signed: unknown, keyring: JobKeyring, now: Date, engine: SandboxEngine = "os_sandbox"): VerifiedJob {
   const repo = isObject(signed) && isObject(signed["job"]) ? signed["job"]["repo"] : undefined;
   if (isObject(repo) && repo["private"] !== true) return { ok: false, reason: "repo_not_private" };
   // The continuation's shape is read from the raw object first, like the privacy flag: a branch that is neither shape, or an item branch without its
@@ -55,5 +58,8 @@ export function verifyJob(signed: unknown, keyring: JobKeyring, now: Date): Veri
   if (jobCarriesPinnedCommit(job.role) && job.review === undefined) return { ok: false, reason: "review_sha_missing" };
   if (!jobCarriesPinnedCommit(job.role) && job.review !== undefined) return { ok: false, reason: "review_wrong_role" };
   if (job.sandbox_allowances !== undefined && allowanceRefusal({ entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s }) !== null) return { ok: false, reason: "sandbox_allowance_forbidden" };
+  // the job's signed `requires_engine` against this runner's own engine: a job that needs a microVM is never run on a weaker engine (D#587 B-5)
+  const engineWord = engineRefusal(job.requires_engine, engine);
+  if (engineWord !== undefined) return { ok: false, reason: engineWord };
   return { ok: true, job };
 }

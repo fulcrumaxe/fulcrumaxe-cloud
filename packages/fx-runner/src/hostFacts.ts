@@ -4,6 +4,7 @@
  * who may do what, so a wrong figure can send work to a poor fit and nothing more.
  */
 import os from "node:os";
+import type { SandboxEngine } from "./vm/limits.js";
 import { RUNNER_MEM_GB_BUCKETS, RUNNER_NAME_MAX, isValidRunnerName, type RunnerFacts } from "@fulcrumaxe/runner-protocol";
 
 export interface HostFactsInput {
@@ -14,6 +15,8 @@ export interface HostFactsInput {
   totalMemBytes: number;
   /** `os.availableParallelism()` */
   cpus: number;
+  /** The engine this runner resolved (`chooseEngine`); the facts say it, so routing and the job gate read one answer. Default `os_sandbox`. */
+  engine?: SandboxEngine;
 }
 
 const GIB = 1024 ** 3;
@@ -35,10 +38,10 @@ export function hostFactsOf(input: HostFactsInput): RunnerFacts | undefined {
   const arch = input.arch === "x64" ? "x64" : input.arch === "arm64" ? "arm64" : undefined;
   if (osName === undefined || arch === undefined) return undefined;
   const cpus = Math.min(256, Math.max(1, Number.isFinite(input.cpus) ? Math.trunc(input.cpus) : 1));
-  return { os: osName, arch, mem_gb_bucket: memBucketOf(input.totalMemBytes), cpus, sandbox_engine: "os_sandbox" };
+  return { os: osName, arch, mem_gb_bucket: memBucketOf(input.totalMemBytes), cpus, sandbox_engine: input.engine ?? "os_sandbox" };
 }
 
-export const readHostFacts = (): RunnerFacts | undefined => hostFactsOf({ platform: os.platform(), arch: os.arch(), totalMemBytes: os.totalmem(), cpus: os.availableParallelism() });
+export const readHostFacts = (engine?: SandboxEngine): RunnerFacts | undefined => hostFactsOf({ platform: os.platform(), arch: os.arch(), totalMemBytes: os.totalmem(), cpus: os.availableParallelism(), ...(engine === undefined ? {} : { engine }) });
 
 /**
  * The machine's host name as the default runner name: characters the name rule refuses are dropped (a host name is rarely anything but letters,
