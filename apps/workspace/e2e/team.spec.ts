@@ -9,7 +9,7 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { bootToDesktop, waitForDesktop } from "./helpers/boot";
-import { HOSTILE, REPO_A, REPO_B, makeFixtures } from "../test/fixtures/team/fixtures.mjs";
+import { HOSTILE, REPO_A, REPO_B, RUNNER_A as BRIDGE_RUNNER, makeFixtures } from "../test/fixtures/team/fixtures.mjs";
 
 const CSP = "script-src 'self'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'";
 const SERVER_TEXT = "server text that must never be shown";
@@ -65,6 +65,12 @@ interface Mock {
   haltPends: boolean;
   /** The answer to GET /api/runners (the fleet read), or null for a 500. */
   runners: Obj | null;
+  /** One-click Connect: the answer to GET .../bridge (a test edits it to play the runner), every POST body and DELETE sent to it, and the status a POST or DELETE answers with. */
+  bridge: Obj;
+  bridgePosts: Obj[];
+  bridgeDeletes: number;
+  bridgeStatus: number;
+  bridgeCode: string;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -78,7 +84,8 @@ function fresh(over: Partial<Mock> = {}): Mock {
     log: F.envelope([F.logLine({ line_id: "aaaa000000000001", pr: 7 }), F.logLine({ line_id: "aaaa000000000002", actor_role: "executor", category: "spawned", pr: null }), F.logLine({ line_id: "aaaa000000000003", discussion: null, pr: 9, category: "gate_passed" })]),
     plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
-    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, runners: F.fleet([F.runner()]), ...over,
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, runners: F.fleet([F.runner()]),
+    bridgePosts: [], bridgeDeletes: 0, bridgeStatus: 201, bridgeCode: "", ...over, bridge: { phase: "idle", plan: "send", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: F.iso(120) }], connected: null, command: null, ...(over.bridge ?? {}) },
   };
 }
 
@@ -151,7 +158,17 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       if (m && m[2] === "plan") return mock.plan === null ? route.fulfill({ status: 204 }) : json(route, 200, mock.plan);
       if (m && m[2] === "log" && mock.logPage) return json(route, 200, mock.logPage(url.searchParams.get("cursor") ?? ""));
       if (m) return json(route, 200, mock[m[2] as "agents" | "lanes" | "gates" | "log" | "stats" | "usage"]);
+      if (/\/repos\/[^/]+\/bridge$/.test(url.pathname)) return json(route, 200, mock.bridge);
       if (url.pathname.endsWith("/commands")) return json(route, 200, mock.commands);
+    }
+    if (/\/repos\/[^/]+\/bridge$/.test(url.pathname) && (req.method() === "POST" || req.method() === "DELETE")) {
+      const enable = req.method() === "POST";
+      if (enable) mock.bridgePosts.push(req.postDataJSON() ?? {});
+      else mock.bridgeDeletes += 1;
+      if (mock.bridgeStatus !== 201) return json(route, mock.bridgeStatus, { error: { code: mock.bridgeCode, message: SERVER_TEXT, request_id: "r" } });
+      const id = "c0000000-0000-4000-8000-0000000000b1";
+      mock.bridge = { ...mock.bridge, phase: enable ? "connecting" : "disconnecting", command: { id, kind: enable ? "bridge_enable" : "bridge_disable", runner_id: BRIDGE_RUNNER, runner_name: "Workshop laptop", state: "pending", result: null, refusal: null, root_tail: null, candidates: [], issued_at: new Date().toISOString(), expires_at: new Date(Date.now() + 600000).toISOString(), acked_at: null } };
+      return json(route, 201, { command_id: id, state: "pending", expires_at: new Date(Date.now() + 600000).toISOString(), runner_id: BRIDGE_RUNNER });
     }
     if (req.method() === "POST" && url.pathname.endsWith("/commands")) {
       const body = req.postDataJSON();
@@ -174,6 +191,7 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
     if (req.method() === "DELETE" && url.pathname.startsWith(`${BASE}/commands/`)) {
       const id = decodeURIComponent(url.pathname.slice(`${BASE}/commands/`.length));
       mock.deletes.push(id);
+      if (mock.bridge.command && mock.bridge.command.id === id) mock.bridge = { ...mock.bridge, phase: "idle", command: { ...mock.bridge.command, state: "cancelled" } };
       if (mock.postStatus !== 201) return json(route, mock.postStatus, { error: { code: mock.postCode, message: SERVER_TEXT, request_id: "r" } });
       mock.commands = { commands: mock.commands.commands.map((c: Obj) => (c.id === id ? { ...c, state: "cancelled" } : c)) };
       return json(route, 200, { command_id: id, state: "cancelled" });
@@ -2058,10 +2076,189 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-connect-bridge").nth(1)).toHaveText("No report from this runner's bridge for acme-labs/widgets yet");
     await expect(t(page, "tm-connect-row").nth(1)).toContainText("Offline");
     await expect(t(page, "tm-connect-row").nth(1)).toContainText("last seen 2 h ago");
-    await expect(t(page, "tm-soon")).toHaveText("Coming soon: set this up from here.");
+    await expect(t(page, "tm-bridge")).toHaveAttribute("data-state", "idle"); // the one-click Connect panel stands where "Coming soon" did
+    await expect(t(page, "tm-bridge-connect")).toBeVisible();
     await expect(t(page, "tm-connect-command")).toHaveCount(0); // one runner is bridged, so there is nothing to set up
     await expect(page.locator(`${WIN} label:has([data-testid="tm-watch"])`)).not.toContainText("this machine");
     await noSideways(page);
+    await clean(page, errors);
+  });
+
+
+  // One-click Connect: the panel in Settings, for every state the cloud can answer, with the runner played by the test editing the mock's answer.
+  const bridgeCmd = (over: Obj = {}) => ({ id: "c0000000-0000-4000-8000-0000000000b1", kind: "bridge_enable", runner_id: BRIDGE_RUNNER, runner_name: "Workshop laptop", state: "pending", result: null, refusal: null, root_tail: null, candidates: [], issued_at: new Date().toISOString(), expires_at: new Date(Date.now() + 600000).toISOString(), acked_at: null, ...over });
+  const panel = (page: Page) => tv(page, "tm-bridge");
+  const sheet = async (page: Page, mock: Obj) => {
+    const { errors } = await setup(page, mock as Mock);
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    return errors;
+  };
+  const noRaw = async (page: Page) => expect(await panel(page).innerText()).not.toMatch(/undefined|null|NaN|\[object/);
+
+  test("Connect: one press sends one request and shows the asking state; the runner's answer then reads connected, and Disconnect undoes it", async ({ page }) => {
+    const mock = fresh();
+    const errors = await sheet(page, mock);
+    await expect(panel(page)).toHaveAttribute("data-state", "idle");
+    await press(tv(page, "tm-bridge-connect"));
+    await expect(panel(page)).toHaveAttribute("data-state", "connecting");
+    await expect(tv(page, "tm-bridge-text")).toContainText("Asking Workshop laptop to connect...");
+    await expect(tv(page, "tm-bridge-cancel")).toBeVisible();
+    expect(mock.bridgePosts).toEqual([{}]);
+    await noRaw(page);
+    // The runner answers; the panel reads it at its next look (the page polls while a request is out).
+    mock.bridge = { ...mock.bridge, phase: "connected", connected: { runner_id: BRIDGE_RUNNER, runner_name: "Workshop laptop", root_tail: "acme/widgets", root: "/home/me/code/acme/widgets" }, command: bridgeCmd({ state: "applied", result: "connected", root_tail: "acme/widgets", acked_at: new Date().toISOString() }) };
+    await expect(panel(page)).toHaveAttribute("data-state", "connected", { timeout: 20000 });
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Connected to acme/widgets on Workshop laptop");
+    expect(await panel(page).innerText()).not.toContain("/home/me");
+    await press(tv(page, "tm-bridge-disconnect"));
+    await expect(panel(page)).toHaveAttribute("data-state", "disconnecting");
+    expect(mock.bridgeDeletes).toBe(1);
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("a disconnect that expired unanswered says it did not reach the runner, never connected, and Disconnect asks again", async ({ page }) => {
+    const connected = { runner_id: BRIDGE_RUNNER, runner_name: "Workshop laptop", root_tail: "acme/widgets", root: "/home/me/code/acme/widgets" };
+    const mock = fresh({ bridge: { phase: "disconnect_failed", connected, command: bridgeCmd({ kind: "bridge_disable", state: "expired", issued_at: new Date(Date.now() - 700000).toISOString(), expires_at: new Date(Date.now() - 100000).toISOString() }) } });
+    const errors = await sheet(page, mock);
+    await expect(panel(page)).toHaveAttribute("data-state", "disconnect_failed");
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Disconnect did not reach Workshop laptop; try again");
+    expect(await panel(page).innerText()).not.toMatch(/Connected to|Will disconnect/);
+    await expect(tv(page, "tm-bridge-disconnect")).not.toHaveAttribute("aria-disabled", "true");
+    await press(tv(page, "tm-bridge-disconnect"));
+    expect(mock.bridgeDeletes).toBe(1);
+    await expect(panel(page)).toHaveAttribute("data-state", "disconnecting");
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("a disconnect the runner refused says so with the reason and offers Disconnect again; a member sees a sentence, not an empty list, when an owner must pick", async ({ page }) => {
+    const connected = { runner_id: BRIDGE_RUNNER, runner_name: "Workshop laptop", root_tail: "acme/widgets", root: null };
+    const mock = fresh({ bridge: { phase: "disconnect_refused", connected, command: bridgeCmd({ kind: "bridge_disable", state: "refused", refusal: "settings_damaged", acked_at: new Date().toISOString() }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toContainText("Disconnect refused:");
+    await expect(tv(page, "tm-bridge-disconnect")).toBeVisible();
+    await clean(page, errors);
+  });
+
+  test("ambiguous for a member: a sentence says an owner or admin can pick, with no list and no button", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const mock = fresh({ settings: F.settings({ can_edit: false }), bridge: { phase: "ambiguous", command: bridgeCmd({ state: "refused", result: "ambiguous", refusal: "checkout_ambiguous", acked_at: new Date().toISOString(), candidates: [] }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toContainText("An owner or an admin can pick which copy to use.");
+    await expect(tv(page, "tm-bridge-folders")).toHaveCount(0);
+    await expect(tv(page, "tm-bridge-connect-this")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("Cancel takes back a request that is waiting, and after a minute with no answer the panel asks whether the runner is running", async ({ page }) => {
+    const mock = fresh({ bridge: { phase: "connecting", command: bridgeCmd({ issued_at: new Date(Date.now() - 120000).toISOString() }) } });
+    const errors = await sheet(page, mock);
+    await expect(panel(page)).toHaveAttribute("data-state", "slow");
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Still waiting for Workshop laptop. Is it running?");
+    await expect(tv(page, "tm-bridge-retry")).toHaveText("Try again");
+    await expect(tv(page, "tm-bridge-cancel")).toBeVisible(); // Cancel stays for the command's whole life
+    mock.bridge = { ...mock.bridge, phase: "connecting", command: bridgeCmd() };
+    await expect(panel(page)).toHaveAttribute("data-state", "connecting", { timeout: 20000 });
+    await press(tv(page, "tm-bridge-cancel"));
+    await expect(panel(page)).toHaveAttribute("data-state", "idle");
+    expect(mock.deletes).toEqual(["c0000000-0000-4000-8000-0000000000b1"]);
+    await clean(page, errors);
+  });
+
+  test("not found: says what the runner did, gives the command with the repo filled in and a place to give the folder, quoted for a shell, and lists the clones it skipped", async ({ page }) => {
+    const mock = fresh({ bridge: { phase: "not_found", command: bridgeCmd({ state: "refused", result: "not_found", refusal: "checkout_not_found", acked_at: new Date().toISOString(), skipped: ["/home/me/shared/widgets"] }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Workshop laptop looked on this computer and found no copy of acme-labs/widgets");
+    await expect(tv(page, "tm-bridge-fallback")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    await tv(page, "tm-bridge-folder").fill("/work/it's here");
+    await expect(tv(page, "tm-bridge-fallback")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root '/work/it'\\''s here'");
+    await expect(tv(page, "tm-bridge-skipped")).toBeVisible();
+    await expect(tv(page, "tm-bridge-folder-label")).toHaveText("shared/widgets");
+    // The skipped copies are there to read, not to pick: a pick of an unsafe copy is refused, so the way on is chmod or the command.
+    await expect(tv(page, "tm-bridge-connect-this")).toHaveCount(0);
+    expect(await panel(page).locator('input[type="radio"]').count()).toBe(0);
+    expect(mock.bridgePosts).toEqual([]);
+    await noRaw(page);
+    await clean(page, errors);
+  });
+
+  test("ambiguous: a list of the folders, told apart; the pick is sent as the folder; a hostile name is text and nothing else", async ({ page }) => {
+    const evil = "/home/me/<img src=x onerror=alert(1)>/widgets";
+    const mock = fresh({ bridge: { phase: "ambiguous", command: bridgeCmd({ state: "refused", result: "ambiguous", refusal: "checkout_ambiguous", acked_at: new Date().toISOString(), candidates: [evil, "/home/me/code/widgets"] }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-folder-label")).toHaveText(["<img src=x onerror=alert(1)>/widgets", "code/widgets"]);
+    expect(await panel(page).locator("img, a").count()).toBe(0);
+    await press(tv(page, "tm-bridge-folders").locator("input").nth(1));
+    await press(tv(page, "tm-bridge-connect-this"));
+    expect(mock.bridgePosts).toEqual([{ runner_id: BRIDGE_RUNNER, repo_root: "/home/me/code/widgets" }]);
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("incomplete: names the one copy it found and takes a one-click confirm, which is sent as the folder", async ({ page }) => {
+    const mock = fresh({ bridge: { phase: "incomplete", command: bridgeCmd({ state: "refused", result: "refused", refusal: "checkout_incomplete", acked_at: new Date().toISOString(), candidates: ["/home/me/code/acme/widgets"] }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toContainText("acme/widgets");
+    await expect(tv(page, "tm-bridge-folders").locator("input").first()).toBeChecked(); // the one copy is already chosen
+    await press(tv(page, "tm-bridge-connect-this"));
+    expect(mock.bridgePosts).toEqual([{ runner_id: BRIDGE_RUNNER, repo_root: "/home/me/code/acme/widgets" }]);
+    await clean(page, errors);
+  });
+
+  test("refused: the reason in plain words with the code kept for Copy details, never the code alone", async ({ page }) => {
+    const mock = fresh({ bridge: { phase: "refused", command: bridgeCmd({ state: "refused", result: "refused", refusal: "state_dir_missing", acked_at: new Date().toISOString() }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toContainText("state folder");
+    expect(await tv(page, "tm-bridge-text").innerText()).not.toContain("state_dir_missing");
+    await expect(tv(page, "tm-bridge-code")).toBeVisible(); // visible and selectable, so it can be copied by hand when the clipboard is blocked
+    await expect(tv(page, "tm-bridge-code")).toHaveText("state_dir_missing");
+    await expect(tv(page, "tm-bridge-details")).toHaveText("Copy details");
+    await clean(page, errors);
+  });
+
+  for (const [name, plan, protocolOk, online, words] of [
+    ["no runner online", "offline", true, false, /No runner that has this repo is online/],
+    ["only an old runner", "old", false, true, /Your runner is out of date: run fx-runner update/],
+  ] as const) {
+    test(`${name}: the command to copy with the repo filled in, the words for it, and nothing is sent`, async ({ page }) => {
+      const mock = fresh({ bridge: { plan, runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online, protocol_ok: protocolOk, last_seen_at: null }] } });
+      const errors = await sheet(page, mock);
+      await expect(panel(page)).toHaveAttribute("data-state", "fallback");
+      await expect(tv(page, "tm-bridge-text")).toHaveText(words);
+      await expect(tv(page, "tm-bridge-fallback")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets");
+      await expect(tv(page, "tm-bridge-connect")).toHaveCount(0);
+      expect(mock.bridgePosts).toEqual([]);
+      await clean(page, errors);
+    });
+  }
+
+  test("several online runners: the person picks by name and the choice goes with the request", async ({ page }) => {
+    const second = "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e77";
+    const mock = fresh({ bridge: { plan: "choose", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: null }, { id: second, name: "Desk machine", has_name: true, online: true, protocol_ok: true, last_seen_at: null }] } });
+    const errors = await sheet(page, mock);
+    await tv(page, "tm-bridge-runner").selectOption(second);
+    await press(tv(page, "tm-bridge-connect"));
+    expect(mock.bridgePosts).toEqual([{ runner_id: second }]);
+    await clean(page, errors);
+  });
+
+  test("a request the cloud refuses says why in words, and the screen then shows what is true", async ({ page }) => {
+    const mock = fresh({ bridgeStatus: 409, bridgeCode: "bridge_pending" });
+    const errors = await sheet(page, mock);
+    await press(tv(page, "tm-bridge-connect"));
+    await expect(tv(page, "tm-bridge-notice")).toHaveText("A request for this repo is already on its way.");
+    await clean(page, errors);
+  });
+
+  test("a member sees the state and no button, and no path", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const mock = fresh({ settings: F.settings({ can_edit: false }), bridge: { phase: "connected", connected: { runner_id: BRIDGE_RUNNER, runner_name: "Workshop laptop", root_tail: "acme/widgets", root: null } } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Connected to acme/widgets on Workshop laptop");
+    await expect(tv(page, "tm-bridge-disconnect")).toHaveCount(0);
+    expect(await page.locator(WIN).innerText()).not.toContain("/home/");
     await clean(page, errors);
   });
 
