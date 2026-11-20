@@ -402,8 +402,18 @@ describe("api-contract rules, against the committed OpenAPI document", () => {
   it("a real list schema from the document checks the first items of a list and their enums and types", () => {
     const onboarding = ops.find((o) => o.template === "/api/v1/onboarding");
     if (onboarding === undefined) throw new Error("no onboarding op");
-    const body = { started_at: "t", steps: [{ step: "model_key", completed_at: null, skipped: false }] };
+    const pipelineSteps = [{ step: "model_key", completed_at: null, skipped: false }];
+    const engineSteps = [{ step: "machine", state: "active", completed_at: null, tier: null, failure: null }];
+    const body = {
+      started_at: "t",
+      steps: pipelineSteps,
+      tracks: [
+        { track: "pipeline", steps: pipelineSteps, chosen_at: null },
+        { track: "engine", steps: engineSteps, chosen_at: null },
+      ],
+    };
     expect(schemaViolations(onboarding.okSchema, body)).toEqual([]);
+    expect(schemaViolations(onboarding.okSchema, { started_at: "t", steps: pipelineSteps })).toEqual(["$.tracks: missing"]);
     expect(schemaViolations(onboarding.okSchema, { ...body, steps: [{ step: "nope", completed_at: null, skipped: false }] })).toEqual(["$.steps[0].step: not one of the documented values"]);
     expect(schemaViolations(onboarding.okSchema, { ...body, steps: [{ step: "pay", completed_at: 3, skipped: false }] })).toEqual(["$.steps[0].completed_at: expected string or null"]);
     expect(schemaViolations(onboarding.okSchema, [])).toEqual(["$: expected object"]);

@@ -31389,7 +31389,7 @@
       "get": {
         "operationId": "getOnboarding",
         "summary": "Where the account is in onboarding",
-        "description": "Session only; a token is refused. Always six steps in order (`model_key`, `readonly_app`, `preview`, `pay`, `write_app`, `first_pr`); `completed_at` is a server time, or null while the step is open. `skipped` is true for a step that is not open but was never done: the free `preview` once the plan is chosen without one (it then has no time; a preview that finishes later turns it into a done step with its real time). Choosing a plan does not wait for any earlier step. Works for an account that has not subscribed yet. `model_key` and `readonly_app` follow the current state, so they reopen when the model key is removed or stops working, or when the read-only GitHub App is uninstalled or suspended; the other steps are milestones that stay done.",
+        "description": "Session only; a token is refused. Always six steps in order (`model_key`, `readonly_app`, `preview`, `pay`, `write_app`, `first_pr`); `completed_at` is a server time, or null while the step is open. `skipped` is true for a step that is not open but was never done: the free `preview` once the plan is chosen without one (it then has no time; a preview that finishes later turns it into a done step with its real time). Choosing a plan does not wait for any earlier step. Works for an account that has not subscribed yet. `model_key` and `readonly_app` follow the current state, so they reopen when the model key is removed or stops working, or when the read-only GitHub App is uninstalled or suspended; the other steps are milestones that stay done. `steps` is the pipeline track and is also `tracks[0].steps`. `tracks` lists the pipeline track, then the engine track (`machine`, `claude`, `github_app`, `project`, `plan`, `install`, `live`), each with `chosen_at` (null until the person chooses it). Every engine step is derived from current rows on each read: `state` is `done`, `failed` (a stored failure for that step while its source is still false; it clears when the source turns true), `active` (the first step not done) or `pending`. `tier` is on `machine` only.",
         "security": [
           {
             "session": []
@@ -31440,11 +31440,176 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "tracks": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "track": {
+                              "type": "string",
+                              "const": "pipeline"
+                            },
+                            "steps": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "step": {
+                                    "type": "string",
+                                    "enum": [
+                                      "model_key",
+                                      "readonly_app",
+                                      "preview",
+                                      "pay",
+                                      "write_app",
+                                      "first_pr"
+                                    ]
+                                  },
+                                  "completed_at": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "skipped": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "step",
+                                  "completed_at",
+                                  "skipped"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "chosen_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "track",
+                            "steps",
+                            "chosen_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "track": {
+                              "type": "string",
+                              "const": "engine"
+                            },
+                            "steps": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "step": {
+                                    "type": "string",
+                                    "enum": [
+                                      "machine",
+                                      "claude",
+                                      "github_app",
+                                      "project",
+                                      "plan",
+                                      "install",
+                                      "live"
+                                    ]
+                                  },
+                                  "state": {
+                                    "type": "string",
+                                    "enum": [
+                                      "done",
+                                      "active",
+                                      "pending",
+                                      "failed"
+                                    ]
+                                  },
+                                  "completed_at": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "tier": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "microvm",
+                                          "standard"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "failure": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "code": {
+                                            "type": "string"
+                                          },
+                                          "at": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "code",
+                                          "at"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "step",
+                                  "state",
+                                  "completed_at",
+                                  "tier",
+                                  "failure"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "chosen_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "track",
+                            "steps",
+                            "chosen_at"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ],
+                      "items": false,
+                      "minItems": 2,
+                      "maxItems": 2
                     }
                   },
                   "required": [
                     "started_at",
-                    "steps"
+                    "steps",
+                    "tracks"
                   ],
                   "additionalProperties": false
                 }
@@ -31487,6 +31652,145 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/onboarding/track": {
+      "put": {
+        "operationId": "putOnboardingTrack",
+        "summary": "Choose an onboarding track",
+        "description": "Session only, owner or admin; a token is refused. Body `{ track }`, `engine` or `pipeline`. Both may be chosen. Choosing a track already chosen changes nothing and writes no audit row (`created` is false); a new choice writes `onboarding.track_chosen`. Answers `{ track, chosen_at, created }`.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "track": {
+                    "type": "string",
+                    "enum": [
+                      "engine",
+                      "pipeline"
+                    ]
+                  }
+                },
+                "required": [
+                  "track"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Choose an onboarding track",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "track": {
+                      "type": "string",
+                      "enum": [
+                        "engine",
+                        "pipeline"
+                      ]
+                    },
+                    "chosen_at": {
+                      "type": "string"
+                    },
+                    "created": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "track",
+                    "chosen_at",
+                    "created"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` (a token) or `insufficient_role` (below admin).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A body that does not validate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
                 }
               }
             }

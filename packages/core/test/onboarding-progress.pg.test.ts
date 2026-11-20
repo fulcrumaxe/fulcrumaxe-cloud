@@ -106,7 +106,7 @@ describe('getOnboarding (pg)', () => {
     expect(view.steps.map((s) => s.step)).toEqual(['model_key', 'readonly_app', 'preview', 'pay', 'write_app', 'first_pr']);
     expect([...ONBOARDING_STEPS]).toEqual(view.steps.map((s) => s.step));
     expect(view.steps.every((s) => Object.keys(s).sort().join() === 'completed_at,skipped,step' && s.skipped === false)).toBe(true);
-    expect(Object.keys(view).sort()).toEqual(['started_at', 'steps']);
+    expect(Object.keys(view).sort()).toEqual(['started_at', 'steps', 'tracks']);
     const created = (await admin.query(`SELECT created_at FROM accounts WHERE id = $1`, [a.accountId])).rows[0].created_at as Date;
     expect(view.started_at).toBe(created.toISOString());
     expect(await steps(a)).toEqual(NONE);

@@ -4,6 +4,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import type { RunActionCtx } from '../runActions/request.js';
 import { INSTALLATION_KPI_SELECT, WORK_ITEM_KPI_SELECT, toInstallationKpiRow, toWorkItemKpiRow } from '../stats/read.js';
 import { getPreview } from './preview.js';
+import { buildEngineSteps, claudeDoneAt, readChosenTracks, readEngineSources, type EngineStep, type MachineFactsReader, type Track } from './engineTrack.js';
 
 /** D#2 H17d: the onboarding progress read. Every time comes from a server row; the caller passes nothing but its context. */
 
@@ -19,6 +20,19 @@ export interface OnboardingProgress {
    * plan is chosen without one. A skipped step has no time (`completed_at` stays null), so a time is never invented.
    */
   steps: { step: OnboardingStep; completed_at: string | null; skipped: boolean }[];
+  /**
+   * D#845 ON-5: both tracks, pipeline first. The pipeline track's `steps` are the top-level `steps` above, unchanged; the engine track's are its seven derived
+   * steps. `chosen_at` is when the person chose that track, null while they have not. The top-level `steps` stays until every reader has moved to `tracks`.
+   */
+  tracks: [
+    { track: 'pipeline'; steps: OnboardingProgress['steps']; chosen_at: string | null },
+    { track: 'engine'; steps: EngineStep[]; chosen_at: string | null },
+  ];
+}
+
+/** What the caller injects: ON-1b's machine-facts read lives in a package that depends on this one. Without it no machine counts as signed in to Claude. */
+export interface OnboardingDeps {
+  readMachineFacts?: MachineFactsReader;
 }
 
 /**
@@ -56,7 +70,7 @@ const earliest = (times: (string | null)[]): string | null => {
  * installation and work-item history, and `preview` is read through getPreview, so a void preview never counts
  * and only a run that ended in success does; a failed or cancelled run leaves the step open.
  */
-export async function getOnboarding(ctx: RunActionCtx): Promise<OnboardingProgress> {
+export async function getOnboarding(ctx: RunActionCtx, deps: OnboardingDeps = {}): Promise<OnboardingProgress> {
   const { accountId, userId, tokenId } = ctx.principal;
   if (tokenId) throw new ForbiddenError('onboarding: a token cannot read progress');
   const now = new Date();
@@ -71,8 +85,13 @@ export async function getOnboarding(ctx: RunActionCtx): Promise<OnboardingProgre
     const okKeys = (await client.query(`SELECT last_validated_at FROM model_connections WHERE status = 'ok'`)).rows;
     const live = new Set((await client.query(`SELECT installation_id FROM onboarding_live_readonly_installations()`)).rows.map((r) => r.installation_id as string));
     const readonly = (await client.query(`SELECT id, created_at FROM installations WHERE app_kind = 'team_readonly'`)).rows;
-    return { account, installations, items, previewIds, okKeys, liveReadonly: readonly.filter((r) => live.has(r.id as string)).map((r) => r.created_at as Date) };
+    const chosen = await readChosenTracks(client, accountId);
+    const githubAppAt = iso(installations.filter((i) => i.app_kind === 'team').map((i) => i.created_at).sort((a, b) => a.getTime() - b.getTime())[0]);
+    const engine = await readEngineSources(client, accountId, githubAppAt);
+    return { account, installations, items, previewIds, okKeys, chosen, engine, liveReadonly: readonly.filter((r) => live.has(r.id as string)).map((r) => r.created_at as Date) };
   });
+  // Its own tenant read (a separate connection), after the transaction above is closed.
+  own.engine.sources.done.claude = await claudeDoneAt(own.engine.runners, accountId, userId, deps.readMachineFacts);
 
   // At most two rows (one per GitHub user and per installation), each read through the preview service.
   const finishes: (string | null)[] = [];
@@ -93,5 +112,14 @@ export async function getOnboarding(ctx: RunActionCtx): Promise<OnboardingProgre
     write_app: installedAt('team'),
     first_pr: firstPrFromInstall(own.items, own.installations, now).first_pr_at,
   };
-  return { started_at: own.account.created_at.toISOString(), steps: buildSteps(done) };
+  const steps = buildSteps(done);
+  const chosenAt = (t: Track): string | null => own.chosen.get(t) ?? null;
+  return {
+    started_at: own.account.created_at.toISOString(),
+    steps,
+    tracks: [
+      { track: 'pipeline', steps, chosen_at: chosenAt('pipeline') },
+      { track: 'engine', steps: buildEngineSteps(own.engine.sources), chosen_at: chosenAt('engine') },
+    ],
+  };
 }

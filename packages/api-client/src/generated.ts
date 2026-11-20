@@ -3581,6 +3581,40 @@ export interface Operations {
         completed_at: string | null;
         skipped: boolean;
       }>;
+      tracks: [{
+        track: "pipeline";
+        steps: Array<{
+          step: "model_key" | "readonly_app" | "preview" | "pay" | "write_app" | "first_pr";
+          completed_at: string | null;
+          skipped: boolean;
+        }>;
+        chosen_at: string | null;
+      }, {
+        track: "engine";
+        steps: Array<{
+          step: "machine" | "claude" | "github_app" | "project" | "plan" | "install" | "live";
+          state: "done" | "active" | "pending" | "failed";
+          completed_at: string | null;
+          tier: ("microvm" | "standard") | (null);
+          failure: ({
+            code: string;
+            at: string;
+          }) | (null);
+        }>;
+        chosen_at: string | null;
+      }];
+    };
+  };
+  putOnboardingTrack: {
+    path: undefined;
+    query: undefined;
+    body: {
+      track: "engine" | "pipeline";
+    };
+    response: {
+      track: "engine" | "pipeline";
+      chosen_at: string;
+      created: boolean;
     };
   };
   getOnboardingPreview: {
@@ -7529,6 +7563,17 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: false,
+  },
+  putOnboardingTrack: {
+    method: "PUT",
+    path: "/api/v1/onboarding/track",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
   },
   getOnboardingPreview: {
     method: "GET",

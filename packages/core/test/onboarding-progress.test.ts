@@ -28,7 +28,10 @@ describe('getOnboarding', () => {
 
   it('returns started_at and six steps in order as ISO strings or null', async () => {
     const view = await getOnboarding({ pool: fakePool(), principal });
-    expect(view).toEqual({
+    // D#845 ON-5: the pipeline track is unchanged; the response gained `tracks` beside it (its content is covered by onboarding-engine-track.test.ts).
+    const { tracks, ...pipeline } = view;
+    expect(tracks.map((t) => t.track)).toEqual(['pipeline', 'engine']);
+    expect(pipeline).toEqual({
       started_at: '2026-01-01T00:00:00.000Z',
       steps: [
         { step: 'model_key', completed_at: null, skipped: false },
