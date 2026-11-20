@@ -6,7 +6,7 @@ import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CURRENT_PROTOCOL_VERSION, HelloMessage, sha256Text } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, HelloMessage, SANDBOX_COMMAND_PURPOSE, sha256Text, type SandboxCommand } from "@fulcrumaxe/runner-protocol";
 import { spillRootFor } from "../../src/job/spillFiles.js";
 import { CliError } from "../../src/cliError.js";
 import { readHostFacts } from "../../src/hostFacts.js";
@@ -14,7 +14,7 @@ import { RUNNER_BUILD_CAPABILITIES, RUNNER_VERSION } from "../../src/version.js"
 import { loadRegistration, saveRegistration } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
 import { roleToolsDigest } from "../../src/job/roleTools.js";
-import { setSetting } from "../../src/runnerSettings.js";
+import { SETTINGS_FILE, setSetting } from "../../src/runnerSettings.js";
 import { setPlaywrightLoader } from "../../src/verifyBrowser/loadPlaywright.js";
 import type { CommandContext } from "../../src/context.js";
 import { claimBlockReason, readCanaryState } from "../../src/instructionCanaryState.js";
@@ -30,10 +30,15 @@ import { manualClock, until } from "../helpers/manualClock.js";
 import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { WSL2_KERNEL, fakeWslMachine, type WslMachineOptions } from "../helpers/fakeWslMachine.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
-import { KEY_ID, KEYRING, OTHER_KEYRING, signedJob } from "../helpers/signedJob.js";
+import { KEY_ID, KEYRING, OTHER_KEYRING, signedJob, signedSandboxCommand } from "../helpers/signedJob.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
 import { shellSandboxUsable, testLaunch } from "../helpers/launch.js";
 import { VERCEL_PROTECTED_BODY } from "../helpers/vercelProtected.js";
+import { makeRig, runCleanups } from "../vm/sandboxd/helpers.js";
+import { scriptedRuntime } from "../sandboxPortContract.js";
+import type { LiveMicrovm, LiveMicrovmParts } from "../../src/vm/sandboxd/live.js";
+import type { VmHostFacts } from "../../src/vm/limits.js";
+import { RESTART_LINE, UNWIRED_LINE } from "../../src/vm/engineGate.js";
 
 let root: string;
 let home: string;
@@ -1374,6 +1379,276 @@ describe("a playwright deploy verifier job in the composed daemon (D#749 V2c-2b)
     expect(mcp.mcpServers["fxverify"]?.args).toEqual(expect.arrayContaining(["--flag", "verify-browser-server", "--base-url", "https://app.example.test/", "--executable", exe, "--storage-state", state]));
     const done = cloud.seen.filter((s) => s.path.endsWith("/done"));
     expect((done[0]!.body as { agentOutput?: unknown }).agentOutput).toEqual(ENVELOPE);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+});
+
+describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
+  afterEach(runCleanups);
+  const claimBodies = (): Array<Record<string, unknown>> => cloud.seen.filter((s) => s.path === "/api/runner/claim").map((s) => s.body as Record<string, unknown>);
+  const queuedJob = () => signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+  const enableMicrovm = (engine: "microvm" | "os_sandbox"): void => {
+    setSetting(stateDir, "sandbox_engine", engine);
+    for (const [key, value] of [["microvm.max_vms", "2"], ["microvm.max_vcpus", "4"], ["microvm.max_memory_mb", "4096"], ["microvm.snapshot_dir", path.join(home, "snaps")], ["microvm.snapshot_quota_bytes", "1073741824"]] as const) setSetting(stateDir, key, value);
+  };
+  /** Fakes at the host-fact and helper seams: a machine with KVM and a ready helper. */
+  const goodFacts: VmHostFacts = { kvm: "present", helperSocket: "present", helperSocketPath: "/fake/helper.sock", helperState: "ready", totalMemMb: 16384, cpus: 8, readMemAvailableBytes: () => 8 * GB };
+  const wiredParts = (over: Partial<LiveMicrovmParts> = {}, wrapHelper?: (helper: ReturnType<typeof makeRig>["deps"]["helper"]) => ReturnType<typeof makeRig>["deps"]["helper"]): LiveMicrovmParts => {
+    const rig = makeRig();
+    const { boot, ...deps } = rig.deps;
+    return {
+      deps: wrapHelper === undefined ? deps : { ...deps, helper: wrapHelper(deps.helper) },
+      boot,
+      template: "fx-agent",
+      memMb: 256,
+      uid: 4711,
+      egress: { startProxy: async () => ({ close: async () => undefined }), startReverse: async () => ({ close: async () => undefined }) },
+      makeRuntime: () => scriptedRuntime(),
+      ...over,
+    };
+  };
+  const sentHello = () => HelloMessage.parse(cloud.seen.find((s) => s.path === "/api/runner/hello")!.body);
+
+  it("a wired microvm runner reports microvm, and its claim lists the daemon's rows: a VM started through the port is there under sb- and 32 hex, and gone after it is deleted", async () => {
+    enableMicrovm("microvm");
+    let live: LiveMicrovm | undefined;
+    const clock = manualClock();
+    const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts() }, hooks: { clock, onMicrovmBuilt: (built) => (live = built) } });
+    const polls = async (condition: () => boolean): Promise<void> => {
+      for (let i = 0; !condition() && i < 200; i++) {
+        await clock.advance(5000);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(condition()).toBe(true);
+    };
+    await until(() => claims() >= 1);
+    expect(sentHello().facts).toMatchObject({ sandbox_engine: "microvm" });
+    expect(claimBodies()[0]).toMatchObject({ sandboxes: [] });
+    const handle = await live!.port.createSandbox({ sandboxName: "rn-run-branch-derived", retention: { persistent: false }, timeoutMs: 60_000 });
+    await polls(() => claimBodies().some((b) => Array.isArray(b["sandboxes"]) && (b["sandboxes"] as unknown[]).length === 1));
+    const rows = claimBodies().map((b) => b["sandboxes"] as Array<{ name: string }> | undefined).find((r) => r?.length === 1)!;
+    expect(rows[0]!.name).toMatch(/^sb-[0-9a-f]{32}$/);
+    expect(JSON.stringify(claimBodies())).not.toContain("branch-derived");
+    await live!.port.stop(handle);
+    await live!.port.deleteSandbox(handle);
+    await polls(() => (claimBodies().at(-1)?.["sandboxes"] as unknown[] | undefined)?.length === 0);
+    expect(fake.spawnCount()).toBe(0);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
+  it("an os_sandbox runner with a complete live stack still reports os_sandbox and sends no sandboxes block: its claim is the one it always sent", async () => {
+    enableMicrovm("os_sandbox");
+    let built = false;
+    const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts() }, hooks: { onMicrovmBuilt: () => (built = true) } });
+    await until(() => claims() >= 1);
+    expect(built).toBe(true);
+    expect(sentHello().facts).toMatchObject({ sandbox_engine: "os_sandbox" });
+    expect(Object.keys(claimBodies()[0]!)).toEqual(["capacity"]);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
+  it("a microvm runner on a build that lacks a part claims nothing: paused, no reason sent, os_sandbox reported, its queued job never run, and it says so", async () => {
+    enableMicrovm("microvm");
+    const job = queuedJob();
+    cloud.enqueue(job);
+    fake.set("hang", "");
+    // each part left out in turn: the guest runtime and the boot facts are the two this build really lacks
+    for (const missing of ["makeRuntime", "boot", undefined] as const) {
+      const before = claims();
+      const parts = missing === undefined ? undefined : { ...wiredParts(), [missing]: undefined };
+      const run = start({ host: { vmFacts: async () => goodFacts, ...(parts === undefined ? {} : { microvm: parts }) } });
+      await until(() => claims() >= before + 1);
+      expect(claimBodies().at(-1), String(missing)).toMatchObject({ capacity: { limited_by: "paused" } });
+      expect(claimBodies().at(-1), String(missing)).not.toHaveProperty("sandbox_unavailable");
+      expect(claimBodies().at(-1), String(missing)).not.toHaveProperty("sandboxes");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(fake.spawnCount()).toBe(0);
+      const result = await stop(run);
+      expect(result.code).toBe(0);
+      expect((await run.done).out).toContain(UNWIRED_LINE);
+    }
+    const hellos = cloud.seen.filter((s) => s.path === "/api/runner/hello").map((s) => HelloMessage.parse(s.body));
+    for (const hello of hellos) expect(hello.facts).toMatchObject({ sandbox_engine: "os_sandbox" });
+  }, 60_000);
+
+  it("microvm limits missing or a missing machine fact still win over the unwired block: the claim names the microvm_* reason, as before", async () => {
+    enableMicrovm("microvm");
+    const run = start({ host: { microvm: { ...wiredParts(), makeRuntime: undefined } } });
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toEqual({ sandbox_unavailable: "microvm_no_kvm" });
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
+  const seedRemote = (): string => {
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    return remote;
+  };
+  /** Moves the claim loop on until `condition` holds (a bounded number of 5 s polls, each one letting the loop run). */
+  const pollsUntil = async (clock: ReturnType<typeof manualClock>, condition: () => boolean): Promise<void> => {
+    for (let i = 0; !condition() && i < 200; i++) {
+      await clock.advance(5000);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(condition()).toBe(true);
+  };
+  const lastBodyIsPaused = (): boolean => (claimBodies().at(-1)?.["capacity"] as { limited_by?: string } | undefined)?.limited_by === "paused";
+
+  // No downgrade: the engine is chosen once at start, the setting is read at every claim; a runner set to microvm never runs a job in the OS sandbox, whichever way the two came apart.
+  it.skipIf(process.platform !== "linux")("facts that throw once at start (so the run chose os_sandbox) while the setting is microvm: a wired build claims nothing, runs no job, and says it needs a restart", async () => {
+    enableMicrovm("microvm");
+    const remote = seedRemote();
+    const job = queuedJob();
+    cloud.enqueue(job);
+    fake.set("hang", "");
+    let calls = 0;
+    const vmFacts = async (): Promise<VmHostFacts> => {
+      calls += 1;
+      if (calls === 1) throw new Error("transient");
+      return goodFacts;
+    };
+    const clock = manualClock();
+    const run = start({ host: { vmFacts, microvm: wiredParts() }, hooks: { clock, remoteUrl: () => pathToFileURL(remote).href } });
+    await until(() => claims() >= 1);
+    await pollsUntil(clock, () => claims() >= 4);
+    expect(sentHello().facts).toMatchObject({ sandbox_engine: "os_sandbox" });
+    expect(lastBodyIsPaused()).toBe(true);
+    for (const body of claimBodies()) expect(body).not.toHaveProperty("sandbox_unavailable");
+    expect(cloud.runs.get(job.job.run_id)?.endedBy).toBeUndefined();
+    expect(fake.spawnCount()).toBe(0);
+    await stop(run);
+    expect((await run.done).out).toContain(RESTART_LINE);
+  }, 60_000);
+
+  it.skipIf(process.platform !== "linux")("a runner started on os_sandbox whose setting is changed to microvm while it runs stops claiming at the next claim: no job runs in the OS sandbox", async () => {
+    enableMicrovm("os_sandbox");
+    const remote = seedRemote();
+    const clock = manualClock();
+    const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts() }, hooks: { clock, remoteUrl: () => pathToFileURL(remote).href } });
+    await until(() => claims() >= 1);
+    expect(sentHello().facts).toMatchObject({ sandbox_engine: "os_sandbox" });
+    expect(lastBodyIsPaused()).toBe(false);
+    fake.set("hang", "");
+    enableMicrovm("microvm"); // the person runs `fx-runner config set sandbox_engine microvm` (and its limits) while the runner runs
+    const job = queuedJob();
+    cloud.enqueue(job);
+    const before = claims();
+    await pollsUntil(clock, () => claims() >= before + 2 && lastBodyIsPaused());
+    expect(cloud.runs.get(job.job.run_id)?.endedBy).toBeUndefined();
+    expect(fake.spawnCount()).toBe(0);
+    await stop(run);
+    expect((await run.done).out).toContain(RESTART_LINE);
+  }, 60_000);
+
+  it("control: a microvm run whose facts read fine at start is not blocked by the engine check, and says nothing about a restart", async () => {
+    enableMicrovm("microvm");
+    const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts() } });
+    await until(() => claims() >= 1);
+    expect(sentHello().facts).toMatchObject({ sandbox_engine: "microvm" });
+    expect(lastBodyIsPaused()).toBe(false);
+    expect((await stop(run)).code).toBe(0);
+    expect((await run.done).out).not.toContain(RESTART_LINE);
+  }, 60_000);
+
+  // Threat item 5: only a microvm run gets the daemon's lifecycle. An os_sandbox run with a complete stack answers a signed command as a runner without VMs does.
+  describe("signed sandbox commands reach the daemon only on a microvm run", () => {
+    type Ack = { outcome: string; refusal?: string };
+    const sandboxId = `sb-${"ab".repeat(16)}`;
+    const commandsFor = (): ReturnType<typeof signedSandboxCommand>[] => {
+      const base = { purpose: SANDBOX_COMMAND_PURPOSE, runner_id: loadRegistration(stateDir)!.runner_id, exp: new Date(Date.now() + 600_000).toISOString() }; // a fresh runner has no nonce history, so a command must outlive its start by the longest command life
+      return [
+        signedSandboxCommand({ ...base, kind: "stop_sandbox", name: sandboxId, nonce: randomUUID() } as SandboxCommand),
+        signedSandboxCommand({ ...base, kind: "delete_sandbox", name: sandboxId, nonce: randomUUID() } as SandboxCommand),
+        signedSandboxCommand({ ...base, kind: "reap_sandboxes", nonce: randomUUID() } as SandboxCommand),
+      ];
+    };
+    const acksOf = (): Ack[] => claimBodies().flatMap((b) => (b["sandbox_acks"] as Ack[] | undefined) ?? []);
+    /** Runs one runner on `engine` with a complete stack, hands it the three commands, and returns the acks it sends back and every call that reached the daemon's helper after the commands arrived. */
+    async function withCommands(engine: "microvm" | "os_sandbox"): Promise<{ acks: Ack[]; helperCalls: string[] }> {
+      enableMicrovm(engine);
+      const helperCalls: string[] = [];
+      let recording = false;
+      const spy = (helper: ReturnType<typeof makeRig>["deps"]["helper"]) =>
+        new Proxy(helper, {
+          get(target, prop, receiver) {
+            const value = Reflect.get(target, prop, receiver) as unknown;
+            return typeof value === "function" ? (...args: unknown[]) => (recording && helperCalls.push(String(prop)), (value as (...a: unknown[]) => unknown).apply(target, args)) : value;
+          },
+        });
+      const clock = manualClock();
+      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, spy as never) }, hooks: { clock } });
+      await until(() => claims() >= 1);
+      expect(sentHello().facts).toMatchObject({ sandbox_engine: engine });
+      recording = true;
+      cloud.force.claim.push({ status: 200, body: { retry_after: 5, sandbox_commands: commandsFor() } });
+      await pollsUntil(clock, () => acksOf().length >= 3);
+      const result = { acks: acksOf(), helperCalls: [...helperCalls] };
+      await stop(run);
+      return result;
+    }
+
+    it("an os_sandbox runner with a complete stack refuses a stop, a delete and a reap as unsupported and touches no VM or helper", async () => {
+      const { acks, helperCalls } = await withCommands("os_sandbox");
+      expect(acks).toHaveLength(3);
+      for (const ack of acks) expect(ack).toMatchObject({ outcome: "refused", refusal: "unsupported" });
+      expect(helperCalls).toEqual([]);
+    }, 60_000);
+
+    it("control: the same commands on a microvm runner do reach the daemon (a reap of nothing is applied), so the refusal above is the engine's doing", async () => {
+      const { acks } = await withCommands("microvm");
+      expect(acks.some((ack) => ack.outcome === "applied")).toBe(true);
+      expect(acks.every((ack) => !(ack.outcome === "refused" && ack.refusal === "unsupported"))).toBe(true);
+    }, 60_000);
+  });
+
+  it("a settings file that cannot be read stops claiming, whatever it used to say, and never claims as os_sandbox", async () => {
+    mkdirSync(stateDir, { recursive: true });
+    for (const text of ["{not json", "[]", "null"]) {
+      writeFileSync(path.join(stateDir, SETTINGS_FILE), text);
+      const before = claims();
+      cloud.enqueue(queuedJob());
+      const run = start({});
+      await until(() => claims() >= before + 1);
+      expect(claimBodies().at(-1), text).toMatchObject({ capacity: { limited_by: "paused" } });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(fake.spawnCount(), text).toBe(0);
+      expect((await stop(run)).code).toBe(0);
+    }
+  }, 60_000);
+
+  it.skipIf(process.platform !== "linux")("a VM that cannot be started ends the job with a closed code and never starts it in the OS sandbox", async () => {
+    enableMicrovm("microvm");
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    const job = queuedJob();
+    cloud.enqueue(job);
+    fake.set("hang", "");
+    const refusing = (helper: ReturnType<typeof makeRig>["deps"]["helper"]) => ({
+      ...helper,
+      prepare: async () => {
+        throw new Error("the helper is gone: /private/path/leaks?");
+      },
+    });
+    const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, refusing as never) }, hooks: { remoteUrl: () => pathToFileURL(remote).href } });
+    await until(() => cloud.runs.get(job.job.run_id)?.endedBy !== undefined, 30_000);
+    const ended = cloud.runs.get(job.job.run_id)!.endedBy as Record<string, unknown>;
+    // 3c restores `sandbox_unavailable` here once `run` wires `deps.vm`; until then the job handler's missing-`deps.vm` refusal is the first closed code.
+    expect(ended).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "workspace_failed" });
+    expect(JSON.stringify(ended)).not.toContain("private");
+    expect(fake.spawnCount()).toBe(0);
+    expect(existsSync(path.join(fake.dir, "argv.txt"))).toBe(false);
     expect((await stop(run)).code).toBe(0);
   }, 60_000);
 });

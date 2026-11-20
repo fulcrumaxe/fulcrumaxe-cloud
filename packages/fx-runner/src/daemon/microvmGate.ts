@@ -3,8 +3,8 @@
  * or out of date) the gate is closed with the matching `microvm_*` reason, the poll loop sends it as a status poll and takes no job, and nothing is run in the OS sandbox
  * instead. An engine that is not `microvm` is the OS sandbox gate, untouched.
  *
- * Same rhythm as the OS sandbox gate: a pass is kept, and a closed answer is asked again at most once every 5 minutes, so a machine that is fixed recovers without a restart
- * and one that is not is not hammered. Fails closed: facts that cannot be read, or a reader that throws, are `microvm_no_kvm` (see `microvmUnavailableReason`). While the engine
+ * One rhythm for both answers: the machine is asked at most once every 5 minutes, whether the last answer was closed (a fixed machine recovers without a restart) or open (a helper
+ * that dies after start is noticed before a later claim), so a machine is not hammered either way. Fails closed: facts that cannot be read, or a reader that throws, are `microvm_no_kvm` (see `microvmUnavailableReason`). While the engine
  * setting is not `microvm` nothing is remembered, so switching it on checks the machine afresh.
  */
 import type { SandboxEngine, VmHostFacts } from "../vm/limits.js";
@@ -37,8 +37,8 @@ export function createMicrovmGate(deps: MicrovmGateDeps): SandboxGate {
         closed = undefined;
         return deps.inner.check();
       }
-      if (passed) return deps.inner.check();
       const now = deps.now().getTime();
+      if (passed && now - askedAt < REPROBE_INTERVAL_MS) return deps.inner.check();
       if (closed !== undefined && now - askedAt < REPROBE_INTERVAL_MS) return closed;
       askedAt = now;
       let facts: VmHostFacts | undefined;
@@ -50,6 +50,7 @@ export function createMicrovmGate(deps: MicrovmGateDeps): SandboxGate {
       }
       const reason = microvmUnavailableReason({ engine: "microvm", facts });
       if (reason !== undefined) {
+        passed = false;
         closed = { open: false, reason };
         return closed;
       }

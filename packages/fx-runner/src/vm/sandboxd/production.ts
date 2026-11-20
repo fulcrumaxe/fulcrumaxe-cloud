@@ -63,10 +63,14 @@ export interface ProductionConfig {
 
 /** The dependency set a daemon process builds: the real euid, the O_PATH fd inspection, helper socket, Firecracker vsock and clock. */
 export function productionDeps(config: ProductionConfig): SandboxdDeps {
+  return { ...productionDepsBase(config), boot: config.boot };
+}
+
+/** Everything `productionDeps` builds except the boot facts, which have no production source yet (D#587 B-5a-BF): `createLiveMicrovm` takes the two apart so a build without them stays unwired. */
+export function productionDepsBase(config: Omit<ProductionConfig, "boot">): Omit<SandboxdDeps, "boot"> {
   return {
     euid: config.host.euid,
     helper: createHelperClient(connectUnix(config.helperSocket), config.helperTimeoutMs),
-    boot: config.boot,
     inspectDir: (dir) => {
       const ops = fdOps(config.host);
       return ops === undefined ? undefined : fdInspectDir(dir, ops);
