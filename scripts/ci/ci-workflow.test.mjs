@@ -1668,6 +1668,70 @@ test("macos spike: the script is bash-valid, lives on a public path, and checks 
   if (existsSync(denyFile)) assert.doesNotMatch(readFileSync(denyFile, "utf8"), /^scripts\/spike\//m, "the spike script must stay on a public path");
 });
 
+// ---- the WSL2 proof workflow (D#587 B-9c) ---------------------------------------------------------------------
+// A hand-started proof on a free hosted Windows runner. Dispatch only, no input, no secret, a read-only token, every action at a full sha,
+// public repositories only, and nothing from the event spliced into a run block.
+const wslProof = workflows.find((w) => w.file === "wsl2-proof.yml");
+/** What is wrong with a would-be WSL2 proof workflow, as a list of short findings (empty when it is as the proof needs it). */
+function wslProofViolations({ doc, text }) {
+  const out = [];
+  const on = triggersOf(doc);
+  const keys = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on ?? {});
+  if (keys.length !== 1 || keys[0] !== "workflow_dispatch") out.push(`triggers are ${keys.join(",")}`);
+  if (typeof on === "object" && !Array.isArray(on) && on.workflow_dispatch?.inputs !== undefined) out.push("takes an input");
+  if (JSON.stringify(doc.permissions) !== JSON.stringify({ contents: "read" })) out.push("top-level permissions are not contents: read");
+  if (/secrets\./.test(noComments(text))) out.push("reads a secret");
+  for (const [name, job] of jobsOf(doc)) {
+    if (job.permissions !== undefined) out.push(`${name} asks for its own permissions`);
+    if (job["runs-on"] !== "windows-2022") out.push(`${name} does not run on windows-2022`);
+    if (!String(job.if ?? "").startsWith("vars.CI_DISABLED != 'true'")) out.push(`${name} has no kill switch`);
+    else {
+      const ctx = (isPrivate) => ({ "vars.CI_DISABLED": "", "github.event.repository.private": isPrivate });
+      if (!evalExpr(job.if, ctx(false))) out.push(`${name} does not run on the public plane`);
+      if (evalExpr(job.if, ctx(true))) out.push(`${name} runs on the private plane`);
+    }
+    for (const step of job.steps ?? []) {
+      if (step.uses !== undefined && !/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/.test(String(step.uses))) out.push(`${name}: ${step.uses} is not at a full sha`);
+      if (typeof step.run === "string" && /\$\{\{/.test(step.run)) out.push(`${name}: a run block holds an expression`);
+    }
+  }
+  return out;
+}
+
+test("wsl2 proof: dispatch only, no input, no secret, read-only, windows-2022, public only, every action at a full sha, nothing spliced into a run", () => {
+  assert.ok(wslProof, "wsl2-proof.yml is missing");
+  assert.deepEqual(wslProofViolations(wslProof), []);
+  const setup = jobsOf(wslProof.doc).flatMap(([, job]) => job.steps ?? []).find((s) => String(s.uses ?? "").startsWith("Vampire/setup-wsl@"));
+  assert.ok(setup, "the workflow installs WSL with setup-wsl");
+  assert.equal(setup.uses, "Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364");
+  assert.equal(setup.with["wsl-version"], 2);
+  assert.match(setup.with["wsl-conf"], /\[interop\]\s+enabled=false\s+appendWindowsPath=false/);
+  for (const w of workflows) if (w.file !== "wsl2-proof.yml") assert.doesNotMatch(noComments(w.text), /setup-wsl|wsl2-proof/, `${w.file} refers to the proof`);
+});
+
+test("wsl2 proof: the check has teeth (a push trigger, an input, a secret, a tag pin, a wrong runner or an expression in a run each turn it red)", () => {
+  const base = "name: x\non:\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  j:\n    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false\n    runs-on: windows-2022\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - run: echo hi\n";
+  const check = (text) => wslProofViolations({ doc: parseYamlText(text), text });
+  assert.deepEqual(check(base), []);
+  assert.deepEqual(check(base.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n")), ["triggers are workflow_dispatch,push"]);
+  assert.deepEqual(check(base.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n    inputs:\n      a:\n        type: string\n")), ["takes an input"]);
+  assert.deepEqual(check(base.replace("echo hi", "echo ${{ secrets.X }}")), ["reads a secret", "j: a run block holds an expression"]);
+  assert.deepEqual(check(base.replace("@3d3c42e5aac5ba805825da76410c181273ba90b1", "@v4")), ["j: actions/checkout@v4 is not at a full sha"]);
+  assert.deepEqual(check(base.replace("windows-2022", "windows-latest")), ["j does not run on windows-2022"]);
+  assert.deepEqual(check(base.replace(" && github.event.repository.private == false", "")), ["j runs on the private plane"]);
+  assert.deepEqual(check(base.replace("contents: read", "contents: write")), ["top-level permissions are not contents: read"]);
+  assert.deepEqual(check(base.replace("echo hi", "echo ${{ github.event.inputs.a }}")), ["j: a run block holds an expression"]);
+});
+
+test("wsl2 proof: the script exists on a public path and is bash-valid", () => {
+  const script = path.join(repoRoot, "packages/fx-runner/scripts/wsl2-proof.sh");
+  const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.match(readFileSync(script, "utf8"), /wslGate\.real\.test\.ts/);
+  const denyFile = path.join(here, "publish-denylist.local");
+  if (existsSync(denyFile)) assert.doesNotMatch(readFileSync(denyFile, "utf8"), /^packages\/fx-runner\/scripts\//m, "the proof script must stay on a public path");
+});
+
 test("workflows: no job-level env value reads the runner context (it is not available there; step-level env and run lines may)", () => {
   for (const w of workflows) {
     for (const [name, job] of jobsOf(w.doc)) {
