@@ -83,8 +83,15 @@ export type ClaimedReply = z.infer<typeof ClaimedReply>;
 export const ClaimReply = z.union([ClaimedReply, ClaimIdleReply]);
 export type ClaimReply = z.infer<typeof ClaimReply>;
 
-/** 200 from hello: the protocol version this cloud speaks, and the wake grant for a runner that asked for one. */
-export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake }).strict();
+/**
+ * What a cloud tells a runner it can do, beyond the protocol number (D#845). `watch_mode`: this cloud's ingest takes the slim status, the detail session and held holes (migration 1043). A protocol
+ * number cannot say so: clouds at 23 and 24 exist that do not. The set is closed; the cloud lists a capability only when it is present, and sends the field only to a runner whose hello is at `WATCH_MIN_PROTOCOL` or above (an older runner parses the reply strictly).
+ */
+export const WATCH_MODE_CAPABILITY = "watch_mode" as const;
+export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY] as const;
+
+/** 200 from hello: the protocol version this cloud speaks, the wake grant for a runner that asked for one, and the capabilities of this cloud. */
+export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake, capabilities: z.array(z.enum(HELLO_REPLY_CAPABILITIES)).max(HELLO_REPLY_CAPABILITIES.length).optional() }).strict();
 export type HelloReply = z.infer<typeof HelloReply>;
 
 /** 429: a second claim inside `CLAIM_MIN_INTERVAL_SECONDS`. */

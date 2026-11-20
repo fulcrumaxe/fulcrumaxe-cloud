@@ -415,4 +415,77 @@ describe("engine commands: pull and ack [pg]", () => {
       expect((await ack(id, { outcome: "applied" })).status).toBe(200);
     });
   });
+
+  /** D#845 watch mode: `watch` is the one kind that is delivered while operate is off (ruling 11), and only to a runner that knows it, for a ticked repo, with the watch switch on. */
+  describe("the pull: watch", () => {
+    const until = () => new Date(Date.now() + 300_000).toISOString();
+    const watchCommand = (over: { runner?: string; repo?: string } = {}) => command({ kind: "watch", args: { until: until() }, ...over });
+    const setProtocol = (version: number | null, runner = runnerId) => h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [runner, version]);
+    const tick = (repo = A.repoId) => h.admin.query("INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [A.accountId, repo]);
+    const operateOff = () => tmp("UPDATE engine_bridge_settings SET operate_enabled = false WHERE account_id = $1", [A.accountId]);
+    beforeEach(async () => {
+      await h.admin.query("DELETE FROM engine_bridge_repos WHERE account_id = $1", [A.accountId]);
+      await tick();
+      await setProtocol(23);
+    });
+    afterAll(() => setProtocol(null));
+
+    it("is delivered with operate off, signed, while every other kind is still held back", async () => {
+      await operateOff();
+      const watch = await watchCommand();
+      const other = await command({ kind: "pause_loop" });
+      const res = await pull();
+      expect(res.status).toBe(200);
+      expect(verified(res).map((c) => [c.kind, c.command_id])).toEqual([["watch", watch]]);
+      expect(await stateOf(watch)).toBe("delivered");
+      expect(await stateOf(other)).toBe("pending");
+      expect(res.body).toMatchObject({ controls: [{ operate_enabled: false }] });
+    });
+
+    it("is delivered with operate on, in sequence order with the rest", async () => {
+      const first = await command({ kind: "pause_loop" });
+      const watch = await watchCommand();
+      expect(verified(await pull()).map((c) => c.command_id)).toEqual([first, watch]);
+    });
+
+    it("is held (pending, not delivered) for a runner whose hello is below the watch protocol, or unknown, and goes out once it is at it", async () => {
+      await operateOff();
+      const watch = await watchCommand();
+      for (const v of [22, 1, null]) {
+        await setProtocol(v);
+        expect(commandsOf(await pull()), String(v)).toEqual([]);
+      }
+      expect(await stateOf(watch)).toBe("pending");
+      await setProtocol(23);
+      expect(verified(await pull()).map((c) => c.command_id)).toEqual([watch]);
+    });
+
+    it("is held while the account's watch switch is off, even with operate on in the scratch row", async () => {
+      await tmp("UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1", [A.accountId]);
+      const watch = await watchCommand();
+      expect(commandsOf(await pull())).toEqual([]);
+      expect(await stateOf(watch)).toBe("pending");
+    });
+
+    it("is held for a repo that is not ticked, and delivered for the ticked one in the same pull", async () => {
+      await operateOff();
+      await h.admin.query("DELETE FROM engine_bridge_repos WHERE account_id = $1", [A.accountId]);
+      await tick(repo2);
+      const unticked = await watchCommand();
+      const ticked = await watchCommand({ repo: repo2 });
+      const res = await pull({ repo_gh_ids: [GH_A, GH_A2], after_seq: {} });
+      expect(verified(res).map((c) => c.command_id)).toEqual([ticked]);
+      expect(await stateOf(unticked)).toBe("pending");
+    });
+
+    it("never goes to another runner, and an expired one is not delivered", async () => {
+      await operateOff();
+      await setProtocol(23, runnerOther);
+      const theirs = await watchCommand({ runner: runnerOther });
+      const old = await command({ kind: "watch", args: { until: until() }, issuedAgo: "20 minutes", life: "600 seconds" });
+      expect(commandsOf(await pull())).toEqual([]);
+      expect(await stateOf(theirs)).toBe("pending");
+      expect(await stateOf(old)).toBe("expired");
+    });
+  });
 });

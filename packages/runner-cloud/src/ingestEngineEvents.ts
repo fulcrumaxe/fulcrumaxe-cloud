@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { engineSeqOrderViolation, parseEngineEventsMessage } from "@fulcrumaxe/runner-protocol";
+import { WATCH_MIN_PROTOCOL, buildEventsAcceptedReply, engineSeqOrderViolation, parseEngineEventsMessage } from "@fulcrumaxe/runner-protocol";
 import { MAX_BODY_BYTES, RunnerHttpError, asRunner, parseJsonBody, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
@@ -65,6 +65,9 @@ interface IngestRow {
   o_retry_after_s: number | null;
   o_session_id: string | null;
   o_usage: EngineUsageSubject[];
+  /** The runner's stored hello protocol, and the furthest `until` of a live watch command for this runner and the batch's repo (null when none, or when the runner is below the watch protocol). */
+  watch_protocol: number;
+  watch_until: Date | null;
 }
 
 const REFUSALS: Readonly<Record<string, number>> = { engine_bridge_off: 403, engine_repo_not_enabled: 403, engine_instance_other_runner: 409 };
@@ -93,7 +96,19 @@ export async function ingestEngineEvents(deps: RunnerCloudDeps, req: RunnerHttpR
       if (r.o_session_id !== null && r.o_usage.length > 0) {
         await deps.engineUsage?.record(client, { accountId: runner.accountId, sessionId: r.o_session_id, subjects: r.o_usage });
       }
-      return r;
+      // How long the cloud holds the repo watched, told to a runner that knows the field only. The watch commands are the lease for now: one this runner was sent, not over, and not refused or cancelled.
+      const watch = await client.query<{ protocol: number; until: Date | null }>(
+        `SELECT COALESCE(rn.protocol_version, 0) AS protocol,
+                CASE WHEN COALESCE(rn.protocol_version, 0) >= $3 AND $4::uuid IS NOT NULL THEN
+                  (SELECT max((c.args ->> 'until')::timestamptz) FROM engine_commands c
+                    WHERE c.account_id = $1 AND c.runner_id = $2 AND c.kind = 'watch' AND c.state IN ('pending', 'delivered', 'applied')
+                      AND c.repo_id = (SELECT s.repo_id FROM engine_sessions s WHERE s.account_id = $1 AND s.id = $4::uuid)
+                      AND (c.args ->> 'until')::timestamptz > now())
+                END AS until
+           FROM runners rn WHERE rn.id = $2 AND rn.account_id = $1`,
+        [runner.accountId, runner.runnerId, WATCH_MIN_PROTOCOL, r.o_session_id],
+      );
+      return { ...r, watch_protocol: watch.rows[0]?.protocol ?? 0, watch_until: watch.rows[0]?.until ?? null };
     }),
   );
 
@@ -103,5 +118,7 @@ export async function ingestEngineEvents(deps: RunnerCloudDeps, req: RunnerHttpR
   if (row.o_outcome === "seq_order") throw new RunnerHttpError(400, "seq_order", "the events in a batch must have strictly increasing seq");
   if (row.o_outcome === "seq_not_increasing") return { status: 409, body: { error: "seq_not_increasing", last_accepted_seq: Number(row.o_last_seq) } };
   if (row.o_outcome === "quota") return { status: 429, body: { error: "engine_event_quota", retry_after_s: row.o_retry_after_s ?? 60 }, headers: { "retry-after": String(row.o_retry_after_s ?? 60) } };
-  return { status: 200, body: { accepted: row.o_accepted, duplicates: row.o_duplicates, last_accepted_seq: row.o_last_seq === null ? null : Number(row.o_last_seq) } };
+  // `watch_until` only for a runner whose hello is at the watch protocol: an older one parses the reply strictly and would refuse the key (buildEventsAcceptedReply drops it below).
+  const reply = { accepted: row.o_accepted, duplicates: row.o_duplicates, last_accepted_seq: row.o_last_seq === null ? null : Number(row.o_last_seq) };
+  return { status: 200, body: buildEventsAcceptedReply(reply, row.watch_until === null ? undefined : row.watch_until.toISOString(), row.watch_protocol) };
 }

@@ -189,6 +189,21 @@ describe('engine commands: issue, cancel, list [pg]', () => {
       expect(await rows(f.owner.accountId)).toHaveLength(0);
     });
 
+    it('the list never carries a watch command either: it is a reader opening a repo, not a command a person sent', async () => {
+      const f = await fixture();
+      const runner = (await admin.query<{ id: string }>('SELECT id FROM runners WHERE account_id = $1', [f.owner.accountId])).rows[0]!.id;
+      await admin.query(
+        `INSERT INTO engine_commands (account_id, runner_id, repo_id, command_seq, kind, args, issued_by, issued_at, expires_at)
+         VALUES ($1, $2, $3, 91, 'watch', jsonb_build_object('until', to_char(now() at time zone 'utc' + interval '5 minutes', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')), $4, now(), now() + interval '600 seconds')`,
+        [f.owner.accountId, runner, f.repo, f.owner.userId],
+      );
+      await issue(f.owner, f.repo, 'pause_loop');
+      for (const who of [f.owner, f.admin, f.member]) {
+        const body = (await (await call(who, 'GET', path(f.repo))).json()) as { commands: Array<{ kind: string }> };
+        expect(body.commands.map((c) => c.kind)).toEqual(['pause_loop']);
+      }
+    });
+
     it('the list never carries a bridge command, whoever asks (its folders are for the bridge route and an owner or admin)', async () => {
       const f = await fixture();
       const runner = (await admin.query<{ id: string }>('SELECT id FROM runners WHERE account_id = $1', [f.owner.accountId])).rows[0]!.id;

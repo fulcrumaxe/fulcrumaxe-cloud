@@ -1,4 +1,4 @@
-import { HelloMessage, HelloReply } from "@fulcrumaxe/runner-protocol";
+import { HelloMessage, HelloReply, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
 import { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
@@ -57,5 +57,22 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   const wake = wakeGrantFor(configuredWakeKey(deps.wakeKey), runner, message.capabilities, deps.now?.() ?? new Date());
   // D#6 RUNNER-WAKE R3b: the allow record the wake check requires (fail closed without it). Never throws.
   if (wake) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());
-  return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}) }) };
+  // D#845 watch mode: said only to a runner that DECLARED `watch_mode_v1` on this hello (a runner built before it parses the reply strictly and would lose its wake grant to an unknown key), at the
+  // watch protocol or above, and only when this database can take what watch mode sends.
+  const watchMode = message.protocol_version >= WATCH_MIN_PROTOCOL && (message.capabilities ?? []).includes(WATCH_MODE_HELLO_CAPABILITY) && (await ingestTakesWatchMode(deps));
+  return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}), ...(watchMode ? { capabilities: [WATCH_MODE_CAPABILITY] } : {}) }) };
+}
+
+/**
+ * True when migration 1043 is applied: the slim status is a known event kind and engine sessions can hold flagged holes. Read from the catalog (the held column is 1043's own), never assumed from
+ * the code's version, so a cloud deployed before its migration does not tell a runner it can take what it would refuse.
+ */
+export async function ingestTakesWatchMode(deps: RunnerCloudDeps): Promise<boolean> {
+  try {
+    const { rows } = await deps.appUserPool.query<{ ok: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.engine_session_gaps') AND attname = 'held' AND NOT attisdropped) AS ok");
+    return rows[0]?.ok === true;
+  } catch {
+    // fx-swallow-ok: a catalog read that fails says nothing about the ingest: the capability is simply not listed
+    return false;
+  }
 }
