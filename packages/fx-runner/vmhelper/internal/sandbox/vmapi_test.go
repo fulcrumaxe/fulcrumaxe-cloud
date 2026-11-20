@@ -381,3 +381,36 @@ func TestHandOverSocketOnlyTouchesASocketOfTheSandbox(t *testing.T) {
 		t.Error("a missing socket was accepted")
 	}
 }
+
+// The fake kernel removes a killed cgroup the way rmdir does: the directory is gone from its path before
+// any file in it is, so a reader holding the directory open that finds cgroup.procs missing may conclude
+// the cgroup was removed (which stopCgroup does). A sandbox's cgroup is never half there.
+func TestFakeCgroupRemovalIsAtomic(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		r := newRig(t)
+		in, err := r.l.Launch(r.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(r.cgroupRoot, "fx/vms/sb-1")
+		cfd, err := syscall.Open(path, dirFlags, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stopped := make(chan struct{})
+		go func() { _ = in.Stop(); close(stopped) }()
+		for open := true; open; {
+			fd, err := syscall.Openat(cfd, "cgroup.procs", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+			if err == nil {
+				closeFd(fd)
+				continue
+			}
+			open = false
+			if _, serr := os.Stat(path); serr == nil {
+				t.Errorf("cgroup.procs is gone while the cgroup directory is still there")
+			}
+		}
+		closeFd(cfd)
+		<-stopped
+	}
+}
