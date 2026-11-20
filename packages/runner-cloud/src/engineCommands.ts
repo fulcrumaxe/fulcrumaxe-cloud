@@ -1,4 +1,4 @@
-import { BRIDGE_COMMAND_KINDS, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand } from "@fulcrumaxe/runner-protocol";
+import { BRIDGE_COMMAND_KINDS, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, commandSendableTo, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand } from "@fulcrumaxe/runner-protocol";
 import { START_LIKE_KINDS, readHaltStates } from "@fx/db/src/engineCommands.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import type { PoolClient } from "pg";
@@ -53,7 +53,9 @@ interface CommandRow {
  *    issued under an earlier halt epoch than the repo's current one is never delivered either: clearing a halt lifts the stop and starts nothing by
  *    itself. Such a row stays `pending` (the guard trigger moves a pending row to `expired` only once its life is over, at most 600 s) and is read as
  *    expired then.
- *  - While operate is off no command at all is delivered (the runner must refuse on `controls[].operate_enabled === false` as well).
+ *  - While operate is off no command is delivered, except `watch` (D#845 watch mode: it only changes how much the runner uploads and never acts on the engine). A `watch` goes out only
+ *    when the account's watch switch is on, for a repo that is ticked, to a runner whose stored hello protocol is at least `WATCH_MIN_PROTOCOL` (`commandSendableTo`); anything else
+ *    leaves it pending until it expires. Every other kind keeps the operate gate (the runner must refuse on `controls[].operate_enabled === false` as well).
  *  - `controls` carries each named covered repo's halt epoch, whether it is halted and whether operate is on.
  *  - Without a signing key the answer is 503 and nothing is delivered.
  */
@@ -89,8 +91,12 @@ async function pullInside(client: PoolClient, runner: VerifiedRunner, message: E
   if (message.bridged !== undefined) await recordReportedBridges(client, runner, repos, message.bridged);
   const bridgeDue = message.bridge_commands === true ? await dueBridgeCommands(client, runner, repos.map((r) => r.id)) : [];
   const bridgeSigned = bridgeDue.map((c) => signCommand(signer, runner, c));
-  const settings = await client.query<{ operate_enabled: boolean }>("SELECT (watch_enabled AND operate_enabled) AS operate_enabled FROM engine_bridge_settings WHERE account_id = $1", [runner.accountId]);
+  const settings = await client.query<{ operate_enabled: boolean; watch_enabled: boolean }>("SELECT (watch_enabled AND operate_enabled) AS operate_enabled, watch_enabled FROM engine_bridge_settings WHERE account_id = $1", [runner.accountId]);
   const operate = settings.rows[0]?.operate_enabled === true;
+  // A watch needs the watch switch, a ticked repo and a runner that knows the kind; none of it needs operate (ruling: the one kind exempt from that gate).
+  const watchRepos = settings.rows[0]?.watch_enabled === true && commandSendableTo("watch", helloProtocol) && named.length > 0
+    ? (await client.query<{ repo_id: string }>("SELECT repo_id FROM engine_bridge_repos WHERE account_id = $1 AND repo_id = ANY ($2::uuid[])", [runner.accountId, named.map((r) => r.id)])).rows.map((r) => r.repo_id)
+    : [];
   const halts = await readHaltStates(client, named.map((r) => r.id));
   const controls = named.map((r) => ({ repo_gh_id: r.gh_repo_id, halt_epoch: halts.get(r.id)!.halt_epoch, halted: halts.get(r.id)!.halted, operate_enabled: operate }));
   // Operate off holds back every command, as a halt holds back the start-like ones: fail closed, nothing is signed.
@@ -98,7 +104,7 @@ async function pullInside(client: PoolClient, runner: VerifiedRunner, message: E
   const markBridgeDelivered = async (): Promise<void> => {
     if (bridgeDue.length > 0) await client.query(`UPDATE engine_commands SET state = 'delivered', delivered_at = now() WHERE id = ANY ($1::uuid[]) AND state = 'pending'`, [bridgeDue.map((c) => c.id)]);
   };
-  if (named.length === 0 || !operate) {
+  if (named.length === 0 || (!operate && watchRepos.length === 0)) {
     await markBridgeDelivered();
     return { commands: bridgeSigned, controls, allowed_repos: allowed };
   }
@@ -114,10 +120,12 @@ async function pullInside(client: PoolClient, runner: VerifiedRunner, message: E
       WHERE c.runner_id = $1 AND c.state = 'pending' AND c.expires_at > now()
         AND NOT (c.kind = ANY ($4::text[]) AND (c.repo_id = ANY ($5::uuid[]) OR c.halt_epoch_at_issue < w.halt_epoch))
         AND c.kind <> ALL ($7::text[])
+        AND (c.kind <> 'watch' OR c.repo_id = ANY ($9::uuid[]))
+        AND ($10::boolean OR c.kind = 'watch')
       ORDER BY c.command_seq, c.issued_at, c.id
       LIMIT $8
       FOR UPDATE OF c`,
-    [runner.runnerId, named.map((r) => r.id), after, [...START_LIKE_KINDS], halted, epochs, [...BRIDGE_COMMAND_KINDS], 20 - bridgeSigned.length],
+    [runner.runnerId, named.map((r) => r.id), after, [...START_LIKE_KINDS], halted, epochs, [...BRIDGE_COMMAND_KINDS], 20 - bridgeSigned.length, watchRepos, operate],
   );
   const commands = [...bridgeSigned, ...due.rows.map((c) => signCommand(signer, runner, c))];
   await markBridgeDelivered();

@@ -101,7 +101,7 @@ export const engineCommandRoutes: RouteEntry[] = [
         const issued = await withTenant(ctx.pool, accountId, userId, async (client) => {
           const target = await findEngineTarget(client, accountId, repoId);
           if (target.status === "no_repo") throw new ApiError(404, "not_found", "no such repo");
-          if (target.status === "operate_off") throw new ApiError(409, "operate_off", "operate is not switched on");
+          if (target.status === "operate_off" || target.status === "watch_off" || target.status === "repo_not_enabled") throw new ApiError(409, "operate_off", "operate is not switched on");
           if (target.status === "not_connected") throw new ApiError(409, "engine_not_connected", "no engine is connected for this repo");
           // This is a plain read, so a halt committing between it and the insert leaves the value one epoch behind. For a tenant session (this one) the
           // trigger of migration 1034 overrides `haltEpoch` with the current epoch it reads under the controls row's lock, whatever is passed here, so
@@ -203,7 +203,7 @@ export const engineCommandRoutes: RouteEntry[] = [
                        ELSE state END AS state,
                   refusal, issued_by, issued_at, expires_at, delivered_at, acked_at, halt_epoch_at_issue
              FROM engine_commands WHERE repo_id = $1 AND account_id = $5
-              AND kind NOT IN ('bridge_enable', 'bridge_disable')
+              AND kind NOT IN ('bridge_enable', 'bridge_disable', 'watch')
               AND ($4::text IS NULL OR (kind = 'answer_ask' AND args ->> 'ask_id' = $4))
             ORDER BY issued_at DESC, command_seq DESC LIMIT $2`,
           [repoId, limit, NOT_CONFIRMED_AFTER_S, askId ?? null, accountId],

@@ -73,7 +73,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1", "watch_mode_v1"] as const;
 /** D#587 B-7b: a runner that lists it can receive signed sandbox commands on its claim reply and ack them on its next claim (sandboxCommands.ts). It gates no role and needs protocol 21. */
 export const SANDBOX_COMMAND_CAPABILITY = "sandbox_commands_v1" as const;
 /**
@@ -91,6 +91,11 @@ export const SURVEY_CAPABILITY = "survey_v1" as const;
 export const ENGINE_SESSION_CAPABILITY = "engine_session_v1" as const;
 export const MACHINE_LOGIN_CAPABILITY = "machine_login_v1" as const;
 export const REPO_TOKEN_REFRESH_CAPABILITY = "repo_token_refresh_v1" as const;
+/**
+ * D#845 watch mode: a runner that lists `watch_mode_v1` on its hello can keep on-demand events on its machine, send the slim status and the detail session. It gates no role. The cloud answers with
+ * `capabilities: ["watch_mode"]` on the hello reply (replies.ts) only to a runner that listed this, so a runner built before it, whose reply parse is strict, never sees the field.
+ */
+export const WATCH_MODE_HELLO_CAPABILITY = "watch_mode_v1" as const;
 /** The engine bridge: a runner that lists it sends engine events, pulls signed engine commands and asks for decisions (engineEvents.ts, engineCommands.ts). It gates no role. */
 export const ENGINE_BRIDGE_CAPABILITY = "engine_bridge_v1" as const;
 /** D#6 PUBLIC-MERGE PR2a: `plane_merge_v1` gates no role either. A runner that lists it can claim and execute a merge order (messages.ts, plane-merge-*). */
