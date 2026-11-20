@@ -29,7 +29,7 @@ Sources:
 - [`@fx/billing`](packages/billing.md) — Stripe test-mode billing.
 - [`@fx/partners`](packages/partners.md) — partner layer.
 - [`@fx/decisions`](packages/decisions.md) — decision-type catalogue, presets, and the pure `decide()` resolver.
-- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper, sandbox daemon, egress proxy), sandbox inventory and signed sandbox commands, and the machine onboarding shapes.
+- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge (including how `engine-bridge enable` finds the engine's checkout) and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper and its install plan, sandbox daemon and SDK adapter, egress proxy), the clone size watch, sandbox inventory and signed sandbox commands, and the machine onboarding shapes.
 - [`@fx/runtime`](packages/runtime.md) — model/runtime adapters.
 - [`@fx/model-router`](packages/model-router.md) — data-driven model routing, escalation, floors.
 - [`@fx/model-connection`](packages/model-connection.md) — customer bring-your-own-key model connections.
@@ -52,6 +52,6 @@ Sources:
 ## Cross-cutting
 
 - [Data model](data-model.md) — the tenant schema across all migrations.
-- [Security](security.md) — the tenancy, auth and RLS model, the engine bridge's trust rules, the device-code link flow, and the VM helper, microVM egress and signed sandbox commands.
+- [Security](security.md) — the tenancy, auth and RLS model, the engine bridge's trust rules (including checkout discovery), the device-code link flow, and the VM helper, microVM policy and egress and signed sandbox commands.
 - [Operations](operations.md) — running and operating this repo, including the CI jobs and the dormant merge-queue rollup switch.
 - Operator runbooks (hosted Postgres, billing, staging) are not part of this public tree.
