@@ -28,7 +28,8 @@ describe.skipIf(process.env.FX_REAL_WSL !== "1")("the WSL2 gate on a real WSL2 m
 
   it("clears a machine set up as the README says", async () => {
     const result = await clearWsl(facts(machine()));
-    expect(result.items.filter((item) => !item.ok)).toEqual([]);
+    // Code and detail in the message: the proof's summary shows only a few lines of a failure, and the code says which setting is wrong.
+    expect(result.items.filter((item) => !item.ok).map((item) => `${item.code}: ${item.detail}`)).toEqual([]);
     expect(result.cleared).toBe(true);
   });
 

@@ -56,6 +56,20 @@ jobs:
             Invoke-Expression $_ 2>&1 | Add-Content proof-out/windows.txt
           }
           Get-Content proof-out/windows.txt
+      - name: Check the settings reached the distribution
+        shell: wsl-bash -u root {0}
+        run: |
+          # A red gate row can mean the machine was not set up as the README says (this job's fault) or that the README's settings are not
+          # enough (the product's). Show the file and the registered binfmt entries, and stop here when the file itself is wrong, so the
+          # two cases are told apart before the proof runs.
+          echo "--- /etc/wsl.conf"; cat /etc/wsl.conf
+          echo "--- binfmt_misc"; ls -la /proc/sys/fs/binfmt_misc/ || true
+          for entry in /proc/sys/fs/binfmt_misc/WSLInterop*; do [ -e "$entry" ] && { echo "--- $entry"; cat "$entry"; }; done || true
+          echo "--- pid 1"; ps -o pid=,comm= -p 1 || true
+          for key in enabled appendWindowsPath; do
+            awk -v key="$key" '/^\[/ { section = tolower($0) } section == "[interop]" && tolower($0) ~ ("^[ \t]*" tolower(key) "[ \t]*=[ \t]*false") { ok = 1 } END { exit !ok }' /etc/wsl.conf \
+              || { echo "the job did not write [interop] $key=false to /etc/wsl.conf: this is the job's setup, not the runner's gate" >&2; exit 1; }
+          done
       - name: Copy the checkout onto the distribution's own file system
         shell: wsl-bash -u fxproof {0}
         run: |
