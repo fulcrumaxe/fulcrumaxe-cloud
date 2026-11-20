@@ -43,6 +43,7 @@ import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } fr
 import { createSandboxCommandReceiver } from "../daemon/sandboxCommands.js";
 import { createInventoryReporter, emptyInventorySource } from "../daemon/sandboxInventory.js";
 import { createBridgeApply, type EngineBridgeCommandOptions } from "./engineBridge.js";
+import { createHostLoadReporter } from "../daemon/hostLoad.js";
 import { startEngineBridge, type EngineBridge, type EngineBridgePorts } from "../engineBridge/daemon.js";
 import { createEventsUploader } from "../engineBridge/upload.js";
 import { createRunnerClient } from "../daemon/client.js";
@@ -57,7 +58,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -391,7 +392,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let cloudWatchMode = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
-    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid }), ...(readHostFacts()?.sandbox_engine === "microvm" ? { sandboxInventory: createInventoryReporter({ source: emptyInventorySource, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
+    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid }), ...(readHostFacts()?.sandbox_engine === "microvm" ? { sandboxInventory: createInventoryReporter({ source: emptyInventorySource, now: ctx.now }) } : {}),
+      // D#845 ON-1b: the machine's load rides the claim, but only for a build that advertises `project_setup_v1` (none does yet, so today the claim body is unchanged). No setup runs here yet: the count is 0.
+      ...((RUNNER_BUILD_CAPABILITIES as readonly string[]).includes(PROJECT_SETUP_CAPABILITY) ? { hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => 0, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
     const git = createGitPath({ platform: host.platform, pushLog, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });

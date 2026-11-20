@@ -149,7 +149,8 @@ describe('migration 0783: runner_facts, runner_settings, runner_facts_record and
         expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE roleid = $1::regrole OR member = $1::regrole`, [role])).rowCount, role).toBe(0);
         const owned = await admin.query<{ sig: string }>(`SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.proowner = $1::regrole`, [role]);
         // 1040 (D#587 B-7a) gives the facts role the sandbox inventory functions too; the settings role still owns exactly one.
-        const expected = role === FACTS_ROLE ? [fn, 'runner_sandbox_facts_record(integer,integer,integer,text[])', 'runner_sandboxes_record(jsonb)'] : [fn];
+        // 1045 (D#845 ON-1b) adds runner_host_load_record to the facts role.
+        const expected = role === FACTS_ROLE ? [fn, 'runner_sandbox_facts_record(integer,integer,integer,text[])', 'runner_sandboxes_record(jsonb)', 'runner_host_load_record(integer,integer,integer)'] : [fn];
         expect(owned.rows.map((r) => r.sig).sort(), role).toEqual(expected.sort());
         expect((await admin.query(`SELECT has_schema_privilege($1, 'public', 'CREATE') AS ok`, [role])).rows[0].ok, role).toBe(false);
       }
