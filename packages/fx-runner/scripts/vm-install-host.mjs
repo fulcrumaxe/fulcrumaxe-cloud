@@ -5,6 +5,8 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { cpus, userInfo } from "node:os";
 
+import { summarizeSnapshots } from "./vm-snapshots.mjs";
+
 const SUDO_PLACES = ["/run/wrappers/bin/sudo", "/usr/bin/sudo", "/bin/sudo"];
 const MAX_STDIN = 1 << 20;
 /** The root side starts programs with exactly this PATH and no other variable: nothing inherited, so no LD_* and no caller-chosen search path (CWE-426). */
@@ -61,7 +63,7 @@ const existingAmong = (paths) =>
     }
   });
 
-/** @param {{ selfCommand: string[], tuf: unknown, confirm: (q: string) => Promise<boolean>, buildRootArgv: Function, buildRemoveArgv?: Function, hostRefusal: Function, hostRefusalRemove?: Function }} deps (the functions come from src/vm, handed in by bin/fx-runner.mjs) */
+/** @param {{ selfCommand: string[], tuf: unknown, confirm: (q: string) => Promise<boolean>, stateDir?: string, createHelper?: (socket: string) => { list(): Promise<string[]>, destroy(id: string): Promise<void> }, helperSocket?: string, snapshotDirOf?: (stateDir: string) => string | undefined, buildRootArgv: Function, buildRemoveArgv?: Function, hostRefusal: Function, hostRefusalRemove?: Function }} deps (the functions come from src/vm, handed in by bin/fx-runner.mjs) */
 export function createVmInstallHosts(deps) {
   const install = {
     nodeArch: process.arch,
@@ -98,11 +100,21 @@ export function createVmInstallHosts(deps) {
       }),
     ops: { run: runFixed },
   };
+  const helperOf = () => {
+    if (deps.createHelper === undefined || deps.helperSocket === undefined) throw new Error("no helper client was given");
+    return deps.createHelper(deps.helperSocket);
+  };
   const uninstall = {
     confirm: deps.confirm,
     hostRefusal: deps.hostRefusalRemove,
     facts: async (paths) => ({ runner: { user: userInfo().username, uid: process.getuid?.() ?? 0 }, existing: existingAmong(paths) }),
     root: { run: (request) => runRoot(deps.buildRemoveArgv, deps.selfCommand, request) },
+    // Both are asked as the runner user, before sudo: the helper's socket admits the runner and nobody else, and snapshot_dir is the runner's own.
+    helper: { list: () => helperOf().list(), destroy: (id) => helperOf().destroy(id) },
+    snapshots: async () => {
+      const dir = deps.stateDir === undefined ? undefined : deps.snapshotDirOf?.(deps.stateDir);
+      return { dir, summary: dir === undefined ? undefined : summarizeSnapshots(dir) };
+    },
   };
   return { install, root, uninstall };
 }

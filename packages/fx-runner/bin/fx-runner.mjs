@@ -31,6 +31,9 @@ import { vmBuildHost } from "../scripts/vm-host.mjs";
 import { vmHostFacts } from "../scripts/vm-facts.mjs";
 import { createVmInstallHosts } from "../scripts/vm-install-host.mjs";
 import { buildRootArgv } from "../src/vm/install.js";
+import { createHelperSandboxes } from "../src/vm/helperSandboxes.js";
+import { socketPath } from "../src/vm/unitRender.js";
+import { loadSettings } from "../src/runnerSettings.js";
 import { hostRefusal } from "../src/vm/rootApply.js";
 import { buildRemoveArgv } from "../src/vm/uninstall.js";
 import { uninstallPathActions } from "../src/vm/uninstallActions.js";
@@ -292,6 +295,13 @@ const vmTuf = () => (tufClient ??= new TufClient({ stateDir: stateDirFor(process
 // One lazy port shared by the install hosts and the doctor facts; neither builds the client until it calls a method.
 const vmTufPort = { listTargets: (...args) => vmTuf().listTargets(...args), fetchTarget: (...args) => vmTuf().fetchTarget(...args) };
 const vmInstallHosts = createVmInstallHosts({
+  // Read when uninstall runs, not at start: it needs a home directory, and the verify server has none.
+  get stateDir() {
+    return stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME);
+  },
+  createHelper: createHelperSandboxes,
+  helperSocket: socketPath(),
+  snapshotDirOf: (dir) => loadSettings(dir).microvm?.snapshotDir,
   buildRootArgv,
   buildRemoveArgv,
   hostRefusalRemove: (actions) => hostRefusal(uninstallPathActions(actions), "", "vm uninstall"),
