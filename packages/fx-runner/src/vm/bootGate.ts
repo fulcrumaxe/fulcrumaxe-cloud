@@ -23,12 +23,18 @@ const SHA256 = /^[0-9a-f]{64}$/;
 /** The part of the target path after the release tag: `rootfs-amd64-<sha256>`. */
 export const vmAssetName = (kind: VmKind, arch: Arch, sha256: string): string => `${kind}-${arch}-${sha256}`;
 
+/** A listed `vm-<template>-<id12>/<name>` path, split. The one definition of that shape: the gate and the boot facts both read it here. */
+export function parseVmTarget(listedPath: string): { readonly template: string; readonly id: string; readonly name: string } | undefined {
+  const named = listedPath.match(/^vm-([a-z][a-z0-9-]*)-([0-9a-f]{12})\/([^/]+)$/);
+  return named === null ? undefined : { template: named[1]!, id: named[2]!, name: named[3]! };
+}
+
 /** The kinds whose digest is not listed for this template and architecture. Empty means the whole set may boot. */
 export function unlistedKinds(listedPaths: readonly string[], template: string, arch: Arch, digests: BootDigests): VmKind[] {
   const listed = new Set<string>();
   for (const listedPath of listedPaths) {
-    const named = listedPath.match(/^vm-([a-z][a-z0-9-]*)-[0-9a-f]{12}\/([^/]+)$/);
-    if (named !== null && named[1] === template) listed.add(named[2]!);
+    const named = parseVmTarget(listedPath);
+    if (named !== undefined && named.template === template) listed.add(named.name);
   }
   return VM_KINDS.filter((kind) => !SHA256.test(digests[kind]) || !listed.has(vmAssetName(kind, arch, digests[kind])));
 }

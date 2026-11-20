@@ -1,7 +1,6 @@
-import { readFileSync } from "node:fs";
-import { describe } from "vitest";
-import type { BootDigests, TargetListing } from "../../src/vm/bootGate.js";
-import type { Arch } from "../../src/vm/lock.js";
+import { afterAll, beforeAll, describe } from "vitest";
+import { createBootFactsSource } from "../../src/vm/bootFacts.js";
+import { signRelease, type SignedRelease } from "./helpers/signedRelease.js";
 import { startEgressProxy } from "../../src/vm/egress/proxy.js";
 import { startReverseEndpoint } from "../../src/vm/egress/reverse.js";
 import { createHelperClient } from "../../src/vm/sandboxd/helperClient.js";
@@ -21,22 +20,33 @@ import { describeEngineContract, type Difference } from "../sandbox/engineContra
  * and skips):
  *   FX_VM_HELPER_SOCKET   the root helper's Unix socket
  *   FX_VM_TEMPLATE        the template name the daemon creates sandboxes from
- *   FX_VM_BOOT_FACTS      a JSON file: { "arch": "amd64"|"arm64", "digests": { kernel, rootfs, agent }, "listing": <the verified targets listing> }
+ *   FX_VM_KERNEL, FX_VM_ROOTFS, FX_VM_AGENT   the three disks the dispatched run built and installed for that template
+ * The boot facts are the production source (`createBootFactsSource`) over a signed TEST release of those disks, made here with throwaway keys and a test root and
+ * served over TLS to the real TUF client; the installed manifest is the pair of digests of the same two files. The production root is never used, and nothing
+ * here is a way to boot an unsigned image: the gate still checks the listing.
  * It runs as the ordinary user, never as root. Not run in the unit job; running it on a dispatched host is a separate step.
  */
-const env = { helper: process.env["FX_VM_HELPER_SOCKET"], template: process.env["FX_VM_TEMPLATE"], facts: process.env["FX_VM_BOOT_FACTS"] };
-const ready = env.helper !== undefined && env.template !== undefined && env.facts !== undefined && process.geteuid !== undefined && process.geteuid() !== 0;
-if (!ready) console.warn("microvmSandbox.real: FX_VM_HELPER_SOCKET, FX_VM_TEMPLATE and FX_VM_BOOT_FACTS are not all set (or this is root); the real-VM engine suite is skipped");
+const env = { helper: process.env["FX_VM_HELPER_SOCKET"], template: process.env["FX_VM_TEMPLATE"], kernel: process.env["FX_VM_KERNEL"], rootfs: process.env["FX_VM_ROOTFS"], agent: process.env["FX_VM_AGENT"] };
+const ready = env.helper !== undefined && env.template !== undefined && env.kernel !== undefined && env.rootfs !== undefined && env.agent !== undefined && process.geteuid !== undefined && process.geteuid() !== 0;
+if (!ready) console.warn("microvmSandbox.real: FX_VM_HELPER_SOCKET, FX_VM_TEMPLATE, FX_VM_KERNEL, FX_VM_ROOTFS and FX_VM_AGENT are not all set (or this is root); the real-VM engine suite is skipped");
 
 /** The same differences as the daemon-fake subject: the VM is real, the behaviour the port promises is not. */
 const MICROVM_DIFFERENCES: ReadonlySet<Difference> = new Set<Difference>(["publishCalls", "idleState", "usageFigures", "lossShape", "jobEnv"]);
 
 describe.skipIf(!ready)("microVM engine (real VMs, the production daemon and the real egress policy port)", () => {
-  const facts = ready ? (JSON.parse(readFileSync(env.facts as string, "utf8")) as { arch: Arch; digests: BootDigests; listing: TargetListing }) : undefined;
   const uid = process.geteuid?.() ?? -1;
-  const daemon = ready
-    ? createProductionSandboxd({ helperSocket: env.helper as string, host: { euid: uid, platform: process.platform }, boot: { listTargets: async () => (facts as NonNullable<typeof facts>).listing, facts: () => ({ arch: (facts as NonNullable<typeof facts>).arch, digests: (facts as NonNullable<typeof facts>).digests }) } })
-    : undefined;
+  let daemon: ReturnType<typeof createProductionSandboxd> | undefined;
+  let signed: SignedRelease | undefined;
+  beforeAll(async () => {
+    const arch = process.arch === "arm64" ? "arm64" : "amd64";
+    signed = await signRelease({ template: env.template as string, files: [{ kind: "kernel", arch, file: env.kernel as string }, { kind: "rootfs", arch, file: env.rootfs as string }, { kind: "agent", arch, file: env.agent as string }] });
+    const d = signed.digests(arch);
+    const boot = createBootFactsSource({ tuf: signed.client, template: env.template as string, nodeArch: process.arch, readManifest: () => JSON.stringify({ [env.template as string]: { kernel: d.kernel, rootfs: d.rootfs } }), now: Date.now });
+    daemon = createProductionSandboxd({ helperSocket: env.helper as string, host: { euid: uid, platform: process.platform }, boot });
+  });
+  afterAll(async () => {
+    await signed?.close();
+  });
   describeEngineContract(
     "microVM engine (real VMs)",
     (runtime) => {

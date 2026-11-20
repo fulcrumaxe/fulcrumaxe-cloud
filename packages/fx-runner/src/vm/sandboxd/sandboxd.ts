@@ -41,7 +41,7 @@ export interface SandboxdDeps {
   /** `process.geteuid()`; undefined where there is none. */
   euid: number | undefined;
   helper: Helper;
-  boot: { listTargets(): Promise<TargetListing>; facts(template: string): { arch: Arch; digests: BootDigests } };
+  boot: { listTargets(): Promise<TargetListing>; facts(template: string): { arch: Arch; digests: BootDigests } | Promise<{ arch: Arch; digests: BootDigests }> };
   /** What an O_PATH|O_NOFOLLOW fd of the directory the helper named shows (a symlink is reported as one); undefined when it is not there. */
   inspectDir(dir: string): DirFacts | undefined;
   /** True when the directory holds a `v.sock_<port>` entry the runner does not own (or one that cannot be examined): the sandbox is then not started. */
@@ -223,7 +223,7 @@ export class Sandboxd {
   /** The signed-metadata gate first, then the helper: a digest that is not listed never reaches `prepare`. */
   private async bring(rec: Record_, from?: SnapshotMeta): Promise<void> {
     const { name, params } = rec;
-    const { arch, digests } = this.deps.boot.facts(params.template);
+    const { arch, digests } = await this.deps.boot.facts(params.template);
     assertBootable(await this.deps.boot.listTargets(), params.template, arch, digests);
     this.registered.add(name);
     try {

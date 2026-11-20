@@ -3,6 +3,7 @@
  * bin edge as the runner's own user and never through root, so a test hands in facts and nothing here touches the machine. Each check is its own
  * PASS, WARN or FAIL line with the fix in plain words. A fact the runner's user could not read is a WARN that says why, never a PASS.
  */
+import { describeBootFacts, type BootFactsResult } from "./bootFacts.js";
 import { HELPER_GROUP, LAYOUT, MODES } from "./installPlan.js";
 import { UNIT_NAME } from "./rootActions.js";
 
@@ -33,6 +34,8 @@ export interface VmInstallFacts {
   /** `undefined` where the group database could not be read. `active`: this session already holds the group. */
   readonly group: { readonly user: string; readonly exists: boolean | undefined; readonly member: boolean | undefined; readonly active: boolean | undefined };
   readonly kvm: Presence;
+  /** What the boot facts answered for the installed template, from the same listing as `signed`. Left out where it was not asked. */
+  readonly image?: BootFactsResult | undefined;
 }
 
 export interface VmCheck {
@@ -58,8 +61,16 @@ function nothingInstalled(f: VmInstallFacts): boolean {
   return f.unit === "absent" && f.config.state === "absent" && f.binary.state === "absent" && f.group.exists === false;
 }
 
-export function vmInstallChecks(f: VmInstallFacts): VmCheck[] {
-  if (nothingInstalled(f)) return [{ level: "INFO", label: "VM helper", detail: "not installed. VM mode is optional; to use it, run: fx-runner vm install" }];
+/** The "VM image" line; `microvm` is whether the person asked for the microVM engine, which turns a refusal from a warning into a failure. */
+function imageCheck(f: VmInstallFacts, microvm: boolean): VmCheck[] {
+  if (f.image === undefined) return [];
+  const d = describeBootFacts(f.image, microvm);
+  return [{ level: d.level, label: "VM image", detail: d.detail }];
+}
+
+export function vmInstallChecks(f: VmInstallFacts, options: { readonly microvm?: boolean } = {}): VmCheck[] {
+  const microvm = options.microvm === true;
+  if (nothingInstalled(f)) return [{ level: "INFO", label: "VM helper", detail: "not installed. VM mode is optional; to use it, run: fx-runner vm install" }, ...(microvm ? imageCheck(f, true) : [])];
   const out: VmCheck[] = [];
   const reinstall = "run: fx-runner vm install";
   const unitLabel = "VM unit";
@@ -96,5 +107,6 @@ export function vmInstallChecks(f: VmInstallFacts): VmCheck[] {
   if (f.kvm === "present") out.push({ level: "PASS", label: kvmLabel, detail: "/dev/kvm is there and this user can use it" });
   else if (f.kvm === "absent") out.push({ level: "FAIL", label: kvmLabel, detail: "/dev/kvm does not exist: this machine cannot run VMs. Turn on virtualization in the firmware settings, or use the default sandbox" });
   else out.push({ level: "WARN", label: kvmLabel, detail: "/dev/kvm exists but this user cannot read and write it, or it could not be examined. Add yourself to the kvm group (sudo usermod -aG kvm <you>) and log in again" });
+  out.push(...imageCheck(f, microvm));
   return out;
 }

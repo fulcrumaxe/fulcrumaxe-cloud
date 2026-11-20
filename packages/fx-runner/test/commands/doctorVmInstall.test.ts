@@ -9,6 +9,7 @@ import type { CommandContext } from "../../src/context.js";
 import { doctorCommand, type DoctorHost } from "../../src/commands/doctor.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
+import { setSetting } from "../../src/runnerSettings.js";
 import type { ScopeSupport } from "../../src/sandbox/jobLimits.js";
 import type { VmInstallFacts } from "../../src/vm/doctorChecks.js";
 import { makeFake, type Fake } from "../engines/claude/harness.js";
@@ -76,6 +77,19 @@ describe("doctor: the installed helper's checks", () => {
     const warn = await withInstall(async () => ({ ...full, kvm: "unreadable" }));
     expect(levelOf(warn.out, "VM KVM")).toBe("WARN");
     expect(warn.code).toBe(0);
+  });
+
+  it("prints the VM image line, and sandbox_engine=microvm turns its refusal from a WARN into a FAIL", async () => {
+    const refused = { ...full, image: { ok: false, code: "image_not_listed" } } as const;
+    const warn = await withInstall(async () => refused);
+    expect(levelOf(warn.out, "VM image")).toBe("WARN");
+    expect(warn.code).toBe(0);
+    expect(levelOf((await withInstall(async () => ({ ...full, image: { ok: true, release: "vm-fx-agent-0123456789ab", arch: "amd64", digests: { kernel: "1".repeat(64), rootfs: "2".repeat(64), agent: "3".repeat(64) } } }))).out, "VM image")).toBe("PASS");
+    setSetting(stateDir, "sandbox_engine", "microvm");
+    const fail = await withInstall(async () => refused);
+    expect(levelOf(fail.out, "VM image")).toBe("FAIL");
+    expect(fail.out).toContain("the installed image is not the current signed release: run fx-runner vm install");
+    expect(fail.code).toBe(1);
   });
 
   it("is silent when the host supplies no install facts, and prints neither null nor undefined", async () => {
