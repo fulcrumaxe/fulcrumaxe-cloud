@@ -6,13 +6,14 @@
 import { CliError } from "./cliError.js";
 import { CODE_ARGV_REFUSED } from "./codeSource.js";
 import { stateDirFor } from "./config.js";
-import type { CommandContext, Flags } from "./context.js";
+import type { CommandContext, DeviceTerminal, Flags } from "./context.js";
 import { assistantCommand } from "./commands/assistant.js";
 import { attachCommand } from "./commands/attach.js";
 import { drainCommand } from "./commands/drain.js";
 import { claimingCommand, runnerResetFootprintsCommand, runnerSettingCommand, runnerUnsetCommand } from "./commands/claiming.js";
 import { SETTING_KEYS } from "./runnerSettings.js";
 import { registerCommand } from "./commands/register.js";
+import { setupCommand, type SetupHost } from "./commands/setup.js";
 import { loadBypass, requireUsable } from "./protectionBypass.js";
 import { credentialsCommand } from "./commands/credentials.js";
 import type { BuildHost } from "./vm/buildImage.js";
@@ -71,6 +72,8 @@ export interface CliIo {
   doctorHost?: DoctorHost;
   /** What `service` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
   serviceHost?: ServiceHost;
+  /** What `setup` needs beyond the doctor and service hosts: the terminal (Ctrl-C, the Enter after an expired code) and a runner for the service start. Only `bin/fx-runner.mjs` supplies it. */
+  setupHost?: { terminal: DeviceTerminal; run: SetupHost["run"] };
   /** What `vm build-image` needs from the machine (crane, tar and mke2fs, started by name). Only `bin/fx-runner.mjs` supplies it. */
   vmHost?: BuildHost;
   /** What `vm install` and its root side need from the machine (host facts, the one root call). Only `bin/fx-runner.mjs` supplies it. */
@@ -93,6 +96,9 @@ Commands:
   register (--code-stdin | --code-file <path>) [--name <name>] --credential-mode <subscription|api_key> --cloud-url <url>
                      Register this machine as a runner. The code (fxrr_) or provisioning token (fxrp_) comes from the workspace; read it from standard input or
                      from a file at mode 0600 that you own. --name sets the runner's name. --code <value> is refused because it would show in the process list.
+  setup --cloud-url <url>
+                     Set this machine up from nothing: check it (every failed check is printed with its fix), show a short code to type at <url>/link while signed in, then install and start the runner service.
+                     "register --cloud-url <url>" with no code does the code step alone. Press Ctrl-C to cancel; nothing is stored until you approve the machine.
   status             Show this machine's registration. Makes no network call.
   run                Claim and run jobs from the cloud on this machine until stopped (Ctrl-C).
   attach [<run|short id>|--latest] [--take-over]
@@ -150,6 +156,7 @@ Commands:
 /** Which flags each command takes, and which of them are switches. */
 const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: readonly string[]; positionals?: number }>> = {
   register: { flags: ["code-file", "name", "credential-mode", "cloud-url"], switches: ["code-stdin"] },
+  setup: { flags: ["cloud-url"], switches: [] },
   status: { flags: [], switches: [] },
   run: { flags: [], switches: [] },
   revoke: { flags: ["reason"], switches: ["local"] },
@@ -245,9 +252,10 @@ export async function runCli(io: CliIo): Promise<number> {
       uid: io.uid,
       hostname: io.hostname,
       sleep: io.sleep,
+      terminal: io.setupHost?.terminal,
     };
     // A bypass file that cannot be used stops a command that calls the cloud before any request; `doctor` reports it instead.
-    if (command === "register" || command === "revoke" || command === "run" || command === "assistant" || (command === "engine-bridge" && positionals0(parsed) === "enable")) requireUsable(ctx.bypass);
+    if (command === "register" || command === "setup" || command === "revoke" || command === "run" || command === "assistant" || (command === "engine-bridge" && positionals0(parsed) === "enable")) requireUsable(ctx.bypass);
     // Its words are never echoed or parsed as options: one of them could be a key typed in the wrong place.
     if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret);
     if (command === "vm") {
@@ -256,6 +264,10 @@ export async function runCli(io: CliIo): Promise<number> {
     }
     const { flags, positionals } = parsed!;
     if (command === "register") return await registerCommand(flags, ctx);
+    if (command === "setup") {
+      if (io.setupHost === undefined || io.doctorHost === undefined || io.serviceHost === undefined) throw new CliError("setup is only available from the fx-runner program");
+      return await setupCommand(flags, ctx, { doctor: io.doctorHost, service: io.serviceHost, run: io.setupHost.run });
+    }
     if (command === "revoke") return await revokeCommand(flags, ctx);
     if (command === "run") {
       if (io.host === undefined) throw new CliError("run is only available from the fx-runner program");

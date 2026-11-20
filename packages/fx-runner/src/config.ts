@@ -62,6 +62,11 @@ export function writePrivateFile(dir: string, name: string, text: string): void 
   }
 }
 
+/** Removes `dir/name` (the entry itself, never what a link points at); nothing happens when it is not there. Used to take back a file this run wrote. */
+export function removePrivateFile(dir: string, name: string): void {
+  rmSync(path.join(dir, name), { force: true });
+}
+
 /** The text of `dir/name`, or undefined when it does not exist. A link, a non-file or a file others can read is refused. */
 export function readPrivateFile(dir: string, name: string): string | undefined {
   const target = path.join(dir, name);

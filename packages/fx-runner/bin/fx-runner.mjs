@@ -311,6 +311,7 @@ const vmInstallHosts = createVmInstallHosts({
   confirm: async (question) => /^y(es)?$/i.test((await askOnTerminal(process.stdin, (text) => process.stdout.write(text), question, 120000)) ?? "n"),
 });
 
+let sigint; // the Ctrl-C listener `setup` installs and releases (see setupHost.terminal)
 runCli({
   vmInstallHosts,
   updateHost,
@@ -375,6 +376,28 @@ runCli({
   },
   doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), vmInstall: createVmInstallFacts({ tuf: vmTufPort }) },
   vmHost: vmBuildHost,
+  // D#845 ON-3: `setup` and a code-less `register`. Ctrl-C is listened for only once one of them asks (every other command keeps the default), the one question is read from the
+  // terminal only (a pipe or a timeout is no answer), and the service start is two fixed programs with a fixed environment, no shell.
+  setupHost: {
+    terminal: {
+      signal: () => {
+        const controller = new AbortController();
+        sigint = () => controller.abort();
+        process.once("SIGINT", sigint);
+        return controller.signal;
+      },
+      release: () => {
+        if (sigint !== undefined) process.removeListener("SIGINT", sigint);
+        sigint = undefined;
+      },
+      askEnter: (question, signal) => askOnTerminal(process.stdin, (text) => process.stdout.write(text), question, 15 * 60_000, signal),
+    },
+    run: async (argv) => {
+      const env = { PATH: "/usr/bin:/bin:/run/current-system/sw/bin:/usr/local/bin", HOME: process.env.HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS };
+      const result = spawnSync(argv[0], argv.slice(1), { env: Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)), stdio: "ignore", timeout: 60000 });
+      return result.error !== undefined || result.status === null ? -1 : result.status;
+    },
+  },
   // D#749 V2c-2b: the verify browser. The MCP server gets the process's own streams and ONLY the variables the browser may inherit (the driver allowlists again); `verify-login` gets a headed browser and the terminal.
   verifyServerHost: {
     input: process.stdin,

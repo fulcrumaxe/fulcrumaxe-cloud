@@ -4,15 +4,17 @@
  * Generates the runner's key on this machine, signs the registration with it and, once the cloud accepts, saves the key
  * (0600) and the registration. The request body holds the code and the public JWK only.
  */
-import { CredentialMode, RUNNER_NAME_MAX, RegisterMessage, RegisterResponse, RevokeMessage, isValidRunnerName } from "@fulcrumaxe/runner-protocol";
+import { CredentialMode, RUNNER_NAME_MAX, RegisterMessage, RegisterResponse, isValidRunnerName } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "../cliError.js";
 import { readRegistrationCode } from "../codeSource.js";
 import { requireUsable } from "../protectionBypass.js";
-import { REGISTER_PATH, REVOKE_PATH, errorCodeOf, normaliseOrigin, refusalError, signedPost } from "../cloud.js";
+import { REGISTER_PATH, errorCodeOf, normaliseOrigin, refusalError, signedPost } from "../cloud.js";
+import { deviceRegister } from "../deviceRegister.js";
+import { existingRegistrationError, selfRevoke } from "../registration.js";
 import { loadRegistration, saveRegistration, withRegisterLock } from "../config.js";
 import type { CommandContext, Flags } from "../context.js";
 import { defaultRunnerName, readHostname } from "../hostFacts.js";
-import { generateRunnerKey, saveRunnerKey, type RunnerKey } from "../keys.js";
+import { generateRunnerKey, saveRunnerKey } from "../keys.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -28,21 +30,14 @@ function checkRunnerName(name: string): string {
   return name;
 }
 
-/** Revokes the runner that `key` just registered, signed with that key. True once the cloud says it is revoked. */
-async function selfRevoke(origin: string, key: RunnerKey, ctx: CommandContext, reason: string): Promise<boolean> {
-  try {
-    const body = RevokeMessage.parse({ reason });
-    const reply = await signedPost({ origin, path: REVOKE_PATH, body, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
-    const revoked = (reply.body as { revoked?: unknown } | undefined)?.revoked === true;
-    // 503 leases_not_failed also means the runner is revoked (the cloud could not yet stop its jobs, and a new runner has none).
-    return revoked && (reply.status === 200 || (reply.status === 503 && errorCodeOf(reply.body) === "leases_not_failed"));
-  } catch {
-    // fx-swallow-ok: the caller reports that the revoke did not happen, with the runner id, so an owner can do it
-    return false;
-  }
-}
-
 export async function registerCommand(flags: Flags, ctx: CommandContext): Promise<number> {
+  // D#845 ON-3: with no code source and none of the code's own options the machine asks to be linked by the device flow (setup, without the checks and the service).
+  // A command line that names a mode or a name but no code is a code registration with its code missing, and says so as before.
+  if (!flags.has("code-stdin") && !flags.has("code-file") && !flags.has("credential-mode") && !flags.has("name")) {
+    const result = await deviceRegister(ctx, { origin: normaliseOrigin(stringFlag(flags, "cloud-url")), kvm: undefined });
+    ctx.out(`Registered runner ${result.runnerId} (${result.mode}) in account ${result.accountId}; if that is not the account you meant, run: fx-runner revoke. The key is saved under ${ctx.stateDir}.`);
+    return 0;
+  }
   const code = await readRegistrationCode(flags, ctx);
   const mode = CredentialMode.safeParse(stringFlag(flags, "credential-mode"));
   if (!mode.success) throw new CliError("--credential-mode must be subscription or api_key", 2);
@@ -60,14 +55,7 @@ export async function registerCommand(flags: Flags, ctx: CommandContext): Promis
   // the save one step, so two runs started together cannot both register.
   return withRegisterLock(ctx.stateDir, ctx.now, async () => {
     const existing = loadRegistration(ctx.stateDir);
-    if (existing) {
-      const ways = "run: fx-runner revoke, then register again (if the cloud no longer accepts this machine's key, such as an expired one, run: fx-runner revoke --local)";
-      throw new CliError(
-        existing.credential_mode === "subscription" || mode.data === "subscription"
-          ? `this machine already holds a runner registration, and a subscription login is never shared between accounts; ${ways}`
-          : `this machine already holds a runner registration; ${ways}`,
-      );
-    }
+    if (existing) throw existingRegistrationError(existing, mode.data);
 
     const reply = await signedPost({ origin, path: REGISTER_PATH, body: message.data, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     // A cloud that predates runner names refuses the unknown `name` key as an invalid message. The name was checked against the same rule here, so

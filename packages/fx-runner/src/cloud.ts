@@ -98,6 +98,14 @@ export function signedPost(input: SignedPost): Promise<CloudReply> {
 }
 
 /**
+ * D#845 ON-3: one POST with no signature, for `device/start` (its body carries a proof of the key instead). Everything else is as for a signed POST:
+ * no redirect, a timeout, a capped reply, the bypass secret sent only to `origin`.
+ */
+export function unsignedPost(input: Omit<SignedPost, "key" | "now">): Promise<CloudReply> {
+  return signedRequest("POST", JSON.stringify(input.body), { "content-type": "application/json" }, input);
+}
+
+/**
  * D#6 RUNNER-WAKE: one signed GET with an empty body, for the wake check. The signature is the same as every other runner request (method, full
  * URI, digest of the empty body). `headers` are the route's own (the wake token and the Accept), sent only to `origin` like the rest.
  */
@@ -105,17 +113,20 @@ export function signedGet(input: Omit<SignedPost, "body"> & { headers: Record<st
   return signedRequest("GET", "", input.headers, input);
 }
 
-async function signedRequest(method: "GET" | "POST", text: string, extra: Record<string, string>, input: Omit<SignedPost, "body">): Promise<CloudReply> {
+async function signedRequest(method: "GET" | "POST", text: string, extra: Record<string, string>, input: Omit<SignedPost, "body" | "key" | "now"> & { key?: RunnerKey; now?: Date }): Promise<CloudReply> {
   const url = `${input.origin}${input.path}`;
-  const headers = signRequest({
-    method,
-    url,
-    body: text,
-    privateKey: input.key.privateKey,
-    keyid: input.key.jkt,
-    nonce: randomBytes(18).toString("base64url"),
-    created: Math.floor(input.now.getTime() / 1000),
-  });
+  const headers =
+    input.key === undefined || input.now === undefined
+      ? {}
+      : signRequest({
+          method,
+          url,
+          body: text,
+          privateKey: input.key.privateKey,
+          keyid: input.key.jkt,
+          nonce: randomBytes(18).toString("base64url"),
+          created: Math.floor(input.now.getTime() / 1000),
+        });
   let response: Response;
   try {
     response = await input.fetchFn(url, {
