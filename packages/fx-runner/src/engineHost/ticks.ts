@@ -289,6 +289,8 @@ export function createTicker(deps: TickerDeps): Ticker {
       }
       return;
     }
+    // The bridge applies a `watch` itself (commands.ts) and never writes one to the inbox. One that reaches the ticker is refused with the fixed code the bridge uses for a command that is not the engine's, whatever the gate says, and nothing runs.
+    if (cmd.kind === "watch") return refuse(c.name, "wrong_repo");
     if (c.seq <= lastSeq) return refuse(c.name, "seq_not_increasing");
     lastSeq = c.seq;
     if (cmd.repo_gh_id !== deps.repoGhId) return refuse(c.name, "wrong_repo");

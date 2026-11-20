@@ -11,10 +11,12 @@
  * Outcomes the engine left in `done/` are acked; a command the engine has not consumed 10 minutes after its expiry is acked `not_confirmed`.
  * A start-like command (`start_day`, `resume_loop`, `request_spawn`, `set_dial`) is also refused `halted` when the repo's control says halted, when a local stop is in force
  * (`localHalted`), or when its `halt_epoch` is below the control's.
+ * `watch` is the one kind that operate being off does not refuse (D#845 watch mode: it only changes how much the bridge uploads). It is applied to the bridge's own watch state (`onWatch`)
+ * and never written to the inbox, and its `until` must be ahead of the runner's own clock by no more than 600 s (`expired` otherwise).
  * The pull and the acks back off on their own: an ack the cloud will not take is kept and sent again later, and it never keeps the pull, or the halt controls in the
  * reply, from being handled. A permanent 400 from the cloud backs off at 300 seconds and drops nothing; other failures wait 2, 4, 8 ... 300 seconds. Log lines are fixed text.
  */
-import { EngineControl, JobSignatureError, MAX_CLOCK_SKEW_S, isBridgeCommandKind, verifyEngineCommand, type EngineCommand, type EngineCommandAck, type JobKeyring } from "@fulcrumaxe/runner-protocol";
+import { EngineControl, JobSignatureError, MAX_CLOCK_SKEW_S, isBridgeCommandKind, verifyEngineCommand, watchUntilAcceptable, type EngineCommand, type EngineCommandAck, type EngineCommandOf, type JobKeyring } from "@fulcrumaxe/runner-protocol";
 import { signedPost, type CloudReply, type SignedPost } from "../cloud.js";
 import type { Clock } from "../daemon/lease.js";
 import { Inbox, InboxRefused, notConfirmedDueMs } from "./inbox.js";
@@ -90,6 +92,11 @@ export interface InboxLoopDeps {
   reportHalt: (repoGhId: number, report: HaltReport) => void;
   /** Called after each successful pull, once its controls have been handled (the halt first). `haltFailed` is true when the pull asked for a halt and the kill path could not be completed: the hook must then withdraw the bridge state, never publish "operate on". A throw is ignored. */
   onPulled?: (repoGhId: number, haltFailed: boolean) => void;
+  /**
+   * Applies a `watch` command (D#845 watch mode) to the bridge's own watch state, never to the engine's inbox. It is judged like any command (signature, runner, repo, expiry, sequence),
+   * except that operate being off does not refuse it: a watch changes how much is uploaded and never acts on the engine. Absent, a `watch` is refused (`wrong_repo`) and nothing is applied.
+   */
+  onWatch?: (repoGhId: number, command: EngineCommandOf<"watch">) => void;
   /** Gets fixed text only. */
   log: (line: string) => void;
 }
@@ -139,9 +146,12 @@ export function judge(raw: unknown, deps: Pick<InboxLoopDeps, "keyring" | "runne
   if (isBridgeCommandKind(command.kind)) return { ok: false, refusal: "wrong_repo" };
   if (!bridged.has(command.repo_gh_id)) return { ok: false, refusal: "wrong_repo" };
   const control = controls.get(command.repo_gh_id);
-  if (control?.operate_enabled !== true) return { ok: false, refusal: "operate_off" };
-  if (START_LIKE.has(command.kind) && (control.halted || command.halt_epoch < control.halt_epoch || localStopOrUnknown(deps, command.repo_gh_id))) return { ok: false, refusal: "halted" };
+  // Only `watch` is exempt from the operate gate (it never acts on the engine); every other kind keeps it.
+  if (control?.operate_enabled !== true && command.kind !== "watch") return { ok: false, refusal: "operate_off" };
+  if (START_LIKE.has(command.kind) && control !== undefined && (control.halted || command.halt_epoch < control.halt_epoch || localStopOrUnknown(deps, command.repo_gh_id))) return { ok: false, refusal: "halted" };
   if (Date.parse(command.expires_at) <= now.getTime() || Date.parse(command.issued_at) > now.getTime() + MAX_CLOCK_SKEW_S * 1000) return { ok: false, refusal: "expired" };
+  // Against this runner's own clock, whatever the issuer's said: a watch that is over, or reaches further than ten minutes, is not applied.
+  if (command.kind === "watch" && !watchUntilAcceptable(command, now)) return { ok: false, refusal: "expired" };
   if (command.command_seq <= (lastSeq[String(command.repo_gh_id)] ?? 0) || Object.hasOwn(seen, command.command_id.toLowerCase())) return { ok: false, refusal: "seq_not_increasing" };
   return { ok: true, command };
 }
@@ -234,6 +244,26 @@ export class CommandPuller {
       const { command } = verdict;
       if (haltFailed.has(command.repo_gh_id)) {
         this.unsent.set(id, { name: null, ack: { outcome: "refused", refusal: "halted" } });
+        continue;
+      }
+      if (command.kind === "watch") {
+        // The bridge's own: applied to the watch state, recorded as seen like any command, and never written to an inbox (the engine's ticker would only refuse it).
+        if (this.deps.onWatch === undefined) {
+          this.unsent.set(id, { name: null, ack: { outcome: "refused", refusal: "wrong_repo" } });
+          continue;
+        }
+        try {
+          this.deps.onWatch(command.repo_gh_id, command);
+        } catch {
+          // fx-swallow-ok: the handler's error could name a path; nothing is applied and the command is acked refused with the one fixed reason
+          this.deps.log("engine-inbox: a watch could not be applied");
+          this.unsent.set(id, { name: null, ack: { outcome: "refused", refusal: "wrong_repo" } });
+          continue;
+        }
+        state.repos[String(command.repo_gh_id)] = command.command_seq;
+        state.seen[command.command_id.toLowerCase()] = this.deps.clock.now().getTime();
+        this.deps.inbox.saveState(state);
+        this.unsent.set(id, { name: null, ack: { outcome: "applied" } });
         continue;
       }
       try {

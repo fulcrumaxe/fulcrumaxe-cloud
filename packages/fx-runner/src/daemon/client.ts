@@ -7,7 +7,7 @@ import {
   CURRENT_PROTOCOL_VERSION, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimMessage, DeployOrderClaimReply, DeployOrderReportMessage, DeployOrderReportReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
@@ -107,7 +107,7 @@ export interface DoneInput {
 
 export interface RunnerClient {
   /** D#605 FL-2: says what this build and machine are. Best effort: the caller keeps going on any answer, and a cloud that predates `facts` answers 400. */
-  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant; /** Capabilities an older cloud refused and the hello went again without; absent when none was dropped. */ dropped?: string[] } | CallError>;
+  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant; /** Capabilities an older cloud refused and the hello went again without; absent when none was dropped. */ dropped?: string[]; /** True when the cloud's hello reply lists the `watch_mode` capability (its ingest takes the slim status and the detail session); absent otherwise. Never a protocol number: clouds at 23 and 24 exist that cannot. */ watchMode?: true } | CallError>;
   /** D#6 RUNNER-WAKE: the no-database wake check, with the token of the grant held. Never a claim: it hands out nothing. */
   wake(token: string): Promise<WakeResult>;
   /**
@@ -189,18 +189,22 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       let dropped: string[] = [];
       // `mem_proposal_v1` (D#601 MEM-6) is the newest, so it goes first (the runner then offers no memory proposal), then `tip_publish_v1` (D#598 P1g-3a-3) (the runner then never asks to publish the branch tip), then `ordered_facts_v1` (D#483 S5-j2c2) (the runner computes and sends no ordering fact), then `conflict_facts_v1` (D#519 MQ4-e2-a) (no `conflict` field on a merge report), then `discovery_analyst` (D#483 S4-f4) (a cloud without it just never offers the analyst), then `plane_merge_queue_v1` (D#694 B7-1), then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
       // D#749 V2b/V2c-1: `browser_playwright_v1`, `browser_chrome_v1` and `deploy_order_v1` are the newest of all, so they go first: a cloud without them keeps every other capability.
-      // D#842 EB-3c: `engine_bridge_v1` is the newest build capability, so it goes first after those three (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability and the bridge stays off.
+      // D#845 watch mode: `watch_mode_v1` is the newest build capability, so it goes first after those three: a cloud without it keeps every other capability and watch mode stays off.
+      // D#842 EB-3c: `engine_bridge_v1` was the newest build capability, so it goes first after those three (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability and the bridge stays off.
       // D#483 S5-j2e-RUNNER: `overlap_facts_v1` is the newest build capability, so it goes first after the three browser/deploy ones: a cloud without it keeps every other capability.
-      for (const drop of [SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
+      for (const drop of [SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
       }
       if (reply?.status !== 200) return fail(reply);
       // The hello is best effort: a 200 whose body is not a protocol reply still counts, it just brings no grant.
-      const body = HelloReply.safeParse(reply.body);
+      // `capabilities` is read on its own (a missing, malformed or unknown one is "not offered", never a failure of the rest of the reply), and only a listed `watch_mode` counts.
+      const { capabilities, ...rest } = (typeof reply.body === "object" && reply.body !== null && !Array.isArray(reply.body) ? reply.body : {}) as Record<string, unknown>;
+      const body = HelloReply.safeParse(rest);
       const left = dropped.length === 0 ? {} : { dropped };
-      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake, ...left } : { kind: "ok", ...left };
+      const watch = body.success && Array.isArray(capabilities) && capabilities.includes("watch_mode") ? { watchMode: true as const } : {};
+      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake, ...watch, ...left } : { kind: "ok", ...watch, ...left };
     },
 
     async wake(token) {

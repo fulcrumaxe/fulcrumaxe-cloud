@@ -147,16 +147,17 @@ describe("the engine bridge in the composed daemon", () => {
 
   it("never starts the bridge on a hello that dropped engine_bridge_v1 (an older cloud), and the claim loop is not held up", async () => {
     enable();
-    // sandbox_commands_v1 (D#587 B-7b) is refused first, then engine_bridge_v1.
+    // sandbox_commands_v1 (D#587 B-7b) is refused first, then watch_mode_v1 (D#845), then engine_bridge_v1.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start({ host: { engineBridge: ports() } });
     await until(() => claims() >= 1 && statusFile() !== undefined);
-    // sandbox_commands_v1 goes first, then engine_bridge_v1: the third hello is the same without both.
-    expect(hellos()).toHaveLength(3);
-    expect(HelloMessage.parse(hellos()[1]!.body).capabilities).toContain("engine_bridge_v1");
-    expect(HelloMessage.parse(hellos()[2]!.body).capabilities).not.toContain("engine_bridge_v1");
-    expect(HelloMessage.parse(hellos()[2]!.body).capabilities).toContain("overlap_facts_v1");
+    // sandbox_commands_v1 goes first, then watch_mode_v1, then engine_bridge_v1: the fourth hello is the same without both.
+    expect(hellos()).toHaveLength(4);
+    expect(HelloMessage.parse(hellos()[2]!.body).capabilities).toContain("engine_bridge_v1");
+    expect(HelloMessage.parse(hellos()[3]!.body).capabilities).not.toContain("engine_bridge_v1");
+    expect(HelloMessage.parse(hellos()[3]!.body).capabilities).toContain("overlap_facts_v1");
     expect(statusFile()).toMatchObject({ hello: false, repos: [{ run: "waiting", reason: "hello" }] });
     expect(await stop(run)).toMatchObject({ code: 0 });
   });

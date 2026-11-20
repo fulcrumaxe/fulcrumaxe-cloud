@@ -48,6 +48,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/keys.ts": ["crypto"],
   // The engine bridge (EB-3): the runner's user id is given by the caller, never read from `process` here.
   "src/engineBridge/cursor.ts": ["crypto", "fs", "path"], // the cursor: a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create, one rename
+  "src/engineBridge/detailSpool.ts": ["crypto", "fs", "path"], // the detail spool (D#845 watch mode): a random instance id, no-follow opens judged by the open handle (cursor.ts's), an append-only 0600 create, an unlink on disconnect
   "src/engineBridge/tail.ts": ["fs"], // positioned reads of the events file through the no-follow handle cursor.ts opened
   "src/engineBridge/loop.ts": ["crypto"], // a random id for the bridge's own session
   "src/engineBridge/ceiling.ts": ["crypto", "fs", "path"], // the dial ceiling file: a random temp-file name, a no-follow exclusive 0600 create judged by lstat of the directory and name, one rename

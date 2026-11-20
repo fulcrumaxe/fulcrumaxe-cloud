@@ -410,6 +410,22 @@ describe("EB-12b.4 commands", () => {
     expect(w.outcome(junk)).toEqual({ outcome: "refused", refusal: "signature_invalid" });
     expect(w.outcome(extra)).toEqual({ outcome: "refused", refusal: "signature_invalid" });
   });
+  it("refuses a watch it is handed with the one fixed code, whatever the gate says, runs nothing and does not spend the repo's sequence", () => {
+    const until = new Date(w.t.now + 5 * MIN).toISOString();
+    for (const gate of [undefined, "halted", "operate_off"] as const) {
+      w.gate.v = gate;
+      const watch = w.put("watch", { until });
+      w.ticker.poll();
+      expect(w.outcome(watch), String(gate)).toEqual({ outcome: "refused", refusal: "wrong_repo" });
+    }
+    w.gate.v = undefined;
+    expect(w.sent).toEqual([]);
+    // A later command at a lower sequence than the watches' is still taken: the refused watch used up none of the ticker's own sequence.
+    const low = w.put("start_day", {}, { command_seq: 1 });
+    w.ticker.poll();
+    expect(w.outcome(low)).toBeUndefined();
+    expect(w.sent).toHaveLength(1);
+  });
   it("claims nothing while the host is not alive: the command stays in the host inbox for the reader to take back", () => {
     w.host.up = false;
     const name = w.put("start_day");

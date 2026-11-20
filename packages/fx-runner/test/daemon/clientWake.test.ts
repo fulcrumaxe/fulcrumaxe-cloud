@@ -33,22 +33,23 @@ describe("hello", () => {
   it("an older cloud that refuses wake_v1 is asked again without it, and the runner carries on with no grant", async () => {
     cloud.wake.oldCloud = true;
     cloud.wake.enabled = true;
-    expect(await client.hello(hello)).toEqual({ kind: "ok", dropped: ["engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1", "memory_limit_v1", "plane_merge_v1", "wake_v1"] });
+    expect(await client.hello(hello)).toEqual({ kind: "ok", dropped: ["watch_mode_v1", "engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1", "memory_limit_v1", "plane_merge_v1", "wake_v1"] });
     const sent = hellos();
-    // Twelve hellos in all: the newest capability goes first, and wake_v1 only when the others do not help.
-    expect(sent).toHaveLength(12);
-    expect(sent[0]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"]);
-    expect(sent[1]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"]);
-    expect(sent[2]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"]);
-    expect(sent[3]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"]);
-    expect(sent[4]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"]);
-    expect(sent[5]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"]);
-    expect(sent[6]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"]);
-    expect(sent[7]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"]);
-    expect(sent[8]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"]);
-    expect(sent[9]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1"]);
-    expect(sent[10]!.capabilities).toEqual(["proposal_verifier", "wake_v1"]);
-    expect(sent[11]!.capabilities).toEqual(["proposal_verifier"]);
+    // Thirteen hellos in all: the newest capability goes first, and wake_v1 only when the others do not help.
+    expect(sent).toHaveLength(13);
+    expect(sent[0]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"]);
+    expect(sent[1]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"]);
+    expect(sent[2]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"]);
+    expect(sent[3]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"]);
+    expect(sent[4]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"]);
+    expect(sent[5]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"]);
+    expect(sent[6]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"]);
+    expect(sent[7]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"]);
+    expect(sent[8]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"]);
+    expect(sent[9]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"]);
+    expect(sent[10]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1"]);
+    expect(sent[11]!.capabilities).toEqual(["proposal_verifier", "wake_v1"]);
+    expect(sent[12]!.capabilities).toEqual(["proposal_verifier"]);
     // Claims work as before: idle with the cloud's retry_after, and no grant.
     expect(await client.claim()).toEqual({ kind: "idle", retryAfter: 60 });
   });
@@ -63,8 +64,8 @@ describe("hello", () => {
     }) as unknown as typeof fetch;
     const middle = createRunnerClient({ origin: "https://cloud.example.test", key, now: () => new Date(), fetchFn });
     const reply = await middle.hello(hello);
-    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"]]);
-    expect(reply).toMatchObject({ kind: "ok", wake: { poll_s: 20 }, dropped: ["engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1", "memory_limit_v1", "plane_merge_v1"] });
+    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"]]);
+    expect(reply).toMatchObject({ kind: "ok", wake: { poll_s: 20 }, dropped: ["watch_mode_v1", "engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1", "memory_limit_v1", "plane_merge_v1"] });
   });
 
   // D#483 S5-j2c2: the newest capability is dropped alone first, so a cloud that knows the others keeps them (conflict facts, queue, wake grant).
@@ -77,8 +78,25 @@ describe("hello", () => {
       return new Response(JSON.stringify({ protocol_version: 1, wake: { token: `${"a".repeat(32)}.${"b".repeat(43)}`, poll_s: 20, transport: "poll" } }), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const reply = await createRunnerClient({ origin: "https://cloud.example.test", key, now: () => new Date(), fetchFn }).hello(hello);
-    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"]] );
-    expect(reply).toMatchObject({ kind: "ok", wake: { poll_s: 20 }, dropped: ["engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1"] });
+    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"]] );
+    expect(reply).toMatchObject({ kind: "ok", wake: { poll_s: 20 }, dropped: ["watch_mode_v1", "engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1"] });
+  });
+
+  it("a cloud that predates engine_bridge_v1 (so it knows neither it nor watch_mode_v1) is asked again until the hello is accepted: both are dropped, in that order, and the rest stays", async () => {
+    const sentCaps: string[][] = [];
+    const fetchFn = (async (_url: string, init: RequestInit) => {
+      const caps = (JSON.parse(String(init.body)) as { capabilities?: string[] }).capabilities ?? [];
+      sentCaps.push(caps);
+      if (caps.includes("engine_bridge_v1") || caps.includes("watch_mode_v1")) return new Response(JSON.stringify({ error: { code: "invalid_message", message: "x" } }), { status: 400, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ protocol_version: 1 }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const reply = await createRunnerClient({ origin: "https://cloud.example.test", key, now: () => new Date(), fetchFn }).hello(hello);
+    expect(sentCaps).toHaveLength(3);
+    expect(sentCaps[1]).not.toContain("watch_mode_v1");
+    expect(sentCaps[1]).toContain("engine_bridge_v1");
+    expect(sentCaps[2]).not.toContain("engine_bridge_v1");
+    expect(sentCaps[2]).toContain("overlap_facts_v1");
+    expect(reply).toMatchObject({ kind: "ok", dropped: ["watch_mode_v1", "engine_bridge_v1"] });
   });
 
   // D#6 CARD-OOM-CAUSE-WORDS: the capability is how the runner learns whether the cloud's strict parse knows `memory_limit_bytes`.
@@ -91,8 +109,8 @@ describe("hello", () => {
       return new Response(JSON.stringify({ protocol_version: 1, wake: { token: `${"a".repeat(32)}.${"b".repeat(43)}`, poll_s: 20, transport: "poll" } }), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const reply = await createRunnerClient({ origin: "https://cloud.example.test", key, now: () => new Date(), fetchFn }).hello(hello);
-    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"]]);
-    expect(reply).toMatchObject({ kind: "ok", wake: { poll_s: 20 }, dropped: ["engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1", "memory_limit_v1"] });
+    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"]]);
+    expect(reply).toMatchObject({ kind: "ok", wake: { poll_s: 20 }, dropped: ["watch_mode_v1", "engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1", "memory_limit_v1"] });
   });
 
   // D#694 B7-1: the newest capability is dropped alone first, so a cloud that knows the others keeps them.
@@ -105,8 +123,8 @@ describe("hello", () => {
       return new Response(JSON.stringify({ protocol_version: 1 }), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const reply = await createRunnerClient({ origin: "https://cloud.example.test", key, now: () => new Date(), fetchFn }).hello(hello);
-    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"]]);
-    expect(reply).toMatchObject({ kind: "ok", dropped: ["engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1"] });
+    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"]]);
+    expect(reply).toMatchObject({ kind: "ok", dropped: ["watch_mode_v1", "engine_bridge_v1", "overlap_facts_v1", "mem_proposal_v1", "tip_publish_v1", "ordered_facts_v1", "conflict_facts_v1", "discovery_analyst", "plane_merge_queue_v1"] });
   });
 
   it("a cloud that keeps memory_limit_v1 drops nothing: the reply has no dropped list", async () => {
@@ -123,6 +141,25 @@ describe("hello", () => {
 
   it("a cloud with no wake key sends no grant", async () => {
     expect(await client.hello(hello)).toEqual({ kind: "ok" });
+  });
+
+  it("watch mode is on only for a reply that LISTS watch_mode: a cloud at 23 or 24 without it is not, and a missing, unknown or malformed capabilities field is safe (no watch mode, the rest of the reply still read)", async () => {
+    const reply = async (body: unknown): Promise<unknown> => {
+      const fetchFn = (async () => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+      return createRunnerClient({ origin: "https://cloud.example.test", key, now: () => new Date(), fetchFn }).hello(hello);
+    };
+    const wake = { token: `${"a".repeat(32)}.${"b".repeat(43)}`, poll_s: 20, transport: "poll" };
+    expect(await reply({ protocol_version: 23, capabilities: ["watch_mode"] })).toEqual({ kind: "ok", watchMode: true });
+    expect(await reply({ protocol_version: 24, capabilities: ["watch_mode"], wake })).toMatchObject({ kind: "ok", watchMode: true, wake: { poll_s: 20 } });
+    for (const protocol of [23, 24, 99]) expect(await reply({ protocol_version: protocol }), String(protocol)).toEqual({ kind: "ok" });
+    for (const capabilities of [[], ["something_else"], ["WATCH_MODE"], "watch_mode", { watch_mode: true }, null, 7, [{ watch_mode: true }], [null]]) {
+      expect(await reply({ protocol_version: 24, capabilities }), JSON.stringify(capabilities)).toEqual({ kind: "ok" });
+    }
+    // Unknown company is fine, the listed one counts.
+    expect(await reply({ protocol_version: 24, capabilities: ["future", "watch_mode"] })).toEqual({ kind: "ok", watchMode: true });
+    // A reply that is not a protocol reply brings none, whatever it lists.
+    expect(await reply({ capabilities: ["watch_mode"] })).toEqual({ kind: "ok" });
+    expect(await reply({ unexpected: true, capabilities: ["watch_mode"] })).toEqual({ kind: "ok" });
   });
 });
 

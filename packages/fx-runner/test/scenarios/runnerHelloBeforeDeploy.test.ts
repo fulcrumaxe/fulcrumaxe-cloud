@@ -93,20 +93,24 @@ describe("scenario: a runner's hello predates a cloud deploy that added a capabi
   it("a cloud that predates the capability drops it at hello; the cloud's deploy is not noticed by the running poll loop; only a restart picks it up", async () => {
     const overlap: boolean[] = [];
     const clock = manualClock();
-    // The cloud before the deploy: it refuses the hello that lists the newest capability (sandbox_commands_v1, D#587 B-7b), then the one that still lists engine_bridge_v1, then the one that still lists overlap_facts_v1.
+    // The cloud before the deploy: it refuses the hello that lists the newest capability (sandbox_commands_v1, D#587 B-7b), then the one that still lists watch_mode_v1, then the one that still lists engine_bridge_v1, then the one that still lists overlap_facts_v1.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start({ clock, onOverlapFactsAccepted: (a: boolean) => void overlap.push(a) });
     await until(() => claims() >= 1);
-    // The first hello listed every capability and was refused; the second dropped only the newest (sandbox_commands_v1) and was refused; the third also dropped engine_bridge_v1 and was refused; the fourth went without overlap_facts_v1 and was answered.
-    expect(hellos()).toHaveLength(4);
+    // The first hello listed every capability and was refused; the second dropped only the newest (sandbox_commands_v1) and was refused; the third also dropped watch_mode_v1 (which sits just ahead of engine_bridge_v1 on the ladder) and was refused; the fourth also dropped engine_bridge_v1 and was refused; the fifth went without overlap_facts_v1 and was answered.
+    expect(hellos()).toHaveLength(5);
     expect(listed(hellos()[0]!.body)).toContain("sandbox_commands_v1");
     expect(listed(hellos()[1]!.body)).not.toContain("sandbox_commands_v1");
-    expect(listed(hellos()[1]!.body)).toContain("engine_bridge_v1");
-    expect(listed(hellos()[2]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
-    expect(listed(hellos()[2]!.body)).not.toContain("engine_bridge_v1");
-    expect(listed(hellos()[3]!.body)).not.toContain(OVERLAP_FACTS_CAPABILITY);
+    expect(listed(hellos()[1]!.body)).toContain("watch_mode_v1");
+    expect(listed(hellos()[2]!.body)).not.toContain("watch_mode_v1");
+    expect(listed(hellos()[2]!.body)).toContain("engine_bridge_v1");
+    expect(listed(hellos()[3]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
+    expect(listed(hellos()[3]!.body)).not.toContain("engine_bridge_v1");
+    expect(listed(hellos()[4]!.body)).not.toContain(OVERLAP_FACTS_CAPABILITY);
+    expect(listed(hellos()[4]!.body)).not.toContain("engine_bridge_v1");
     expect(overlap).toEqual([false]);
 
     // The cloud is deployed with the capability (nothing is forced any more: every hello would now be answered in full). The runner keeps polling for a long while.
@@ -114,15 +118,15 @@ describe("scenario: a runner's hello predates a cloud deploy that added a capabi
     while (claims() < before + 30) await clock.advance(5000);
     await clock.advance(10 * 60_000);
     // Today: no new hello is said, so the overlap verdict is still held back. (RUNNER-REHELLO-ON-CLOUD-CHANGE is the todo below.)
-    expect(hellos()).toHaveLength(4);
+    expect(hellos()).toHaveLength(5);
     expect(overlap).toEqual([false]);
     expect(await stop(run)).toMatchObject({ code: 0 });
 
     // A restart is a fresh hello to the deployed cloud, which keeps the capability.
     const restarted = start({ clock: manualClock(), onOverlapFactsAccepted: (a: boolean) => void overlap.push(a) });
-    await until(() => hellos().length >= 5 && overlap.length >= 2);
-    expect(listed(hellos()[4]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
-    expect(listed(hellos()[4]!.body)).toContain("sandbox_commands_v1");
+    await until(() => hellos().length >= 6 && overlap.length >= 2);
+    expect(listed(hellos()[5]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
+    expect(listed(hellos()[5]!.body)).toContain("sandbox_commands_v1");
     expect(overlap).toEqual([false, true]);
     expect(await stop(restarted)).toMatchObject({ code: 0 });
   });
