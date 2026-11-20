@@ -18,6 +18,7 @@ import { machineCredentialRoutes } from "./machine-credential.js";
 import { repoRoutes } from "./repos.js";
 import { roleRoutes } from "./roles.js";
 import { decisionSettingRoutes } from "./decision-settings.js";
+import { engineBridgeConnectRoutes } from "./engine-bridge-connect.js";
 import { engineCommandRoutes } from "./engine-commands.js";
 import { actionRuleRoutes } from "./action-rules.js";
 import { askSettingRoutes } from "./ask-settings.js";
@@ -141,6 +142,7 @@ export const ROUTES: RouteEntry[] = [
   ...runHandoffRoutes,
   ...memoryRoutes,
   ...engineCommandRoutes,
+  ...engineBridgeConnectRoutes,
   ...engineRoutes,
   ...engineHaltRoutes,
   ...enginePlanRoutes,

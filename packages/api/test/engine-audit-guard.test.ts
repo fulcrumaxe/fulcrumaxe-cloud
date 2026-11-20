@@ -114,6 +114,28 @@ async function bridgeRepo(ctx: GuardContext, label: string): Promise<string> {
 const commandRows = async (ctx: GuardContext, label: string, where = 'true'): Promise<number> =>
   Number((await ctx.admin.query(`SELECT count(*) AS n FROM engine_commands WHERE repo_id = $1 AND ${where}`, [await bridgeRepo(ctx, label)])).rows[0].n);
 
+
+/**
+ * D#845 ON-BR-2: a runner_local repo with an online runner at protocol 24 and nothing else: no operate switch and no engine session, which Connect must not need. Made once per (account, label); each run
+ * first cancels what the last one left pending, so the one-waiting-per-repo rule never stands between a run and the audit write it is there to test.
+ */
+const connectRepos = new Map<string, string>();
+async function connectRepo(ctx: GuardContext, label: string): Promise<string> {
+  const key = `${ctx.accountId}:${label}`;
+  let repo = connectRepos.get(key);
+  if (repo === undefined) {
+    repo = (await ctx.admin.query<{ id: string }>(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, NULL, $2, 'web', 'acme', 'connect', 'runner_local') RETURNING id`, [ctx.accountId, Math.floor(Math.random() * 1e12)])).rows[0]!.id;
+    const runner = await insertRunner(ctx.admin, ctx.accountId, ctx.userId, { keepPlan: true });
+    await ctx.admin.query('UPDATE runners SET allowed_repo_ids = $2::uuid[], protocol_version = 24, last_seen_at = now() WHERE id = $1', [runner, [repo]]);
+    await ctx.admin.query('INSERT INTO engine_runner_bridges (account_id, runner_id, repo_id, root) VALUES ($1, $2, $3, $4)', [ctx.accountId, runner, repo, '/work/acme/connect']);
+    connectRepos.set(key, repo);
+  }
+  await ctx.admin.query("UPDATE engine_commands SET state = 'cancelled' WHERE repo_id = $1 AND state = 'pending'", [repo]);
+  return repo;
+}
+const bridgeCommandRows = async (ctx: GuardContext, label: string, kind: string): Promise<number> =>
+  Number((await ctx.admin.query('SELECT count(*) AS n FROM engine_commands WHERE repo_id = $1 AND kind = $2', [await connectRepo(ctx, label), kind])).rows[0].n);
+
 /** What the settings entries below need that the account does not already have: a runner to hang a seeded session on, set up in `beforeAll`. */
 const seeded: { runnerId: string } = { runnerId: '' };
 const SEEDED_TABLE = 'engine_audit_guard_seeded';
@@ -142,6 +164,22 @@ async function askedDecision(ctx: GuardContext): Promise<string> {
 
 /** Later rows add their routes here. */
 export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
+  {
+    // ON-BR-2. Connect needs neither operate nor an engine session; the change is the bridge_enable row.
+    id: 'POST /api/v1/engine/repos/{id}/bridge',
+    action: 'engine_command.issued',
+    covers: ['engine-bridge-connect.ts#engineBridgeConnectRoutes'],
+    run: async (ctx) => callEngineRoute(ctx, 'POST', `/engine/repos/${await connectRepo(ctx, 'connect')}/bridge`, {}),
+    effects: (ctx) => bridgeCommandRows(ctx, 'connect', 'bridge_enable'),
+  },
+  {
+    // ON-BR-2. Disconnect goes to the runner that reports the repo; the change is the bridge_disable row.
+    id: 'DELETE /api/v1/engine/repos/{id}/bridge',
+    action: 'engine_command.issued',
+    covers: [],
+    run: async (ctx) => callEngineRoute(ctx, 'DELETE', `/engine/repos/${await connectRepo(ctx, 'disconnect')}/bridge`),
+    effects: (ctx) => bridgeCommandRows(ctx, 'disconnect', 'bridge_disable'),
+  },
   {
     // EB-8a. The change is the command row: none before, one after, and a rolled-back issue leaves the first.
     id: 'POST /api/v1/engine/repos/{id}/commands',

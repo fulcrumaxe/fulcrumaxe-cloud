@@ -48003,6 +48003,612 @@
         }
       }
     },
+    "/api/v1/engine/repos/{id}/bridge": {
+      "get": {
+        "operationId": "getEngineBridgeConnect",
+        "summary": "Where Connect stands for a repo: the runners, what is connected, and the newest answer",
+        "description": "Any member, session only. `connected` is what a runner last reported bridging (renewed on each of its pulls, and read as gone after 24 hours without one), never a stamp. `phase` says what the screen shows; `plan` what a Connect press would do. A folder (`connected.root`, `command.candidates`) is shown only to an owner or admin: a member gets the last two parts of the connected folder and no list. 404 for a repo that is not the account's.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where Connect stands for a repo: the runners, what is connected, and the newest answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "phase": {
+                      "type": "string",
+                      "enum": [
+                        "connecting",
+                        "connected",
+                        "disconnecting",
+                        "not_found",
+                        "ambiguous",
+                        "incomplete",
+                        "refused",
+                        "not_confirmed",
+                        "expired",
+                        "disconnect_failed",
+                        "disconnect_refused",
+                        "idle"
+                      ]
+                    },
+                    "plan": {
+                      "type": "string",
+                      "enum": [
+                        "send",
+                        "choose",
+                        "no_runner",
+                        "offline",
+                        "old"
+                      ]
+                    },
+                    "runners": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "has_name": {
+                            "type": "boolean"
+                          },
+                          "online": {
+                            "type": "boolean"
+                          },
+                          "protocol_ok": {
+                            "type": "boolean"
+                          },
+                          "last_seen_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "has_name",
+                          "online",
+                          "protocol_ok",
+                          "last_seen_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "connected": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "runner_id": {
+                              "type": "string"
+                            },
+                            "runner_name": {
+                              "type": "string"
+                            },
+                            "root_tail": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "root": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "reported_at": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "runner_id",
+                            "runner_name",
+                            "root_tail",
+                            "root",
+                            "reported_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "command": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "bridge_enable",
+                                "bridge_disable"
+                              ]
+                            },
+                            "runner_id": {
+                              "type": "string"
+                            },
+                            "runner_name": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "pending",
+                                "delivered",
+                                "applied",
+                                "refused",
+                                "expired",
+                                "cancelled",
+                                "not_confirmed"
+                              ]
+                            },
+                            "result": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "refusal": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "root_tail": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "candidates": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "skipped": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "issued_at": {
+                              "type": "string"
+                            },
+                            "expires_at": {
+                              "type": "string"
+                            },
+                            "acked_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "kind",
+                            "runner_id",
+                            "runner_name",
+                            "state",
+                            "result",
+                            "refusal",
+                            "root_tail",
+                            "candidates",
+                            "skipped",
+                            "issued_at",
+                            "expires_at",
+                            "acked_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "phase",
+                    "plan",
+                    "runners",
+                    "connected",
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repo in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "connectEngineBridge",
+        "summary": "Ask a runner to connect the engine bridge for a repo",
+        "description": "Owner or admin, session only (a token is 403 `session_required`, a member 403). The command goes to one runner the account owns that is paired with the repo and speaks protocol 24 or later: the only one online, or the `runner_id` the person chose (an id that is not a paired runner of this account is 404). None online is 409 `no_runner_online`, only older ones 409 `runner_too_old`, several with no choice 409 `runner_choice_needed`. `repo_root` is accepted only if that runner offered it for this repo in the last 10 minutes (else 400 `root_not_offered`). At most 5 bridge commands per account per 10 minutes (429 `rate_limited`), and one waiting per repo (409 `bridge_pending`). It needs neither operate nor a live engine session. Answers 201 `pending` with the expiry (10 minutes) and writes `engine_command.issued` in the same transaction.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "runner_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "repo_root": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 1024
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Ask a runner to connect the engine bridge for a repo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command_id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "const": "pending"
+                    },
+                    "expires_at": {
+                      "type": "string"
+                    },
+                    "runner_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "command_id",
+                    "state",
+                    "expires_at",
+                    "runner_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`root_not_offered`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repo or runner in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`bridge_pending`, `no_runner_online`, `runner_too_old`, `runner_choice_needed` or `too_many_pending`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`rate_limited`: 5 bridge commands in 10 minutes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "disconnectEngineBridge",
+        "summary": "Ask the connected runner to stop bridging a repo",
+        "description": "Owner or admin, session only. The command goes to the runner that last reported bridging the repo, even while it is offline (it waits up to 10 minutes; past that it expires unanswered, and while a runner still reports the repo the phase is `disconnect_failed` (\"did not reach\") until a newer command is answered or the report drops the repo). A disconnect the runner refused reads `disconnect_refused`, with the reason in the command's `refusal`. A repo no runner reports bridging is 409 `bridge_not_connected`. The runner removes only its bridge state for the repo, never the engine's state directory or the checkout. Same limits as Connect: 5 per account per 10 minutes, one waiting per repo.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Ask the connected runner to stop bridging a repo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command_id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "const": "pending"
+                    },
+                    "expires_at": {
+                      "type": "string"
+                    },
+                    "runner_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "command_id",
+                    "state",
+                    "expires_at",
+                    "runner_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repo in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`bridge_pending`, `bridge_not_connected`, `runner_too_old` or `too_many_pending`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`rate_limited`: 5 bridge commands in 10 minutes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/engine/repos": {
       "get": {
         "operationId": "listEngineRepos",
