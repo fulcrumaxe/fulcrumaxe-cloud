@@ -5364,7 +5364,7 @@ export interface Operations {
       commands: Array<{
         id: string;
         command_seq: number;
-        kind: "start_day" | "pause_loop" | "resume_loop" | "answer_ask" | "set_dial" | "request_spawn" | "stop_agent" | "watch";
+        kind: "start_day" | "pause_loop" | "resume_loop" | "answer_ask" | "set_dial" | "request_spawn" | "stop_agent" | "watch" | "bridge_enable" | "bridge_disable";
         args: {
           [key: string]: unknown;
         };

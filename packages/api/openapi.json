@@ -47736,7 +47736,9 @@
                               "set_dial",
                               "request_spawn",
                               "stop_agent",
-                              "watch"
+                              "watch",
+                              "bridge_enable",
+                              "bridge_disable"
                             ]
                           },
                           "args": {

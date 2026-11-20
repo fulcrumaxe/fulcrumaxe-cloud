@@ -47,6 +47,8 @@ const ARGS: Record<string, unknown> = {
   request_spawn: { role: "code-reviewer", discussion: 842 },
   stop_agent: { agent_id: "a0e5cfdaaf80bf298" },
   watch: { until: "2026-11-16T15:03:00.000Z", before: 120 },
+  bridge_enable: { repo_root: "/work/acme/site" },
+  bridge_disable: {},
 };
 const command = (kind: string, over: Record<string, unknown> = {}) => ({ v: 1, purpose: "engine_command_v1", command_id: U1, command_seq: 1, runner_id: U2, repo_gh_id: 77, kind, args: ARGS[kind], issued_by: U3, issued_at: "2026-11-16T14:59:00.000Z", expires_at: "2026-11-16T15:04:00.000Z", halt_epoch: 0, ...over });
 const ok = (value: unknown) => EngineCommand.safeParse(value).success;
@@ -62,7 +64,7 @@ const code = (run: () => unknown): JobSignatureErrorCode | "returned" => {
 
 describe("EngineCommand", () => {
   it("parses every kind with its own args", () => {
-    expect(ENGINE_COMMAND_KINDS).toHaveLength(8);
+    expect(ENGINE_COMMAND_KINDS).toHaveLength(10);
     for (const kind of ENGINE_COMMAND_KINDS) expect(EngineCommand.parse(command(kind)), kind).toEqual(command(kind));
   });
 
@@ -70,7 +72,8 @@ describe("EngineCommand", () => {
     expect(ok(command("kill_everything"))).toBe(false);
     expect(ok({ ...command("start_day"), kind: "halt" })).toBe(false);
     for (const kind of ENGINE_COMMAND_KINDS) for (const from of ENGINE_COMMAND_KINDS) {
-      if (from !== kind && JSON.stringify(ARGS[from]) !== JSON.stringify(ARGS[kind])) expect(ok(command(kind, { args: ARGS[from] })), `${kind} with ${from} args`).toBe(false);
+      // bridge_enable takes its one argument or none, so the empty args of another kind are its own.
+      if (from !== kind && JSON.stringify(ARGS[from]) !== JSON.stringify(ARGS[kind]) && !(kind === "bridge_enable" && JSON.stringify(ARGS[from]) === "{}")) expect(ok(command(kind, { args: ARGS[from] })), `${kind} with ${from} args`).toBe(false);
     }
     expect(ok(command("start_day", { args: { extra: 1 } }))).toBe(false);
     expect(ok(command("answer_ask", { args: { ...(ARGS["answer_ask"] as object), extra: 1 } }))).toBe(false);
@@ -282,7 +285,7 @@ describe("pull and ack", () => {
   it("takes an ack with a closed outcome and a closed refusal that goes with a refusal only", () => {
     const ack = (body: unknown) => EngineCommandAck.safeParse(body).success;
     expect([...ENGINE_COMMAND_OUTCOMES]).toEqual(["applied", "refused", "expired", "not_confirmed"]);
-    expect(COMMAND_REFUSALS).toHaveLength(12);
+    expect(COMMAND_REFUSALS).toHaveLength(29); // the 12 every command had, then the 17 bridge refusals (D#845 ON-BR-2)
     expect(ack({ outcome: "applied" })).toBe(true);
     expect(ack({ outcome: "not_confirmed" })).toBe(true);
     expect(ack({ outcome: "expired" })).toBe(true);
