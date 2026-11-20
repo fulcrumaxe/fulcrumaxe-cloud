@@ -590,6 +590,12 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "already_cancelled",
   "expired",
   "already_delivered",
+  // Engine bridge connect and disconnect (D#845 ON-BR-2): why a runner cannot be asked, and a folder the person was not offered.
+  "bridge_pending",
+  "bridge_not_connected",
+  "runner_too_old",
+  "runner_choice_needed",
+  "root_not_offered",
   // Engine bridge decisions: an answer to a decision that was not asked. (already_answered is listed above.)
   "not_asked",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.

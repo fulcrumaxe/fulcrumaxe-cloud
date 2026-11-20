@@ -14,6 +14,7 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import * as engineModule from '../src/routes/engine.js';
+import { engineBridgeConnectRoutes } from '../src/routes/engine-bridge-connect.js';
 import { engineCommandRoutes } from '../src/routes/engine-commands.js';
 import { engineDecisionRoutes } from '../src/routes/engine-decisions.js';
 import { engineHaltRoutes } from '../src/routes/engine-halt.js';
@@ -22,7 +23,7 @@ import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const ROUTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes');
 // Every engine route, from all five files. The command routes are session-only by default (no `principals` key), so the probes read `principalsOf`.
-const engineRoutes: RouteEntry[] = [...engineModule.engineRoutes, ...engineCommandRoutes, ...engineDecisionRoutes, ...engineHaltRoutes, ...enginePlanRoutes];
+const engineRoutes: RouteEntry[] = [...engineModule.engineRoutes, ...engineCommandRoutes, ...engineBridgeConnectRoutes, ...engineDecisionRoutes, ...engineHaltRoutes, ...enginePlanRoutes];
 const principalsOf = (r: RouteEntry): readonly string[] => r.principals ?? ['session'];
 
 /**
@@ -46,6 +47,9 @@ const EXPECTED_ROLES: Record<string, 'member' | 'admin' | 'owner'> = {
   issueEngineCommand: 'admin',
   cancelEngineCommand: 'admin',
   listEngineCommands: 'member',
+  getEngineBridgeConnect: 'member',
+  connectEngineBridge: 'admin',
+  disconnectEngineBridge: 'admin',
   haltEngineRepo: 'admin',
   clearEngineRepoHalt: 'admin',
   getEngineRepoPlan: 'member',
@@ -61,7 +65,7 @@ const exportsOf = (): string[] =>
  * `routes/engine*.ts` that is neither a route array nor named below as a helper fails, and every route it registers must declare its principals and
  * role itself and pass the four probes.
  */
-const ROUTE_ARRAYS = ['engine.ts#engineRoutes', 'engine-commands.ts#engineCommandRoutes', 'engine-decisions.ts#engineDecisionRoutes', 'engine-halt.ts#engineHaltRoutes', 'enginePlan.ts#enginePlanRoutes'];
+const ROUTE_ARRAYS = ['engine.ts#engineRoutes', 'engine-commands.ts#engineCommandRoutes', 'engine-bridge-connect.ts#engineBridgeConnectRoutes', 'engine-decisions.ts#engineDecisionRoutes', 'engine-halt.ts#engineHaltRoutes', 'enginePlan.ts#enginePlanRoutes'];
 const HELPER_EXPORTS: Record<string, string> = {
   'engine.ts#engineSettingsDeps': 'the GitHub visibility seam, not a route',
 };
@@ -146,6 +150,7 @@ describe('engine route auth meta-test [pg]', () => {
     expect(engineDecisionRoutes.map((r) => r.operationId)).toEqual(['answerEngineDecision']);
     expect(engineHaltRoutes.map((r) => r.operationId)).toEqual(['haltEngineRepo', 'clearEngineRepoHalt']);
     expect(enginePlanRoutes.map((r) => r.operationId)).toEqual(['getEngineRepoPlan']);
+    expect(engineBridgeConnectRoutes.map((r) => r.operationId)).toEqual(['getEngineBridgeConnect', 'connectEngineBridge', 'disconnectEngineBridge']);
     expect(engineCommandRoutes.map((r) => r.operationId)).toEqual(['issueEngineCommand', 'cancelEngineCommand', 'listEngineCommands']);
     for (const r of engineRoutes) {
       expect(ROUTES.includes(r), `${r.operationId} is registered in ROUTES`).toBe(true);

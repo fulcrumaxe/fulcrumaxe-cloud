@@ -5408,6 +5408,76 @@ export interface Operations {
       state: "cancelled";
     };
   };
+  getEngineBridgeConnect: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      phase: "connecting" | "connected" | "disconnecting" | "not_found" | "ambiguous" | "incomplete" | "refused" | "not_confirmed" | "expired" | "disconnect_failed" | "disconnect_refused" | "idle";
+      plan: "send" | "choose" | "no_runner" | "offline" | "old";
+      runners: Array<{
+        id: string;
+        name: string;
+        has_name: boolean;
+        online: boolean;
+        protocol_ok: boolean;
+        last_seen_at: string | null;
+      }>;
+      connected: ({
+        runner_id: string;
+        runner_name: string;
+        root_tail: string | null;
+        root: string | null;
+        reported_at: string;
+      }) | (null);
+      command: ({
+        id: string;
+        kind: "bridge_enable" | "bridge_disable";
+        runner_id: string;
+        runner_name: string | null;
+        state: "pending" | "delivered" | "applied" | "refused" | "expired" | "cancelled" | "not_confirmed";
+        result: string | null;
+        refusal: string | null;
+        root_tail: string | null;
+        candidates: Array<string>;
+        skipped: Array<string>;
+        issued_at: string;
+        expires_at: string;
+        acked_at: string | null;
+      }) | (null);
+    };
+  };
+  connectEngineBridge: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      runner_id?: string;
+      repo_root?: string;
+    };
+    response: {
+      command_id: string;
+      state: "pending";
+      expires_at: string;
+      runner_id: string;
+    };
+  };
+  disconnectEngineBridge: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      command_id: string;
+      state: "pending";
+      expires_at: string;
+      runner_id: string;
+    };
+  };
   listEngineRepos: {
     path: undefined;
     query: undefined;
@@ -8214,6 +8284,39 @@ export const operations = {
     scope: null,
     tokenSelfOnly: false,
     idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  getEngineBridgeConnect: {
+    method: "GET",
+    path: "/api/v1/engine/repos/{id}/bridge",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  connectEngineBridge: {
+    method: "POST",
+    path: "/api/v1/engine/repos/{id}/bridge",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  disconnectEngineBridge: {
+    method: "DELETE",
+    path: "/api/v1/engine/repos/{id}/bridge",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
