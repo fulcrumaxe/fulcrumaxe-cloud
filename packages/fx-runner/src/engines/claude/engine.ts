@@ -1,7 +1,7 @@
 import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { CONTEXT_WARN_PCT, ContextLedgerCapture, createUsageMeter, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type BrowserMethod, type LocalOnlyEvent, structuredSchemaFor, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WARN_PCT, SESSION_ID_PATTERN, contextNoteLine, contextPct, type AgentHandle, type AgentRuntime, type BrowserMethod, type LocalOnlyEvent, structuredSchemaFor, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
@@ -11,25 +11,19 @@ import { confineFileTools, readRulesFor } from "./filePermissions.js";
 import { authPresent } from "./authStatus.js";
 import type { SpawnFn } from "./capture.js";
 import type { LaunchPlace } from "../../launchDir.js";
-import { initCredentialMatches, isInitLine } from "./credentialCheck.js";
 import { MIN_CLAUDE_VERSION, versionSupported, type BinarySource } from "./pin.js";
 import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 import { readSessionIndex, recordSession } from "./session.js";
 import { bashSandboxUnusableFor, type SettingsWithDeny } from "./bashSandboxProbe.js";
-import { clearVerifyLeftovers, verifyServerUp, writeJobFiles, type VerifyServerSpec } from "./settingsFile.js";
-import { LineBuffer, createRunLog, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
+import { clearVerifyLeftovers, writeJobFiles, type VerifyServerSpec } from "./settingsFile.js";
+import { createRunLog } from "./stream.js";
+import { HOST_USAGE_LIMITS, PERMISSION_MODE_FORCED, runAgentStream, type AgentStreamEnd } from "./streamRun.js";
 
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CLI_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
-/**
- * What the CLI writes to stderr when it overrides the permission mode a caller asked for (it does that whenever
- * `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is set and a non-default mode was passed). This engine passes none, so seeing it
- * means a build or an argument list changed under it: the run is stopped and fails closed instead of carrying on with
- * a mode nobody chose.
- */
-export const PERMISSION_MODE_FORCED = /permission mode forced to default/i;
+export { PERMISSION_MODE_FORCED };
 
 export interface EngineConfig {
   /**
@@ -96,9 +90,8 @@ export function outcomeOf(handle: AgentHandle): Promise<RunOutcome> {
   return done as Promise<RunOutcome>;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
+/** The source of a stream a child was started without (never the case for these stdio settings). */
+const NO_OUTPUT: AsyncIterable<string> = (async function* () {})();
 
 /**
  * The directory for one run's job files: exactly one plain segment under `jobsDir`. The id pattern already allows only
@@ -182,127 +175,34 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     child.stdin?.end(notePct === undefined ? opts.prompt : `${contextNoteLine(notePct)}\n\n${opts.prompt}`);
 
     const handle: AgentHandle = { runId: opts.runId, child, options: opts };
+    const engineVersion = binary.version;
+    const ended = new Promise<AgentStreamEnd>((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
     handle.done = new Promise<RunOutcome>((resolve) => {
-      let seq = 0;
-      let localSeq = 0;
-      const marks: StageMarks = { writingResult: false };
-      let sawInit = false;
-      let mismatch = false;
-      let noInit = false;
-      let modeForced = false;
-      // D#749: a playwright job whose `fxverify` server is not up at the init line ends before its first turn, under its own closed code (never a tool-less answer).
-      let browserDown = false;
-      let result: Record<string, unknown> | undefined;
-      let sessionId: string | undefined;
-      let agentOutput: Record<string, unknown> | undefined;
-      const ledger = new ContextLedgerCapture(disabledToolsFor(excludes));
-      // The run total is metered from every assistant message and the result line's cumulative figures, with the same meter the sandbox path
-      // uses: the result line's own `usage` alone can describe one turn. This is the person's own CLI, so the hostile-line ceilings are lifted.
-      const meter = createUsageMeter({ maxLineInputSideTokens: Number.MAX_SAFE_INTEGER, maxLineOutputTokens: Number.MAX_SAFE_INTEGER, maxIds: Number.MAX_SAFE_INTEGER });
-      const engineVersion = binary.version;
-      log.write("meta", JSON.stringify({ engine_version: engineVersion }));
-      // The version goes out first, so a breaking release shows up across runs.
-      let chain: Promise<void> = Promise.resolve(config.onLocalEvent?.({ seq: localSeq++, ts: new Date().toISOString(), type: "engine_version", engine_version: engineVersion }));
-      let stderrTail = "";
-      const lineBuffer = new LineBuffer();
-
-      const handleLine = async (line: string): Promise<void> => {
-        log.write("stdout", line);
-        if (mismatch || noInit || modeForced || browserDown || line.trim() === "") return;
-        let message: unknown;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          // fx-swallow-ok: a line that is not JSON carries no event; it is already in the raw log
-          return;
-        }
-        if (!isRecord(message)) return;
-        // The first line must be the init line, and its credential source must be the one this mode allows. Nothing
-        // else is processed (or uploaded) before that holds.
-        if (!sawInit) {
-          if (!isInitLine(message)) {
-            // Not a credential problem: the stream did not open the way this engine requires (an early error result, a build that changed its output).
-            noInit = true;
-            void terminateGroup(child, graceMs);
-            return;
-          }
-          if (!initCredentialMatches(config.credentials.mode, message)) {
-            mismatch = true;
-            void terminateGroup(child, graceMs);
-            await config.onLocalEvent?.({ seq: localSeq++, ts: new Date().toISOString(), type: "credential_mismatch" });
-            return;
-          }
-          sawInit = true;
-          if (browserMethod === "playwright_runner" && !verifyServerUp(message)) {
-            browserDown = true;
-            void terminateGroup(child, graceMs);
-            return;
-          }
-        }
-        // Integers only leave the capture (no text, no path); the result line comes last, so its snapshot covers the whole command.
-        ledger.observe(message);
-        const normalized = normalizeMessage({ runId: opts.runId, role: opts.role }, message, seq++, workdir);
-        // D#600 CX-9b: beside the integers, the window the job named (when it did), so the cloud can say how full the context was.
-        const windowNow = (opts as EngineStartOptions).contextWindowTokens;
-        const event = message.type === "result" ? { ...normalized, contextLedger: { ...ledger.snapshot(), ...(windowNow === undefined ? {} : { window_tokens: windowNow }) } } : normalized;
-        if (event.sessionId !== undefined && SESSION_ID_PATTERN.test(event.sessionId)) sessionId = event.sessionId;
-        if (message.type === "result") {
-          result = message;
-          agentOutput = event.agentOutput;
-        }
-        await opts.onEvent(event);
-        const near = nearLimitOf(message);
-        if (near !== undefined) config.onNearLimit?.(near);
-        meter.observe(event);
-        for (const local of projectLocalOnly(message, event, () => localSeq++, workdir, secrets, marks, meter.total())) await config.onLocalEvent?.(local);
-      };
-      const enqueue = (line: string): void => {
-        chain = chain.then(() => handleLine(line)).catch(() => {
-          // fx-swallow-ok: one failing consumer must not stop the run's remaining lines from reaching the log
-        });
-      };
-
-      child.stdout?.setEncoding("utf8");
-      child.stdout?.on("data", (chunk: string) => lineBuffer.push(chunk).forEach(enqueue));
-      child.stderr?.setEncoding("utf8");
-      child.stderr?.on("data", (chunk: string) => {
-        log.write("stderr", chunk);
-        if (stderrTail.length < 4096) stderrTail += chunk;
-        // The warning can arrive split across chunks, so the accumulated tail is searched as well as the chunk.
-        if (!modeForced && (PERMISSION_MODE_FORCED.test(chunk) || PERMISSION_MODE_FORCED.test(stderrTail))) {
-          modeForced = true;
-          void terminateGroup(child, graceMs);
-        }
-      });
       child.on("error", () => resolve({ status: "failed", failureReason: "agent_exit", engineVersion }));
-      child.on("close", (code) => {
-        lineBuffer.end().forEach(enqueue);
-        void chain.then(async () => {
-          // A clean end needs no question; any other end may be the kernel enforcing the memory budget, which only the scope can say.
-          const limited = config.limits !== undefined && code !== 0 && !mismatch && !noInit && !modeForced && !browserDown ? await config.limits.exceeded(opts.runId).catch(() => false) : false;
-          if (sessionId !== undefined && !mismatch && !noInit && !modeForced && !browserDown) {
-            try {
-              const windowTokens = (opts as EngineStartOptions).contextWindowTokens;
-              const pctNow = windowTokens === undefined ? undefined : contextPct(ledger.lastContextTokens(), windowTokens);
-              await recordSession(config.sessionsFile, sessionId, workdir, { contextPct: pctNow, notedPct: pctNow !== undefined && pctNow < CONTEXT_WARN_PCT ? undefined : notePct ?? known?.notedPct });
-            } catch {
-              // fx-swallow-ok: a session that could not be indexed is only not resumable later; the outcome is unchanged
-            }
-          }
-          const denied = ledger.deniedToolCalls();
-          const base = { engineVersion, ...(denied > 0 ? { deniedToolCalls: denied } : {}), ...(sessionId === undefined ? {} : { sessionId }), ...(agentOutput === undefined ? {} : { agentOutput }) };
-          if (limited) resolve({ status: "failed", failureReason: "resource_limit", ...base });
-          else if (modeForced) resolve({ status: "failed", failureReason: "permission_mode_forced", engineVersion });
-          else if (mismatch) resolve({ status: "failed", failureReason: "credential_mismatch", engineVersion });
-          else if (noInit) resolve({ status: "failed", failureReason: "no_init_line", engineVersion });
-          else if (browserDown) resolve({ status: "failed", failureReason: "verify_browser_unavailable", engineVersion });
-          // Backstop for a build that dropped a flag after the --help check: an unknown-option exit before any init line.
-          else if (!sawInit && code !== 0 && /unknown (option|argument)|unrecognized (option|argument)|invalid option/i.test(stderrTail)) resolve({ status: "failed", failureReason: "claude_flags_unsupported", engineVersion });
-          else if (result === undefined) resolve({ status: "failed", failureReason: "agent_exit", ...base });
-          else if (result.is_error === true) resolve({ status: "failed", failureReason: "agent_error", ...base });
-          else resolve({ status: "ok", ...base });
-        });
-      });
+      void runAgentStream({
+        options: opts,
+        workdir,
+        credentials: config.credentials,
+        engineVersion,
+        stdout: child.stdout ?? NO_OUTPUT,
+        stderr: child.stderr ?? NO_OUTPUT,
+        ended,
+        terminate: () => terminateGroup(child, graceMs),
+        usageLimits: HOST_USAGE_LIMITS,
+        log,
+        secrets,
+        ...(config.onLocalEvent === undefined ? {} : { onLocalEvent: config.onLocalEvent }),
+        ...(config.onNearLimit === undefined ? {} : { onNearLimit: config.onNearLimit }),
+        ...(config.limits === undefined ? {} : { resourceLimitExceeded: () => config.limits!.exceeded(opts.runId) }),
+        checkVerifyServer: browserMethod === "playwright_runner",
+        onSession: async (sessionId, lastContextTokens) => {
+          const windowTokens = (opts as EngineStartOptions).contextWindowTokens;
+          const pctNow = windowTokens === undefined ? undefined : contextPct(lastContextTokens, windowTokens);
+          await recordSession(config.sessionsFile, sessionId, workdir, { contextPct: pctNow, notedPct: pctNow !== undefined && pctNow < CONTEXT_WARN_PCT ? undefined : notePct ?? known?.notedPct });
+        },
+      }).then(resolve);
     });
     return { handle };
   }
