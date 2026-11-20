@@ -108,12 +108,14 @@ window.showDesktop = function (user, isAdmin) {
     // freshly opened below.
     markDesktopReady();
 
+    if (FULCWM) FULCWM.setRestorePending(true);
     setTimeout(function () {
       if (!FULCWM) return;
       var hasSaved = !!getItem('window-layout');
       if (hasSaved) {
         FULCWM.restoreLayout();
       } else {
+        FULCWM.setRestorePending(false);
         FULCWM.open('terminal');
       }
     }, 200);
