@@ -2,6 +2,7 @@
 //
 // Which runner the Team app's watch switch means (team-runners.js), the runner list read, and the connecting state (team-model.js), against a fake client.
 // The page itself, on the built output at desktop, tablet and phone widths, is e2e/team-runners.spec.ts.
+import { execFileSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { readFleet } from "../apps/runners/runners-fleet.js";
 import { REPOS_URL, RUNNERS_URL, SETTINGS_URL, createTeamApi, panelUrl, commandsUrl, dialsUrl } from "../apps/team/team-model.js";
@@ -54,10 +55,10 @@ describe("the watch switch names its runner", () => {
     expect(v.status).toEqual({ kind: "offline", text: "Offline · last seen 3 h ago" });
   });
   it("a runner never seen says so", () => expect(live({ state: "offline", last_seen_at: null }).status.text).toBe("Offline · never seen"));
-  it("bridge not set up on any runner: the one command, the repo filled in, placeholders for the person's folders", () => {
+  it("bridge not set up on any runner: the one command, the repo filled in, nothing to edit", () => {
     const v = view({ settings: readSettings(paired({ bridged_runner_id: null })), fleet: fleetOf(F.runner()) });
     expect(v.status.kind).toBe("unset");
-    expect(v.command).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root <path to the engine's checkout> --state-dir <the engine's state dir>");
+    expect(v.command).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets");
     expect(v.label).toBe(RUNNER_WORDS.watchAny);
   });
   it("no runner registered: says so and shows no command to run yet", () => {
@@ -93,11 +94,41 @@ describe("the connect list", () => {
     const rows = view({ settings: readSettings(two()), fleet: twoRunners(), repoName: "acme-labs/site" }).connect.rows;
     expect(rows.map((r) => r.bridged)).toEqual([false, true]);
   });
-  it("an unnamed repository never goes into the command: the placeholder stands in", () => {
-    expect(commandFor("Unnamed repository (6f1c2f5e)")).toContain("--repo <owner/name> ");
-    expect(commandFor("acme-labs/widgets")).toContain("--repo acme-labs/widgets ");
+  it("an unnamed repository gives no command at all, and the page says why instead of a placeholder", () => {
+    expect(commandFor("Unnamed repository (6f1c2f5e)")).toBe("");
+    expect(commandFor("")).toBe("");
+    expect(commandFor("acme-labs/widgets")).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets");
     const v = view({ settings: readSettings(paired({ full_name: "Unnamed repository (6f1c2f5e)", bridged_runner_id: null })), fleet: fleetOf(F.runner()) });
-    expect(v.command).toContain("--repo <owner/name> ");
+    expect([v.command, v.connect.command]).toEqual(["", ""]);
+    expect(RUNNER_WORDS.noRepoName).toMatch(/no command to show/);
+  });
+  // ON-BR-3 criterion 1: no <...> placeholder in any state that shows the command, and the old wording is gone (criterion 5).
+  it("no state shows a placeholder, and the words never ask the person to replace anything", () => {
+    const states = [
+      view({ settings: readSettings(paired({ bridged_runner_id: null })), fleet: fleetOf(F.runner()) }),
+      view({ settings: readSettings(paired({ bridged_runner_id: null })), fleet: fleetOf(F.runner(), F.runner({ id: RUNNER_B, name: "Build box", state: "offline" })) }),
+      view({ settings: readSettings(paired({ full_name: "Unnamed repository (6f1c2f5e)", bridged_runner_id: null })), fleet: fleetOf(F.runner()) }),
+      view({ settings: readSettings(paired({ bridged_runner_id: null })), fleet: fleetOf(F.runner()), root: "/srv/my engine" }),
+      view({ fleet: twoRunners() }), view({ fleet: null }), view({ fleet: fleetOf() }),
+    ];
+    for (const v of states) expect(strings(v).join("\n")).not.toMatch(/<[^>\n]*>|placeholder|replace the/i);
+    expect(strings(RUNNER_WORDS).join("\n")).not.toMatch(/<[^>\n]*>|placeholder|replace the/i);
+  });
+  it("the runner's discovered folder is quoted for a shell and shown only to an owner or admin", () => {
+    const unset = { settings: readSettings(paired({ bridged_runner_id: null })), fleet: fleetOf(F.runner()), root: "/srv/engine" };
+    expect(view(unset).command).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root /srv/engine");
+    const member = readSettings(F.settings({ can_edit: false, repos: [F.settingsRepo({ bridged_runner_id: null })] }));
+    expect(view({ ...unset, settings: member }).command).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    expect(commandFor("acme-labs/widgets", "relative/dir")).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets"); // not an absolute path: left out
+    expect(commandFor("acme-labs/widgets", "/a\nb")).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets");
+  });
+  it("four awkward folder names each survive a real shell word for word", () => {
+    for (const dir of ["/srv/my engine", "/srv/it's here", "/srv/a'b c'd", "/srv/$HOME/`x`;rm -rf \"q\" *"]) {
+      const cmd = commandFor("acme-labs/widgets", dir);
+      const out = execFileSync("sh", ["-c", "set -- " + cmd.replace("fx-runner engine-bridge enable", "") + '; printf "%s\\0" "$@"'], { env: {} }).toString().split("\0");
+      expect(out.slice(0, 3)).toEqual(["--repo", "acme-labs/widgets", "--repo-root"]);
+      expect(out[3]).toBe(dir);
+    }
   });
   it("the first-run order reads command, then the switch, and never claims the bridge is missing", () => {
     const v = view({ settings: readSettings(paired({ bridged_runner_id: null })), fleet: fleetOf(F.runner()) });
@@ -105,8 +136,7 @@ describe("the connect list", () => {
     expect(v.connect.rows[0].bridge).toBe("No report from this runner's bridge for acme-labs/widgets yet");
     expect(strings(v).join(" ")).not.toMatch(/not set up/i);
   });
-  it("the command carries the repo, or a placeholder, and no path of the server's", () => {
-    expect(commandFor("")).toContain("--repo <owner/name>");
+  it("the command carries the repo and no path of the server's", () => {
     expect(view({ fleet: twoRunners() }).connect.command).toContain("--repo acme-labs/widgets");
     expect(strings(view({ fleet: twoRunners() })).join(" ")).not.toMatch(/\/(home|Users|tmp|var)\//);
   });

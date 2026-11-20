@@ -2015,13 +2015,14 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
-  test("bridge not set up on any runner: the one command with the repo filled in and placeholders for the folders, and no path from the server", async ({ page }) => {
+  test("bridge not set up on any runner: the one connect command with the repo filled in, nothing to edit, and no path from the server", async ({ page }) => {
     const F = makeFixtures(Date.now());
     const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false }) }));
     await open(page);
     await expect(t(page, "tm-watch-off").locator("xpath=..")).toHaveText("Watch the engine team on your runner");
     await expect(tv(page, "tm-runner-status")).toContainText("then turn the switch on");
-    await expect(tv(page, "tm-bridge-command")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root <path to the engine's checkout> --state-dir <the engine's state dir>");
+    await expect(tv(page, "tm-bridge-command")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    expect(await page.locator(WIN).innerText()).not.toMatch(/<[^>\n]*>|placeholder|replace the/i);
     await noSideways(page);
     await clean(page, errors);
   });
@@ -2052,7 +2053,7 @@ test.describe("Team app", () => {
     const F = makeFixtures(Date.now());
     const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false }) }));
     await open(page);
-    const cmd = "fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root <path to the engine's checkout> --state-dir <the engine's state dir>";
+    const cmd = "fx-runner engine-bridge enable --repo acme-labs/widgets";
     const btn = page.locator(`${WIN} [data-testid="tm-copy"]:visible`).first();
     await expect(btn).toHaveAccessibleName("Copy command");
     await btn.focus();
@@ -2060,6 +2061,36 @@ test.describe("Team app", () => {
     await page.keyboard.press("Enter");
     await expect(page.locator(`${WIN} [data-testid="tm-copy-note"]:visible`).first()).toHaveText("Copied");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(cmd);
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("the connect command where the clipboard is blocked: the note says to copy by hand, and the command stays on the page as selectable text", async ({ page }) => {
+    await page.addInitScript(() => { Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("blocked")) }, configurable: true }); });
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false }) }));
+    await open(page);
+    await press(page.locator(`${WIN} [data-testid="tm-copy"]:visible`).first());
+    await expect(page.locator(`${WIN} [data-testid="tm-copy-note"]:visible`).first()).toHaveText("Couldn't copy. Select the command and copy it by hand.");
+    const code = tv(page, "tm-bridge-command");
+    await expect(code).toBeVisible();
+    await expect(code).toHaveCSS("user-select", /^(auto|text|all)$/);
+    await expect(code).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("the connect list in Settings shows the same command, no placeholder wording, and copies it", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const F = makeFixtures(Date.now());
+    const { errors } = await setup(page, fresh({ settings: F.settings({ watch_enabled: false }) }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, "tm-connect-command")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    await expect(t(page, "tm-connect-fill")).toHaveText("Run this on that computer, then turn the switch on.");
+    expect(await page.locator(WIN).innerText()).not.toMatch(/replace the|placeholder|<[^>\n]*>/i);
+    await press(t(page, "tm-connect-command").locator("xpath=following-sibling::button[1]"));
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets");
     await noSideways(page);
     await clean(page, errors);
   });
