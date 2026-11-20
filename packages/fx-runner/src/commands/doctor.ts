@@ -29,6 +29,7 @@ import { toolchainReport } from "../sandbox/toolchain.js";
 import { findCliStubs } from "../daemon/cliStubs.js";
 import { ENGINE_LINES, engineLineOf, missingCaps, type VmHostFacts } from "../vm/limits.js";
 import { loadSettings } from "../runnerSettings.js";
+import { vmInstallChecks, type VmInstallFacts } from "../vm/doctorChecks.js";
 import { updatesLine } from "./update.js";
 import { userUnitInstalled } from "./service.js";
 
@@ -45,6 +46,8 @@ export interface DoctorHost {
   engine: Pick<EngineKit, "locate" | "inspect">;
   /** The user's home directory, looked up by name by the caller. Without it the sandbox probe cannot be set up and says so. */
   home: string | undefined;
+  /** D#587 B-2a-2 PR-4: what the runner's own user can read about the installed VM helper (no root call). Left out, the VM install checks are not printed. */
+  vmInstall?: (() => Promise<VmInstallFacts>) | undefined;
   /** The directory `doctor` was started in, where the CLI placeholders check also looks (D#6 RUNNER-CWD-1). */
   cwd?: string | undefined;
   xdgCacheHome?: string | undefined;
@@ -352,6 +355,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   await limitsCheck(host, line);
   vmEngineCheck(ctx, host, line);
   await lingerCheck(host, line);
+  if (host.vmInstall !== undefined) for (const c of vmInstallChecks(await host.vmInstall())) line(c.level, c.label, c.detail);
 
   // What a job's agent can run for a project's own tests (D#6 R4d-3), on the runner's own PATH. Missing node is a warning, not a failure: not every repository needs it.
   // What the job's login shell finds is the next check (D#6 C44-2), and it only means something when the runner's PATH has node and the sandbox runs.

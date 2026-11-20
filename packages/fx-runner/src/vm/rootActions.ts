@@ -17,6 +17,8 @@ export type RootAction =
   | { readonly op: "mkdir"; readonly path: string; readonly owner: string; readonly mode: string }
   /** `source` is a staged file (read by no-follow open, as the runner's user); `text` is content carried in the request. */
   | { readonly op: "install"; readonly path: string; readonly owner: string; readonly mode: string; readonly sha256: string; readonly length: number; readonly source?: string; readonly text?: string; readonly restarts?: true; /** The unit file: systemd must reload after it changes. */ readonly reloads?: true }
+  /** Writes the install record (./installRecord) from what this run did to the group and the membership, merged with any earlier record. Its path is fixed and its content is made on the root side. */
+  | { readonly op: "record"; readonly path: string }
   | { readonly op: "daemon-reload" }
   | { readonly op: "enable-start"; readonly unit: string }
   /** Only when this run changed the helper, its config or its unit and the service was already running: an upgrade must not leave the old program running. */
@@ -54,11 +56,11 @@ export function buildRootActions(plan: InstallPlan, staged: StagedBundle, runner
   for (const f of Object.values(staged.binaries)) actions.push(fromStaged(f, "0755", true));
   actions.push({ op: "install", path: staged.manifest.dest, owner: ROOT_OWNER, mode: "0644", sha256: sha256Of(staged.manifest.text), length: Buffer.byteLength(staged.manifest.text), text: staged.manifest.text });
   for (const t of Object.values(staged.templates)) for (const f of Object.values(t)) actions.push(fromStaged(f, "0644"));
-  for (const item of plan.createList.filter((i) => i.kind === "file" || i.kind === "unit")) {
+  for (const item of plan.createList.filter((i) => (i.kind === "file" && i.target !== LAYOUT.recordFile) || i.kind === "unit")) {
     const text = item.kind === "unit" ? plan.unit.text : plan.config.text;
     actions.push({ op: "install", path: item.target, owner: item.owner, mode: item.mode, sha256: sha256Of(text), length: Buffer.byteLength(text), text, restarts: true, ...(item.kind === "unit" ? { reloads: true as const } : {}) });
   }
-  actions.push({ op: "daemon-reload" }, { op: "enable-start", unit: UNIT_NAME }, { op: "restart", unit: UNIT_NAME }, { op: "probe", socket: socketPath() });
+  actions.push({ op: "record", path: LAYOUT.recordFile }, { op: "daemon-reload" }, { op: "enable-start", unit: UNIT_NAME }, { op: "restart", unit: UNIT_NAME }, { op: "probe", socket: socketPath() });
   return actions;
 }
 
@@ -73,6 +75,8 @@ export function describeAction(a: RootAction): string {
       return `make directory ${a.path}  ${a.owner} ${a.mode}`;
     case "install":
       return `install ${a.path}  ${a.owner} ${a.mode}  sha256 ${a.sha256.slice(0, 12)}  (${a.length} bytes, via a temp file, fsync, rename, then checked)`;
+    case "record":
+      return `write ${a.path}  ${ROOT_OWNER} 0600  (which of the group and the membership this install made)`;
     case "daemon-reload":
       return "systemctl daemon-reload";
     case "restart":
@@ -117,11 +121,12 @@ export function checkRequest(value: unknown, euid: number): RootRequest {
       if (!sha256Hex.test(a.sha256) || !Number.isInteger(a.length) || a.length < 0 || (a.source === undefined) === (a.text === undefined) || (a.restarts !== undefined && a.restarts !== true) || (a.reloads !== undefined && (a.reloads !== true || a.path !== LAYOUT.unitFile))) bad("an install step is malformed");
       if (a.source !== undefined && !abs(a.source)) bad("a source path is not absolute");
     }
+    if (a.op === "record" && a.path !== LAYOUT.recordFile) bad("only the install record may be written");
     if (a.op === "group" && a.name !== HELPER_GROUP) bad("only the helper's group may be created");
     if (a.op === "member" && (a.group !== HELPER_GROUP || a.user !== req.runnerUser)) bad("only the runner's user may join the helper's group");
     if ((a.op === "enable-start" || a.op === "restart") && a.unit !== UNIT_NAME) bad("only the helper's unit may be started");
     if (a.op === "probe" && a.socket !== socketPath()) bad("only the helper's socket may be probed");
-    if (!["group", "member", "mkdir", "install", "daemon-reload", "enable-start", "restart", "probe"].includes(a.op)) bad("an unknown step");
+    if (!["group", "member", "mkdir", "install", "record", "daemon-reload", "enable-start", "restart", "probe"].includes(a.op)) bad("an unknown step");
   }
   return req;
 }

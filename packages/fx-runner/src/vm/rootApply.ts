@@ -13,6 +13,7 @@ import path from "node:path";
 import { CliError } from "../cliError.js";
 import type { RootAction, RootRequest } from "./rootActions.js";
 import { UNIT_NAME, describeAction } from "./rootActions.js";
+import { NO_RECORD, mergeRecord, parseRecord, renderRecord, type InstallRecord } from "./installRecord.js";
 
 /** The two calls whose failure leaves temp and backup files to clean up. Tests replace them to make them fail; nothing else does. */
 export const fsCalls = { link: linkSync, rename: renameSync };
@@ -40,7 +41,7 @@ const fail = (why: string): never => {
 const sha256Of = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
 
 /** Refuses a path that is not clean and absolute, or whose own name or any directory above it is a symlink or not a directory. Returns the target's stat, or undefined if it does not exist. */
-function checkedLstat(target: string): Stats | undefined {
+export function checkedLstat(target: string): Stats | undefined {
   if (!target.startsWith("/") || target.includes("\0") || path.posix.normalize(target) !== target) fail(`refused: ${target} is not a clean absolute path`);
   let dir = "/";
   const parts = target.split("/").filter((p) => p !== "");
@@ -50,8 +51,8 @@ function checkedLstat(target: string): Stats | undefined {
     try {
       st = lstatSync(dir);
     } catch (e) {
-      // fx-swallow-ok: a missing last component is the answer "does not exist"; anything else is refused by name below
-      if ((e as NodeJS.ErrnoException).code === "ENOENT" && i === parts.length - 1) return undefined;
+      // fx-swallow-ok: a missing component, the last or one above it (the directory was removed), is the answer "does not exist"; anything else is refused by name below
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       return fail(`refused: ${dir} cannot be examined`);
     }
     if (st.isSymbolicLink()) fail(`refused: ${dir} is a symlink`);
@@ -61,7 +62,7 @@ function checkedLstat(target: string): Stats | undefined {
   return undefined;
 }
 
-async function lookup(ops: RootOps, db: "passwd" | "group", name: string): Promise<{ id: number; gid: number; members: string[] } | undefined> {
+export async function lookup(ops: RootOps, db: "passwd" | "group", name: string): Promise<{ id: number; gid: number; members: string[] } | undefined> {
   const r = await ops.run("getent", [db, name]);
   if (r.code !== 0) return undefined;
   const f = r.output.trim().split("\n")[0]!.split(":");
@@ -70,7 +71,7 @@ async function lookup(ops: RootOps, db: "passwd" | "group", name: string): Promi
   return db === "passwd" ? { id, gid: Number(f[3]), members: [] } : { id, gid: id, members: (f[3] ?? "").split(",").filter((m) => m !== "") };
 }
 
-async function ids(ops: RootOps, owner: string): Promise<{ uid: number; gid: number }> {
+export async function ids(ops: RootOps, owner: string): Promise<{ uid: number; gid: number }> {
   const [user, group] = owner.split(":") as [string, string];
   const u = await lookup(ops, "passwd", user);
   const g = await lookup(ops, "group", group);
@@ -78,9 +79,9 @@ async function ids(ops: RootOps, owner: string): Promise<{ uid: number; gid: num
   return { uid: u.id, gid: g.id };
 }
 
-const sameMeta = (st: Stats, uid: number, gid: number, mode: number): boolean => st.uid === uid && st.gid === gid && (st.mode & 0o7777) === mode;
+export const sameMeta = (st: Stats, uid: number, gid: number, mode: number): boolean => st.uid === uid && st.gid === gid && (st.mode & 0o7777) === mode;
 
-function syncDir(dir: string): void {
+export function syncDir(dir: string): void {
   const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     fsyncSync(fd);
@@ -168,7 +169,25 @@ async function installFile(a: Extract<RootAction, { op: "install" }>, req: RootR
   return Object.assign(() => undo(), { commit: () => (before === undefined ? undefined : unlinkSync(backup)) });
 }
 
-function readNoFollowFile(file: string): Buffer {
+/** The install record, trusted only if it is root's by the opened handle itself: a regular file, one link, owner and mode as install writes them. Anything else is "recorded nothing". */
+export async function readTrustedRecord(ops: RootOps, file: string): Promise<InstallRecord> {
+  try {
+    if (checkedLstat(file) === undefined) return NO_RECORD;
+    const { uid, gid } = await ids(ops, "root:root");
+    const fd = openNoFollow(file, constants.O_RDONLY);
+    try {
+      const st = fstatSync(fd);
+      return !st.isFile() || st.nlink !== 1 || !sameMeta(st, uid, gid, 0o600) ? NO_RECORD : parseRecord(readFileSync(fd).toString("utf8"));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // fx-swallow-ok: a record that cannot be examined is "install recorded nothing", which leaves the group and membership alone
+    return NO_RECORD;
+  }
+}
+
+export function readNoFollowFile(file: string): Buffer {
   const fd = openNoFollow(file, constants.O_RDONLY);
   try {
     return readFileSync(fd);
@@ -205,7 +224,7 @@ async function makeDir(a: Extract<RootAction, { op: "mkdir" }>, ops: RootOps): P
   return undo;
 }
 
-async function must(ops: RootOps, file: string, args: readonly string[]): Promise<void> {
+export async function must(ops: RootOps, file: string, args: readonly string[]): Promise<void> {
   const r = await ops.run(file, args);
   if (r.code !== 0) fail(`${file} ${args[0] ?? ""} failed`);
 }
@@ -220,6 +239,9 @@ interface RunState {
   wasActive: boolean;
   /** A restart was begun, so a rollback must restart again once the old files are back. */
   restartBegun: boolean;
+  /** This run made the group, or added the user to it (install's record). */
+  groupCreated: boolean;
+  memberAdded: string | undefined;
 }
 
 async function step(a: RootAction, req: RootRequest, ops: RootOps, st: RunState): Promise<Undo | undefined> {
@@ -227,18 +249,25 @@ async function step(a: RootAction, req: RootRequest, ops: RootOps, st: RunState)
     case "group": {
       if ((await lookup(ops, "group", a.name)) !== undefined) return undefined;
       await must(ops, "groupadd", ["--system", "--", a.name]);
+      st.groupCreated = true;
       return () => must(ops, "groupdel", [a.name]);
     }
     case "member": {
       const g = await lookup(ops, "group", a.group);
       if (g?.members.includes(a.user) === true) return undefined;
       await must(ops, "usermod", ["-aG", a.group, "--", a.user]);
+      st.memberAdded = a.user;
       return () => must(ops, "gpasswd", ["-d", a.user, a.group]);
     }
     case "mkdir":
       return makeDir(a, ops);
     case "install":
       return installFile(a, req, ops);
+    case "record": {
+      const old = await readTrustedRecord(ops, a.path);
+      const bytes = Buffer.from(renderRecord(mergeRecord(old, st)));
+      return installFile({ op: "install", path: a.path, owner: "root:root", mode: "0600", sha256: sha256Of(bytes), length: bytes.length, text: bytes.toString("utf8") }, req, ops);
+    }
     case "daemon-reload":
       // Only when this run changed the unit file; on an installed host it is not a step at all.
       if (!st.unitChanged) return undefined;
@@ -293,7 +322,7 @@ export function symlinkRefusal(actions: readonly RootAction[], fsRoot = ""): str
 }
 
 /** What the user side checks before it asks for root: a NixOS machine, or a link on the way to a target, is configured declaratively and is refused with one sentence. */
-export function hostRefusal(actions: readonly RootAction[], fsRoot = ""): string | undefined {
+export function hostRefusal(actions: readonly RootAction[], fsRoot = "", verb = "vm install"): string | undefined {
   let why: string | undefined;
   try {
     lstatSync(`${fsRoot}/etc/NIXOS`);
@@ -302,14 +331,14 @@ export function hostRefusal(actions: readonly RootAction[], fsRoot = ""): string
     // fx-swallow-ok: no /etc/NIXOS means this is not NixOS
     why = symlinkRefusal(actions, fsRoot);
   }
-  return why === undefined ? undefined : `vm install cannot run here (${why}); use the NixOS module services.fx-vmhelper instead.`;
+  return why === undefined ? undefined : `${verb} cannot run here (${why}); use the NixOS module services.fx-vmhelper instead.`;
 }
 
 /** Applies the request. Never throws for a step failure: the report says what was done, what was undone and what failed. */
 export async function applyRootActions(req: RootRequest, ops: RootOps): Promise<RootReport> {
   const done: Array<{ label: string; undo: Undo }> = [];
   const unchanged: string[] = [];
-  const st: RunState = { unitChanged: false, programChanged: false, wasActive: false, restartBegun: false };
+  const st: RunState = { unitChanged: false, programChanged: false, wasActive: false, restartBegun: false, groupCreated: false, memberAdded: undefined };
   // Every staged file is judged before the first change: a file swapped after staging means no step runs at all. Each is read again,
   // through a fresh no-follow open and the same checks, when its own step runs, and what is written is exactly the bytes that passed.
   for (const a of req.actions) {

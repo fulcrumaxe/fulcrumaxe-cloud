@@ -3,6 +3,7 @@
   directory    /opt/fx-vmhelper  root:root 0755  (the helper, the jailer, the VMM, the template manifest and the templates)
   directory    /etc/fx-vmhelper  root:root 0755  (the helper's config)
   file         /etc/fx-vmhelper/config.json  root:root 0600  (the helper's config; limits: 8 sandboxes, 8 vCPUs, 12288 MB)
+  file         /etc/fx-vmhelper/install-record.json  root:root 0600  (which of the group and the membership this install made, so uninstall removes only those)
   unit         /etc/systemd/system/fx-vmhelper.service  root:root 0644  (the hardened systemd unit)
   directory    /var/lib/fx-vm  root:root 0711  (the one jail root)
   directory    /var/lib/fx-vm-snapshots  root:root 0700  (where snapshots are stored: guest memory, root only)

@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { CliError } from "../cliError.js";
 import { buildImage, type BuildHost } from "./buildImage.js";
 import { INSTALL_USAGE, installCommand, rootApplyCommand, type InstallHost, type RootSideHost } from "./install.js";
+import { UNINSTALL_USAGE, rootRemoveCommand, uninstallCommand, type UninstallHost } from "./uninstall.js";
 import { ARCHES, TEMPLATES, parseLock, type Arch } from "./lock.js";
 
 export const VM_USAGE = "usage: fx-runner vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64] [--lock <file>] [--guest-dir <dir>]";
@@ -17,6 +18,7 @@ const FLAGS =["template", "image", "out", "arch", "lock", "guest-dir"] as const;
 export interface VmInstallHosts {
   readonly install?: InstallHost;
   readonly root?: RootSideHost;
+  readonly uninstall?: UninstallHost;
 }
 
 export async function vmCommand(args: readonly string[], host: BuildHost, out: (line: string) => void, hosts: VmInstallHosts = {}): Promise<number> {
@@ -29,6 +31,19 @@ export async function vmCommand(args: readonly string[], host: BuildHost, out: (
     if (hosts.install === undefined) throw new CliError("vm install is only available from the fx-runner program");
     return await installCommand(rest, hosts.install, out);
   }
+  if (sub === "uninstall" && rest.includes("--help")) {
+    out(UNINSTALL_USAGE);
+    return 0;
+  }
+  if (sub === "uninstall") {
+    if (hosts.uninstall === undefined) throw new CliError("vm uninstall is only available from the fx-runner program");
+    return await uninstallCommand(rest, hosts.uninstall, out);
+  }
+  if (sub === "root-remove") {
+    if (hosts.root === undefined) throw new CliError("vm root-remove is only available from the fx-runner program");
+    if (rest.length > 0) throw new CliError(UNINSTALL_USAGE, 2);
+    return await rootRemoveCommand(hosts.root, out);
+  }
   if (sub === "root-apply") {
     if (hosts.root === undefined) throw new CliError("vm root-apply is only available from the fx-runner program");
     if (rest.length > 0) throw new CliError(INSTALL_USAGE, 2);
@@ -38,7 +53,7 @@ export async function vmCommand(args: readonly string[], host: BuildHost, out: (
     out(VM_USAGE);
     return 0;
   }
-  if (sub !== "build-image") throw new CliError(`${VM_USAGE}\n${INSTALL_USAGE}`, 2);
+  if (sub !== "build-image") throw new CliError(`${VM_USAGE}\n${INSTALL_USAGE}\n${UNINSTALL_USAGE}`, 2);
   const flags = new Map<string, string>();
   for (let i = 0; i < rest.length; i += 2) {
     const name = rest[i]?.startsWith("--") ? rest[i]!.slice(2) : "";

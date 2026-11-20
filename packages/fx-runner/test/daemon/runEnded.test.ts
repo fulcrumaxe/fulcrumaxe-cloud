@@ -28,6 +28,9 @@ export const ROOT_HOST_COMMANDS: ReadonlyArray<readonly [file: string, command: 
   ["src/vm/install.ts", "getent"],
   ["src/vm/rootApply.ts", "getent"],
   ["src/vm/rootApply.ts", "systemctl"],
+  // The uninstall path runs the same root host commands: the user lookup before it removes the account, and the unit state checks before it stops a unit.
+  ["src/vm/uninstall.ts", "getent"],
+  ["src/vm/uninstallApply.ts", "systemctl"],
 ];
 
 /** The codes in one file's text that no mapping or reviewed exemption covers. */
@@ -75,7 +78,11 @@ describe("C2: a new git-path code without a detail fails here", () => {
     expect(unmappedIn("src/vm/install.ts", 'await host.ops.run("getent", ["passwd", u]);')).toEqual([]);
     expect(unmappedIn("src/vm/rootApply.ts", 'await ops.run("useradd", []);')).toEqual(["useradd"]);
     expect(unmappedIn("src/vm/install.ts", 'await host.ops.run("systemctl", []);')).toEqual(["systemctl"]);
-    expect(unmappedIn("src/vm/uninstall.ts", 'await ops.run("getent", []);')).toEqual(["getent"]);
+    expect(unmappedIn("src/vm/doctorChecks.ts", 'await ops.run("getent", []);')).toEqual(["getent"]);
+    expect(unmappedIn("src/vm/uninstall.ts", 'await host.ops.run("getent", ["passwd", u]);')).toEqual([]);
+    expect(unmappedIn("src/vm/uninstall.ts", 'await ops.run("systemctl", []);')).toEqual(["systemctl"]);
+    expect(unmappedIn("src/vm/uninstallApply.ts", 'await ops.run("systemctl", ["is-active"]);')).toEqual([]);
+    expect(unmappedIn("src/vm/uninstallApply.ts", 'await ops.run("getent", []);')).toEqual(["getent"]);
     expect(unmappedIn("src/daemon/other.ts", 'throw new GitPathError("getent");')).toEqual(["getent"]);
   });
 

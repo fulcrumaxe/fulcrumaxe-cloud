@@ -39,6 +39,8 @@ export const LAYOUT = {
   templateDir: "/opt/fx-vmhelper/templates",
   configDir: "/etc/fx-vmhelper",
   configFile: "/etc/fx-vmhelper/config.json",
+  /** What install made of the group and the membership (./installRecord): uninstall removes only that. */
+  recordFile: "/etc/fx-vmhelper/install-record.json",
   unitFile: "/etc/systemd/system/fx-vmhelper.service",
   jailRoot: "/var/lib/fx-vm",
   /** Outside the jail root and not holding it (config.Parse refuses otherwise); the helper stores snapshots here as root. */
@@ -162,6 +164,7 @@ export function buildInstallPlan(facts: HostFacts, pinned: Pinned = loadPinned()
     { kind: "directory", target: LAYOUT.helperDir, detail: "the helper, the jailer, the VMM, the template manifest and the templates", owner: root, mode: MODES.dir },
     { kind: "directory", target: LAYOUT.configDir, detail: "the helper's config", owner: root, mode: MODES.dir },
     { kind: "file", target: LAYOUT.configFile, detail: `the helper's config; limits: ${limits.max_sandboxes} sandboxes, ${limits.max_vcpus} vCPUs, ${limits.max_mem_mb} MB`, owner: root, mode: MODES.config },
+    { kind: "file", target: LAYOUT.recordFile, detail: "which of the group and the membership this install made, so uninstall removes only those", owner: root, mode: MODES.config },
     { kind: "unit", target: LAYOUT.unitFile, detail: "the hardened systemd unit", owner: root, mode: MODES.unit },
     { kind: "directory", target: LAYOUT.jailRoot, detail: "the one jail root", owner: root, mode: MODES.jailRoot },
     { kind: "directory", target: LAYOUT.snapshotDir, detail: "where snapshots are stored: guest memory, root only", owner: root, mode: MODES.snapshotDir },

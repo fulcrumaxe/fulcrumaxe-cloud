@@ -32,6 +32,9 @@ import { vmHostFacts } from "../scripts/vm-facts.mjs";
 import { createVmInstallHosts } from "../scripts/vm-install-host.mjs";
 import { buildRootArgv } from "../src/vm/install.js";
 import { hostRefusal } from "../src/vm/rootApply.js";
+import { buildRemoveArgv } from "../src/vm/uninstall.js";
+import { uninstallPathActions } from "../src/vm/uninstallActions.js";
+import { createVmInstallFacts } from "../scripts/vm-doctor-host.mjs";
 import { stateDirFor } from "../src/config.js";
 import { TufClient } from "../src/update/tuf.js";
 import { findChromium, openHeadedBrowser } from "../src/verifyBrowser/driver.js";
@@ -286,11 +289,15 @@ const engineHostRuntime = {
 // The client is made on first use, not at start: its state directory needs a home directory, and the verify server runs with an environment that has none.
 let tufClient;
 const vmTuf = () => (tufClient ??= new TufClient({ stateDir: stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME) }));
+// One lazy port shared by the install hosts and the doctor facts; neither builds the client until it calls a method.
+const vmTufPort = { listTargets: (...args) => vmTuf().listTargets(...args), fetchTarget: (...args) => vmTuf().fetchTarget(...args) };
 const vmInstallHosts = createVmInstallHosts({
   buildRootArgv,
+  buildRemoveArgv,
+  hostRefusalRemove: (actions) => hostRefusal(uninstallPathActions(actions), "", "vm uninstall"),
   hostRefusal: (actions) => hostRefusal(actions),
   selfCommand: sea ? [process.execPath] : [process.execPath].concat(process.execArgv, [scriptPath()]),
-  tuf: { listTargets: (...args) => vmTuf().listTargets(...args), fetchTarget: (...args) => vmTuf().fetchTarget(...args) },
+  tuf: vmTufPort,
   confirm: async (question) => /^y(es)?$/i.test((await askOnTerminal(process.stdin, (text) => process.stdout.write(text), question, 120000)) ?? "n"),
 });
 
@@ -354,7 +361,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts() },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), vmInstall: createVmInstallFacts({ tuf: vmTufPort }) },
   vmHost: vmBuildHost,
   // D#749 V2c-2b: the verify browser. The MCP server gets the process's own streams and ONLY the variables the browser may inherit (the driver allowlists again); `verify-login` gets a headed browser and the terminal.
   verifyServerHost: {
