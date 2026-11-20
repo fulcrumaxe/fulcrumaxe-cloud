@@ -16,7 +16,7 @@ import { registerCommand } from "./commands/register.js";
 import { loadBypass, requireUsable } from "./protectionBypass.js";
 import { credentialsCommand } from "./commands/credentials.js";
 import type { BuildHost } from "./vm/buildImage.js";
-import { vmCommand } from "./vm/command.js";
+import { vmCommand, type VmInstallHosts } from "./vm/command.js";
 import { revokeCommand } from "./commands/revoke.js";
 import { doctorCommand, type DoctorHost } from "./commands/doctor.js";
 import { versionLine } from "./version.js";
@@ -73,6 +73,8 @@ export interface CliIo {
   serviceHost?: ServiceHost;
   /** What `vm build-image` needs from the machine (crane, tar and mke2fs, started by name). Only `bin/fx-runner.mjs` supplies it. */
   vmHost?: BuildHost;
+  /** What `vm install` and its root side need from the machine (host facts, the one root call). Only `bin/fx-runner.mjs` supplies it. */
+  vmInstallHosts?: VmInstallHosts;
   /** What `update`, `config` and the daemon's self-update need from the machine. Only `bin/fx-runner.mjs` supplies it. */
   updateHost?: UpdateHost;
   /** What `verify-browser-server` needs (the process's own streams and a short allowlist of its environment). Only `bin/fx-runner.mjs` supplies it. */
@@ -101,6 +103,8 @@ Commands:
                      Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request. --sandbox-only runs only the sandbox test.
   --version          Print the version.
   logs <run id>      Print the local transcript of a run on this machine.
+  vm install [--yes] [--dry-run]
+                     Install the VM helper: shows every file, user, group and limit it makes, asks once, then runs one sudo call that applies them and undoes them all if any step fails. --dry-run shows the root steps and makes no root call.
   vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64]
                      Make the read-only root disk of the microVM guest from a digest-pinned image, for amd64 and arm64, and print the sha256 of each. Needs crane, tar and mke2fs 1.47.1 or newer; no root.
   credentials set-api-key | clear-api-key | status
@@ -248,7 +252,7 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret);
     if (command === "vm") {
       if (io.vmHost === undefined) throw new CliError("vm is only available from the fx-runner program");
-      return await vmCommand(rest, io.vmHost, ctx.out);
+      return await vmCommand(rest, io.vmHost, ctx.out, io.vmInstallHosts);
     }
     const { flags, positionals } = parsed!;
     if (command === "register") return await registerCommand(flags, ctx);

@@ -7,18 +7,38 @@
 import { readFileSync } from "node:fs";
 import { CliError } from "../cliError.js";
 import { buildImage, type BuildHost } from "./buildImage.js";
+import { INSTALL_USAGE, installCommand, rootApplyCommand, type InstallHost, type RootSideHost } from "./install.js";
 import { ARCHES, TEMPLATES, parseLock, type Arch } from "./lock.js";
 
 export const VM_USAGE = "usage: fx-runner vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64] [--lock <file>] [--guest-dir <dir>]";
 const FLAGS =["template", "image", "out", "arch", "lock", "guest-dir"] as const;
 
-export async function vmCommand(args: readonly string[], host: BuildHost, out: (line: string) => void): Promise<number> {
+/** What `vm install` and its root side need from the machine; only `bin/fx-runner.mjs` supplies them. */
+export interface VmInstallHosts {
+  readonly install?: InstallHost;
+  readonly root?: RootSideHost;
+}
+
+export async function vmCommand(args: readonly string[], host: BuildHost, out: (line: string) => void, hosts: VmInstallHosts = {}): Promise<number> {
   const [sub, ...rest] = args;
+  if (sub === "install" && rest.includes("--help")) {
+    out(INSTALL_USAGE);
+    return 0;
+  }
+  if (sub === "install") {
+    if (hosts.install === undefined) throw new CliError("vm install is only available from the fx-runner program");
+    return await installCommand(rest, hosts.install, out);
+  }
+  if (sub === "root-apply") {
+    if (hosts.root === undefined) throw new CliError("vm root-apply is only available from the fx-runner program");
+    if (rest.length > 0) throw new CliError(INSTALL_USAGE, 2);
+    return await rootApplyCommand(hosts.root, out);
+  }
   if (sub === "build-image" && rest.includes("--help")) {
     out(VM_USAGE);
     return 0;
   }
-  if (sub !== "build-image") throw new CliError(VM_USAGE, 2);
+  if (sub !== "build-image") throw new CliError(`${VM_USAGE}\n${INSTALL_USAGE}`, 2);
   const flags = new Map<string, string>();
   for (let i = 0; i < rest.length; i += 2) {
     const name = rest[i]?.startsWith("--") ? rest[i]!.slice(2) : "";

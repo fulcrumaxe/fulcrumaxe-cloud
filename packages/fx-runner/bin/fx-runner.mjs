@@ -29,6 +29,11 @@ import { cacheRootsFor } from "../src/daemon/mirror.js";
 import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
 import { vmHostFacts } from "../scripts/vm-facts.mjs";
+import { createVmInstallHosts } from "../scripts/vm-install-host.mjs";
+import { buildRootArgv } from "../src/vm/install.js";
+import { hostRefusal } from "../src/vm/rootApply.js";
+import { stateDirFor } from "../src/config.js";
+import { TufClient } from "../src/update/tuf.js";
 import { findChromium, openHeadedBrowser } from "../src/verifyBrowser/driver.js";
 import { setPlaywrightLoader, sidecarFor } from "../src/verifyBrowser/loadPlaywright.js";
 import { sidecarLibrary } from "./sidecarLibrary.mjs";
@@ -277,7 +282,20 @@ const engineHostRuntime = {
     }),
 };
 
+// D#587 B-2a-2: `vm install` reads the machine here and makes its one root call here; the verified downloads use the same TUF client the updater does.
+// The client is made on first use, not at start: its state directory needs a home directory, and the verify server runs with an environment that has none.
+let tufClient;
+const vmTuf = () => (tufClient ??= new TufClient({ stateDir: stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME) }));
+const vmInstallHosts = createVmInstallHosts({
+  buildRootArgv,
+  hostRefusal: (actions) => hostRefusal(actions),
+  selfCommand: sea ? [process.execPath] : [process.execPath].concat(process.execArgv, [scriptPath()]),
+  tuf: { listTargets: (...args) => vmTuf().listTargets(...args), fetchTarget: (...args) => vmTuf().fetchTarget(...args) },
+  confirm: async (question) => /^y(es)?$/i.test((await askOnTerminal(process.stdin, (text) => process.stdout.write(text), question, 120000)) ?? "n"),
+});
+
 runCli({
+  vmInstallHosts,
   updateHost,
   argv: process.argv.slice(2),
   home: process.env.HOME,
