@@ -976,6 +976,19 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     expect((await stop(run)).code).toBe(0);
   }, 60_000);
 
+  it("D#587 B-5a part 3: microvm mode with every limit set but no machine facts (so no KVM) takes no job: the claim names microvm_no_kvm, and the OS sandbox is not used instead", async () => {
+    partialMicrovm("microvm");
+    setSetting(stateDir, "microvm.snapshot_quota_bytes", "1073741824");
+    cloud.enqueue(queuedJob());
+    fake.set("hang", "");
+    const run = start();
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toEqual({ sandbox_unavailable: "microvm_no_kvm" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fake.spawnCount()).toBe(0);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
   it("D#587 B-6a: the same incomplete limits in os_sandbox mode are ignored and the queued job is taken", async () => {
     partialMicrovm("os_sandbox");
     const job = queuedJob();

@@ -3792,7 +3792,7 @@ check_runner_sandbox_status_role_shape() {
 
 # D#6 R4a-6 (0763): the shape of runner_sandbox_status. Row security enabled and forced; platform_ops, partner_user and agent_run_writer hold
 # nothing on it (no table privilege, no column privilege); app_user holds exactly the three-column SELECT; the reason is held to the closed
-# set by a CHECK; the runners table has no column for it (a table-wide platform_ops grant on runners would have reached one). A no-op
+# set of nine (0763's five and 1044's four microvm_* codes) by a CHECK; the runners table has no column for it (a table-wide platform_ops grant on runners would have reached one). A no-op
 # when the table does not exist.
 check_runner_sandbox_status_table_shape() {
   local dbname="$1" out rc=0
@@ -3806,7 +3806,7 @@ check_runner_sandbox_status_table_shape() {
       CASE WHEN has_any_column_privilege('app_user', c.oid, 'INSERT, UPDATE, REFERENCES') OR has_table_privilege('app_user', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'app_user can write it' END,
       CASE WHEN (SELECT count(*) FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attnum > 0 AND NOT t.attisdropped AND has_column_privilege('app_user', c.oid, t.attnum, 'SELECT')) <> 3
                 OR NOT has_column_privilege('app_user', c.oid, 'reason', 'SELECT') THEN 'app_user does not read exactly its three columns' END,
-      CASE WHEN NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'c' AND pg_get_constraintdef(k.oid) ~ 'bwrap_missing.*socat_missing.*userns_disabled.*apparmor_userns_restricted.*probe_failed_other') THEN 'the reason is not held to the closed set' END,
+      CASE WHEN NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'c' AND pg_get_constraintdef(k.oid) ~ 'bwrap_missing.*socat_missing.*userns_disabled.*apparmor_userns_restricted.*probe_failed_other.*microvm_no_kvm.*microvm_helper_missing.*microvm_helper_not_ready.*microvm_helper_out_of_date') THEN 'the reason is not held to the closed set' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_attribute t WHERE t.attrelid = 'public.runners'::regclass AND t.attname = 'sandbox_unavailable' AND NOT t.attisdropped) THEN 'runners has a sandbox_unavailable column' END)
     FROM pg_class c WHERE c.oid = to_regclass('public.runner_sandbox_status');" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then

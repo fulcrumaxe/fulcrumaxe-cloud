@@ -30,7 +30,8 @@ import { createFootprintStore } from "../daemon/footprints.js";
 import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
 import { isDraining, isPaused, loadSettings, setDraining } from "../runnerSettings.js";
-import { limitsClaimBlock, type ClaimBlock } from "../vm/limits.js";
+import { limitsClaimBlock, type ClaimBlock, type VmHostFacts } from "../vm/limits.js";
+import { createMicrovmGate } from "../daemon/microvmGate.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readVerifyAnswer } from "../daemon/answerFile.js";
@@ -133,6 +134,8 @@ export interface RunHost {
   env?: Readonly<Record<string, string | undefined>> | undefined;
   /** D#842 EB-3c: the engine bridge's halt path and ceiling keeper, bound by the entry point (`engineBridge/ports.ts`). Absent: the bridge never starts. */
   engineBridge?: EngineBridgePorts | undefined;
+  /** D#587 B-5a part 3: what the machine says about KVM, the helper's socket and what the helper answered, read by the entry point. Absent: a runner set to `microvm` has no facts, which closes its gate (no KVM). */
+  vmFacts?: (() => Promise<VmHostFacts | undefined>) | undefined;
   /** D#845 ON-BR-2: what the machine gives the runner's own Connect handling (home, the engine's state directory variable, discovery roots). Absent: `bridge_enable` and `bridge_disable` are not pulled. */
   engineBridgeOptions?: EngineBridgeCommandOptions | undefined;
 }
@@ -496,7 +499,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
 
     // The claim gate (C16 section 1.3). Each probe first looks for bubblewrap and socat again, so a tool installed while the daemon runs is found
     // (the directories are updated in place: every user of `envOptions` reads them when it builds an environment).
-    const gate = createSandboxGate({
+    const osGate = createSandboxGate({
       now: ctx.now,
       probe: () => {
         const found = sandboxDirs(host, searchPath);
@@ -504,6 +507,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return probeMachine({ platform: host.platform, home, stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath }, host.sandbox);
       },
     });
+    // D#587 B-5a part 3: a runner set to `microvm` that cannot start a VM names one of four `microvm_*` reasons and takes no job; it never falls back to the OS sandbox.
+    const gate = createMicrovmGate({ engine: () => loadSettings(stateDir).sandboxEngine ?? "os_sandbox", facts: host.vmFacts, now: ctx.now, limitsBlocked: () => vmLimitsBlock(stateDir) !== undefined, inner: osGate });
     let lastReason: string | undefined;
     // Self-update (D#6 R6-2b): checked at the top of the claim loop, and never while any job is in hand. A count, so one job ending does not clear the others (C43-3).
     const jobs = createJobsInHand();
@@ -545,7 +550,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         if (blocked !== undefined) ctx.out(`fx-runner: ${blocked}: ${CANARY_BLOCK_HINT[blocked]}`);
       }
       const first = await gate.check();
-      if (!first.open) ctx.out(`fx-runner: the sandbox does not work on this machine (${first.reason}); no job will be claimed until it does. Run: fx-runner doctor`);
+      if (!first.open) ctx.out(first.reason.startsWith("microvm_") ? `fx-runner: this machine cannot start the microVM engine you chose (${first.reason}); no job will be claimed until it can, and the OS sandbox is not used instead. Run: fx-runner doctor` : `fx-runner: the sandbox does not work on this machine (${first.reason}); no job will be claimed until it does. Run: fx-runner doctor`);
       lastReason = first.open ? undefined : first.reason;
       // D#605 FL-2: say what this build and machine are, once per start, before the first claim. Best effort and no gate: a cloud that is older, a network
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.

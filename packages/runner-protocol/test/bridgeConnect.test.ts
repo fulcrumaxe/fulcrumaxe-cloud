@@ -75,9 +75,9 @@ describe("bridge_enable and bridge_disable: the shapes", () => {
 });
 
 describe("the protocol gate", () => {
-  it("is 24, the highest minimum in the file, and the current version", () => {
+  it("is 24, the highest minimum in the file (the version since is 25, the current one)", () => {
     expect(BRIDGE_ENABLE_MIN_PROTOCOL).toBe(24);
-    expect(CURRENT_PROTOCOL_VERSION).toBe(24);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(25);
     const text = readFileSync(new URL("../src/messages.ts", import.meta.url), "utf8");
     const mins = [...text.matchAll(/export const [A-Z_]*MIN_PROTOCOL = (\d+);/g)].map((m) => ({ name: m[0], n: Number(m[1]) }));
     const highest = Math.max(...mins.map((m) => m.n));

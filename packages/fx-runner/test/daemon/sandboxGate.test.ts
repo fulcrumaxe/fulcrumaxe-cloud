@@ -4,6 +4,7 @@ import { REPROBE_INTERVAL_MS, createSandboxGate } from "../../src/daemon/sandbox
 import { abortOnSignals, pollLoop, type PollEvent } from "../../src/daemon/pollLoop.js";
 import type { ClaimResult } from "../../src/daemon/client.js";
 import { SANDBOX_REASONS, type SandboxProbeResult } from "../../src/sandbox/probe.js";
+import { MICROVM_UNAVAILABLE_REASONS } from "../../src/vm/engineGate.js";
 import { manualClock } from "../helpers/manualClock.js";
 import { signedJob } from "../helpers/signedJob.js";
 
@@ -27,8 +28,8 @@ function rig(first: SandboxProbeResult | (() => never)) {
 }
 
 describe("the protocol and the probe agree on the reason codes", () => {
-  it("the closed sets are the same five, in the same order", () => {
-    expect([...SANDBOX_UNAVAILABLE_REASONS]).toEqual([...SANDBOX_REASONS]);
+  it("the protocol's set is the probe's five and the four microvm reasons, in that order", () => {
+    expect([...SANDBOX_UNAVAILABLE_REASONS]).toEqual([...SANDBOX_REASONS, ...MICROVM_UNAVAILABLE_REASONS]);
   });
 });
 

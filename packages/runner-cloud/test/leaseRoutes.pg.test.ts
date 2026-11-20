@@ -205,6 +205,21 @@ describe("lease routes [pg]", () => {
         expect((await h.admin.query("SELECT last_seen_at FROM runners WHERE id = $1", [runnerId])).rows[0].last_seen_at).not.toBeNull();
       });
 
+      it("D#587 B-5a part 3: each microvm_* reason is stored as itself (the claim's own status write is the one that would have failed on the old five), and a near miss is a 400", async () => {
+        for (const reason of ["microvm_no_kvm", "microvm_helper_missing", "microvm_helper_not_ready", "microvm_helper_out_of_date"]) {
+          await reset();
+          claimResult = { kind: "claimed", signedJob: signJob(job, generateKeyPairSync("ed25519").privateKey), runId: RUN, leaseGeneration: 1 };
+          const res = await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: reason })));
+          expect(res.status, reason).toBe(200);
+          expect(res.body, reason).toEqual({ retry_after: 60 });
+          expect(await stored(), reason).toBe(reason);
+        }
+        expect(calls).toEqual([]);
+        await reset();
+        expect((await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "microvm_helper" })))).status).toBe(400);
+        expect(await stored()).toBe("microvm_helper_out_of_date");
+      });
+
       it("is cleared by the runner's next ordinary claim, which does reach the worker", async () => {
         await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "bwrap_missing" })));
         expect(await stored()).toBe("bwrap_missing");

@@ -135,6 +135,9 @@ export function admitVm(input: { caps: MicrovmCaps | undefined; running: readonl
 
 export type Presence = "present" | "absent" | "unreadable";
 
+/** What the helper answered when asked on its socket: speaking this build's protocol (`ready`), no usable answer (`not_ready`), or another protocol number (`out_of_date`). */
+export type HelperState = "ready" | "not_ready" | "out_of_date";
+
 /** What the machine says, filled in by `bin/fx-runner.mjs`. A fact the caller could not read is `unreadable` (or left out), never `present`. */
 export interface VmHostFacts {
   /** The device the hypervisor needs. */
@@ -143,6 +146,8 @@ export interface VmHostFacts {
   helperSocket: Presence;
   /** Where the socket is looked for, for the message. */
   helperSocketPath: string;
+  /** D#587 B-5a part 3: what the helper answered. Left out when nobody asked; a runner set to `microvm` reads that as `not_ready`, never as ready. `doctor`'s line does not use it. */
+  helperState?: HelperState | undefined;
   /** Total memory in MiB and the core count, to print beside the limits. */
   totalMemMb?: number | undefined;
   cpus?: number | undefined;

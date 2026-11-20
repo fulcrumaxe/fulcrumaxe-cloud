@@ -343,6 +343,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "userns_disabled",
   "apparmor_userns_restricted",
   "probe_failed_other",
+  // D#587 B-5a part 3: a runner set to the microVM engine that cannot start it (protocol 25).
+  "microvm_no_kvm",
+  "microvm_helper_missing",
+  "microvm_helper_not_ready",
+  "microvm_helper_out_of_date",
   // Cloud-verified runner git ticket (D#6 R5a-2b): the ticket route refused a run that is not cloud-verified.
   "not_cloud_verified",
   // D#598 P1f-2: the public-push token and report routes (and the report check's own refusal code).

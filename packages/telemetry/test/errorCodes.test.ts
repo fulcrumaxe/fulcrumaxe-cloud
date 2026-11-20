@@ -63,7 +63,7 @@ describe("the error-code allowlist", () => {
   });
 
   it("keeps the sandbox probe's reason codes (D#6 R4a-5) instead of folding them into other, in a block of their own", () => {
-    const codes = ["bwrap_missing", "socat_missing", "userns_disabled", "apparmor_userns_restricted", "probe_failed_other"];
+    const codes = ["bwrap_missing", "socat_missing", "userns_disabled", "apparmor_userns_restricted", "probe_failed_other", "microvm_no_kvm", "microvm_helper_missing", "microvm_helper_not_ready", "microvm_helper_out_of_date"];
     for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);
     const first = OWN_ERROR_CODES.indexOf(codes[0]!);
     expect(OWN_ERROR_CODES.slice(first, first + codes.length)).toEqual(codes);
