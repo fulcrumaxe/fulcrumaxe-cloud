@@ -1864,6 +1864,20 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
     // [data-testid] query (and any script that counts cards or columns) see each node twice, so the copy drops them.
     clone.removeAttribute('data-testid');
     clone.querySelectorAll('[data-testid]').forEach(function (n) { n.removeAttribute('data-testid'); });
+    // A copied radio keeps its `name`, so the browser puts it in the same
+    // group as the live radios. Once the clone is attached and painted, its
+    // checked radio takes the live group's selection and unchecks the live one
+    // (a hover on the dock changed the person's runner dial). The copy of any
+    // form control therefore loses `name`, `id` and `form`, so it joins no
+    // group, form or label of the live window.
+    clone.querySelectorAll('input, select, textarea, button, output, fieldset, label[for]').forEach(function (n) {
+      n.removeAttribute('name');
+      n.removeAttribute('id');
+      n.removeAttribute('form');
+      n.removeAttribute('for');
+      n.removeAttribute('autofocus');
+      n.setAttribute('tabindex', '-1');
+    });
     // A window nested inside the clone (none today) must not pass for live.
     clone.querySelectorAll('.fulc-window').forEach(markAsClone);
     if (clone.hasAttribute('data-no-preview')) {
