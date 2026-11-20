@@ -141,7 +141,7 @@ func TestExtraDirectivesAndRuntimeMode(t *testing.T) {
 	for k, v := range map[string]string{
 		"SystemCallArchitectures": "native", "LockPersonality": "yes", "RestrictSUIDSGID": "yes",
 		"DevicePolicy": "closed", "SystemCallFilter": "@system-service @mount seccomp", "Delegate": "yes",
-		"DeviceAllow": "/dev/kvm rwm\n/dev/net/tun m\n/dev/userfaultfd m",
+		"DeviceAllow": "/dev/kvm rwm\n/dev/net/tun m\n/dev/userfaultfd m\n/dev/nitro_enclaves m",
 	} {
 		if strings.Join(p.Directives[k], "\n") != v {
 			t.Errorf("%s=%q, want %q", k, p.Directives[k], v)
@@ -151,7 +151,7 @@ func TestExtraDirectivesAndRuntimeMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"SystemCallArchitectures=native", "LockPersonality=yes", "RestrictSUIDSGID=yes", "DevicePolicy=closed", "Delegate=yes", "DeviceAllow=/dev/kvm rwm", "DeviceAllow=/dev/net/tun m", "DeviceAllow=/dev/userfaultfd m"} {
+	for _, line := range []string{"SystemCallArchitectures=native", "LockPersonality=yes", "RestrictSUIDSGID=yes", "DevicePolicy=closed", "Delegate=yes", "DeviceAllow=/dev/kvm rwm", "DeviceAllow=/dev/net/tun m", "DeviceAllow=/dev/userfaultfd m", "DeviceAllow=/dev/nitro_enclaves m"} {
 		if !strings.Contains("\n"+text, "\n"+line+"\n") {
 			t.Errorf("the unit lacks %q", line)
 		}
@@ -258,7 +258,7 @@ func TestSyscallGroupsExist(t *testing.T) {
 // nodes, nothing may open them.
 func TestDeviceAllowIsAListWithMknodAccess(t *testing.T) {
 	got := Load().Directives["DeviceAllow"]
-	want := []string{"/dev/kvm rwm", "/dev/net/tun m", "/dev/userfaultfd m"}
+	want := []string{"/dev/kvm rwm", "/dev/net/tun m", "/dev/userfaultfd m", "/dev/nitro_enclaves m"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("%q", got)
 	}

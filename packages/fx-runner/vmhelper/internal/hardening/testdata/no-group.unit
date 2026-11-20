@@ -17,6 +17,7 @@ Delegate=yes
 DeviceAllow=/dev/kvm rwm
 DeviceAllow=/dev/net/tun m
 DeviceAllow=/dev/userfaultfd m
+DeviceAllow=/dev/nitro_enclaves m
 DevicePolicy=closed
 IPAddressDeny=any
 LockPersonality=yes

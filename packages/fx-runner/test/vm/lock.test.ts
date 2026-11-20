@@ -46,6 +46,18 @@ describe("infra/microvm-image/lock.json", () => {
     }
   });
 
+  it("the Firecracker pin is one release: both URLs carry its version, and its snapshot format is the one the helper stamps", () => {
+    const fc = lock.firecracker as unknown as { version: string; snapshot_format: number } & Record<string, Pin>;
+    expect(fc.version).toMatch(/^\d+\.\d+\.\d+$/);
+    for (const [arch, name] of [["amd64", "x86_64"], ["arm64", "aarch64"]] as const) {
+      expect(fc[arch]!.url).toBe(`https://github.com/firecracker-microvm/firecracker/releases/download/v${fc.version}/firecracker-v${fc.version}-${name}.tgz`);
+    }
+    // a snapshot is refused on resume unless its recorded format equals the helper's SnapshotFormat; a Firecracker bump that changes
+    // the snapshot data version must change both together (Firecracker 1.16 wrote 11, 1.17 and 1.18 write 12)
+    const go = readFileSync(path.join(IMAGE_DIR, "..", "..", "packages", "fx-runner", "vmhelper", "internal", "sandbox", "snapshot.go"), "utf8");
+    expect(Number(/^const SnapshotFormat = (\d+)$/m.exec(go)?.[1])).toBe(fc.snapshot_format);
+  });
+
   it("the base image is pinned by digest, and the Dockerfile uses the same one in both stages", () => {
     expect(lock.base_image).toMatch(/@sha256:[0-9a-f]{64}$/);
     const dockerfile = readFileSync(path.join(IMAGE_DIR, "Dockerfile"), "utf8");

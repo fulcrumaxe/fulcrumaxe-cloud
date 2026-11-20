@@ -131,7 +131,7 @@ func TestSnapshotThenResumeRoundTrip(t *testing.T) {
 		}
 	}
 	meta, _ := os.ReadFile(dir + "/snap-1/meta.json")
-	for _, want := range []string{`"template":"fx-agent"`, `"kernel":"` + sum([]byte("kernel-bytes")) + `"`, `"rootfs":"` + sum([]byte("rootfs-bytes-0123456789")) + `"`, `"vcpus":2`, `"mem_mb":1`} {
+	for _, want := range []string{`"template":"fx-agent"`, `"kernel":"` + sum([]byte("kernel-bytes")) + `"`, `"rootfs":"` + sum([]byte("rootfs-bytes-0123456789")) + `"`, `"vcpus":2`, `"mem_mb":1`, `"v":2`, `"fc":12`} {
 		if !strings.Contains(string(meta), want) {
 			t.Errorf("meta lacks %s: %s", want, meta)
 		}
@@ -349,6 +349,11 @@ func TestResumeRefusesOtherSizeOrTemplate(t *testing.T) {
 func TestResumeRefusesMetadataOfAnotherTemplateOrDigest(t *testing.T) {
 	for name, edit := range map[string]func(string) string{
 		"template": func(s string) string { return strings.Replace(s, `"template":"fx-agent"`, `"template":"other"`, 1) },
+		// snapshots written under Firecracker 1.16 (format 11, and a version 1 meta.json without the field) cannot be loaded by 1.17 or later
+		"format 11": func(s string) string { return strings.Replace(s, `"fc":12`, `"fc":11`, 1) },
+		"version 1 meta": func(s string) string {
+			return strings.Replace(s, `"v":2,"fc":12,`, `"v":1,`, 1)
+		},
 		"kernel": func(s string) string {
 			return strings.Replace(s, sum([]byte("kernel-bytes")), sum([]byte("another")), 1)
 		},

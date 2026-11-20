@@ -40,6 +40,13 @@ const (
 	storedState              = "state"
 )
 
+// SnapshotFormat is the snapshot data version (the major number of Firecracker's SNAPSHOT_VERSION) of the pinned
+// Firecracker. Firecracker refuses a state file of another major version, so meta.json records it and a resume
+// of a snapshot written under another one answers snapshot_mismatch before anything is staged or launched. It
+// must equal firecracker.snapshot_format in infra/microvm-image/lock.json (a test in the runner checks that):
+// Firecracker 1.16 wrote 11, 1.17 and 1.18 write 12.
+const SnapshotFormat = 12
+
 // The names Firecracker writes in the jail root (the paths of fcapi without the slash).
 var jailMem, jailState = fcapi.SnapMemPath[1:], fcapi.SnapStatePath[1:]
 
@@ -81,22 +88,28 @@ type Snapshotter interface{ Snapshot() error }
 type snapMeta struct {
 	template, kernel, rootfs           string
 	vcpus, memMB, memBytes, stateBytes int64
+	format                             int64 // SnapshotFormat when it was written; 0 for a version 1 file, which predates it
 }
 
 func (s snapMeta) bytes() []byte {
-	return fmt.Appendf(nil, `{"v":1,"template":%q,"kernel":%q,"rootfs":%q,"vcpus":%d,"mem_mb":%d,"mem_bytes":%d,"state_bytes":%d}`+"\n",
-		s.template, s.kernel, s.rootfs, s.vcpus, s.memMB, s.memBytes, s.stateBytes)
+	return fmt.Appendf(nil, `{"v":2,"fc":%d,"template":%q,"kernel":%q,"rootfs":%q,"vcpus":%d,"mem_mb":%d,"mem_bytes":%d,"state_bytes":%d}`+"\n",
+		s.format, s.template, s.kernel, s.rootfs, s.vcpus, s.memMB, s.memBytes, s.stateBytes)
 }
 
 func parseMeta(data []byte) (snapMeta, error) {
 	f, err := protocol.DecodeFlat(data)
-	if err != nil || len(f) != 8 {
+	// Version 1 (eight fields) was written before the format was recorded. It parses, with format 0, so a
+	// resume names it a mismatch instead of an internal fault.
+	if err != nil || (len(f) != 8 && len(f) != 9) {
 		return snapMeta{}, errors.New("snapshot metadata is malformed")
 	}
 	str := func(k string) string { s, _ := f[k].(string); return s }
 	num := func(k string) int64 { n, _ := protocol.PlainInt(f[k]); return n }
-	m := snapMeta{str("template"), str("kernel"), str("rootfs"), num("vcpus"), num("mem_mb"), num("mem_bytes"), num("state_bytes")}
-	if num("v") != 1 || !protocol.ValidID(m.template) || !validDigest(m.kernel) || !validDigest(m.rootfs) || m.vcpus < 1 || m.memMB < 1 || m.memBytes < 1 || m.stateBytes < 1 {
+	m := snapMeta{str("template"), str("kernel"), str("rootfs"), num("vcpus"), num("mem_mb"), num("mem_bytes"), num("state_bytes"), num("fc")}
+	if v := num("v"); (v != 1 || len(f) != 8) && (v != 2 || len(f) != 9 || m.format < 1) {
+		return snapMeta{}, errors.New("snapshot metadata is malformed")
+	}
+	if !protocol.ValidID(m.template) || !validDigest(m.kernel) || !validDigest(m.rootfs) || m.vcpus < 1 || m.memMB < 1 || m.memBytes < 1 || m.stateBytes < 1 {
 		return snapMeta{}, errors.New("snapshot metadata is malformed")
 	}
 	return m, nil
@@ -338,7 +351,7 @@ func (m *Manager) collect(b *box, sfd int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	meta := snapMeta{b.spec.Template, b.staged["kernel"], b.staged["rootfs"], b.spec.VCPUs, b.spec.MemMB, mem, state}
+	meta := snapMeta{b.spec.Template, b.staged["kernel"], b.staged["rootfs"], b.spec.VCPUs, b.spec.MemMB, mem, state, SnapshotFormat}
 	if !validDigest(meta.kernel) || !validDigest(meta.rootfs) {
 		return 0, errors.New("snapshot: the sandbox has no verified template digests")
 	}
@@ -413,6 +426,9 @@ func (m *Manager) Resume(id, snap string) (server.Reply, protocol.Code) {
 	digests, code := m.lookup(b.spec.Template)
 	if code != protocol.OK {
 		return server.Reply{}, code
+	}
+	if meta.format != SnapshotFormat {
+		return server.Reply{}, protocol.SnapshotMismatch // written under another Firecracker snapshot format: it would not load
 	}
 	if meta.template != b.spec.Template || meta.vcpus != b.spec.VCPUs || meta.memMB != b.spec.MemMB || meta.kernel != digests["kernel"] || meta.rootfs != digests["rootfs"] {
 		return server.Reply{}, protocol.SnapshotMismatch
