@@ -228,7 +228,7 @@ describe("getMergeQueueMode", () => {
     expect(f.reached).toEqual([]);
   });
 
-  it("a port with no documents is direct (today's behaviour); a runner_local port is direct and reads nothing", async () => {
+  it("an unpaired port with no documents is direct (today's behaviour); a runner_local port is direct and reads nothing", async () => {
     const f = fresh();
     expect(await portFor(f, { queueDocuments: undefined }).getMergeQueueMode!(PR, "main")).toMatchObject({ mode: "direct", source: "queue_not_configured" });
     expect(f.requests).toEqual([]);
@@ -241,6 +241,33 @@ describe("getMergeQueueMode", () => {
     });
     expect(await local.getMergeQueueMode!(PR, "main")).toMatchObject({ mode: "direct", source: "runner_local" });
     expect(f.requests).toEqual([]);
+  });
+
+  it("a paired port with no documents is unknown and makes no HTTP request", async () => {
+    const f = fresh();
+    const paired = createGitHubMergeGatePort({
+      http: httpFor(f),
+      resolveRepo: async () => ({ owner: "acme", name: "widgets" }),
+      markReadyForHumanMerge: async () => undefined,
+      pairedQueueReads: true,
+    });
+    expect(await paired.getMergeQueueMode!(PR, "main")).toMatchObject({ mode: "unknown", source: "queue_not_configured" });
+    expect(f.requests).toEqual([]);
+    expect(await paired.getMergeQueueInfo!(PR)).toEqual({ mode: "unknown", maxEntries: 1 });
+  });
+
+  it("a paired port built WITH queueDocuments still reads GitHub as before", async () => {
+    const f = fresh();
+    const paired = createGitHubMergeGatePort({
+      http: httpFor(f),
+      resolveRepo: async () => ({ owner: "acme", name: "widgets" }),
+      markReadyForHumanMerge: async () => undefined,
+      queueDocuments: DOCS,
+      pairedQueueReads: true,
+    });
+    expect(await paired.getMergeQueueMode!(PR, "main")).toMatchObject({ mode: "queue", source: "graphql_and_rules" });
+    expect(f.reached.some((r) => r.path === "/graphql")).toBe(true);
+    expect(f.reached.some((r) => r.path.includes("/rules/branches/"))).toBe(true);
   });
 });
 
