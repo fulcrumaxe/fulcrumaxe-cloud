@@ -92,6 +92,8 @@ const SHA_RE = /^[0-9a-f]{40}$/;
  */
 /** The clone script's exit code for "the clone finished but holds no commit". Any non-zero code other than too-large reads as `clone_failed`. */
 export const CLONE_EXIT_EMPTY = 89;
+/** The deepening script's exit code for "over the limit, but the checkout could not be removed": the caller logs it, since a checkout is left on disk. */
+export const CLONE_EXIT_NOT_REMOVED = 90;
 
 export const CLONE_SCRIPT = [
   // A persistent sandbox (the executor's, named for the issue) keeps the checkout of an earlier attempt. "Build again" is a
@@ -155,14 +157,21 @@ export const DEEPEN_SCRIPT = [
   // The limit must be plain digits, at most 15 of them: anything else would make the `-gt` tests below fail or error, and a size watch that cannot trip is no watch.
   'case "$max" in ""|*[!0-9]*|????????????????*) exit 2 ;; esac',
   'shift',
+  // The checkout is removed, once more if the first try fails, and a checkout that is still there then is a distinct failure (`CLONE_EXIT_NOT_REMOVED`), never a quiet "too large".
+  `gone() { rm -rf "$dir" 2>/dev/null; [ ! -e "$dir" ] || rm -rf "$dir" 2>/dev/null; [ ! -e "$dir" ] || exit ${CLONE_EXIT_NOT_REMOVED}; }`,
+  // Job control gives the fetch its own process group, so an oversize kill reaches git's helpers (index-pack, the transport) too: killed alone, the parent leaves them writing into the checkout while `rm -rf` walks it, and the removal fails with "Directory not empty".
+  'set -m 2>/dev/null',
   // `--` ends the options, so a refspec that starts with a dash is a refspec (git then refuses it) and never an option such as `--upload-pack`.
   'git fetch --depth=2147483647 -- origin "$@" &',
   'pid=$!',
-  'while kill -0 "$pid" 2>/dev/null; do kb=$(du -sk "$dir" 2>/dev/null | cut -f1); if [ "${kb:-0}" -gt "$max" ]; then kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$dir"; exit ' +
+  // However this shell ends (a signal to it, or a normal exit), the fetch's group goes with it. `-s KILL` is the spelling dash accepts for a negative pid.
+  'trap "exit 143" TERM INT HUP',
+  'trap "kill -s KILL -- -$pid 2>/dev/null" EXIT',
+  'while kill -0 "$pid" 2>/dev/null; do kb=$(du -sk "$dir" 2>/dev/null | cut -f1); if [ "${kb:-0}" -gt "$max" ]; then kill -s KILL -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null; gone; exit ' +
     `${CLONE_EXIT_TOO_LARGE}; fi; sleep 1; done`,
   'wait "$pid" || exit $?',
   'kb=$(du -sk "$dir" 2>/dev/null | cut -f1)',
-  'if [ "${kb:-0}" -gt "$max" ]; then rm -rf "$dir"; exit ' + `${CLONE_EXIT_TOO_LARGE}; fi`,
+  'if [ "${kb:-0}" -gt "$max" ]; then gone; exit ' + `${CLONE_EXIT_TOO_LARGE}; fi`,
 ].join("; ").replace("&; ", "& ");
 
 /** The command to run in the sandbox, as a program and an argument array. Throws on a name, directory or commit that is not plain. */
