@@ -151,6 +151,15 @@ const watchCommand = (seq: number, aheadMs: number) => {
   const issued = clock.now();
   return cmds.command(REPO, seq, { kind: "watch", issued_at: issued.toISOString(), expires_at: new Date(issued.getTime() + 600_000).toISOString(), args: { until: new Date(issued.getTime() + aheadMs).toISOString() } } as never);
 };
+// A folder that does not exist is the same as one with no spool files: the plain bridge may never make it.
+const spoolIn = (dir: string): string[] => {
+  try {
+    return readdirSync(dir).filter((f) => f.includes(".detail."));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+};
 const inboxJson = (): string[] => readdirSync(path.join(stateDir, "engine-inbox")).filter((f) => f.endsWith(".json"));
 
 describe("watch mode in the daemon", () => {
@@ -172,7 +181,7 @@ describe("watch mode in the daemon", () => {
     await advanceUntil(() => withKind("merged").length === 1 && withKind("bridge_heartbeat").length === 1);
     expect(ingest.seqsOf(A)).toEqual([0, 1, 2, 3]);
     expect(withKind("slim_status")).toEqual([]);
-    expect(readdirSync(path.join(runnerDir, "engine-bridge")).filter((f) => f.includes(".detail."))).toEqual([]);
+    expect(spoolIn(path.join(runnerDir, "engine-bridge"))).toEqual([]);
   });
 
   it("a signed watch command, with operate off, starts the catch-up in the detail session, is acked applied and never reaches the engine's inbox", async () => {
@@ -200,7 +209,7 @@ describe("watch mode in the daemon", () => {
     writeFileSync(path.join(stateDir, ENGINE_EVENTS_FILE), lines(), { mode: 0o600 });
     const b = start({ cloudWatchMode: () => true });
     await advanceUntil(() => withKind("merged").length === 1);
-    const spoolFiles = (): string[] => readdirSync(path.join(runnerDir, "engine-bridge")).filter((f) => f.includes(".detail."));
+    const spoolFiles = (): string[] => spoolIn(path.join(runnerDir, "engine-bridge"));
     expect(spoolFiles()).toHaveLength(2);
     saveBridgeSettings(runnerDir, []);
     await advanceUntil(() => !running(b));
