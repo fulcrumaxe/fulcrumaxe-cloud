@@ -168,17 +168,23 @@ describe("engine-bridge enable with only --repo (D ON-BR-1)", () => {
   });
 
   describe("one match from a capped scan (ruling 7)", () => {
-    /** Lists `code` as the clone followed by `after` non-directory entries; `onClone` runs once the clone has been handed out. */
-    const lister = (clone: string, after: number, onClone: () => void): DiscoveryOps => ({
+    /**
+     * The scan goes one level at a time: `code` lists the clone and a plain folder `big`, the clone is judged, and only then is `big` listed. So the cap is made to trip
+     * while `big` is listed (`onBig` runs first, then `after` non-directory entries), after the one match was found and before the rest of the tree was seen.
+     */
+    const lister = (after: number, onBig: () => void): DiscoveryOps => ({
       readDir: (dir) => {
-        if (dir !== path.join(home, "code")) return realOps.readDir(dir);
+        if (dir !== path.join(home, "code", "big")) return realOps.readDir(dir);
         return (function* () {
-          yield { name: path.basename(clone), isDirectory: true };
-          onClone();
+          onBig();
           for (let i = 0; i < after; i++) yield { name: `f${i}`, isDirectory: false };
         })();
       },
     });
+    const withBig = (clone: string): string => {
+      mkdirSync(path.join(home, "code", "big"));
+      return clone;
+    };
     const run = (ops: DiscoveryOps, now?: () => Date) =>
       runCli({ argv: ["engine-bridge", "enable", "--repo", "acme/widgets"], home, stateDirOverride: state, engineDiscovery: { cwd: undefined, searchRoots: undefined, ops }, uid, stdout: (t) => out.push(t), stderr: (t) => err.push(t), fetchFn: fetch, now: now ?? (() => new Date()) });
     const refused = (dir: string) => {
@@ -188,22 +194,22 @@ describe("engine-bridge enable with only --repo (D ON-BR-1)", () => {
       expect(settingsText()).toBeNull();
     };
     it("an entry-capped scan with one match refuses, names the path and writes nothing", async () => {
-      const dir = checkout(path.join(home, "code", "widgets"), { project_name: "widgets" });
-      expect(await run(lister(dir, 25000, () => undefined))).toBe(2);
+      const dir = withBig(checkout(path.join(home, "code", "widgets"), { project_name: "widgets" }));
+      expect(await run(lister(25000, () => undefined))).toBe(2);
       refused(dir);
       expect(err.join("")).toContain("20000 entry limit");
     });
     it("a time-capped scan with one match refuses, names the path and writes nothing", async () => {
-      const dir = checkout(path.join(home, "code", "widgets"), { project_name: "widgets" });
+      const dir = withBig(checkout(path.join(home, "code", "widgets"), { project_name: "widgets" }));
       let skew = 0;
-      expect(await run(lister(dir, 3, () => (skew += 6000)), () => new Date(Date.now() + skew))).toBe(2);
+      expect(await run(lister(3, () => (skew += 6000)), () => new Date(Date.now() + skew))).toBe(2);
       refused(dir);
       expect(err.join("")).toContain("5 second limit");
     });
     it("an uncapped scan with one match is still adopted", async () => {
-      const dir = checkout(path.join(home, "code", "widgets"), { project_name: "widgets" });
+      const dir = withBig(checkout(path.join(home, "code", "widgets"), { project_name: "widgets" }));
       mkdirSync(path.join(home, ".widgets-state"), { mode: 0o700 });
-      expect(await run(lister(dir, 3, () => undefined))).toBe(0);
+      expect(await run(lister(3, () => undefined))).toBe(0);
       expect(saved()![0]!.repo_root).toBe(dir);
     });
   });
