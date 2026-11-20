@@ -1709,6 +1709,23 @@ test("wsl2 proof: dispatch only, no input, no secret, read-only, windows-2022, p
   for (const w of workflows) if (w.file !== "wsl2-proof.yml") assert.doesNotMatch(noComments(w.text), /setup-wsl|wsl2-proof/, `${w.file} refers to the proof`);
 });
 
+test("wsl2 proof: the clone trusts only the exact checkout, on the upload-pack command line, and writes no git config", () => {
+  const steps = jobsOf(wslProof.doc).flatMap(([, job]) => job.steps ?? []);
+  const copy = steps.find((s) => String(s.name ?? "").startsWith("Copy the checkout"));
+  assert.ok(copy, "the copy step exists");
+  const run = noComments(copy.run);
+  assert.match(run, /git clone -u "git -c safe\.directory=\$src\/\.git -c safe\.directory=\$src upload-pack" /);
+  assert.match(run, /"file:\/\/\$src"/);
+  assert.doesNotMatch(run, /GIT_CONFIG/, "the trust is not carried by GIT_CONFIG_COUNT or any GIT_CONFIG variable (git scrubs them for upload-pack)");
+  assert.doesNotMatch(run, /safe\.directory=\\?['"]?\*/, "no wildcard trust");
+  assert.doesNotMatch(run, /git config|--global|--system/, "no git config command");
+  assert.equal((run.match(/safe\.directory=/g) ?? []).length, 2, "exactly the two spellings of this checkout");
+  const back = steps.find((s) => String(s.name ?? "").startsWith("Bring the results back"));
+  assert.ok(back, "the copy-back step exists");
+  assert.equal(back.if, "always()");
+  assert.match(noComments(back.run), /exit 0\s*$/, "a failed copy-back is logged and does not fail the step");
+});
+
 test("wsl2 proof: the check has teeth (a push trigger, an input, a secret, a tag pin, a wrong runner or an expression in a run each turn it red)", () => {
   const base = "name: x\non:\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  j:\n    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false\n    runs-on: windows-2022\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - run: echo hi\n";
   const check = (text) => wslProofViolations({ doc: parseYamlText(text), text });
