@@ -133,13 +133,61 @@ function mountApp(contentEl) {
     c.rows.length && !c.rows.some((r) => r.bridged) ? h("p", { class: "tm-muted", "data-testid": "tm-connect-fill" }, c.command ? RUNNER_WORDS.fillIn : RUNNER_WORDS.noRepoName) : null,
     ...(c.command && c.rows.length && !c.rows.some((r) => r.bridged) ? copyBlock(RUNNER_WORDS, c.command, "tm-connect-command") : []),
     ...(c.rows.some((r) => r.unnamed) ? renameNodes(RUNNER_WORDS) : []),
-    h("p", { class: "tm-muted", "data-testid": "tm-soon" }, RUNNER_WORDS.soon),
   ];
+  // The Connect panel keeps one element for good and is redrawn on its own, so the sheet's boxes are never rebuilt when its answer arrives.
+  const bridgeBox = h("div", { class: "tm-sheet-part", "data-testid": "tm-bridge-box" });
+  // One-click Connect: every sentence and every button comes from the view; a folder the runner offered is drawn as text, never as a link.
+  const folderBox = (b, preId) => {
+    const out = h("pre", { class: "tm-code", tabindex: "0", "aria-label": "Command to run", "data-testid": preId }, b.command);
+    const input = h("input", { type: "text", class: "tm-input", "data-testid": "tm-bridge-folder", "aria-label": b.words.giveFolder, placeholder: b.words.folderHint, autocomplete: "off", spellcheck: "false",
+      onInput: (e) => { out.textContent = b.commandFor(e.target.value.trim()) || b.command; } });
+    return [h("label", { class: "tm-check" }, h("span", null, b.words.giveFolder + ": "), input), out];
+  };
+  const pickList = (b) => h("ul", { class: "tm-list", role: "list", "data-testid": "tm-bridge-folders" }, b.rows.map((r) =>
+    h("li", { class: "tm-item", "data-testid": "tm-bridge-folder-row" },
+      h("label", { class: "tm-check" },
+        h("input", { type: "radio", name: "tm-bridge-folder", value: r.path, checked: r.picked, "data-focus": "bridge-folder-" + r.label, onChange: () => team.bridge.pickRoot(r.path) }),
+        h("bdi", { "data-testid": "tm-bridge-folder-label" }, r.label)))));
+  const bridgeButton = (testid, label, enabled, run, focus) => h("button", { type: "button", class: "tm-btn", "data-testid": testid, "data-focus": focus || testid, "aria-disabled": enabled ? null : "true", onClick: () => { if (enabled) { want = focus || testid; run(); } } }, label);
+  const copyDetails = (b, code) => {
+    const say = h("span", { class: "tm-muted", role: "status", "data-testid": "tm-bridge-details-note" });
+    return [h("button", { type: "button", class: "tm-btn", "data-testid": "tm-bridge-details", onClick: async () => {
+      try { await navigator.clipboard.writeText(code); say.textContent = b.words.detailsCopied; } catch { say.textContent = b.words.detailsFailed; } // fx-swallow-ok: no clipboard here; the note says so and the code is shown for copying by hand
+    } }, b.words.copyDetails), say, h("code", { class: "tm-code", tabindex: "0", "aria-label": "Details", "data-testid": "tm-bridge-code" }, code)];
+  };
+  function bridgeNodes(b) {
+    if (!b || b.kind === "none") return [];
+    const ok = !b.busy;
+    const head = [h("h3", { class: "tm-sub" }, b.words.title), b.notice ? h("p", { class: "tm-muted", role: "status", "data-testid": "tm-bridge-notice" }, b.notice) : null];
+    const text = (extra) => h("p", Object.assign({ "data-testid": "tm-bridge-text" }, extra || {}), b.text);
+    const retry = b.retry ? [bridgeButton("tm-bridge-retry", b.words.tryAgain, ok, () => team.bridge.connect())] : [];
+    const picked = b.rows ? b.rows.some((r) => r.picked) : false;
+    const wrap = (...kids) => [...head, h("div", { "data-testid": "tm-bridge", "data-state": b.kind }, ...kids.flat().filter(Boolean))];
+    const cmd = (id) => copyBlock(b.words, b.command, id);
+    switch (b.kind) {
+      case "unknown": return wrap(h("p", { class: "tm-muted", "data-testid": "tm-bridge-text" }, b.text));
+      case "connected": return wrap(text(), h("p", { class: "tm-muted", "data-testid": "tm-bridge-tip" }, b.tip), b.canDisconnect ? bridgeButton("tm-bridge-disconnect", b.words.disconnect, ok, () => team.bridge.disconnect()) : null);
+      case "disconnect_failed": return wrap(text({ role: "status" }), b.canDisconnect ? bridgeButton("tm-bridge-disconnect", b.words.disconnect, ok, () => team.bridge.disconnect()) : null);
+      case "connecting": case "disconnecting":
+        return wrap(h("p", { role: "status", "data-testid": "tm-bridge-text" }, h("span", { class: "tm-spin", "aria-hidden": "true" }), " ", b.text), b.cancelId ? bridgeButton("tm-bridge-cancel", b.words.cancel, ok, () => team.bridge.cancel(b.cancelId)) : null);
+      case "slow": return wrap(text({ role: "status" }), ...(b.cancelId ? [bridgeButton("tm-bridge-cancel", b.words.cancel, ok, () => team.bridge.cancel(b.cancelId))] : []), ...retry, ...(b.command ? cmd("tm-bridge-fallback") : []));
+      case "disconnect_refused": return wrap(text({ role: "status" }), b.canDisconnect ? bridgeButton("tm-bridge-disconnect", b.words.disconnect, ok, () => team.bridge.disconnect()) : null);
+      case "not_found": return wrap(text(), b.skipped ? h("p", { class: "tm-muted", "data-testid": "tm-bridge-skipped" }, b.skipped) : null,
+        b.rows.length ? h("ul", { class: "tm-list", role: "list", "data-testid": "tm-bridge-skipped-folders" }, b.rows.map((r) => h("li", { class: "tm-item" }, h("bdi", { "data-testid": "tm-bridge-folder-label" }, r.label)))) : null, ...retry, ...(b.folderBox ? folderBox(b, "tm-bridge-fallback") : cmd("tm-bridge-fallback")));
+      case "ambiguous": case "incomplete": return wrap(text(), b.rows.length ? pickList(b) : null, b.canPick ? bridgeButton("tm-bridge-connect-this", b.words.connectThis, ok && picked, () => team.bridge.connect()) : null);
+      case "refused": return wrap(text(), ...copyDetails(b, b.code), ...retry, ...(b.command ? cmd("tm-bridge-fallback") : []));
+      case "fallback": return wrap(text(), ...(b.folderBox ? folderBox(b, "tm-bridge-fallback") : cmd("tm-bridge-fallback")));
+      default: // idle
+        return wrap(b.choices.length > 1 ? h("label", { class: "tm-check" }, h("span", null, b.words.pickRunner + " "),
+          h("select", { class: "tm-select", "data-testid": "tm-bridge-runner", "data-focus": "bridge-runner", onChange: (e) => team.bridge.pickRunner(e.target.value) }, b.choices.map((c) => h("option", { value: c.id, selected: c.id === b.picked }, c.name)))) : null,
+          b.canEdit ? bridgeButton("tm-bridge-connect", b.words.connect, ok && b.canConnect, () => team.bridge.connect()) : h("p", { class: "tm-muted", "data-testid": "tm-bridge-readonly" }, b.words.readOnly));
+    }
+  }
   const closeConfirm = () => { want = "delete"; team.cancelDelete(); };
   // The sheet is three parts, each redrawn only when its own data changes. The switch and the repository boxes sit in parts the runner list never touches, so the runner
   // module or the runner list arriving late cannot replace a box under a tap that is already half done.
   const sheetHead = h("div", { class: "tm-sheet-part" }), sheetRunner = h("div", { class: "tm-sheet-part" }), sheetRepos = h("div", { class: "tm-sheet-part" });
-  sheet.replaceChildren(sheetHead, sheetRunner, sheetRepos);
+  sheet.replaceChildren(sheetHead, sheetRunner, bridgeBox, sheetRepos); // the Connect panel is a part of its own between the runner and the repos; its children take the same 8 px top margin as every part's
   function paintSheet(s) {
     const can = s.canEdit && !s.saving;
     const ro = s.canEdit ? null : "tm-ro";
@@ -362,6 +410,7 @@ function mountApp(contentEl) {
     note.hidden = !d.refreshFailed;
     sheet.hidden = !(d.sheet && d.sheet.open);
     if (d.sheet) paintSheet(d.sheet);
+    swap("bridge", bridgeBox, d.bridge || null, () => bridgeNodes(d.bridge));
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
     const broken = hasRepos ? Object.keys(TITLE).filter((k) => d[k].failed && d.failedKeys.includes(k)).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not

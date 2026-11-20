@@ -34,6 +34,7 @@ export const logUrl = (repoId, cursor) => panelUrl("log", repoId) + "&cursor=" +
 export const lanesUrl = (repoId, cursor) => panelUrl("lanes", repoId) + "?cursor=" + enc(cursor);
 export const commandsUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/commands";
 export const commandUrl = (id) => "/api/v1/engine/commands/" + enc(id);
+export const bridgeUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/bridge";
 export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
 export const clearHaltUrl = (repoId) => haltUrl(repoId) + "/clear";
 export const dialsUrl = (repoId) => "/api/v1/repos/" + enc(repoId) + "/decision-settings";
@@ -53,6 +54,9 @@ export function createTeamApi(call = api) {
     commands: (repoId, signal) => call("GET", commandsUrl(repoId) + "?limit=50", undefined, signal),
     issue: (repoId, kind, args, signal) => call("POST", commandsUrl(repoId), { kind, args }, signal),
     cancel: (id, signal) => call("DELETE", commandUrl(id), undefined, signal),
+    bridge: (repoId, signal) => call("GET", bridgeUrl(repoId), undefined, signal),
+    connectBridge: (repoId, body, signal) => call("POST", bridgeUrl(repoId), body, signal),
+    disconnectBridge: (repoId, signal) => call("DELETE", bridgeUrl(repoId), undefined, signal),
     halt: (repoId, signal) => call("POST", haltUrl(repoId), {}, signal),
     clearHalt: (repoId, signal) => call("POST", clearHaltUrl(repoId), {}, signal),
     dials: (repoId, signal) => call("GET", dialsUrl(repoId), undefined, signal),
@@ -421,6 +425,15 @@ export function failureSentence(e, forbidden = WORDS.forbidden) {
   return WORDS.saveFailed;
 }
 
+/** The repo the sheet's Connect panel is about: the one chosen on the page, else the first the settings list shows. */
+export function bridgeRepo(st) {
+  const chosen = st.repos.find((r) => r.id === st.selectedId);
+  const list = st.settings ? st.settings.repos.filter((r) => r.enabled || r.eligible) : [];
+  const named = chosen ? list.find((r) => r.name === chosen.name) : null;
+  return named || list.find((r) => r.enabled) || list[0] || null;
+}
+const bridgeTarget = (st) => { const r = bridgeRepo(st); return r ? r.name : ""; };
+
 const NO_RUNNER_VIEW = Object.freeze({ words: null, label: WORDS.watchAny, runnerName: "", choices: [], pickedId: "", status: { kind: "unknown", text: "" }, command: "", connect: { failed: false, empty: false, command: "", rows: [] } });
 
 /** Everything the page draws for one moment. */
@@ -433,13 +446,16 @@ export function describe(st, nowMs) {
   };
   const repo = st.repos.find((r) => r.id === st.selectedId);
   // The runner words and the connect panel's data live in team-runners.js, fetched by import() only when a screen shows the runners; until it lands the switch says WORDS.watchAny and draws no runner lines.
-  const rv = st.runnersMod ? st.runnersMod.runnerView({ settings: st.settings, fleet: st.fleet, repoName: repo ? repo.name : "", pickId: st.runnerPick, nowMs }) : NO_RUNNER_VIEW;
+  const reported = st.bridge && st.bridge.data && st.bridge.data.connected ? st.bridge.data.connected.root : "";
+  const rv = st.runnersMod ? st.runnersMod.runnerView({ settings: st.settings, fleet: st.fleet, repoName: repo ? repo.name : "", pickId: st.runnerPick, nowMs, root: reported }) : NO_RUNNER_VIEW;
   // Asked for, not yet answered: the switch was just turned on (the save is out), or it is on and the runner has never reported in.
   const connecting = (st.saving && st.draft && st.draft.watch === true) || (st.settings.watch && repo && repo.liveness === "never") ? WORDS.connecting + (repo && repo.runner ? repo.runner : rv.runnerName || "your runner") + WORDS.connectingTail : "";
   sheet.runner = { ...rv, connecting };
+  // The Connect panel is drawn on its own (not inside `sheet`), so its answer arriving never rebuilds the boxes above it.
+  const bridgeV = st.bridgeMod && st.sheetOpen ? st.bridgeMod.bridgeView(st.bridge, { repoName: bridgeTarget(st), canEdit: st.settings.canEdit, nowMs }) : null;
   const shown = st.draft && st.draft.operate !== undefined ? { ...st, settings: { ...st.settings, operate: st.draft.operate } } : st; // the operate switch the person just chose, while its save is out
   const asOf = (iso) => asOfWords({ as_of: iso }, nowMs);
-  const base = { sheet, rv: sheet.runner, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", failedKeys: st.failedKeys, operate: describeOperate(shown, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
+  const base = { sheet, bridge: bridgeV, rv: sheet.runner, refreshFailed: st.refreshFailed ? WORDS.refreshFailed : "", failedKeys: st.failedKeys, operate: describeOperate(shown, nowMs, st.settings.watch ? repo : undefined, asOf, null) };
   if (!st.settings.watch) return { kind: "off", text: WORDS.watchOff, ...base };
   if (!repo) return { kind: "norepos", text: WORDS.noRepos, ...base };
   const { agents, lanes, gates, log, plan, stats, usage } = st.panels;
@@ -474,7 +490,7 @@ const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, fa
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
 export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval, now = Date.now } = {}) {
-  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null, fleet: null, runnerPick: "", runnersMod: null };
+  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null, fleet: null, runnerPick: "", runnersMod: null, bridge: { repoId: "", data: null, failed: false, busy: false, notice: "", runnerPick: "", rootPick: "" }, bridgeMod: null };
   let safetyTimer = null, started = false, retryTimer = null, busy = false, queued = new Set(), lastFull = -Infinity, pick = 0, stopFn = null, saveVer = 0, hiddenFn = () => false;
   // Which parts a notice asked for, and when each may be read again. Every read, whoever asked for it, is marked here, so no part is read twice inside the gate.
   const gate = createCoalescer({ now, setTimer, clearTimer, run: (names) => { if (!hiddenFn()) refresh(new Set(names)); } });
@@ -482,6 +498,26 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
   // the answer was asked before the save changed things and is dropped (the read that follows the save shows the server's answer).
   const set = (patch) => { if (("saving" in patch && patch.saving !== st.saving) || (patch.op && patch.op.saving !== st.op.saving)) saveVer += 1; st = { ...st, ...patch }; onChange(); };
   const operate = createOperate({ client, signal, get: () => st, set, refresh: () => refresh(), aborted: (e) => aborted(e, signal) });
+  // One-click Connect lives in its own module, fetched the first time the Settings sheet opens (the page does not need it before). A module that cannot be fetched leaves the sheet without the panel.
+  let bridgeCtl = null;
+  async function bridgeOn() {
+    if (bridgeCtl) return bridgeCtl;
+    try {
+      const m = await import("./team-runners.js");
+      bridgeCtl = m.createBridge({ client, signal, get: () => st, set, aborted: (e) => aborted(e, signal) });
+      set({ bridgeMod: m });
+    } catch { bridgeCtl = null; } // fx-swallow-ok: the module could not be fetched; the sheet then shows no Connect panel and the rest works
+    return bridgeCtl;
+  }
+  /** Reads where Connect stands for the repo the sheet is about. */
+  async function showBridge() {
+    const repo = bridgeRepo(st);
+    if (!st.sheetOpen || !repo || (signal && signal.aborted)) return;
+    const ctl = await bridgeOn();
+    if (ctl && st.sheetOpen) await ctl.show(repo.id);
+  }
+  const bridgePoll = () => { if (!hiddenFn() && st.sheetOpen && bridgeCtl && bridgeCtl.waiting() && !st.bridge.busy) showBridge(); };
+  const bridgeDo = (name) => (...args) => (bridgeCtl ? bridgeCtl[name](...args) : undefined);
 
   /**
    * Reads the parts named in `want` (a Set of READ_NAMES); everything when it holds them all, or when nothing has been loaded yet.
@@ -608,6 +644,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     pick += 1;
     set({ selectedId: id, panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], refreshFailed: false, failedKeys: [], op: NO_OP });
     refresh();
+    showBridge();
   }
   /** `draft` is what the person just chose: it stays on screen while the save is out, and is dropped if the save fails (the last server value comes back). */
   async function put(call, ok, forbidden, draft = null, commit = null) {
@@ -654,7 +691,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
       typeof visibility === "function" ? visibility(refreshVisible) : () => {}];
     started = true;
     armSafety();
-    const poll = setRepeat(opPoll, OP_POLL_MS);
+    const poll = setRepeat(() => { opPoll(); bridgePoll(); }, OP_POLL_MS); // one repeat for both: the runner's report on a command raises no notice
     stopFn = () => { offs.forEach((off) => off()); clearRepeat(poll); started = false; armSafety(); };
   }
   function stop() {
@@ -673,7 +710,9 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     toggleSheet: () => {
       set({ sheetOpen: !st.sheetOpen, confirmDelete: false, notice: "" });
       if (st.sheetOpen && st.settings && st.settings.watch) readFleetSafe().then((fleet) => { if (!(signal && signal.aborted)) set({ fleet }); }, () => {});
+      if (st.sheetOpen) showBridge();
     },
+    bridge: { connect: bridgeDo("connect"), disconnect: bridgeDo("disconnect"), cancel: bridgeDo("cancel"), pickRunner: bridgeDo("pickRunner"), pickRoot: bridgeDo("pickRoot") },
     setWatch: (on) => put(() => client.saveSettings({ watch_enabled: on }, signal), WORDS.saved, undefined, { watch: on, repos: {} }, (s) => ({ ...s, watch: on })),
     setRepo: (id, on) => put(() => client.saveSettings({ repo_ids: enabledIds(id, on) }, signal), WORDS.saved, undefined, { repos: { [id]: on } }, (s) => ({ ...s, repos: s.repos.map((r) => (r.id === id ? { ...r, enabled: on } : r)) })),
     askDelete: () => set({ confirmDelete: true }),
