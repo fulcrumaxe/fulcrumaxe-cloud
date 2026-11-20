@@ -9,10 +9,13 @@ import { seedAccount, type SeedRefs } from './helpers/seed.js';
 const ROLE = 'runner_sandbox_status_definer';
 const FN = 'runner_sandbox_status_record(text)';
 const TABLE = 'runner_sandbox_status';
-const REASONS = ['bwrap_missing', 'socat_missing', 'userns_disabled', 'apparmor_userns_restricted', 'probe_failed_other'];
+const OS_SANDBOX_REASONS = ['bwrap_missing', 'socat_missing', 'userns_disabled', 'apparmor_userns_restricted', 'probe_failed_other'];
+/** 1044 (D#587 B-5a part 3): the four a runner configured for the microVM engine gives. Same order as the protocol's list. */
+const MICROVM_REASONS = ['microvm_no_kvm', 'microvm_helper_missing', 'microvm_helper_not_ready', 'microvm_helper_out_of_date'];
+const REASONS = [...OS_SANDBOX_REASONS, ...MICROVM_REASONS];
 
 /** 0763 (D#6 R4a-6, C16 section 1.3): the side table, its closed set, and the definer that sets it for the runner named by the session. */
-describe('migration 0763: runner_sandbox_status and runner_sandbox_status_record', () => {
+describe('migrations 0763 and 1044: runner_sandbox_status and runner_sandbox_status_record', () => {
   let adminPool: Pool;
   let appPool: Pool;
   let admin: PoolClient;
@@ -137,6 +140,32 @@ describe('migration 0763: runner_sandbox_status and runner_sandbox_status_record
     await record('socat_missing');
     expect((await admin.query<{ x: string }>(`SELECT xmin::text AS x FROM ${TABLE} WHERE runner_id = $1`, [runner])).rows[0]!.x).not.toBe(before);
     await record(null);
+  });
+
+  it('1044: the table constraint and the function hold the same nine, each microvm_* code is stored as itself, and a tenth is refused by both', async () => {
+    expect(REASONS).toHaveLength(9);
+    const def = (await admin.query<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'runner_sandbox_status_reason_check'`, [TABLE])).rows[0]!.d;
+    const body = (await admin.query<{ b: string }>(`SELECT prosrc AS b FROM pg_proc WHERE oid = $1::regprocedure`, [FN])).rows[0]!.b;
+    for (const reason of REASONS) {
+      expect(def, `constraint: ${reason}`).toContain(`'${reason}'`);
+      expect(body, `function: ${reason}`).toContain(`'${reason}'`);
+    }
+    // A direct write (the table's own constraint) takes each new code, and the function stores it unchanged and clears it.
+    for (const reason of MICROVM_REASONS) {
+      await admin.query(`INSERT INTO ${TABLE} (runner_id, account_id, reason) VALUES ($1, $2, $3)`, [runner, refs.accountId, reason]);
+      expect(await stored(), reason).toBe(reason);
+      await admin.query(`DELETE FROM ${TABLE} WHERE runner_id = $1`, [runner]);
+      await record(reason);
+      expect(await stored(), reason).toBe(reason);
+      await record(null);
+      expect(await stored()).toBeNull();
+    }
+    // Near misses of the new codes are refused by both.
+    for (const bad of ['microvm_no_kvm ', 'microvm_helper', 'MICROVM_NO_KVM', 'microvm_unavailable']) {
+      await expect(record(bad), bad).rejects.toMatchObject({ code: '22023' });
+      await expect(admin.query(`INSERT INTO ${TABLE} (runner_id, account_id, reason) VALUES ($1, $2, $3)`, [runner, refs.accountId, bad]), bad).rejects.toMatchObject({ code: '23514' });
+    }
+    expect(await stored()).toBeNull();
   });
 
   it('refuses a value outside the set (22023), and the table constraint holds for a direct write', async () => {

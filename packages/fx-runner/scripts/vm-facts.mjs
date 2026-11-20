@@ -3,6 +3,8 @@
 import { accessSync, constants, lstatSync, readFileSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { DEFAULT_HELPER_SOCKET, parseMemAvailableBytes } from "../src/vm/limits.js";
+import { askHelperState } from "../src/vm/helperProbe.js";
+import { HELPER_PROTOCOL } from "../src/vm/sandboxd/helperClient.js";
 
 /** Whether a path is there: "absent" for a plain not-found answer, "unreadable" for any other error, and for a path the user cannot use. */
 function presence(file, kind, needReadWrite) {
@@ -23,6 +25,17 @@ export function readMemAvailableBytes(table = "/proc/meminfo") {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The machine's facts with what the helper answered added (D#587 B-5a part 3), for the claim gate of a runner set to `microvm`. The helper is asked only when its socket is
+ * there and usable; otherwise the state is left out (the gate has its own word for each missing piece). One attempt, with the helper's own time limit.
+ * @param {string} [socketPath] the helper's socket; the unit's runtime directory by default
+ */
+export async function vmHostFactsWithHelper(socketPath = DEFAULT_HELPER_SOCKET) {
+  const facts = vmHostFacts(socketPath);
+  if (facts.kvm !== "present" || facts.helperSocket !== "present") return facts;
+  return { ...facts, helperState: await askHelperState(socketPath, HELPER_PROTOCOL) };
 }
 
 /** @param {string} [socketPath] the helper's socket; the unit's runtime directory by default */

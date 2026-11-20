@@ -28,7 +28,7 @@ import { interopEntryPresent } from "../src/sandbox/platform.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
 import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
-import { vmHostFacts } from "../scripts/vm-facts.mjs";
+import { vmHostFacts, vmHostFactsWithHelper } from "../scripts/vm-facts.mjs";
 import { createVmInstallHosts } from "../scripts/vm-install-host.mjs";
 import { buildRootArgv } from "../src/vm/install.js";
 import { createHelperSandboxes } from "../src/vm/helperSandboxes.js";
@@ -355,6 +355,8 @@ runCli({
     xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
     // D#842 EB-3c: the engine bridge's halt path and dial ceiling keeper, bound to the machine through the same kill-path dependencies `engine-host stop` uses. Without them `run` never starts the bridge.
     engineBridge: createEngineBridgePorts(engineHaltDeps),
+    // D#587 B-5a part 3: what a runner set to `microvm` checks before every claim until it passes: KVM, the helper's socket and the helper's own answer.
+    vmFacts: () => vmHostFactsWithHelper(),
     // D#749 V2b: the Chrome bridge directory is named for the user; a deploy command is given a short allowlist of this environment (src/daemon/deployOrder.ts).
     username: userInfo().username,
     env: { PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, TMPDIR: process.env.TMPDIR, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME },

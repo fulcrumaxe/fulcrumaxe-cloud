@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { JobSchema, SignedJobSchema } from "../src/job.js";
@@ -306,7 +307,12 @@ describe("the other messages", () => {
     expect(RUNNER_MESSAGES.claim.safeParse({}).success).toBe(true);
     for (const reason of SANDBOX_UNAVAILABLE_REASONS) expect(RUNNER_MESSAGES.claim.safeParse({ sandbox_unavailable: reason }).success, reason).toBe(true);
     for (const bad of ["", "sandbox_unavailable", "bwrap missing", "bwrap_missing\nx", 1, null, true]) expect(RUNNER_MESSAGES.claim.safeParse({ sandbox_unavailable: bad }).success, String(bad)).toBe(false);
-    expect(SANDBOX_UNAVAILABLE_REASONS).toEqual(["bwrap_missing", "socat_missing", "userns_disabled", "apparmor_userns_restricted", "probe_failed_other"]);
+    expect(SANDBOX_UNAVAILABLE_REASONS).toEqual([
+      "bwrap_missing", "socat_missing", "userns_disabled", "apparmor_userns_restricted", "probe_failed_other",
+      "microvm_no_kvm", "microvm_helper_missing", "microvm_helper_not_ready", "microvm_helper_out_of_date",
+    ]);
+    for (const near of ["microvm_no_kvm ", "microvm_kvm", "microvm_helper_ready", "MICROVM_NO_KVM", "microvm_helper_outdated"]) expect(RUNNER_MESSAGES.claim.safeParse({ sandbox_unavailable: near }).success, near).toBe(false);
+    expect(readFileSync(new URL("../src/messages.ts", import.meta.url), "utf8")).toContain("Version 25 is the first whose runner may name one of the four `microvm_*` reasons");
     expect(RUNNER_MESSAGES.revoke.safeParse({}).success).toBe(true);
     expect(RUNNER_MESSAGES.revoke.safeParse({ reason: "x".repeat(201) }).success).toBe(false);
     expect(RUNNER_MESSAGES.revoke.safeParse({ reason: "a\nb" }).success).toBe(false);
