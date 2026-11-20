@@ -116,7 +116,9 @@ describe("search roots and exclusions (item 1)", () => {
     for (let i = 0; i < 30; i++) mkdirSync(path.join(home, "code", `d${i}`), { recursive: true });
     clone(path.join(home, "code", "zzz-last"));
     let t = 0;
-    const r = scan({ nowMs: () => (t += 1000) });
+    // The host lists a directory in whatever order its filesystem likes, so the clone could come up before the clock ran out. List it last, always.
+    const lastOrder = { readDir: (dir: string) => [...realOps.readDir(dir)].sort((a, b) => Number(a.name === "zzz-last") - Number(b.name === "zzz-last")) };
+    const r = scan({ nowMs: () => (t += 1000), ops: lastOrder });
     expect(r.limit).toBe("time");
     expect(r.visited).toBeLessThan(10);
     expect(r.matches).toEqual([]);

@@ -167,6 +167,47 @@ describe("engine-bridge enable with only --repo (D ON-BR-1)", () => {
     expect(settingsText()).toBeNull();
   });
 
+  describe("one match from a capped scan (ruling 7)", () => {
+    /** Lists `code` as the clone followed by `after` non-directory entries; `onClone` runs once the clone has been handed out. */
+    const lister = (clone: string, after: number, onClone: () => void): DiscoveryOps => ({
+      readDir: (dir) => {
+        if (dir !== path.join(home, "code")) return realOps.readDir(dir);
+        return (function* () {
+          yield { name: path.basename(clone), isDirectory: true };
+          onClone();
+          for (let i = 0; i < after; i++) yield { name: `f${i}`, isDirectory: false };
+        })();
+      },
+    });
+    const run = (ops: DiscoveryOps, now?: () => Date) =>
+      runCli({ argv: ["engine-bridge", "enable", "--repo", "acme/widgets"], home, stateDirOverride: state, engineDiscovery: { cwd: undefined, searchRoots: undefined, ops }, uid, stdout: (t) => out.push(t), stderr: (t) => err.push(t), fetchFn: fetch, now: now ?? (() => new Date()) });
+    const refused = (dir: string) => {
+      const text = err.join("");
+      expect(text).toContain("checkout_incomplete");
+      expect(text).toContain(`--repo-root ${dir}`);
+      expect(settingsText()).toBeNull();
+    };
+    it("an entry-capped scan with one match refuses, names the path and writes nothing", async () => {
+      const dir = checkout(path.join(home, "code", "widgets"), { project_name: "widgets" });
+      expect(await run(lister(dir, 25000, () => undefined))).toBe(2);
+      refused(dir);
+      expect(err.join("")).toContain("20000 entry limit");
+    });
+    it("a time-capped scan with one match refuses, names the path and writes nothing", async () => {
+      const dir = checkout(path.join(home, "code", "widgets"), { project_name: "widgets" });
+      let skew = 0;
+      expect(await run(lister(dir, 3, () => (skew += 6000)), () => new Date(Date.now() + skew))).toBe(2);
+      refused(dir);
+      expect(err.join("")).toContain("5 second limit");
+    });
+    it("an uncapped scan with one match is still adopted", async () => {
+      const dir = checkout(path.join(home, "code", "widgets"), { project_name: "widgets" });
+      mkdirSync(path.join(home, ".widgets-state"), { mode: 0o700 });
+      expect(await run(lister(dir, 3, () => undefined))).toBe(0);
+      expect(saved()![0]!.repo_root).toBe(dir);
+    });
+  });
+
   it("item 8: a state dir that is missing or is a plain file is refused with its path, and the runner creates nothing", async () => {
     const eng = path.join(root, "never-made");
     checkout(path.join(home, "code", "widgets"), { state_dir: eng });

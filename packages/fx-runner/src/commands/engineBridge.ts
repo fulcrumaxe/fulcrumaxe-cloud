@@ -64,7 +64,7 @@ function networkCodeOf(error: unknown): string {
 
 /**
  * The repository root to bridge. An explicit `--repo-root` skips the scan (no directory is listed); its project file, when usable, still gives the engine's state
- * directory. Without it the scan runs, and exactly one engine checkout of the repo is accepted: none, an unusable clone, or several is a refusal that writes nothing.
+ * directory. Without it the scan runs, and exactly one engine checkout of the repo is accepted: none, an unusable clone, several, or one found by a scan that hit its time or entry limit is a refusal that writes nothing.
  */
 function pickCheckout(repo: string, rootFlag: string | undefined, ctx: CommandContext, options: EngineBridgeCommandOptions): { root: string; project: ProjectFile | undefined; discovered: boolean } {
   if (rootFlag !== undefined) {
@@ -89,6 +89,10 @@ function pickCheckout(repo: string, rootFlag: string | undefined, ctx: CommandCo
   }
   if (found.matches.length > 1) {
     throw refusal(`checkout_ambiguous: ${found.matches.length} checkouts of ${repo}:${list(found.matches.map((m) => m.root).sort())}\nrun again with --repo-root <one of these>; nothing was changed`);
+  }
+  // A scan cut short by its time or entry limit may not have seen a second clone (the host lists directories in its own order), so one match is not enough to adopt.
+  if (found.limit !== null) {
+    throw refusal(`checkout_incomplete: the search stopped at its ${found.limit === "time" ? "5 second" : "20000 entry"} limit after finding one checkout of ${repo}, and a second may lie past the limit:\n  ${found.matches[0]!.root}\nif that is the one, run again with --repo-root ${found.matches[0]!.root}; nothing was changed`);
   }
   return { root: found.matches[0]!.root, project: found.matches[0]!.project, discovered: true };
 }
