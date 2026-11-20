@@ -16,11 +16,25 @@ import { FIXED_ENV, HOST_ENV_ALLOWLIST } from "../../job/cleanEnv.js";
 const CONNECT_RELAY = "http://127.0.0.1:5253";
 /**
  * The hosts the guest reaches through the reverse relay (the guest's hosts file maps each to `127.0.0.1`, which the relay carries to vsock 5254)
- * instead of the CONNECT relay: the model API, and GitHub for git. One list feeds both the tool base URL and `NO_PROXY`, so a client that follows
- * proxy variables sends these hosts straight to the reverse relay (a plain-http request through the CONNECT relay is refused) and the two cannot drift.
+ * instead of the CONNECT relay: the model API, and GitHub for git. Each tool is told in its own way, from this one list:
+ *  - the model API by its base URL (`ANTHROPIC_BASE_URL`), and `NO_PROXY` names that one host, so a client that follows proxy variables sends it
+ *    straight to the reverse relay (a plain-http request through the CONNECT relay is refused);
+ *  - GitHub, for git only, by git's own per-URL settings (`MICROVM_GIT_ENV`): `https://github.com/` is rewritten to plain `http://github.com/`, and that
+ *    one URL is given an empty proxy. GitHub is NOT in `NO_PROXY`: an entry there also matches every subdomain, which would send `api.github.com` (and
+ *    the gh tool with it) straight to a loopback relay that does not serve it. Those hosts go through the CONNECT relay, where the policy decides.
  */
 export const REVERSE_HOSTS: readonly string[] = Object.freeze(["api.anthropic.com", "github.com"]);
-const NO_PROXY_VALUE = ["127.0.0.1", "localhost", ...REVERSE_HOSTS].join(",");
+const GIT_HOST = REVERSE_HOSTS[1] as string;
+const NO_PROXY_VALUE = ["127.0.0.1", "localhost", ...REVERSE_HOSTS.filter((host) => host !== GIT_HOST)].join(",");
+
+/** The guest's git, pointed at the reverse relay for GitHub and nowhere else. All of it is pinned: a job cannot add a rule (`GIT_CONFIG_COUNT` is fixed) or change one. */
+export const MICROVM_GIT_ENV: Readonly<Record<string, string>> = Object.freeze({
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: `url.http://${GIT_HOST}/.insteadOf`,
+  GIT_CONFIG_VALUE_0: `https://${GIT_HOST}/`,
+  GIT_CONFIG_KEY_1: `http.http://${GIT_HOST}/.proxy`,
+  GIT_CONFIG_VALUE_1: "",
+});
 
 /** Names the guest's own network setup sets; a job may only repeat them with exactly these values. */
 export const MICROVM_NETWORK_ENV: Readonly<Record<string, string>> = Object.freeze({
@@ -31,6 +45,7 @@ export const MICROVM_NETWORK_ENV: Readonly<Record<string, string>> = Object.free
   NO_PROXY: NO_PROXY_VALUE,
   no_proxy: NO_PROXY_VALUE,
   ANTHROPIC_BASE_URL: `http://${REVERSE_HOSTS[0] as string}`,
+  ...MICROVM_GIT_ENV,
 });
 
 /**
