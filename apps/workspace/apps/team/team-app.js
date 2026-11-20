@@ -101,7 +101,7 @@ function mountApp(contentEl) {
   // A control that cannot be used right now keeps its place in the Tab order (aria-disabled, not disabled): focus stays on it through a save, and a member who tabs to it hears why.
   const box = (attrs, checked, enabled, why, set) => h("input", { type: "checkbox", checked, "aria-disabled": enabled ? null : "true", "aria-describedby": enabled ? null : why, onClick: (e) => { if (!enabled) e.preventDefault(); }, onChange: (e) => set(e.target.checked), ...attrs });
   function switchRow(testid, label, checked, enabled, why) {
-    return h("label", { class: "tm-check" }, box({ "data-testid": testid, "data-focus": testid }, checked, enabled, why, (on) => team.setWatch(on)), h("span", null, label));
+    return h("label", { class: "tm-check" }, box({ "data-testid": testid, "data-focus": testid }, checked, enabled, why, (on) => team.setWatch(on)), h("span", { "data-part": "watch-words" }, label));
   }
   // The command, with a button that copies it. The answer (Copied, or why not) is spoken in a status line next to the button.
   const copyBlock = (rw, command, testid) => {
@@ -136,14 +136,22 @@ function mountApp(contentEl) {
     h("p", { class: "tm-muted", "data-testid": "tm-soon" }, RUNNER_WORDS.soon),
   ];
   const closeConfirm = () => { want = "delete"; team.cancelDelete(); };
-  function sheetNodes(s) {
+  // The sheet is three parts, each redrawn only when its own data changes. The switch and the repository boxes sit in parts the runner list never touches, so the runner
+  // module or the runner list arriving late cannot replace a box under a tap that is already half done.
+  const sheetHead = h("div", { class: "tm-sheet-part" }), sheetRunner = h("div", { class: "tm-sheet-part" }), sheetRepos = h("div", { class: "tm-sheet-part" });
+  sheet.replaceChildren(sheetHead, sheetRunner, sheetRepos);
+  function paintSheet(s) {
     const can = s.canEdit && !s.saving;
     const ro = s.canEdit ? null : "tm-ro";
-    return [
+    swap("sheet:head", sheetHead, { w: s.watch, can, ro, r: s.readOnly }, () => [
       s.readOnly ? h("p", { class: "tm-muted", id: "tm-ro", "data-testid": "tm-readonly" }, s.readOnly) : null,
       switchRow("tm-watch", s.runner.label, s.watch, can, ro),
-      ...runnerNodes(s.runner),
-      ...connectNodes(s.runner.connect, s.runner.words),
+    ]);
+    // The switch's words change when the runner arrives, so they are set on the span and the box stays.
+    const words = sheetHead.querySelector("[data-part='watch-words']");
+    if (words) setText(words, s.runner.label);
+    swap("sheet:runner", sheetRunner, s.runner, () => [...runnerNodes(s.runner), ...connectNodes(s.runner.connect, s.runner.words)]);
+    swap("sheet:repos", sheetRepos, { repos: s.repos, can, ro, c: s.canEdit, d: s.confirmDelete, s: s.saving }, () => [
       h("h3", { class: "tm-sub" }, WORDS.repos),
       s.repos.length === 0 ? h("p", { class: "tm-muted" }, WORDS.noSettingsRepos) : h("ul", { class: "tm-list", role: "list" }, s.repos.map((r) =>
         h("li", { class: "tm-item", "data-testid": "tm-repo-row", "data-refused": r.refused ? "true" : "false" },
@@ -157,7 +165,7 @@ function mountApp(contentEl) {
             h("button", { type: "button", class: "tm-btn", "data-testid": "tm-delete-yes", "data-focus": "delete-yes", onClick: () => { want = "delete"; team.deleteData(); } }, WORDS.deleteYes),
             h("button", { type: "button", class: "tm-btn", "data-testid": "tm-delete-cancel", "data-focus": "delete-cancel", onClick: closeConfirm }, WORDS.cancel))
         : h("button", { type: "button", class: "tm-btn", "data-testid": "tm-delete", "data-focus": "delete", "aria-disabled": s.saving ? "true" : "false", onClick: () => { if (!s.saving) { want = "delete-cancel"; team.askDelete(); } } }, WORDS.deleteData)) : null,
-    ];
+    ]);
   }
 
   // Each panel is built once: a header and a body, each redrawn only when its own data changes, so a refresh never resets the log's scroll position or takes focus from a button.
@@ -353,7 +361,7 @@ function mountApp(contentEl) {
     setText(note, d.refreshFailed || "");
     note.hidden = !d.refreshFailed;
     sheet.hidden = !(d.sheet && d.sheet.open);
-    if (d.sheet) swap("sheet", sheet, d.sheet, () => sheetNodes(d.sheet));
+    if (d.sheet) paintSheet(d.sheet);
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
     const broken = hasRepos ? Object.keys(TITLE).filter((k) => d[k].failed && d.failedKeys.includes(k)).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not

@@ -36,7 +36,10 @@
 .tm-banner, .tm-op-why { margin: 8px 0; padding: 8px 10px; border: 2px solid var(--accent, #1aff80); font-weight: 600; }
 .tm-notices { margin: 0 0 8px; padding: 0; list-style: none; }
 .tm-sheet { margin: 8px 0; padding: 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
-.tm-sheet > * + * { margin-top: 8px; }
+.tm-sheet-part { display: contents; }
+.tm-sheet-part > * { margin-top: 8px; }
+.tm-sheet > .tm-sheet-part:first-child > .tm-check:first-child { margin-top: 0; }
+.tm-sheet > .tm-sheet-part:first-child > p.tm-muted:first-child { margin-top: 6px; } /* the read-only sentence keeps the .tm-muted margin it had as the sheet's first child */
 .tm-check { display: flex; align-items: center; gap: 8px; min-height: 44px; overflow-wrap: anywhere; }
 .tm-check input { width: 20px; height: 20px; flex: none; }
 .tm-reason { display: block; font-size: 0.8rem; font-style: italic; }
