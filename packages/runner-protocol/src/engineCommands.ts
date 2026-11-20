@@ -5,6 +5,7 @@
  */
 import { createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 import { z } from "zod";
+import { WATCH_MIN_PROTOCOL } from "./messages.js";
 import { AgentId, ASK_ID_PATTERN, SHA40_PATTERN } from "./engineEvents.js";
 import { canonicalJson, JobSignatureError, type JobKeyring } from "./jobSignature.js";
 
@@ -14,7 +15,7 @@ const ghNumber = z.number().int().min(1).max(2_147_483_647);
 /** Dial classes a person may set from the cloud. `sandbox.modify`, `methodology.change`, `external.system`, `intent.generate` and `cost.spend` can never be set from here. */
 export const SETTABLE_DIAL_CLASSES = ["docs.write", "tests.add", "deps.bump", "agent.spawn", "merge.standard", "merge.fast-path", "memory.write", "archive.move"] as const;
 export const SPAWNABLE_ROLES = ["executor", "code-reviewer", "security-reviewer", "acceptance-tester", "browser-tester", "project-manager", "technical-architect", "product-owner", "cost-analyst", "performance-expert", "security-expert"] as const;
-export const ENGINE_COMMAND_KINDS = ["start_day", "pause_loop", "resume_loop", "answer_ask", "set_dial", "request_spawn", "stop_agent"] as const;
+export const ENGINE_COMMAND_KINDS = ["start_day", "pause_loop", "resume_loop", "answer_ask", "set_dial", "request_spawn", "stop_agent", "watch"] as const;
 export const ENGINE_ASK_CHOICES = ["approve", "decline", "defer"] as const;
 export const COMMAND_REFUSALS = ["signature_invalid", "wrong_runner", "wrong_repo", "expired", "seq_not_increasing", "halted", "operate_off", "host_not_running", "unknown_ask", "unknown_agent", "ceiling", "already_answered"] as const;
 export const ENGINE_COMMAND_OUTCOMES = ["applied", "refused", "expired", "not_confirmed"] as const;
@@ -60,13 +61,31 @@ export const EngineCommand = z
     command("set_dial", strict({ dial_class: SettableDialClass, level: z.number().int().min(1).max(5), ttl: z.enum(["for_today", "none"]) })),
     command("request_spawn", strict({ role: SpawnableRole, discussion: ghNumber })),
     command("stop_agent", strict({ agent_id: AgentId })),
+    // D#845 ON-24a: `until` is the end of the watch, `before` the ingest `seq` the reader asks the history before. Whether `before` is at or under the repo's high-water seq is the cloud's check (`watchBeforeWithinHighWater`).
+    command("watch", strict({ until: z.string().datetime(), before: safeInt.min(0).optional() })),
   ])
   .superRefine((cmd, ctx) => {
     const life = Date.parse(cmd.expires_at) - Date.parse(cmd.issued_at);
     if (!(life > 0 && life <= ENGINE_COMMAND_MAX_LIFE_S * 1000)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a command lives 1 ms to 600 s", path: ["expires_at"] });
+    if (cmd.kind === "watch") {
+      const ahead = Date.parse(cmd.args.until) - Date.parse(cmd.issued_at);
+      if (!(ahead > 0 && ahead <= ENGINE_COMMAND_MAX_LIFE_S * 1000)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a watch ends 1 ms to 600 s after it is issued", path: ["args", "until"] });
+    }
   });
 export type EngineCommand = z.infer<typeof EngineCommand>;
 export type EngineCommandOf<K extends EngineCommandKind> = Extract<EngineCommand, { kind: K }>;
+
+/** The lowest hello protocol a command kind may be sent to; a kind not listed here predates the bridge's versioning and goes to every bridge runner. */
+export const ENGINE_COMMAND_MIN_PROTOCOL: Partial<Record<EngineCommandKind, number>> = { watch: WATCH_MIN_PROTOCOL };
+/** True when a runner whose hello said `helloProtocol` may be sent a `kind` command. */
+export const commandSendableTo = (kind: EngineCommandKind, helloProtocol: number): boolean => helloProtocol >= (ENGINE_COMMAND_MIN_PROTOCOL[kind] ?? 0);
+/** True when a `watch` command's `until` is still ahead of the checker's own clock and no more than 600 s ahead of it, whatever the issuer's clock said. */
+export const watchUntilAcceptable = (cmd: { args: { until: string } }, now: Date): boolean => {
+  const ahead = Date.parse(cmd.args.until) - now.getTime();
+  return ahead > 0 && ahead <= ENGINE_COMMAND_MAX_LIFE_S * 1000;
+};
+/** True when a `watch` cursor is a seq the repo has already reached. */
+export const watchBeforeWithinHighWater = (before: number, highWaterSeq: number): boolean => Number.isSafeInteger(before) && before >= 0 && before <= highWaterSeq;
 
 /** A command with its signature. The signature is over `canonicalJson(command)`; `key_id` only picks which trusted key to check it with. */
 export const SignedEngineCommand = z.object({ command: EngineCommand, key_id: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/), signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();

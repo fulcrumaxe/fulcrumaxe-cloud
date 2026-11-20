@@ -47735,7 +47735,8 @@
                               "answer_ask",
                               "set_dial",
                               "request_spawn",
-                              "stop_agent"
+                              "stop_agent",
+                              "watch"
                             ]
                           },
                           "args": {

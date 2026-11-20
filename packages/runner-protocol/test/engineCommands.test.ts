@@ -46,6 +46,7 @@ const ARGS: Record<string, unknown> = {
   set_dial: { dial_class: "agent.spawn", level: 3, ttl: "for_today" },
   request_spawn: { role: "code-reviewer", discussion: 842 },
   stop_agent: { agent_id: "a0e5cfdaaf80bf298" },
+  watch: { until: "2026-11-16T15:03:00.000Z", before: 120 },
 };
 const command = (kind: string, over: Record<string, unknown> = {}) => ({ v: 1, purpose: "engine_command_v1", command_id: U1, command_seq: 1, runner_id: U2, repo_gh_id: 77, kind, args: ARGS[kind], issued_by: U3, issued_at: "2026-11-16T14:59:00.000Z", expires_at: "2026-11-16T15:04:00.000Z", halt_epoch: 0, ...over });
 const ok = (value: unknown) => EngineCommand.safeParse(value).success;
@@ -61,7 +62,7 @@ const code = (run: () => unknown): JobSignatureErrorCode | "returned" => {
 
 describe("EngineCommand", () => {
   it("parses every kind with its own args", () => {
-    expect(ENGINE_COMMAND_KINDS).toHaveLength(7);
+    expect(ENGINE_COMMAND_KINDS).toHaveLength(8);
     for (const kind of ENGINE_COMMAND_KINDS) expect(EngineCommand.parse(command(kind)), kind).toEqual(command(kind));
   });
 

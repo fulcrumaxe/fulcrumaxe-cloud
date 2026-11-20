@@ -21,10 +21,10 @@ const MIGRATION_1039 = read('../migrations/1039_engine_notice_panels.sql');
 
 const ALL = [...ENGINE_NOTICE_PANELS];
 /**
- * Kinds the protocol accepts before the cloud's ingest knows them (D#845 ON-1 added `usage_tick`; the migration that teaches `engine_kind_spec` and the panel map is a later row).
+ * Kinds the protocol accepts before the cloud's ingest knows them (D#845 ON-1 added `usage_tick`, ON-24a added `slim_status`; the migration that teaches `engine_kind_spec` and the panel map is a later row).
  * They are left out of the SQL comparisons below. A test at the end fails the moment the SQL names one, so the migration that adds it must also delete it from this list.
  */
-const PENDING_INGEST: readonly string[] = ['usage_tick'];
+const PENDING_INGEST: readonly string[] = ['usage_tick', 'slim_status'];
 const KINDS: readonly string[] = ENGINE_EVENT_KINDS.filter((k) => !PENDING_INGEST.includes(k));
 
 /** The `WHEN '<kind>'` literals of one SQL function body. */

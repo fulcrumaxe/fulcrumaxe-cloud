@@ -287,6 +287,7 @@ describe('engine commands: issue, cancel, list [pg]', () => {
         ['request_spawn', { role: 'root', discussion: 1 }],
         ['request_spawn', { role: 'executor', discussion: -4 }],
         ['stop_agent', { agent_id: '../etc' }],
+        ['watch', { until: new Date(Date.now() + 60_000).toISOString() }],
       ];
       for (const [kind, args] of bad) expect((await call(f.owner, 'POST', path(f.repo), { kind, args })).status, `${kind} ${JSON.stringify(args)}`).toBe(422);
       expect((await call(f.owner, 'POST', path(f.repo), { args: {} })).status).toBe(422);
