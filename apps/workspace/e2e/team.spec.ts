@@ -709,6 +709,64 @@ test.describe("Team app", () => {
     expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe(`tm-repo-${REPO_A}`);
   });
 
+  test("the runner module landing after the sheet opened does not replace the boxes: same nodes, same marks, runner lines still arrive", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    // Routed before the page loads: index.html hints the module with modulepreload, so a later route would find it already fetched.
+    await page.route((u) => u.pathname.endsWith("/team-runners.js"), async (route) => { await held; await route.fallback(); });
+    const settings = F.settings({ repos: [F.settingsRepo({ bridged_runner_id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66" })] });
+    const { errors } = await setup(page, fresh({ settings, runners: F.fleet([F.runner()]) }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, `tm-repo-${REPO_A}`)).toBeVisible();
+    await expect(t(page, "tm-runner-status")).toHaveCount(0); // the module is still held: no runner lines yet
+    const mark = () => page.evaluate((id) => {
+      const q = (s: string) => document.querySelector(`[data-testid="${s}"]`) as (HTMLElement & { mark?: number }) | null;
+      return [q("tm-watch")?.mark, q(`tm-repo-${id}`)?.mark];
+    }, REPO_A);
+    await page.evaluate((id) => {
+      const q = (s: string) => document.querySelector(`[data-testid="${s}"]`) as HTMLElement & { mark?: number };
+      q("tm-watch").mark = 5;
+      q(`tm-repo-${id}`).mark = 7;
+    }, REPO_A);
+    release();
+    await expect(tv(page, "tm-runner-status")).toHaveText("Online · last seen 2 min ago"); // the sheet did draw again with the runner lines
+    await expect(page.locator(`${WIN} label:has([data-testid="tm-watch"])`)).toHaveText("Watch the engine team on Workshop laptop");
+    expect(await mark()).toEqual([5, 7]); // the same switch and repository box, not rebuilt copies
+    await clean(page, errors);
+  });
+
+  // The sheet's vertical rhythm, as the single-block sheet drew it: offsets between neighbours, so the numbers do not depend on the window size.
+  const sheetOffsets = (page: Page) => page.evaluate(() => {
+    const sheet = document.querySelector('.fulc-window[data-app-id="team"] [data-testid="tm-sheet"]') as HTMLElement;
+    const r = (el: Element) => el.getBoundingClientRect();
+    const s = r(sheet);
+    const ro = document.querySelector('.fulc-window[data-app-id="team"] [data-testid="tm-readonly"]');
+    const sw = document.querySelector('.fulc-window[data-app-id="team"] [data-testid="tm-watch"]')!.closest("label")!;
+    const last = [...sheet.querySelectorAll("*")].filter((e) => e.getBoundingClientRect().height > 0).reduce((m, e) => Math.max(m, r(e).bottom), 0);
+    const round = (n: number) => Math.round(n * 1000) / 1000;
+    return { roTop: ro ? round(r(ro).top - s.top) : null, switchTop: round(r(sw).top - (ro ? r(ro).bottom : s.top)), tail: round(s.bottom - last) };
+  });
+
+  test("the sheet keeps its spacing: the read-only sentence and the switch sit where the one-block sheet put them", async ({ page }) => {
+    const ro = await setup(page, fresh({ settings: makeFixtures(Date.now()).settings({ can_edit: false }) }));
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, "tm-readonly")).toBeVisible();
+    expect(await sheetOffsets(page)).toEqual({ roTop: 17, switchTop: 8, tail: 11 }); // measured on main before the sheet was split into parts
+    await clean(page, ro.errors);
+  });
+
+  test("the sheet keeps its spacing when the member can edit: the switch sits at the top", async ({ page }) => {
+    const { errors } = await setup(page, fresh());
+    await open(page);
+    await press(t(page, "tm-settings-btn"));
+    await expect(t(page, "tm-watch")).toBeVisible();
+    expect(await sheetOffsets(page)).toEqual({ roTop: null, switchTop: 11, tail: 11 });
+    await clean(page, errors);
+  });
+
   test("toggling a box keeps keyboard focus on it while the save is out and after it, and the box stays in the Tab order", async ({ page }) => {
     const { mock, errors } = await setup(page, fresh());
     await open(page);
