@@ -59,6 +59,7 @@ describe.skipIf(!ready)("microVM engine (real VMs, the production daemon and the
         env: () => ({}),
         workdir: "/work/job",
         timeoutMsOf: (handle) => port.timeoutMsOf(handle),
+        interrupt: (handle) => port.interrupt(handle),
         lose: async () => {
           const id = daemon?.list()[0]?.name;
           if (id === undefined) throw new Error("no sandbox to lose");

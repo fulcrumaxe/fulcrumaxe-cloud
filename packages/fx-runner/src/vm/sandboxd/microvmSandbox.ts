@@ -64,12 +64,17 @@ export interface MicrovmSandboxConfig {
   /** `createDaemonSdk(...)`: the slice every sandbox call goes through, and the VM's limit as an absolute value. */
   sdk: Pick<VercelSandboxSdk, "create" | "get"> & LimitControl;
   /** Builds the agent runtime for one job from the guest's own command slice. */
-  makeRuntime(guest: SdkSandbox, opts: StartDetachedOptions): AgentRuntime;
+  makeRuntime(guest: SdkSandbox, opts: StartDetachedOptions): InterruptibleRuntime;
 }
+
+/** An agent runtime that can also be sent an interrupt (SIGINT: it ends the agent's turn cleanly), as the host engine's can. */
+export type InterruptibleRuntime = AgentRuntime & { interrupt?(handle: AgentHandle): void | Promise<void> };
 
 export interface MicrovmSandbox extends SandboxPort {
   /** The sandbox's current wall-clock limit, or `undefined` for a name this port does not hold. */
   timeoutMsOf(handle: SandboxHandle): number | undefined;
+  /** Interrupts the sandbox's agent once it exists. Does nothing, and does not throw, for a name that is gone or an agent that has ended. */
+  interrupt(handle: SandboxHandle): Promise<void>;
   /**
    * The running guest of this sandbox, for the runner's own steps after the agent (the bundle read; D#587 B-5b). The approved check never runs in it: it runs in a fresh VM. `not_running` when the VM is
    * stopped, and `SandboxNotFoundError` for a name the daemon no longer holds.
@@ -88,7 +93,7 @@ interface Entry {
   vmDeadline: number;
   /** When the current run was started, wall-clock ms. */
   launchedAt: number;
-  runtime?: AgentRuntime;
+  runtime?: InterruptibleRuntime;
   agent?: AgentHandle;
   /** Settles when the agent process exists (or its start failed). A stop waits on this, never on the run's end. */
   agentUp?: Promise<unknown>;
@@ -412,6 +417,11 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
       }
     },
     timeoutMsOf: (handle) => entries.get(handle.sandboxName)?.timeoutMs,
+    async interrupt(handle) {
+      const entry = entries.get(handle.sandboxName);
+      await entry?.agentUp?.catch(noop); // the agent may still be starting: it is interrupted once it exists
+      if (entry?.running === true && entry.runtime !== undefined && entry.agent !== undefined) await entry.runtime.interrupt?.(entry.agent);
+    },
     async guestOf(handle) {
       const guest = await open(handle.sandboxName, false);
       if (guest.status !== "running") throw new MicrovmSandboxRefused("not_running");

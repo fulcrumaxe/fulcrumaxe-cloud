@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { SandboxdCommand, type LogChunk } from "../../../src/vm/sandboxd/command.js";
 import { createGuestAgent, viaFirecrackerVsock, type ExecResult, type GuestAgent } from "../../../src/vm/sandboxd/guestAgent.js";
+import type { GuestStream } from "../../../src/vm/sandboxd/streamCommand.js";
 import { makeRig, runCleanups } from "./helpers.js";
 
 afterEach(runCleanups);
@@ -132,6 +133,7 @@ describe("kill during start, scripted", () => {
       get: async () => 0,
       putToken: async () => undefined,
       wipeToken: async () => ({ removed: false, killed: 0 }),
+      streamInGuest: async () => Promise.reject(new Error("no stream expected")),
       runInGuest: (req) => {
         calls.push(req.argv);
         return new Promise((resolve, reject) => held.push({ req, resolve, reject }));
@@ -210,5 +212,35 @@ describe("kill during start, scripted", () => {
     await until(() => running("sleep 31.16") === 0);
     expect(running("sleep 31.16")).toBe(0);
     expect(rig.daemon.list()).toEqual([]);
+  });
+});
+
+/** The daemon remembers the ids a VM's agent has seen so a reused one is refused here; the memory is bounded. */
+describe("runStream: the id memory", () => {
+  const instant = (id: string): GuestStream => ({ id, frames: { [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true, value: undefined }) }) }, done: Promise.resolve({ exit: 0, signal: null, timedOut: false }), kill: async () => undefined, abort: () => undefined });
+  const stubAgent = (): GuestAgent => ({
+    ping: async () => undefined,
+    put: async () => undefined,
+    get: async () => 0,
+    putToken: async () => undefined,
+    wipeToken: async () => ({ removed: false, killed: 0 }),
+    runInGuest: () => Promise.reject(new Error("no exec expected")),
+    streamInGuest: async (req) => instant(req.id),
+  });
+
+  it("refuses a new id once 4096 are remembered, and still refuses a remembered one", async () => {
+    const rig = makeRig({ agentFor: stubAgent });
+    const sb = await rig.daemon.create(params("cap"));
+    for (let i = 0; i < 4096; i++) await sb.runStream({ id: `id-${i}`, cmd: "true" });
+    await expect(sb.runStream({ id: "id-4096", cmd: "true" })).rejects.toMatchObject({ status: 409, code: "conflict" });
+    await expect(sb.runStream({ id: "id-0", cmd: "true" })).rejects.toMatchObject({ status: 409, code: "conflict" });
+  }, 60_000);
+
+  it("a remembered id stays refused, and a fresh one starts, below the cap", async () => {
+    const rig = makeRig({ agentFor: stubAgent });
+    const sb = await rig.daemon.create(params("below"));
+    await sb.runStream({ id: "once", cmd: "true" });
+    await expect(sb.runStream({ id: "once", cmd: "true" })).rejects.toMatchObject({ status: 409, code: "conflict" });
+    await expect(sb.runStream({ id: "twice", cmd: "true" })).resolves.toBeDefined();
   });
 });

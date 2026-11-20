@@ -18,8 +18,8 @@ unaffected. `exec_stream` takes the exec fields plus `id` (1-64 of A-Za-z0-9_-, 
 "timed_out":bool}`, after which the agent closes. Frames follow the order the bytes reached the agent: exact within a stream, and
 across streams exact only up to what one select() round can tell apart. The agent reads a pipe only after the previous frame has
 been sent, so a slow host stalls the child on its full pipe and the agent holds at most CHUNK bytes per command. A send that fails
-or stalls for STALL_S (a host that vanished or stopped reading) kills the command. After the leader exits the stream ends
-within POST_EXIT_S whatever output still arrives, and the command's remaining processes are killed first. "Killed" and `kill`
+or stalls for STALL_S (a host that vanished or stopped reading) kills the command. Every byte the leader wrote is framed before the exit frame, at the host's pace. After that the stream ends
+within POST_EXIT_S whatever output still arrives from background processes, and the command's remaining processes are killed first. "Killed" and `kill`
 reach the process group and also every process that inherited the command's marker variable (`FX_CMD_ID=<agent pid>.<id>`, set last in its
 environment), which finds descendants that left the group with setsid. A process that clears its environment escapes this; the guest
 is root-equivalent to the code it runs, so this is cleanup, not a boundary. A client treats any frame other than `data` or `exit`
@@ -41,6 +41,7 @@ is killed whatever it did with its name, session or environment) and answers ok 
 checked by name as a second net. /proc/<pid>/environ is only ever read into one preallocated buffer that is zeroed after each pid. A copy a
 holder makes on purpose (a file, the network) is outside what the wipe can undo. No reply, error or log line carries the token or a byte of it.
 """
+import fcntl
 import itertools
 import json
 import os
@@ -52,6 +53,7 @@ import stat
 import struct
 import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -544,6 +546,14 @@ def feed_stdin(proc, data):
             pass
 
 
+def pending(fd):
+    """Bytes sitting in a pipe right now."""
+    try:
+        return struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0]
+    except OSError:
+        return 0
+
+
 def run_stream(conn, req, stdin):
     cid = req.get("id")
     if not isinstance(cid, str) or not ID_RE.match(cid):
@@ -572,6 +582,7 @@ def run_stream(conn, req, stdin):
     threading.Thread(target=feed_stdin, args=(proc, stdin), daemon=True).start()
     fds = {proc.stdout.fileno(): "stdout", proc.stderr.fileno(): "stderr"}
     seq, timed_out, exit_at, after = 0, False, None, 0
+    owed = {}  # fd -> bytes its pipe held when the leader was seen gone: the leader's own output, framed in full whatever the host's pace
     deadline = time.monotonic() + timeout
     conn.settimeout(STALL_S)
     try:
@@ -581,18 +592,26 @@ def run_stream(conn, req, stdin):
                 chunk = os.read(fd, CHUNK)
                 if not chunk:
                     del fds[fd]
+                    owed.pop(fd, None)
                     continue
                 send(conn, {"ev": "data", "stream": fds[fd], "seq": seq, "size": len(chunk)}, chunk)  # blocks on a slow host: the backpressure
                 seq += 1
-                after += len(chunk) if exit_at else 0
+                if owed.get(fd, 0) > 0:
+                    owed[fd] -= len(chunk)
+                elif exit_at is not None:
+                    after += len(chunk)
             now = time.monotonic()
             if exit_at is None and ended(proc):
                 exit_at = now
+                owed = {fd: pending(fd) for fd in fds}  # the leader can write no more: what its pipes hold now is its own output
             if not timed_out and exit_at is None and now > deadline:
                 timed_out = True
                 with LOCK:
                     signal_group(entry, signal.SIGKILL)
-            # the leader is gone but something still holds a pipe: stop after a quiet second, GRACE_BYTES more, or POST_EXIT_S
+            if exit_at is not None and any(left > 0 for left in owed.values()):
+                exit_at = now  # the leader's own output is still being framed: the cutoffs below for background output have not started
+                continue
+            # the leader's output is all framed but something still holds a pipe: stop after a quiet second, GRACE_BYTES more, or POST_EXIT_S
             if exit_at is not None and (after > GRACE_BYTES or now - exit_at > POST_EXIT_S or (not ready and now - exit_at > 1)):
                 break
     except Exception:
@@ -717,6 +736,10 @@ def listen(unix_path):
 
 def main():
     unix_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--unix" else None
+    # init starts this agent with `&` from a non-interactive shell, which leaves SIGINT and SIGQUIT ignored; every command would inherit that,
+    # and a `kill` with SIGINT could never interrupt anything. Commands get the default disposition.
+    for sig in (signal.SIGINT, signal.SIGQUIT):
+        signal.signal(sig, signal.SIG_DFL)
     srv = listen(unix_path)
     print(f"FXMARK agent_listening uptime={read_proc('/proc/uptime').split()[0]} t={time.time():.0f}", flush=True)
     while True:

@@ -5,6 +5,8 @@
  */
 import net from "node:net";
 import type { Duplex } from "node:stream";
+import { AgentError } from "./agentError.js";
+import { startStream, type GuestStream, type StreamRequest, type StreamSignal } from "./streamCommand.js";
 import { VSOCK_SOCKET_NAME, dialVsockDir, type FdOps } from "./vsockFd.js";
 import { FILE_PIECE, MAX_FILE_BYTES, checkGuestPath, guestFileMode, type FileContent } from "./files.js";
 
@@ -15,12 +17,7 @@ export const MAX_OUTPUT = 16 << 20;
 
 export type Connect = () => Promise<Duplex>;
 
-export class AgentError extends Error {
-  constructor(readonly code: "unreachable" | "bad_reply" | "refused" | "timeout" | "bad_request") {
-    super(`the guest agent failed: ${code}`);
-    this.name = "AgentError";
-  }
-}
+export { AgentError };
 
 /**
  * Connects to a Firecracker vsock Unix socket and finishes the `CONNECT` handshake; nothing past the `OK <port>` line has been read. `target` is
@@ -135,7 +132,7 @@ class Reader {
 }
 
 /** One reply frame's JSON, checked: an object with `ok: true`. Raw bytes it names are still unread. */
-async function readReply(reader: Reader): Promise<Record<string, unknown>> {
+async function readReply(reader: Reader, anyAnswer = false): Promise<Record<string, unknown>> {
   const size = (await reader.take(4)).readUInt32BE(0);
   if (size > MAX_HEADER) throw new AgentError("bad_reply");
   let head: unknown;
@@ -147,7 +144,7 @@ async function readReply(reader: Reader): Promise<Record<string, unknown>> {
     throw new AgentError("bad_reply");
   }
   if (typeof head !== "object" || head === null || Array.isArray(head)) throw new AgentError("bad_reply");
-  if ((head as Record<string, unknown>)["ok"] !== true) throw new AgentError("refused");
+  if (!anyAnswer && (head as Record<string, unknown>)["ok"] !== true) throw new AgentError("refused");
   return head as Record<string, unknown>;
 }
 
@@ -228,6 +225,11 @@ export interface GuestAgent {
   putToken(token: Buffer): Promise<void>;
   /** Asks the guest to remove the token and kill every process that holds it; call it before any snapshot. Rejects unless the guest says none is left. */
   wipeToken(): Promise<{ removed: boolean; killed: number }>;
+  /**
+   * Starts a command on the guest's streaming exec and answers once its request is written. Output is read on demand (see `GuestStream`): a consumer that stops
+   * reading stalls the guest's pipe, and `done` settles only as the frames are read. Refuses before any request body is sent when the guest does not advertise the op.
+   */
+  streamInGuest(req: StreamRequest): Promise<GuestStream>;
 }
 
 /** A transfer ends after this long in all; it also ends when `ioTimeoutMs` passes with no progress. */
@@ -247,7 +249,7 @@ export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000, transfe
       throw err;
     }).finally(() => clearTimeout(connectTimer));
   }
-  async function request(header: Record<string, unknown>, body: Buffer, blobKeys: readonly string[], timeoutMs: number, onSent?: () => void): Promise<AgentReply> {
+  async function request(header: Record<string, unknown>, body: Buffer, blobKeys: readonly string[], timeoutMs: number, onSent?: () => void, anyAnswer = false): Promise<AgentReply> {
     const socket = await open();
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -258,7 +260,7 @@ export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000, transfe
       socket.write(Buffer.concat([length, json, body]));
       onSent?.();
       const answer = (async (): Promise<AgentReply> => {
-        const header = await readReply(reader);
+        const header = await readReply(reader, anyAnswer);
         const blobs: Buffer[] = [];
         for (const key of blobKeys) {
           const n = header[key] ?? 0; // the agent names no size on a timeout or a program it could not start, and sends no bytes
@@ -302,7 +304,24 @@ export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000, transfe
     return Buffer.concat([length, json]);
   };
   const intOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
+  /** What the guest advertises in `ping`; a list that lacks the streaming op is not kept, so an agent that is later replaced is asked again. */
+  let advertised: readonly string[] | undefined;
+  const capsOf = async (): Promise<readonly string[]> => {
+    if (advertised !== undefined) return advertised;
+    const { header } = await request({ op: "ping" }, Buffer.alloc(0), [], ioTimeoutMs);
+    const list = header["caps"];
+    const caps = Array.isArray(list) && list.length <= 64 ? list.filter((c): c is string => typeof c === "string" && c.length <= 64) : [];
+    if (caps.includes("exec_stream")) advertised = caps;
+    return caps;
+  };
+  const killOp = async (id: string, signal: StreamSignal): Promise<"signalled" | "unknown_id"> => {
+    const { header } = await request({ op: "kill", id, signal }, Buffer.alloc(0), [], ioTimeoutMs, undefined, true);
+    if (header["ok"] === true) return "signalled";
+    if (header["code"] === "unknown_id") return "unknown_id";
+    throw new AgentError("refused");
+  };
   return {
+    streamInGuest: (req) => startStream({ open, caps: capsOf, kill: killOp, ioTimeoutMs }, req),
     ping: async () => void (await request({ op: "ping" }, Buffer.alloc(0), [], ioTimeoutMs)),
     put: async (req) => {
       const path = checkGuestPath(req.path);
