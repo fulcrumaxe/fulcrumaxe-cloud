@@ -48,6 +48,15 @@ describe("assembleConflictPrompt", () => {
     expect(boundary).not.toContain("src/a.ts");
   });
 
+  it("explains exit 87 and exit 90 to the agent: 90 is reported, never retried", () => {
+    const { prompt } = assembleConflictPrompt(input());
+    expect(prompt).toContain("if the command exits 87");
+    expect(prompt).toContain("if it exits 90");
+    expect(prompt).toContain("could not be removed");
+    expect(prompt).toContain("do not retry the command");
+    expect(prompt).toContain("report exit 90 in your summary");
+  });
+
   it("ends with the result block the runner reads, once", () => {
     const { prompt } = assembleConflictPrompt(input());
     expect(prompt.match(/AGENT_OUTPUT/g)?.length).toBeGreaterThanOrEqual(1);

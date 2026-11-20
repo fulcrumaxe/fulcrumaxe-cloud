@@ -92,7 +92,11 @@ const SHA_RE = /^[0-9a-f]{40}$/;
  */
 /** The clone script's exit code for "the clone finished but holds no commit". Any non-zero code other than too-large reads as `clone_failed`. */
 export const CLONE_EXIT_EMPTY = 89;
-/** The deepening script's exit code for "over the limit, but the checkout could not be removed": the caller logs it, since a checkout is left on disk. */
+/**
+ * The deepening script's exit code for "over the limit, but the checkout could not be removed", so a checkout is left on disk.
+ * Only the agent runs that script (the conflict prompt hands it the command), so no code of ours observes this exit code: the prompt tells the
+ * agent to report it, and the agent's summary is where it surfaces. It is never a success.
+ */
 export const CLONE_EXIT_NOT_REMOVED = 90;
 
 export const CLONE_SCRIPT = [
