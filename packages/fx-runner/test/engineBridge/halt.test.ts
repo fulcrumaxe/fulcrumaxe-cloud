@@ -524,15 +524,36 @@ describe("applyHalt, handleControl and the local stop", () => {
   });
 
   it("a clear at the same epoch rewrites the file to halted:false, keeps the epoch and starts nothing", async () => {
-    const deps = fastDeps({ platform: "darwin" });
+    // "Starts nothing" is judged by what THIS code could start: every program it runs goes through deps.capture, every kill through deps.terminateGroup.
+    // The host's process table is not evidence: another test run or an installed runner may legitimately be running `fx-runner run`.
+    const real = realHaltDeps();
+    const calls: string[] = [];
+    const deps = fastDeps({
+      platform: "darwin",
+      capture: async (file, args) => { calls.push(`capture ${file} ${args.join(" ")}`); return real.capture(file, args); },
+      terminateGroup: async (pgid, grace) => { calls.push(`terminateGroup ${pgid}`); return real.terminateGroup(pgid, grace); },
+    });
     await handleControl(dir, undefined, { halt_epoch: 2, halted: true }, deps);
-    const before = new Set(spawnSync("ps", ["-A", "-o", "pid="], { encoding: "utf8" }).stdout.split("\n").map((l) => l.trim()));
-    expect(await handleControl(dir, undefined, { halt_epoch: 2, halted: false }, deps)).toBeUndefined();
-    expect(readHaltFile(dir, uid)).toMatchObject({ halted: false, halt_epoch: 2 });
-    const after = spawnSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8" }).stdout;
-    // Nothing named an engine host or started a loop; the only new processes are our own `ps`.
-    expect(after).not.toMatch(/engine-host|fx-runner run/);
-    expect(before.size).toBeGreaterThan(0);
+    calls.length = 0;
+    // An unrelated process that looks like a runner exists the whole time; it must not matter.
+    const bystander = spawn("sh", ["-c", 'exec -a "fx-runner run" sleep 30'], { stdio: "ignore" });
+    try {
+      expect(await handleControl(dir, undefined, { halt_epoch: 2, halted: false }, deps)).toBeUndefined();
+      expect(readHaltFile(dir, uid)).toMatchObject({ halted: false, halt_epoch: 2 });
+      expect(calls).toEqual([]);
+      // Real-process check, limited to descendants of this test process other than the bystander we started ourselves.
+      const table = spawnSync("ps", ["-A", "-o", "pid=,ppid=,args="], { encoding: "utf8" }).stdout
+        .split("\n").map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter((m): m is RegExpMatchArray => m !== null);
+      const kids = new Map<number, number[]>();
+      for (const m of table) kids.set(Number(m[2]), [...(kids.get(Number(m[2])) ?? []), Number(m[1])]);
+      const mine = new Set<number>();
+      const walk = (pid: number): void => { for (const k of kids.get(pid) ?? []) if (!mine.has(k)) { mine.add(k); walk(k); } };
+      walk(process.pid);
+      const started = table.filter((m) => mine.has(Number(m[1])) && Number(m[1]) !== bystander.pid && /engine-host|fx-runner run/.test(m[3] ?? ""));
+      expect(started.map((m) => m[3])).toEqual([]);
+    } finally {
+      bystander.kill("SIGKILL");
+    }
   });
 
   it("a halt that was cleared before this pull is still killed, and the file ends halted:false at the new epoch", async () => {
