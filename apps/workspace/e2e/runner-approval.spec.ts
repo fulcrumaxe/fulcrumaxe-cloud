@@ -141,10 +141,27 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
 }
 
 const open = async (page: Page, id: string) => {
-  await page.locator(`.dock-icon[data-app-id="${id}"]`).click();
+  // Detach the dock's hover-preview host (core/taskbar.js) before the dock is touched. It clones the open window 400 ms after the pointer
+  // arrives, even if a dock repaint left that timer behind, and a cloned radio group shares the live group's name: a clone made after the
+  // radios paint unchecks the live ones. A detached host still takes its clones, but they no longer sit in the document's radio groups.
+  await page.evaluate(() => document.querySelector(".dock-preview")?.remove());
   const win = page.locator(`#windows-container .fulc-window[data-app-id="${id}"]`);
-  await expect(win).toBeVisible();
-  await expect(win).not.toHaveClass(/opening/);
+  // After a reload the shell restores the saved window layout 200 ms after the dock is up. A window opened before that is minimized by it,
+  // so wait until the restore has run (the dock is up, which is when the shell marks it pending, so pending reads true until it is done).
+  await page.locator(`.dock-icon[data-app-id="${id}"]`).waitFor({ state: "visible" });
+  await page.waitForFunction(() => {
+    const wm = (window as unknown as { FULCWM?: { isRestorePending(): boolean } }).FULCWM;
+    return !!wm && !wm.isRestorePending();
+  });
+  // A dock press on a window that is already open minimizes it, so press only while the window is not showing.
+  await expect(async () => {
+    if (!(await win.isVisible())) await page.locator(`.dock-icon[data-app-id="${id}"]`).click();
+    await expect(win).toBeVisible({ timeout: 2000 });
+    await expect(win).not.toHaveClass(/opening/, { timeout: 2000 });
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await expect(win).not.toHaveClass(/minimized/, { timeout: 2000 });
+    await expect(win).toBeVisible({ timeout: 2000 });
+  }).toPass();
   return win;
 };
 const press = async (loc: ReturnType<Page["locator"]>) => {
@@ -270,6 +287,10 @@ test.describe("D#6 R2b-4b: Repos app, runners", () => {
     await page.reload();
     await open(page, "repos");
     await press(t(page, "repos-open").first());
+    // The panel must have opened, and the control must have swapped its loading paragraph for the real radios, before anything is read.
+    await expect(t(page, "repos-dial")).toBeVisible();
+    await expect(t(page, "repos-dial-loading")).toHaveCount(0);
+    await expect(t(page, "repos-dial-source")).not.toHaveText("");
     await expect(t(page, "repos-dial-announce")).toBeChecked();
     await expect(t(page, "repos-dial-source")).toHaveText("This is the default. Nobody has set it for this repo.");
     await expect(t(page, "repos-dial-reset")).toHaveCount(0);
