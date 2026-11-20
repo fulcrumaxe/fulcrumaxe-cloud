@@ -20,7 +20,7 @@ for an id the agent never ran, and returns the recorded result for a command tha
 A streaming client must treat any frame other than `data` or `exit` as fatal, and a stream that closes without an `exit` frame as a
 lost command. After the leader exits the agent ends the stream within 5 s whatever output still arrives; before that it kills the
 command's remaining processes, including ones that left the process group with `setsid`. They are found by a marker variable
-(`FX_CMD_ID`, set last in the command's environment), not by cgroup or subreaper: the guest's init mounts no cgroup2, and a subreaper
+(`FX_CMD_ID`, set last in the command's environment), not by cgroup or subreaper (ordinary commands get no cgroup; only token launches do, below), and a subreaper
 would have to reap strangers' children. A process that clears its environment escapes the sweep; the guest treats code it runs as
 root-equivalent, so this is cleanup, not a boundary.
 
@@ -28,6 +28,25 @@ The guest files are inside the root disk, so a change to `agent.py` changes the 
 image's entry in the signed update metadata. No digest of the agent is committed to the repo: the release workflow computes it from the
 checked-in file, checks it against the build, and signs it in `microvm-image-release.yml`. A new image is therefore published by a release
 run of that workflow, not by this change.
+
+## The subscription token
+
+The runner's token reaches a VM only over vsock, into RAM, and is gone before any snapshot (D#587 B-6.4). `guest/init` mounts `/run/fx-secret`
+as a 0700 tmpfs (no swap exists, and the kernel runs with `init_on_free=1`). The host connects and pushes the token with the agent's
+`token_put`; the agent writes it to a 0600 file there, never keeping a copy in its own memory. A command run with `"token": true` is started
+by a launcher that reads the file through an inherited fd (the name is unlinked first, so there is one launch per delivery) and execs the
+program with `CLAUDE_CODE_OAUTH_TOKEN` in its environment. Before a snapshot the daemon sends `token_wipe`, which zeroes and removes the file and
+kills every process that still carries the variable; a wipe that is not confirmed means no snapshot. The token is never on the kernel command
+line, in PID 1's environment, in MMDS, in an `env` field of a request, or in any reply or log line. The guest's Bash sandbox must run in its
+own PID namespace (`bwrap --unshare-pid`), or `/proc/<cli>/environ` is readable from it; `test/vm/vmToken.real.test.ts` checks that, and greps a
+snapshot taken after the wipe for the token.
+
+The wipe finds holders by descent, not by name: init mounts cgroup2, every token launch joins a cgroup of its own before it can fork, and
+`token_wipe` writes `cgroup.kill` in each and answers ok only when each is empty (a guest without cgroup2 refuses token launches and spends
+nothing). `/proc/<pid>/environ` is read only into one buffer that is zeroed after each pid. What the guarantees do not cover: `--unshare-pid`
+hides `/proc/<cli>/environ` from the Bash sandbox, but not the environment the CLI's children inherit (the engine gate must scrub the CLI's
+subprocess environment; that is a separate follow-up, FU-120), and a copy a holder deliberately writes somewhere (tmpfs, the root disk, the
+network) is outside what the wipe can undo; the snapshot grep in the real-VM test is the check on the disk side.
 
 ## Building a root disk
 

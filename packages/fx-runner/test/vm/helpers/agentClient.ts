@@ -104,9 +104,9 @@ export class AgentClient {
   ping = async (): Promise<Record<string, unknown>> => (await this.request({ op: "ping" })).header;
   counters = async (): Promise<Record<string, unknown>> => (await this.request({ op: "counters" })).header;
 
-  async exec(argv: string[], opts: { env?: Record<string, string>; cwd?: string; user?: "root" | "ubuntu"; timeoutS?: number; stdin?: Buffer } = {}): Promise<{ exit: number | null; stdout: string; stderr: string; header: Record<string, unknown> }> {
+  async exec(argv: string[], opts: { env?: Record<string, string>; cwd?: string; user?: "root" | "ubuntu"; timeoutS?: number; stdin?: Buffer; token?: boolean } = {}): Promise<{ exit: number | null; stdout: string; stderr: string; header: Record<string, unknown> }> {
     const stdin = opts.stdin ?? Buffer.alloc(0);
-    const { header, blobs } = await this.request({ op: "exec", argv, env: opts.env, cwd: opts.cwd, user: opts.user, timeout_s: opts.timeoutS, stdin_size: stdin.length }, stdin, ["stdout_size", "stderr_size"]);
+    const { header, blobs } = await this.request({ op: "exec", argv, env: opts.env, cwd: opts.cwd, user: opts.user, timeout_s: opts.timeoutS, stdin_size: stdin.length, ...(opts.token === true ? { token: true } : {}) }, stdin, ["stdout_size", "stderr_size"]);
     if (header["ok"] !== true) throw new Error(`exec refused: ${String(header["error"])}`);
     return { exit: header["exit"] as number | null, stdout: blobs[0]?.toString("utf8") ?? "", stderr: blobs[1]?.toString("utf8") ?? "", header };
   }
@@ -121,6 +121,11 @@ export class AgentClient {
     if (header["ok"] !== true) throw new Error(`get refused: ${String(header["error"])}`);
     return blobs[0] ?? Buffer.alloc(0);
   }
+
+  /** `token_put`: the agent's whole reply, `ok` or not. */
+  putToken = async (token: Buffer): Promise<Record<string, unknown>> => (await this.request({ op: "token_put", size: token.length }, token)).header;
+  /** `token_wipe`: the agent's whole reply, `ok` or not. */
+  wipeToken = async (): Promise<Record<string, unknown>> => (await this.request({ op: "token_wipe" })).header;
 
   /** `kill` on its own connection; the agent's whole reply, `ok` or not. */
   kill = async (id: string, signal?: string): Promise<Record<string, unknown>> => (await this.request({ op: "kill", id, ...(signal === undefined ? {} : { signal }) })).header;
@@ -179,6 +184,24 @@ export class ExecStream {
     }
     if (head["ev"] === "exit") return head as unknown as StreamEvent;
     return { ev: "error", header: head };
+  }
+
+  /**
+   * Every frame up to and including the exit frame, then the socket is ended from this side. The exit frame is the last one the agent sends
+   * and the agent then waits for the host to end its side before it closes, so a reader that waits for the close instead of the exit waits
+   * for the agent's own close timeout. If the agent closes without an exit frame the result simply has none.
+   */
+  async untilExit(): Promise<StreamItem[]> {
+    const out: StreamItem[] = [];
+    try {
+      for (let e = await this.next(); e !== null; e = await this.next()) {
+        out.push(e);
+        if (e.ev === "exit") break;
+      }
+    } finally {
+      this.socket.destroy();
+    }
+    return out;
   }
 
   async all(): Promise<StreamItem[]> {

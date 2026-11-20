@@ -28,13 +28,27 @@ SIGKILL, SIGINT, SIGHUP) and answers `{"ok":true,"signalled":true}` for a runnin
 `{"ok":true,"signalled":false,"exit":..,"signal":..,"timed_out":..}` with the recorded result for one that already ended, and
 `{"ok":false,"code":"unknown_id"|"bad_id"|"bad_signal"}` otherwise. Errors before the first frame are the usual `{"ok":false,
 "error":..}`; an id already in use answers `code: duplicate_id`.
+
+The subscription token (D#587 B-6.4), advertised as cap `token`. The host pushes it with `token_put` (`size` 1..4096 raw bytes of printable
+ASCII; no JSON field carries it) into SECRET_DIR, a 0700 tmpfs that init mounts; the agent refuses to write into a directory that is not a
+real 0700 directory of its own on tmpfs. The bytes go from the socket into one preallocated buffer, to a 0600 file, and are zeroed there:
+the agent never builds an immutable object from them, so its heap keeps no copy. `exec` and `exec_stream` take `"token": true`: the agent
+makes a cgroup of its own for the launch (cgroup2, under CGROUP_DIR; no cgroup2 means a refusal that consumes nothing), opens the file,
+unlinks its name and hands the open fd to a launcher that joins the cgroup before it can fork, drops to the command's user, reads the fd and
+execs the command with the token variable in its environment (one launch per delivery). A request that names that variable in `env` is
+refused. `token_wipe` (asked before any snapshot) zeroes and removes the file, writes `cgroup.kill` in every token cgroup (so a descendant
+is killed whatever it did with its name, session or environment) and answers ok only when each cgroup is empty; the environment is also
+checked by name as a second net. /proc/<pid>/environ is only ever read into one preallocated buffer that is zeroed after each pid. A copy a
+holder makes on purpose (a file, the network) is outside what the wipe can undo. No reply, error or log line carries the token or a byte of it.
 """
+import itertools
 import json
 import os
 import re
 import select
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -53,7 +67,34 @@ GRACE_BYTES = 1 << 20
 POST_EXIT_S = 5
 MARK = "FX_CMD_ID"
 KEEP_DONE = 256
-CAPS = ["exec_stream", "kill"]
+CAPS = ["exec_stream", "kill", "token"]
+SECRET_DIR = os.environ.get("FX_SECRET_DIR", "/run/fx-secret")  # the variable exists for tests; init mounts the default as a 0700 tmpfs
+TOKEN_FILE = "oauth-token"
+TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+MAX_TOKEN = 4096
+RECV = bytearray(MAX_TOKEN)  # the only place a pushed token ever sits in this process; zeroed after every put
+RECV_LOCK = threading.Lock()
+ENV_BUF = bytearray(1 << 16)  # the only place another process's environment is ever read into; zeroed after each pid
+ENV_LOCK = threading.Lock()
+CGROUP_DIR = os.environ.get("FX_CGROUP_DIR", "/sys/fs/cgroup/fx-token")  # the variable exists for tests; init mounts cgroup2 at /sys/fs/cgroup
+CG_SEQ = itertools.count(1)
+# Runs as the agent's user: joins its own cgroup BEFORE it can fork anything, then drops to the command's user (or stays, when uid is "-"),
+# reads the token from the inherited fd and execs the command with it in the environment; the launcher itself is replaced by the command.
+LAUNCHER = ("import os,sys\n"
+            "fd,name,procs,uid,gid,argv=int(sys.argv[1]),sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5],sys.argv[6:]\n"
+            "try:\n"
+            "    with open(procs,'w') as f: f.write(str(os.getpid()))\n"
+            "    if uid!='-': os.setgroups([]); os.setgid(int(gid)); os.setuid(int(uid))\n"
+            "except OSError: os._exit(126)\n"
+            "b=bytearray()\n"
+            "while True:\n"
+            "    c=os.read(fd,4096)\n"
+            "    if not c: break\n"
+            "    b+=c\n"
+            "os.close(fd)\n"
+            "env=dict(os.environ); env[name]=b.decode('ascii')\n"
+            "try: os.execvpe(argv[0],argv,env)\n"
+            "except OSError: os._exit(127)\n")
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SIGNALS = {"SIGTERM": signal.SIGTERM, "SIGKILL": signal.SIGKILL, "SIGINT": signal.SIGINT, "SIGHUP": signal.SIGHUP}
 COMMANDS = {}  # id -> {"proc", "pending" (a signal asked for before the process existed), "result"}; insertion order = age
@@ -108,11 +149,276 @@ def counters():
             "cpu_ticks": [int(x) for x in read_proc("/proc/stat").splitlines()[0].split()[1:]], "nics": nics, "agent": dict(STATS)}
 
 
+def mount_type(path):
+    """The file system type of the mount that holds `path`, from /proc/self/mountinfo (the longest mount point that is a prefix)."""
+    best, kind = -1, None
+    with open("/proc/self/mountinfo") as f:
+        for line in f:
+            left, _, right = line.partition(" - ")
+            fields = left.split()
+            if len(fields) < 5 or not right:
+                continue
+            point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4])
+            if (point == "/" or path == point or path.startswith(point + "/")) and len(point) > best:
+                best, kind = len(point), right.split()[0]
+    return kind
+
+
+def secret_dir_problem():
+    """None when the secret directory is a real directory of ours, mode 0700, on its own tmpfs; else a fixed code."""
+    try:
+        st = os.lstat(SECRET_DIR)
+    except OSError:
+        return "secret_dir_missing"
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o700:
+        return "secret_dir_unsafe"
+    try:
+        if mount_type(os.path.realpath(SECRET_DIR)) != "tmpfs":
+            return "secret_dir_not_tmpfs"
+    except OSError:
+        return "secret_dir_unsafe"
+    return None
+
+
+def token_path():
+    return os.path.join(SECRET_DIR, TOKEN_FILE)
+
+
+def token_put(conn, size):
+    """Receives the token straight into one preallocated buffer, writes it to a 0600 file and zeroes the buffer. The file is
+    removed on every failure after it exists. The reply never echoes input."""
+    if not isinstance(size, int) or not 1 <= size <= MAX_TOKEN:
+        return {"ok": False, "code": "bad_token"}
+    problem = secret_dir_problem()
+    if problem:
+        return {"ok": False, "code": problem}
+    if not RECV_LOCK.acquire(timeout=10):
+        return {"ok": False, "code": "busy"}
+    view = memoryview(RECV)[:size]  # one buffer for the life of the agent, so zeroing it is the whole story (a freed block's fate is the allocator's)
+    fd = None
+    try:
+        got = 0
+        while got < size:
+            n = conn.recv_into(view[got:], size - got)
+            if n == 0:
+                raise EOFError
+            got += n
+        if any(b < 0x21 or b > 0x7E for b in view):
+            return {"ok": False, "code": "bad_token"}
+        try:
+            os.unlink(token_path())
+        except FileNotFoundError:
+            pass
+        fd = os.open(token_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        os.fchmod(fd, 0o600)
+        done = 0
+        while done < size:
+            done += os.write(fd, view[done:])
+        os.close(fd)
+        fd = None
+        return {"ok": True}
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+            try:
+                os.unlink(token_path())
+            except OSError:
+                pass
+        raise
+    finally:
+        view[:] = bytes(size)
+        view.release()
+        RECV_LOCK.release()
+
+
+def take_token():
+    """The token file as an open fd whose name is already gone: a second launch finds nothing."""
+    problem = secret_dir_problem()
+    if problem:
+        raise ValueError(problem)
+    try:
+        fd = os.open(token_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise ValueError("no_token") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.geteuid():
+            raise ValueError("no_token")
+        os.unlink(token_path())
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def popen(argv, kwargs, token):
+    """Popen with the three pipes; with `token`, the command runs behind the launcher and the token reaches it only as an inherited fd."""
+    pipes = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if not token:
+        return subprocess.Popen(argv, **pipes, **kwargs)
+    cg = cgroup_new()  # before the token is taken: a refusal here consumes nothing
+    try:
+        fd = take_token()
+    except BaseException:
+        os.rmdir(cg)
+        raise
+    kw = dict(kwargs)
+    ids = ("-", "-")
+    if "user" in kw:  # the launcher drops the user itself, once it is in its cgroup
+        ids = (str(kw.pop("user")), str(kw.pop("group")))
+        kw.pop("extra_groups", None)
+    try:
+        return subprocess.Popen([sys.executable, "-I", "-c", LAUNCHER, str(fd), TOKEN_ENV, os.path.join(cg, "cgroup.procs"), *ids, *argv], pass_fds=(fd,), **pipes, **kw)
+    except BaseException:
+        os.rmdir(cg)
+        raise
+    finally:
+        os.close(fd)
+
+
+def cgroup_new():
+    """A fresh cgroup under the agent's own parent, for one token launch; ValueError(cgroup_unavailable) when cgroup2 cannot be used."""
+    try:
+        os.makedirs(CGROUP_DIR, mode=0o755, exist_ok=True)
+        if mount_type(os.path.realpath(CGROUP_DIR)) != "cgroup2":
+            raise OSError
+        path = os.path.join(CGROUP_DIR, f"t{os.getpid()}-{next(CG_SEQ)}")
+        os.mkdir(path, 0o755)
+    except OSError:
+        raise ValueError("cgroup_unavailable") from None
+    if not os.path.exists(os.path.join(path, "cgroup.kill")):
+        os.rmdir(path)
+        raise ValueError("cgroup_unavailable")
+    return path
+
+
+def environ_has(pid, want):
+    """True when an entry of /proc/<pid>/environ starts with `want` (bytes). The file is read with a plain fd into ENV_BUF, one buffer for the
+    life of the agent, searched in place and zeroed before returning: no immutable copy of any process's environment ever exists here."""
+    with ENV_LOCK:
+        view = memoryview(ENV_BUF)
+        try:
+            fd = os.open(f"/proc/{pid}/environ", os.O_RDONLY | os.O_CLOEXEC)
+        except OSError:
+            view.release()
+            return False
+        n = 1  # ENV_BUF[0] is a NUL, so an entry at the very start is found like any other
+        try:
+            ENV_BUF[0] = 0
+            while n < len(ENV_BUF) - 1:
+                got = os.readv(fd, [view[n:len(ENV_BUF) - 1]])
+                if got == 0:
+                    break
+                n += got
+            ENV_BUF[n] = 0
+            return ENV_BUF.find(b"\0" + want, 0, n + 1) != -1
+        except OSError:
+            return False  # gone, or not ours to read
+        finally:
+            os.close(fd)
+            view[:n + 1] = bytes(n + 1)
+            view.release()
+
+
+def token_holders():
+    """Pids (other than ours) whose environment names the token variable (a second check; the cgroups are the first)."""
+    found = []
+    for name in os.listdir("/proc"):
+        if name.isdigit() and int(name) != os.getpid() and environ_has(int(name), f"{TOKEN_ENV}=".encode()):
+            found.append(int(name))
+    return found
+
+
+def cgroup_kill_all():
+    """Kills every process of every token cgroup (`cgroup.kill`: by descent, whatever name or session a descendant took), waits until each is
+    empty, removes them. Returns (processes that were there, True when all are now empty)."""
+    try:
+        paths = [p for p in (os.path.join(CGROUP_DIR, n) for n in os.listdir(CGROUP_DIR)) if os.path.isdir(p)]
+    except FileNotFoundError:
+        return 0, True  # no token launch ever happened
+    except OSError:
+        return 0, False
+    killed, ok = 0, True
+    for p in paths:
+        try:
+            with open(os.path.join(p, "cgroup.procs")) as f:
+                killed += len(f.read().split())
+            with open(os.path.join(p, "cgroup.kill"), "w") as f:
+                f.write("1")
+        except OSError:
+            ok = False
+    until = time.monotonic() + 5
+    for p in paths:
+        while True:
+            try:
+                with open(os.path.join(p, "cgroup.procs")) as f:
+                    empty = f.read().strip() == ""
+            except OSError:
+                empty = False
+            if empty or time.monotonic() >= until:
+                break
+            time.sleep(0.02)
+        if not empty:
+            ok = False
+            continue
+        try:
+            os.rmdir(p)
+        except OSError:
+            ok = False
+    return killed, ok
+
+
+def alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rpartition(")")[2].split()[0] != "Z"  # a zombie holds no memory
+    except OSError:
+        return False
+
+
+def token_wipe():
+    """Before a snapshot: zero and remove the token file, kill every process that holds the token, and say ok only when none is left."""
+    removed = False
+    problem = secret_dir_problem()
+    if problem in ("secret_dir_unsafe", "secret_dir_not_tmpfs"):
+        return {"ok": False, "code": problem}
+    if problem is None:
+        try:
+            fd = os.open(token_path(), os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            fd = None
+        if fd is not None:
+            try:
+                os.write(fd, bytes(os.fstat(fd).st_size))
+            finally:
+                os.close(fd)
+            os.unlink(token_path())
+            removed = True
+    killed, emptied = cgroup_kill_all()
+    # a second check, by name, for anything that is not in a token cgroup
+    found = token_holders()
+    for pid in found:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    until = time.monotonic() + 5
+    while any(alive(p) for p in found) and time.monotonic() < until:
+        time.sleep(0.05)
+    if not emptied or any(alive(p) for p in found) or token_holders():
+        return {"ok": False, "code": "holders_remain"}
+    return {"ok": True, "removed": removed, "killed": killed + len(found)}
+
+
 def spawn_args(req, mark=None):
     """Everything Popen could refuse is refused here, before a command is registered."""
     argv = req["argv"]
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and "\0" not in a for a in argv):
         raise ValueError("argv must be a non-empty list of strings without NUL")
+    if TOKEN_ENV in (req.get("env") or {}):
+        raise ValueError("env must not name the token variable")
+    if req.get("token") is True and req.get("user") == "root":  # a root descendant could leave the token cgroup, so the wipe could not find it
+        raise ValueError("token_requires_unprivileged_user")
     env = dict(BASE_ENV)
     env.update({k: v for k, v in (req.get("env") or {}).items() if isinstance(k, str) and isinstance(v, str)})
     if mark is not None:
@@ -130,7 +436,7 @@ def spawn_args(req, mark=None):
 def run_exec(req, stdin):
     argv, kwargs, timeout = spawn_args(req)
     try:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+        proc = popen(argv, kwargs, req.get("token") is True)
     except OSError as err:
         return {"ok": True, "exit": 127, "error": err.strerror}, b"", b""
     out, err = bytearray(), bytearray()
@@ -193,15 +499,10 @@ def ended(proc):
 
 def marked(cid):
     """Pids (other than ours) whose environment carries this command's marker: its descendants, setsid or not."""
-    want, found = f"\0{MARK}={os.getpid()}.{cid}\0".encode(), []
+    want, found = f"{MARK}={os.getpid()}.{cid}\0".encode(), []
     for name in os.listdir("/proc"):
-        if name.isdigit() and int(name) != os.getpid():
-            try:
-                with open(f"/proc/{name}/environ", "rb") as f:
-                    if want in b"\0" + f.read() + b"\0":
-                        found.append(int(name))
-            except OSError:
-                pass  # gone, or not ours to read
+        if name.isdigit() and int(name) != os.getpid() and environ_has(int(name), want):
+            found.append(int(name))
     return found
 
 
@@ -257,7 +558,7 @@ def run_stream(conn, req, stdin):
     if taken:
         return send(conn, {"ok": False, "code": "duplicate_id", "error": "id in use"})
     try:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+        proc = popen(argv, kwargs, req.get("token") is True)
     except Exception as err:
         with LOCK:
             del COMMANDS[cid]  # a failed start leaves no record: kill says unknown_id and the id can be used again
@@ -347,6 +648,10 @@ def serve(conn):
         size = header.get("size", header.get("stdin_size", 0))
         if not isinstance(size, int) or not 0 <= size <= MAX_BYTES:
             raise ValueError("bad size")
+        if op == "token_put":  # the body goes into a buffer of its own, never through read_exact
+            with LOCK:
+                STATS["requests"] += 1
+            return send(conn, token_put(conn, size))
         body = read_exact(conn, size) if size else b""
         with LOCK:
             STATS["requests"] += 1
@@ -364,6 +669,8 @@ def serve(conn):
             run_stream(conn, header, body)
         elif op == "kill":
             send(conn, run_kill(header))
+        elif op == "token_wipe":
+            send(conn, token_wipe())
         elif op == "put":
             send(conn, put(header, body))
         elif op == "get":

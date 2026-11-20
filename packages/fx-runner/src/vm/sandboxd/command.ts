@@ -15,7 +15,8 @@ import type { GuestAgent } from "./guestAgent.js";
 
 export type Signal = "SIGTERM" | "SIGKILL";
 export interface LogChunk { stream: "stdout" | "stderr"; data: string }
-export interface CommandSpec { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string>; timeoutS?: number }
+/** `withToken`: the command runs with the delivered subscription token in its environment (see `Sandboxd.deliverToken`); `env` may not carry it. */
+export interface CommandSpec { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string>; timeoutS?: number; withToken?: boolean; user?: "root" | "ubuntu" }
 
 const SIGNUMBER: Record<Signal, number> = { SIGTERM: 15, SIGKILL: 9 };
 const RECORD_PID = 'echo $$ >"$1" && shift && exec "$@"';
@@ -55,7 +56,7 @@ export class SandboxdCommand {
     const argv = ["/bin/sh", "-c", RECORD_PID, "sh", this.pidFile, spec.cmd, ...(spec.args ?? [])];
     let sentNow!: () => void;
     const sentAt = new Promise<void>((resolve) => (sentNow = resolve));
-    const run = this.agent.runInGuest({ argv, ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }), ...(spec.env === undefined ? {} : { env: spec.env }), ...(spec.timeoutS === undefined ? {} : { timeoutS: spec.timeoutS }), onSent: () => {
+    const run = this.agent.runInGuest({ argv, ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }), ...(spec.env === undefined ? {} : { env: spec.env }), ...(spec.timeoutS === undefined ? {} : { timeoutS: spec.timeoutS }), ...(spec.withToken === true ? { token: true } : {}), ...(spec.user === undefined ? {} : { user: spec.user }), onSent: () => {
       this.sent = true;
       sentNow();
       if (this.killedWith !== undefined) void this.deliver(this.killedWith); // a kill that came while the request was being written

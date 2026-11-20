@@ -5,6 +5,8 @@
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc
 mount -t sysfs sys /sys
+# cgroup2, so a token launch can be killed by descent (D#587 B-6.4, Ruling 7); without it the agent refuses token launches
+mount -t cgroup2 none /sys/fs/cgroup
 mountpoint -q /dev || mount -t devtmpfs dev /dev
 mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts
@@ -14,6 +16,9 @@ ln -sfn /proc/self/fd/0 /dev/stdin
 ln -sfn /proc/self/fd/1 /dev/stdout
 ln -sfn /proc/self/fd/2 /dev/stderr
 mount -t tmpfs -o mode=0755 tmpfs /run
+# The subscription token's home (D#587 B-6.4): RAM only, root's, 0700, no swap behind it. The agent refuses to write anywhere that is not this.
+mkdir -m 0700 /run/fx-secret
+mount -t tmpfs -o mode=0700,size=64k,nosuid,nodev,noexec tmpfs /run/fx-secret
 for d in /tmp /var/tmp; do mount -t tmpfs -o mode=1777 tmpfs "$d"; done
 for d in /var/log /var/cache; do mount -t tmpfs -o mode=0755 tmpfs "$d"; done
 # The home directory and the work directory: owned by ubuntu (uid 1000), empty at every boot.

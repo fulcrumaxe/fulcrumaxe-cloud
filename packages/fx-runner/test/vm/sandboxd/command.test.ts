@@ -130,6 +130,8 @@ describe("kill during start, scripted", () => {
       ping: async () => undefined,
       put: async () => undefined,
       get: async () => 0,
+      putToken: async () => undefined,
+      wipeToken: async () => ({ removed: false, killed: 0 }),
       runInGuest: (req) => {
         calls.push(req.argv);
         return new Promise((resolve, reject) => held.push({ req, resolve, reject }));

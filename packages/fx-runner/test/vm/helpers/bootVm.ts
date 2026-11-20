@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import path from "node:path";
-import { AgentClient, viaFirecrackerVsock } from "./agentClient.js";
+import { AgentClient, viaFirecrackerVsock, type Connect } from "./agentClient.js";
 
 /**
  * Boots the fx-agent root disk under a real Firecracker, no jailer and no root (the jailer is B-2a). Test tooling for B-1: it is the
@@ -15,6 +16,12 @@ export interface BootEnv {
 
 export interface Vm {
   agent: AgentClient;
+  /** A new connection to the agent's vsock port, for a streaming exec. */
+  connect: Connect;
+  /** The files of this VM that a snapshot or a grep may look at: its console log and the (read-only) root disk. */
+  files: { console: string; rootfs: string };
+  /** Pauses the VM and writes a full snapshot (device state, then guest memory) through Firecracker's API; only a VM booted with `api: true` has it. The VM stays paused. */
+  snapshot(stateFile: string, memFile: string): Promise<void>;
   console(): string;
   bootMs: number;
   /** Resolves true when the Firecracker process has exited, false if it is still running after `ms`. */
@@ -27,7 +34,20 @@ export const CMDLINE = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro 
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-export async function bootVm(env: BootEnv, dir: string, opts: { memMib?: number; vcpus?: number } = {}): Promise<Vm> {
+/** One request to Firecracker's API socket; a non-2xx answer throws with the status only. */
+function api(sock: string, method: string, url: string, body: object): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ socketPath: sock, method, path: url, headers: { "content-type": "application/json" } }, (res) => {
+      res.resume();
+      res.on("end", () => ((res.statusCode ?? 0) < 300 ? resolve() : reject(new Error(`${method} ${url} answered ${res.statusCode}`))));
+    });
+    req.setTimeout(120_000, () => req.destroy(new Error(`${method} ${url} timed out`)));
+    req.on("error", reject);
+    req.end(JSON.stringify(body));
+  });
+}
+
+export async function bootVm(env: BootEnv, dir: string, opts: { memMib?: number; vcpus?: number; api?: boolean } = {}): Promise<Vm> {
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const uds = path.join(dir, "v.sock");
@@ -41,8 +61,15 @@ export async function bootVm(env: BootEnv, dir: string, opts: { memMib?: number;
   writeFileSync(path.join(dir, "config.json"), JSON.stringify(config));
   const out = openSync(log, "w");
   const started = Date.now();
-  const child: ChildProcess = spawn(env.firecracker, ["--no-api", "--config-file", path.join(dir, "config.json")], { stdio: ["ignore", out, out] });
-  const agent = new AgentClient(viaFirecrackerVsock(uds));
+  const apiSock = path.join(dir, "api.sock");
+  const child: ChildProcess = spawn(env.firecracker, [...(opts.api === true ? ["--api-sock", apiSock] : ["--no-api"]), "--config-file", path.join(dir, "config.json")], { stdio: ["ignore", out, out] });
+  const connect = viaFirecrackerVsock(uds);
+  const agent = new AgentClient(connect);
+  const snapshot = async (stateFile: string, memFile: string): Promise<void> => {
+    if (opts.api !== true) throw new Error("this VM was booted without the API socket");
+    await api(apiSock, "PATCH", "/vm", { state: "Paused" });
+    await api(apiSock, "PUT", "/snapshot/create", { snapshot_type: "Full", snapshot_path: stateFile, mem_file_path: memFile });
+  };
   const text = (): string => readFileSync(log, "utf8");
   let exited = false;
   child.on("exit", () => {
@@ -64,7 +91,7 @@ export async function bootVm(env: BootEnv, dir: string, opts: { memMib?: number;
         for (const until = Date.now() + ms; !exited && Date.now() < until; ) await sleep(20);
         return exited;
       };
-      return { agent, console: text, bootMs: Date.now() - started, exitedWithin, stop };
+      return { agent, connect, files: { console: log, rootfs: env.rootfs }, snapshot, console: text, bootMs: Date.now() - started, exitedWithin, stop };
     } catch {
       await sleep(25);
     }

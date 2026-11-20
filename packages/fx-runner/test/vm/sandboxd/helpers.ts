@@ -63,13 +63,21 @@ export interface FakeAgent {
   getReply?: (path: string) => { header: object; blobs: Buffer[] } | undefined;
   /** Holds every accepted connection until released: a guest that is slow to answer. */
   gate?: Promise<void>;
+  /** The token the guest holds (a `token_put` stored it, a `token_wipe` removed it), and the `token` flag of every exec. */
+  token?: Buffer;
+  execTokenFlags: boolean[];
+  /** Answers `token_put` / `token_wipe` with the agent's refusal. */
+  refuseTokenPut?: boolean;
+  /** Holds every `token_put` until this resolves: a slow delivery. */
+  holdTokenPut?: Promise<void>;
+  refuseTokenWipe?: boolean;
   close(): void;
 }
 
 /** A guest agent on `<dir>/v.sock`, behind Firecracker's `CONNECT` handshake. It runs exec for real (a new session, as agent.py does) and answers when the process ends. */
 export function startFakeAgent(dir: string): FakeAgent {
   const children = new Set<ChildProcess>();
-  const agent: FakeAgent = { execs: [], pings: 0, ops: [], files: new Map(), close: () => undefined };
+  const agent: FakeAgent = { execs: [], execTokenFlags: [], pings: 0, ops: [], files: new Map(), close: () => undefined };
   const server = net.createServer((sock) => {
     sock.on("error", () => undefined);
     agent.lastSock = sock;
@@ -114,9 +122,22 @@ export function startFakeAgent(dir: string): FakeAgent {
       if (file === undefined) return send(sock, { ok: false, error: "FileNotFoundError" });
       return send(sock, { ok: true, size: file.data.length }, file.data);
     }
+    if (header["op"] === "token_put") {
+      await agent.holdTokenPut;
+      if (agent.refuseTokenPut === true) return send(sock, { ok: false, code: "secret_dir_unsafe" });
+      agent.token = Buffer.from(body);
+      return send(sock, { ok: true });
+    }
+    if (header["op"] === "token_wipe") {
+      if (agent.refuseTokenWipe === true) return send(sock, { ok: false, code: "holders_remain" });
+      const removed = agent.token !== undefined;
+      agent.token = undefined;
+      return send(sock, { ok: true, removed, killed: 0 });
+    }
     if (header["op"] !== "exec") return send(sock, { ok: false, error: "unknown op" });
     const argv = header["argv"] as string[];
     agent.execs.push(argv);
+    agent.execTokenFlags.push(header["token"] === true);
     const child = spawn(argv[0]!, argv.slice(1), { detached: true, stdio: ["pipe", "pipe", "pipe"], env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, cwd: typeof header["cwd"] === "string" ? header["cwd"] : "/" });
     children.add(child);
     const out: Buffer[] = [];
