@@ -68,4 +68,55 @@ test.describe("D#37 DOCK-PREVIEW-CLONE", () => {
     await expect(page.locator(".dock-preview #long-probe > li").last()).toHaveText("row 2");
     await expect(page.locator('.fulc-window[data-app-id="themes"] #long-probe > li')).toHaveCount(12);
   });
+  test("the preview's copy of a radio group does not take the live selection", async ({ page }) => {
+    await bootToDesktop(page);
+    await page.locator('.dock-icon[data-app-id="themes"]').click();
+    await expect(page.locator('.fulc-window[data-app-id="themes"]')).toBeVisible();
+    await page.evaluate(() => {
+      const live = document.querySelector('.fulc-window[data-app-id="themes"]')!;
+      const box = document.createElement("div");
+      box.innerHTML =
+        '<input type="radio" name="probe-dial" id="probe-a" value="a">' +
+        '<input type="radio" name="probe-dial" id="probe-b" value="b">' +
+        '<input type="radio" name="probe-dial" id="probe-c" value="c">' +
+        '<input type="checkbox" name="probe-box" id="probe-check">' +
+        '<select name="probe-sel" id="probe-sel"><option value="x">x</option><option value="y">y</option></select>' +
+        '<textarea name="probe-text" id="probe-text"></textarea>' +
+        '<input type="text" name="probe-line" id="probe-line">';
+      live.appendChild(box);
+      // Set as a person would: the choice lives in the control's state, not in the markup.
+      (document.getElementById("probe-c") as HTMLInputElement).checked = true;
+      (document.getElementById("probe-check") as HTMLInputElement).checked = true;
+      (document.getElementById("probe-sel") as HTMLSelectElement).value = "y";
+      (document.getElementById("probe-text") as HTMLTextAreaElement).value = "typed";
+      (document.getElementById("probe-line") as HTMLInputElement).value = "line";
+    });
+
+    await page.locator('.dock-icon[data-app-id="themes"]').hover();
+    await page.clock.runFor(PREVIEW_DELAY_PAST_MS);
+    await expect(page.locator(".dock-preview .fulc-window-clone")).toHaveCount(1);
+    // Let the clone paint, then let any group reconciliation happen.
+    await page.clock.runFor(500);
+
+    const live = await page.evaluate(() => ({
+      radios: ["probe-a", "probe-b", "probe-c"].map((id) => (document.getElementById(id) as HTMLInputElement).checked),
+      check: (document.getElementById("probe-check") as HTMLInputElement).checked,
+      sel: (document.getElementById("probe-sel") as HTMLSelectElement).value,
+      text: (document.getElementById("probe-text") as HTMLTextAreaElement).value,
+      line: (document.getElementById("probe-line") as HTMLInputElement).value,
+    }));
+    expect(live).toEqual({ radios: [false, false, true], check: true, sel: "y", text: "typed", line: "line" });
+
+    // The copy shows the same choice but belongs to no group, form or label of the live window.
+    const copy = await page.evaluate(() => {
+      const c = document.querySelector(".dock-preview .fulc-window-clone")!;
+      const controls = Array.from(c.querySelectorAll("input, select, textarea"));
+      return {
+        named: controls.filter((n) => n.hasAttribute("name") || n.hasAttribute("id")).length,
+        checkedRadios: Array.from(c.querySelectorAll('input[type="radio"]')).filter((n) => (n as HTMLInputElement).checked).length,
+      };
+    });
+    expect(copy.named).toBe(0);
+    expect(copy.checkedRadios).toBe(1);
+  });
 });
