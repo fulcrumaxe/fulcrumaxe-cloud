@@ -10,6 +10,7 @@ import { LAYOUT, HELPER_GROUP } from "../src/vm/installPlan.js";
 import { UNIT_NAME } from "../src/vm/rootActions.js";
 import { createHash } from "node:crypto";
 import { socketPath } from "../src/vm/unitRender.js";
+import { createHostBootFacts } from "./vm-boot-host.mjs";
 
 const ENV = { PATH: process.env.PATH ?? "", LC_ALL: "C" };
 const run = (file, args) =>
@@ -90,10 +91,14 @@ async function group() {
   return { user, exists: true, member: (f[3] ?? "").split(",").includes(user), active: groups.includes(gid) };
 }
 
-/** @param {{ tuf: { listTargets(): Promise<{ ok: boolean, paths?: string[] }> } }} deps */
+/**
+ * One listing fetch per doctor run: the "VM binary" line and the "VM image" line both read the verified listing through one boot facts source, which fetches it once.
+ * @param {{ tuf: { listTargets(): Promise<{ ok: boolean, paths?: string[] }> }, readManifest?: () => string | Promise<string> }} deps
+ */
 export function createVmInstallFacts(deps) {
   return async () => {
-    const [u, s, sig, g] = await Promise.all([unit(), socket(), signed(deps.tuf, process.arch), group()]);
-    return { unit: u, socket: s, binary: binary(), signed: sig, config: look(LAYOUT.configFile), jailRoot: look(LAYOUT.jailRoot), group: g, kvm: kvm() };
+    const boot = createHostBootFacts({ tuf: deps.tuf, ...(deps.readManifest === undefined ? {} : { readManifest: deps.readManifest }) });
+    const [u, s, sig, g, image] = await Promise.all([unit(), socket(), signed(boot, process.arch), group(), boot.inspect()]);
+    return { unit: u, socket: s, binary: binary(), signed: sig, config: look(LAYOUT.configFile), jailRoot: look(LAYOUT.jailRoot), group: g, kvm: kvm(), image };
   };
 }

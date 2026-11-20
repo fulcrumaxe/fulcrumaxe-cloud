@@ -355,7 +355,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   await limitsCheck(host, line);
   vmEngineCheck(ctx, host, line);
   await lingerCheck(host, line);
-  if (host.vmInstall !== undefined) for (const c of vmInstallChecks(await host.vmInstall())) line(c.level, c.label, c.detail);
+  if (host.vmInstall !== undefined) for (const c of vmInstallChecks(await host.vmInstall(), { microvm: loadSettings(ctx.stateDir).sandboxEngine === "microvm" })) line(c.level, c.label, c.detail);
 
   // What a job's agent can run for a project's own tests (D#6 R4d-3), on the runner's own PATH. Missing node is a warning, not a failure: not every repository needs it.
   // What the job's login shell finds is the next check (D#6 C44-2), and it only means something when the runner's PATH has node and the sandbox runs.

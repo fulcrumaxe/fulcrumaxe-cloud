@@ -74,3 +74,32 @@ describe("vm install checks", () => {
     for (const [, broken] of CASES) expect(JSON.stringify(vmInstallChecks({ ...GOOD, ...broken }).map((c) => c.detail))).not.toMatch(/null|undefined/);
   });
 });
+
+describe("the VM image line (B-5a-BF criterion 11)", () => {
+  const image = { ok: true, release: "vm-fx-agent-0123456789ab", arch: "amd64", digests: { kernel: "1".repeat(64), rootfs: "2".repeat(64), agent: "3".repeat(64) } } as const;
+  const gone = { ...GOOD, unit: "absent", binary: { state: "absent" }, config: { state: "absent" }, jailRoot: { state: "absent" }, group: { user: "alice", exists: false, member: false, active: false } } as const;
+
+  it("an installed host gets one more line, PASS with the release and short digests", () => {
+    const all = vmInstallChecks({ ...GOOD, image });
+    expect(all.map((c) => c.label)).toEqual([...LABELS, "VM image"]);
+    expect(all.at(-1)).toEqual({ level: "PASS", label: "VM image", detail: `release vm-fx-agent-0123456789ab for amd64: kernel ${"1".repeat(12)}, root disk ${"2".repeat(12)} and agent ${"3".repeat(12)} are listed in the signed metadata (checked just now)` });
+  });
+
+  it("a refusal is a FAIL in microvm mode and a WARN otherwise, with the fix in the sentence", () => {
+    const refused = { ...GOOD, image: { ok: false, code: "image_not_installed" } } as const;
+    expect(vmInstallChecks(refused, { microvm: true }).at(-1)).toMatchObject({ level: "FAIL", label: "VM image", detail: expect.stringContaining("run: fx-runner vm install") });
+    expect(vmInstallChecks(refused).at(-1)).toMatchObject({ level: "WARN", label: "VM image" });
+    expect(vmInstallChecks({ ...GOOD, image: { ok: false, code: "image_not_listed" } }, { microvm: true }).at(-1)?.detail).toBe("the installed image is not the current signed release: run fx-runner vm install");
+  });
+
+  it("nothing installed: the one INFO line stands without the image line, unless microvm was asked for, which fails", () => {
+    const info = { level: "INFO", label: "VM helper", detail: "not installed. VM mode is optional; to use it, run: fx-runner vm install" };
+    const none = { ...gone, image: { ok: false, code: "image_not_configured" } } as const;
+    expect(vmInstallChecks(none)).toEqual([info]);
+    expect(vmInstallChecks(none, { microvm: true })).toEqual([info, { level: "FAIL", label: "VM image", detail: expect.stringContaining("nothing falls back to the OS sandbox") }]);
+  });
+
+  it("no image fact, no line", () => {
+    expect(vmInstallChecks(GOOD, { microvm: true }).map((c) => c.label)).toEqual(LABELS);
+  });
+});
