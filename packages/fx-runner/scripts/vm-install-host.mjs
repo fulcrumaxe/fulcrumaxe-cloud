@@ -2,7 +2,7 @@
 // root call (sudo, a fixed argument list, no shell) and, on the root side, starts the account and service programs by name. It lives here, not in
 // src/, because src/ never starts a process or reads `process` (test/prompt.test.ts, test/cleanEnv.test.ts). bin/fx-runner.mjs hands it to the CLI.
 import { execFile, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { cpus, userInfo } from "node:os";
 
 const SUDO_PLACES = ["/run/wrappers/bin/sudo", "/usr/bin/sudo", "/bin/sudo"];
@@ -36,7 +36,32 @@ const idRanges = (text, sub) =>
     .flatMap((f) => (sub ? [{ first: Number(f[1]), count: Number(f[2]) }] : [{ first: Number(f[2]), count: 1 }]))
     .filter((r) => Number.isInteger(r.first) && Number.isInteger(r.count) && r.count > 0);
 
-/** @param {{ selfCommand: string[], tuf: unknown, confirm: (q: string) => Promise<boolean>, buildRootArgv: Function, hostRefusal: Function }} deps (the two functions come from src/vm, handed in by bin/fx-runner.mjs) */
+/** The ONE root call: sudo with a fixed argument list and no shell, the request on its standard input, one report line back on its standard output. */
+const runRoot = (build, selfCommand, request) =>
+  new Promise((resolve, reject) => {
+    const sudo = SUDO_PLACES.find((p) => existsSync(p));
+    if (sudo === undefined) return reject(new Error("sudo was not found on this machine"));
+    const [file, ...args] = build(sudo, selfCommand);
+    const child = spawn(file, args, { env: { PATH: process.env.PATH ?? "" }, shell: false, stdio: ["pipe", "pipe", "inherit"] });
+    let stdout = "";
+    child.stdout.on("data", (d) => (stdout += d.toString("utf8")));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout }));
+    child.stdin.end(JSON.stringify(request));
+  });
+
+/** Which of `paths` are there (a no-follow look: a dangling link counts, and so does a path we may not read into). */
+const existingAmong = (paths) =>
+  paths.filter((p) => {
+    try {
+      lstatSync(p);
+      return true;
+    } catch (error) {
+      return error?.code !== "ENOENT" && error?.code !== "ENOTDIR";
+    }
+  });
+
+/** @param {{ selfCommand: string[], tuf: unknown, confirm: (q: string) => Promise<boolean>, buildRootArgv: Function, buildRemoveArgv?: Function, hostRefusal: Function, hostRefusalRemove?: Function }} deps (the functions come from src/vm, handed in by bin/fx-runner.mjs) */
 export function createVmInstallHosts(deps) {
   const install = {
     nodeArch: process.arch,
@@ -55,20 +80,7 @@ export function createVmInstallHosts(deps) {
         takenGids: [...idRanges(read("/etc/group"), false), ...idRanges(gr, false), ...idRanges(read("/etc/subgid"), true)],
       };
     },
-    root: {
-      run: (request) =>
-        new Promise((resolve, reject) => {
-          const sudo = SUDO_PLACES.find((p) => existsSync(p));
-          if (sudo === undefined) return reject(new Error("sudo was not found on this machine"));
-          const [file, ...args] = deps.buildRootArgv(sudo, deps.selfCommand);
-          const child = spawn(file, args, { env: { PATH: process.env.PATH ?? "" }, shell: false, stdio: ["pipe", "pipe", "inherit"] });
-          let stdout = "";
-          child.stdout.on("data", (d) => (stdout += d.toString("utf8")));
-          child.on("error", reject);
-          child.on("close", (code) => resolve({ code, stdout }));
-          child.stdin.end(JSON.stringify(request));
-        }),
-    },
+    root: { run: (request) => runRoot(deps.buildRootArgv, deps.selfCommand, request) },
   };
   const root = {
     euid: process.geteuid?.() ?? -1,
@@ -86,5 +98,11 @@ export function createVmInstallHosts(deps) {
       }),
     ops: { run: runFixed },
   };
-  return { install, root };
+  const uninstall = {
+    confirm: deps.confirm,
+    hostRefusal: deps.hostRefusalRemove,
+    facts: async (paths) => ({ runner: { user: userInfo().username, uid: process.getuid?.() ?? 0 }, existing: existingAmong(paths) }),
+    root: { run: (request) => runRoot(deps.buildRemoveArgv, deps.selfCommand, request) },
+  };
+  return { install, root, uninstall };
 }

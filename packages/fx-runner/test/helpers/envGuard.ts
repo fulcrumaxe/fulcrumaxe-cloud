@@ -175,6 +175,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/vm/install.ts": ["crypto"], // `vm install`: SHA-256 of the unit, config and manifest text carried in the root request; no process is started here
   "src/vm/rootActions.ts": ["path"], // the root steps as data, and the root side's check that every path is clean, absolute and inside the install's own places
   "src/vm/rootApply.ts": ["crypto", "fs", "path"], // the root side: lstat of every path and its parents, no-follow opens judged by the handle, a random temp-file name, an exclusive create, fsync, one rename, owner/mode/content checked afterwards
+  "src/vm/uninstallApply.ts": ["fs", "path"], // the root side of `vm uninstall`: no-follow lstat of each path and its parents (via rootApply), a directory listing and unlink or rmdir of what install made; no process is started here
   "src/vm/helperProbe.ts": ["net"], // one connect to the helper's Unix socket to see whether it answers; nothing else is read
   "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
   "src/vm/sandboxd/command.ts": ["crypto"], // D#587 B-2b-iii: a random command id and pid-file name; no process is started here, the command runs in the guest through the agent

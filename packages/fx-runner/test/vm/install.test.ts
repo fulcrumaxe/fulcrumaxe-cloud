@@ -80,6 +80,7 @@ describe("the root actions", () => {
       "install /opt/fx-vmhelper/templates/fx-agent/rootfs root:root 0644",
       "install /etc/fx-vmhelper/config.json root:root 0600",
       "install /etc/systemd/system/fx-vmhelper.service root:root 0644",
+      "record",
       "daemon-reload",
       `enable-start ${UNIT_NAME}`,
       `restart ${UNIT_NAME}`,
@@ -175,6 +176,50 @@ function scratchRequest(root: string, src: string): RootRequest {
     ],
   };
 }
+
+describe("the install record (what install made of the group and the membership)", () => {
+  const recordOf = async (preGroup: string[] | undefined, again = false): Promise<{ group_created: boolean; members_added: string[] }> => {
+    const root = path.join(scratch(), "etc");
+    const f = fakeOps();
+    if (preGroup !== undefined) f.groups.set(HELPER_GROUP, preGroup);
+    const rec = path.join(root, "install-record.json");
+    const o = { owner: "root:root" };
+    const req: RootRequest = { version: 1, runnerUid: UID, runnerUser: "alice", actions: [{ op: "group", name: HELPER_GROUP }, { op: "member", user: "alice", group: HELPER_GROUP }, { op: "mkdir", path: root, ...o, mode: "0755" }, { op: "record", path: rec }] };
+    expect((await applyRootActions(req, f.ops)).ok).toBe(true);
+    if (again) expect((await applyRootActions(req, f.ops))).toMatchObject({ ok: true, done: [] });
+    expect(lstatSync(rec).mode & 0o7777).toBe(0o600);
+    return JSON.parse(readFileSync(rec, "utf8")) as { group_created: boolean; members_added: string[] };
+  };
+
+  it("records that install made the group and added the user, and a re-run, which finds both already there, does not forget it", async () => {
+    expect(await recordOf(undefined)).toMatchObject({ group_created: true, members_added: ["alice"] });
+    expect(await recordOf(undefined, true)).toMatchObject({ group_created: true, members_added: ["alice"] });
+  });
+
+  it("records nothing for a group, or a membership, that was there before install", async () => {
+    expect(await recordOf([])).toMatchObject({ group_created: false, members_added: ["alice"] });
+    expect(await recordOf(["alice"])).toMatchObject({ group_created: false, members_added: [] });
+  });
+
+  it("a record that is not root-owned 0600 with one link is not believed, and is replaced", async () => {
+    const root = path.join(scratch(), "etc");
+    mkdirSync(root, { mode: 0o755 });
+    const rec = path.join(root, "install-record.json");
+    writeFileSync(rec, JSON.stringify({ version: 1, group_created: true, members_added: ["alice"] }), { mode: 0o644 });
+    const f = fakeOps();
+    f.groups.set(HELPER_GROUP, ["alice"]);
+    const req: RootRequest = { version: 1, runnerUid: UID, runnerUser: "alice", actions: [{ op: "group", name: HELPER_GROUP }, { op: "member", user: "alice", group: HELPER_GROUP }, { op: "record", path: rec }] };
+    expect((await applyRootActions(req, f.ops)).ok).toBe(true);
+    expect(JSON.parse(readFileSync(rec, "utf8"))).toMatchObject({ group_created: false, members_added: [] });
+    expect(lstatSync(rec).mode & 0o7777).toBe(0o600);
+  });
+
+  it("the root side accepts the record step only at its own path", () => {
+    const req = (path: string): unknown => ({ version: 1, runnerUid: 1000, runnerUser: "alice", actions: [{ op: "record", path }] });
+    expect(() => checkRequest(req(LAYOUT.recordFile), 0)).not.toThrow();
+    expect(() => checkRequest(req("/etc/passwd"), 0)).toThrow(CliError);
+  });
+});
 
 describe("applying the root actions", () => {
   it("makes everything with the stated owner and mode, and the second run changes nothing and says so", async () => {
@@ -547,6 +592,7 @@ describe("fx-runner vm install", () => {
     const plan = buildInstallPlan({ ...FACTS, smallestTemplateRamMb: 512 });
     const actions = buildRootActions(plan, fixtureBundle(scratch()), FACTS.runner, sha);
     const request = JSON.stringify({ version: 1, runnerUid: UID, runnerUser: "alice", actions });
+    // real-paths-safe: this request names the real install places, and every use of go() below expects a refusal before any step runs
     const go = (sudoUid: string | undefined, ops: Pick<RootOps, "run">): Promise<number> => rootApplyCommand({ euid: 0, sudoUid, readStdin: async () => request, ops }, () => undefined);
     const agrees = fakeOps().ops;
     await expect(go(undefined, agrees)).rejects.toThrow(/not the user who ran sudo/);
