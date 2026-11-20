@@ -695,6 +695,9 @@ test.describe("Team app", () => {
     const { mock } = await setup(page, fresh({ streaming: true }));
     await open(page);
     await press(t(page, "tm-settings-btn"));
+    // The sheet draws twice on its first open: at once, and again when the runner lines' module lands a few ms later. Mark the boxes only after that
+    // second draw (its runner status line is the sign), or the mark lands on a box the late draw then replaces.
+    await expect(t(page, "tm-runner-status")).toBeVisible();
     await t(page, `tm-repo-${REPO_A}`).focus();
     await page.evaluate((id) => { (document.querySelector(`[data-testid="tm-repo-${id}"]`) as HTMLElement & { mark?: number }).mark = 7; }, REPO_A);
     const before = mock.reads.length;
@@ -1349,13 +1352,16 @@ test.describe("Team app", () => {
     await clean(page, member.errors);
   });
 
+  // Five minutes ago, but never before local midnight: the app writes a halt from an earlier day as "11-17 14:05", so a run in the first minutes
+  // after midnight (CI runs in UTC) would otherwise expect "23:57" and get the dated form.
+  const sameDayAgo = () => { const d = new Date(); const sinceMidnight = Math.floor((d.getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 1000); return Math.max(0, Math.min(5 * 60, sinceMidnight - 2)); };
   const hhmmOf = (iso: string) => { const d = new Date(iso); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
   const memberOf = (F: ReturnType<typeof makeFixtures>, over: Record<string, unknown>) =>
     operateOn({ settings: F.settings({ can_edit: false, operate_enabled: true }), repos: [F.repo({ operate_enabled: true, ...over })] });
 
   test("a halted repo says who halted it and when, to a member too: the name is in its own run, inside the labelled halt region", async ({ page }) => {
     const F = makeFixtures(Date.now());
-    const at = F.iso(5 * 60);
+    const at = F.iso(sameDayAgo());
     const member = await setup(page, memberOf(F, { halted: true, halted_at: at, halted_by: { id: "u0000000-0000-4000-8000-000000000009", display_name: "Olive Owner" } }));
     await open(page);
     const by = t(page, "tm-halt-by");
@@ -1367,7 +1373,7 @@ test.describe("Team app", () => {
 
   test("a halt with no recorded author says only when it was halted, and never null or undefined", async ({ page }) => {
     const F = makeFixtures(Date.now());
-    const at = F.iso(5 * 60);
+    const at = F.iso(sameDayAgo());
     const { errors } = await setup(page, memberOf(F, { halted: true, halted_at: at, halted_by: null }));
     await open(page);
     await expect(t(page, "tm-halt-by")).toHaveText(`Halted at ${hhmmOf(at)}`);
