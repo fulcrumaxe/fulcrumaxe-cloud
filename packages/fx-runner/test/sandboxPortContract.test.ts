@@ -1,13 +1,16 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import { buildSandboxEnv, createFakeSandbox, type SandboxPort } from "@fx/runner";
 import { cleanEnv } from "../src/job/cleanEnv.js";
 import { createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import type { SandboxPort as FxSandboxPort } from "../src/sandbox/port.js";
+import { createDaemonSdk } from "../src/vm/sandboxd/sdkAdapter.js";
+import { createMicrovmSandbox } from "../src/vm/sandboxd/microvmSandbox.js";
 import { describeSandboxPortContract } from "./sandboxPortContract.js";
+import { makeRig, runCleanups } from "./vm/sandboxd/helpers.js";
 
 // The two copies of the port must stay assignable to each other. If either side drifts, `tsc` fails here.
 const asReal = (port: FxSandboxPort): SandboxPort => port;
@@ -45,6 +48,15 @@ describeSandboxPortContract("hostSandbox", (runtime) => {
     workspaceRoot: tmpdir(),
   });
   return { port: host, env: () => cleanEnv({ mode: "subscription" }), workdir: mkdtempSync(path.join(tmpdir(), "r4b13_work-")), timeoutMsOf: (handle) => host.timeoutMsOf(handle) };
+}, { reportsOutcomes: true });
+
+afterEach(runCleanups);
+
+describeSandboxPortContract("microvmSandbox", (runtime) => {
+  const rig = makeRig();
+  const sdk = createDaemonSdk({ daemon: rig.daemon, policy: { apply: async () => undefined, release: async () => undefined }, template: "fx-agent", memMb: 256 });
+  const microvm = createMicrovmSandbox({ sdk, makeRuntime: () => runtime });
+  return { port: microvm, env: () => ({}), workdir: "/work/job", timeoutMsOf: (handle) => microvm.timeoutMsOf(handle) };
 }, { reportsOutcomes: true });
 
 describe("the two copies of the port", () => {

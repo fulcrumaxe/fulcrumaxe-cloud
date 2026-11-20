@@ -59,6 +59,8 @@ export class SandboxdSdkError extends Error {
 
 const idOf = (name: string): string => `sb-${createHash("sha256").update(name).digest("hex").slice(0, 32)}`;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+/** The most a timer may be asked to wait: `setTimeout` overflows past 2^31-1 ms and would fire at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** A daemon refusal keeps its status and fixed code; anything else is a 500 with no text. */
 function translated(err: unknown): SandboxdSdkError {
@@ -99,7 +101,18 @@ interface Meta {
 
 /** What the runner's own inventory and lifecycle read, by daemon id. They go through the adapter so its tables, timers and policy stay in step with the daemon. */
 export interface ManagedSandbox { id: string; state: "pending" | "running" | "stopping" | "stopped"; createdAtMs: number; lastUsedAtMs: number }
-export interface DaemonSdk extends VercelSandboxSdk {
+/**
+ * What the microVM port needs beyond the real SDK's own calls, by sandbox name: the VM's limit as an absolute value. `extendTimeout` only ever adds
+ * (to the running total a wake re-arms from), so a port that topped a timer up for idle time through it would make that total grow over a sandbox's life.
+ */
+export interface LimitControl {
+  /** Sets the total a woken VM's timer is armed with. The live timer is not touched. */
+  setTimeoutMs(name: string, totalMs: number): Promise<void>;
+  /** Re-arms the live timer to fire `remainingMs` from now. The total a wake re-arms from is not touched; a VM with no live timer is left alone. */
+  armTimeoutAt(name: string, remainingMs: number): Promise<void>;
+}
+
+export interface DaemonSdk extends VercelSandboxSdk, LimitControl {
   managed(): ManagedSandbox[];
   /** A sandbox that is not there is done, for the three of these (idempotent, as on Vercel). A running one is never touched by `reapStopped`. */
   stopById(id: string): Promise<void>;
@@ -131,8 +144,9 @@ export function createDaemonSdk(config: AdapterConfig): DaemonSdk {
     meta.commands.clear();
     disarm(meta);
   }
-  function arm(id: string, meta: Meta, ms: number): void {
+  function arm(id: string, meta: Meta, wanted: number): void {
     disarm(meta);
+    const ms = Math.min(Math.max(wanted, 0), MAX_TIMER_MS);
     meta.deadline = now() + ms;
     meta.timer = setTimeout(() => void wrap(id).stop().catch(() => undefined), ms); // fx-swallow-ok: a failed timed stop leaves the sandbox for the next stop or the daemon teardown
     meta.timer.unref();
@@ -358,6 +372,24 @@ export function createDaemonSdk(config: AdapterConfig): DaemonSdk {
   };
   return {
     ...sdk,
+    async setTimeoutMs(name, totalMs) {
+      if (!NAME.test(name) || !Number.isSafeInteger(totalMs) || totalMs <= 0 || totalMs > MAX_TIMER_MS) throw new SandboxdSdkError(400, "bad_request");
+      const id = idFor(name);
+      const meta = metaOf(id);
+      await exclusive(id, async () => {
+        if (metas.get(id) !== meta) throw new SandboxdSdkError(404, "not_found");
+        meta.timeoutMs = totalMs;
+      }).catch(translate);
+    },
+    async armTimeoutAt(name, remainingMs) {
+      if (!NAME.test(name) || !Number.isSafeInteger(remainingMs) || remainingMs <= 0 || remainingMs > MAX_TIMER_MS) throw new SandboxdSdkError(400, "bad_request");
+      const id = idFor(name);
+      const meta = metaOf(id);
+      await exclusive(id, async () => {
+        if (metas.get(id) !== meta) throw new SandboxdSdkError(404, "not_found");
+        if (meta.deadline !== undefined) arm(id, meta, remainingMs); // no live timer (stopped, or not yet armed): the next arm decides
+      }).catch(translate);
+    },
     managed: () => managedRows(),
     async stopById(id) {
       if (present(id)) await wrap(busy(id)).stop();
