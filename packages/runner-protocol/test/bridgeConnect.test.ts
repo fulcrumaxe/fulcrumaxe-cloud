@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  BRIDGE_COMMAND_KINDS, BRIDGE_REFUSALS, BRIDGE_RESULTS, COMMAND_REFUSALS, ENGINE_COMMAND_MIN_PROTOCOL, EngineCommand, EngineCommandAck, EngineCommandsPullRequest, RootTail, bridgeRootTail, commandSendableTo,
+  BRIDGE_COMMAND_KINDS, BRIDGE_INCOMPLETE_ACK_PROTOCOL, BRIDGE_REFUSALS, BRIDGE_RESULTS, COMMAND_REFUSALS, ENGINE_COMMAND_MIN_PROTOCOL, EngineCommand, EngineCommandAck, EngineCommandsPullRequest, RootTail, bridgeRootTail, commandSendableTo,
   engineCommandsPullSchemaFor, isBridgeCommandKind, signEngineCommand, verifyEngineCommand,
 } from "../src/engineCommands.js";
 import { BRIDGE_ENABLE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION } from "../src/messages.js";
@@ -75,9 +75,9 @@ describe("bridge_enable and bridge_disable: the shapes", () => {
 });
 
 describe("the protocol gate", () => {
-  it("is 24, the highest minimum in the file (the version since is 25, the current one)", () => {
+  it("is 24, the highest minimum in the file (the version since is 26, the current one)", () => {
     expect(BRIDGE_ENABLE_MIN_PROTOCOL).toBe(24);
-    expect(CURRENT_PROTOCOL_VERSION).toBe(25);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(26);
     const text = readFileSync(new URL("../src/messages.ts", import.meta.url), "utf8");
     const mins = [...text.matchAll(/export const [A-Z_]*MIN_PROTOCOL = (\d+);/g)].map((m) => ({ name: m[0], n: Number(m[1]) }));
     const highest = Math.max(...mins.map((m) => m.n));
@@ -89,11 +89,17 @@ describe("the protocol gate", () => {
     for (const kind of BRIDGE_COMMAND_KINDS) {
       expect(ENGINE_COMMAND_MIN_PROTOCOL[kind]).toBe(24);
       for (const hello of [20, 22, 23]) expect(commandSendableTo(kind, hello), `${kind} at ${hello}`).toBe(false);
-      for (const hello of [24, 25]) expect(commandSendableTo(kind, hello), `${kind} at ${hello}`).toBe(true);
+      for (const hello of [24, 25, 26]) expect(commandSendableTo(kind, hello), `${kind} at ${hello}`).toBe(true);
     }
     // The older kinds are unchanged.
     expect(commandSendableTo("start_day", 20)).toBe(true);
     expect(commandSendableTo("watch", 22)).toBe(false);
+  });
+
+  it("ON-BR-4: incomplete is additive and from protocol 26: an ack without the key parses as before", () => {
+    expect(BRIDGE_INCOMPLETE_ACK_PROTOCOL).toBe(26);
+    expect(BRIDGE_INCOMPLETE_ACK_PROTOCOL).toBe(CURRENT_PROTOCOL_VERSION);
+    expect(EngineCommandAck.safeParse({ outcome: "refused", refusal: "checkout_not_found", result: "not_found" }).success).toBe(true);
   });
 
   it("is told in the version history on the protocol version", () => {
@@ -112,6 +118,8 @@ describe("the ack's results", () => {
     expect(parse({ outcome: "applied", result: "already_connected", root_tail: "acme/site" }).success).toBe(true);
     expect(parse({ outcome: "refused", refusal: "checkout_not_found", result: "not_found" }).success).toBe(true);
     expect(parse({ outcome: "refused", refusal: "checkout_not_found", result: "not_found", skipped: ["/work/skipped/site"] }).success).toBe(true);
+    expect(parse({ outcome: "refused", refusal: "checkout_not_found", result: "not_found", incomplete: true }).success).toBe(true);
+    expect(parse({ outcome: "refused", refusal: "checkout_not_found", result: "not_found", skipped: ["/work/skipped/site"], incomplete: true }).success).toBe(true);
     expect(parse({ outcome: "refused", refusal: "checkout_ambiguous", result: "ambiguous", candidates: dirs }).success).toBe(true);
     expect(parse({ outcome: "refused", refusal: "checkout_incomplete", result: "refused", candidates: ["/work/one/site"] }).success).toBe(true);
     for (const refusal of BRIDGE_REFUSALS.filter((r) => r !== "checkout_not_found" && r !== "checkout_ambiguous")) expect(parse({ outcome: "refused", refusal, result: "refused" }).success, refusal).toBe(true);
@@ -138,6 +146,11 @@ describe("the ack's results", () => {
       ["candidates with no result", { outcome: "refused", refusal: "checkout_ambiguous", candidates: ["/work/a", "/work/b"] }],
       ["not_found offering a folder to pick", { outcome: "refused", refusal: "checkout_not_found", result: "not_found", candidates: ["/work/a"] }],
       ["skipped on another result", { outcome: "refused", refusal: "checkout_ambiguous", result: "ambiguous", candidates: ["/work/a", "/work/b"], skipped: ["/work/c"] }],
+      ["incomplete on another result", { outcome: "refused", refusal: "checkout_ambiguous", result: "ambiguous", candidates: ["/work/a", "/work/b"], incomplete: true }],
+      ["incomplete on a refused result", { outcome: "refused", refusal: "checkout_incomplete", result: "refused", candidates: ["/work/a"], incomplete: true }],
+      ["incomplete with no result", { outcome: "refused", refusal: "bridge_failed", incomplete: true }],
+      ["incomplete false", { outcome: "refused", refusal: "checkout_not_found", result: "not_found", incomplete: false }],
+      ["incomplete as text", { outcome: "refused", refusal: "checkout_not_found", result: "not_found", incomplete: "true" }],
       ["skipped with no result", { outcome: "refused", refusal: "bridge_failed", skipped: ["/work/c"] }],
       ["a connected repo offering folders", { outcome: "applied", result: "connected", root_tail: "a/b", candidates: ["/work/a"] }],
       ["a root_tail of three parts", { outcome: "applied", result: "connected", root_tail: "a/b/c" }],

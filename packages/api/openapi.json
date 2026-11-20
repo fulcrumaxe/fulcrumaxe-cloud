@@ -48204,6 +48204,9 @@
                                 "type": "string"
                               }
                             },
+                            "incomplete": {
+                              "type": "boolean"
+                            },
                             "issued_at": {
                               "type": "string"
                             },
@@ -48228,6 +48231,7 @@
                             "root_tail",
                             "candidates",
                             "skipped",
+                            "incomplete",
                             "issued_at",
                             "expires_at",
                             "acked_at"

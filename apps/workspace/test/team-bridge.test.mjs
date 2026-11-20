@@ -88,6 +88,23 @@ describe("each state, its words and its next step", () => {
     expect(v.commandFor("/work/it's here")).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root '/work/it'\\''s here'");
     expect(v.commandFor("relative")).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets");
   });
+  it("ON-BR-4: a not_found from a capped search says the search was cut short, and keeps the command and the folder box; one that finished does not; a value that is not true is read as false", () => {
+    const capped = view(raw({ phase: "not_found", command: cmd({ state: "refused", result: "not_found", refusal: "checkout_not_found", incomplete: true }) }));
+    expect(capped).toMatchObject({ kind: "not_found", cutShort: true, folderBox: true, canPick: false, retry: true });
+    expect(capped.text).toBe("Studio laptop looked on this computer and found no copy of acme-labs/widgets, but its search was cut short, so a copy may be somewhere it did not reach. Type the folder below to get a command you can run yourself.");
+    expect(capped.command).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    expect(capped.commandFor("/work/widgets")).toBe("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root /work/widgets");
+    expect(view(raw({ phase: "not_found", command: cmd({ state: "refused", result: "not_found", incomplete: true }) }), {}, { canEdit: false }).text).toBe("Studio laptop looked on this computer and found no copy of acme-labs/widgets, but its search was cut short, so a copy may be somewhere it did not reach. An owner or an admin can give the folder.");
+    const member = view(raw({ phase: "not_found", command: cmd({ state: "refused", result: "not_found", incomplete: true }) }), {}, { canEdit: false });
+    expect(member.text).not.toMatch(/Type the folder/);
+    expect(member).toMatchObject({ cutShort: true, folderBox: false });
+    for (const value of [false, undefined, "true", 1, null]) {
+      const v = view(raw({ phase: "not_found", command: cmd({ state: "refused", result: "not_found", incomplete: value }) }));
+      expect(v.cutShort).toBe(false);
+      expect(v.text).not.toMatch(/cut short/);
+    }
+    expect(BRIDGE_WORDS.giveFolder).toBe("Or type the folder, to get a command you can run yourself");
+  });
   it("ambiguous: a list of the folders and a button that sends the pick; the pick shows as chosen", () => {
     const data = raw({ phase: "ambiguous", command: cmd({ state: "refused", result: "ambiguous", refusal: "checkout_ambiguous", candidates: ["/home/me/a/widgets", "/home/me/b/widgets"] }) });
     const v = view(data, { rootPick: "/home/me/b/widgets" });
@@ -190,6 +207,7 @@ describe("a folder is text, never a link, and no state shows undefined", () => {
       raw({ phase: "connected", connected: { runner_id: R1, runner_name: "Studio laptop", root_tail: "acme/widgets", root: "/home/me/code/acme/widgets" } }),
       raw({ phase: "disconnecting", connected: { runner_id: R1, runner_name: "Studio laptop", root_tail: null, root: null }, command: cmd({ kind: "bridge_disable" }) }),
       raw({ phase: "not_found", command: cmd({ state: "refused", result: "not_found" }) }),
+      raw({ phase: "not_found", command: cmd({ state: "refused", result: "not_found", incomplete: true }) }),
       raw({ phase: "ambiguous", command: cmd({ state: "refused", result: "ambiguous", candidates: ["/home/me/a/w", "/home/me/b/w"] }) }),
       raw({ phase: "incomplete", command: cmd({ state: "refused", refusal: "checkout_incomplete", candidates: ["/home/me/a/w"] }) }),
       raw({ phase: "refused", command: cmd({ state: "refused", refusal: "bridge_failed" }) }),

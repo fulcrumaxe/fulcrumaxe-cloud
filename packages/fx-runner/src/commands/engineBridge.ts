@@ -41,15 +41,15 @@ export interface EngineBridgeCommandOptions {
 
 /**
  * A refusal with a closed code (D#845 ON-BR-2). The command line prints its message; the runner's handling of a `bridge_enable` command answers with the code, and with the folders a person may pick
- * from (`candidates`: the clones found, the ones skipped as group-writable, or the one a capped scan found). The candidates are paths on this machine: they go only to the cloud's answer, never to a log.
+ * from (`candidates`: the clones found, the ones skipped as group-writable, or the one a capped scan found). `incomplete` is true on a `checkout_not_found` whose scan hit its time or entry cap (ON-BR-4). The candidates are paths on this machine: they go only to the cloud's answer, never to a log.
  */
 export class BridgeRefusal extends CliError {
-  constructor(message: string, readonly code: BridgeRefusalCode, readonly candidates: readonly string[] = []) {
+  constructor(message: string, readonly code: BridgeRefusalCode, readonly candidates: readonly string[] = [], readonly incomplete = false) {
     super(message, 2);
     this.name = "BridgeRefusal";
   }
 }
-const refusal = (reason: string, code?: BridgeRefusalCode, candidates?: readonly string[]): CliError => (code === undefined ? new CliError(`engine-bridge: ${reason}`, 2) : new BridgeRefusal(`engine-bridge: ${reason}`, code, candidates));
+const refusal = (reason: string, code?: BridgeRefusalCode, candidates?: readonly string[], incomplete?: boolean): CliError => (code === undefined ? new CliError(`engine-bridge: ${reason}`, 2) : new BridgeRefusal(`engine-bridge: ${reason}`, code, candidates, incomplete));
 
 /** The engine's state directory: `--state-dir`, else `$AUTONOMOUS_TEAM_STATE_DIR`, else `~/.autonomous-forever-state`: the engine's own rule. Always absolute and normalised. */
 export function engineStateDirFor(flag: string | undefined, override: string | undefined, home: string | undefined): string {
@@ -100,7 +100,7 @@ function pickCheckout(repo: string, rootFlag: string | undefined, ctx: Pick<Comm
     throw refusal(`checkout_layout_unexpected: a clone of that repo has no usable .autonomous-team/project.json, so it is not an engine checkout:${list(found.unexpected)}\n${skippedNote === "" ? "" : `${skippedNote.trim()}\n`}coldstart it, or give --repo-root <path>; nothing was changed`, "checkout_layout_unexpected");
   }
   if (found.matches.length === 0) {
-    throw refusal(`checkout_not_found: no engine checkout of ${repo} under ${found.roots.join(", ") || "any search root"}.${cut}${skippedNote} Give --repo-root <path> (and --state-dir <dir> if the engine uses its own); nothing was changed`, "checkout_not_found", found.unsafePaths);
+    throw refusal(`checkout_not_found: no engine checkout of ${repo} under ${found.roots.join(", ") || "any search root"}.${cut}${skippedNote} Give --repo-root <path> (and --state-dir <dir> if the engine uses its own); nothing was changed`, "checkout_not_found", found.unsafePaths, found.limit !== null);
   }
   if (found.matches.length > 1) {
     throw refusal(`checkout_ambiguous: ${found.matches.length} checkouts of ${repo}:${list(found.matches.map((m) => m.root).sort())}\nrun again with --repo-root <one of these>; nothing was changed`, "checkout_ambiguous", found.matches.map((m) => m.root).sort().slice(0, 10));
@@ -301,7 +301,7 @@ export function createBridgeApply(env: { stateDir: string; uid: number | undefin
         return { ok: true, root: done.root };
       } catch (error) {
         // fx-swallow-ok: the outcome carries the closed code; anything unexpected is a plain bridge_failed (the message could name a path)
-        if (error instanceof BridgeRefusal) return { ok: false, code: error.code, candidates: error.candidates };
+        if (error instanceof BridgeRefusal) return { ok: false, code: error.code, candidates: error.candidates, ...(error.incomplete ? { incomplete: true } : {}) };
         return { ok: false, code: "bridge_failed", candidates: [] };
       }
     },

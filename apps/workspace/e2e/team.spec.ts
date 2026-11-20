@@ -2184,6 +2184,48 @@ test.describe("Team app", () => {
     await clean(page, errors);
   });
 
+  test("not found after a capped search: says the search was cut short, keeps the command and the folder box, labels the box as a way to get a command to run yourself, and sends no folder", async ({ page }) => {
+    const mock = fresh({ bridge: { phase: "not_found", command: bridgeCmd({ state: "refused", result: "not_found", refusal: "checkout_not_found", acked_at: new Date().toISOString(), incomplete: true }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Workshop laptop looked on this computer and found no copy of acme-labs/widgets, but its search was cut short, so a copy may be somewhere it did not reach. Type the folder below to get a command you can run yourself.");
+    await expect(tv(page, "tm-bridge-fallback")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    const box = tv(page, "tm-bridge-folder");
+    await expect(box).toBeVisible();
+    await expect(box).toHaveAttribute("aria-label", "Or type the folder, to get a command you can run yourself");
+    await expect(panel(page).getByText("Or type the folder, to get a command you can run yourself:")).toBeVisible();
+    await box.fill("/work/widgets");
+    await expect(tv(page, "tm-bridge-fallback")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets --repo-root /work/widgets");
+    // Typing a folder only builds the command: nothing goes to the cloud, of any kind.
+    expect(mock.bridgePosts).toEqual([]);
+    expect(mock.posts).toEqual([]);
+    // Nothing runs off the edge of the screen, whatever the width.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await noRaw(page);
+    await clean(page, errors);
+  });
+
+  test("not found after a capped search, as a member: says the search was cut short without telling them to type a folder, and shows no folder box", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const mock = fresh({ settings: F.settings({ can_edit: false }), bridge: { phase: "not_found", command: bridgeCmd({ state: "refused", result: "not_found", refusal: "checkout_not_found", acked_at: new Date().toISOString(), incomplete: true }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Workshop laptop looked on this computer and found no copy of acme-labs/widgets, but its search was cut short, so a copy may be somewhere it did not reach. An owner or an admin can give the folder.");
+    await expect(tv(page, "tm-bridge-text")).not.toContainText("Type the folder");
+    await expect(tv(page, "tm-bridge-folder")).toHaveCount(0);
+    await expect(tv(page, "tm-bridge-fallback")).toHaveText("fx-runner engine-bridge enable --repo acme-labs/widgets");
+    expect(mock.bridgePosts).toEqual([]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await noRaw(page);
+    await clean(page, errors);
+  });
+
+  test("not found after a search that finished: no cut-short wording", async ({ page }) => {
+    const mock = fresh({ bridge: { phase: "not_found", command: bridgeCmd({ state: "refused", result: "not_found", refusal: "checkout_not_found", acked_at: new Date().toISOString(), incomplete: false }) } });
+    const errors = await sheet(page, mock);
+    await expect(tv(page, "tm-bridge-text")).toHaveText("Workshop laptop looked on this computer and found no copy of acme-labs/widgets");
+    await expect(panel(page).getByText("cut short")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
   test("ambiguous: a list of the folders, told apart; the pick is sent as the folder; a hostile name is text and nothing else", async ({ page }) => {
     const evil = "/home/me/<img src=x onerror=alert(1)>/widgets";
     const mock = fresh({ bridge: { phase: "ambiguous", command: bridgeCmd({ state: "refused", result: "ambiguous", refusal: "checkout_ambiguous", acked_at: new Date().toISOString(), candidates: [evil, "/home/me/code/widgets"] }) } });

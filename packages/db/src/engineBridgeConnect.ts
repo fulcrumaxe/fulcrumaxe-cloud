@@ -113,6 +113,8 @@ export interface BridgeCommandView {
   candidates: string[];
   /** Copies the runner skipped as unsafe: information only, never offered for a pick. */
   skipped: string[];
+  /** True when a `not_found` answer came from a search that hit its time or entry cap, so a copy may exist past it (ON-BR-4). False for every other answer, and for an answer from a runner that never says. */
+  incomplete: boolean;
   issued_at: Date;
   expires_at: Date;
   delivered_at: Date | null;
@@ -122,7 +124,7 @@ export interface BridgeCommandView {
 /** The newest bridge command for the repo with its state as the routes read time (a pending one past its life is `expired`, a delivered one 15 minutes past its life `not_confirmed`). */
 export async function latestBridgeCommand(client: Pick<PoolClient, 'query'>, accountId: string, repoId: string, notConfirmedAfterS: number): Promise<BridgeCommandView | null> {
   const { rows } = await client.query<{
-    id: string; kind: BridgeCommandView['kind']; runner_id: string; state: BridgeCommandView['state']; refusal: string | null; ack_result: { result?: string; root_tail?: string; candidates?: string[]; skipped?: string[] } | null;
+    id: string; kind: BridgeCommandView['kind']; runner_id: string; state: BridgeCommandView['state']; refusal: string | null; ack_result: { result?: string; root_tail?: string; candidates?: string[]; skipped?: string[]; incomplete?: boolean } | null;
     issued_at: Date; expires_at: Date; delivered_at: Date | null; acked_at: Date | null;
   }>(
     `SELECT id, kind, runner_id,
@@ -147,6 +149,7 @@ export async function latestBridgeCommand(client: Pick<PoolClient, 'query'>, acc
     root_tail: r.ack_result?.root_tail ?? null,
     candidates: r.ack_result?.candidates ?? [],
     skipped: r.ack_result?.skipped ?? [],
+    incomplete: r.ack_result?.result === 'not_found' && r.ack_result.incomplete === true,
     issued_at: r.issued_at,
     expires_at: r.expires_at,
     delivered_at: r.delivered_at,
