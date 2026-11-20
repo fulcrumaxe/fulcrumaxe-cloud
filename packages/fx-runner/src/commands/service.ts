@@ -212,6 +212,18 @@ function targetFor(host: ServiceHost, home: string): Target {
   throw new CliError("service_unsupported: a service can be installed on Linux (systemd) and macOS (launchd) only; Windows, including WSL2, is not supported yet");
 }
 
+/**
+ * D#845 ON-3: the commands that start the per-user service now, as fixed argument lists (never a shell string). `setup` runs them after writing the unit.
+ * The same steps `service install` prints for a person to run, with the user id filled in.
+ */
+export function userServiceStartArgv(host: Pick<ServiceHost, "home" | "platform" | "xdgConfigHome">, uid: number | undefined): string[][] {
+  if (host.platform === "linux") return [["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT_NAME]];
+  if (host.platform === "darwin" && host.home !== undefined && path.isAbsolute(host.home) && uid !== undefined) {
+    return [["launchctl", "bootstrap", `gui/${uid}`, path.join(host.home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`)]];
+  }
+  throw new CliError("service_unsupported: a service can be installed on Linux (systemd) and macOS (launchd) only; Windows, including WSL2, is not supported yet");
+}
+
 /** The system service's file (under `host.root`) and the commands the person runs; nothing here depends on a home directory. */
 function systemTargetFor(host: ServiceHost): Target {
   const root = host.root ?? "/";
