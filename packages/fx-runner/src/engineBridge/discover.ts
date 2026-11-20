@@ -335,33 +335,52 @@ export function discoverCheckout(input: DiscoverInput): DiscoverResult {
   const realRunner = realOrSelf(input.runnerStateDir);
   const skipPath = (p: string): boolean => SKIPPED_PATHS.some((s) => within(p, s)) || within(p, input.runnerStateDir);
   // `chainSafe`: every directory from the search root down to the parent of `dir` passed `ancestorSafe`. A checkout below an unsafe one is never adopted.
-  const visit = (dir: string, depth: number, realBase: string, chainSafe: boolean): void => {
-    if (stop() || seen.has(dir) || skipPath(dir)) return;
-    seen.add(dir);
-    // Nothing is opened or listed in a directory whose real path is outside the root it was reached from.
-    const real = realInside(dir, realBase);
-    if (real === null || within(real, realRunner) || SKIPPED_PATHS.some((s) => within(real, s))) return;
-    result.visited += 1;
-    const verdict = chainSafe ? judge(dir, wanted, input.uid, realBase, ops) : isRealDir(path.join(dir, ".git")) ? { kind: "unsafe" as const } : { kind: "none" as const };
-    // The adopted root is the real path, so a link added later above it cannot move it.
-    if (verdict.kind === "match") result.matches.push({ root: real, project: verdict.project });
-    else if (verdict.kind === "unexpected") result.unexpected.push(real);
-    else if (verdict.kind === "unsafe") {
-      result.unsafe += 1;
-      if (result.unsafePaths.length < 10) result.unsafePaths.push(real);
-    }
-    const childrenSafe = chainSafe && ancestorOk(real, input.uid);
-    // A directory with a `.git` is a checkout: nothing inside it is searched.
-    if (isRealDir(path.join(dir, ".git")) || depth >= SCAN_MAX_DEPTH) return;
-    try {
-      for (const entry of ops.readDir(dir)) {
-        entries += 1;
-        if (stop()) return;
-        if (!entry.isDirectory || SKIPPED_NAMES.has(entry.name)) continue;
-        visit(path.join(dir, entry.name), depth + 1, realBase, childrenSafe);
+  interface Pending {
+    dir: string;
+    chainSafe: boolean;
+  }
+  // The scan goes one level at a time, and judges every directory of a level before it lists any of them. Its entry budget is therefore spent on the shallow places first: a
+  // big tree of plain folders in one early child can no longer use up the budget before a checkout in a later child of the same folder was looked at.
+  const scanRoot = (root: string, realBase: string, chainSafe: boolean): void => {
+    let level: Pending[] = [{ dir: root, chainSafe }];
+    for (let depth = 0; level.length > 0 && depth <= SCAN_MAX_DEPTH; depth++) {
+      const judged: Array<Pending & { real: string; isCheckout: boolean; childrenSafe: boolean }> = [];
+      for (const item of level) {
+        const { dir } = item;
+        if (stop() || seen.has(dir) || skipPath(dir)) continue;
+        seen.add(dir);
+        // Nothing is opened or listed in a directory whose real path is outside the root it was reached from.
+        const real = realInside(dir, realBase);
+        if (real === null || within(real, realRunner) || SKIPPED_PATHS.some((s) => within(real, s))) continue;
+        result.visited += 1;
+        const verdict = item.chainSafe ? judge(dir, wanted, input.uid, realBase, ops) : isRealDir(path.join(dir, ".git")) ? { kind: "unsafe" as const } : { kind: "none" as const };
+        // The adopted root is the real path, so a link added later above it cannot move it.
+        if (verdict.kind === "match") result.matches.push({ root: real, project: verdict.project });
+        else if (verdict.kind === "unexpected") result.unexpected.push(real);
+        else if (verdict.kind === "unsafe") {
+          result.unsafe += 1;
+          if (result.unsafePaths.length < 10) result.unsafePaths.push(real);
+        }
+        // A directory with a `.git` is a checkout: nothing inside it is searched.
+        judged.push({ ...item, real, isCheckout: isRealDir(path.join(dir, ".git")), childrenSafe: item.chainSafe && ancestorOk(real, input.uid) });
       }
-    } catch {
-      // fx-swallow-ok: an unreadable directory is skipped; the error text could name paths
+      const next: Pending[] = [];
+      if (depth < SCAN_MAX_DEPTH) {
+        for (const item of judged) {
+          if (item.isCheckout) continue;
+          try {
+            for (const entry of ops.readDir(item.dir)) {
+              entries += 1;
+              if (stop()) return;
+              if (!entry.isDirectory || SKIPPED_NAMES.has(entry.name)) continue;
+              next.push({ dir: path.join(item.dir, entry.name), chainSafe: item.childrenSafe });
+            }
+          } catch {
+            // fx-swallow-ok: an unreadable directory is skipped; the error text could name paths
+          }
+        }
+      }
+      level = next;
     }
   };
   for (const root of roots) {
@@ -373,7 +392,7 @@ export function discoverCheckout(input: DiscoverInput): DiscoverResult {
       // fx-swallow-ok: a root that cannot be resolved is not searched
       continue;
     }
-    visit(root, 0, realBase, aboveSafe(realBase, input.uid));
+    scanRoot(root, realBase, aboveSafe(realBase, input.uid));
   }
   return result;
 }

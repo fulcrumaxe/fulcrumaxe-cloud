@@ -129,6 +129,15 @@ describe("search roots and exclusions (item 1)", () => {
     expect(r.limit).toBe("entries");
     expect(scan().limit).toBeNull();
   });
+  it("looks at every folder of a level before it lists any of them, so a big early tree cannot starve a later checkout", () => {
+    // `aaa-junk` is listed first and holds 50 folders with 5 each; the checkout sits in `zzz-mine`. Going deep first, the budget below would be gone inside `aaa-junk`.
+    for (let i = 0; i < 50; i++) for (let j = 0; j < 5; j++) mkdirSync(path.join(home, "aaa-junk", `d${i}`, `e${j}`), { recursive: true });
+    const mine = clone(path.join(home, "zzz-mine"));
+    const byName = { readDir: (dir: string) => [...realOps.readDir(dir)].sort((a, b) => a.name.localeCompare(b.name)) };
+    const r = scan({ maxEntries: 120, ops: byName });
+    expect(r.limit).toBe("entries");
+    expect(r.matches.map((m) => m.root)).toEqual([mine]);
+  });
   it("counts an entry limit of 20000 by default", () => {
     const list = Array.from({ length: 25000 }, (_, i) => ({ name: `d${i}`, isDirectory: false }));
     let calls = 0;
