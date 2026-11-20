@@ -23,6 +23,7 @@ import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, Clon
 import { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import type { AgentHandle, NormalizedEvent } from "./types.js";
 import { assertSandboxEnvMatchesRole } from "./fakeSandbox.js";
+import type { GuestEngine } from "./sandboxEnv.js";
 import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunCommandOptions, assertWriteFiles, vcpusForCreate } from "./runCommand.js";
 import { RunLimitError, WARN_FRACTION, createRunGuard, resolveRunLimits, type RunLimits } from "./meteringGuard.js";
 import type { RunLimit } from "./executionTarget.js";
@@ -341,6 +342,8 @@ const realSdk: VercelSandboxSdk = {
 };
 
 export interface CreateVercelSandboxPortOptions {
+  /** D#587 B-5: the guest the sandboxes run on. Unset is the hosted sandbox; `microvm` makes every command's env be the microVM table (no CA variables), derived from the command's own network rules. */
+  guestEngine?: "microvm";
   /** Test seam for the `fetch` the real SDK's `Sandbox.list` uses (a local server in the contract test); production leaves it unset. */
   fetch?: typeof globalThis.fetch;
   /**
@@ -939,6 +942,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   if (typeof getToken !== "function") {
     throw new Error("createVercelSandboxPort: getToken is required");
   }
+  const guestEngineOf = (rules: NetworkPolicyRule[]): GuestEngine => (options.guestEngine === "microvm" ? { kind: "microvm", rules } : { kind: "hosted" });
   const sandboxImage = resolveSandboxImage("image" in options ? options.image : SANDBOX_IMAGE_REF);
   const sdk = options.sdk ?? realSdk;
   const backends = options.backends ?? BACKENDS;
@@ -1264,7 +1268,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     // D#598 P1f-5a: no agent is ever launched in a publish sandbox (any role), and the publish role has no model connection (any sandbox).
     assertNoAgentInPublishSandbox(handle.sandboxName, opts.role);
     // A re-attach carries no environment: it starts no process the environment could reach.
-    if (attach === undefined) assertSandboxEnvMatchesRole(opts.role, opts.env);
+    if (attach === undefined) assertSandboxEnvMatchesRole(opts.role, opts.env, guestEngineOf(opts.networkPolicy));
     // A role with no tool list is refused here (UnknownRoleError, `unknown_role`), before any agent file is written or command run.
     toolsForRole(opts.role);
     // This run's limits: the port's defaults under whatever the run carries. Invalid values throw here, before anything starts.
@@ -2380,7 +2384,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
      */
     async runCommand(handle, opts) {
       assertRunCommandOptions(opts);
-      assertSandboxEnvMatchesRole(opts.role, opts.env);
+      assertSandboxEnvMatchesRole(opts.role, opts.env, guestEngineOf(opts.networkPolicy));
       if (!handle.sandboxName.startsWith("pp-")) throw new Error("createVercelSandboxPort: runCommand runs only in a pp- sandbox");
       const sandbox = await open(handle, "runCommand", false);
       if (sandbox.status !== "running") throw new SandboxPortError("runCommand");

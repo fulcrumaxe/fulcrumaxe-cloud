@@ -46,6 +46,7 @@ import { startLease, type Clock, type Lease, type LeaseEnd, type EventRelay } fr
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { withAnswerFile } from "./answerFile.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
+import type { SandboxEngine } from "../vm/limits.js";
 import { closedWord, observedClient, type StepSink } from "./stepLog.js";
 import type { JobWatch, WatchedJob } from "./watch.js";
 
@@ -76,6 +77,8 @@ export type JobResult =
 
 export interface JobHandlerDeps {
   client: RunnerClient;
+  /** The engine this runner reported (`resolveEngine`). Unset is `os_sandbox`, so a job that requires a microVM is refused rather than run on the OS sandbox. */
+  engine?: SandboxEngine;
   /** The public keys job signatures are checked against, pinned by the caller. */
   keyring: JobKeyring;
   clock: Clock;
@@ -452,7 +455,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
   }
 
   return async (claimed) => {
-    const verified = verifyJob(claimed.signedJob, deps.keyring, deps.clock.now());
+    const verified = verifyJob(claimed.signedJob, deps.keyring, deps.clock.now(), deps.engine);
     if (!verified.ok) return refuse(claimed, verified.reason);
     const job = verified.job;
     // The signed job's own mode picks the path (C27 section 4.1); nothing on this machine can change it.

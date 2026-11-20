@@ -37,6 +37,7 @@ import { readVerifyAnswer } from "../daemon/answerFile.js";
 import { createVerifyLocal } from "../daemon/verifyLocal.js";
 import { readSignInState } from "../daemon/signInState.js";
 import { readHostFacts } from "../hostFacts.js";
+import { chooseEngine, selectSandbox } from "../vm/engineGate.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createSandboxCommandReceiver } from "../daemon/sandboxCommands.js";
 import { createInventoryReporter, emptyInventorySource } from "../daemon/sandboxInventory.js";
@@ -389,7 +390,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
     const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ pushLog, capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), cloudOrigin: registration.cloud_origin, platform: host.platform, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
     const packageStoreRoot = path.join(path.dirname(mirrorsRoot), "pnpm-store");
-    const sandbox = createHostSandbox({
+    // D#587 B-5b: the one engine this run reports, gates jobs by and runs them in. This build starts jobs in the OS sandbox only, so it is `os_sandbox` whatever the machine could do.
+    const engine = chooseEngine(undefined, false);
+    const sandbox = selectSandbox(engine, { os_sandbox: createHostSandbox({
       credentials,
       platform: host.platform,
       wsl: host.sandbox.wsl,
@@ -405,7 +408,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       toolchainReadPaths: toolchainReadPaths(toolchain),
       packageStoreRoot,
       makeRuntime: (sandboxSettings, protectedPaths, jobEnv, runId) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: (event) => (usage.observe(event), relay.emit(runId, event)), onNearLimit: (info) => usage.warn(info), ...(jobEnv === undefined ? {} : { jobEnv }), ...(limits === undefined ? {} : { limits }), verifyServer: () => verifyLocal.verifyServer() }),
-    });
+    }) });
     const socketTooLong = Buffer.byteLength(socketPath(stateDir)) > MAX_SOCKET_PATH_BYTES;
     const tmuxBinary = host.selfCommand === undefined || socketTooLong ? undefined : findTmux(searchPath);
     if (host.selfCommand !== undefined && socketTooLong) ctx.out("fx-runner: the state directory path is too long for a tmux socket; jobs run without a watch session");
@@ -452,6 +455,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     // D#749 V2b: the local half of the post-merge verify stage. Off until the owner sets `verify.*` on this machine; what it advertises is decided by those settings and the probe.
     const verifyLocal = createVerifyLocal({ stateDir, uid: host.uid ?? -1, username: host.username ?? "", env: host.env ?? {}, platform: host.platform, capture: host.engine.installCapture, signal: stopped.signal, say: (line) => ctx.out(line), home, selfCommand: host.selfCommand, ...(ctx.bypass?.kind === "ok" && ctx.bypassFile !== undefined ? { bypass: { file: ctx.bypassFile, cloudOrigin: registration.cloud_origin } } : {}) });
     const handle = createJobHandler({
+      engine,
       browserReady: (method) => verifyLocal.browserReady(method),
       verifyAnswer: (runId) => readVerifyAnswer(path.join(ctx.stateDir, "jobs"), runId, host.uid),
       memoryOffer: createMemoryOffer(memoryOfferDeps),
@@ -542,7 +546,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       lastReason = first.open ? undefined : first.reason;
       // D#605 FL-2: say what this build and machine are, once per start, before the first claim. Best effort and no gate: a cloud that is older, a network
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
-      const facts = readHostFacts();
+      const facts = readHostFacts(engine);
       // D#749 V2b: the build's capabilities and, only while their settings and probe pass, `browser_chrome_v1` and `deploy_order_v1`. Said again when that set changes (see `betweenJobs`).
       const helloMessage = async () => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(await verifyLocal.capabilities())] });
       const firstHello = await helloMessage();

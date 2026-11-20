@@ -2,6 +2,7 @@ import { CONTEXT_LEVER_ENV } from "@fulcrumaxe/runner-protocol";
 import { OPERATOR_OAUTH_PLACEHOLDER } from "@fx/runtime/src/operatorSubscription.js";
 import type { Role } from "./types.js";
 import { PLANE_PUBLISH_ROLE } from "./sandboxNaming.js";
+import { GITHUB_FORWARDED_HOSTS, type NetworkPolicyRule } from "./networkPolicy.js";
 
 /**
  * D#2 H09 pass/fail 4: "The sandbox env for every role contains no value
@@ -96,26 +97,50 @@ export const SANDBOX_CA_ENV: Readonly<Record<string, string>> = Object.freeze({
  * non-secret env var would extend this function's explicit parameter list,
  * never reach for `process.env`.
  */
-export function buildSandboxEnv(role: Role, mode: SandboxEnvMode = "tenant_key"): Record<string, string> {
+/**
+ * D#587 B-5 (ruling 5): which engine's guest the env is for. `hosted` is the Vercel sandbox: its firewall terminates TLS with a per-sandbox CA, so the
+ * four CA variables above point tools at the system bundle. `microvm` trusts no extra CA (nothing terminates TLS), so those four are NOT set and guest
+ * tools use the image's own trust store; instead tools reach a rewritten host (the model, the proxy's forwarded hosts) by plain HTTP to the guest's
+ * relay on 127.0.0.1:80 (the reverse endpoint), and every other host through the CONNECT relay named by `HTTPS_PROXY` and `HTTP_PROXY`. The rewritten
+ * hosts are read from the sandbox's network rules, so a rule set and its env cannot disagree. One table per engine; the port checks the one it was built for.
+ */
+export type GuestEngine = { readonly kind: "hosted" } | { readonly kind: "microvm"; readonly rules: readonly NetworkPolicyRule[] };
+/** The guest-side CONNECT relay (it forwards to vsock 5253); the image's relay listens on the port of the vsock port it serves. */
+export const MICROVM_CONNECT_RELAY = "http://127.0.0.1:5253";
+
+/** The microVM engine's network variables for these rules. No CA variable is ever among them. */
+export function microvmNetworkEnv(rules: readonly NetworkPolicyRule[]): Record<string, string> {
+  const rewritten = [...new Set(rules.flatMap((r) => (r.purpose === "model" ? [r.host] : r.purpose === "github_proxy" ? [...GITHUB_FORWARDED_HOSTS] : [])))].sort();
+  const model = rules.find((r) => r.purpose === "model");
+  return {
+    HTTPS_PROXY: MICROVM_CONNECT_RELAY,
+    HTTP_PROXY: MICROVM_CONNECT_RELAY,
+    NO_PROXY: ["127.0.0.1", "localhost", ...rewritten].join(","),
+    ...(model === undefined ? {} : { ANTHROPIC_BASE_URL: `http://${model.host}` }),
+  };
+}
+
+export function buildSandboxEnv(role: Role, mode: SandboxEnvMode = "tenant_key", engine: GuestEngine = { kind: "hosted" }): Record<string, string> {
   // D#598 P1f-5a: the publish sandbox has no model connection, so it carries no model variable at all (not even the placeholders) and no
-  // operator mode. It holds only the CA paths; the proxy adds every GitHub credential outside the VM.
+  // operator mode. It holds only the network variables; the proxy adds every credential outside the VM.
+  const network = engine.kind === "hosted" ? { ...SANDBOX_CA_ENV } : microvmNetworkEnv(engine.rules);
   if (role === PLANE_PUBLISH_ROLE) {
     if (mode !== "tenant_key") throw new Error("buildSandboxEnv: the plane_publish role has no model connection");
-    return { ...SANDBOX_CA_ENV };
+    return network;
   }
   if (mode === "operator_subscription") {
     // Operator mode: the CLI believes it holds an OAuth token (so it sends the OAuth headers
     // itself) and the firewall swaps the Authorization header for ours. ANTHROPIC_AUTH_TOKEN is
     // left out: it outranks the OAuth slot in the CLI's credential order and would bypass it.
     return {
-      ...SANDBOX_CA_ENV,
+      ...network,
       ...CONTEXT_LEVER_ENV,
       [ANTHROPIC_API_KEY_EXEMPT_NAME]: "",
       [OPERATOR_OAUTH_ENV_NAME]: OPERATOR_OAUTH_PLACEHOLDER,
     };
   }
   return {
-    ...SANDBOX_CA_ENV,
+    ...network,
     ...CONTEXT_LEVER_ENV,
     [ANTHROPIC_API_KEY_EXEMPT_NAME]: "",
     [ANTHROPIC_AUTH_TOKEN_EXEMPT_NAME]: ANTHROPIC_AUTH_TOKEN_PLACEHOLDER,

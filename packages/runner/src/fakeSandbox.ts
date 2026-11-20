@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AgentRuntime, NormalizedEvent, Role } from "./types.js";
-import { OPERATOR_OAUTH_ENV_NAME, buildSandboxEnv } from "./sandboxEnv.js";
+import { OPERATOR_OAUTH_ENV_NAME, buildSandboxEnv, type GuestEngine } from "./sandboxEnv.js";
 import { PLANE_PUBLISH_ROLE } from "./sandboxNaming.js";
 import { toolsForRole } from "./agentConfig.js";
 // A cycle with vercelSandboxPort.ts (it imports assertSandboxEnvMatchesRole from here); the class is only used when a scripted create fails, never at load.
@@ -35,10 +35,10 @@ import {
  * `@vercel/sandbox` implementation ships here -- see sandboxPort.ts's
  * file header), so it is the one place that assertion belongs today.
  */
-export function assertSandboxEnvMatchesRole(role: Role, env: Record<string, string>): void {
+export function assertSandboxEnvMatchesRole(role: Role, env: Record<string, string>, engine: GuestEngine = { kind: "hosted" }): void {
   // Either of the two envs `buildSandboxEnv` can build; the operator one holds only the fixed placeholder.
   // The publish role has one env only: a smuggled operator variable then fails the comparison as an extra key.
-  const expected = role !== PLANE_PUBLISH_ROLE && Object.hasOwn(env, OPERATOR_OAUTH_ENV_NAME) ? buildSandboxEnv(role, "operator_subscription") : buildSandboxEnv(role);
+  const expected = role !== PLANE_PUBLISH_ROLE && Object.hasOwn(env, OPERATOR_OAUTH_ENV_NAME) ? buildSandboxEnv(role, "operator_subscription", engine) : buildSandboxEnv(role, "tenant_key", engine);
   const expectedKeys = Object.keys(expected).sort();
   const actualKeys = Object.keys(env).sort();
   const matches =

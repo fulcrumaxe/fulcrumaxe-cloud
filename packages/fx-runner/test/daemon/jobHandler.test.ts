@@ -181,6 +181,17 @@ describe("a verified job runs and is reported done", () => {
     expect(existsSync(rig.sessionsFile)).toBe(false);
   });
 
+  it("a job that requires a microVM runs on a handler whose engine is microvm, and not on one whose engine is left unset", async () => {
+    const asked = signedJob({ requires_engine: "microvm" });
+    const claimed: Claimed = { kind: "claimed", signedJob: asked, runId: asked.job.run_id, leaseGeneration: 1 };
+    const unset = makeRig();
+    expect((await unset.handle(claimed)).status).toBe("refused");
+    unset.ledger.close();
+    const vm = makeRig({ handler: { engine: "microvm" } });
+    expect((await vm.handle(claimed)).status).not.toBe("refused");
+    vm.ledger.close();
+  });
+
   it("the cloud's own verdict is reported, not assumed", async () => {
     const rig = makeRig();
     const claimed = await rig.claim();
@@ -200,6 +211,7 @@ describe("a job that fails verification never reaches runJob", () => {
     ["role tools hash", () => { const s = signRaw({ ...base, role_tools_sha256: "0".repeat(64) }); return { kind: "claimed", signedJob: s as never, runId: base.run_id, leaseGeneration: 1 }; }],
     ["repo not private", () => { const s = signRaw({ ...base, repo: { ...base.repo, private: false } }); return { kind: "claimed", signedJob: s as never, runId: base.run_id, leaseGeneration: 1 }; }],
     ["run id differs from the reply's", () => { const s = signedJob(); return { kind: "claimed", signedJob: s, runId: "11111111-1111-4111-8111-111111111111", leaseGeneration: 1 }; }],
+    ["requires a microVM, on an os_sandbox runner", () => { const s = signedJob({ requires_engine: "microvm" }); return { kind: "claimed", signedJob: s, runId: s.job.run_id, leaseGeneration: 1 }; }],
   ];
   // What each refusal says to the cloud (C24 section 1): the refusal code as the closed detail, and a public repository as its own reason.
   const ENDS: Array<{ reason: string; detail?: string }> = [
@@ -211,6 +223,7 @@ describe("a job that fails verification never reaches runJob", () => {
     { reason: "job_refused", detail: "role_tools_mismatch" },
     { reason: "repo_not_private" },
     { reason: "job_refused", detail: "run_id_mismatch" },
+    { reason: "job_refused", detail: "engine_required" },
   ];
   cases.forEach(([name, make], index) => {
     it(`${name}: refused, zero runJob calls, no sandbox, no workspace, and exactly one events call holding one run_ended`, async () => {
@@ -248,7 +261,7 @@ describe("a job that fails verification never reaches runJob", () => {
       rig.ledger.close();
       reasons.push(result.status === "refused" ? result.reason : result.status);
     }
-    expect(reasons).toEqual(["job_signature_invalid", "job_signature_invalid", "job_signature_invalid", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "repo_not_private", "run_id_mismatch"]);
+    expect(reasons).toEqual(["job_signature_invalid", "job_signature_invalid", "job_signature_invalid", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "repo_not_private", "run_id_mismatch", "engine_required"]);
   });
 
   it("an unknown role is refused on its own detail (the hash check names it)", async () => {
