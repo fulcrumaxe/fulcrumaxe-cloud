@@ -185,8 +185,21 @@ export interface AgentReply {
   blobs: Buffer[];
 }
 
+/** The most bytes of a subscription token the agent takes (MAX_TOKEN in agent.py). */
+export const TOKEN_MAX_BYTES = 4096;
+
+/** A token is 1..TOKEN_MAX_BYTES bytes of printable ASCII without a space, as the agent requires; nothing here names a byte of it. */
+export function checkToken(token: Buffer): void {
+  if (token.length < 1 || token.length > TOKEN_MAX_BYTES) throw new AgentError("bad_request");
+  for (const b of token) if (b < 0x21 || b > 0x7e) throw new AgentError("bad_request");
+}
+
 export interface ExecRequest {
   argv: string[];
+  /** Runs the command with the delivered subscription token in its environment (the agent reads it from its tmpfs file and removes the file). */
+  token?: boolean;
+  /** The guest user; the agent's default is the unprivileged one. A token launch as root is refused. */
+  user?: "root" | "ubuntu";
   env?: Record<string, string>;
   cwd?: string;
   stdin?: Buffer;
@@ -211,6 +224,10 @@ export interface GuestAgent {
   put(req: { path: string; mode?: number; size: number; content: FileContent }): Promise<void>;
   /** Reads one file into `sink` in pieces, awaiting it between pieces; resolves with the byte count. */
   get(path: string, sink: (chunk: Buffer) => void | Promise<void>): Promise<number>;
+  /** Pushes the subscription token to the guest's tmpfs. The caller's buffer is zeroed when this settles, whatever the outcome. */
+  putToken(token: Buffer): Promise<void>;
+  /** Asks the guest to remove the token and kill every process that holds it; call it before any snapshot. Rejects unless the guest says none is left. */
+  wipeToken(): Promise<{ removed: boolean; killed: number }>;
 }
 
 /** A transfer ends after this long in all; it also ends when `ioTimeoutMs` passes with no progress. */
@@ -314,10 +331,29 @@ export function createGuestAgent(connect: Connect, ioTimeoutMs = 30_000, transfe
         return n;
       });
     },
+    putToken: async (token) => {
+      try {
+        checkToken(token);
+        await transfer(async (socket, reader) => {
+          await writeAll(socket, frame({ op: "token_put", size: token.length }));
+          await writeAll(socket, token); // straight from the caller's buffer: no JSON field, no copy of ours
+          await readReply(reader);
+        });
+      } finally {
+        token.fill(0);
+      }
+    },
+    wipeToken: async () => {
+      const { header } = await request({ op: "token_wipe" }, Buffer.alloc(0), [], ioTimeoutMs);
+      const killed = intOrNull(header["killed"]);
+      if (typeof header["removed"] !== "boolean" || killed === null || killed < 0) throw new AgentError("bad_reply");
+      return { removed: header["removed"], killed };
+    },
     runInGuest: async (req) => {
+      if (req.token === true && req.user === "root") throw new AgentError("bad_request"); // a root descendant could leave the token's cgroup: refused before any connection
       const stdin = req.stdin ?? Buffer.alloc(0);
       const timeoutS = req.timeoutS ?? 600;
-      const { header, blobs } = await request({ op: "exec", argv: req.argv, env: req.env, cwd: req.cwd, timeout_s: timeoutS, stdin_size: stdin.length }, stdin, ["stdout_size", "stderr_size"], timeoutS * 1000 + ioTimeoutMs, req.onSent);
+      const { header, blobs } = await request({ op: "exec", argv: req.argv, env: req.env, cwd: req.cwd, timeout_s: timeoutS, stdin_size: stdin.length, ...(req.token === true ? { token: true } : {}), ...(req.user === undefined ? {} : { user: req.user }) }, stdin, ["stdout_size", "stderr_size"], timeoutS * 1000 + ioTimeoutMs, req.onSent);
       const timedOut = header["timed_out"] === true;
       return { exit: timedOut ? null : intOrNull(header["exit"]), signal: intOrNull(header["signal"]), timedOut, stdout: blobs[0] ?? Buffer.alloc(0), stderr: blobs[1] ?? Buffer.alloc(0) };
     },

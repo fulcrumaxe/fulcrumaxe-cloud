@@ -28,7 +28,7 @@ export interface InventoryRow { name: string; state: SandboxState; createdAt: nu
 /** `status` is the HTTP status the overlay's contract names (a taken name is 400 `bad_request`); `code` is fixed text. */
 export class SandboxdError extends Error {
   /** `detail` is numbers only (a snapshot refusal names the two it compared); it never carries a path or anything the helper sent. */
-  constructor(readonly status: number, readonly code: "bad_request" | "not_found" | "conflict" | "not_running" | "vsock_dir_refused" | "agent_not_ready" | "helper_failed" | "snapshot_refused" | "snapshot_mismatch", readonly detail?: string) {
+  constructor(readonly status: number, readonly code: "bad_request" | "not_found" | "conflict" | "not_running" | "vsock_dir_refused" | "agent_not_ready" | "helper_failed" | "snapshot_refused" | "snapshot_mismatch" | "token_wipe_failed", readonly detail?: string) {
     super(detail === undefined ? `fx-sandboxd: ${code}` : `fx-sandboxd: ${code}: ${detail}`);
     this.name = "SandboxdError";
   }
@@ -87,6 +87,12 @@ interface Record_ {
   resuming?: Promise<void>;
   /** The boot in flight (create or resume), so a teardown can wait for it instead of racing it. */
   bringing?: Promise<void>;
+  /** A token was pushed to this VM and not yet wiped: set before the first byte is sent, so a delivery that fails half way is still wiped. */
+  tokenHeld?: boolean;
+  /** Token deliveries in flight: a snapshot stop waits for them (bounded) before it wipes. */
+  delivering?: Set<Promise<void>>;
+  /** A stop has begun: no new delivery is taken. */
+  stopRequested?: boolean;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -106,6 +112,8 @@ export class Sandbox {
   get status(): SandboxState { return this.daemon.stateOf(this.name); }
   runCommand(spec: CommandSpec & { signal?: AbortSignal }): Promise<SandboxdCommand> { return this.daemon.runCommand(this.name, spec); }
   writeFiles(files: WriteFile[]): Promise<void> { return this.daemon.writeFiles(this.name, files); }
+  /** Takes ownership of `token`: it is zeroed once sent. */
+  deliverToken(token: Buffer): Promise<void> { return this.daemon.deliverToken(this.name, token); }
   readFile(path: string, sink: (chunk: Buffer) => void | Promise<void>): Promise<number> { return this.daemon.readFile(this.name, path, sink); }
   stop(): Promise<void> { return this.daemon.stop(this.name); }
   delete(): Promise<void> { return this.daemon.delete(this.name); }
@@ -363,6 +371,39 @@ export class Sandboxd {
     for (const file of plan) await agent.put(file);
   }
 
+  /**
+   * Pushes the subscription token into the guest's tmpfs (D#587 B-6.4); the host connects, the guest never asks. A token delivered here is wiped
+   * (file removed, holders killed) before any snapshot of this sandbox, and a snapshot is refused if the wipe cannot be confirmed. `token` is
+   * zeroed when this settles. A delivery that fails is wiped on a best-effort basis, and the error is the agent's fixed one.
+   */
+  async deliverToken(name: string, token: Buffer): Promise<void> {
+    let agent: GuestAgent;
+    try {
+      agent = this.runningAgent(name);
+      if (this.get_(name).stopRequested === true) throw new SandboxdError(409, "not_running"); // a stop has begun: a token that lands after its wipe would be snapshotted
+    } catch (err) {
+      token.fill(0);
+      throw err;
+    }
+    const rec = this.get_(name);
+    rec.tokenHeld = true;
+    const delivery = (async (): Promise<void> => {
+      try {
+        await agent.putToken(token);
+      } catch (err) {
+        // fx-swallow-ok: the put's own error is the one the caller gets; tokenHeld stays set when the wipe is not confirmed
+        await agent.wipeToken().then(() => void (rec.tokenHeld = false), () => undefined);
+        throw err;
+      }
+    })();
+    (rec.delivering ??= new Set()).add(delivery);
+    try {
+      await delivery;
+    } finally {
+      rec.delivering.delete(delivery);
+    }
+  }
+
   /** Streams one guest file into `sink` and resolves with its size. */
   async readFile(name: string, path: string, sink: (chunk: Buffer) => void | Promise<void>): Promise<number> {
     const agent = this.runningAgent(name);
@@ -384,7 +425,7 @@ export class Sandboxd {
     await this.records.get(name)?.bringing?.catch(() => undefined); // fx-swallow-ok: the create's own caller has the error; this only waits for it to end
     const rec = this.records.get(name);
     if (rec !== undefined && rec.state !== "creating" && rec.state !== "stopped") {
-      rec.stopping ??= this.stopNow(rec, false).finally(() => (rec.stopping = undefined)); // never a snapshot: nobody asked for one, and it would write the guest's whole RAM
+      rec.stopping ??= this.beginStop(rec, false); // never a snapshot: nobody asked for one, and it would write the guest's whole RAM
       await rec.stopping.catch(() => undefined); // fx-swallow-ok: the destroy below is the real attempt, and the result is what is returned
     }
     if (this.registered.has(name)) await this.destroyQuietly(name);
@@ -401,8 +442,17 @@ export class Sandboxd {
     const rec = this.get_(name);
     if (rec.state === "stopped") return Promise.resolve();
     if (rec.state === "creating") return Promise.reject(new SandboxdError(409, "conflict"));
-    rec.stopping ??= this.stopNow(rec, this.persistent(rec)).finally(() => (rec.stopping = undefined));
+    rec.stopping ??= this.beginStop(rec, this.persistent(rec));
     return rec.stopping;
+  }
+
+  /** The stop is requested in this same step (the state stays `running` while a snapshot is admitted), so a token delivery that comes after it is refused. */
+  private beginStop(rec: Record_, snapshot: boolean): Promise<void> {
+    rec.stopRequested = true;
+    return this.stopNow(rec, snapshot).finally(() => {
+      rec.stopping = undefined;
+      rec.stopRequested = false;
+    });
   }
 
   /**
@@ -437,13 +487,34 @@ export class Sandboxd {
     await Promise.allSettled([...rec.commands].map((c) => c.kill("SIGKILL")));
     await within(Promise.allSettled([...rec.commands].map((c) => c.wait())), this.deps.pollMs ?? 100);
     rec.commands.clear();
-    if (reservation !== undefined) return this.snapshotNow(rec, reservation);
+    if (reservation !== undefined) {
+      // a delivery already in flight lands (or is given up on) before the wipe; one that is still pending after the bound means no snapshot
+      await within(Promise.allSettled([...(rec.delivering ?? [])]), this.deps.startWaitMs ?? 30_000);
+      if ((rec.delivering?.size ?? 0) > 0 || (rec.tokenHeld === true && !(await this.wipeBeforeSnapshot(rec)))) {
+        await this.destroyQuietly(name); // no snapshot of a guest that may still hold the token: the VM goes, and its RAM with it
+        rec.state = this.registered.has(name) ? "running" : "stopped";
+        throw new SandboxdError(502, "token_wipe_failed");
+      }
+      return this.snapshotNow(rec, reservation);
+    }
     await this.destroyQuietly(name);
     if (this.registered.has(name)) {
       rec.state = "running"; // the helper still holds the VM: say so, and let the caller try again
       throw new SandboxdError(502, "helper_failed");
     }
     rec.state = "stopped";
+  }
+
+  /** True when the guest confirmed that no token file and no holder is left. */
+  private async wipeBeforeSnapshot(rec: Record_): Promise<boolean> {
+    try {
+      await (rec.agent as GuestAgent).wipeToken();
+      rec.tokenHeld = false;
+      return true;
+    } catch {
+      // fx-swallow-ok: not confirmed means no snapshot; the caller destroys the VM and reports one fixed code
+      return false;
+    }
   }
 
   /**
@@ -493,7 +564,7 @@ export class Sandboxd {
     if (rec === undefined) return; // idempotent, as on Vercel
     if (rec.state === "creating") throw new SandboxdError(409, "conflict");
     if (rec.state !== "stopped") {
-      rec.stopping ??= this.stopNow(rec, false).finally(() => (rec.stopping = undefined));
+      rec.stopping ??= this.beginStop(rec, false);
       await rec.stopping;
     }
     if (this.registered.has(name)) await this.destroyQuietly(name); // a persistent one is still prepared on the helper

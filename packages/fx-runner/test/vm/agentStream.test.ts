@@ -82,7 +82,7 @@ describe.skipIf(skip)("agent.py streaming exec and kill", () => {
   });
 
   it("advertises the streaming ops without changing the protocol number", async () => {
-    expect(await a.client.ping()).toEqual({ ok: true, proto: 1, caps: ["exec_stream", "kill"] });
+    expect(await a.client.ping()).toEqual({ ok: true, proto: 1, caps: ["exec_stream", "kill", "token"] });
   });
 
   it("delivers stdout and stderr as ordered frames while the process runs, and the exit exactly once at the end", async () => {
