@@ -114,6 +114,8 @@ export class Sandbox {
   writeFiles(files: WriteFile[]): Promise<void> { return this.daemon.writeFiles(this.name, files); }
   /** Takes ownership of `token`: it is zeroed once sent. */
   deliverToken(token: Buffer): Promise<void> { return this.daemon.deliverToken(this.name, token); }
+  /** Removes the token and kills every holder; resolves only when the guest confirms none is left (`token_wipe_failed` otherwise). */
+  wipeToken(): Promise<void> { return this.daemon.wipeToken(this.name); }
   readFile(path: string, sink: (chunk: Buffer) => void | Promise<void>): Promise<number> { return this.daemon.readFile(this.name, path, sink); }
   stop(): Promise<void> { return this.daemon.stop(this.name); }
   delete(): Promise<void> { return this.daemon.delete(this.name); }
@@ -402,6 +404,14 @@ export class Sandboxd {
     } finally {
       rec.delivering.delete(delivery);
     }
+  }
+
+  /** An explicit wipe: a delivery in flight lands (or is given up on, bounded) first, then the guest must confirm that no file and no holder is left. */
+  async wipeToken(name: string): Promise<void> {
+    const rec = this.get_(name);
+    this.runningAgent(name);
+    await within(Promise.allSettled([...(rec.delivering ?? [])]), this.deps.startWaitMs ?? 30_000);
+    if ((rec.delivering?.size ?? 0) > 0 || !(await this.wipeBeforeSnapshot(rec))) throw new SandboxdError(502, "token_wipe_failed");
   }
 
   /** Streams one guest file into `sink` and resolves with its size. */
