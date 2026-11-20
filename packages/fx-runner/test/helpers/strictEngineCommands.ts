@@ -8,6 +8,7 @@ import {
   EngineCommandsPullRequest,
   EngineDecideReply,
   EngineDecideRequest,
+  isBridgeCommandKind,
   jwkThumbprint,
   signEngineCommand,
   verifyRunnerRequest,
@@ -34,7 +35,7 @@ export interface FakeCommands {
   allowedRepos: Array<{ repo_gh_id: number; full_name: string }> | undefined;
   delivered: Set<string>;
   acks: Array<{ id: string; ack: EngineCommandAck }>;
-  pulls: Array<{ repo_gh_ids: number[]; after_seq: Record<string, number> }>;
+  pulls: Array<{ repo_gh_ids: number[]; after_seq: Record<string, number>; bridged?: Array<{ repo_gh_id: number; root?: string | undefined }> | undefined; bridge_commands?: true | undefined }>;
   decides: EngineDecideRequest[];
   decideAnswer: { status: number; body: unknown };
   /** Consumed one per request, before the contract's own answer. */
@@ -138,7 +139,9 @@ export async function startFakeCommands(): Promise<FakeCommands> {
       if (!body.success) return reply(res, 400, { error: "invalid_message" });
       fake.pulls.push(body.data);
       const asked = new Set(body.data.repo_gh_ids);
-      const due = fake.queue.filter((c) => asked.has(c.repo_gh_id) && c.command_seq > (body.data.after_seq[String(c.repo_gh_id)] ?? 0)).sort((a, b) => a.command_seq - b.command_seq);
+      // As the cloud does: a bridge command is the runner's own, delivered only to a pull that asks for them (whatever repos it names), and never to the engine's per-repo pull.
+      const wantsBridge = body.data.bridge_commands === true;
+      const due = fake.queue.filter((c) => (isBridgeCommandKind(c.kind) ? wantsBridge : asked.has(c.repo_gh_id) && c.command_seq > (body.data.after_seq[String(c.repo_gh_id)] ?? 0))).sort((a, b) => a.command_seq - b.command_seq);
       fake.queue = fake.queue.filter((c) => !due.includes(c));
       for (const c of due) fake.delivered.add(c.command_id);
       const controls = body.data.repo_gh_ids.flatMap((id) => (fake.controls.has(id) ? [{ repo_gh_id: id, ...fake.controls.get(id)! }] : []));
