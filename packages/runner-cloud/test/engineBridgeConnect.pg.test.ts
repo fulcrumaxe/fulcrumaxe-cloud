@@ -214,6 +214,41 @@ describe("engine bridge connect: pull, ack and report [pg]", () => {
       expect((await ack(disable, { outcome: "applied" })).status).toBe(200);
     });
 
+    it("ON-BR-4: a not_found with incomplete: true is stored whole from a runner at 26; a runner below 26 sending it is refused and nothing is stored; one without the key is stored as before", async () => {
+      const body = { outcome: "refused", refusal: "checkout_not_found", result: "not_found", incomplete: true };
+      const old = await delivered();
+      expect((await ack(old, body)).status).toBe(400);
+      expect(await row(old)).toMatchObject({ state: "delivered", ack_result: null });
+      expect((await ack(old, { outcome: "refused", refusal: "checkout_not_found", result: "not_found" })).status).toBe(200);
+      expect((await row(old)).ack_result).toEqual({ result: "not_found" });
+      await setProtocol(runnerId, 26);
+      try {
+        const id = await delivered();
+        expect((await ack(id, body)).status).toBe(200);
+        expect(await row(id)).toMatchObject({ state: "refused", refusal: "checkout_not_found", ack_result: { result: "not_found", incomplete: true } });
+        const withSkipped = await delivered();
+        expect((await ack(withSkipped, { ...body, skipped: ["/work/skipped/widgets"] })).status).toBe(200);
+        expect((await row(withSkipped)).ack_result).toEqual({ result: "not_found", skipped: ["/work/skipped/widgets"], incomplete: true });
+        const amb = await delivered();
+        expect((await ack(amb, { outcome: "refused", refusal: "checkout_ambiguous", result: "ambiguous", candidates: ["/work/a", "/work/b"], incomplete: true })).status).toBe(400);
+      } finally {
+        await setProtocol(runnerId, 24);
+      }
+    });
+
+    it("ON-BR-4: the table itself holds incomplete to the boolean true on a not_found, and rows without it stay valid", async () => {
+      const set = async (json: string) => {
+        const id = await command();
+        await h.admin.query("UPDATE engine_commands SET state = 'delivered', delivered_at = now() WHERE id = $1", [id]);
+        return h.admin.query(`UPDATE engine_commands SET state = 'refused', refusal = 'checkout_not_found', acked_at = now(), ack_result = $2::jsonb WHERE id = $1`, [id, json]);
+      };
+      await expect(set('{"result":"not_found","incomplete":true}')).resolves.toBeTruthy();
+      await expect(set('{"result":"not_found"}')).resolves.toBeTruthy();
+      for (const bad of ['{"result":"not_found","incomplete":false}', '{"result":"not_found","incomplete":"true"}', '{"result":"not_found","incomplete":1}', '{"result":"ambiguous","candidates":["/work/a","/work/b"],"incomplete":true}', '{"result":"refused","incomplete":true}']) {
+        await expect(set(bad), bad).rejects.toThrow();
+      }
+    });
+
     it("one ack per command, and another runner's ack is 404", async () => {
       const id = await delivered();
       expect((await ack(id, { outcome: "applied", result: "already_connected" }, keyB)).status).toBe(404);

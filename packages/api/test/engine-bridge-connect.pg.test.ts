@@ -377,6 +377,25 @@ describe('engine bridge connect: the routes [pg]', () => {
       expect([picked.status, await code(picked)]).toEqual([400, 'root_not_offered']);
     });
 
+    it('ON-BR-4: a not_found from a capped search reads back `incomplete: true` to an owner and to a member (it is no folder), an uncapped one and any other answer read false, and the phase stays not_found', async () => {
+      const f = await fixture();
+      const c = (await (await connect(f.owner, f.repo)).json()) as { command_id: string };
+      await answer(c.command_id, 'refused', { result: 'not_found', incomplete: true }, 'checkout_not_found');
+      for (const who of [f.owner, f.member]) {
+        const v = (await view(who, f.repo)) as unknown as { phase: string; command: { incomplete: boolean; candidates: string[]; skipped: string[] } };
+        expect(v.phase).toBe('not_found');
+        expect(v.command).toMatchObject({ incomplete: true, candidates: [], skipped: [] });
+      }
+      const g = await fixture();
+      const c2 = (await (await connect(g.owner, g.repo)).json()) as { command_id: string };
+      await answer(c2.command_id, 'refused', { result: 'not_found' }, 'checkout_not_found');
+      expect(((await view(g.owner, g.repo)) as unknown as { command: { incomplete: boolean } }).command.incomplete).toBe(false);
+      const h = await fixture();
+      const c3 = (await (await connect(h.owner, h.repo)).json()) as { command_id: string };
+      await answer(c3.command_id, 'refused', { result: 'ambiguous', candidates: ['/home/me/a/site', '/home/me/b/site'] }, 'checkout_ambiguous');
+      expect(((await view(h.owner, h.repo)) as unknown as { command: { incomplete: boolean } }).command.incomplete).toBe(false);
+    });
+
     it('404 for a repo that is not the account\'s; a token is refused', async () => {
       const f = await fixture();
       const other = await fixture();

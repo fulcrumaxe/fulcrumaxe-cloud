@@ -32,7 +32,7 @@ const merged = (seq: number) => ({ ...valid("merged"), seq });
 
 describe("protocol 20", () => {
   it("is the current version, with the capability, and never cuts an older runner off", () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(25);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(26);
     expect(ENGINE_BRIDGE_MIN_PROTOCOL).toBe(20);
     expect(RUNNER_CAPABILITIES).toContain("engine_bridge_v1");
     expect(ENGINE_BRIDGE_CAPABILITY).toBe("engine_bridge_v1");

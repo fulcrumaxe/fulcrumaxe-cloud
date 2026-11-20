@@ -33,6 +33,8 @@ const commandSchema = z.object({
   candidates: z.array(z.string()),
   /** Copies the runner skipped as unsafe: shown as information, never pickable. Owner or admin only. */
   skipped: z.array(z.string()),
+  /** True when a not_found answer came from a search that hit its cap: the screen says the search was cut short. Not a folder, so a member sees it too. */
+  incomplete: z.boolean(),
   issued_at: z.string(),
   expires_at: z.string(),
   acked_at: z.string().nullable(),
@@ -86,7 +88,7 @@ export const engineBridgeConnectRoutes: RouteEntry[] = [
               ? null
               : {
                   id: command.id, kind: command.kind, runner_id: command.runner_id, runner_name: names.get(command.runner_id) ?? null, state: command.state, result: command.result, refusal: command.refusal,
-                  root_tail: command.root_tail, candidates: sees ? command.candidates : [], skipped: sees ? command.skipped : [], issued_at: command.issued_at.toISOString(), expires_at: command.expires_at.toISOString(), acked_at: command.acked_at?.toISOString() ?? null,
+                  root_tail: command.root_tail, candidates: sees ? command.candidates : [], skipped: sees ? command.skipped : [], incomplete: command.incomplete, issued_at: command.issued_at.toISOString(), expires_at: command.expires_at.toISOString(), acked_at: command.acked_at?.toISOString() ?? null,
                 },
         };
       });

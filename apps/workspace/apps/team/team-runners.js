@@ -93,7 +93,7 @@ export const BRIDGE_WORDS = {
   title: "Connect this repo's engine",
   connect: "Connect", disconnect: "Disconnect", cancel: "Cancel", tryAgain: "Try again", connectThis: "Connect this one",
   copyDetails: "Copy details", detailsCopied: "Copied", detailsFailed: "Couldn't copy. Select the code and copy it by hand.",
-  pickRunner: "Which runner?", pickFolder: "Folder", giveFolder: "Or type the folder this repo is in on that computer", folderHint: "/path/to/the/checkout",
+  pickRunner: "Which runner?", pickFolder: "Folder", giveFolder: "Or type the folder, to get a command you can run yourself", folderHint: "/path/to/the/checkout",
   readFailed: "Couldn't check whether this repo is connected.",
   copy: "Copy command", copied: "Copied", copyFailed: "Couldn't copy. Select the command and copy it by hand.",
   waiting: "Still waiting for ", waitingTail: ". Is it running?",
@@ -112,6 +112,8 @@ export const BRIDGE_WORDS = {
   memberPick: "An owner or an admin can pick which copy to use.",
   alreadyHas: "The runner already has this request. Wait for its answer.",
   incompleteTail: ". If it is the right one, confirm it:",
+  cutShort: ", but its search was cut short, so a copy may be somewhere it did not reach. Type the folder below to get a command you can run yourself.",
+  cutShortMember: ", but its search was cut short, so a copy may be somewhere it did not reach. An owner or an admin can give the folder.",
 };
 const REFUSALS = {
   checkout_layout_unexpected: "A copy of this repo was found, but it is not set up for the engine (no usable .autonomous-team/project.json). Set it up with coldstart, or give the folder.",
@@ -159,7 +161,7 @@ export function readBridge(raw) {
     command = {
       id: c.id, kind: c.kind, runnerId: str(c.runner_id) || "", runnerName: str(c.runner_name) || "your runner", state: str(c.state) || "", result: str(c.result) || "", refusal: str(c.refusal) || "", tail: str(c.root_tail) || "",
       candidates: Array.isArray(c.candidates) ? c.candidates.filter((p) => typeof p === "string" && ABS.test(p)).slice(0, 10) : [],
-      skipped: Array.isArray(c.skipped) ? c.skipped.filter((p) => typeof p === "string" && ABS.test(p)).slice(0, 10) : [], issuedAt: Date.parse(c.issued_at) || 0,
+      skipped: Array.isArray(c.skipped) ? c.skipped.filter((p) => typeof p === "string" && ABS.test(p)).slice(0, 10) : [], incomplete: c.incomplete === true, issuedAt: Date.parse(c.issued_at) || 0,
     };
   }
   return { phase: raw.phase, plan: raw.plan, runners, connected, command };
@@ -212,7 +214,7 @@ export function bridgeView(bridge, { repoName, canEdit, nowMs }) {
     case "disconnect_refused": // the runner would not disconnect: it says why, and the button is there to ask again
       return { ...base, kind: "disconnect_refused", text: "Disconnect refused: " + (REFUSALS[c.refusal] || W.failed), canDisconnect: canEdit };
     case "not_found": // the folders it skipped are shown to read, not to pick: a pick of an unsafe copy is refused, so the way forward is chmod or the command
-      return { ...base, kind: "not_found", retry, text: runnerName + " looked on this computer and found no copy of " + repoName, command: fallback, folderBox: canEdit, skipped: rows.length ? W.skipped : "", rows, canPick: false };
+      return { ...base, kind: "not_found", retry, text: runnerName + " looked on this computer and found no copy of " + repoName + (c.incomplete ? (canEdit ? W.cutShort : W.cutShortMember) : ""), cutShort: !!c.incomplete, command: fallback, folderBox: canEdit, skipped: rows.length ? W.skipped : "", rows, canPick: false };
     case "ambiguous":
       return { ...base, kind: "ambiguous", text: runnerName + " found more than one copy of " + repoName + (canEdit ? ". Which one?" : ". " + W.memberPick), rows, canPick: canEdit && rows.length > 0, command: fallback };
     case "incomplete":

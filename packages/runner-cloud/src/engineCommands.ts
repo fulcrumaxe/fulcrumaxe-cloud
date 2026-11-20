@@ -1,4 +1,4 @@
-import { BRIDGE_COMMAND_KINDS, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, commandSendableTo, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand } from "@fulcrumaxe/runner-protocol";
+import { BRIDGE_COMMAND_KINDS, BRIDGE_INCOMPLETE_ACK_PROTOCOL, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, commandSendableTo, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand } from "@fulcrumaxe/runner-protocol";
 import { START_LIKE_KINDS, readHaltStates } from "@fx/db/src/engineCommands.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import type { PoolClient } from "pg";
@@ -197,13 +197,15 @@ export async function ackEngineCommand(deps: RunnerCloudDeps, req: RunnerHttpReq
   if (!UUID.test(commandId)) throw new RunnerHttpError(404, "not_found", "no such command");
   const ack = parseMessage(EngineCommandAck, parseJsonBody(req));
   const id = commandId.toLowerCase();
-  const stored = ack.result === undefined ? null : { result: ack.result, ...(ack.root_tail === undefined ? {} : { root_tail: ack.root_tail }), ...(ack.candidates === undefined ? {} : { candidates: ack.candidates }), ...(ack.skipped === undefined ? {} : { skipped: ack.skipped }) };
+  const stored = ack.result === undefined ? null : { result: ack.result, ...(ack.root_tail === undefined ? {} : { root_tail: ack.root_tail }), ...(ack.candidates === undefined ? {} : { candidates: ack.candidates }), ...(ack.skipped === undefined ? {} : { skipped: ack.skipped }), ...(ack.incomplete === undefined ? {} : { incomplete: ack.incomplete }) };
   await asRunner(() =>
     withRunnerSession(deps.appUserPool, runner, async (client) => {
       // A result belongs to `bridge_enable` alone, and an enable that was applied, or refused for a bridge reason, always carries one (D#845 ON-BR-2).
       const kindOf = (await client.query<{ kind: string }>("SELECT kind FROM engine_commands WHERE id = $1 AND runner_id = $2", [id, runner.runnerId])).rows[0]?.kind;
       if (kindOf !== undefined) {
         const needsResult = kindOf === "bridge_enable" && (ack.outcome === "applied" || (ack.refusal !== undefined && (BRIDGE_REFUSALS as readonly string[]).includes(ack.refusal)));
+        // `incomplete` is the one key a runner below protocol 26 never sends: from an older hello it is a bad message, not a stored claim (ON-BR-4).
+        if (ack.incomplete !== undefined && ((await client.query<{ protocol_version: number | null }>("SELECT protocol_version FROM runners WHERE id = $1 AND account_id = $2", [runner.runnerId, runner.accountId])).rows[0]?.protocol_version ?? 0) < BRIDGE_INCOMPLETE_ACK_PROTOCOL) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
         if ((ack.result !== undefined && kindOf !== "bridge_enable") || (needsResult && ack.result === undefined)) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
       }
       const moved = await client.query<{ repo_id: string; kind: string }>(

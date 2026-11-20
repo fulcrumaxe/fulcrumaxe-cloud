@@ -24,6 +24,8 @@ export const BRIDGE_REFUSALS = [
   "engine_version_unusable", "state_dir_missing", "state_dir_unreadable", "state_dir_shared", "state_dir_reserved", "state_dir_unchecked", "too_many_repos", "settings_damaged", "bridge_failed",
 ] as const;
 export type BridgeRefusal = (typeof BRIDGE_REFUSALS)[number];
+/** The first protocol whose runner may send `incomplete` on an ack (ON-BR-4). Named without `MIN_PROTOCOL` on purpose: the bridge's own minimum stays the highest one in messages.ts. */
+export const BRIDGE_INCOMPLETE_ACK_PROTOCOL = 26;
 /** What an enable answers with, beside its outcome. `connected` and `already_connected` are applied; the other three are refused. */
 export const BRIDGE_RESULTS = ["connected", "not_found", "ambiguous", "refused", "already_connected"] as const;
 export const ENGINE_ASK_CHOICES = ["approve", "decline", "defer"] as const;
@@ -180,7 +182,7 @@ export type EngineCommandsPullReply = z.infer<typeof EngineCommandsPullReply>;
 /**
  * POST /api/runner/engine/commands/:id/ack. A refusal reason goes with `refused` and with nothing that was applied. A `bridge_enable` ack also carries a `result` (D#845 ON-BR-2):
  * `connected` and `already_connected` are applied, `connected` with the chosen folder's last two parts; `not_found`, `ambiguous` and `refused` are refused, `ambiguous` with the folders (at most 10)
- * the person may pick from. `not_found` may list the copies it skipped as unsafe in `skipped` (information only, never pickable, ruling 9), and `refused` with `checkout_incomplete` carries the one it found in `candidates`; a candidate is offered for a pick, never adopted.
+ * the person may pick from. `not_found` may list the copies it skipped as unsafe in `skipped` (information only, never pickable, ruling 9) and says `incomplete: true` when its search hit a cap (ON-BR-4), and `refused` with `checkout_incomplete` carries the one it found in `candidates`; a candidate is offered for a pick, never adopted.
  */
 export const EngineCommandAck = strict({
   outcome: z.enum(ENGINE_COMMAND_OUTCOMES),
@@ -190,11 +192,13 @@ export const EngineCommandAck = strict({
   candidates: z.array(RepoRoot).min(1).max(10).optional(),
   /** Copies the scan skipped as unsafe (others can write in them): shown for information, never pickable (ruling 9). Only with `not_found`. */
   skipped: z.array(RepoRoot).min(1).max(10).optional(),
+  /** True when the scan that found nothing was cut short by its time or entry cap, so a copy may exist past it (ON-BR-4). Only `true`, only with `not_found`; absent otherwise. A runner at protocol 26 or later may send it. */
+  incomplete: z.literal(true).optional(),
 }).superRefine((ack, ctx) => {
   const bad = (message: string, at: string): void => ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: [at] });
   if ((ack.outcome === "refused" && ack.refusal === undefined) || (ack.outcome === "applied" && ack.refusal !== undefined)) bad("a refused ack names its reason and an applied one names none", "refusal");
   if (ack.result === undefined) {
-    if (ack.root_tail !== undefined || ack.candidates !== undefined || ack.skipped !== undefined) bad("a folder goes with a result", ack.root_tail !== undefined ? "root_tail" : ack.candidates !== undefined ? "candidates" : "skipped");
+    if (ack.root_tail !== undefined || ack.candidates !== undefined || ack.skipped !== undefined || ack.incomplete !== undefined) bad("a folder goes with a result", ack.root_tail !== undefined ? "root_tail" : ack.candidates !== undefined ? "candidates" : ack.skipped !== undefined ? "skipped" : "incomplete");
     return;
   }
   const applied = ack.result === "connected" || ack.result === "already_connected";
@@ -204,6 +208,7 @@ export const EngineCommandAck = strict({
   if (applied && ack.candidates !== undefined) bad("a connected repo offers no folders", "candidates");
   if (ack.result === "not_found" && (ack.refusal !== "checkout_not_found" || ack.candidates !== undefined)) bad("not_found is refused checkout_not_found and offers nothing to pick", "refusal");
   if (ack.result !== "not_found" && ack.skipped !== undefined) bad("only not_found lists skipped copies", "skipped");
+  if (ack.result !== "not_found" && ack.incomplete !== undefined) bad("only not_found can say the search was cut short", "incomplete");
   if (ack.result === "ambiguous" && (ack.refusal !== "checkout_ambiguous" || (ack.candidates?.length ?? 0) < 2)) bad("ambiguous is refused checkout_ambiguous with at least two folders", "candidates");
   if (ack.result === "refused" && (ack.refusal === undefined || !(BRIDGE_REFUSALS as readonly string[]).includes(ack.refusal) || ack.refusal === "checkout_not_found" || ack.refusal === "checkout_ambiguous")) bad("a refused result names one of the bridge refusals", "refusal");
 });

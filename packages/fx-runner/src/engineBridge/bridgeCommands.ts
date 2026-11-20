@@ -29,7 +29,7 @@ export const OFFER_WINDOW_MS = 600_000;
 const PROBE_ID = Number.MAX_SAFE_INTEGER;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export type EnableOutcome = { ok: true; root: string } | { ok: false; code: BridgeRefusal; candidates: readonly string[] };
+export type EnableOutcome = { ok: true; root: string } | { ok: false; code: BridgeRefusal; candidates: readonly string[]; /** The scan hit its cap before it found a copy (only with `checkout_not_found`). */ incomplete?: boolean };
 /** What the runner can do to its own settings, bound by the entry point to `enableRepo` and `disableRepos` of the command line. */
 export interface BridgeApply {
   /** Enables the repo as `engine-bridge enable --repo <full_name>` would, with `root` as `--repo-root` when the person picked one. Never throws. */
@@ -74,7 +74,7 @@ export function ackForEnable(outcome: EnableOutcome): EngineCommandAck {
   const code = outcome.code;
   const attempt =
     code === "checkout_not_found"
-      ? { outcome: "refused", refusal: code, result: "not_found", ...(candidates.length === 0 ? {} : { skipped: candidates }) }
+      ? { outcome: "refused", refusal: code, result: "not_found", ...(candidates.length === 0 ? {} : { skipped: candidates }), ...(outcome.incomplete === true ? { incomplete: true } : {}) }
       : code === "checkout_ambiguous"
         ? { outcome: "refused", refusal: code, result: "ambiguous", ...base }
         : { outcome: "refused", refusal: code, result: "refused", ...(code === "checkout_incomplete" ? base : {}) };

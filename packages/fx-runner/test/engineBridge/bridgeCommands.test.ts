@@ -52,8 +52,8 @@ function command(kind: "bridge_enable" | "bridge_disable", args: Record<string, 
   const body = { v: 1, purpose: "engine_command_v1", command_id: randomUUID(), command_seq: ++seq, runner_id: RUNNER_ID, repo_gh_id: REPO, kind, args, issued_by: randomUUID(), issued_at: issued.toISOString(), expires_at: new Date(issued.getTime() + 600_000).toISOString(), halt_epoch: 0, ...over };
   return signEngineCommand(EngineCommand.parse(body), "job-key-1", privateKey);
 }
-const puller = (): BridgeCommandPuller => {
-  const apply = createBridgeApply({ stateDir: runnerState, uid, now: () => clock.now(), options: options() });
+const puller = (opts: EngineBridgeCommandOptions = options()): BridgeCommandPuller => {
+  const apply = createBridgeApply({ stateDir: runnerState, uid, now: () => clock.now(), options: opts });
   return new BridgeCommandPuller({
     post: async (p, body) => {
       if (p === PULL_PATH) {
@@ -128,6 +128,17 @@ describe("bridge_enable: finding the checkout", () => {
     await handle(puller(), command("bridge_enable"));
     expect(lastAck()).toEqual({ outcome: "refused", refusal: "checkout_not_found", result: "not_found" });
     expect(settingsBytes()).toBe("");
+  });
+
+  it("ON-BR-4: a search that hit its entry cap and found nothing says `incomplete: true`; one that finished says nothing of the kind", async () => {
+    let first = true;
+    const flood = { readDir: () => (first ? ((first = false), Array.from({ length: 25000 }, (_, i) => ({ name: `n${i}`, isDirectory: false }))) : []) };
+    await handle(puller({ ...options(), discovery: { cwd: undefined, searchRoots: undefined, ops: flood } }), command("bridge_enable"));
+    expect(lastAck()).toEqual({ outcome: "refused", refusal: "checkout_not_found", result: "not_found", incomplete: true });
+    expect(EngineCommandAck.safeParse(lastAck()).success).toBe(true);
+    expect(settingsBytes()).toBe("");
+    await handle(puller(), command("bridge_enable"));
+    expect(lastAck()).toEqual({ outcome: "refused", refusal: "checkout_not_found", result: "not_found" });
   });
 
   it("lists the clones it skipped as unsafe for information only, in `skipped`, never as a pick: a pick of one is refused, and after chmod go-w the scan finds it by itself (ruling 9)", async () => {
@@ -488,6 +499,12 @@ describe("ackForEnable", () => {
     expect(ackForEnable({ ok: false, code: "checkout_ambiguous", candidates: dirs(12) })).toMatchObject({ result: "ambiguous", candidates: dirs(10) });
     expect(ackForEnable({ ok: false, code: "checkout_incomplete", candidates: ["/work/one/widgets"] })).toEqual({ outcome: "refused", refusal: "checkout_incomplete", result: "refused", candidates: ["/work/one/widgets"] });
     expect(ackForEnable({ ok: false, code: "state_dir_shared", candidates: ["/work/never/shown"] })).toEqual({ outcome: "refused", refusal: "state_dir_shared", result: "refused" });
+  });
+  it("ON-BR-4: incomplete rides only a not_found answer, whatever the outcome says", () => {
+    expect(ackForEnable({ ok: false, code: "checkout_not_found", candidates: [], incomplete: true })).toEqual({ outcome: "refused", refusal: "checkout_not_found", result: "not_found", incomplete: true });
+    expect(ackForEnable({ ok: false, code: "checkout_not_found", candidates: ["/work/ok/x"], incomplete: true })).toEqual({ outcome: "refused", refusal: "checkout_not_found", result: "not_found", skipped: ["/work/ok/x"], incomplete: true });
+    expect(ackForEnable({ ok: false, code: "checkout_incomplete", candidates: ["/work/one/widgets"], incomplete: true })).not.toHaveProperty("incomplete");
+    expect(ackForEnable({ ok: false, code: "checkout_ambiguous", candidates: ["/work/a/x", "/work/b/x"], incomplete: true })).not.toHaveProperty("incomplete");
   });
   it("never sends a candidate that is not a plain absolute folder, and an ambiguous answer left with fewer than two is a plain failure", () => {
     expect(ackForEnable({ ok: false, code: "checkout_ambiguous", candidates: ["/work/a\nb/x", "relative", "/work/c/x"] })).toEqual({ outcome: "refused", refusal: "bridge_failed", result: "refused" });

@@ -5443,6 +5443,7 @@ export interface Operations {
         root_tail: string | null;
         candidates: Array<string>;
         skipped: Array<string>;
+        incomplete: boolean;
         issued_at: string;
         expires_at: string;
         acked_at: string | null;
