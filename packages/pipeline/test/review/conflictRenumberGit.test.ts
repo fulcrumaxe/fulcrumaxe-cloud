@@ -1,9 +1,9 @@
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CLONE_EXIT_TOO_LARGE, DEEPEN_SCRIPT, MAX_CLONE_KB } from "@fx/runner";
+import { CLONE_EXIT_NOT_REMOVED, CLONE_EXIT_TOO_LARGE, DEEPEN_SCRIPT, MAX_CLONE_KB } from "@fx/runner";
 import { assembleConflictPrompt, assembleRenumberPrompt, checkoutBranchCommand } from "../../src/review/reviewPrompts.js";
 
 /**
@@ -275,6 +275,74 @@ describe("the deepening script on its own", () => {
     expect(out.status).toBe(CLONE_EXIT_TOO_LARGE);
     expect(Date.now() - started).toBeLessThan(30_000);
     expect(existsSync(dir)).toBe(false);
+  });
+
+  /** A process that is gone, or exited and is waiting to be reaped. */
+  const isDead = (pid: number): boolean => {
+    try {
+      const stat = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+      return stat === "" || stat.startsWith("Z");
+    } catch {
+      return true; // ps exits 1 when there is no such process
+    }
+  };
+  /** A stand-in fetch that records the pid of a writer it started (outside the checkout), then grows the checkout past any small limit while the writer keeps creating files in it. */
+  const writerFetch = (pidFile: string): NodeJS.ProcessEnv =>
+    stubGit(
+      `top="$(command git rev-parse --show-toplevel)"\n(while :; do echo x > "$top/.git/w$$-$(date +%s%N)"; done) &\necho $! > "${pidFile}"\ndd if=/dev/zero of="$top/.git/big" bs=1024 count=200 2>/dev/null\nexec sleep 60`,
+    );
+  /** A limit the checkout is under until the stand-in fetch grows it: the clone is already past a tiny limit, which would trip the watch before the fetch ran at all. */
+  const limitAbove = (dir: string): string => String(Number(execFileSync("du", ["-sk", dir], { encoding: "utf8" }).split("\t")[0]) + 50);
+  const dash = spawnSync("sh", ["-c", "command -v dash"], { encoding: "utf8" }).stdout.trim() || undefined;
+
+  it.each([["sh", "sh"], ["dash", dash]])("a helper the fetch started, still writing into the checkout when the fetch is killed, is killed with it, and the checkout is gone (%s)", (_name, shell) => {
+    if (shell === undefined) return; // no dash on this machine: the string check below still holds the spelling dash needs
+    const dir = sandboxClone();
+    const pidFile = path.join(root, `writer-${n++}.pid`);
+    const out = spawnSync(shell, ["-c", DEEPEN_SCRIPT, "fx-deepen", limitAbove(dir), ...refspecs], { cwd: dir, encoding: "utf8", env: writerFetch(pidFile), timeout: 60_000 });
+    const writer = Number(readFileSync(pidFile, "utf8").trim());
+    try {
+      expect(out.status).toBe(CLONE_EXIT_TOO_LARGE);
+      expect(isDead(writer)).toBe(true);
+      expect(existsSync(dir)).toBe(false);
+    } finally {
+      if (!isDead(writer)) process.kill(writer, "SIGKILL");
+    }
+  });
+
+  it("the kill names the group in the spelling dash accepts, and the shell cleans up on every way it can end", () => {
+    expect(DEEPEN_SCRIPT).toContain('kill -s KILL -- "-$pid"');
+    expect(DEEPEN_SCRIPT).not.toContain("kill -KILL");
+    expect(DEEPEN_SCRIPT).toContain('trap "exit 143" TERM INT HUP');
+    expect(DEEPEN_SCRIPT).toContain('trap "kill -s KILL -- -$pid 2>/dev/null" EXIT');
+    expect(DEEPEN_SCRIPT).toContain("set -m 2>/dev/null");
+  });
+
+  it("a signal to the script's shell takes the fetch down with it", async () => {
+    const dir = sandboxClone();
+    const pidFile = path.join(root, `fetch-${n++}.pid`);
+    const env = stubGit(`echo $$ > "${pidFile}"\necho ready\nexec sleep 60`);
+    const child = spawn("sh", ["-c", DEEPEN_SCRIPT, "fx-deepen", "100000", ...refspecs], { cwd: dir, env, stdio: ["ignore", "pipe", "ignore"] });
+    const closed = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
+    await new Promise<void>((resolve) => child.stdout.on("data", () => resolve()));
+    const fetchPid = Number(readFileSync(pidFile, "utf8").trim());
+    child.kill("SIGTERM");
+    expect(await closed).toBe(143);
+    expect(isDead(fetchPid)).toBe(true);
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("a checkout that cannot be removed is a distinct failure, not a quiet refusal", () => {
+    if (process.getuid?.() === 0) return; // root removes anything
+    const dir = sandboxClone();
+    const env = stubGit(`top="$(command git rev-parse --show-toplevel)"\nmkdir "$top/locked"\ntouch "$top/locked/f"\nchmod 555 "$top/locked"\ndd if=/dev/zero of="$top/.git/big" bs=1024 count=200 2>/dev/null\nexec sleep 60`);
+    try {
+      const out = script(dir, [limitAbove(dir), ...refspecs], env);
+      expect(out.status).toBe(CLONE_EXIT_NOT_REMOVED);
+      expect(existsSync(dir)).toBe(true);
+    } finally {
+      chmodSync(path.join(dir, "locked"), 0o755);
+    }
   });
 
   it("a fetch that fails passes its own exit code on, and the checkout is left where it was", () => {
