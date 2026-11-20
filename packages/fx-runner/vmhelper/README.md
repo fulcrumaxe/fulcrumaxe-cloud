@@ -100,9 +100,9 @@ keeps no list of snapshots and takes no decision about how many to keep, or for 
   one link, the sandbox's uid), given to root, set to `0600` and read through `/proc/self/fd`. After a load the jail
   root is taken to root for the unlink of the two copies and given back at once. The API socket is reached by the
   existing dial.
-- **Bound to its disk.** `meta.json` holds the template id, vcpus, memory and the manifest's kernel and root-disk
+- **Bound to its disk and its Firecracker.** `meta.json` (version 2) holds the Firecracker snapshot format (`fc`, 12 for 1.17 and 1.18; 1.16 wrote 11), the template id, vcpus, memory and the manifest's kernel and root-disk
   digests as staged (nothing is hashed again at snapshot time). `resume` answers `snapshot_mismatch` when the sandbox
-  has another template, vcpu count or memory, when the manifest's digests are not those, or when the template files
+  has another template, vcpu count or memory, when the manifest's digests are not those, when the snapshot was written under another Firecracker snapshot format (every snapshot taken under 1.16.x, whose version 1 `meta.json` has no `fc`), or when the template files
   on disk no longer match the manifest (the copy-and-hash of staging). Nothing is launched and nothing stays staged.
   The meta, memory and state files must be single-link, root-owned `0600` files of the recorded size, else `internal`.
 - **Sizes and space.** What the sandbox's VMM writes is not trusted: `snap.mem` must be exactly `mem_mb` MiB and `snap.state` at most 4 MiB, checked
@@ -205,8 +205,8 @@ the next start, and systemd removes the runtime directory when the unit stops.
 ## Pinned values
 
 `internal/hardening/hardening.json` is the one file of unit hardening values and capabilities (each with
-its reason). A directive may hold a list (`DeviceAllow` is `/dev/kvm rwm`, `/dev/net/tun m` and
-`/dev/userfaultfd m`: the jailer makes those nodes inside each jail and fails the launch if a mknod is refused,
+its reason). A directive may hold a list (`DeviceAllow` is `/dev/kvm rwm`, `/dev/net/tun m`,
+`/dev/userfaultfd m` and `/dev/nitro_enclaves m` (the last since Firecracker 1.18): the jailer makes those nodes inside each jail and fails the launch if a mknod is refused,
 and only `/dev/kvm` may be opened). The unit generator (`hardening.RenderUnit`), the start-up capability check and the tests read
 it; so will the NixOS module.
 
