@@ -558,3 +558,70 @@ describe("a session is never half in force (review of the first version)", () =>
     await vi.waitFor(() => expect(woken.status).toBe("stopped"), { timeout: 2000 });
   });
 });
+
+describe("the limit as an absolute value (LimitControl)", () => {
+  const build = () => {
+    const rig = makeRig();
+    const log: PolicyLog = { applied: [], released: [] };
+    return { rig, sdk: createDaemonSdk({ daemon: rig.daemon, policy: policyPort(log), template: "fx-agent", memMb: 512 }) };
+  };
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  it("armTimeoutAt sets the live timer and leaves the total alone: a longer value outlives the original limit, a shorter one ends the sandbox sooner", async () => {
+    const { sdk } = build();
+    const longer = await sdk.create(params("lc-longer", { timeout: 150 }));
+    const shorter = await sdk.create(params("lc-shorter", { timeout: 60_000 }));
+    await sdk.armTimeoutAt("lc-longer", 1000);
+    await sdk.armTimeoutAt("lc-shorter", 100);
+    expect(longer.timeout).toBe(150); // not added to the total
+    expect(shorter.timeout).toBe(60_000);
+    await sleep(400);
+    expect(longer.status).toBe("running");
+    expect(shorter.status).toBe("stopped");
+    await longer.delete();
+  });
+
+  it("setTimeoutMs sets the total a wake arms with, and leaves the live timer alone", async () => {
+    const { sdk } = build();
+    const live = await sdk.create(params("lc-live", { timeout: 150 }));
+    await sdk.setTimeoutMs("lc-live", 60_000);
+    expect(live.timeout).toBe(60_000);
+    await vi.waitFor(() => expect(live.status).toBe("stopped"), { timeout: 2000 }); // the live timer still fired at 150 ms
+    await sdk.setTimeoutMs("lc-live", 250); // a wake now arms with this total, exactly
+    const woken = await sdk.get({ name: "lc-live", resume: true, ...creds });
+    expect(woken.timeout).toBe(250);
+    expect(woken.status).toBe("running");
+    await vi.waitFor(() => expect(woken.status).toBe("stopped"), { timeout: 2000 });
+  });
+
+  it("armTimeoutAt on a sandbox with no live timer does nothing, and a bad value or an unknown name is refused", async () => {
+    const { sdk } = build();
+    const sandbox = await sdk.create(params("lc-down", { timeout: 60_000 }));
+    await sandbox.stop();
+    await expect(sdk.armTimeoutAt("lc-down", 50)).resolves.toBeUndefined();
+    const woken = await sdk.get({ name: "lc-down", resume: true, ...creds });
+    await sleep(150);
+    expect(woken.status).toBe("running"); // the 50 ms was never applied to the next session
+    for (const bad of [0, -1, 1.5, Number.NaN, 2 ** 31]) {
+      await expect(sdk.armTimeoutAt("lc-down", bad)).rejects.toMatchObject({ response: { status: 400 } });
+      await expect(sdk.setTimeoutMs("lc-down", bad)).rejects.toMatchObject({ response: { status: 400 } });
+    }
+    await expect(sdk.armTimeoutAt("lc-nobody", 100)).rejects.toMatchObject({ response: { status: 404 } });
+    await expect(sdk.setTimeoutMs("lc-nobody", 100)).rejects.toMatchObject({ response: { status: 404 } });
+    await woken.delete();
+  });
+
+  it("a timer past 2^31-1 ms is clamped, on an extension and on a wake, and never fires at once", async () => {
+    const { sdk } = build();
+    const sandbox = await sdk.create(params("lc-clamp", { timeout: 1000 }));
+    await sandbox.extendTimeout(2 ** 31 - 1); // the running total is now past what a timer holds
+    await sleep(150);
+    expect(sandbox.status).toBe("running");
+    await sandbox.stop();
+    const woken = await sdk.get({ name: "lc-clamp", resume: true, ...creds });
+    expect(woken.timeout).toBe(1000 + 2 ** 31 - 1);
+    await sleep(150);
+    expect(woken.status).toBe("running");
+    await woken.delete();
+  });
+});

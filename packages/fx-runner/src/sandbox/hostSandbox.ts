@@ -13,6 +13,7 @@ import type { WslMachine } from "./platform.js";
 import { wslDenyPaths } from "./wslChecks.js";
 import { unixSocketFilter } from "./checkSeccomp.js";
 import { checkProtected } from "./checkProtected.js";
+import { AgentRunFailed, failureOf } from "./agentOutcome.js";
 
 /** Where a Linux session keeps per-user sockets (the session bus among them). */
 const USER_RUNTIME_ROOT = ["", "run", "user"].join("/");
@@ -92,22 +93,7 @@ export class HostSandboxRefused extends Error {
   }
 }
 
-/** The agent ended in a failed outcome. `code` is the engine's closed failure reason, so the job runner reports it as is. */
-export class AgentRunFailed extends Error {
-  constructor(readonly code: string) {
-    super(code);
-    this.name = "AgentRunFailed";
-  }
-}
-
-const REASON = /^[a-z][a-z0-9_]{0,63}$/;
-
-/** The failure reason of an engine outcome (`{ status: "failed", failureReason }`), or `undefined` for a clean end or a runtime that settles with no outcome. */
-function failureOf(outcome: unknown): string | undefined {
-  if (outcome === null || typeof outcome !== "object" || (outcome as { status?: unknown }).status !== "failed") return undefined;
-  const reason = (outcome as { failureReason?: unknown }).failureReason;
-  return typeof reason === "string" && REASON.test(reason) ? reason : "agent_exit";
-}
+export { AgentRunFailed };
 
 interface Entry {
   tempDir: string;
