@@ -172,6 +172,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/vm/egress/address.ts": ["net", "os"], // B-4a: `net.BlockList` and `net.isIP` classify a resolved address (pure, opens no socket); `os.networkInterfaces()` reads this host's own addresses. No process is started and no environment is read
   "src/vm/egress/proxy.ts": ["dns", "fs", "http", "net", "path"], // B-4a: an http server on one Unix socket inside the VM's vsock directory (lstat checks, chmod); `dns.promises.lookup` resolves a policy host; `net.connect` opens the upstream leg to an address already judged public. No process is started and no environment is read
   "src/vm/egress/reverse.ts": ["dns", "http", "https", "net", "path"], // B-4a-ii: an http server on one Unix socket in the VM's vsock directory; `https.request` makes the upstream TLS request to an address already judged public; `dns.promises.lookup` resolves the policy host. No process is started and no environment is read
+  "src/vm/install.ts": ["crypto"], // `vm install`: SHA-256 of the unit, config and manifest text carried in the root request; no process is started here
+  "src/vm/rootActions.ts": ["path"], // the root steps as data, and the root side's check that every path is clean, absolute and inside the install's own places
+  "src/vm/rootApply.ts": ["crypto", "fs", "path"], // the root side: lstat of every path and its parents, no-follow opens judged by the handle, a random temp-file name, an exclusive create, fsync, one rename, owner/mode/content checked afterwards
+  "src/vm/helperProbe.ts": ["net"], // one connect to the helper's Unix socket to see whether it answers; nothing else is read
   "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
   "src/vm/sandboxd/command.ts": ["crypto"], // D#587 B-2b-iii: a random command id and pid-file name; no process is started here, the command runs in the guest through the agent
   "src/vm/sandboxd/guestAgent.ts": ["net", "stream"], // D#587 B-2b-iii: the guest agent client: a Unix-socket connection to the sandbox's vsock proxy and the Duplex type it is handed; no process is started

@@ -19,6 +19,22 @@ const OWN_REASON_CODES = ["push_rejected"];
 
 const MAPPED: ReadonlySet<string> = new Set([...RUNNER_SETUP_DETAILS, ...STOP_CODES, ...OWN_REASON_CODES]);
 
+/**
+ * Reviewed exemptions, exact file and command pairs: `RootOps.run(file, args)` of the `vm install` root phase starts a host program by name, and the pattern above
+ * reads that first argument as a failure code. These are root host commands, not codes a run can end with. Nothing else is exempt: any other `.run("x", ...)` in
+ * these files, or any of these commands in another file, is still an unmapped code.
+ */
+export const ROOT_HOST_COMMANDS: ReadonlyArray<readonly [file: string, command: string]> = [
+  ["src/vm/install.ts", "getent"],
+  ["src/vm/rootApply.ts", "getent"],
+  ["src/vm/rootApply.ts", "systemctl"],
+];
+
+/** The codes in one file's text that no mapping or reviewed exemption covers. */
+export function unmappedIn(file: string, text: string): string[] {
+  return codesIn(text).filter((code) => !MAPPED.has(code) && !ROOT_HOST_COMMANDS.some(([f, c]) => f === file && c === code));
+}
+
 describe("C1: each git-path code is reported under its own detail", () => {
   const NEW = ["push_ref_refused", "snapshot_refused", "push_failed", "mirror_failed", "mirror_dir_insecure", "git_version_unsupported", "workspace_failed", "workspace_git_refused", "head_not_from_base", "sandbox_stub_committed", "review_sha_not_in_mirror", "base_conflict"];
   for (const code of NEW) {
@@ -49,9 +65,23 @@ describe("C2: a new git-path code without a detail fails here", () => {
   it("every code named in fx-runner/src is a setup detail, a stop code, or already has its own reason", () => {
     const unmapped: string[] = [];
     for (const [file, text] of srcFiles()) {
-      for (const code of codesIn(text)) if (!MAPPED.has(code)) unmapped.push(`${file}: ${code}`);
+      for (const code of unmappedIn(file, text)) unmapped.push(`${file}: ${code}`);
     }
     expect(unmapped).toEqual([]);
+  });
+
+  it("the root host command exemption is exact: another command in those files, or the same command in another file, still fails", () => {
+    expect(unmappedIn("src/vm/rootApply.ts", 'await ops.run("systemctl", ["x"]);\nawait ops.run("getent", []);')).toEqual([]);
+    expect(unmappedIn("src/vm/install.ts", 'await host.ops.run("getent", ["passwd", u]);')).toEqual([]);
+    expect(unmappedIn("src/vm/rootApply.ts", 'await ops.run("useradd", []);')).toEqual(["useradd"]);
+    expect(unmappedIn("src/vm/install.ts", 'await host.ops.run("systemctl", []);')).toEqual(["systemctl"]);
+    expect(unmappedIn("src/vm/uninstall.ts", 'await ops.run("getent", []);')).toEqual(["getent"]);
+    expect(unmappedIn("src/daemon/other.ts", 'throw new GitPathError("getent");')).toEqual(["getent"]);
+  });
+
+  it("every exempted pair is really used (a stale exemption fails here)", () => {
+    const files = new Map(srcFiles());
+    for (const [file, command] of ROOT_HOST_COMMANDS) expect(codesIn(files.get(file) ?? "").includes(command), `${file}: ${command}`).toBe(true);
   });
 
   it("the scan sees both ways a code is named, and would catch one that is not mapped", () => {
