@@ -25,6 +25,18 @@ function target(base: BasePin): { protocol: string; host: string; port: number }
   return { protocol: u.protocol, host: u.hostname, port: u.port === "" ? (u.protocol === "https:" ? 443 : 80) : Number(u.port) };
 }
 
+/**
+ * The error listener for a socket the proxy only closes. After a CONNECT the http server hands the socket over and removes its own error listener, so an error on it that nobody
+ * listens for is an uncaught exception. A browser that resets the connection (ECONNRESET) or closes it while the proxy is still writing (EPIPE) is normal and must not crash the
+ * runner: the socket is destroyed. Any other error is not expected here, so it is thrown again and stays loud.
+ */
+function closeOnReset(socket: Socket): (err: NodeJS.ErrnoException) => void {
+  return (err) => {
+    socket.destroy();
+    if (err.code !== "ECONNRESET" && err.code !== "EPIPE") throw err;
+  };
+}
+
 export function startOriginProxy(base: BasePin): Promise<OriginProxy> {
   const want = target(base);
   let refused = 0;
@@ -61,6 +73,7 @@ export function startOriginProxy(base: BasePin): Promise<OriginProxy> {
     const same = host !== undefined && host.replace(/^\[|\]$/g, "") === want.host.replace(/^\[|\]$/g, "") && Number(port) === want.port;
     if (!same) {
       refused += 1;
+      client.on("error", closeOnReset(client));
       client.end("HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n");
       return;
     }
