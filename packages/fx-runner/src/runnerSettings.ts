@@ -3,7 +3,7 @@
  * every claim, so a change applies from the next claim and a running job is never touched. Files are written 0600 through a temporary file and a
  * rename; a file that is not a plain file, or is damaged, counts as absent.
  */
-import { lstatSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, type JobClass } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "./cliError.js";
@@ -41,6 +41,8 @@ export interface RunnerSettings {
   sandboxEngine?: SandboxEngine | "invalid";
   /** D#587 B-6a: the microvm limits. Only the ones that are set and in range are here; `os_sandbox` ignores them. */
   microvm?: PartialMicrovmCaps;
+  /** D#587 B-5b-3a: the file exists but could not be read as settings (unparseable, not an object, oversized, not a regular file, unreadable). Never written back; claiming stops with `engine_setting_invalid`. A missing file is not this. */
+  unreadable?: true;
 }
 
 /**
@@ -152,9 +154,18 @@ export function loadSettings(stateDir: string): RunnerSettings {
   const settings: RunnerSettings = { ...DEFAULT_SETTINGS, budget: { light: { ...DEFAULT_BUDGET.light }, heavy: { ...DEFAULT_BUDGET.heavy } } };
   try {
     const file = path.join(stateDir, SETTINGS_FILE);
-    const info = lstatSync(file);
-    if (!info.isFile() || info.size > MAX_SETTINGS_BYTES) return settings;
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    // Opened without following a link and without blocking (a FIFO swapped in cannot hang the read), then judged by the open descriptor, so the file checked is the file read.
+    const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    let text: string;
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile() || info.size > MAX_SETTINGS_BYTES) return { ...settings, unreadable: true };
+      text = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { ...settings, unreadable: true };
     settings.ceilingTotal = whole(parsed["ceilingTotal"], 1, MAX_TOTAL_CAPACITY) ?? settings.ceilingTotal;
     settings.ceilingHeavy = whole(parsed["ceilingHeavy"], 1, MAX_HEAVY_CAPACITY) ?? settings.ceilingHeavy;
     const reserve = whole(parsed["reserveGb"], 1, 256);
@@ -195,22 +206,34 @@ export function loadSettings(stateDir: string): RunnerSettings {
     }
     if (Object.keys(caps).length > 0) settings.microvm = caps as PartialMicrovmCaps;
     if (argv !== undefined || dir !== undefined || account !== undefined || Object.keys(browser).length > 0) settings.verify = { ...(argv === undefined ? {} : { deployArgv: argv }), ...(dir === undefined ? {} : { deployDir: dir }), ...(account === undefined ? {} : { testAccount: account }), ...(Object.keys(browser).length > 0 ? { browser } : {}) };
-  } catch {
-    // fx-swallow-ok: a missing or damaged settings file is the defaults
+  } catch (error) {
+    // fx-swallow-ok: a missing settings file is the defaults; one that is there and cannot be read is flagged, so a runner set to `microvm` never reads it as `os_sandbox`
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { ...settings, unreadable: true };
   }
+  return settings;
+}
+
+/** What a settings write says when the file cannot be read: nothing is written, so a damaged file is never replaced by defaults (a runner set to `microvm` would read them as `os_sandbox`). Fixed text, no path. */
+export const SETTINGS_UNREADABLE_MESSAGE = "the settings file cannot be read (damaged, too large or not a regular file); nothing was changed. Fix or remove it, or choose the engine again with: fx-runner config set sandbox_engine os_sandbox|microvm";
+
+/** The settings a write starts from. Refuses while the file is unreadable, except for an explicit engine choice (`allowUnreadable`), which is the way out. */
+function loadForWrite(stateDir: string, allowUnreadable = false): RunnerSettings {
+  const settings = loadSettings(stateDir);
+  if (settings.unreadable === true && !allowUnreadable) throw new CliError(SETTINGS_UNREADABLE_MESSAGE, 1);
   return settings;
 }
 
 /** The file's text: the heavy memory figure is written only when the person set it, so a derived budget stays derived. */
 function serialize(settings: RunnerSettings): string {
   const { heavyMemorySet, ...rest } = settings;
+  delete rest.unreadable;
   const budget = { light: rest.budget.light, heavy: heavyMemorySet === true ? rest.budget.heavy : { tasks: rest.budget.heavy.tasks } };
   return `${JSON.stringify({ ...rest, budget })}\n`;
 }
 
 /** Saves one of the two verify values. The deploy command is given as a JSON array of strings; anything else is refused and nothing is written. */
 function setVerify(stateDir: string, key: (typeof VERIFY_KEYS)[number], text: string): string {
-  const settings = loadSettings(stateDir);
+  const settings = loadForWrite(stateDir);
   const verify: VerifySettings = { ...settings.verify };
   if (key === VERIFY_DEPLOY_ARGV_KEY) {
     let parsed: unknown;
@@ -249,7 +272,7 @@ function setVerify(stateDir: string, key: (typeof VERIFY_KEYS)[number], text: st
 
 /** D#587 B-6a: saves the engine or one microvm limit. A value out of range is refused and nothing is written. */
 function setVm(stateDir: string, key: string, text: string): string {
-  const settings = loadSettings(stateDir);
+  const settings = loadForWrite(stateDir, key === SANDBOX_ENGINE_KEY);
   if (key === SANDBOX_ENGINE_KEY) {
     if (!(SANDBOX_ENGINES as readonly string[]).includes(text)) throw new CliError(`${key} takes ${SANDBOX_ENGINES.join(" or ")}`, 2);
     settings.sandboxEngine = text as SandboxEngine;
@@ -273,7 +296,7 @@ function setVm(stateDir: string, key: string, text: string): string {
 }
 
 function unsetVm(stateDir: string, key: string): string {
-  const settings = loadSettings(stateDir);
+  const settings = loadForWrite(stateDir);
   if (key === SANDBOX_ENGINE_KEY) delete settings.sandboxEngine;
   else {
     const caps: PartialMicrovmCaps = { ...settings.microvm };
@@ -290,7 +313,7 @@ export function setSetting(stateDir: string, key: string, text: string): string 
   if (isVmKey(key)) return setVm(stateDir, key, text);
   if ((VERIFY_KEYS as readonly string[]).includes(key)) return setVerify(stateDir, key as (typeof VERIFY_KEYS)[number], text);
   if ((ENGINE_HOST_KEYS as readonly string[]).includes(key)) {
-    const settings = loadSettings(stateDir);
+    const settings = loadForWrite(stateDir);
     const host: EngineHostSettings = { ...settings.engineHost };
     if (key === ENGINE_LOOP_MINUTES_KEY) {
       const n = /^\d{1,3}$/.test(text) ? Number(text) : undefined;
@@ -312,7 +335,7 @@ export function setSetting(stateDir: string, key: string, text: string): string 
   const value = text.match(target?.field === "memoryGb" ? /^(\d{1,4})(?:GB?)?$/i : /^(\d{1,5})$/)?.[1];
   const number = value === undefined ? undefined : Number(value);
   if (number === undefined || number < range[0] || number > range[1]) throw new CliError(`${key} takes a whole number${target?.field === "memoryGb" ? " of GB" : ""} from ${range[0]} to ${range[1]}`, 2);
-  const settings = loadSettings(stateDir);
+  const settings = loadForWrite(stateDir);
   if (target !== undefined) {
     settings.budget[target.cls][target.field] = number;
     if (key === "budget.heavy.memory") settings.heavyMemorySet = true;
@@ -329,7 +352,7 @@ export function unsetSetting(stateDir: string, key: string): string {
   if (isVmKey(key)) return unsetVm(stateDir, key);
   if (RANGES[key] === undefined && !(VERIFY_KEYS as readonly string[]).includes(key) && !(ENGINE_HOST_KEYS as readonly string[]).includes(key)) throw new CliError(`unknown setting ${key.slice(0, 40)}`, 2);
   if ((ENGINE_HOST_KEYS as readonly string[]).includes(key)) {
-    const settings = loadSettings(stateDir);
+    const settings = loadForWrite(stateDir);
     const host: EngineHostSettings = { ...settings.engineHost };
     if (key === ENGINE_LOOP_MINUTES_KEY) delete host.loopMin;
     else delete host.startDayAt;
@@ -339,7 +362,7 @@ export function unsetSetting(stateDir: string, key: string): string {
     return `${key} is cleared; the engine host reads it at its next poll`;
   }
   const target = budgetKey(key);
-  const settings = loadSettings(stateDir);
+  const settings = loadForWrite(stateDir);
   if ((VERIFY_KEYS as readonly string[]).includes(key)) {
     const left: VerifySettings = { ...settings.verify };
     if (key === VERIFY_DEPLOY_ARGV_KEY) delete left.deployArgv;

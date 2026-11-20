@@ -67,6 +67,8 @@ export interface DoctorHost {
   userName?: string | undefined;
   /** D#587 B-6a: what the machine says about KVM, the VM helper's socket and memory. Left out means every one of them is unreadable, which never reads as available. */
   vm?: VmHostFacts | undefined;
+  /** D#587 B-5b-3a: whether this build composed a live microVM stack (`liveMicrovmComplete`). Anything but `true` is "not wired", which fails a runner set to `microvm`, never passes it. */
+  microvmWired?: boolean | undefined;
   /** This program's version and real path, for the Updates line. Absent in tests that do not care. */
   update?: { version?: string | undefined; execPath?: string | undefined } | undefined;
 }
@@ -136,17 +138,18 @@ const MIB = 1024 ** 2;
  */
 function vmEngineCheck(ctx: CommandContext, host: DoctorHost, line: (level: Level, label: string, detail: string) => void): void {
   const settings = loadSettings(ctx.stateDir);
-  const engine = settings.sandboxEngine ?? "os_sandbox";
+  const engine = settings.unreadable === true ? "invalid" : (settings.sandboxEngine ?? "os_sandbox");
   const text = engineLineOf({ platform: host.platform, engine, caps: settings.microvm, facts: host.vm });
   ctx.out(`INFO  sandbox_engine: ${text}`);
   if (engine === "invalid") {
-    line("FAIL", "microvm", "sandbox_engine in the settings file is neither os_sandbox nor microvm; nothing is claimed. Fix it with: fx-runner config set sandbox_engine os_sandbox|microvm");
+    line("FAIL", "microvm", settings.unreadable === true ? "the settings file cannot be read (damaged, too large or not a regular file); nothing is claimed. Fix or remove it, then run: fx-runner config set sandbox_engine os_sandbox|microvm" : "sandbox_engine in the settings file is neither os_sandbox nor microvm; nothing is claimed. Fix it with: fx-runner config set sandbox_engine os_sandbox|microvm");
     return;
   }
   if (engine !== "microvm") return;
   const missing = missingCaps(settings.microvm);
   if (missing.length > 0) line("FAIL", "microvm limits", `missing or invalid: ${missing.join(", ")}; nothing is claimed. Set each with: fx-runner config set <key> <value>`);
   if (text !== ENGINE_LINES.microvm && text !== ENGINE_LINES.limitsMissing) line("FAIL", "microvm", `microvm_unavailable: ${text}; nothing is claimed and the runner does not fall back to os_sandbox`);
+  if (host.microvmWired !== true) line("FAIL", "microvm", "microvm_build_unwired: this build cannot start jobs in a microVM yet; nothing is claimed and the runner does not fall back to os_sandbox");
   const caps = settings.microvm;
   if (missing.length > 0 || caps === undefined) return;
   const vm = host.vm;

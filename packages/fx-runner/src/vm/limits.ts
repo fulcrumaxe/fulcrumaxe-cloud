@@ -70,11 +70,29 @@ export function completeCaps(caps: PartialMicrovmCaps | undefined): MicrovmCaps 
  * Whether this runner may claim, as far as its configured engine and limits go. Only `microvm` mode with an incomplete set of limits, or an engine
  * setting that is neither value, blocks. `os_sandbox` ignores the caps, even bad ones.
  */
-export type ClaimBlock = "engine_setting_invalid" | "microvm_limits_missing";
+export type ClaimBlock = "engine_setting_invalid" | "microvm_limits_missing" | "microvm_build_unwired" | "microvm_restart_needed";
 export function limitsClaimBlock(engine: SandboxEngine | "invalid", caps: PartialMicrovmCaps | undefined): ClaimBlock | undefined {
   if (engine === "invalid") return "engine_setting_invalid";
   if (engine === "microvm" && missingCaps(caps).length > 0) return "microvm_limits_missing";
   return undefined;
+}
+
+/**
+ * D#587 B-5b-3a: a runner set to `microvm` whose build cannot start a VM yet (`wired` false) claims nothing. Local only: no reason goes to the cloud, and the engine is never
+ * read as `os_sandbox` instead. Every other setting, and a wired build, is not blocked here.
+ */
+export function unwiredClaimBlock(engine: SandboxEngine | "invalid", wired: boolean): ClaimBlock | undefined {
+  return engine === "microvm" && !wired ? "microvm_build_unwired" : undefined;
+}
+
+/**
+ * D#587 B-5b-3a, no downgrade: the engine a run reports and runs in is chosen once at start, but the setting is read again at every claim. A setting that is `microvm` NOW while this run's engine is not `microvm`
+ * (the build is not wired, or the machine's facts were unreadable at start, or the person changed the setting while the runner ran) stops claiming here: `microvm_build_unwired` for an unwired build,
+ * `microvm_restart_needed` for a wired one that must be restarted to choose its engine again. Local only. Nothing is blocked while the run's engine is `microvm`.
+ */
+export function engineMismatchClaimBlock(liveEngine: SandboxEngine | "invalid", runEngine: SandboxEngine, wired: boolean): ClaimBlock | undefined {
+  if (liveEngine !== "microvm" || runEngine === "microvm") return undefined;
+  return wired ? "microvm_restart_needed" : "microvm_build_unwired";
 }
 
 // ---- admission (the B-0 guard) ----

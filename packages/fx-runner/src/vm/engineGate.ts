@@ -58,3 +58,29 @@ export function microvmUnavailableReason(input: { engine: SandboxEngine | "inval
   if (facts.helperState !== "ready") return "microvm_helper_not_ready";
   return undefined;
 }
+
+/**
+ * D#587 B-5b-3a: what a runner says when its answer to "can I claim?" changes while it runs, one closed sentence per reason. The four `microvm_*` reasons each have their own
+ * words and never borrow the OS sandbox's (bubblewrap, user namespaces); the OS reasons keep the wording they always had. A back-to-working change is one fixed line.
+ * An unknown word is described as the OS sandbox's, as before, and never as a VM problem.
+ */
+const MICROVM_REASON_WORDS: Readonly<Record<MicrovmUnavailableReason, string>> = {
+  microvm_no_kvm: "this machine has no usable KVM device",
+  microvm_helper_missing: "the VM helper is not installed",
+  microvm_helper_not_ready: "the VM helper is installed but did not answer as ready",
+  microvm_helper_out_of_date: "the VM helper speaks another version than this runner",
+};
+
+export function reasonChangeLine(reason: string | undefined): string {
+  if (reason === undefined) return "fx-runner: the sandbox works again; claiming jobs";
+  if ((MICROVM_UNAVAILABLE_REASONS as readonly string[]).includes(reason)) {
+    return `fx-runner: the microVM engine you chose cannot start (${reason}: ${MICROVM_REASON_WORDS[reason as MicrovmUnavailableReason]}); no job will be claimed, and the OS sandbox is not used instead. Run: fx-runner doctor`;
+  }
+  return `fx-runner: the sandbox does not work on this machine (${reason}); no job will be claimed. Run: fx-runner doctor`;
+}
+
+/** The start-up line for a runner that cannot claim because its build cannot start a VM yet (`microvm_build_unwired`, local only: nothing is sent to the cloud). */
+export const UNWIRED_LINE = "fx-runner: this build cannot start jobs in a microVM yet (microvm_build_unwired), so a runner set to microvm claims nothing, and the OS sandbox is not used instead. Run: fx-runner doctor";
+
+/** The line for a wired build whose run chose the OS sandbox while the setting now says `microvm` (`microvm_restart_needed`, local only). */
+export const RESTART_LINE = "fx-runner: the engine setting is microvm but this run started on the OS sandbox (microvm_restart_needed), so it claims nothing until it is restarted, and the OS sandbox is not used instead. Restart it, then run: fx-runner doctor";

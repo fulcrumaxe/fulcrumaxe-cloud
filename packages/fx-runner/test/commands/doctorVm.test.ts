@@ -9,7 +9,7 @@ import type { CommandContext } from "../../src/context.js";
 import { doctorCommand, type DoctorHost } from "../../src/commands/doctor.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
-import { setSetting } from "../../src/runnerSettings.js";
+import { SETTINGS_FILE, setSetting } from "../../src/runnerSettings.js";
 import type { ScopeSupport } from "../../src/sandbox/jobLimits.js";
 import type { VmHostFacts } from "../../src/vm/limits.js";
 import { makeFake, type Fake } from "../engines/claude/harness.js";
@@ -48,10 +48,10 @@ afterEach(() => {
 
 const facts = (over: Partial<VmHostFacts> = {}): VmHostFacts => ({ kvm: "present", helperSocket: "present", helperSocketPath: "/fake/helper.sock", totalMemMb: 16384, cpus: 8, readMemAvailableBytes: () => 8 * GIB, ...over });
 
-async function doctor(vm: VmHostFacts | undefined, platform: NodeJS.Platform = "linux"): Promise<{ code: number; out: string }> {
+async function doctor(vm: VmHostFacts | undefined, platform: NodeJS.Platform = "linux", wired: boolean | "absent" = true): Promise<{ code: number; out: string }> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir, uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: (async () => new Response("", { status: 200 })) as typeof fetch };
-  const host: DoctorHost = { platform, shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, vm };
+  const host: DoctorHost = { platform, shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, vm, microvmWired: wired === "absent" ? undefined : wired };
   const code = await doctorCommand(ctx, host);
   return { code, out: lines.join("\n") };
 }
@@ -95,6 +95,33 @@ describe("doctor: the sandbox_engine line", () => {
 
   it("never prints null or undefined", async () => {
     for (const vm of [facts(), facts({ kvm: "absent" }), undefined]) expect((await doctor(vm)).out).not.toMatch(/\bnull\b|\bundefined\b/);
+  });
+});
+
+describe("doctor: a build that cannot start a VM yet (D#587 B-5b-3a)", () => {
+  it("microvm mode on an unwired build FAILs with microvm_build_unwired, whatever else passes, and an absent flag reads as unwired", async () => {
+    enableMicrovm();
+    for (const wired of [false, "absent"] as const) {
+      const result = await doctor(facts(), "linux", wired);
+      expect(result.code).not.toBe(0);
+      expect(levelOf(result.out, "microvm")).toBe("FAIL");
+      expect(result.out).toContain("microvm_build_unwired");
+      expect(result.out).toContain("does not fall back to os_sandbox");
+      expect(engineLine(result.out)).toBe("INFO  sandbox_engine: microvm");
+    }
+    expect((await doctor(facts(), "linux", true)).out).not.toContain("microvm_build_unwired");
+  });
+
+  it("os_sandbox mode never prints the line, wired or not", async () => {
+    for (const wired of [true, false]) expect((await doctor(facts(), "linux", wired)).out).not.toContain("microvm_build_unwired");
+  });
+
+  it("a settings file that cannot be read FAILs in plain words, and is never read as os_sandbox", async () => {
+    writeFileSync(path.join(stateDir, SETTINGS_FILE), "{broken");
+    const result = await doctor(facts());
+    expect(result.code).not.toBe(0);
+    expect(result.out).toContain("the settings file cannot be read");
+    expect(levelOf(result.out, "microvm")).toBe("FAIL");
   });
 });
 

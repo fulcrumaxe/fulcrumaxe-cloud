@@ -128,6 +128,22 @@ describe("the claim gate of a runner set to microvm", () => {
     expect(r.asked()).toBe(2);
   });
 
+  it("a pass is asked again after the same 5 minutes, so a helper that dies after start closes the gate before a later claim, and it recovers", async () => {
+    const r = rig(facts());
+    expect(await r.gate.check()).toEqual({ open: true });
+    r.set(facts({ helperSocket: "absent", helperState: undefined }));
+    await r.clock.advance(REPROBE_INTERVAL_MS - 60_000, 60_000);
+    expect(await r.gate.check()).toEqual({ open: true });
+    expect(r.asked()).toBe(1);
+    await r.clock.advance(60_000, 60_000);
+    expect(await r.gate.check()).toEqual({ open: false, reason: "microvm_helper_missing" });
+    expect(r.asked()).toBe(2);
+    r.set(facts());
+    await r.clock.advance(REPROBE_INTERVAL_MS, 60_000);
+    expect(await r.gate.check()).toEqual({ open: true });
+    expect(r.asked()).toBe(3);
+  });
+
   it("while a missing limit already holds claiming it says nothing (the claim goes out paused as before), and says its reason once the limits are set", async () => {
     let blocked = true;
     const r = rig(facts({ kvm: "absent" }), () => "microvm", OS_OPEN, () => blocked);

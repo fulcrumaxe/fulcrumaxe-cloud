@@ -98,10 +98,10 @@ describe("config set concurrency (D#6 C43-4)", () => {
     expect((await rig.run(["config", "unset", "whatever"])).code).not.toBe(0);
   });
 
-  it("a settings file over 64 KB counts as none", async () => {
+  it("a settings file over 64 KB counts as none: the defaults, flagged unreadable so a runner set to microvm never reads it as os_sandbox (D#587 B-5b-3a)", async () => {
     await rig.run(["pause"]);
     writeFileSync(path.join(rig.dir, SETTINGS_FILE), JSON.stringify({ ceilingTotal: 2, pad: "x".repeat(70_000) }));
-    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4, unreadable: true });
   });
 
   it("the job budgets: saved per class, in whole GB (a G or GB suffix is allowed) or whole tasks, and refused outside their ranges (D#6 C43-5)", async () => {
@@ -142,10 +142,10 @@ describe("config set concurrency (D#6 C43-4)", () => {
     expect(result.err).toContain("usage: fx-runner config set concurrency.total");
   });
 
-  it("a damaged settings file means the defaults, and a hand-edited bad number is ignored", async () => {
+  it("a damaged settings file means the defaults (flagged unreadable, D#587 B-5b-3a), and a hand-edited bad number is ignored", async () => {
     await rig.run(["pause"]); // makes the state directory
     writeFileSync(path.join(rig.dir, SETTINGS_FILE), "{ nope");
-    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4, unreadable: true });
     // Out-of-range numbers in a hand-edited file are ignored one by one, not trusted.
     writeFileSync(path.join(rig.dir, SETTINGS_FILE), JSON.stringify({ ceilingTotal: 99, ceilingHeavy: 2 }));
     expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 2 });

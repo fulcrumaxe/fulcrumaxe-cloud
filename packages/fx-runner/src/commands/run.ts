@@ -30,7 +30,9 @@ import { createFootprintStore } from "../daemon/footprints.js";
 import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
 import { isDraining, isPaused, loadSettings, setDraining } from "../runnerSettings.js";
-import { limitsClaimBlock, type ClaimBlock, type VmHostFacts } from "../vm/limits.js";
+import { engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
+import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
+import { daemonInventorySource, daemonSandboxLifecycle } from "../vm/sandboxd/management.js";
 import { createMicrovmGate } from "../daemon/microvmGate.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
@@ -38,10 +40,10 @@ import { readVerifyAnswer } from "../daemon/answerFile.js";
 import { createVerifyLocal } from "../daemon/verifyLocal.js";
 import { readSignInState } from "../daemon/signInState.js";
 import { readHostFacts } from "../hostFacts.js";
-import { chooseEngine, selectSandbox } from "../vm/engineGate.js";
+import { chooseEngine, reasonChangeLine, RESTART_LINE, selectSandbox, UNWIRED_LINE } from "../vm/engineGate.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createSandboxCommandReceiver } from "../daemon/sandboxCommands.js";
-import { createInventoryReporter, emptyInventorySource } from "../daemon/sandboxInventory.js";
+import { createInventoryReporter } from "../daemon/sandboxInventory.js";
 import { createBridgeApply, type EngineBridgeCommandOptions } from "./engineBridge.js";
 import { createHostLoadReporter } from "../daemon/hostLoad.js";
 import { startEngineBridge, type EngineBridge, type EngineBridgePorts } from "../engineBridge/daemon.js";
@@ -137,6 +139,8 @@ export interface RunHost {
   engineBridge?: EngineBridgePorts | undefined;
   /** D#587 B-5a part 3: what the machine says about KVM, the helper's socket and what the helper answered, read by the entry point. Absent: a runner set to `microvm` has no facts, which closes its gate (no KVM). */
   vmFacts?: (() => Promise<VmHostFacts | undefined>) | undefined;
+  /** D#587 B-5b-3a: the parts of the live microVM stack this build has, read by the entry point (the uid, the helper's socket). `createLiveMicrovm` wires them only when every part is there; absent or incomplete, a runner set to `microvm` claims nothing (`microvm_build_unwired`) and never runs a job in the OS sandbox instead. */
+  microvm?: LiveMicrovmParts | undefined;
   /** D#845 ON-BR-2: what the machine gives the runner's own Connect handling (home, the engine's state directory variable, discovery roots). Absent: `bridge_enable` and `bridge_disable` are not pulled. */
   engineBridgeOptions?: EngineBridgeCommandOptions | undefined;
 }
@@ -156,6 +160,8 @@ export interface RunHooks {
   probe?: ResourceProbe;
   /** Whether per-job limits are enforced, and the limits to start jobs under (default: tried on the real machine through the engine's process start). */
   jobLimits?: { enforced: boolean; limits?: JobLimits; reason?: string };
+  /** A test seam: handed the live microVM stack exactly as the command composed it (only when every part was there), so a test can start a VM through its port. */
+  onMicrovmBuilt?: (live: LiveMicrovm) => void;
   /** A test seam: told, once the hello is answered, whether the conflict verdict may be sent on a merge report. */
   onConflictFactsAccepted?: (accepted: boolean) => void;
   /** A test seam: told, once the hello is answered, whether the ordering fact may be computed and sent on a merge order. */
@@ -185,7 +191,18 @@ export function openPushLog(stateDir: string, options: LedgerOptions, out: (line
 /** D#587 B-6a: why the configured engine and limits forbid claiming right now, read again at every claim. Undefined in `os_sandbox` mode, whatever the limits say. */
 export function vmLimitsBlock(stateDir: string): ClaimBlock | undefined {
   const settings = loadSettings(stateDir);
+  // A settings file that is there and cannot be read is never taken as `os_sandbox` (nor as an old `microvm`): the claim stops, as for an invalid engine value.
+  if (settings.unreadable === true) return "engine_setting_invalid";
   return limitsClaimBlock(settings.sandboxEngine ?? "os_sandbox", settings.microvm);
+}
+
+/**
+ * D#587 B-5b-3a: every reason this runner may not claim for its engine setting, read again at every claim. `vmLimitsBlock`'s (an unreadable settings file included), then, for a live
+ * setting of `microvm` while this run's engine (`engine`, chosen once at start) is not `microvm`, `microvm_build_unwired` (`wired` false) or `microvm_restart_needed`. Local only: it pauses the claim
+ * like `engine_setting_invalid` does and sends no reason to the cloud.
+ */
+export function vmClaimBlock(stateDir: string, engine: SandboxEngine, wired: boolean): ClaimBlock | undefined {
+  return vmLimitsBlock(stateDir) ?? engineMismatchClaimBlock(loadSettings(stateDir).sandboxEngine ?? "os_sandbox", engine, wired);
 }
 
 export function pidIsAlive(kill: RunHost["kill"], pid: number): boolean {
@@ -392,7 +409,15 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let cloudWatchMode = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
-    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid }), ...(readHostFacts()?.sandbox_engine === "microvm" ? { sandboxInventory: createInventoryReporter({ source: emptyInventorySource, now: ctx.now }) } : {}),
+    // D#587 B-5b-3a: the one engine this run reports, gates jobs by and runs them in, decided once here from the machine's engine line and whether this build composed a live microVM stack.
+    const built = createLiveMicrovm(host.microvm);
+    if (built !== undefined) hooks.onMicrovmBuilt?.(built);
+    const settingsAtStart = loadSettings(stateDir);
+    const engineFacts = await host.vmFacts?.().catch(() => undefined); // fx-swallow-ok: facts that cannot be read are "unreadable" in the engine line, which is not microvm
+    const engine = chooseEngine(engineLineOf({ platform: host.platform, engine: settingsAtStart.unreadable === true ? "invalid" : (settingsAtStart.sandboxEngine ?? "os_sandbox"), caps: settingsAtStart.microvm, facts: engineFacts }), built !== undefined);
+    /** The live stack only when this run's engine is `microvm`: an `os_sandbox` runner reports no inventory and takes no signed VM command. */
+    const vm = engine === "microvm" ? built : undefined;
+    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(vm !== undefined && readHostFacts(engine)?.sandbox_engine === "microvm" ? { sandboxInventory: createInventoryReporter({ source: daemonInventorySource(vm.sdk), now: ctx.now }) } : {}),
       // D#845 ON-1b: the machine's load rides the claim, but only for a build that advertises `project_setup_v1` (none does yet, so today the claim body is unchanged). No setup runs here yet: the count is 0.
       ...((RUNNER_BUILD_CAPABILITIES as readonly string[]).includes(PROJECT_SETUP_CAPABILITY) ? { hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => 0, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
@@ -401,9 +426,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
     const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ pushLog, capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), cloudOrigin: registration.cloud_origin, platform: host.platform, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
     const packageStoreRoot = path.join(path.dirname(mirrorsRoot), "pnpm-store");
-    // D#587 B-5b: the one engine this run reports, gates jobs by and runs them in. This build starts jobs in the OS sandbox only, so it is `os_sandbox` whatever the machine could do.
-    const engine = chooseEngine(undefined, false);
-    const sandbox = selectSandbox(engine, { os_sandbox: createHostSandbox({
+    // D#587 B-5b: `selectSandbox` is the only place a port is picked; `microvm` without a live port is an error, never the OS sandbox.
+    const sandbox = selectSandbox(engine, { ...(built === undefined ? {} : { microvm: built.port }), os_sandbox: createHostSandbox({
       credentials,
       platform: host.platform,
       wsl: host.sandbox.wsl,
@@ -515,6 +539,19 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     // D#587 B-5a part 3: a runner set to `microvm` that cannot start a VM names one of four `microvm_*` reasons and takes no job; it never falls back to the OS sandbox.
     const gate = createMicrovmGate({ engine: () => loadSettings(stateDir).sandboxEngine ?? "os_sandbox", facts: host.vmFacts, now: ctx.now, limitsBlocked: () => vmLimitsBlock(stateDir) !== undefined, inner: osGate });
     let lastReason: string | undefined;
+    // The two local-only engine blocks are said once each time they begin (the claim loop's own lines are about the sandbox gate's reasons).
+    let lastVmBlock: ClaimBlock | undefined;
+    const noteVmBlock = (block: ClaimBlock | undefined): void => {
+      if (block === lastVmBlock) return;
+      lastVmBlock = block;
+      if (block === "microvm_build_unwired") ctx.out(UNWIRED_LINE);
+      else if (block === "microvm_restart_needed") ctx.out(RESTART_LINE);
+    };
+    const vmBlocked = (): boolean => {
+      const block = vmClaimBlock(stateDir, engine, built !== undefined);
+      noteVmBlock(block);
+      return block !== undefined;
+    };
     // Self-update (D#6 R6-2b): checked at the top of the claim loop, and never while any job is in hand. A count, so one job ending does not clear the others (C43-3).
     const jobs = createJobsInHand();
     const updater = updateHost === undefined ? undefined : createUpdater(ctx, updateHost, hooks.updateTuf === undefined ? {} : { tuf: hooks.updateTuf });
@@ -557,6 +594,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const first = await gate.check();
       if (!first.open) ctx.out(first.reason.startsWith("microvm_") ? `fx-runner: this machine cannot start the microVM engine you chose (${first.reason}); no job will be claimed until it can, and the OS sandbox is not used instead. Run: fx-runner doctor` : `fx-runner: the sandbox does not work on this machine (${first.reason}); no job will be claimed until it does. Run: fx-runner doctor`);
       lastReason = first.open ? undefined : first.reason;
+      noteVmBlock(vmClaimBlock(stateDir, engine, built !== undefined));
       // D#605 FL-2: say what this build and machine are, once per start, before the first claim. Best effort and no gate: a cloud that is older, a network
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
       const facts = readHostFacts(engine);
@@ -646,7 +684,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           ...(limits?.peak === undefined ? {} : { scopePeak: (runId: string) => limits.peak?.(runId), releaseScope: (runId: string) => limits.release?.(runId) }),
           settings: () => capUnenforced(loadSettings(stateDir), enforced),
           heavyBudgetBytes: () => budgets().heavy.memoryBytes,
-          paused: () => isPaused(stateDir) || isDraining(stateDir) || claimBlockReason(stateDir) !== undefined || vmLimitsBlock(stateDir) !== undefined,
+          paused: () => isPaused(stateDir) || isDraining(stateDir) || claimBlockReason(stateDir) !== undefined || vmBlocked(),
           usage: () => usage.state(),
           now: () => clock.now().getTime(),
         }),
@@ -682,7 +720,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         log: (event) => {
           // Said when the answer changes, not on every poll.
           const reason = event.event === "sandbox_unavailable" ? event.reason : event.event === "idle" || event.event === "rate_limited" ? undefined : lastReason;
-          if (reason !== lastReason) ctx.out(reason === undefined ? "fx-runner: the sandbox works again; claiming jobs" : `fx-runner: the sandbox does not work on this machine (${reason}); no job will be claimed. Run: fx-runner doctor`);
+          if (reason !== lastReason) ctx.out(reasonChangeLine(reason));
           lastReason = reason;
           const line = describePoll(event);
           if (line !== undefined) ctx.out(`fx-runner: ${line}`);

@@ -33,6 +33,10 @@ import { createVmInstallHosts } from "../scripts/vm-install-host.mjs";
 import { buildRootArgv } from "../src/vm/install.js";
 import { createHelperSandboxes } from "../src/vm/helperSandboxes.js";
 import { socketPath } from "../src/vm/unitRender.js";
+import { startEgressProxy } from "../src/vm/egress/proxy.js";
+import { startReverseEndpoint } from "../src/vm/egress/reverse.js";
+import { liveMicrovmComplete } from "../src/vm/sandboxd/live.js";
+import { productionDepsBase } from "../src/vm/sandboxd/production.js";
 import { loadSettings } from "../src/runnerSettings.js";
 import { hostRefusal } from "../src/vm/rootApply.js";
 import { buildRemoveArgv } from "../src/vm/uninstall.js";
@@ -44,6 +48,14 @@ import { findChromium, openHeadedBrowser } from "../src/verifyBrowser/driver.js"
 import { setPlaywrightLoader, sidecarFor } from "../src/verifyBrowser/loadPlaywright.js";
 import { sidecarLibrary } from "./sidecarLibrary.mjs";
 import { swapSidecar, unpackSidecar, verifySidecar } from "../scripts/sidecar.mjs";
+
+// D#587 B-5b-3a: the parts of the live microVM stack this build has. The guest agent runtime (`makeRuntime`, B-5a-RT) and the boot facts (`boot`, `template`, `memMb`, B-5a-BF) have no
+// production source yet, so they are left out on purpose: `createLiveMicrovm` then returns nothing, a runner set to `microvm` claims nothing (`microvm_build_unwired`), and `doctor` says so.
+const microvmParts = {
+  deps: productionDepsBase({ helperSocket: socketPath(), host: { euid: process.geteuid?.(), platform: process.platform } }),
+  uid: process.getuid?.(),
+  egress: { startProxy: startEgressProxy, startReverse: startReverseEndpoint },
+};
 
 // D#6 RUNNER-CWD-1: where every program the kit starts without a directory of its own is started (a fresh empty directory under it each time),
 // and the two places such a start may never be: the home directory and this process's working directory (read at each start). No home, no launches.
@@ -358,6 +370,7 @@ runCli({
     engineBridge: createEngineBridgePorts(engineHaltDeps),
     // D#587 B-5a part 3: what a runner set to `microvm` checks before every claim until it passes: KVM, the helper's socket and the helper's own answer.
     vmFacts: () => vmHostFactsWithHelper(),
+    microvm: microvmParts,
     // D#749 V2b: the Chrome bridge directory is named for the user; a deploy command is given a short allowlist of this environment (src/daemon/deployOrder.ts).
     username: userInfo().username,
     env: { PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, TMPDIR: process.env.TMPDIR, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME },
@@ -374,7 +387,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), vmInstall: createVmInstallFacts({ tuf: vmTufPort }) },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), microvmWired: liveMicrovmComplete(microvmParts), vmInstall: createVmInstallFacts({ tuf: vmTufPort }) },
   vmHost: vmBuildHost,
   // D#845 ON-3: `setup` and a code-less `register`. Ctrl-C is listened for only once one of them asks (every other command keeps the default), the one question is read from the
   // terminal only (a pipe or a timeout is no answer), and the service start is two fixed programs with a fixed environment, no shell.

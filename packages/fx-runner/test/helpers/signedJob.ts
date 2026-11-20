@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
-import { canonicalJson, signJob, sha256Text, type Job, type JobKeyring, type SignedJob } from "@fulcrumaxe/runner-protocol";
+import { canonicalJson, signJob, signSandboxCommand, sha256Text, type Job, type JobKeyring, type SignedJob, type SandboxCommand, type SignedSandboxCommand } from "@fulcrumaxe/runner-protocol";
 import { roleToolsDigest } from "../../src/job/roleTools.js";
 
 export const KEY_ID = "test-key-1";
@@ -47,4 +47,9 @@ export function signedJob(over: Partial<Job> = {}): SignedJob {
 /** Signs whatever it is given, with the test key: the way to get a validly signed job the cloud would never have signed. */
 export function signRaw(job: unknown, key: KeyObject = privateKey): { job: unknown; signature: string } {
   return { job, signature: sign(null, Buffer.from(canonicalJson(job), "utf8"), key).toString("base64url") };
+}
+
+/** A sandbox command (stop, delete or reap) signed with the cloud's test key, the way the cloud signs one for the runner it names. */
+export function signedSandboxCommand(command: SandboxCommand): SignedSandboxCommand {
+  return signSandboxCommand(command, KEY_ID, privateKey);
 }
