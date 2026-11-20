@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import type { SandboxHandle, StartDetachedOptions } from "../../../src/sandbox/port.js";
 import { createDaemonSdk, type LimitControl } from "../../../src/vm/sandboxd/sdkAdapter.js";
-import { FIXED_ENV, SUBSCRIPTION_TOKEN_VAR } from "../../../src/job/cleanEnv.js";
+import { cleanEnv, FIXED_ENV, LOGIN_SHELL_MARKERS, SUBSCRIPTION_TOKEN_VAR } from "../../../src/job/cleanEnv.js";
 import { MICROVM_ENV_NAMES, MICROVM_GIT_ENV, MICROVM_GUEST_ENV, MICROVM_PINNED_ENV, REVERSE_HOSTS, guestEnvOf, microvmEnvAllowed } from "../../../src/vm/sandboxd/guestEnv.js";
 import { MAX_TIMEOUT_MS, VM_BACKSTOP_MS, RUN_COMMAND_MAX_OUTPUT_CHARS, createMicrovmSandbox, policyOf } from "../../../src/vm/sandboxd/microvmSandbox.js";
 import type { SdkSandbox, VercelSandboxSdk } from "../../../src/vm/sandboxd/sdkSlice.js";
@@ -671,6 +671,15 @@ describe("a client that follows the proxy variables sends the rewritten hosts to
     expect(routeOf(env, `${base}/v1/messages`)).toBe("reverse relay");
     expect(routeOf(env, "https://api.github.com/repos/o/r")).toBe("CONNECT relay");
     expect(routeOf(env, "https://registry.npmjs.org/left-pad")).toBe("CONNECT relay");
+  });
+
+  it("the runner's own clean environment passes the table on any host: a login-shell marker is a name a job may carry, and it never reaches the guest", () => {
+    const clean = cleanEnv({ mode: "subscription" }, undefined);
+    expect(microvmEnvAllowed(clean)).toBe(true);
+    for (const marker of LOGIN_SHELL_MARKERS) {
+      expect(microvmEnvAllowed({ [marker]: "1" }), marker).toBe(true);
+      expect(guestEnvOf({ [marker]: "1" })[marker], marker).toBeUndefined();
+    }
   });
 
   it("git is pointed at the reverse relay for GitHub only, by git's own settings (read back with the real git); a job cannot add or change one", () => {

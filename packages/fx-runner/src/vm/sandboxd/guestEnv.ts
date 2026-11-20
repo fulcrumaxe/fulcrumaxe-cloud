@@ -10,7 +10,7 @@
  *  - The names the host engine copies from the host (`PATH`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`) are not carried into the guest: the guest
  *    agent user's own values replace them.
  */
-import { FIXED_ENV, HOST_ENV_ALLOWLIST } from "../../job/cleanEnv.js";
+import { FIXED_ENV, HOST_ENV_ALLOWLIST, LOGIN_SHELL_MARKERS } from "../../job/cleanEnv.js";
 
 /** The guest-side CONNECT relay (`127.0.0.1:5253`); the reverse relay is `127.0.0.1:80`. The guest image provides both. */
 const CONNECT_RELAY = "http://127.0.0.1:5253";
@@ -68,7 +68,7 @@ export const MICROVM_GUEST_ENV: Readonly<Record<string, string>> = Object.freeze
 });
 
 /** Every name a job's environment may carry into a microVM guest. */
-export const MICROVM_ENV_NAMES: ReadonlySet<string> = new Set<string>([...HOST_ENV_ALLOWLIST, ...Object.keys(MICROVM_PINNED_ENV)]);
+export const MICROVM_ENV_NAMES: ReadonlySet<string> = new Set<string>([...HOST_ENV_ALLOWLIST, ...LOGIN_SHELL_MARKERS, ...Object.keys(MICROVM_PINNED_ENV)]);
 
 const MAX_VALUE_CHARS = 8192;
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -89,5 +89,9 @@ export function microvmEnvAllowed(env: unknown): boolean {
 
 /** The environment a guest process gets from an already checked job environment: the guest's own values, then every pinned name, laid over it. */
 export function guestEnvOf(env: Readonly<Record<string, string>>): Record<string, string> {
-  return { ...env, ...MICROVM_GUEST_ENV, ...MICROVM_PINNED_ENV };
+  const carried = { ...env };
+  // The host's login-shell markers (a NixOS host's `__NIXOS_SET_ENVIRONMENT_DONE`) are in the runner's clean environment, so a job may name them, but they say something about the
+  // HOST's shell: they are never carried into a guest.
+  for (const marker of LOGIN_SHELL_MARKERS) delete carried[marker];
+  return { ...carried, ...MICROVM_GUEST_ENV, ...MICROVM_PINNED_ENV };
 }

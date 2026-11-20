@@ -75,10 +75,12 @@ export interface WorkspaceArchive {
 /**
  * Runs `cmd` in the guest, as its agent user, and answers its exit code and the end of what it printed (`keep` characters of each stream). `limitMs` ends it
  * with SIGKILL, and `timedOut` says so; the limit starts BEFORE the guest is asked to start the command, so a guest that never answers is bounded here and not only by the VM's own
- * timer. An aborted `signal` kills the command at once and says so (`aborted`). `onText` sees every chunk as it arrives.
+ * timer. An aborted `signal` kills the command at once and says so (`aborted`). `onText` sees every chunk as it arrives; answering "stop" kills the command at once (`stopped`),
+ * which is how a caller holds a reader to a size it set.
  */
-export async function runInGuest(guest: SdkSandbox, spec: { cmd: string; args: readonly string[]; cwd?: string; env?: Record<string, string> }, limitMs: number, keep = 64 * 1024, onText?: (stream: "stdout" | "stderr", text: string) => void, signal?: AbortSignal): Promise<{ exitCode: number | null; timedOut: boolean; aborted?: true; stdout: string; stderr: string }> {
+export async function runInGuest(guest: SdkSandbox, spec: { cmd: string; args: readonly string[]; cwd?: string; env?: Record<string, string> }, limitMs: number, keep = 64 * 1024, onText?: (stream: "stdout" | "stderr", text: string) => void | "stop", signal?: AbortSignal): Promise<{ exitCode: number | null; timedOut: boolean; aborted?: true; stopped?: true; stdout: string; stderr: string }> {
   const held = { stdout: "", stderr: "" };
+  let stopped = false;
   if (signal?.aborted === true) return { exitCode: null, timedOut: false, aborted: true, ...held };
   let timer: NodeJS.Timeout | undefined;
   const limit = new Promise<"timeout">((resolve) => {
@@ -103,7 +105,11 @@ export async function runInGuest(guest: SdkSandbox, spec: { cmd: string; args: r
     const finished = (async () => {
       for await (const chunk of command.logs()) {
         if ((chunk.stream !== "stdout" && chunk.stream !== "stderr") || typeof chunk.data !== "string") continue;
-        onText?.(chunk.stream, chunk.data);
+        if (onText?.(chunk.stream, chunk.data) === "stop") {
+          stopped = true;
+          await command.kill("SIGKILL").catch(() => undefined); // fx-swallow-ok: the caller asked to stop reading; whether the kill reached the command, nothing more is read
+          return { exitCode: 137 };
+        }
         held[chunk.stream] = (held[chunk.stream] + chunk.data).slice(-keep);
       }
       return command.wait();
@@ -114,7 +120,7 @@ export async function runInGuest(guest: SdkSandbox, spec: { cmd: string; args: r
       await command.kill("SIGKILL").catch(() => undefined); // fx-swallow-ok: the command is reported as timed out or stopped whether or not the kill reached it
       return { exitCode: null, timedOut: outcome === "timeout", ...(outcome === "abort" ? { aborted: true as const } : {}), ...held };
     }
-    return { exitCode: outcome.exitCode, timedOut: false, ...held };
+    return { exitCode: outcome.exitCode, timedOut: false, ...(stopped ? { stopped: true as const } : {}), ...held };
   } finally {
     clearTimeout(timer);
     if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);

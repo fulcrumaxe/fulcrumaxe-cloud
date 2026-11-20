@@ -34,10 +34,13 @@ import { readDerivedRules, verifyDerivedOutputs, type GeneratorFailure } from ".
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
-import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
+import type { NetworkRule, SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import type { WorkspaceStore } from "../job/workspace.js";
 import type { WorkspaceCrossing } from "../vm/workspace/crossing.js";
+import type { FreshCheckInput } from "../vm/workspace/guestCheck.js";
 import type { WorkspaceArchive } from "../vm/workspace/guestWorkspace.js";
+import type { SdkSandbox } from "../vm/sandboxd/sdkSlice.js";
+import type { AppliedBundle } from "./vmBundle.js";
 import type { Claimed, RunnerClient } from "./client.js";
 import { GitPathError } from "./git.js";
 import type { GitPath } from "./gitPath.js";
@@ -97,9 +100,17 @@ export interface JobHandlerDeps {
    * the agent starts); `archive` builds the verified archive of a commit from a mirror; `quiesce` ends the agent and keeps the VM (the runner reads the agent's commits out of it afterwards; the approved check never runs in it).
    */
   vm?: {
-    crossing: Pick<WorkspaceCrossing, "bind" | "unbind">;
+    crossing: Pick<WorkspaceCrossing, "bind" | "unbind" | "collect">;
     archive: (mirrorDir: string, commit: string) => Promise<WorkspaceArchive>;
     quiesce: (handle: SandboxHandle) => Promise<void>;
+    /** The running guest of a sandbox (`MicrovmSandbox.guestOf`), to read the agent's commits out of. */
+    guestOf: (handle: SandboxHandle) => Promise<SdkSandbox>;
+    /** Checks the untrusted bundle read out of the guest and, only if it passes, brings it into the host workspace (`applyBundle`). */
+    apply: (input: { bundle: Buffer; base: string; mirrorDir: string; workspace: string }) => Promise<AppliedBundle>;
+    /** True when the sandbox is created persistent (a stop keeps a snapshot and a later start reopens the same working copy). Left to the wiring: it needs the snapshot directory and quota (B-6). */
+    persistent?: boolean;
+    /** The approved check in a FRESH VM, given the archive of the host's new tip (`createFreshVmCheck`). Absent: a VM run's check is closed (`not_set_up`). */
+    freshCheck?: (input: FreshCheckInput) => Promise<CheckOutcome>;
   };
   ledger: JobLedger;
   /** Git path B: the mirror, the workspace and the push. */
@@ -291,6 +302,15 @@ function stopOnAbort(port: SandboxPort, signal: AbortSignal, held: HeldSandbox):
  * A port that says, on `step`, when the agent's turn starts and when it ends (with the kind of its last event, a closed word). It changes nothing the agent or the run sees:
  * the start's own return value is passed on as it was.
  */
+/** A port that tells `remember` the network rules of every start and resume, and changes nothing else. */
+function rememberingNetwork(port: SandboxPort, remember: (rules: NetworkRule[]) => void): SandboxPort {
+  return {
+    ...port,
+    startDetached: (handle, opts) => (remember(opts.networkPolicy), port.startDetached(handle, opts)),
+    resume: (handle, sessionId, prompt, opts) => (remember(opts.networkPolicy), port.resume(handle, sessionId, prompt, opts)),
+  };
+}
+
 function narrated(port: SandboxPort, step: StepSink): SandboxPort {
   const watch = <T extends { hookFired: Promise<{ type: string } | undefined> }>(started: T, what: string): T => {
     step(`agent turn ${what}`);
@@ -528,6 +548,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     let spillHeld: SpillHandle | undefined;
     /** True once this run's working copy source was handed to the microVM crossing: it is released when the run ends. */
     let bound = false;
+    let vmMirror = "";
     /**
      * D#600 CX-4b: writes the job's spill files before anything else starts (no mirror fetch, no sandbox) and keeps the handle. True when the job has a spill and it could not be
      * made: with no spill root, a damaged root, a file that could not be written, or a marker with no text behind it. The run then ends and the agent never sees a dangling marker.
@@ -572,7 +593,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const grant: JobAllowanceGrant | undefined = job.sandbox_allowances === undefined ? undefined : { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) };
           let planSession = deps.run.planSession;
           const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
-          if (job.continues !== null && wanted?.kind === "resume" && deps.run.workspaces.owns(wanted.workspace)) {
+          if (job.continues !== null && wanted?.kind === "resume" && !vmRun && deps.run.workspaces.owns(wanted.workspace)) {
             const resumed = await git.resume(job, claimed, wanted.workspace);
             if (resumed !== null) {
               started.base = resumed.base;
@@ -592,6 +613,12 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               const fresh = { kind: "fresh", branch: job.continues.branch } as const;
               planSession = () => fresh;
             }
+          }
+          // A fix round in a microVM starts a new VM (its own sandbox name), which holds no earlier session or working copy: it starts fresh from the branch's tip, the way a resume
+          // after an eviction does. Only a start that is NOT the first one of the same run reopens the guest's copy (the repair turn, a start after a stop).
+          if (vmRun && job.continues !== null) {
+            const fresh = { kind: "fresh", branch: job.continues.branch } as const;
+            planSession = () => fresh;
           }
           const fill = async (workspace: string): Promise<void> => {
             // The job is verified, the sandbox gate has passed and the workspace directory exists; the mirror checkout comes next.
@@ -631,15 +658,32 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               },
               archive: (commit) => vm.archive(mirror, commit),
             });
+            vmMirror = mirror;
             bound = true;
           }
           const granted = vmRun ? baseSandbox : withReadGrants(baseSandbox, git.readGrants(job));
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
           const spilled = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
-          const allowed = deps.onStep === undefined ? spilled : narrated(spilled, step);
+          const narrow = deps.onStep === undefined ? spilled : narrated(spilled, step);
+          // The network rules the agent's VM ran under: the check's fresh VM gets the same ones (TL ruling 12).
+          let vmNetwork: NetworkRule[] = [];
+          const allowed = vmRun ? rememberingNetwork(narrow, (rules) => void (vmNetwork = rules)) : narrow;
           usedPort = allowed;
           const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
             let agentStopFailed = false;
+            // D#587 B-5b: in a microVM the agent worked on the guest's copy. It is ended (the VM kept), its commits are read out as a bundle the host checks, and only a bundle that
+            // passes changes the host workspace; every step after this (the lockfile update, the scope test, the push) then sees what the agent made. A failure here is a closed code.
+            let vmQuiesced = false;
+            if (vmRun && deps.vm !== undefined) {
+              const vm = deps.vm;
+              await vm.quiesce(sandboxHandle);
+              vmQuiesced = true;
+              const collected = await vm.crossing.collect(job.run_id, await vm.guestOf(sandboxHandle));
+              if (collected !== null) {
+                const applied = await vm.apply({ bundle: collected.bundle, base: collected.base, mirrorDir: vmMirror, workspace });
+                step(`microVM commits brought in (${String(applied.commits)})`);
+              }
+            }
             // Before the check's before-and-after comparison of the protected files, so a placeholder is neither checked nor reported as a change.
             clearStubs(workspace);
             // The agent could not touch the lockfile; the runner does it, so the check's frozen install and the published change both see a lockfile that matches the manifests.
@@ -651,7 +695,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // below still launches under its rules. It runs for the check whether or not a lockfile update is wired.
             if (syncsLockfile || job.check !== undefined) {
               // A microVM keeps running after its agent ends: `stop` would end the VM the runner reads the agent's commits out of.
-              const ended = await (vmRun && deps.vm !== undefined ? deps.vm.quiesce(sandboxHandle) : allowed.stop(sandboxHandle)).then(() => true, () => false);
+              const ended = await (vmQuiesced ? Promise.resolve() : allowed.stop(sandboxHandle)).then(() => true, () => false);
               if (!ended) {
                 agentStopFailed = true;
                 if (syncsLockfile) step("lockfile update ended (not run: the agent could not be stopped)");
@@ -674,13 +718,6 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               checkHeld.outcome = closed("the check was not run: the agent could not be stopped", "agent_not_stopped"); step("check not run (agent_not_stopped)");
               return;
             }
-            // D#587 B-5b, TL ruling 12: the approved check never runs in the guest the agent controlled (it has passwordless sudo there, so a verdict taken there is the agent's own). A VM
-            // run's check belongs in a FRESH VM, given the archive of the host's new tip once the agent's commits have been brought back and checked on the host copy. Until that is in
-            // place the check is closed for a VM run, with this fixed code, and nothing is run in the agent's VM.
-            if (vmRun) {
-              checkHeld.outcome = closed("the check was not run: a microVM run's check runs in a fresh VM, which this runner does not have yet", "not_set_up"); step("check not run (not_set_up)");
-              return;
-            }
             // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: a fix round (a branch it continues) whose workspace HEAD is still the exact commit it started from added no commit, and the cloud will end it on its own
             // no-commit path whatever a check says, so the check (up to its time limit) is not spent. Compared by full commit id, the tip read from a snapshot the daemon made (never the agent's `.git`). A
             // build, a round brought up to date with the default branch (its merge commit is a new tip) and a tip that cannot be read all run the check as before. The reason is a hint, never a pass.
@@ -696,8 +733,12 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               checkHeld.outcome = closed("", undefined, { noDevShell: true }); step("check not run (check_no_dev_shell)");
               return;
             }
+            // D#587 B-5b, TL ruling 12: the approved check never runs in the guest the agent controlled (it has passwordless sudo there, so a verdict taken there is the agent's own). A VM run's
+            // check runs in a FRESH VM (`deps.vm.freshCheck`) given the archive of the host's new tip, after the agent's commits were brought back and checked and every step above ran on that
+            // host copy; the host reads the verdict. An OS-sandbox run's check is the host step, as before. Without the way to run it, the check is closed (`not_set_up`), never passed.
             const { checkStep, checkLaunch, baseFile } = deps;
-            if (checkStep === undefined || checkLaunch === undefined || baseFile === undefined || started.base === undefined) {
+            const freshCheck = vmRun ? deps.vm?.freshCheck : undefined;
+            if (baseFile === undefined || started.base === undefined || (vmRun ? freshCheck === undefined : checkStep === undefined || checkLaunch === undefined)) {
               checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up"); step("check not run (not_set_up)");
               return;
             }
@@ -715,6 +756,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // #751: a changed generated file (the OpenAPI document and client beside a route) is lifted out of that count only when a fresh run of its generators on this workspace, under the check's own
             // sandbox rules and time limit, reproduces it byte for byte. The files vouched for are named on `done` beside a passing check; a run without a pass vouches for nothing.
             const generate = async (argv: readonly string[]): Promise<boolean | GeneratorFailure> => {
+              // A VM run's generators would run in a VM whose output stays there, so nothing could be set beside the host's files: such a run vouches for no generated file (closed, never lifted).
+              if (vmRun || checkStep === undefined || checkLaunch === undefined) return "refused";
               const ran = await checkStep({ check: { argv: [...argv], dev_shell: check.dev_shell, timeout_s: check.timeout_s }, workspace, base: pin, baseDir: mirror, launch: (a, devShell) => checkLaunch(sandboxHandle, a, devShell), baseFile, home: deps.checkHome, signal: stopRun });
               if (ran.passed) return true;
               return ran.body.timed_out ? "timeout" : ran.body.exit_code === null ? "refused" : "nonzero";
@@ -731,7 +774,15 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             }
             step(`check started (time limit ${String(check.timeout_s)} s)`);
             try {
-              checkHeld.outcome = await checkStep({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+              if (vmRun && freshCheck !== undefined) {
+                // the tip is read by the host the way the push reads it, from the host copy the verified bundle was brought into
+                const tip = await git.tip?.(job, workspace).catch(() => null);
+                checkHeld.outcome = tip === undefined || tip === null || !FULL_COMMIT_ID.test(tip)
+                  ? closed("the check was not run: the new tip could not be read", "start_failed")
+                  : await freshCheck({ runId: job.run_id, check, repoDir: workspace, tip, baseFile: (relative) => baseFile(mirror, pin, relative), networkPolicy: vmNetwork, signal: stopRun });
+              } else {
+                checkHeld.outcome = await checkStep!({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch!(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+              }
               if (checkHeld.outcome.passed && verdict !== null && verdict.derivedFresh.length > 0) checkHeld.outcome = { ...checkHeld.outcome, body: { ...checkHeld.outcome.body, derived_fresh: verdict.derivedFresh } };
               const body = checkHeld.outcome.body;
               step(`check ended (exit ${body.exit_code === null ? "none" : String(body.exit_code)}, ${String(body.duration_ms)} ms, timed_out ${String(body.timed_out)}${stopRun.aborted ? ", stopped" : ""}${body.reason === undefined ? "" : `, ${closedWord(body.reason)}`})`);
@@ -741,7 +792,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               step("check ended (not run: it is not set up on this runner)");
             }
           };
-          result = withAnswerFile(job, await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger }), deps.verifyAnswer, claimed.runId);
+          result = withAnswerFile(job, await run(job, { ...deps.run, ...(vmRun ? { persistentSandbox: deps.vm?.persistent === true } : {}), afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger }), deps.verifyAnswer, claimed.runId);
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.

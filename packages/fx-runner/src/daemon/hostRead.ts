@@ -11,7 +11,7 @@
  * Read sites call `readWorkspaceGit` / `runWorkspaceGit` and never build a workspace-directed git call themselves (`test/daemon/hostRead.test.ts` fails on a bare one).
  */
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
-import { GitPathError, guardConfigEnv, type Git, type GitCapture, type GitCaptured, type GitPathCode } from "./git.js";
+import { GitPathError, GUARD_CONFIG, guardConfigEnv, type Git, type GitCapture, type GitCaptured, type GitPathCode } from "./git.js";
 import { assertHostReadableGit } from "./workspaceGit.js";
 import { assertNoOutsideGitfiles } from "./nestedGitfiles.js";
 import { checkPin, pinWorkspace, unpinWorkspace } from "./workspacePin.js";
@@ -48,9 +48,12 @@ const NEUTRAL_ARGS: readonly string[] = Object.freeze(NEUTRAL_CONFIG.flatMap(([k
 
 /** The git verbs a host read may run. Only the diff family (`diff`, `status`) inspects submodules. */
 export type HostGitVerb = "diff" | "status" | "ls-files" | "for-each-ref" | "rev-parse" | "symbolic-ref" | "cat-file";
+/** The verbs that change the workspace (the bundle apply). Only `runWorkspaceGit` takes them; `readWorkspaceGit` stays read-only. */
+export type HostGitWriteVerb = "fetch" | "reset" | "update-ref";
+const WRITE_VERBS: ReadonlySet<string> = new Set<string>(["fetch", "reset", "update-ref"]);
 const SUBMODULE_VERBS: ReadonlySet<HostGitVerb> = new Set<HostGitVerb>(["diff", "status"]);
 /** The verbs that name worktree paths. The others read refs and the object store only and never touch a nested repository. */
-const WORKTREE_VERBS: ReadonlySet<HostGitVerb> = new Set<HostGitVerb>(["diff", "status", "ls-files"]);
+const WORKTREE_VERBS: ReadonlySet<string> = new Set<string>(["diff", "status", "ls-files", "reset"]);
 const IGNORE_SUBMODULES_ALL = "--ignore-submodules=all";
 
 /**
@@ -58,19 +61,40 @@ const IGNORE_SUBMODULES_ALL = "--ignore-submodules=all";
  * family without `--ignore-submodules=all` cannot be written: it does not type-check, and the class cannot be constructed outside this file.
  */
 export class HostGitArgs {
-  private constructor(readonly argv: readonly string[], readonly touchesWorktree: boolean) {}
-  /** @internal use `hostGit`. */
-  static build(verb: HostGitVerb, rest: readonly string[]): HostGitArgs {
+  private constructor(readonly argv: readonly string[], readonly touchesWorktree: boolean, readonly writes: boolean) {}
+  /** @internal use `hostGit` or `hostGitWrite`. */
+  static build(verb: HostGitVerb | HostGitWriteVerb, rest: readonly string[]): HostGitArgs {
     // A caller's own `--ignore-submodules` (any value) is refused: the builder alone sets it.
     if (rest.some((arg) => arg === "--ignore-submodules" || arg.startsWith("--ignore-submodules="))) refused();
     // `--recurse-submodules` (on any verb) starts git inside every submodule.
     if (rest.some((arg) => arg === "--recurse-submodules" || arg.startsWith("--recurse-submodules="))) refused();
-    return new HostGitArgs(SUBMODULE_VERBS.has(verb) ? [verb, IGNORE_SUBMODULES_ALL, ...rest] : [verb, ...rest], WORKTREE_VERBS.has(verb));
+    if (verb === "fetch") vetFetch(rest);
+    return new HostGitArgs(SUBMODULE_VERBS.has(verb as HostGitVerb) ? [verb, IGNORE_SUBMODULES_ALL, ...rest] : [verb, ...rest], WORKTREE_VERBS.has(verb), WRITE_VERBS.has(verb));
   }
 }
 
+/**
+ * `fetch` can run a program (`--upload-pack`, `-u`, `--exec`, and any abbreviation of them) and can reach a URL or a transport helper (`ext::`, `fd::`). So it takes
+ * only the flags on this list, and its source must be an absolute local path, never a URL, a remote name or a flag. Refspecs after it may not start with `-`.
+ */
+const FETCH_FLAGS: ReadonlySet<string> = new Set(["--no-tags", "--no-recurse-submodules", "--quiet", "-q"]);
+function vetFetch(rest: readonly string[]): void {
+  const positional: string[] = [];
+  for (const arg of rest) {
+    if (arg.startsWith("-")) {
+      if (!FETCH_FLAGS.has(arg)) refused();
+    } else positional.push(arg);
+  }
+  const source = positional[0];
+  if (source === undefined || !source.startsWith("/") || source.includes("::") || source.includes("\0") || source.includes("\n")) refused();
+}
+
 /** Builds the arguments of a host read: `hostGit("diff", "--name-only", base)` runs `git diff --ignore-submodules=all --name-only <base>`. */
-export const hostGit = (verb: HostGitVerb, ...rest: readonly string[]): HostGitArgs => HostGitArgs.build(verb, rest);
+export const hostGit = (verb: HostGitVerb, ...rest: readonly string[]): HostReadArgs => HostGitArgs.build(verb, rest) as HostReadArgs;
+/** The same for the verbs that change the workspace: only `runWorkspaceGit` accepts the result. */
+export const hostGitWrite = (verb: HostGitWriteVerb, ...rest: readonly string[]): HostGitArgs => HostGitArgs.build(verb, rest);
+/** The arguments of a read: the type `readWorkspaceGit` takes. */
+export type HostReadArgs = HostGitArgs & { readonly writes: false };
 
 const refused = (): never => {
   throw new GitPathError("workspace_git_refused");
@@ -135,7 +159,8 @@ export class HostReadSession {
 }
 
 /** Runs git in the workspace through `capture` with the guarded environment, after the checks. Throws `GitPathError("workspace_git_refused")` on a refusal. */
-export async function readWorkspaceGit(capture: GitCapture, envOptions: CleanEnvOptions, workspace: string, args: HostGitArgs, timeoutMs: number, session?: HostReadSession): Promise<GitCaptured> {
+export async function readWorkspaceGit(capture: GitCapture, envOptions: CleanEnvOptions, workspace: string, args: HostReadArgs, timeoutMs: number, session?: HostReadSession): Promise<GitCaptured> {
+  if (args.writes) return refused();
   const env = { ...gitEnv(envOptions), ...guardConfigEnv(), ...NEUTRAL_ENV };
   await vet(workspace, async (file) => {
     const out = await capture("git", CONFIG_LIST(file), env, 30_000);
@@ -147,10 +172,15 @@ export async function readWorkspaceGit(capture: GitCapture, envOptions: CleanEnv
 }
 
 /** The same for a `Git` runner (the resume clean-up's listing): checks, then `git.run`. */
-export async function runWorkspaceGit(git: Git, code: GitPathCode, workspace: string, args: HostGitArgs): Promise<string> {
+export async function runWorkspaceGit(git: Git, code: GitPathCode, workspace: string, args: HostGitArgs, options?: { config?: ReadonlyArray<readonly [string, string]>; timeoutMs?: number }): Promise<string> {
+  // A caller's config entries are an allowlist of tuning keys: never one that a protection (`GUARD_CONFIG`, `NEUTRAL_CONFIG`) sets, so a caller cannot turn a protection off.
+  const extra = options?.config ?? [];
+  for (const [key] of extra) if (!OPTION_CONFIG_KEYS.has(key.toLowerCase())) refused();
   await vet(workspace, (file) => git.run("workspace_git_refused", CONFIG_LIST(file), undefined, undefined, NEUTRAL_ENV), args.touchesWorktree);
-  return git.run(code, ["-C", workspace, ...args.argv], NEUTRAL_CONFIG, undefined, NEUTRAL_ENV);
+  // `git.run` puts GUARD_CONFIG first and then these; the later entry wins, so the protections come last here as well.
+  return git.run(code, ["-C", workspace, ...args.argv], [...extra, ...NEUTRAL_CONFIG, ...GUARD_CONFIG], options?.timeoutMs, NEUTRAL_ENV);
 }
+const OPTION_CONFIG_KEYS: ReadonlySet<string> = new Set(["pack.threads"]);
 
 /** What `mergeDefaultInto` found. `merged`: the branch now holds `target` (a merge commit, or a fast-forward when the branch had no commit of its own). `blocked`: the merge is clean but the working tree would not take it (local changes in the way); nothing was changed. */
 export type BranchUpdate = { kind: "current" } | { kind: "merged"; head: string } | { kind: "conflict" } | { kind: "blocked" };

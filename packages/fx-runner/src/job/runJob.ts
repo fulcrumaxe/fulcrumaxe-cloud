@@ -68,6 +68,11 @@ export interface RunJobDeps {
    * It must not throw; a throw ends the run like any failure.
    */
   afterAgent?: (handle: SandboxHandle, workspace: string) => Promise<void>;
+  /**
+   * D#587 B-5b: make the run's sandbox persistent (a microVM that keeps a snapshot when it stops, so a later start in the same run reopens the same working copy). A persistent
+   * sandbox is not stopped at the end of the run: that would write a snapshot of the guest's memory only to delete it at once; it is deleted, which ends the VM.
+   */
+  persistentSandbox?: boolean;
 }
 
 export const DEFAULT_WALL_CLOCK_MS = 2 * 60 * 60_000;
@@ -142,7 +147,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
 
   let handle;
   try {
-    handle = await deps.sandbox.createSandbox({ sandboxName: `rn-${job.run_id}`, retention: { persistent: false }, timeoutMs: wallClockMs + SANDBOX_MARGIN_MS });
+    handle = await deps.sandbox.createSandbox({ sandboxName: `rn-${job.run_id}`, retention: { persistent: deps.persistentSandbox === true }, timeoutMs: wallClockMs + SANDBOX_MARGIN_MS });
   } catch (error) {
     // fx-swallow-ok: the failure is returned as a closed reason code; the error text could hold job content
     if (plan.kind === "fresh") await deps.workspaces.discard(workspace);
@@ -184,7 +189,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     return { status: "failed", reason: reasonOf(error), workspace };
   } finally {
     clearTimeout(timer);
-    await deps.sandbox.stop(handle).catch(noop);
+    if (deps.persistentSandbox !== true) await deps.sandbox.stop(handle).catch(noop);
     await deps.sandbox.deleteSandbox(handle).catch(noop);
   }
 }
