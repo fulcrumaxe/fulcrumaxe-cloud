@@ -4,7 +4,7 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
-  CURRENT_PROTOCOL_VERSION, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
+  CURRENT_PROTOCOL_VERSION, MACHINE_ONBOARDING_MIN_PROTOCOL, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
@@ -15,6 +15,7 @@ import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js
 import { WAKE_PATH, parseWakeReply } from "./wake.js";
 import type { SandboxCommandReceiver } from "./sandboxCommands.js";
 import type { InventoryReporter } from "./sandboxInventory.js";
+import type { HostLoadReporter } from "./hostLoad.js";
 import type { RunnerKey } from "../keys.js";
 
 export const HELLO_PATH = "/api/runner/hello";
@@ -153,6 +154,11 @@ export interface RunnerClientConfig {
    */
   sandboxInventory?: InventoryReporter;
   /**
+   * D#845 ON-1b: the machine's load, asked on each ordinary claim (never a status poll). It is sent only when `protocolVersion` is `MACHINE_ONBOARDING_MIN_PROTOCOL` or later, and only when the
+   * reporter says it is due. It counts as sent once the cloud answered 200. Wired only by a runner whose hello lists `project_setup_v1`.
+   */
+  hostLoad?: HostLoadReporter;
+  /**
    * D#587 B-7b: receives the signed sandbox commands a claim reply carries and holds their acks for the next claim. Wired only by a runner whose hello lists `sandbox_commands_v1`;
    * like the inventory it is used only at protocol 21 or later, and never on a status poll. The acks count as sent once the cloud answered 200.
    */
@@ -226,11 +232,13 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // A status poll (closed sandbox) takes no job, so it declares no capacity; every other claim says what the runner could take now (D#6 C43-4).
       const signIn = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= VERIFY_SIGN_IN_MIN_PROTOCOL ? config.verifySignIn?.() : undefined;
       const inventory = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= SANDBOX_INVENTORY_MIN_PROTOCOL ? await config.sandboxInventory?.next() : undefined;
+      const hostLoad = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= MACHINE_ONBOARDING_MIN_PROTOCOL ? config.hostLoad?.next() : undefined;
       const commands = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= SANDBOX_INVENTORY_MIN_PROTOCOL ? config.sandboxCommands : undefined;
       const sentAcks = commands?.pendingAcks() ?? [];
-      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : { ...(capacity === undefined ? {} : { capacity }), ...(signIn === undefined ? {} : { verify_sign_in: signIn }), ...(inventory === undefined ? {} : { sandboxes: inventory.rows }), ...(sentAcks.length === 0 ? {} : { sandbox_acks: sentAcks }) }));
+      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : { ...(capacity === undefined ? {} : { capacity }), ...(signIn === undefined ? {} : { verify_sign_in: signIn }), ...(inventory === undefined ? {} : { sandboxes: inventory.rows }), ...(sentAcks.length === 0 ? {} : { sandbox_acks: sentAcks }), ...(hostLoad === undefined ? {} : { host_load: hostLoad.load }) }));
       if (reply?.status === 200) {
         inventory?.commit();
+        hostLoad?.commit();
         commands?.committed(sentAcks);
         const parsed = ClaimReply.safeParse(reply.body);
         if (!parsed.success) return fail(reply, "invalid_reply");

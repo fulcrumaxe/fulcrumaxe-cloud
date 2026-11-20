@@ -64,6 +64,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // D#587 B-7a: the sandbox inventory, when the runner sent one (it does so only when its list changed, or every 10 minutes). Replaced whole through the
       // definer, which refuses unknown keys, a protocol below 21 and more than 200 rows. Routing and display only; nothing below reads it.
       if (waited <= 0 && message.sandboxes !== undefined) await client.query("SELECT runner_sandboxes_record($1::jsonb)", [JSON.stringify(message.sandboxes)]);
+      // D#845 ON-1b: the machine's load, when the claim carried it (protocol 22 and later; the definer refuses a runner whose hello declared less). A status poll never carries one. Routing and display only; nothing below reads it.
+      if (waited <= 0 && message.sandbox_unavailable === undefined && message.host_load !== undefined) await client.query("SELECT runner_host_load_record($1::int, $2::int, $3::int)", [message.host_load.mem_avail_mb, message.host_load.disk_free_mb, message.host_load.setups_running]);
       // D#587 B-7b: the acks this claim carried are stored, and the signed sandbox commands waiting for this runner are handed over (an ordinary claim only; none for a runner
       // that did not list `sandbox_commands_v1`). Delivery reads nothing about the inventory.
       let sandboxCommands: SignedSandboxCommand[] = [];
