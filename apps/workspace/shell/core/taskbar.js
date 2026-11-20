@@ -273,7 +273,8 @@ import { workspaceMenuItems, syncElsewhereMarker, bindMenuKeys } from "./workspa
           window.FULCWM.jumpTo(appId);
         } else if (ws.state === 'minimized') {
           window.FULCWM.restore(appId);
-        } else if (active && active.id === appId) {
+        } else if (active && active.id === appId &&
+                   !(window.FULCWM.isRestorePending && window.FULCWM.isRestorePending())) {
           window.FULCWM.minimize(appId);
         } else {
           window.FULCWM.focus(appId);

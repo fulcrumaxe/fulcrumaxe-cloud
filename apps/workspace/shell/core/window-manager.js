@@ -34,6 +34,11 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
   // or click) while the saved layout was still waiting to be restored at boot.
   // restoreLayout() reads it so the late restore cannot take that window back.
   let userWindowId = null;
+  // True from desktop-ready until the boot restore (or the default first
+  // window) has run. A dock tap on the active window means "bring it forward"
+  // here, never "minimize": the person is tapping again because nothing seems
+  // to have happened yet, and minimizing would hide the window they asked for.
+  let restorePending = false;
   let cascadeOffset = 0;
   const CASCADE_STEP = 30;
   const CASCADE_MAX = 210;
@@ -291,6 +296,7 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
     // layout reload) starts from what the person does after this point.
     var keepId = userWindowId;
     userWindowId = null;
+    restorePending = false;
     try {
       // The current workspace comes back first, so windows restored with a
       // membership of 2..4 are hidden or shown against the right one.
@@ -2514,6 +2520,8 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
     closeWorkspaceOverview: closeWorkspaceOverview,
     resetLayout: resetLayout,
     restoreLayout: restoreLayout,
+    setRestorePending: function (v) { restorePending = !!v; },
+    isRestorePending: function () { return restorePending; },
     renameWindow: function (appId, title) {
       var ws = windows[appId];
       if (!ws) return;
