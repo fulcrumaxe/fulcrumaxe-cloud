@@ -36,6 +36,13 @@ describe("wsl_interop_enabled", () => {
     expect(result.detail).toContain("wsl --shutdown");
   });
 
+  it("when wsl.conf already says false but the entry is there, says so, and still fails", () => {
+    const result = wslChecks(input({ interop: true }))[0]!;
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("already sets enabled=false");
+    expect(wslChecks(input({ interop: true, conf: "[interop]\nenabled=true\nappendWindowsPath=false\n" }))[0]!.detail).not.toContain("already sets");
+  });
+
   it.each([["no wsl.conf at all", undefined], ["[interop] enabled=true", "[interop]\nenabled=true\nappendWindowsPath=false\n"], ["the key in another section", "[automount]\nenabled=false\n[interop]\nappendWindowsPath=false\n"], ["a commented-out false", "[interop]\n#enabled=false\nappendWindowsPath=false\n"]])("fails with %s", (_name, conf) => {
     expect(failing(input({ conf: conf ?? null }))).toContain("wsl_interop_enabled");
   });

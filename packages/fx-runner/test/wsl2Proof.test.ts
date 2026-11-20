@@ -38,7 +38,7 @@ esac`,
 };
 
 /** The system tools the script itself uses. The case's PATH holds the stubs and links to exactly these, so a tool the script needs and the host lacks, or a stub left out, shows. */
-const SYSTEM_TOOLS = ["bash", "sh", "sed", "grep", "tr", "cut", "sort", "head", "tail", "timeout", "sha256sum", "stat", "mkdir", "rm", "ln", "tar", "cat", "dirname", "xz"];
+const SYSTEM_TOOLS = ["bash", "sh", "sed", "grep", "tr", "cut", "sort", "head", "tail", "timeout", "sha256sum", "stat", "mkdir", "rm", "ln", "tar", "cat", "dirname", "xz", "wc"];
 
 function findOnPath(name: string): string | undefined {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -191,6 +191,63 @@ describe("wsl2-proof.sh", () => {
     expect(verdictOf(run({ STUB_CANARY_OUT: " Tests  1 skipped (1)\n" }), "canary")).toBe("fail");
     expect(verdictOf(run({ STUB_CANARY_OUT: " Test Files  1 passed | 1 skipped (2)\n      Tests  1 passed (1)\n" }), "canary")).toBe("fail");
     expect(verdictOf(run({ STUB_CANARY_RC: "1" }), "canary")).toBe("fail");
+  });
+
+  describe("the two matrix files that cannot apply on a Linux host", () => {
+    const LIVE = " ↓ test/canary.live.test.ts (1 test | 1 skipped)\n";
+    const KEYCHAIN = " ↓ test/canary/securitydInit.test.ts (1 test | 1 skipped)\n";
+    const TOTALS = " Test Files  5 passed | 2 skipped (7)\n      Tests  32 passed | 2 skipped (34)\n";
+
+    it("passes when exactly those two files are skipped whole, and the row names them (the real run's output)", () => {
+      const r = run({ STUB_CANARY_OUT: `${LIVE} ✓ test/canary/matrixUnit.test.ts (13 tests) 282ms\n${KEYCHAIN}${TOTALS}` });
+      expect(verdictOf(r, "canary")).toBe("pass");
+      expect(r.rows.find((row) => row.id === "canary")?.detail).toContain("test/canary.live.test.ts test/canary/securitydInit.test.ts");
+    });
+
+    it("passes with one of them skipped, and says nothing was skipped when none is", () => {
+      expect(verdictOf(run({ STUB_CANARY_OUT: `${KEYCHAIN} Test Files  3 passed | 1 skipped (4)\n Tests  4 passed | 1 skipped (5)\n` }), "canary")).toBe("pass");
+      expect(run().rows.find((row) => row.id === "canary")?.detail).toContain("no test skipped");
+    });
+
+    it("fails when any other file is skipped", () => {
+      const other = " ↓ test/canary/readDenyMatrix.test.ts (1 test | 1 skipped)\n";
+      expect(verdictOf(run({ STUB_CANARY_OUT: `${other}${KEYCHAIN} Test Files  3 passed | 2 skipped (5)\n Tests  4 passed | 2 skipped (6)\n` }), "canary")).toBe("fail");
+    });
+
+    it("fails when an allowed file is only partly skipped, or skips more than its one test", () => {
+      expect(verdictOf(run({ STUB_CANARY_OUT: " ❯ test/canary/securitydInit.test.ts (2 tests | 1 skipped)\n Tests  4 passed | 1 skipped (5)\n" }), "canary")).toBe("fail");
+      expect(verdictOf(run({ STUB_CANARY_OUT: " ↓ test/canary/securitydInit.test.ts (1 test | 1 skipped)\n Tests  4 passed | 3 skipped (7)\n" }), "canary")).toBe("fail");
+    });
+
+    it("fails when a test skips itself from inside an allowed run (a skip the file list does not explain)", () => {
+      expect(verdictOf(run({ STUB_CANARY_OUT: `${KEYCHAIN}   ↓ some test skipped at runtime\n Tests  4 passed | 1 skipped (5)\n` }), "canary")).toBe("fail");
+    });
+
+    it("matches the allowed paths whole: a skipped file whose path is a prefix, suffix or substring of an allowed one fails", () => {
+      for (const file of ["test/canary.live.test.ts.bak", "canary.live.test.ts", "test/canary", "other/test/canary.live.test.ts", "est/canary.live.test.ts"]) {
+        const out = ` ↓ ${file} (1 test | 1 skipped)\n Test Files  3 passed | 1 skipped (4)\n Tests  4 passed | 1 skipped (5)\n`;
+        expect(verdictOf(run({ STUB_CANARY_OUT: out }), "canary"), file).toBe("fail");
+      }
+    });
+
+    it("fails when an allowed clean skip is joined by any other line that says skipped (stderr, a reporter note)", () => {
+      const clean = `${KEYCHAIN} Test Files  3 passed | 1 skipped (4)\n Tests  4 passed | 1 skipped (5)\n`;
+      expect(verdictOf(run({ STUB_CANARY_OUT: clean }), "canary")).toBe("pass");
+      expect(verdictOf(run({ STUB_CANARY_OUT: `stderr: 1 skipped\n${clean}` }), "canary")).toBe("fail");
+    });
+
+    it("still fails on a non-zero exit, however clean the skip list", () => {
+      expect(verdictOf(run({ STUB_CANARY_RC: "1", STUB_CANARY_OUT: `${KEYCHAIN} Test Files  3 passed | 1 skipped (4)\n Tests  4 passed | 1 skipped (5)\n` }), "canary")).toBe("fail");
+    });
+
+    it("never excuses a skipped gate: the gate has no allowed skips", () => {
+      expect(verdictOf(run({ STUB_GATE_OUT: " ↓ test/wslGate.real.test.ts (3 tests | 3 skipped)\n Tests  3 skipped (3)\n" }), "gate")).toBe("fail");
+    });
+  });
+
+  it("a failing gate's row carries the setting code the assertion printed", () => {
+    const r = run({ STUB_GATE_RC: "1", STUB_GATE_OUT: 'AssertionError: expected [ \'x\' ] to deeply equal []\n+   "wsl_interop_enabled: the WSLInterop entry exists"\n Tests  1 failed | 2 passed (3)\n' });
+    expect(r.rows.find((row) => row.id === "gate")?.detail).toContain("wsl_interop_enabled");
   });
 
   it("FX_WSL_PROOF_CANARY=0 leaves the matrix out as not tested: the verdict cannot be YES", () => {

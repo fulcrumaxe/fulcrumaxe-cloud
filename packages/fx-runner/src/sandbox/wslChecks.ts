@@ -136,7 +136,10 @@ export function wslChecks(input: WslCheckInput): WslFinding[] {
   const interopConf = wslConfValue(conf, "interop", "enabled");
   if (interopOn || interopConf !== "false") {
     const why = interopOn ? `the WSLInterop entry exists, so a job could start Windows programs (cmd.exe, powershell.exe)` : `${WSL_CONF} does not set [interop] enabled=false, and the default lets a job start Windows programs`;
-    findings.push({ code: "wsl_interop_enabled", ok: false, detail: `${why}. Put "[interop]" and "enabled=false" in ${WSL_CONF}, then run "wsl --shutdown" from Windows and open the distribution again. The cost: no .exe launches from WSL2 while the runner is installed.` });
+    // The entry is there although the file already says false: the README's remedy is done, so repeating it is not the whole answer. Either the machine was not restarted
+    // since the file was written, or something else registers the entry (for example a binfmt service started by systemd). The check stays closed either way.
+    const applied = interopOn && interopConf === "false" ? ` ${WSL_CONF} already sets enabled=false, so the setting has not taken effect or something else registers the entry (for example systemd's binfmt service): the entry has to be gone before a job runs.` : "";
+    findings.push({ code: "wsl_interop_enabled", ok: false, detail: `${why}.${applied} Put "[interop]" and "enabled=false" in ${WSL_CONF}, then run "wsl --shutdown" from Windows and open the distribution again. The cost: no .exe launches from WSL2 while the runner is installed.` });
   } else {
     findings.push({ code: "wsl_interop_enabled", ok: true, detail: "Windows interop is off" });
   }
