@@ -62,7 +62,12 @@ jobs:
           set -euo pipefail
           src="$(pwd)"
           case "$src" in /mnt/*) ;; *) echo "the working directory is not under /mnt: $src" >&2; exit 1 ;; esac
-          git -c safe.directory='*' clone --quiet --depth 1 "file://$src" "$HOME/fx-src"
+          # The checkout belongs to the Windows runner account, so git calls it dubious for this user. A file:// clone starts a second
+          # process (upload-pack) and git scrubs GIT_CONFIG_COUNT and GIT_CONFIG_PARAMETERS from it, so neither the environment nor
+          # `git -c` reaches it. The -u option names the command that runs there, so the trust is given on that command line. Only this
+          # exact checkout is trusted (git names the .git directory in its refusal, so both spellings are listed) and no git config
+          # file is written.
+          git clone -u "git -c safe.directory=$src/.git -c safe.directory=$src upload-pack" --quiet --depth 1 "file://$src" "$HOME/fx-src"
       - name: Run the proof
         shell: wsl-bash -u fxproof {0}
         run: |
@@ -72,7 +77,13 @@ jobs:
         if: always()
         shell: wsl-bash -u fxproof {0}
         run: |
-          if [ -d "$HOME/proof-out" ]; then mkdir -p "$(pwd)/proof-out/wsl" && cp -r "$HOME/proof-out/." "$(pwd)/proof-out/wsl/"; fi
+          # The proof writes under HOME; this copy is best effort, so a failed write to the runner's drive is logged and never fails the step.
+          if [ -d "$HOME/proof-out" ]; then
+            if mkdir -p "$(pwd)/proof-out/wsl" && cp -r "$HOME/proof-out/." "$(pwd)/proof-out/wsl/"; then echo "results copied back"; else echo "copy-back to the runner workspace failed; the proof itself ran under HOME" >&2; fi
+          else
+            echo "no proof-out under HOME: the proof did not start"
+          fi
+          exit 0
       - name: Job summary
         if: always()
         shell: pwsh
