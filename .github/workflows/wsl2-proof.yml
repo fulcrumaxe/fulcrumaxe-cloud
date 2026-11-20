@@ -34,8 +34,6 @@ jobs:
           use-cache: false
           set-as-default: true
           wsl-conf: |
-            [automount]
-            enabled=true
             [interop]
             enabled=false
             appendWindowsPath=false
@@ -44,13 +42,38 @@ jobs:
         shell: wsl-bash -u root {0}
         run: |
           useradd --create-home --shell /bin/bash fxproof
+      - name: Record and normalise /etc/wsl.conf
+        shell: wsl-bash -u root {0}
+        run: |
+          # Show the exact bytes the action wrote (a CRLF or BOM would make WSL ignore a key), then write the README's settings again as
+          # plain LF text so the restart below reads them for certain.
+          echo "--- /etc/wsl.conf as written by the action"; od -c /etc/wsl.conf
+          # Exactly the file packages/fx-runner/README.md documents. (The setup action cannot carry the quoted [boot] command: its shell
+          # escaping breaks the quotes, so the action writes the interop part and this step writes the whole file.)
+          cat > /etc/wsl.conf <<'CONF'
+          [boot]
+          command = "sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/WSLInterop'"
+
+          [interop]
+          enabled=false
+          appendWindowsPath=false
+          CONF
+          echo "--- /etc/wsl.conf now"; od -c /etc/wsl.conf
       - name: Restart WSL so the settings take effect, and record what Windows says
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
           New-Item -ItemType Directory -Force -Path proof-out | Out-Null
           wsl --shutdown
-          Start-Sleep -Seconds 8
+          # Wait until Windows no longer lists the distribution as running; the next wsl call starts it again with the new settings.
+          $stopped = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            $running = (wsl -l --running 2>&1 | Out-String)
+            if ($running -notmatch 'Ubuntu') { $stopped = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $stopped) { Write-Host "::error::job setup: the distribution still runs 60 s after wsl --shutdown, so /etc/wsl.conf was not re-read"; exit 1 }
+          Start-Sleep -Seconds 2
           @('wsl --status', 'wsl -l -v', 'wsl --version') | ForEach-Object {
             "## $_" | Add-Content proof-out/windows.txt
             Invoke-Expression $_ 2>&1 | Add-Content proof-out/windows.txt
@@ -66,6 +89,19 @@ jobs:
           echo "--- binfmt_misc"; ls -la /proc/sys/fs/binfmt_misc/ || true
           for entry in /proc/sys/fs/binfmt_misc/WSLInterop*; do [ -e "$entry" ] && { echo "--- $entry"; cat "$entry"; }; done || true
           echo "--- pid 1"; ps -o pid=,comm= -p 1 || true
+          echo "--- did the virtual machine restart? uptime and boot time"; cat /proc/uptime; ps -o lstart= -p 1 || true; date
+          echo "--- kernel log mentions of interop"; dmesg 2>/dev/null | grep -i -E 'interop|binfmt' | head -20 || true
+          # Job setup versus product gate: if the virtual machine did not restart (it has been up for minutes), a surviving WSLInterop entry
+          # is this job's fault. If it did restart with the file shown above, the entry is the README settings' result and the product's
+          # gate row decides; the job does not hide it here.
+          up="$(cut -d. -f1 /proc/uptime)"
+          if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] && [ "$up" -gt 120 ]; then
+            echo "JOB SETUP ERROR (not a runner gate result): the WSLInterop entry exists and the virtual machine has been up ${up} s, so it was not restarted after /etc/wsl.conf was written" >&2
+            exit 1
+          fi
+          if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ]; then
+            echo "NOTE: the machine restarted ${up} s ago with the README's settings and the WSLInterop entry is still registered; the runner's gate row reports on this, not the job setup"
+          fi
           for key in enabled appendWindowsPath; do
             awk -v key="$key" '/^\[/ { section = tolower($0) } section == "[interop]" && tolower($0) ~ ("^[ \t]*" tolower(key) "[ \t]*=[ \t]*false") { ok = 1 } END { exit !ok }' /etc/wsl.conf \
               || { echo "the job did not write [interop] $key=false to /etc/wsl.conf: this is the job's setup, not the runner's gate" >&2; exit 1; }
