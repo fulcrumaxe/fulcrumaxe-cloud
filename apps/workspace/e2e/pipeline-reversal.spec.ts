@@ -323,8 +323,13 @@ test.describe("D#7 DP7-2f: the Reverse control (mocked API)", () => {
     const { mock, errors } = await setup(page);
     await page.setViewportSize({ width: 375, height: 800 });
     const priced = line(page, "Starting a small piece of work").first();
-    await priced.getByTestId("pl-reverse").click();
-    await expect(priced.getByTestId("pl-reverse-confirm")).toBeVisible();
+    await expect(priced).toContainText("About $1.50");
+    await expect(priced.getByTestId("pl-reverse")).toBeEnabled();
+    // A re-render at the new width can detach the node mid-click, so click and confirm together until the estimate shows.
+    await expect(async () => {
+      await priced.getByTestId("pl-reverse").click({ timeout: 2000 });
+      await expect(priced.getByTestId("pl-reverse-confirm")).toBeVisible({ timeout: 2000 });
+    }).toPass();
     const fit = await tid(page, "pl-detail").evaluate((el) => {
       const box = el as HTMLElement;
       const right = box.getBoundingClientRect().right;
