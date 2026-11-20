@@ -97,7 +97,17 @@ interface Meta {
   ready: boolean;
 }
 
-export function createDaemonSdk(config: AdapterConfig): VercelSandboxSdk {
+/** What the runner's own inventory and lifecycle read, by daemon id. They go through the adapter so its tables, timers and policy stay in step with the daemon. */
+export interface ManagedSandbox { id: string; state: "pending" | "running" | "stopping" | "stopped"; createdAtMs: number; lastUsedAtMs: number }
+export interface DaemonSdk extends VercelSandboxSdk {
+  managed(): ManagedSandbox[];
+  /** A sandbox that is not there is done, for the three of these (idempotent, as on Vercel). A running one is never touched by `reapStopped`. */
+  stopById(id: string): Promise<void>;
+  deleteById(id: string): Promise<void>;
+  reapStopped(): Promise<number>;
+}
+
+export function createDaemonSdk(config: AdapterConfig): DaemonSdk {
   const { daemon, policy, template, memMb } = config;
   const now = config.now ?? Date.now;
   const idFor = config.idOf ?? idOf;
@@ -340,7 +350,51 @@ export function createDaemonSdk(config: AdapterConfig): VercelSandboxSdk {
       return { sandboxes, pagination: { next: null } };
     },
   };
-  return sdk;
+  const present = (id: string): boolean => metas.has(id);
+  /** A sandbox still being made, or woken, is in use: a typed command is refused for it, never queued behind a boot that may be 30 s long. */
+  const busy = (id: string): string => {
+    if (!metas.get(id)?.ready) throw new SandboxdSdkError(409, "conflict");
+    return id;
+  };
+  return {
+    ...sdk,
+    managed: () => managedRows(),
+    async stopById(id) {
+      if (present(id)) await wrap(busy(id)).stop();
+    },
+    async deleteById(id) {
+      if (present(id)) await wrap(busy(id)).delete();
+    },
+    async reapStopped() {
+      let reaped = 0;
+      for (const row of managedRows()) {
+        if (row.state !== "stopped") continue;
+        const id = row.id;
+        const meta = metas.get(id);
+        if (meta === undefined) continue;
+        // the check and the delete are ONE turn on this id: a wake queued ahead of this has finished by now, and a sandbox it brought up is left alone
+        const gone = await exclusive(id, async () => {
+          if (metas.get(id) !== meta || !meta.ready || !stoppedNow(id)) return false;
+          await daemon.delete(id);
+          endSession(meta);
+          metas.delete(id);
+          await policy.release(id);
+          return true;
+        }).catch(translate);
+        if (gone) reaped += 1;
+      }
+      return reaped;
+    },
+  };
+  function managedRows(): ManagedSandbox[] {
+    const rows = new Map(daemon.list().map((r) => [r.name, r]));
+    const out: ManagedSandbox[] = [];
+    for (const [id, meta] of metas) {
+      const row = rows.get(id);
+      if (row !== undefined) out.push({ id, state: meta.ready ? (statusOf(row.state) as ManagedSandbox["state"]) : "pending", createdAtMs: row.createdAt * 1000, lastUsedAtMs: meta.updatedAt });
+    }
+    return out;
+  }
 }
 
 function statusOf(state: ReturnType<Sandboxd["stateOf"]>): ListedStatus {

@@ -28,6 +28,7 @@ const ALLOWED: Record<string, string> = {
   "packages/fx-runner/src/vm/installPlan.ts": "writes the helper's own root-owned config on this machine: the default limits and the config keys; it makes no decision from a limit and reads no cloud inventory",
   "packages/db/migrations/1040_runner_sandbox_inventory.sql": "creates the tables and the two definers; the only migration that may name them",
   "packages/runner-cloud/src/fleetSandboxes.ts": "display-only reader for the fleet page: the sandboxes, their last-seen time and the host limits; computes no permission from them",
+  "packages/fx-runner/src/vm/sandboxd/management.ts": "the daemon's own inventory and lifecycle views for the runner's sandbox reporter; reads the daemon's table, computes no permission from it",
 };
 
 /** Paths on which a request is verified, a job or a ticket is signed, a repository or credential is granted: none may name the inventory or the limits. */
