@@ -49,7 +49,11 @@ no credential can be linked to an account by a code a signed-in owner or admin t
 `/link`; the cloud side is merged and the runner does not call it yet
 (`packages/runner-cloud/src/deviceFlow.ts`, `apps/web/app/link/page.tsx`).
 The Team app's watch switch names the runner it means and lists the account's
-runners with the command that connects one (`apps/workspace/apps/team/`). The protocol
+runners with the command that connects one (`apps/workspace/apps/team/`). That command is
+`fx-runner engine-bridge enable --repo <owner/name>` with the repo name filled in: the runner
+finds the engine's checkout and its state folder itself, and refuses, changing nothing, when it
+finds none, several, or one in a scan that hit its limit
+(`packages/fx-runner/src/engineBridge/discover.ts`). The protocol
 (version 22) also defines the signed jobs, commands and capabilities for setting a
 project up on a person's own machine; the cloud's shapes are merged and the runner does
 not act on them yet (`packages/runner-protocol/src/machineJobs.ts`).
@@ -60,6 +64,11 @@ does not need the customer's own sandbox tooling. A small root service, the VM h
 and resume it; an unprivileged daemon, `fx-sandboxd` (`packages/fx-runner/src/vm/sandboxd/`),
 keeps named sandboxes, snapshots and files, and every connection a guest makes goes
 through a host-side egress proxy over vsock (`packages/fx-runner/src/vm/egress/`).
+An adapter puts the hosted sandbox port's SDK slice on the daemon, with each sandbox's network
+policy in force before anything runs in it (`packages/fx-runner/src/vm/sandboxd/sdkAdapter.ts`,
+`policyPort.ts`). The VM helper's install plan, its unit text and a NixOS module
+(`services.fx-vmhelper`, `nix/fx-vmhelper.nix`) are written, and nothing applies them yet
+(`packages/fx-runner/src/vm/installPlan.ts`).
 `fx-runner run` does not use the daemon yet. The cloud already takes a runner's sandbox
 inventory and host limits, and an owner or admin can queue signed stop, delete and reap
 commands for a runner's sandboxes (`packages/runner-cloud/src/sandboxCommands.ts`; see
