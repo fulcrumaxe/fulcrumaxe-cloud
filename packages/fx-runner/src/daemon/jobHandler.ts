@@ -36,6 +36,8 @@ import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import type { WorkspaceStore } from "../job/workspace.js";
+import type { WorkspaceCrossing } from "../vm/workspace/crossing.js";
+import type { WorkspaceArchive } from "../vm/workspace/guestWorkspace.js";
 import type { Claimed, RunnerClient } from "./client.js";
 import { GitPathError } from "./git.js";
 import type { GitPath } from "./gitPath.js";
@@ -85,6 +87,20 @@ export interface JobHandlerDeps {
   /** Everything `runJob` needs except the ledger and the sandbox, which the handler supplies. */
   run: Omit<RunJobDeps, "sandbox" | "ledger">;
   sandbox: SandboxPort;
+  /**
+   * D#587 B-5b item 6: the OS sandbox port a microVM runner keeps for the one job kind that never runs in a VM (the deploy verifier, which carries a browser method). Absent on a
+   * microVM runner: such a job is then refused (`browser_not_connected`), never run in the VM. On an `os_sandbox` runner the one `sandbox` runs every job and this is not read.
+   */
+  hostSandbox?: SandboxPort;
+  /**
+   * D#587 B-5b: what a microVM run needs besides its port, present exactly when `engine` is `microvm`. `crossing` carries the run's working copy into the guest (bound by run id before
+   * the agent starts); `archive` builds the verified archive of a commit from a mirror; `quiesce` ends the agent and keeps the VM (the runner reads the agent's commits out of it afterwards; the approved check never runs in it).
+   */
+  vm?: {
+    crossing: Pick<WorkspaceCrossing, "bind" | "unbind">;
+    archive: (mirrorDir: string, commit: string) => Promise<WorkspaceArchive>;
+    quiesce: (handle: SandboxHandle) => Promise<void>;
+  };
   ledger: JobLedger;
   /** Git path B: the mirror, the workspace and the push. */
   git: GitPath;
@@ -482,7 +498,12 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     const detach = deps.events.attach(claimed.runId, (event) => lease.push({ ...event, seq: next() }));
     const mark = (stage: "workspace_ready" | "cloned" | "deps_installed" | "deps_install_failed" | "base_updated"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
     let abandonSend = false;
-    let usedPort: SandboxPort = deps.sandbox;
+    // D#587 B-5b item 6: a deploy-verifier job (the one kind that carries a browser method) is never run in a VM. That browser holds the person's sign-in state on this machine,
+    // which a guest must never see, so such a job runs on the host sandbox as it always did; a microVM runner with no host sandbox wired refuses it (below).
+    const onHost = isBrowserJobRole(job.role) || job.browser_method !== undefined;
+    const vmRun = deps.engine === "microvm" && !onHost;
+    const baseSandbox: SandboxPort = onHost && deps.hostSandbox !== undefined ? deps.hostSandbox : deps.sandbox;
+    let usedPort: SandboxPort = baseSandbox;
     /** One journal line for this run (`stepLog.ts`). */
     const step: StepSink = (text) => deps.onStep?.(`fx-runner: run ${claimed.runId}: ${text}`);
     const watched = await deps.watch?.begin({ runId: claimed.runId, role: job.role, repo: `${job.repo.owner}/${job.repo.name}`, started: deps.clock.now(), ...(job.browser_method === undefined ? {} : { browserMethod: job.browser_method }) });
@@ -502,9 +523,11 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       if (handle === undefined) return;
       await Promise.resolve(deps.interrupt?.(handle)).catch(() => undefined);
       await deps.clock.sleep(TAKEOVER_STOP_GRACE_MS, ran.signal);
-      if (!ran.signal.aborted) await deps.sandbox.stop(handle).catch(() => undefined);
+      if (!ran.signal.aborted) await baseSandbox.stop(handle).catch(() => undefined);
     }
     let spillHeld: SpillHandle | undefined;
+    /** True once this run's working copy source was handed to the microVM crossing: it is released when the run ends. */
+    let bound = false;
     /**
      * D#600 CX-4b: writes the job's spill files before anything else starts (no mirror fetch, no sandbox) and keeps the handle. True when the job has a spill and it could not be
      * made: with no spill root, a damaged root, a file that could not be written, or a marker with no text behind it. The run then ends and the agent never sees a dangling marker.
@@ -539,6 +562,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         // `runJob` keeps its own check for callers that do not come through here.
         if (cliModelFor(job, deps.run.defaultModel) === undefined) result = { status: "failed", reason: "model_unsupported" };
         else if ((notReady = deps.credentialsReady?.()) !== undefined) result = { status: "failed", reason: notReady };
+        else if (deps.engine === "microvm" && onHost && deps.hostSandbox === undefined) result = { status: "failed", reason: "browser_not_connected" };
         else if (isBrowserJobRole(job.role) && (notReady = deps.browserReady === undefined ? "browser_not_connected" : await deps.browserReady(job.browser_method)) !== undefined) result = { status: "failed", reason: notReady };
         else if (spillFails()) result = { status: "failed", reason: "context_spill_unwritable" };
         else {
@@ -592,7 +616,24 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // soft outcome (the install says `aborted`), and without this the agent would start on a run the cloud already closed.
             if (stopRun.aborted) throw new GitPathError("git_stopped");
           };
-          const granted = withReadGrants(deps.sandbox, git.readGrants(job));
+          // A microVM reads nothing of this machine's: the repository goes in as an archive (`deps.vm`), so the mirror's objects directory is no grant for it.
+          if (vmRun && deps.vm === undefined) throw new GitPathError("workspace_failed");
+          if (vmRun && deps.vm !== undefined) {
+            const vm = deps.vm;
+            const mirror = git.mirrorDir?.(job);
+            if (mirror === undefined || git.tip === undefined) throw new GitPathError("workspace_failed");
+            const tipOf = git.tip.bind(git);
+            vm.crossing.bind(job.run_id, {
+              startCommit: async (hostWorkspace) => {
+                const tip = await tipOf(job, hostWorkspace);
+                if (tip === null || !FULL_COMMIT_ID.test(tip)) throw new GitPathError("workspace_failed");
+                return tip;
+              },
+              archive: (commit) => vm.archive(mirror, commit),
+            });
+            bound = true;
+          }
+          const granted = vmRun ? baseSandbox : withReadGrants(baseSandbox, git.readGrants(job));
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
           const spilled = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
           const allowed = deps.onStep === undefined ? spilled : narrated(spilled, step);
@@ -609,7 +650,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // result event, and a tool call's background process may still be running (CWE-367). `stop` ends the whole group and waits; the sandbox itself stays, so the check
             // below still launches under its rules. It runs for the check whether or not a lockfile update is wired.
             if (syncsLockfile || job.check !== undefined) {
-              const ended = await allowed.stop(sandboxHandle).then(() => true, () => false);
+              // A microVM keeps running after its agent ends: `stop` would end the VM the runner reads the agent's commits out of.
+              const ended = await (vmRun && deps.vm !== undefined ? deps.vm.quiesce(sandboxHandle) : allowed.stop(sandboxHandle)).then(() => true, () => false);
               if (!ended) {
                 agentStopFailed = true;
                 if (syncsLockfile) step("lockfile update ended (not run: the agent could not be stopped)");
@@ -630,6 +672,13 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // The agent may still be alive: the check's reads of the workspace on the host (and the check itself) are not run beside it.
             if (agentStopFailed) {
               checkHeld.outcome = closed("the check was not run: the agent could not be stopped", "agent_not_stopped"); step("check not run (agent_not_stopped)");
+              return;
+            }
+            // D#587 B-5b, TL ruling 12: the approved check never runs in the guest the agent controlled (it has passwordless sudo there, so a verdict taken there is the agent's own). A VM
+            // run's check belongs in a FRESH VM, given the archive of the host's new tip once the agent's commits have been brought back and checked on the host copy. Until that is in
+            // place the check is closed for a VM run, with this fixed code, and nothing is run in the agent's VM.
+            if (vmRun) {
+              checkHeld.outcome = closed("the check was not run: a microVM run's check runs in a fresh VM, which this runner does not have yet", "not_set_up"); step("check not run (not_set_up)");
               return;
             }
             // D#6 RUNNER-CHECK-SKIP-NO-COMMIT: a fix round (a branch it continues) whose workspace HEAD is still the exact commit it started from added no commit, and the cloud will end it on its own
@@ -794,6 +843,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       ran.abort();
       observed.delete(claimed.runId);
       detach();
+      if (bound) deps.vm?.crossing.unbind(job.run_id);
       // The run's spill files go with the run, on every way out; a directory that is not the one made is left alone.
       if (spillHeld !== undefined) try { removeSpill(spillHeld); } catch { /* fx-swallow-ok: a refused or failed removal leaves the daemon's own directory, cleared the next time this run id is seen */ }
       deps.planePush?.baseLedger.forget(claimed.runId);

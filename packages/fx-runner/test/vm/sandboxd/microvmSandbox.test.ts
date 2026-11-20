@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +7,7 @@ import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import type { SandboxHandle, StartDetachedOptions } from "../../../src/sandbox/port.js";
 import { createDaemonSdk, type LimitControl } from "../../../src/vm/sandboxd/sdkAdapter.js";
 import { FIXED_ENV, SUBSCRIPTION_TOKEN_VAR } from "../../../src/job/cleanEnv.js";
-import { MICROVM_ENV_NAMES, MICROVM_GUEST_ENV, MICROVM_PINNED_ENV, REVERSE_HOSTS, guestEnvOf, microvmEnvAllowed } from "../../../src/vm/sandboxd/guestEnv.js";
+import { MICROVM_ENV_NAMES, MICROVM_GIT_ENV, MICROVM_GUEST_ENV, MICROVM_PINNED_ENV, REVERSE_HOSTS, guestEnvOf, microvmEnvAllowed } from "../../../src/vm/sandboxd/guestEnv.js";
 import { MAX_TIMEOUT_MS, VM_BACKSTOP_MS, RUN_COMMAND_MAX_OUTPUT_CHARS, createMicrovmSandbox, policyOf } from "../../../src/vm/sandboxd/microvmSandbox.js";
 import type { SdkSandbox, VercelSandboxSdk } from "../../../src/vm/sandboxd/sdkSlice.js";
 import { scriptedRuntime } from "../../sandboxPortContract.js";
@@ -258,7 +259,8 @@ describe("a job's environment is checked against the microVM table", () => {
 
   it("the table has no CA variable, a pinned network name carries only its pinned value, and a clean job's own names pass", () => {
     for (const name of ["CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", SUBSCRIPTION_TOKEN_VAR]) expect(MICROVM_ENV_NAMES.has(name), name).toBe(false);
-    expect([...MICROVM_ENV_NAMES].filter((n) => /CA_|_CA|CERT|SSL|TOKEN|KEY|SECRET/i.test(n))).toEqual([]);
+    // the one reviewed exemption: git's own `GIT_CONFIG_KEY_<n>` names (the "KEY" is a settings key, not a secret), each pinned to a fixed value that names a URL rewrite
+    expect([...MICROVM_ENV_NAMES].filter((n) => /CA_|_CA|CERT|SSL|TOKEN|KEY|SECRET/i.test(n) && !/^GIT_CONFIG_KEY_[01]$/.test(n))).toEqual([]);
     expect(microvmEnvAllowed({})).toBe(true);
     expect(microvmEnvAllowed({ PATH: "/usr/bin", HOME: "/home/u", ...FIXED_ENV, HTTPS_PROXY: MICROVM_PINNED_ENV["HTTPS_PROXY"], ANTHROPIC_BASE_URL: "http://api.anthropic.com" })).toBe(true);
     expect(microvmEnvAllowed({ HTTPS_PROXY: "http://evil.example:3128" })).toBe(false);
@@ -656,24 +658,38 @@ describe("a client that follows the proxy variables sends the rewritten hosts to
     return bypasses(noProxy, host) ? "reverse relay" : "CONNECT relay";
   };
 
-  it("the model API base URL and GitHub are covered by both NO_PROXY spellings; any other host still goes to the CONNECT relay", () => {
+  it("the model API base URL is covered by both NO_PROXY spellings; GitHub is not (an entry also matches its subdomains); any other host goes to the CONNECT relay", () => {
     const env = guestEnvOf({});
     const base = env["ANTHROPIC_BASE_URL"] as string;
     expect(base).toBe("http://api.anthropic.com");
     for (const name of ["NO_PROXY", "no_proxy"]) {
       expect(bypasses(env[name] as string, new URL(base).hostname), name).toBe(true);
-      expect(bypasses(env[name] as string, "github.com"), name).toBe(true);
+      expect(bypasses(env[name] as string, "github.com"), name).toBe(false);
+      expect(bypasses(env[name] as string, "api.github.com"), name).toBe(false);
       expect(bypasses(env[name] as string, "registry.npmjs.org"), name).toBe(false);
-      expect(bypasses(env[name] as string, "notgithub.com"), name).toBe(false);
     }
     expect(routeOf(env, `${base}/v1/messages`)).toBe("reverse relay");
-    expect(routeOf(env, "http://github.com/owner/repo.git")).toBe("reverse relay");
+    expect(routeOf(env, "https://api.github.com/repos/o/r")).toBe("CONNECT relay");
     expect(routeOf(env, "https://registry.npmjs.org/left-pad")).toBe("CONNECT relay");
   });
 
-  it("every host the engine rewrites is on one list: the base URL and NO_PROXY are built from it, so they cannot drift", () => {
+  it("git is pointed at the reverse relay for GitHub only, by git's own settings (read back with the real git); a job cannot add or change one", () => {
+    const env = guestEnvOf({});
+    for (const [name, value] of Object.entries(MICROVM_GIT_ENV)) expect(env[name], name).toBe(value);
+    expect(microvmEnvAllowed({ ...MICROVM_GIT_ENV })).toBe(true);
+    for (const bad of [{ GIT_CONFIG_COUNT: "3" }, { GIT_CONFIG_KEY_2: "core.hooksPath" }, { GIT_CONFIG_VALUE_0: "http://other.example/" }, { GIT_CONFIG_VALUE_1: "http://127.0.0.1:1" }]) expect(microvmEnvAllowed(bad), JSON.stringify(bad)).toBe(false);
+    expect(Object.keys(MICROVM_GIT_ENV).some((name) => /CA_|SSL|CERT/.test(name))).toBe(false);
+    const git = (...args: string[]): string => execFileSync("git", args, { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", ...MICROVM_GIT_ENV } }).trim();
+    expect(git("ls-remote", "--get-url", "https://github.com/owner/repo.git")).toBe("http://github.com/owner/repo.git");
+    expect(git("ls-remote", "--get-url", "https://example.com/owner/repo.git")).toBe("https://example.com/owner/repo.git");
+    expect(git("config", "--get-urlmatch", "http.proxy", "http://github.com/owner/repo.git")).toBe("");
+  });
+
+  it("every host the engine rewrites is on one list: the base URL, NO_PROXY and git's settings are built from it, so they cannot drift", () => {
     expect(REVERSE_HOSTS.length).toBeGreaterThan(0);
-    for (const host of REVERSE_HOSTS) for (const name of ["NO_PROXY", "no_proxy"]) expect((MICROVM_PINNED_ENV[name] as string).split(",")).toContain(host);
+    for (const name of ["NO_PROXY", "no_proxy"]) expect((MICROVM_PINNED_ENV[name] as string).split(",")).toContain(REVERSE_HOSTS[0]);
+    expect(MICROVM_GIT_ENV["GIT_CONFIG_KEY_0"]).toBe(`url.http://${REVERSE_HOSTS[1]}/.insteadOf`);
+    expect(MICROVM_GIT_ENV["GIT_CONFIG_KEY_1"]).toBe(`http.http://${REVERSE_HOSTS[1]}/.proxy`);
     expect(new URL(MICROVM_PINNED_ENV["ANTHROPIC_BASE_URL"] as string).hostname).toBe(REVERSE_HOSTS[0]);
     expect(MICROVM_PINNED_ENV["NO_PROXY"]).toBe(MICROVM_PINNED_ENV["no_proxy"]);
     expect((MICROVM_PINNED_ENV["NO_PROXY"] as string).split(",")).toEqual(expect.arrayContaining(["127.0.0.1", "localhost"]));

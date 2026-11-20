@@ -70,6 +70,13 @@ export interface MicrovmSandboxConfig {
 export interface MicrovmSandbox extends SandboxPort {
   /** The sandbox's current wall-clock limit, or `undefined` for a name this port does not hold. */
   timeoutMsOf(handle: SandboxHandle): number | undefined;
+  /**
+   * The running guest of this sandbox, for the runner's own steps after the agent (the bundle read; D#587 B-5b). The approved check never runs in it: it runs in a fresh VM. `not_running` when the VM is
+   * stopped, and `SandboxNotFoundError` for a name the daemon no longer holds.
+   */
+  guestOf(handle: SandboxHandle): Promise<SdkSandbox>;
+  /** Ends the agent and its process group and leaves the VM running: the quiet point before the runner reads or checks the working copy. Idempotent. */
+  quiesce(handle: SandboxHandle): Promise<void>;
 }
 
 interface Entry {
@@ -405,5 +412,14 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
       }
     },
     timeoutMsOf: (handle) => entries.get(handle.sandboxName)?.timeoutMs,
+    async guestOf(handle) {
+      const guest = await open(handle.sandboxName, false);
+      if (guest.status !== "running") throw new MicrovmSandboxRefused("not_running");
+      return guest;
+    },
+    async quiesce(handle) {
+      const entry = entries.get(handle.sandboxName);
+      if (entry !== undefined) await stopAgent(entry, true);
+    },
   };
 }
