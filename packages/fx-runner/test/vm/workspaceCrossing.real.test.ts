@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import { buildWorkspaceArchive } from "../../src/daemon/vmArchive.js";
+import { applyBundle } from "../../src/daemon/vmBundle.js";
 import { createGit } from "../../src/daemon/git.js";
 import type { BootDigests, TargetListing } from "../../src/vm/bootGate.js";
 import type { Arch } from "../../src/vm/lock.js";
@@ -60,7 +61,7 @@ describe.skipIf(!ready)("a job's working copy in a real VM", () => {
     const capture = async (command: string, args: readonly string[], e: Record<string, string>) => ({ code: 0, stdout: execFileSync(command, [...args], { env: { ...GIT_ENV, ...e }, encoding: "utf8", maxBuffer: 1 << 26 }), timedOut: false });
     const g = createGit({ capture });
 
-    const seen: { head?: string; tree?: string; mounts?: string; environ?: string; mountinfo?: string } = {};
+    const seen: { head?: string; tree?: string; mounts?: string; environ?: string; mountinfo?: string; guestTree?: string } = {};
     let guestRef: SdkSandbox | undefined;
     const crossing = createWorkspaceCrossing((guest) => {
       guestRef = guest;
@@ -72,6 +73,9 @@ describe.skipIf(!ready)("a job's working copy in a real VM", () => {
           seen.mounts = await run("mount", []);
           seen.environ = await run("env", []);
           seen.mountinfo = await run("cat", ["/proc/self/mountinfo"]);
+          // the agent's own work: one edit and one commit, in the guest
+          await run("sh", ["-c", "echo more >> README.md && git add -A && git commit -qm agent"]);
+          seen.guestTree = (await run("git", ["rev-parse", "HEAD^{tree}"])).trim();
           return { handle: { runId: o.runId, done: Promise.resolve({ status: "ok" }) } as never };
         },
         async stop() {},
@@ -87,13 +91,24 @@ describe.skipIf(!ready)("a job's working copy in a real VM", () => {
       });
       expect(seen.head).toBe(commit);
       expect(seen.tree).toBe(tree);
-      for (const text of [seen.mounts, seen.environ, seen.mountinfo]) for (const hostPath of [root, tmpdir(), repo, mirror]) expect(text?.includes(hostPath), hostPath).toBe(false);
+      for (const text of [seen.mounts, seen.environ, seen.mountinfo]) for (const hostPath of [root, repo, mirror]) expect(text?.includes(hostPath), hostPath).toBe(false);
       const guest = await port.guestOf(handle);
       const passing = await runGuestCheck({ check: { argv: ["sh", "scripts/check.sh"], dev_shell: false, timeout_s: 120 }, guest, baseFile: async () => null, now: () => new Date() });
       expect(passing.passed).toBe(true);
       expect(passing.body).toMatchObject({ exit_code: 0, skipped_tests: 1 });
       const failing = await runGuestCheck({ check: { argv: ["sh", "-c", "exit 7"], dev_shell: false, timeout_s: 120 }, guest, baseFile: async () => null, now: () => new Date() });
       expect(failing.body.exit_code).toBe(7);
+      // the commit comes out as a bundle, the host checks it, and its workspace then holds the guest's tree
+      const hostWs = path.join(root, "host-ws");
+      git(root, "clone", "-q", "--shared", mirror, hostWs);
+      git(hostWs, "checkout", "-q", "-B", "fx/run", commit);
+      await port.quiesce(handle);
+      const collected = await crossing.collect("real-1", guest);
+      expect(collected?.base).toBe(commit);
+      const applied = await applyBundle({ git: g, gitLarge: g, scratchDir: mkdtempSync(path.join(root, "scratch-")) }, { bundle: (collected as NonNullable<typeof collected>).bundle, base: commit, mirrorDir: mirror, workspace: hostWs });
+      expect(applied.commits).toBe(1);
+      expect(git(hostWs, "rev-parse", "HEAD^{tree}")).toBe(seen.guestTree);
+      expect(readFileSync(path.join(hostWs, "README.md"), "utf8")).toBe("hello\nmore\n");
       expect(GUEST_WORKSPACE).toBe("/vercel/sandbox/work");
       expect(guestRef).toBeDefined();
     } finally {

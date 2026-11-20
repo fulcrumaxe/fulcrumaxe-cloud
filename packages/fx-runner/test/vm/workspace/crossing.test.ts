@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AgentRuntime, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
@@ -95,7 +95,7 @@ describe("the workspace crossing in front of the microVM port", () => {
     expect(seen.made[0]?.workdir).toBe(local.paths.workspace);
   });
 
-  it("a start with no source bound for its run is refused before anything is sent, and so is a resume (the copy is not reopened in this part)", async () => {
+  it("a start with no source bound for its run is refused before anything is sent, and so is a resume of a run that sent nothing", async () => {
     const { local, crossing, port } = rig();
     const handle = await port.createSandbox({ sandboxName: "rn-run-1", retention: { persistent: false }, timeoutMs: 60_000 });
     await expect(port.startDetached(handle, opts("/host/ws")).hookFired).rejects.toMatchObject({ code: "workspace_missing" });
@@ -124,5 +124,62 @@ describe("the workspace crossing in front of the microVM port", () => {
     expect((await port.guestOf(handle)).name).toBe("rn-run-1");
     await expect(port.quiesce(handle)).resolves.toBeUndefined();
     await expect(port.quiesce({ runId: "", sandboxName: "other" })).resolves.toBeUndefined();
+  });
+});
+
+describe("a start that resumes a session reopens the guest's own copy", () => {
+  async function sent() {
+    const fx = fixtureRepo();
+    const r = rig();
+    const deps = hostDeps();
+    const hostWs = path.join(scratchDir("fxw-host-"), "ws");
+    mkdirSync(hostWs);
+    r.crossing.bind("run-1", { startCommit: async () => fx.commit, archive: (c) => buildWorkspaceArchive(deps, fx.mirror, c) });
+    const handle = await r.port.createSandbox({ sandboxName: "rn-run-1", retention: { persistent: true }, timeoutMs: 60_000 });
+    await r.port.startDetached(handle, opts(hostWs)).hookFired;
+    return { fx, ...r, handle, hostWs };
+  }
+
+  it("the same run's repair turn, or a start after a stop that kept the VM's memory and disk, finds the copy and the agent starts in it WITHOUT the archive being sent again", async () => {
+    const s = await sent();
+    const files = s.local.sent.files.length;
+    writeFileSync(path.join(s.local.paths.workspace, "agent-made.txt"), "kept\n");
+    await s.port.resume(s.handle, "s1", "go on", opts(s.hostWs)).hookFired;
+    expect(s.seen.started).toHaveLength(2);
+    expect(s.seen.guestPath[1]).toBe(s.local.paths.workspace);
+    expect(s.local.sent.files.length).toBe(files);
+    expect(git(s.local.paths.workspace, "status", "--porcelain")).toContain("agent-made.txt");
+  });
+
+  it("a guest that came back without its copy (an evicted snapshot is a fresh boot) is refused with workspace_missing, and the agent never starts", async () => {
+    const s = await sent();
+    rmSync(s.local.paths.stage, { recursive: true, force: true });
+    await expect(s.port.resume(s.handle, "s1", "go on", opts(s.hostWs)).hookFired).rejects.toMatchObject({ code: "workspace_missing" });
+    expect(s.seen.started).toHaveLength(1);
+  });
+
+  it("a copy that started from another commit is not this run's copy", async () => {
+    const s = await sent();
+    writeFileSync(path.join(s.local.paths.stage, "base"), `${"c".repeat(40)}\n`);
+    await expect(s.port.resume(s.handle, "s1", "go on", opts(s.hostWs)).hookFired).rejects.toMatchObject({ code: "workspace_missing" });
+  });
+
+  it("a run that is unbound forgets its copy: a resume afterwards is refused, and `collect` for it is too", async () => {
+    const s = await sent();
+    s.crossing.unbind("run-1");
+    s.crossing.bind("run-1", { startCommit: async () => s.fx.commit, archive: async () => Promise.reject(new Error("not built")) });
+    await expect(s.port.resume(s.handle, "s1", "go on", opts(s.hostWs)).hookFired).rejects.toMatchObject({ code: "workspace_missing" });
+    await expect(s.crossing.collect("run-1", await s.port.guestOf(s.handle))).rejects.toMatchObject({ code: "workspace_missing" });
+  });
+
+  it("collect asks the guest for what the run committed, against the commit it sent", async () => {
+    const s = await sent();
+    expect(await s.crossing.collect("run-1", await s.port.guestOf(s.handle))).toBeNull();
+    writeFileSync(path.join(s.local.paths.workspace, "n.txt"), "n\n");
+    git(s.local.paths.workspace, "add", "-A");
+    git(s.local.paths.workspace, "commit", "-qm", "agent");
+    const out = await s.crossing.collect("run-1", await s.port.guestOf(s.handle));
+    expect(out?.base).toBe(s.fx.commit);
+    expect(out?.bundle.subarray(0, 15).toString()).toBe("# v2 git bundle");
   });
 });

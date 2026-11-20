@@ -3,6 +3,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach } from "vitest";
+import { createGit } from "../../../src/daemon/git.js";
+import { pinWorkspace } from "../../../src/daemon/workspacePin.js";
 import type { SdkSandbox } from "../../../src/vm/sandboxd/sdkSlice.js";
 import type { GuestPaths } from "../../../src/vm/workspace/guestWorkspace.js";
 
@@ -110,4 +112,28 @@ export function localGuest(existingRoot?: string): LocalGuest {
     },
   } as unknown as SdkSandbox;
   return { guest, paths, sent, root };
+}
+
+/** The daemon's guarded git, bound to real processes with the test environment (optionally with extra environment, for example a global config file). */
+export function hostDeps(extraEnv: Record<string, string> = {}) {
+  const capture = async (command: string, args: readonly string[], env: Record<string, string>, _timeoutMs: number) => {
+    try {
+      const stdout = execFileSync(command, [...args], { env: { ...GIT_ENV(), ...extraEnv, ...env }, encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] });
+      return { code: 0, stdout, timedOut: false };
+    } catch (error) {
+      return { code: (error as { status?: number }).status ?? 1, stdout: "", timedOut: false };
+    }
+  };
+  const g = createGit({ capture });
+  return { git: g, gitLarge: g, scratchDir: scratchDir("fxw-scratch-") };
+}
+
+/** A host workspace: a clone of the mirror at `commit`, as the git path's `prepare` leaves it. */
+export function hostWorkspace(mirror: string, commit: string): string {
+  const dir = path.join(scratchDir("fxw-host-"), "ws");
+  git(path.dirname(dir), "clone", "-q", "--shared", mirror, dir);
+  git(dir, "checkout", "-q", "-B", "fx/run", commit);
+  // The daemon pins a workspace's git folder right after its own clone; every host git call on it is checked against that pin.
+  pinWorkspace(dir, path.join(mirror, "objects"));
+  return dir;
 }
