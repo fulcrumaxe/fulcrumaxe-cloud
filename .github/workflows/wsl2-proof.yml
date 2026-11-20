@@ -1,0 +1,88 @@
+name: WSL2 proof
+
+# Does the runner's WSL2 gate hold on a real WSL2 machine? (D#587 B-9c.) A Ubuntu distribution is installed on a free GitHub-hosted
+# windows-2022 runner, set up as the runner's README says (interop off, no Windows PATH, the C: drive automounted), restarted so the
+# settings take effect, and then packages/fx-runner/scripts/wsl2-proof.sh runs inside it as an ordinary user: the kernel must name itself
+# WSL2, the runner's own gate runs for real (each probe has an unsandboxed control), and the read-deny canary matrix runs under
+# bubblewrap against a scripted loopback model API. Start it by hand (Actions tab, or `gh workflow run wsl2-proof.yml`).
+#
+# No secrets, no inputs, a read-only token and a dummy key: the hosted runner never holds a Claude credential. The job also requires a
+# public repository. Hosted WSL2 has a flaky history, so a red run may be the host and not the runner: the summary says which step failed.
+# To undo, delete this file and packages/fx-runner/scripts/wsl2-proof.sh.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wsl2:
+    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      WSL_UTF8: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install a WSL2 distribution and write its settings
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          use-cache: false
+          set-as-default: true
+          wsl-conf: |
+            [automount]
+            enabled=true
+            [interop]
+            enabled=false
+            appendWindowsPath=false
+          additional-packages: bubblewrap socat git curl ca-certificates xz-utils
+      - name: Make the ordinary user the proof runs as
+        shell: wsl-bash -u root {0}
+        run: |
+          useradd --create-home --shell /bin/bash fxproof
+      - name: Restart WSL so the settings take effect, and record what Windows says
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path proof-out | Out-Null
+          wsl --shutdown
+          Start-Sleep -Seconds 8
+          @('wsl --status', 'wsl -l -v', 'wsl --version') | ForEach-Object {
+            "## $_" | Add-Content proof-out/windows.txt
+            Invoke-Expression $_ 2>&1 | Add-Content proof-out/windows.txt
+          }
+          Get-Content proof-out/windows.txt
+      - name: Copy the checkout onto the distribution's own file system
+        shell: wsl-bash -u fxproof {0}
+        run: |
+          set -euo pipefail
+          src="$(pwd)"
+          case "$src" in /mnt/*) ;; *) echo "the working directory is not under /mnt: $src" >&2; exit 1 ;; esac
+          git -c safe.directory='*' clone --quiet --depth 1 "file://$src" "$HOME/fx-src"
+      - name: Run the proof
+        shell: wsl-bash -u fxproof {0}
+        run: |
+          cd "$HOME/fx-src"
+          bash packages/fx-runner/scripts/wsl2-proof.sh "$HOME/proof-out"
+      - name: Bring the results back to the runner
+        if: always()
+        shell: wsl-bash -u fxproof {0}
+        run: |
+          if [ -d "$HOME/proof-out" ]; then mkdir -p "$(pwd)/proof-out/wsl" && cp -r "$HOME/proof-out/." "$(pwd)/proof-out/wsl/"; fi
+      - name: Job summary
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path proof-out/wsl/summary.md) { Get-Content proof-out/wsl/summary.md | Add-Content $env:GITHUB_STEP_SUMMARY }
+          else { "## WSL2 proof: NOT TESTED`n`nThe proof script did not start inside the distribution. See the step logs." | Add-Content $env:GITHUB_STEP_SUMMARY }
+      - name: Upload the logs and results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wsl2-proof
+          path: proof-out
+          if-no-files-found: warn
