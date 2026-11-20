@@ -15,8 +15,8 @@ export const MAX_WAIT_S = 86_400;
 export type RetryWhy = "network" | "server" | "unauthorized" | "refused" | "unexpected";
 
 export type SendOutcome =
-  /** Every event of the request is stored (new or already there). `last` is the cloud's highest accepted `seq` for this session. */
-  | { kind: "accepted"; last: number | null }
+  /** Every event of the request is stored (new or already there). `last` is the cloud's highest accepted `seq` for this session. `watchUntil` is how long the cloud holds the repo watched (only a cloud that lists `watch_mode` says). */
+  | { kind: "accepted"; last: number | null; watchUntil?: string }
   /** The request starts at or below what the cloud holds (409). `last` says what that is. */
   | { kind: "conflict"; last: number | null }
   /** The account switch or the repo switch is off (403). Nothing was stored. */
@@ -40,7 +40,7 @@ export const bodyBytes = (message: EngineEventsMessage): number => Buffer.byteLe
 export function classify(status: number, body: unknown, retryAfter: number | undefined): SendOutcome {
   if (status === 200) {
     const reply = EngineEventsAcceptedReply.safeParse(body);
-    return reply.success ? { kind: "accepted", last: reply.data.last_accepted_seq } : { kind: "retry", why: "unexpected" };
+    return reply.success ? { kind: "accepted", last: reply.data.last_accepted_seq, ...(reply.data.watch_until === undefined ? {} : { watchUntil: reply.data.watch_until }) } : { kind: "retry", why: "unexpected" };
   }
   const reply = EngineEventsErrorReply.safeParse(body);
   const error = reply.success ? reply.data : undefined;

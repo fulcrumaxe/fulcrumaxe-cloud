@@ -20,6 +20,8 @@ import type { Clock } from "../daemon/lease.js";
 import { BridgeCommandPuller, type BridgeApply } from "./bridgeCommands.js";
 import { CommandPuller, PULL_PATH, createCloudPost, type HaltOutcome, type PullStatus } from "./commands.js";
 import { loadCursor } from "./cursor.js";
+import { DetailSpool, detailSpoolPaths, removeDetailSpool, sweepDetailSpools } from "./detailSpool.js";
+import { WatchState } from "./watchState.js";
 import { serveDecideSocket, socketPathFor, type DecideSocket } from "./decideSocket.js";
 import { readEngineVersion } from "./engineVersion.js";
 import { removeBridgeState, writeBridgeState } from "../engineHost/hostFiles.js";
@@ -93,6 +95,11 @@ export interface EngineBridgeDeps {
   wakeEpoch: () => number | null;
   /** True once the hello was answered and kept `engine_bridge_v1`. Nothing starts before. */
   accepted: () => boolean;
+  /**
+   * True when the cloud's hello reply listed the `watch_mode` capability. Watch mode (on-demand events kept for a watcher, the slim status instead of the heartbeats) starts only then:
+   * until then the bridge sends what it always sent, whatever protocol number the cloud answers. Absent: never.
+   */
+  cloudWatchMode?: () => boolean;
   /** `XDG_RUNTIME_DIR`, looked up by name by the caller. Without it no decide socket is served. */
   xdgRuntimeDir: string | undefined;
   /** The runner's secrets, for the redaction every uploaded event goes through. */
@@ -196,6 +203,7 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
   const uidNum = deps.uid ?? -1;
   const units = new Map<number, Unit>();
   const refused = new Map<number, string>();
+  let swept = false;
   let settings: "ok" | "damaged" = "ok";
   let known: readonly BridgedRepo[] = [];
   let allowed: Allowed[] | undefined;
@@ -283,7 +291,14 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
       // fx-swallow-ok: a refused cursor shows no acked seq in `status`; the tail itself refuses it again and says so once
     }
     const { tail, hostTail } = createBridgeTails({ stateDir: repo.state_dir, runnerStateDir: deps.runnerStateDir, repoGhId: repo.repo_gh_id, uid: deps.uid, secrets: deps.secrets, log });
-    const loop = new BridgeLoop({ tail, tails: [hostTail], send: deps.send, clock, repoGhId: repo.repo_gh_id, engineVersion, bridgeVersion: deps.runnerVersion, log, lastAckedSeq, wakeEpoch: deps.wakeEpoch });
+    // Watch mode: who is watching, and the spool the on-demand events wait in. The spool opens on first use; one that is unsafe ends watch mode for this loop (with a fixed line), never the bridge.
+    const watchState = new WatchState(() => clock.now().getTime());
+    const spool = new DetailSpool({ ...detailSpoolPaths(deps.runnerStateDir, repo.repo_gh_id), uid: deps.uid, now: () => clock.now().getTime() });
+    const cloudWatchMode = deps.cloudWatchMode;
+    const loop = new BridgeLoop({
+      tail, tails: [hostTail], send: deps.send, clock, repoGhId: repo.repo_gh_id, engineVersion, bridgeVersion: deps.runnerVersion, log, lastAckedSeq, wakeEpoch: deps.wakeEpoch,
+      ...(cloudWatchMode === undefined ? {} : { watch: { state: watchState, spool, advertised: cloudWatchMode } }),
+    });
     const keeper = ports.ceiling.create(deps.cloud, { stateDir: repo.state_dir, uid: deps.uid, clock, repoGhId: repo.repo_gh_id, log });
     let lastControl: string | undefined;
     const puller = new CommandPuller({
@@ -305,6 +320,12 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
       handleControl: (repoGhId, control) => handleControl(repo, repoGhId, control),
       localHalted: () => localHalted(repo),
       reportHalt: (_repoGhId, report) => loop.reportHalt(report),
+      // A watch changes how much is uploaded and nothing else (never an inbox write): it extends the watch, and a `before` asks for the older detail too.
+      onWatch: (repoGhId, command) => {
+        if (repoGhId !== repo.repo_gh_id) return;
+        watchState.extend(Date.parse(command.args.until));
+        if (command.args.before !== undefined) loop.requestOlder(command.args.before);
+      },
       // The engine host reads this file to start and to keep running: it is written only after a pull the cloud answered, never from a guess.
       onPulled: (repoGhId, haltFailed) => {
         if (repoGhId !== repo.repo_gh_id || abort.signal.aborted || units.get(repo.repo_gh_id)?.abort !== abort || deps.uid === undefined) return;
@@ -339,12 +360,14 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
     log("engine-bridge: started for a repo");
   }
 
-  async function stopUnit(id: number, why: string): Promise<void> {
+  async function stopUnit(id: number, why: string, repoLeft = false): Promise<void> {
     const unit = units.get(id);
     if (unit === undefined) return;
     units.delete(id);
     unit.abort.abort();
     await unit.done;
+    // A repo that left the settings (a disconnect) leaves none of its detail on the machine. Removed here, after the loop ended: `disableRepos` runs in another process while the loop may still write, and the loop would write the spool again.
+    if (repoLeft && !removeDetailSpool(deps.runnerStateDir, id)) deps.log("engine-bridge: the detail spool of a disconnected repo could not be removed");
     // After the loops ended, so a pull that was in flight cannot write it again. Absent reads as "off" to the engine host.
     try {
       removeBridgeState(unit.repo.state_dir);
@@ -374,8 +397,13 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
       for (const id of [...units.keys()]) await stopUnit(id, "settings");
     } else {
       known = loaded.repos;
+      // Once, at start: a spool of a repo that is no longer bridged (disabled by hand while no daemon ran) is not kept.
+      if (!swept) {
+        swept = true;
+        sweepDetailSpools(deps.runnerStateDir, new Set(loaded.repos.map((r) => r.repo_gh_id)), deps.log);
+      }
       const wanted = new Map(loaded.repos.map((r) => [r.repo_gh_id, r]));
-      for (const [id, unit] of [...units]) if (!wanted.has(id) || !sameBinding(unit.repo, wanted.get(id)!)) await stopUnit(id, "disabled");
+      for (const [id, unit] of [...units]) if (!wanted.has(id) || !sameBinding(unit.repo, wanted.get(id)!)) await stopUnit(id, "disabled", !wanted.has(id));
       for (const id of [...refused.keys()]) if (!wanted.has(id)) refused.delete(id);
       if (!deps.accepted()) {
         // A later hello that dropped `engine_bridge_v1` (or was not answered) stops every running repo: it waits for a hello that kept it.

@@ -387,6 +387,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let memProposalAccepted = false;
     /** D#842 EB-3c: set once the hello is answered; the engine bridge starts only when the cloud kept `engine_bridge_v1`. */
     let engineBridgeAccepted = false;
+    // D#845 watch mode: true once a hello reply listed the `watch_mode` capability (not a protocol number: clouds at 23 and 24 exist that cannot take the slim status).
+    let cloudWatchMode = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid }), ...(readHostFacts()?.sandbox_engine === "microvm" ? { sandboxInventory: createInventoryReporter({ source: emptyInventorySource, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
@@ -579,6 +581,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         memProposalAccepted = dropped !== undefined && !dropped.includes(MEM_PROPOSAL_CAPABILITY);
         hooks.onMemProposalAccepted?.(memProposalAccepted);
         engineBridgeAccepted = dropped !== undefined && !dropped.includes(ENGINE_BRIDGE_CAPABILITY);
+        if (answer?.kind === "ok") cloudWatchMode = answer.watchMode === true;
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
@@ -619,6 +622,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           send: createEventsUploader(cloud),
           wakeEpoch: () => wake.seenEpoch(),
           accepted: () => engineBridgeAccepted,
+          cloudWatchMode: () => cloudWatchMode,
           xdgRuntimeDir: host.xdgRuntimeDir,
           secrets: () => (credentials.mode === "api_key" ? [credentials.apiKey] : []),
           ports: host.engineBridge,

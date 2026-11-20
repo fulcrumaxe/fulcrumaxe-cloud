@@ -12,6 +12,7 @@
 import path from "node:path";
 import { type BridgeRefusal as BridgeRefusalCode } from "@fulcrumaxe/runner-protocol";
 import { plainFileExists } from "../engineBridge/cursor.js";
+import { removeDetailSpool } from "../engineBridge/detailSpool.js";
 import { CliError } from "../cliError.js";
 import { loadRegistration } from "../config.js";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
@@ -160,8 +161,9 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
   if (!loaded.ok) throw refusal("the settings file is damaged; remove engine-bridge.json from the runner's state directory and enable the repos again");
   if (action === "disable") {
     if (repo !== undefined && !loaded.repos.some((r) => r.full_name === repo)) throw refusal("that repo is not enabled");
-    const { notRemoved } = disableRepos(ctx.stateDir, loaded.repos, repo === undefined ? () => true : (r) => r.full_name === repo);
+    const { notRemoved, spoolNotRemoved } = disableRepos(ctx.stateDir, loaded.repos, repo === undefined ? () => true : (r) => r.full_name === repo);
     if (notRemoved) ctx.out("A bridge state file could not be removed; the engine host will stop using it once it is a few minutes old.");
+    if (spoolNotRemoved) ctx.out("A detail spool file could not be removed; it is under engine-bridge/ in the runner's state directory, so delete it by hand.");
     ctx.out(repo === undefined ? "No repo is bridged now. A running fx-runner stops its bridge within a few seconds." : "That repo is no longer bridged. A running fx-runner stops its bridge within a few seconds.");
     return 0;
   }
@@ -199,21 +201,24 @@ export async function engineBridgeCommand(positionals: readonly string[], flags:
 
 /**
  * The local half of `disable`, shared by the command line and by the runner's handling of a `bridge_disable` command (D#845 ON-BR-2): the matching repos leave the settings file and their bridge state
- * files are removed. It makes no cloud call and never touches the engine's state directory or the checkout: the bridge state file is the one file it removes. `notRemoved` is true when a file could not be removed.
+ * files are removed. It makes no cloud call and never touches the engine's state directory or the checkout: the bridge state file and the repo's detail spool are what it removes. `notRemoved` is true when the state file could not be removed, `spoolNotRemoved` when a spool file could not.
  */
-export function disableRepos(stateDir: string, loaded: readonly BridgedRepo[], match: (repo: BridgedRepo) => boolean): { notRemoved: boolean } {
+export function disableRepos(stateDir: string, loaded: readonly BridgedRepo[], match: (repo: BridgedRepo) => boolean): { notRemoved: boolean; spoolNotRemoved: boolean } {
   saveBridgeSettings(stateDir, loaded.filter((r) => !match(r)));
   // With the daemon down nothing else withdraws the file, and the host would keep reading "bridge on" until it aged out. Absent reads as off.
   let notRemoved = false;
+  let spoolNotRemoved = false;
   for (const gone of loaded.filter(match)) {
     try {
       removeBridgeState(gone.state_dir);
+      // The repo's detail spool goes too: a disconnected repo leaves no events of it on this machine. A running daemon stops the repo's loop within seconds and writes nothing after.
+      if (!removeDetailSpool(stateDir, gone.repo_gh_id)) spoolNotRemoved = true;
     } catch {
       // fx-swallow-ok: the error could name a path; a link or odd entry at the name is left alone, and the caller says so
       notRemoved = true;
     }
   }
-  return { notRemoved };
+  return { notRemoved, spoolNotRemoved };
 }
 
 /**

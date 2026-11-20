@@ -101,8 +101,11 @@ export function loadCursor(file: string, observe: OpenObserver | undefined, uid:
   }
 }
 
-/** Writes the cursor atomically: a new 0600 file, flushed, renamed over the old one. A link at the cursor path is refused before anything is written. */
-export function saveCursor(file: string, cursor: Cursor, observe: OpenObserver | undefined, uid: number | undefined): void {
+/**
+ * Writes `text` to `file` atomically: a new 0600 file, flushed, renamed over the old one. A link, FIFO, device or file of another user at the path is refused before anything is written.
+ * The cursor and the detail spool's own state go through here, so both keep one set of refusal rules.
+ */
+export function saveTextAtomic(file: string, text: string, observe: OpenObserver | undefined, uid: number | undefined): void {
   const existing = openPlain(file, 0o077, observe, uid);
   if (existing !== null) closeSync(existing.fd);
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -111,7 +114,7 @@ export function saveCursor(file: string, cursor: Cursor, observe: OpenObserver |
   const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   let open = true;
   try {
-    writeSync(fd, `${JSON.stringify(cursor)}\n`);
+    writeSync(fd, text);
     fsyncSync(fd);
     closeSync(fd);
     open = false;
@@ -125,4 +128,9 @@ export function saveCursor(file: string, cursor: Cursor, observe: OpenObserver |
     }
     throw error;
   }
+}
+
+/** Writes the cursor atomically: a new 0600 file, flushed, renamed over the old one. A link at the cursor path is refused before anything is written. */
+export function saveCursor(file: string, cursor: Cursor, observe: OpenObserver | undefined, uid: number | undefined): void {
+  saveTextAtomic(file, `${JSON.stringify(cursor)}\n`, observe, uid);
 }

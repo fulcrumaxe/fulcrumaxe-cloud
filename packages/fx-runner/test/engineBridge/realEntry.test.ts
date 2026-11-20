@@ -215,6 +215,13 @@ describe("fx-runner run, started from the built and moved entry", () => {
     await waitFor("the status file to say the ceiling was written", () => status()?.repos[0]?.ceiling === "written", 70_000);
   }, 150_000);
 
+  it("keeps the plain bridge when the cloud's hello reply lists no watch_mode (this stand-in lists none): bridge_heartbeat, never slim_status, no spool", async () => {
+    await waitFor("a bridge heartbeat at the cloud", () => [...ingest.sessions.values()].some((s) => s.stored.some((e) => e.kind === "bridge_heartbeat")));
+    const kinds = [...ingest.sessions.values()].flatMap((s) => s.stored.map((e) => e.kind));
+    expect(kinds).not.toContain("slim_status");
+    expect(existsSync(path.join(stateDir, "engine-bridge", `${REPO}.detail.jsonl`))).toBe(false);
+  }, 90_000);
+
   it("stops the bridge with the program: SIGTERM ends it cleanly and the socket is gone", async () => {
     child!.kill("SIGTERM");
     expect(await childExit).toBe(0);
