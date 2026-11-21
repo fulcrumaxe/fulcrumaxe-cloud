@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { reportError } from '@fx/telemetry';
+import { enginePricePerMonthUsd } from '@fx/spend';
 import type Stripe from 'stripe';
 import { withPlatformOps } from './pg.js';
 import { authorizeAccountWrite } from './authorize.js';
@@ -21,6 +22,11 @@ const ITEM_CHANGE_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing']
 
 export type EngineResult = { ok: true } | { ok: false; reason: string };
 export type StoredSubscription = { customerId: string; subscriptionId: string; status: string };
+
+/** Whether the Engine plan can be bought here: an engine price id is configured AND the plan data carries the plan's price. Either one missing means it is not offered (`engine_price_unset` on health). */
+export function enginePlanOffered(): boolean {
+  return stripeEnginePriceIdsFromEnv().length > 0 && enginePricePerMonthUsd() !== null;
+}
 
 export function isValidEngineQuantity(quantity: unknown): quantity is number {
   return typeof quantity === 'number' && Number.isInteger(quantity) && quantity >= 1 && quantity <= MAX_ENGINE_QUANTITY;

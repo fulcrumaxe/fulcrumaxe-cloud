@@ -49,6 +49,13 @@
       "runners": { "maxRunners": 8, "defaultAccountJobs": 4, "defaultPerRepoJobs": 2 }
     }
   },
+  "enginePlan": {
+    "priceUsdPerMonth": 26.5,
+    "quantityUnit": "engine",
+    "enginesPerMachine": 1,
+    "enginesPerRepo": 1,
+    "heavyLine": { "worstCaseUsdPerEngineMonth": 9.5, "atEngineCount": 10, "provisional": true, "source": "test fixture, invented figures" }
+  },
   "runnerPlan": {
     "foreground": { "kind": "flat", "usdPerMonth": 6 },
     "background": { "kind": "flat", "usdPerMonth": 0 },

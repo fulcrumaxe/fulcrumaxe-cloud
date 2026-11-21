@@ -402,13 +402,13 @@ describe("prerequisites (item 13)", () => {
     expect(TIME_TO_LIVE).toBe("usually 15–30 minutes");
   });
   it("the price is read from plan data: change it and the line changes (no price is written in app code)", () => {
-    const plans = (price) => ({ plans: [{ id: "starter", price_usd_month: 129 }, { id: "engine", price_usd_month: price }] });
+    const plans = (price) => ({ plans: [{ id: "starter", price_usd_month: 129 }], engine_plan: { price_usd_month: price } });
     expect(prerequisites(enginePrice(plans(29)))[3]).toBe("Price: $29.00 a month per engine");
     expect(prerequisites(enginePrice(plans(35.5)))[3]).toBe("Price: $35.50 a month per engine");
     expect(prerequisites(enginePrice(plans(49)))[3]).toBe("Price: $49.00 a month per engine");
   });
   it("without an Engine plan in the data, the line says where the price will be, never a number or 'undefined'", () => {
-    for (const body of [null, {}, { plans: [] }, { plans: [{ id: "starter", price_usd_month: 129 }] }, { plans: [{ id: "engine" }] }, { plans: [{ id: "engine", price_usd_month: "29" }] }, { plans: [{ id: "engine", price_usd_month: NaN }] }]) {
+    for (const body of [null, {}, { plans: [] }, { plans: [{ id: "starter", price_usd_month: 129 }], engine_plan: null }, { engine_plan: {} }, { engine_plan: { price_usd_month: "29" } }, { engine_plan: { price_usd_month: NaN } }, { plans: [{ id: "engine", price_usd_month: 29 }] }]) {
       expect(enginePrice(body)).toBeNull();
       expect(prerequisites(enginePrice(body))[3]).toBe("Price: shown when you choose a plan");
     }
@@ -440,4 +440,62 @@ describe("the machine named in the copy (ruling 26.2)", () => {
 
 it("every engine step has a label", () => {
   expect(Object.keys(LABELS)).toEqual(IDS);
+});
+
+// D#845 ON-22: the project step's plan gate. The server sends a closed value on the project step; the words and the price are the app's, the price from plan data.
+describe("the Engine plan gate on the project step", () => {
+  const gated = (gate, state = "active", extra = {}) => {
+    const steps = track({ machine: "done", claude: "done", github_app: "done", project: state }).map((s) => (s.step === "project" ? { ...s, plan_gate: gate, ...extra } : s));
+    return steps;
+  };
+  const price = (n) => ({ price: enginePrice({ engine_plan: { price_usd_month: n } }) });
+
+  it("plan_required reads 'Pick the Engine plan to run the engine ($X a month per engine)' with Choose plan; the price follows plan data", () => {
+    for (const n of [29, 35.5, 49]) {
+      const v = at(gated("plan_required"), "project", price(n));
+      expect(v.lines).toEqual(["Pick the Engine plan to run the engine ($" + n.toFixed(2) + " a month per engine)"]);
+      expect(v.actions).toEqual([{ id: "choose_plan", label: "Choose plan", run: true }]);
+    }
+  });
+
+  it("without a price in the data the line says what to do and never prints undefined or NaN", () => {
+    for (const ctx of [{}, { price: null }, { price: NaN }, { price: "29" }]) {
+      const v = at(gated("plan_required"), "project", ctx);
+      expect(v.lines).toEqual(["Pick the Engine plan to run the engine"]);
+      expect(text(v)).not.toMatch(/undefined|NaN|null/);
+    }
+  });
+
+  it("engine_quantity says every engine is in use and offers Add an engine; plan_ended says so with Renew; unavailable says so with no action", () => {
+    expect(at(gated("engine_quantity"), "project")).toMatchObject({ lines: ["Every engine on your plan is in use. Add an engine to place another project."], actions: [{ id: "add_engine", label: "Add an engine", run: true }] });
+    expect(at(gated("plan_ended"), "project")).toMatchObject({ lines: ["Plan ended: the engine is stopped"], actions: [{ id: "renew", label: "Renew", run: true }] });
+    expect(at(gated("unavailable"), "project")).toMatchObject({ lines: ["The Engine plan isn't available right now"], actions: [] });
+    expect(at(gated("account_held"), "project")).toMatchObject({ lines: ["This account is on hold, so an engine can't be placed right now"], actions: [] });
+  });
+
+  it("a placed project shows only an ended plan; the purchase prompts do not show on a done step", () => {
+    expect(at(gated("plan_ended", "done"), "project").lines).toEqual(["Your project is placed", "Plan ended: the engine is stopped"]);
+    for (const gate of ["plan_required", "engine_quantity", "unavailable"]) expect(at(gated(gate, "done"), "project").lines).toEqual(["Your project is placed"]);
+  });
+
+  it("a refused purchase or the 'Engine added' notice is shown under the gate, and a step with no gate is unchanged", () => {
+    expect(at(gated("plan_required"), "project", { planNote: "Only the account owner can change the Engine plan." }).lines.at(-1)).toBe("Only the account owner can change the Engine plan.");
+    expect(at(track({ machine: "done", claude: "done", github_app: "done", project: "active" }), "project", { planNote: "x" }).lines).toEqual([]);
+  });
+
+  it("parseTracks keeps the closed plan_gate and the engine counts on the project step only, and drops anything else", () => {
+    const body = fixture("200-new.json");
+    const parse = (extra) => parseTracks({ ...body, tracks: [body.tracks[0], { ...body.tracks[1], steps: body.tracks[1].steps.map((s) => ({ ...s, ...extra })) }] }).engine;
+    const project = (extra) => parse(extra).find((s) => s.step === "project");
+    expect(project({ plan_gate: "engine_quantity", engines: { quantity: 2, live: 2 } })).toMatchObject({ plan_gate: "engine_quantity", engines: { quantity: 2, live: 2 } });
+    expect(project({ plan_gate: "account_held" })).toMatchObject({ plan_gate: "account_held" });
+    for (const bad of [{ plan_gate: "free" }, { plan_gate: null }, { plan_gate: 1 }, { engines: { quantity: -1, live: 0 } }, { engines: { quantity: 1.5, live: 0 } }, { engines: "2" }]) {
+      expect(project(bad), JSON.stringify(bad)).not.toHaveProperty(Object.keys(bad)[0]);
+    }
+    for (const other of parse({ plan_gate: "plan_required", engines: { quantity: 1, live: 1 } }).filter((s) => s.step !== "project")) {
+      expect(other).not.toHaveProperty("plan_gate");
+      expect(other).not.toHaveProperty("engines");
+    }
+    expect(parseTracks(body).engine.every((s) => !("plan_gate" in s))).toBe(true);
+  });
 });

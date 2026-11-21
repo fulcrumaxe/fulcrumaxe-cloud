@@ -72,6 +72,30 @@ const runnerPlanSchema = z
   })
   .strict();
 
+/**
+ * D#845 ON-22: the Engine plan, a per-live-engine quantity line item on the account's one subscription. It sits beside the hosted plans because it has no compute
+ * budgets, repo limit or API limits of its own, and optional so data that predates it loads: a caller that needs it gets an "unavailable" answer, never a default.
+ * One engine per machine and one per repo are literals, so a file that says otherwise is refused. `heavyLine` names the inputs of the cost model's heavy line: the
+ * most one engine can cost us in a month (the heavy engine, at the model's smallest fleet step), which `plan-data-check` holds the price above.
+ */
+const enginePlanSchema = z
+  .object({
+    priceUsdPerMonth: z.number().finite().positive(),
+    quantityUnit: z.literal('engine'),
+    enginesPerMachine: z.literal(1),
+    enginesPerRepo: z.literal(1),
+    heavyLine: z
+      .object({
+        worstCaseUsdPerEngineMonth: z.number().finite().positive(),
+        /** The fleet step the figure was taken at (the cost model's rows are 10, 100 and 1,000 engines). */
+        atEngineCount: z.number().int().positive(),
+        provisional: z.boolean(),
+        source: z.string().min(1),
+      })
+      .strict(),
+  })
+  .strict();
+
 const modelRate = z
   .object({
     inputUsdPerMTok: usd,
@@ -95,6 +119,7 @@ export const planDataSchema = z
     fixture: z.boolean().optional(),
     plans: z.object({ starter: planSchema, team: planSchema, scale: planSchema }).strict(),
     runnerPlan: runnerPlanSchema.optional(),
+    enginePlan: enginePlanSchema.optional(),
     pricing: z
       .object({
         fetchedAt: z.string().min(1),

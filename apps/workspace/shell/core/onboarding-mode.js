@@ -9,6 +9,8 @@ export const ONBOARDING_APPS = Object.freeze(["onboarding", "model-key", "repos"
 export const STEP_IDS = Object.freeze(["model_key", "readonly_app", "preview", "pay", "write_app", "first_pr"]);
 export const ENGINE_STEP_IDS = Object.freeze(["machine", "claude", "github_app", "project", "plan", "install", "live"]);
 const ENGINE_STATES = Object.freeze(["done", "active", "pending", "failed"]);
+// D#845 ON-22: why the Engine plan does not cover one more engine (the server's closed list).
+const PLAN_GATES = Object.freeze(["plan_required", "engine_quantity", "plan_ended", "account_held", "unavailable"]);
 const READ_TIMEOUT_MS = 5000;
 const AFTER_RESTORE_MS = 300; // script.js restores or opens its first windows 200 ms after DESKTOP
 
@@ -51,6 +53,12 @@ function parseEngine(list) {
     if (s.step === "machine") {
       if (s.kvm === "present" || s.kvm === "absent") entry.kvm = s.kvm;
       if (s.helper_missing === true) entry.helper_missing = true;
+    }
+    // D#845 ON-22: the project step's plan gate (a closed value, or none) and the engine counts the "Add an engine" prompt needs. Anything else is "no gate", never a failure of the whole track.
+    if (s.step === "project") {
+      if (PLAN_GATES.includes(s.plan_gate)) entry.plan_gate = s.plan_gate;
+      const n = s.engines;
+      if (n && Number.isInteger(n.quantity) && Number.isInteger(n.live) && n.quantity >= 0 && n.live >= 0) entry.engines = { quantity: n.quantity, live: n.live };
     }
     steps.push(entry);
   }

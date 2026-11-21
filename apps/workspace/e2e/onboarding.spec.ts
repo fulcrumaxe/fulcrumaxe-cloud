@@ -39,7 +39,7 @@ interface Mock {
   access: string; isAdmin: boolean; isOwner: boolean; partner: boolean;
   onboarding: Reply[]; previewGet: Reply[]; previewPost: Reply[]; // a queue: the last reply repeats
   requests: string[]; posts: { key?: string; body: unknown; ct: string }[]; checkouts: unknown[];
-  repos: unknown; plans: unknown;
+  repos: unknown; plans: unknown; enginePlan?: { price_usd_month: number } | null; // GET /api/plans `engine_plan`, beside the hosted plans
 }
 const mock = (o: Partial<Mock> = {}): Mock => ({
   access: "no_subscription", isAdmin: true, isOwner: true, partner: false,
@@ -75,7 +75,7 @@ async function setup(page: Page, m: Mock) {
     return answer(route, take(m.previewPost));
   });
   await page.route((u) => u.pathname === "/api/v1/repos", (route) => route.fulfill({ json: m.repos }));
-  await page.route("**/api/plans", (route) => route.fulfill({ json: { ...PLANS, plans: m.plans, viewer: { is_owner: m.isOwner, partner_billed: m.partner } } }));
+  await page.route("**/api/plans", (route) => route.fulfill({ json: { ...PLANS, plans: m.plans, ...(m.enginePlan ? { engine_plan: m.enginePlan } : {}), viewer: { is_owner: m.isOwner, partner_billed: m.partner } } }));
   await page.route("**/api/v1/billing/checkout-session", (route) => {
     m.checkouts.push(route.request().postDataJSON());
     return route.fulfill({ json: { url: "https://checkout.stripe.com/c/pay/opaque" } });
@@ -1142,7 +1142,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     expect(await ob(page).locator('[data-testid="ob-app"]').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
   };
   const noPlaceholder = async (page: Page) => expect(await ob(page).innerText()).not.toMatch(PLACEHOLDER);
-  const withEnginePlan = (price: number) => [...PLANS.plans, { id: "engine", price_usd_month: price, repo_limit: 1 }];
+  const withEnginePlan = (price: number) => ({ plans: PLANS.plans, enginePlan: { price_usd_month: price } });
 
   test("a first visit offers the choice and nothing else; choosing the engine saves it and shows its steps", async ({ page }) => {
     const x = extra();
@@ -1226,7 +1226,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
 
   test("machine step open: the prerequisites, then the commands from this origin; Copy copies exactly the text shown", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-    const m = mock({ onboarding: [json(states({ machine: "active" }))], plans: withEnginePlan(29) });
+    const m = mock({ onboarding: [json(states({ machine: "active" }))], ...withEnginePlan(29) });
     await engineSetup(page, m, extra({ machine: null }));
     await bootToDesktop(page);
     const origin = new URL(page.url()).origin;
@@ -1254,9 +1254,15 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   });
 
   test("the price in the prerequisites is plan data: another Engine plan price changes the line", async ({ page }) => {
-    await engineSetup(page, mock({ onboarding: [json(states({ machine: "active" }))], plans: withEnginePlan(41) }), extra());
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "active" }))], ...withEnginePlan(41) }), extra());
     await bootToDesktop(page);
     await expect(ob(page).locator('[data-testid="ob-prereq-line"]').nth(3)).toHaveText("Price: $41.00 a month per engine");
+  });
+
+  test("an Engine plan listed among the hosted plans is not the Engine price: the line does not invent one", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "active" }))], plans: [...PLANS.plans, { id: "engine", price_usd_month: 29, repo_limit: 1 }] }), extra());
+    await bootToDesktop(page);
+    await expect(ob(page).locator('[data-testid="ob-prereq-line"]').nth(3)).toHaveText("Price: shown when you choose a plan");
   });
 
   test("no Engine plan in the plan data: the line does not invent a price", async ({ page }) => {

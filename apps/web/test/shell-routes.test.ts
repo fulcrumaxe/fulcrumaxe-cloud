@@ -384,6 +384,27 @@ describe("D#37 WS-F6 (G1): GET /api/plans, the plan list read from the plan sour
     }
   });
 
+  it("D#845 ON-22: engine_plan carries the Engine plan's price from the plan data, beside the hosted list and never in it; no block means null", async () => {
+    const saved = process.env.FX_PLAN_DATA;
+    const read = async () => (await (await plansAs("owner")).json()) as { plans: { id: string }[]; engine_plan: { price_usd_month: number } | null };
+    try {
+      const data = JSON.parse(process.env.FX_PLAN_DATA!);
+      const body = await read();
+      expect(body.engine_plan).toEqual({ price_usd_month: data.enginePlan.priceUsdPerMonth });
+      expect(body.plans.map((p) => p.id)).not.toContain("engine");
+      process.env.FX_PLAN_DATA = JSON.stringify({ ...data, enginePlan: { ...data.enginePlan, priceUsdPerMonth: 41.25 } });
+      resetPlanDataCache();
+      expect((await read()).engine_plan).toEqual({ price_usd_month: 41.25 });
+      delete data.enginePlan;
+      process.env.FX_PLAN_DATA = JSON.stringify(data);
+      resetPlanDataCache();
+      expect((await read()).engine_plan).toBeNull();
+    } finally {
+      if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
   it("viewer.is_owner is true only for the owner; admin and member are false", async () => {
     for (const [role, expected] of [["owner", true], ["admin", false], ["member", false]] as const) {
       const body = (await (await plansAs(role)).json()) as { viewer: { is_owner: boolean; partner_billed: boolean } };

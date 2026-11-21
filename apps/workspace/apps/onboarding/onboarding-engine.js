@@ -48,9 +48,9 @@ export function prerequisites(priceUsd) {
   ];
 }
 
-/** The Engine plan's monthly price from a GET /api/plans body, or null. */
+/** The Engine plan's monthly price from a GET /api/plans body (`engine_plan`, beside the hosted plans), or null. */
 export function enginePrice(body) {
-  const p = body && Array.isArray(body.plans) ? body.plans.find((x) => x && x.id === "engine") : null;
+  const p = body && body.engine_plan;
   return p && typeof p.price_usd_month === "number" && Number.isFinite(p.price_usd_month) ? p.price_usd_month : null;
 }
 
@@ -115,9 +115,25 @@ export const machineChoiceLine = (m) => (m && m.tier === "standard" && m.hasProj
 export const visibilityLabel = (v) => (v === "public" ? "Public" : v === "private" ? "Private" : "");
 
 const act = (id, label, app) => ({ id, label, app });
+/** An action the app runs itself (a purchase), not a hand-off to another app. */
+const run = (id, label) => ({ id, label, run: true });
+/**
+ * D#845 ON-22: the project step's plan gate. The price is plan data (`ctx.price`, from GET /api/plans), never a literal here; without it the line says only what to do.
+ * `plan_ended` shows even on a placed project (its engine is stopped); the others only while the project is still to be placed.
+ */
+function planGate(v, gate, ctx) {
+  const price = typeof ctx.price === "number" && Number.isFinite(ctx.price) ? " (" + usd(ctx.price) + " a month per engine)" : "";
+  if (gate === "plan_required") { v.lines.push("Pick the Engine plan to run the engine" + price); v.actions.push(run("choose_plan", "Choose plan")); }
+  else if (gate === "engine_quantity") { v.lines.push("Every engine on your plan is in use. Add an engine to place another project."); v.actions.push(run("add_engine", "Add an engine")); }
+  else if (gate === "plan_ended") { v.lines.push("Plan ended: the engine is stopped"); v.actions.push(run("renew", "Renew")); }
+  else if (gate === "account_held") v.lines.push("This account is on hold, so an engine can't be placed right now");
+  else if (gate === "unavailable") v.lines.push("The Engine plan isn't available right now");
+  if (ctx.planNote) v.lines.push(ctx.planNote);
+}
+
 /**
  * One engine step's copy. `steps` is the engine track, `i` the step, `ctx` the view-model (every field optional):
- *   name, origin, isAdmin, offline, last_seen_min
+ *   name, origin, isAdmin, offline, last_seen_min, price (the Engine plan's monthly price), planNote (a refused purchase's sentence, or the "Engine added" notice), planBusy
  *   machine { linked_silent, helper_missing, kvm: "present"|"absent", doctor_reason, doctor: [{ code, ...detail }] }
  *   project { no_eligible_machine }   plan { stage: "surveying"|"draft", run_id }
  *   install { sub_steps: [{ id, state }], pr: { number, state: "open"|"closed" } }   live { operate: "on"|"off", silent_min, starting }
@@ -166,7 +182,10 @@ export function describeStep(steps, i, ctx = {}) {
       if (step.state !== "done") v.actions.push(act("open_repos", "Open Repos", "repos"));
       break;
     case "project":
-      if (step.state === "done") v.lines.push("Your project is placed");
+      if (step.plan_gate && (step.plan_gate === "plan_ended" || step.state !== "done")) {
+        if (step.state === "done") v.lines.push("Your project is placed");
+        planGate(v, step.plan_gate, ctx);
+      } else if (step.state === "done") v.lines.push("Your project is placed");
       else if ((ctx.project || {}).no_eligible_machine) { v.lines.push("Every machine is full or offline"); v.actions.push(act("add_machine", "Add a machine", "runners")); }
       break;
     case "plan": {
@@ -227,7 +246,7 @@ export function engineSection(steps, env) {
   const first = steps.findIndex((s) => s.state !== "done");
   const items = steps.map((s, i) => {
     const v = describeStep(steps, i, env.ctx);
-    const buttons = v.actions.filter((a) => env.canOpen(a.app)).map((a) => h("button", { type: "button", class: "ob-btn ob-btn-primary", "data-testid": "ob-engine-" + a.id, onClick: () => env.openApp(a.app) }, a.label));
+    const buttons = v.actions.filter((a) => a.run || env.canOpen(a.app)).map((a) => h("button", { type: "button", class: "ob-btn ob-btn-primary", "data-testid": "ob-engine-" + a.id, disabled: a.run && env.ctx.planBusy === true, onClick: () => (a.run ? env.runAction(a.id) : env.openApp(a.app)) }, a.label));
     return h("li", { class: "ob-step ob-engine-step" + (s.state === "done" ? " ob-done" : "") + (i === first ? " ob-current" : "") + (v.failed ? " ob-failed" : ""), "data-testid": "ob-engine-" + s.step, "data-state": s.state, "aria-current": i === first ? "step" : null },
       h("div", { class: "ob-step-head" }, h("strong", null, v.label),
         h("span", { class: "ob-state", "data-testid": "ob-engine-state" }, v.word, s.completed_at ? [" ", timeNode(s.completed_at, true)] : null)),

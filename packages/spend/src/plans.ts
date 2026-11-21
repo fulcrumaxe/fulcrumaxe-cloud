@@ -1,4 +1,4 @@
-import { PlanDataMissingError, loadPlanData } from '@fx/plan-data';
+import { PlanDataMissingError, enginePlanSettings, loadPlanData } from '@fx/plan-data';
 import type { PlanId } from './types.js';
 
 /**
@@ -49,6 +49,12 @@ export interface Plan {
   tokenStreamsPerTenant: number;
   /** Assumed monthly volume for the role-settings cost estimate. */
   monthlyWorkload: { features: number; smalls: number };
+}
+
+/** D#845 ON-22: the Engine plan's price per live engine a month, from the plan data; null when it carries no engine plan (the plan is then not offered). Never a default. */
+export function enginePricePerMonthUsd(): number | null {
+  const e = enginePlanSettings();
+  return e.on ? e.priceUsdPerMonth : null;
 }
 
 /** The plan ids the plan data defines, in its order. Throws PlanDataMissingError when the data is unavailable. */

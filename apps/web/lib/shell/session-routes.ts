@@ -4,7 +4,7 @@ import type { VerifiedSession } from "@fx/core/src/auth/session";
 import { getUserProfile } from "@fx/core/src/auth/identity";
 import { getMemberRole } from "@fx/core/src/tenancy/authorize";
 import { withTenant } from "@fx/core/src/tenancy/withTenant";
-import { listPlans, readAccountStatus, type AccountStatus, type Plan } from "@fx/billing";
+import { enginePricePerMonthUsd, listPlans, readAccountStatus, type AccountStatus, type Plan } from "@fx/billing";
 import { PlanDataMissingError } from "@fx/plan-data";
 import { applyNoStore, applySecurityHeaders } from "./headers";
 import { opaqueUserId, storageNamespace } from "./storage-ns";
@@ -182,6 +182,8 @@ async function plansResponse(session: VerifiedSession, deps: SessionRouteDeps): 
   ]);
   const body = {
     plans: plans.map(planEntry),
+    // D#845 ON-22: the Engine plan is a per-engine line item, not a hosted plan, so it sits beside the list and no plan picker lists it. Null when plan data carries none.
+    engine_plan: enginePricePerMonthUsd() === null ? null : { price_usd_month: enginePricePerMonthUsd() },
     viewer: { is_owner: role === "owner", partner_billed: partnerBilled },
   };
   return applySecurityHeaders(applyNoStore(NextResponse.json(body)));
