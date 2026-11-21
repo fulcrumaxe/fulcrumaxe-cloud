@@ -6,10 +6,10 @@
  * It is sent at most once every `HOST_LOAD_MIN_INTERVAL_SECONDS`, and counts as sent only once the cloud answered 200, so a failed or rate-limited claim sends it again.
  * A reading that cannot be taken (no disk volume readable) or does not fit the protocol's schema sends nothing: a missing fact is never made up.
  */
-import { HOST_LOAD_MAX_MB, HostLoad } from "@fulcrumaxe/runner-protocol";
+import { HOST_LOAD_MAX_MB, HOST_LOAD_MIN_INTERVAL_SECONDS, HostLoad } from "@fulcrumaxe/runner-protocol";
 import type { ResourceProbe } from "./resources.js";
 
-export const HOST_LOAD_MIN_INTERVAL_SECONDS = 60;
+export { HOST_LOAD_MIN_INTERVAL_SECONDS };
 
 export interface PendingHostLoad {
   load: HostLoad;
