@@ -14,6 +14,12 @@ describe("the TypeScript unit renderer against the Go golden files", () => {
     });
   }
 
+  it("writes no User= line: systemd 255 then starts the helper without CAP_SETUID, and a system unit is root anyway", () => {
+    for (const group of [undefined, "example-runner"]) {
+      expect(renderUnit({ ...params, group }).split("\n").filter((l) => l.startsWith("User="))).toEqual([]);
+    }
+  });
+
   it("takes every directive and capability from hardening.json, so a changed file changes the unit", () => {
     const changed: Pinned = {
       ...pinnedFile,

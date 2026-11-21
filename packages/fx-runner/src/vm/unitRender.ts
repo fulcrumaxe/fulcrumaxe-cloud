@@ -75,7 +75,9 @@ export function renderUnit(u: UnitParams, p: Pinned = HARDENING): string {
   if (!safePath(u.helperPath) || !safePath(u.configPath) || !safePath(u.jailRoot) || !safePath(u.snapshotDir) || (u.group !== undefined && u.group !== "" && !safeToken(u.group))) {
     throw new Error("unit parameters must be clean absolute paths and a plain group name");
   }
-  const out: string[] = ["[Unit]\nDescription=fx-vmhelper: root service for the local runner's microVM sandboxes\nAfter=local-fs.target\n\n[Service]\nType=simple\nUser=root\n"];
+  // No User= line: a system unit runs as root without one, and with User=root written out systemd 255 starts the helper without
+  // CAP_SETUID in its effective set.
+  const out: string[] = ["[Unit]\nDescription=fx-vmhelper: root service for the local runner's microVM sandboxes\nAfter=local-fs.target\n\n[Service]\nType=simple\n"];
   if (u.group !== undefined && u.group !== "") out.push(`Group=${u.group}\n`);
   out.push(`ExecStart=${u.helperPath} -config ${u.configPath}\nRestart=on-failure\n`);
   out.push(`RuntimeDirectory=${p.runtime_directory}\nRuntimeDirectoryMode=${p.runtime_directory_mode}\nStateDirectory=${p.state_directory}\nStateDirectoryMode=${p.state_directory_mode}\n`);

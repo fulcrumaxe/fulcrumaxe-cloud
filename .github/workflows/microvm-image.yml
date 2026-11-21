@@ -116,11 +116,10 @@ jobs:
           printf '{"fx-agent":{"kernel":"%s","rootfs":"%s"}}\n' "$K" "$R" | sudo tee "$O/template-manifest.json" > /dev/null
           sudo chmod 0644 "$O/template-manifest.json"
           sudo install -m 0600 -o root -g root "$W/plan/config.json" /etc/fx-vmhelper/config.json
-          # Found by this job: with `User=root` in the rendered unit, systemd 255 on this image starts the helper without CAP_SETUID in its
-          # effective set, and its own start-up check refuses (CapEff 0x08200041, pinned 0x082000c1). A system unit runs as root without
-          # that line, and then the check passes, so the line is dropped for this run only; the product's unit text is not changed here.
-          sed '/^User=root$/d' "$W/plan/fx-vmhelper.service" > "$W/plan/fx-vmhelper.service.run"
-          sudo install -m 0644 -o root -g root "$W/plan/fx-vmhelper.service.run" /etc/systemd/system/fx-vmhelper.service
+          # The unit is installed exactly as the installer renders it. It carries no User= line: with `User=root` written out, systemd 255
+          # on this image started the helper without CAP_SETUID in its effective set (CapEff 0x08200041, pinned 0x082000c1).
+          if grep -q '^User=' "$W/plan/fx-vmhelper.service"; then echo "the rendered unit carries a User= line"; exit 1; fi
+          sudo install -m 0644 -o root -g root "$W/plan/fx-vmhelper.service" /etc/systemd/system/fx-vmhelper.service
           # what a dispatched host tells the real-VM suites (see the header of the two test files)
           T="vm-fx-agent-${K:0:12}"
           jq -n --arg k "$K" --arg r "$R" --arg a "$A" --arg t "$T" '{arch:"amd64",digests:{kernel:$k,rootfs:$r,agent:$a},listing:{ok:true,paths:["\($t)/kernel-amd64-\($k)","\($t)/rootfs-amd64-\($r)","\($t)/agent-amd64-\($a)"]}}' > "$W/boot-facts.json"
@@ -134,6 +133,9 @@ jobs:
           sudo systemctl start fx-vmhelper.service || { sudo journalctl -u fx-vmhelper --no-pager | tail -n 60; exit 1; }
           for i in $(seq 1 20); do sudo test -S /run/fx-vmhelper/helper.sock && break; sleep 0.5; done
           sudo systemctl status fx-vmhelper.service --no-pager | head -n 20
+          # the proof for the unit text: the running helper's own capability sets (pinned effective set 0x082000c1)
+          HPID="$(systemctl show -p MainPID --value fx-vmhelper.service)"
+          { echo "helper main pid $HPID"; grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):' "/proc/$HPID/status"; } | tee -a "$W/host.txt"
           sudo test -S /run/fx-vmhelper/helper.sock
       - name: Boot the guest under Firecracker and run the probes (the whole vm test directory)
         # sg gives the test process the helper's group (the socket directory is root:fx-vmhelper 0750; a usermod does not reach a running
