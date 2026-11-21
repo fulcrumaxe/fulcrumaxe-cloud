@@ -6,7 +6,7 @@ import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CURRENT_PROTOCOL_VERSION, HelloMessage, SANDBOX_COMMAND_PURPOSE, sha256Text, type SandboxCommand } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, HelloMessage, PREFLIGHT_CODES, SANDBOX_COMMAND_PURPOSE, sha256Text, type SandboxCommand } from "@fulcrumaxe/runner-protocol";
 import { spillRootFor } from "../../src/job/spillFiles.js";
 import { CliError } from "../../src/cliError.js";
 import { readHostFacts } from "../../src/hostFacts.js";
@@ -530,6 +530,123 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
         expect(declared(0)).toBe(false);
         expect(await stop(run)).toMatchObject({ code: 0 });
       }
+    });
+  });
+
+  // D#845 ON-21b: the preflight codes are the same handshake. The runner declares `preflight_v1`; the cloud lists `preflight` only to a runner that declared it; the codes go only on a hello after that reply.
+  describe("hello facts carry the preflight codes only after the cloud listed preflight", () => {
+    const GBYTES = 1024 ** 3;
+    const kernel = (kvm: "present" | "absent" = "absent") => () => ({ kvm, vt: "yes" as const, cgroup: "v2" as const, cgroupDelegated: "yes" as const, diskFreeBytes: 500 * GBYTES, memAvailableBytes: 60 * GBYTES });
+    /** Every place the machine would reach is the local fake cloud, and every name resolves: only the kernel's answers decide the codes. */
+    const preflightHost = (kernelOf = kernel()): Partial<RunHost> => {
+      const probe = `${cloud.origin}/probe`;
+      const base = fakeSandboxHost();
+      return {
+        uid: process.getuid?.(),
+        preflight: { kernel: kernelOf, lookup: async () => [{ address: "192.0.2.1", family: 4 }], urls: { github: probe, model_api: probe, registry_npm: probe, registry_pypi: probe } },
+        sandbox: { ...base, run: async (command, args, env, timeoutMs) => (command === "loginctl" ? { code: 0, stdout: "Linger=yes\n", stderr: "", timedOut: false } : base.run(command, args, env, timeoutMs)) },
+      };
+    };
+    const factsOf = (n: number): Record<string, unknown> | undefined => (hellos()[n]!.body as { facts?: Record<string, unknown> }).facts;
+    const declaresPreflight = (n: number): boolean => ((hellos()[n]!.body as { capabilities?: string[] }).capabilities ?? []).includes("preflight_v1");
+    const anyPreflight = (): boolean => hellos().some((h) => "preflight" in ((h.body as { facts?: object }).facts ?? {}));
+    const baselineHello = async (): Promise<unknown> => {
+      cloud.seen.length = 0;
+      const plain = start({});
+      await until(() => claims() >= 1);
+      const first = hellos()[0]!.body;
+      expect(await stop(plain)).toMatchObject({ code: 0 });
+      cloud.seen.length = 0;
+      return first;
+    };
+
+    it("new cloud, new runner: the first hello declares it and carries no codes, the second carries them", async () => {
+      cloud.preflightCloud = "listed";
+      const run = start({ host: preflightHost() });
+      await until(() => hellos().length >= 2, 20_000);
+      expect(declaresPreflight(0)).toBe(true);
+      expect(factsOf(0)).not.toHaveProperty("preflight");
+      expect(factsOf(1)?.preflight).toEqual(["kvm_absent"]);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+
+    it("a machine whose checks all pass sends an empty list (every check ok), which is not the same as sending none", async () => {
+      cloud.preflightCloud = "listed";
+      const run = start({ host: preflightHost(kernel("present")) });
+      await until(() => hellos().length >= 2, 20_000);
+      expect(factsOf(1)?.preflight).toEqual([]);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+
+    it("what is sent is only members of the closed set: no host name, address or path is in any hello", async () => {
+      cloud.preflightCloud = "listed";
+      const host = preflightHost();
+      const failing = async (): Promise<never> => {
+        throw new Error("resolver at 192.0.2.7 failed for fictional-dir/config");
+      };
+      const run = start({ host: { ...host, preflight: { ...host.preflight!, lookup: failing } } });
+      await until(() => hellos().length >= 2, 20_000);
+      const codes = factsOf(hellos().length - 1)?.preflight as string[];
+      expect(codes.length).toBeGreaterThan(0);
+      for (const code of codes) expect(PREFLIGHT_CODES as readonly string[]).toContain(code);
+      const wire = JSON.stringify(hellos().map((h) => h.body));
+      for (const leak of ["192.0.2", "fictional", "127.0.0.1", "resolv.conf", "firewall"]) expect(wire, leak).not.toContain(leak);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+
+    it("new cloud, old runner (no readers): nothing is declared and no hello carries codes; the hello is the old one", async () => {
+      cloud.preflightCloud = "listed";
+      const baseline = await baselineHello();
+      const run = start({});
+      await until(() => claims() >= 1);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(hellos()).toHaveLength(1);
+      expect(declaresPreflight(0)).toBe(false);
+      expect(anyPreflight()).toBe(false);
+      expect(hellos()[0]!.body).toEqual(baseline);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+
+    it("old cloud (strict, refuses the capability and the key), new runner: one retry drops only preflight_v1, no hello carries codes, and the accepted hello is the old one byte for byte", async () => {
+      cloud.preflightCloud = "old";
+      const baseline = await baselineHello();
+      const run = start({ host: preflightHost() });
+      await until(() => claims() >= 1);
+      const sent = hellos();
+      expect(declaresPreflight(0)).toBe(true);
+      expect(sent).toHaveLength(2);
+      expect(anyPreflight()).toBe(false);
+      expect(JSON.stringify(sent[1]!.body)).toBe(JSON.stringify(baseline));
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+
+    it("a cloud that predates both the KVM fact and the codes costs two retries, in that order, and ends at the old hello", async () => {
+      cloud.preflightCloud = "old";
+      cloud.kvmCloud = "old";
+      const vmFacts: RunHost["vmFacts"] = async () => ({ kvm: "present", helperSocket: "absent", helperSocketPath: "fictional-helper.sock", readMemAvailableBytes: async () => undefined }) as never;
+      const run = start({ host: { ...preflightHost(), vmFacts } });
+      await until(() => claims() >= 1);
+      const caps = hellos().map((h) => (h.body as { capabilities: string[] }).capabilities);
+      expect(caps).toHaveLength(3);
+      expect(caps[0]).toEqual(expect.arrayContaining(["preflight_v1", "kvm_fact_v1"]));
+      expect(caps[1]).toEqual(expect.arrayContaining(["kvm_fact_v1"]));
+      expect(caps[1]).not.toContain("preflight_v1");
+      expect(caps[2]).not.toContain("kvm_fact_v1");
+      expect(caps[2]).not.toContain("preflight_v1");
+      expect(caps[2]).toEqual(caps[0]!.filter((c) => c !== "preflight_v1" && c !== "kvm_fact_v1"));
+      expect(anyPreflight()).toBe(false);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+
+    it("a cloud that knows the field but does not list it: no hello carries codes", async () => {
+      cloud.preflightCloud = "unlisted";
+      const run = start({ host: preflightHost() });
+      await until(() => claims() >= 1);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(hellos()).toHaveLength(1);
+      expect(declaresPreflight(0)).toBe(true);
+      expect(anyPreflight()).toBe(false);
+      expect(await stop(run)).toMatchObject({ code: 0 });
     });
   });
 

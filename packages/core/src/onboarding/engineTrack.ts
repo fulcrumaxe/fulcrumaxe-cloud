@@ -3,6 +3,7 @@ import { ForbiddenError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import type { RunActionCtx } from '../runActions/request.js';
 import { emitDomainEvent } from '../domain-events/emit.js';
+import { preflightView } from '@fulcrumaxe/runner-protocol';
 
 /**
  * D#845 ON-5: the engine track of onboarding. The seven steps are DERIVED from current rows on every read, so a step reopens when what it stands for goes away.
@@ -27,6 +28,8 @@ export interface EngineStep {
   kvm?: 'present' | 'absent';
   /** D#845 ON-6c, machine step only: true when the machine has KVM but its engine is not microvm (so it could run microVMs and the helper is not set up). Left out otherwise. */
   helper_missing?: true;
+  /** D#845 ON-21b, machine step only: the preflight codes the machine's latest hello reported that are not ok, each with its one fixed line, only members of the closed set. Left out when the machine did not say; an empty list says every check passed. */
+  preflight?: Array<{ code: string; fix: string }>;
   /** The stored failure for this step; null unless `state` is `failed`. */
   failure: { code: string; at: string } | null;
 }
@@ -37,6 +40,8 @@ export interface EngineSources {
   tier: EngineStep['tier'];
   /** The most recently heard machine's KVM fact; null when it never said. */
   kvm?: 'present' | 'absent' | null;
+  /** The most recently heard machine's stored preflight codes; null when it never said. */
+  preflight?: string[] | null;
   failures: Partial<Record<EngineStepKey, { code: string; at: string }>>;
 }
 
@@ -64,7 +69,7 @@ export function buildEngineSteps(src: EngineSources): EngineStep[] {
     if (state !== 'done' && state !== 'pending') activeTaken = true;
     const machine =
       step === 'machine'
-        ? { ...(src.kvm ? { kvm: src.kvm } : {}), ...(src.kvm === 'present' && src.tier === 'standard' ? { helper_missing: true as const } : {}) }
+        ? { ...(src.kvm ? { kvm: src.kvm } : {}), ...(src.kvm === 'present' && src.tier === 'standard' ? { helper_missing: true as const } : {}), ...(src.preflight ? { preflight: preflightView(src.preflight) } : {}) }
         : {};
     return { step, state, completed_at, tier: step === 'machine' ? src.tier : null, ...machine, failure };
   });
@@ -87,8 +92,8 @@ export async function readEngineSources(
   githubAppAt: string | null,
 ): Promise<{ sources: EngineSources; runners: { id: string; heardAt: string }[] }> {
   const rn = (
-    await client.query<{ id: string; last_seen_at: Date; sandbox_engine: string | null; kvm: string | null }>(
-      `SELECT rn.id, rn.last_seen_at, rn.kvm, f.sandbox_engine FROM runners rn LEFT JOIN runner_facts f ON f.account_id = rn.account_id AND f.runner_id = rn.id
+    await client.query<{ id: string; last_seen_at: Date; sandbox_engine: string | null; kvm: string | null; preflight: string[] | null }>(
+      `SELECT rn.id, rn.last_seen_at, rn.kvm, rn.preflight, f.sandbox_engine FROM runners rn LEFT JOIN runner_facts f ON f.account_id = rn.account_id AND f.runner_id = rn.id
         WHERE rn.account_id = $1 AND rn.revoked_at IS NULL AND rn.protocol_version IS NOT NULL AND rn.last_seen_at IS NOT NULL ORDER BY rn.last_seen_at DESC, rn.id`,
       [accountId],
     )
@@ -112,7 +117,7 @@ export async function readEngineSources(
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
   return {
-    sources: { done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
+    sources: { done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, preflight: rn[0]?.preflight ?? null, failures },
     runners,
   };
 }

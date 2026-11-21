@@ -89,6 +89,8 @@ const FIXES = {
   subscription_limit: () => ["Your Claude plan's usage limit was reached. Work resumes after it resets"],
   machine_offline: (nm, d) => [nm + " is offline" + (Number.isInteger(d.last_seen_min) ? " (last seen " + d.last_seen_min + " min ago)" : "")],
 };
+/** The distinct fixed lines of a machine's reported preflight codes, in the order the cloud sent them; nothing but a { code, fix } pair of strings counts. */
+export const preflightTexts = (list) => [...new Set((Array.isArray(list) ? list : []).filter((p) => p && typeof p.code === "string" && typeof p.fix === "string" && p.fix !== "").map((p) => p.fix))];
 /** The sentence and optional command for a failure code (a code with no entry reads as a generic stop). */
 export function fixFor(code, nm, detail) {
   const f = Object.prototype.hasOwnProperty.call(FIXES, code) ? FIXES[code] : null;
@@ -118,7 +120,7 @@ const act = (id, label, app) => ({ id, label, app });
 /**
  * One engine step's copy. `steps` is the engine track, `i` the step, `ctx` the view-model (every field optional):
  *   name, origin, isAdmin, offline, last_seen_min
- *   machine { linked_silent, helper_missing, kvm: "present"|"absent", doctor_reason, doctor: [{ code, ...detail }] }
+ *   machine { linked_silent, helper_missing, kvm: "present"|"absent", preflight: [{ code, fix }], doctor_reason, doctor: [{ code, ...detail }] }
  *   project { no_eligible_machine }   plan { stage: "surveying"|"draft", run_id }
  *   install { sub_steps: [{ id, state }], pr: { number, state: "open"|"closed" } }   live { operate: "on"|"off", silent_min, starting }
  * Returns { label, state, word, failed, lines, list, commands, actions }; an action with `app` is a hand-off to that app.
@@ -155,6 +157,15 @@ export function describeStep(steps, i, ctx = {}) {
         v.lines.push(cleanOrigin(ctx.origin) ? "It prints a code. Open " + ctx.origin + "/link and type the code there." : "", "Waiting for your machine…");
       }
       if (step.state !== "done") for (const c of Array.isArray(m.doctor) ? m.doctor : []) if (c && Object.hasOwn(FIXES, c.code)) fix(c.code, c);
+      // D#845 ON-21b: what the machine's own preflight found, each code's one fixed line (the cloud's, never retyped here), the same lines the Machines row shows. The reported `kvm_absent` line says it better than the generic
+      // no-KVM sentence, so it takes that one's place; identical lines are said once.
+      for (const text of preflightTexts(m.preflight)) {
+        if (m.preflight.some((p) => p.code === "kvm_absent" && p.fix === text)) {
+          const at = v.lines.indexOf(NO_KVM);
+          if (at >= 0) v.lines.splice(at, 1);
+        }
+        v.lines.push(text);
+      }
       break;
     case "claude":
       if (step.state === "done") v.lines.push("Claude is signed in on " + nm);

@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { COPY } from "@fulcrumaxe/runner-protocol";
+import { COPY, preflightView } from "@fulcrumaxe/runner-protocol";
 import type { RunnerCloudDeps, RunnerHttpResponse, SessionPrincipal } from "./http.js";
 import { readSandboxViews } from "./fleetSandboxes.js";
 import { readFleet, type ReportedFactsLoader } from "./readModel.js";
@@ -9,12 +9,15 @@ import { readFleet, type ReportedFactsLoader } from "./readModel.js";
  * `runner_facts` besides the hello route, and it lives here, apart from readModel.ts, because the request verifier's import graph reaches readModel.ts
  * and must never name the facts (D#605 FL-2 acceptance 4). Display only: nothing reads these values to decide anything.
  */
-const readReportedFacts: ReportedFactsLoader = async (client: PoolClient, accountId: string) => {
-  const { rows } = await client.query<{ runner_id: string; os: string; arch: string; sandbox_engine: string }>(
-    "SELECT runner_id, os, arch, sandbox_engine FROM runner_facts WHERE account_id = $1",
+export const readReportedFacts: ReportedFactsLoader = async (client: PoolClient, accountId: string) => {
+  // D#845 ON-21b: the preflight codes sit on the runner's own row; both tables are named by the account, on top of row security. What is shown is only what the closed set names, each with its fixed line.
+  const { rows } = await client.query<{ runner_id: string; os: string; arch: string; sandbox_engine: string; preflight: string[] | null }>(
+    `SELECT f.runner_id, f.os, f.arch, f.sandbox_engine, r.preflight FROM runner_facts f
+       LEFT JOIN runners r ON r.id = f.runner_id AND r.account_id = f.account_id
+      WHERE f.account_id = $1`,
     [accountId],
   );
-  return new Map(rows.map((r) => [r.runner_id, { os: r.os, arch: r.arch, engine: r.sandbox_engine }]));
+  return new Map(rows.map((r) => [r.runner_id, { os: r.os, arch: r.arch, engine: r.sandbox_engine, preflight: r.preflight === null ? null : preflightView(r.preflight) }]));
 };
 
 /**

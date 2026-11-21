@@ -2,6 +2,7 @@ import { z } from "zod";
 import { SANDBOX_PINNED_VCPUS, PINNED_MEMORY_MB, computeComputeUsd } from "@fx/spend";
 import { ONBOARDING_STEPS, getOnboarding } from "@fx/core/src/onboarding/progress.js";
 import { ENGINE_STEPS, TRACKS, chooseTrack } from "@fx/core/src/onboarding/engineTrack.js";
+import { PREFLIGHT_CODES } from "@fulcrumaxe/runner-protocol";
 import { readMachineFacts } from "@fx/runner-cloud";
 import {
   PreviewExistsError as ServicePreviewExistsError,
@@ -54,6 +55,8 @@ const engineStepsSchema = z.array(
     tier: z.enum(["microvm", "standard"]).nullable(),
     kvm: z.enum(["present", "absent"]).optional(),
     helper_missing: z.literal(true).optional(),
+    // D#845 ON-21b: the preflight codes that are not ok, only members of the closed set, each with its one fixed line. Left out when the machine did not say.
+    preflight: z.array(z.object({ code: z.enum(PREFLIGHT_CODES), fix: z.string() })).optional(),
     failure: z.object({ code: z.string(), at: z.string() }).nullable(),
   }),
 );

@@ -109,8 +109,8 @@ describe("G4: nothing secret in public code", () => {
   });
 
   it("names no host other than the documented defaults", () => {
-    // D#845 ON-1 adds the three hosts the machine protocol names by design: the engine tarball host and the two Claude sign-in hosts (machineJobs.ts, machineCommands.ts).
-    const allowed = new Set(["api.anthropic.com", "github.com", "api.github.com", "registry.npmjs.org", "codeload.github.com", "claude.ai", "console.anthropic.com"]);
+    // D#845 ON-21b adds the fixed fix line for an unreachable package registry (preflight.ts names pypi.org beside registry.npmjs.org). D#845 ON-1 adds the three hosts the machine protocol names by design: the engine tarball host and the two Claude sign-in hosts (machineJobs.ts, machineCommands.ts).
+    const allowed = new Set(["api.anthropic.com", "github.com", "api.github.com", "registry.npmjs.org", "codeload.github.com", "claude.ai", "console.anthropic.com", "pypi.org"]);
     const url = /\b[a-z][a-z0-9+.-]*:\/\/(?:[^\s/@"'`]*@)?([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
     const bare = /\b((?:[a-z0-9-]+\.)+(?:com|dev|io|net|org|ai|app|cloud|xyz|co))\b/gi;
     const found: string[] = [];
