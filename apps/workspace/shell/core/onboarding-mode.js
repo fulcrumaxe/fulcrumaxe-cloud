@@ -7,29 +7,82 @@
 // A UI gate only: the server decides every call. Restriction is one-way (see app-registry.js restrictTo).
 export const ONBOARDING_APPS = Object.freeze(["onboarding", "model-key", "repos", "themes"]);
 export const STEP_IDS = Object.freeze(["model_key", "readonly_app", "preview", "pay", "write_app", "first_pr"]);
+export const ENGINE_STEP_IDS = Object.freeze(["machine", "claude", "github_app", "project", "plan", "install", "live"]);
+const ENGINE_STATES = Object.freeze(["done", "active", "pending", "failed"]);
 const READ_TIMEOUT_MS = 5000;
 const AFTER_RESTORE_MS = 300; // script.js restores or opens its first windows 200 ms after DESKTOP
 
 /** A step still to do: not finished and not skipped. A skipped step (the preview, once a plan is chosen) is not waiting on anyone. */
 export const isOpenStep = (s) => s.completed_at === null && !s.skipped;
 
-/**
- * The six steps of a GET /api/v1/onboarding body in the server's order, or null when the body does not fit.
- * `skipped` is true only on a step with no time; a body without the field reads as not skipped.
- */
-export function parseSteps(body) {
-  if (!body || typeof body !== "object" || !Array.isArray(body.steps) || body.steps.length !== STEP_IDS.length) return null;
+const validTime = (t) => typeof t === "string" && !Number.isNaN(Date.parse(t));
+/** The pipeline track's six steps in the server's order, or null when they do not fit. `skipped` is true only on a step with no time; a missing field reads as not skipped. */
+function parsePipeline(list) {
+  if (!Array.isArray(list) || list.length !== STEP_IDS.length) return null;
   const steps = [];
   for (let i = 0; i < STEP_IDS.length; i++) {
-    const s = body.steps[i];
+    const s = list[i];
     if (!s || s.step !== STEP_IDS[i]) return null;
     const t = s.completed_at;
-    if (t !== null && !(typeof t === "string" && !Number.isNaN(Date.parse(t)))) return null;
+    if (t !== null && !validTime(t)) return null;
     const skipped = s.skipped === undefined ? false : s.skipped;
     if (typeof skipped !== "boolean" || (skipped && t !== null)) return null;
     steps.push({ step: s.step, completed_at: t, skipped });
   }
   return steps;
+}
+/** The engine track's seven steps. A state agrees with the time (only `done` has one) and with the failure (only `failed` carries one). */
+function parseEngine(list) {
+  if (!Array.isArray(list) || list.length !== ENGINE_STEP_IDS.length) return null;
+  const steps = [];
+  for (let i = 0; i < ENGINE_STEP_IDS.length; i++) {
+    const s = list[i];
+    if (!s || s.step !== ENGINE_STEP_IDS[i] || !ENGINE_STATES.includes(s.state)) return null;
+    const t = s.completed_at;
+    if (t !== null && !validTime(t)) return null;
+    if ((s.state === "done") !== (t !== null)) return null;
+    const tier = s.tier === undefined ? null : s.tier;
+    if (tier !== null && tier !== "microvm" && tier !== "standard") return null;
+    const f = s.failure === undefined ? null : s.failure;
+    if (f !== null && !(f && typeof f.code === "string" && f.code !== "" && validTime(f.at))) return null;
+    if ((s.state === "failed") !== (f !== null)) return null;
+    steps.push({ step: s.step, state: s.state, completed_at: t, tier, failure: f === null ? null : { code: f.code, at: f.at } });
+  }
+  return steps;
+}
+
+/**
+ * D#845 ON-6: both tracks of a GET /api/v1/onboarding body (`tracks`, pipeline first), or null when the pipeline track or the envelope does not fit.
+ * An engine track that does not fit gives `engine: null` (the pipeline track still reads; the app shows the engine track's own error).
+ * `chosen` is when the person chose each track, or null while they have not.
+ */
+export function parseTracks(body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.tracks) || body.tracks.length !== 2) return null;
+  const [p, e] = body.tracks;
+  if (!p || !e || p.track !== "pipeline" || e.track !== "engine") return null;
+  const pipeline = parsePipeline(p.steps);
+  const engine = parseEngine(e.steps);
+  if (!pipeline) return null;
+  if (p.chosen_at !== null && !validTime(p.chosen_at)) return null;
+  if (e.chosen_at !== null && !validTime(e.chosen_at)) return null;
+  return { pipeline, engine, chosen: { pipeline: p.chosen_at, engine: e.chosen_at } };
+}
+
+/**
+ * Which tracks the Onboarding screen shows, in the order the person chose them. The pipeline track also shows for an account that has already made progress
+ * in it (before tracks existed it was the only one), so no one's setup disappears. An empty list is the first visit: the track choice.
+ */
+export function shownTracks(parsed) {
+  const { pipeline, chosen } = parsed;
+  const started = pipeline.some((s) => s.completed_at !== null || s.skipped);
+  const list = ["pipeline", "engine"].filter((t) => chosen[t] !== null || (t === "pipeline" && started));
+  return list.sort((a, b) => (chosen[a] === null ? 0 : Date.parse(chosen[a])) - (chosen[b] === null ? 0 : Date.parse(chosen[b])));
+}
+
+/** The pipeline track's six steps (`tracks[0]`), or null when they do not fit. The gate and the strip read only this, so an engine track they do not use can never close the desktop. */
+export function parseSteps(body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.tracks) || !body.tracks[0] || body.tracks[0].track !== "pipeline") return null;
+  return parsePipeline(body.tracks[0].steps);
 }
 
 // The steps resolveAccess last parsed, so the setup strip (below) does not read a second time.

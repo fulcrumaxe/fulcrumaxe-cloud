@@ -12,16 +12,17 @@ import { fileURLToPath } from "node:url";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { bootToDesktop } from "./helpers/boot";
+import { engineTrack, pipelineChosen, withEngine, withSteps } from "./helpers/onboarding-body";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const fx = (...p: string[]) => JSON.parse(readFileSync(join(DIR, "..", "..", "..", "packages", "api", "fixtures", "v1", ...p), "utf8"));
-const NEW = fx("getOnboarding", "200-new.json");
+const NEW = pipelineChosen(fx("getOnboarding", "200-new.json")); // an account that chose the pipeline track
 const NONE_PREVIEW = fx("getOnboardingPreview", "200-none.json");
 const PAGE = fx("listRepos", "200-page.json");
 const CSP = "script-src 'self'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'";
 
 /** The server's answer when steps 1..`n` are done and the rest are open. */
-const doneUpTo = (n: number) => ({ ...NEW, steps: NEW.steps.map((s: object, i: number) => ({ ...s, completed_at: i < n ? `2026-09-20T09:0${i}:00.000Z` : null })) });
+const doneUpTo = (n: number) => withSteps(NEW, NEW.steps.map((s: object, i: number) => ({ ...s, completed_at: i < n ? `2026-09-20T09:0${i}:00.000Z` : null })));
 /** Both repos attached to the read-only App, or both detached (what the server lists once it is uninstalled). */
 const repos = (installed: boolean) => ({
   ...PAGE,
@@ -88,6 +89,22 @@ async function watchNoReload(page: Page) {
 }
 
 test.describe("ONBOARDING-STATE: Onboarding and Repos follow the account without a reload", () => {
+  test("a setup that moved (setup.changed) re-reads the engine track's steps without a reload", async ({ page }) => {
+    const engine = (machine: string) => withEngine(NEW, engineTrack({ machine, claude: machine === "done" ? "active" : "pending" }, { tier: "microvm" }));
+    const m: Mock = { onboarding: engine("active"), repos: repos(true), reads: 0, repoReads: 0 };
+    await setup(page, m);
+    await bootToDesktop(page);
+    const state = win(page, "onboarding").locator('[data-testid="ob-engine-machine"] [data-testid="ob-engine-state"]');
+    await expect(state).toHaveText("Up next");
+    const untouched = await watchNoReload(page);
+    const before = m.reads;
+    m.onboarding = engine("done");
+    await deliver(page, "setup.changed", { setup_id: "s1", repo_id: "r1" });
+    await expect(state).toContainText("Done");
+    expect(m.reads).toBeGreaterThan(before);
+    await untouched();
+  });
+
   test("removing the model key sends Onboarding back to step 1", async ({ page }) => {
     const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
     const problems = await setup(page, m);
@@ -196,8 +213,8 @@ test.describe("ONBOARDING-STATE: Onboarding and Repos follow the account without
     });
     await expect(win(page, "onboarding")).toHaveCount(0);
     await expect(win(page, "repos")).toHaveCount(0);
-    // Onboarding holds 5 (four events and the refresh), Repos 3 (two events and the refresh); all of them are released.
-    expect(open - (await count())).toBe(5 + 3);
+    // Onboarding holds 6 (five events, `setup.changed` among them, and the refresh), Repos 3 (two events and the refresh); all of them are released.
+    expect(open - (await count())).toBe(6 + 3);
     const [onb, rep] = [m.reads, m.repoReads];
     await deliver(page, "installation.changed", { kind: "team_readonly", state: "deleted" });
     await page.clock.runFor(1_000);

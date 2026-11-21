@@ -10,13 +10,14 @@ import { fileURLToPath } from "node:url";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { bootToDesktop, stepToDesktop } from "./helpers/boot";
+import { engineTrack, pipelineOnly, withChosen, withEngine, withSteps } from "./helpers/onboarding-body";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const fx = (...p: string[]) => JSON.parse(readFileSync(join(DIR, "..", "..", "..", "packages", "api", "fixtures", "v1", ...p), "utf8"));
-const ONB = { new: fx("getOnboarding", "200-new.json"), step3: fx("getOnboarding", "200-step3.json"), done: fx("getOnboarding", "200-complete.json") };
-const doneUpTo = (n: number) => ({ ...ONB.new, steps: ONB.new.steps.map((s: object, i: number) => ({ ...s, completed_at: i < n ? `2026-09-20T09:0${i}:00.000Z` : null })) });
+const ONB = { new: pipelineOnly(fx("getOnboarding", "200-new.json")), step3: pipelineOnly(fx("getOnboarding", "200-step3.json")), done: pipelineOnly(fx("getOnboarding", "200-complete.json")) };
+const doneUpTo = (n: number) => withSteps(ONB.new, ONB.new.steps.map((s: object, i: number) => ({ ...s, completed_at: i < n ? `2026-09-20T09:0${i}:00.000Z` : null })));
 /** Steps 1 to 5 done except `id`, which has reopened. */
-const reopened = (id: string) => ({ ...ONB.done, steps: ONB.done.steps.map((s: { step: string }) => (s.step === id || s.step === "first_pr" ? { ...s, completed_at: null } : s)) });
+const reopened = (id: string) => withSteps(ONB.done, ONB.done.steps.map((s: { step: string }) => (s.step === id || s.step === "first_pr" ? { ...s, completed_at: null } : s)));
 const THEMES = ["classic-crt", "retro-amber", "corporate", "crystal", "cyberpunk", "modern-flat", "nord", "orchard"];
 const STRIP = '[data-testid="setup-strip"]';
 
@@ -83,6 +84,38 @@ test.describe("who sees the strip and what it costs", () => {
     await setup(page, m);
     await bootToDesktop(page);
     await expect(strip(page)).toHaveCount(0);
+  });
+});
+
+// D#845 ON-6: the strip and the gate read the pipeline track (tracks[0]); the engine track does not change what they show.
+test.describe("the strip follows the pipeline track only", () => {
+  test("it counts tracks[0], whatever the engine track says", async ({ page }) => {
+    const m = mock({ onboarding: withEngine(doneUpTo(4), engineTrack({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "done", live: "done" }, { tier: "microvm" })) });
+    await setup(page, m);
+    await bootToDesktop(page);
+    await expect(strip(page)).toContainText("Finish setup: 2 steps left");
+  });
+
+  test("an engine track that does not fit leaves the strip as it was (it is the Onboarding app that reports it)", async ({ page }) => {
+    const m = mock({ onboarding: withEngine(doneUpTo(4), engineTrack({ machine: "active" }).slice(1)) });
+    await setup(page, m);
+    await bootToDesktop(page);
+    await expect(strip(page)).toContainText("Finish setup: 2 steps left");
+  });
+
+  test("a body that has only the old top-level steps is not a body the strip can read", async ({ page }) => {
+    const old = doneUpTo(4);
+    await setup(page, mock({ onboarding: { started_at: old.started_at, steps: old.steps } }));
+    await bootToDesktop(page);
+    await expect(strip(page)).toHaveCount(0);
+  });
+
+  test("an account on the engine track alone still sees the pipeline count, and the track choice does not hide the strip", async ({ page }) => {
+    const m = mock({ onboarding: withChosen(withEngine(ONB.new, engineTrack({ machine: "active" })), { pipeline: null }) });
+    await setup(page, m);
+    await bootToDesktop(page);
+    await expect(strip(page)).toContainText("Finish setup: 6 steps left");
+    await expect(win(page, "onboarding")).toHaveCount(0); // nothing opens by itself on an open session
   });
 });
 
