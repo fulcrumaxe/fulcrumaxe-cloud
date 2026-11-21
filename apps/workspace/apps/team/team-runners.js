@@ -14,7 +14,7 @@ export const RUNNER_WORDS = {
   pick: "Runner",
   unknown: "The runner list isn't available right now.",
   noRunners: "No runners yet. Use Add a runner to register your first machine.",
-  openRunners: "Open Runners",
+  openRunners: "Open Machines",
   connectTitle: "Connect a runner",
   setUpFor: "Bridge has reported for ",
   notSetUpFor: "No report from this runner's bridge for ",
@@ -25,7 +25,7 @@ export const RUNNER_WORDS = {
   noRepoName: "This repository has no owner/name yet, so there is no command to show.",
   never: "never seen",
   copy: "Copy command", copied: "Copied", copyFailed: "Couldn't copy. Select the command and copy it by hand.",
-  unnamed: "This runner has no name yet. You can name it in Runners.", rename: "Name it in Runners",
+  unnamed: "This runner has no name yet. You can name it in Machines.", rename: "Name it in Machines",
 };
 const OWNER_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/; // a name that is not owner/name (an unnamed repository) gives no command at all
 /** One shell word: bare when plain, else single-quoted with each ' written as '\'' . */
@@ -97,7 +97,7 @@ export const BRIDGE_WORDS = {
   readFailed: "Couldn't check whether this repo is connected.",
   copy: "Copy command", copied: "Copied", copyFailed: "Couldn't copy. Select the command and copy it by hand.",
   waiting: "Still waiting for ", waitingTail: ". Is it running?",
-  noRunner: "No runner is paired with this repo. Pair one in Runners, or run this on the computer that has the engine:",
+  noRunner: "No runner is paired with this repo. Pair one in Machines, or run this on the computer that has the engine:",
   offline: "No runner that has this repo is online. Start it, or run this on the computer that has the engine:",
   old: "Your runner is out of date: run fx-runner update. Or run this on the computer that has the engine:",
   readOnly: "Only an owner or an admin can connect a repo.",

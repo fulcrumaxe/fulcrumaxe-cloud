@@ -488,3 +488,63 @@ export async function loadRepoChoices(call = api, signal) {
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
+
+// D#845 MC-10a: the Machines tab's logic. It lives in this file so the app adds no boot request.
+
+export const MACHINES_URL = "/api/machines";
+export const MACHINES_UNAVAILABLE = "Machines couldn't be loaded";
+export const NO_MACHINES = "No machines yet";
+export const ONLY_ADMINS_ADD = "Only owners and admins can add a machine.";
+export const SERVERS_UNAVAILABLE = "Hetzner Cloud servers aren't available right now";
+export const TABS = [["machines", "Machines"], ["servers", "Servers"], ["fleet", "Fleet"]];
+
+/** The isolation chip. A machine that has not said what it can do reads as not reported, never as a guess. */
+export const tierText = (tier) =>
+  tier === "microvm" ? "MicroVM isolation" : tier === "standard" ? "Standard isolation: one project on this machine (no KVM)" : "Isolation not reported yet";
+
+
+/** One machine, or null when the row is not a machine. Every text is a string a person can read: no null, undefined or id reaches the screen. */
+export function readMachine(m) {
+  if (!m || typeof m !== "object" || typeof m.id !== "string" || m.id === "") return null;
+  return {
+    id: m.id,
+    name: typeof m.name === "string" && m.name.trim() !== "" ? m.name : "Unnamed machine",
+    kind: "Computer",
+    tier: m.tier === "microvm" || m.tier === "standard" ? m.tier : null,
+    live: m.live === true,
+    claude: m.claude === true,
+    running: m.running && typeof m.running.name === "string" && m.running.name !== "" ? m.running.name : m.running ? "a project" : null,
+  };
+}
+
+/** The whole read, or null when the body is not a machine list. */
+export const readMachines = (body) => (body && Array.isArray(body.machines) ? body.machines.map(readMachine).filter(Boolean) : null);
+
+/** The commands the "A computer or server I have" choice shows, in order. `command` is null for a step that is words only. */
+export function addSteps(origin) {
+  return [
+    { text: "Install the claude command, then run claude once and sign in.", command: null },
+    { text: "Install the runner:", command: "curl -fsSL " + origin + "/install.sh | sh" },
+    { text: "Link it to your account. It prints a code; open " + origin + "/link and type the code there:", command: "fx-runner setup --cloud-url " + origin },
+  ];
+}
+export const KVM_NOTE = "On a server with KVM, add sudo fx-runner vm install for microVM isolation.";
+
+/** The machine list: one read at a time, and the last good list stays on screen when a later read fails. */
+export function createMachines({ call = api, signal, onChange = () => {} } = {}) {
+  let st = { status: "loading", list: [] };
+  let gen = 0;
+  async function load() {
+    const mine = ++gen;
+    try {
+      const list = readMachines(await call("GET", MACHINES_URL, undefined, signal));
+      if (mine !== gen) return;
+      st = list ? { status: "ready", list } : { status: st.status === "ready" ? "ready" : "error", list: st.list };
+    } catch (e) {
+      if (mine !== gen || (e && e.name === "AbortError")) return;
+      if (st.status !== "ready") st = { status: "error", list: [] };
+    }
+    onChange();
+  }
+  return { get state() { return st; }, load };
+}

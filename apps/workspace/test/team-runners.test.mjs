@@ -37,9 +37,9 @@ describe("connect panel: copy words, and a runner without a name", () => {
     expect([named.unnamed, named.connect.rows[0].unnamed]).toEqual([false, false]);
     expect(view({ fleet: null }).unnamed).toBe(false); // nothing is claimed before the list arrives
   });
-  it("the rename hint points at the Runners app, not at a flag that may not exist", () => {
-    expect(RUNNER_WORDS.unnamed).toMatch(/Runners/);
-    expect(RUNNER_WORDS.rename).toBe("Name it in Runners");
+  it("the rename hint points at the Machines app, not at a flag that may not exist", () => {
+    expect(RUNNER_WORDS.unnamed).toMatch(/Machines/);
+    expect(RUNNER_WORDS.rename).toBe("Name it in Machines");
   });
 });
 

@@ -1,3 +1,4 @@
+// D#845 MC-10a: the app is now Machines, with three tabs: Machines (what each machine is and what it runs), Servers (MC-10b) and Fleet (the page below).
 // D#605 FL-9: the Runners app, the fleet page. One row per runner with its state, version, current runs, capacity, last check-in, repos, credential
 // mode, labels and facts; the controls the caller is offered (each disabled one shows its reason); the account line; and the "Add a runner" sheet.
 //
@@ -8,6 +9,7 @@ import { h, timeNode } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import {
   CHECK_READ_FAILED, SANDBOX_ACTION, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, heldBackText, loadRepoChoices, provText, runnerLimitText, sandboxCommandText, sandboxConfirm, sandboxControls, sandboxLine, sandboxQuotaLines, sandboxStatusText, stateParts, versionText,
+  KVM_NOTE, MACHINES_UNAVAILABLE, NO_MACHINES, ONLY_ADMINS_ADD, SERVERS_UNAVAILABLE, TABS, addSteps, createMachines, tierText,
 } from "./runners-fleet.js";
 
 const FULC = window.FULC;
@@ -32,9 +34,11 @@ function mountApp(contentEl) {
   let returnTo = ADD_ID; // the id of the control that opened the dialog now open
   let dialog = null; // { dlg, close }
   let sheetEl = null;
+  let tab = "machines";
   let repoChoices = { status: "idle", list: [] };
   const rowErrors = new Map();
   const fleet = createFleet({ signal: ac.signal, onChange: () => paint() });
+  const machines = createMachines({ signal: ac.signal, onChange: () => paint() });
   const adder = createAdder({ signal: ac.signal, origin: window.location.origin, onChange: () => paintSheet() });
 
   const root = h("div", { class: "runners-app", "data-testid": "runners-app" });
@@ -249,6 +253,60 @@ function mountApp(contentEl) {
     else if (held) focusId(held);
   }
 
+  // ── the "Add a machine" sheet: two choices (D#845 MC-10a) ──
+  function openAddMachine(from) {
+    const origin = window.location.origin;
+    const steps = addSteps(origin).map((x) => h("li", null, x.text, x.command === null ? null : [h("pre", { class: "runners-code", tabindex: "0", "aria-label": "Command" }, x.command), button("Copy command", null,() => copyText(x.command))]));
+    openDialog({
+      title: "Add a machine", from, labelId: "runners-addm-h",
+      body: h("div", { "data-testid": "runners-addm" },
+        h("section", { "aria-labelledby": "runners-addm-own" }, h("h3", { id: "runners-addm-own", class: "runners-subtitle" }, "A computer or server I have"), h("ol", null, steps), h("p", { class: "runners-muted", "data-testid": "runners-addm-kvm" }, KVM_NOTE)),
+        h("section", { "aria-labelledby": "runners-addm-hz" }, h("h3", { id: "runners-addm-hz", class: "runners-subtitle" }, "A new Hetzner Cloud server"), h("p", { class: "runners-muted" }, "Hetzner makes the server and bills you directly."),
+          button("Open Servers", { id: "runners-addm-servers", "data-testid": "runners-addm-servers" }, () => (closeDialog(), (tab = "servers"), paint(), focusId("runners-tab-servers"))))),
+      actions: [button("Close", { id: "runners-addm-close" }, closeDialog)],
+    });
+    focusId("runners-addm-close");
+  }
+
+  // ── the tabs ──
+  const tabBar = () =>
+    h("div", { class: "runners-tabs", role: "tablist", "aria-label": "Machines sections" }, TABS.map(([id, label], i) =>
+      h("button", {
+        type: "button", role: "tab", id: "runners-tab-" + id, class: "runners-btn", "aria-selected": tab === id ? "true" : "false", "aria-controls": "runners-panel", "data-testid": "runners-tab-" + id,
+        onClick: () => ((tab = id), paint()),
+        onKeydown: (e) => {
+          const to = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+          if (to === 0) return;
+          e.preventDefault();
+          tab = TABS[(i + to + TABS.length) % TABS.length][0];
+          paint();
+          focusId("runners-tab-" + tab);
+        },
+      }, label)));
+  const panel = (...kids) => h("div", { id: "runners-panel", role: "tabpanel", "aria-labelledby": "runners-tab-" + tab }, ...kids);
+
+  function machineRow(m) {
+    return h("li", { class: "runners-row", "data-testid": "runners-machine", "data-state": m.live ? "live" : "offline" },
+      h("h3", { class: "runners-name", "data-testid": "runners-machine-name" }, h("bdi", null, m.name)),
+      h("p", { class: "runners-state" }, h("span", { "data-testid": "runners-machine-tier" }, tierText(m.tier)), " · ", h("span", { "data-testid": "runners-machine-live" }, m.live ? "Online" : "Offline")),
+      h("dl", { class: "runners-facts" }, ...line("Kind", m.kind), ...line("Claude", m.claude ? "yes" : "no"), ...line("Capacity", h("span", { "data-testid": "runners-machine-capacity" }, m.running === null ? "Free" : ["Running ", h("bdi", null, m.running)]))));
+  }
+  function paintMachines() {
+    const f = fleet.state.fleet;
+    const s = machines.state;
+    const body =
+      s.status === "loading" ? h("p", { class: "runners-muted", "data-testid": "runners-machines-loading" }, "Loading machines...")
+      : s.status === "error" ? h("div", null, h("p", { class: "runners-error", role: "alert", "data-testid": "runners-machines-error" }, MACHINES_UNAVAILABLE), button("Retry", { id: "runners-machines-retry", "data-testid": "runners-machines-retry" }, () => machines.load()))
+      : s.list.length === 0 ? h("p", { class: "runners-muted", "data-testid": "runners-machines-empty" }, NO_MACHINES)
+      : h("ul", { class: "runners-rows", "data-testid": "runners-machines" }, s.list.map(machineRow));
+    const off = !f || !f.isAdmin; // also off while the fleet is still loading: the role is not known yet
+    return panel(h("div", { class: "runners-head" }, h("h2", { class: "runners-title" }, "Machines"),
+      h("span", { class: "runners-actions" }, button("Refresh", { id: "runners-machines-refresh" }, () => (machines.load(), fleet.load())),
+        button("Add a machine", { id: "runners-addm", "aria-disabled": off ? "true" : "false", "aria-describedby": f && off ? "runners-addm-why" : null, "data-testid": "runners-addm-open" }, () => f && f.isAdmin && openAddMachine("runners-addm"))),
+      f && off ? h("span", { id: "runners-addm-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, ONLY_ADMINS_ADD) : null), body);
+  }
+  const paintServers = () => panel(h("h2", { class: "runners-title" }, "Servers"), h("p", { class: "runners-muted", "data-testid": "runners-servers-unavailable" }, SERVERS_UNAVAILABLE));
+
   // ── the list ──
   function line(label, ...value) {
     return [h("dt", null, label), h("dd", null, ...value)];
@@ -299,6 +357,13 @@ function mountApp(contentEl) {
   function paint() {
     const doc = root.ownerDocument;
     const held = root.contains(doc.activeElement) ? doc.activeElement.id : "";
+    if (tab === "fleet") paintFleet();
+    else root.replaceChildren(h("div", { class: "runners-page" }, tabBar(), tab === "machines" ? paintMachines() : paintServers()));
+    if (held) focusId(held);
+    if (sheetEl) paintSheet();
+  }
+
+  function paintFleet() {
     const s = fleet.state;
     const f = s.fleet;
     const head = h("div", { class: "runners-head" }, h("h2", { class: "runners-title" }, "Runners"),
@@ -313,21 +378,23 @@ function mountApp(contentEl) {
       : h("ul", { class: "runners-rows" }, f.runners.map((r) => row(r, f.isAdmin)));
     root.replaceChildren(
       h("div", { class: "runners-page" },
-        head,
+        tabBar(),
+        panel(head,
         f ? h("p", { class: "runners-account", role: "status", "data-testid": "runners-account" }, accountText(f.account)) : null,
         f && runnerLimitText(f.account) ? h("p", { class: "runners-note", "data-testid": "runners-limit-note" }, runnerLimitText(f.account)) : null,
-        body)
+        body))
     );
-    if (held) focusId(held);
-    if (sheetEl) paintSheet();
   }
 
   paint();
   fleet.load();
-  const off = onRefresh(() => fleet.load());
+  machines.load();
+  const off = onRefresh(() => (fleet.load(), machines.load()));
   // Read again on its own while the page is open and showing, so the check-in time and capacity never go stale on screen.
   const refreshTimer = setInterval(() => {
-    if (!root.ownerDocument.hidden) fleet.load();
+    if (root.ownerDocument.hidden) return;
+    fleet.load();
+    machines.load();
   }, FLEET_REFRESH_MS);
   return {
     destroy() {
@@ -349,7 +416,8 @@ let current = null;
 
 FULC.register({
   id: "runners",
-  title: "Runners",
+  title: "Machines",
+  keywords: ["Runners"],
   icon: "▣",
   defaultSize: { w: 900, h: 620 },
   onOpen({ contentEl }) {
