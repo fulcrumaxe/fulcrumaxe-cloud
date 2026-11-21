@@ -310,7 +310,13 @@ export function createGuestRuntime(config: GuestRuntimeConfig): AgentRuntime & {
 }
 
 /** The per-guest part of a runtime: how the wiring reaches this sandbox's streaming exec. `writeFiles` is the guest's own. */
-export interface GuestBinding { launch: GuestLaunch; timeoutMs?: () => number | undefined }
+export interface GuestBinding {
+  launch: GuestLaunch;
+  timeoutMs?: () => number | undefined;
+  /** The run's own usage and relay sinks (D#587 3c-iii): what the OS-sandbox path passes as `onLocalEvent` and `onNearLimit`, so a guest run's usage reaches the lease and the usage gate. */
+  onLocalEvent?: GuestRuntimeConfig["onLocalEvent"];
+  onNearLimit?: GuestRuntimeConfig["onNearLimit"];
+}
 
 /**
  * `makeRuntime` for `createMicrovmSandbox`. The port calls it for every start and resume, so what must outlive one call (the binary check) is kept

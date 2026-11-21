@@ -77,7 +77,7 @@ export interface RunJobDeps {
 
 export const DEFAULT_WALL_CLOCK_MS = 2 * 60 * 60_000;
 /** How long the sandbox outlives the wall clock, so this module's clock fires first. */
-const SANDBOX_MARGIN_MS = 10 * 60_000;
+export const SANDBOX_MARGIN_MS = 10 * 60_000;
 
 export type FailureReason = "wall_clock" | "no_result" | "agent_error" | "agent_exit" | "sandbox_unavailable" | (string & {});
 
