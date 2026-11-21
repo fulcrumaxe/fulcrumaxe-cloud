@@ -1,4 +1,4 @@
-import { HelloMessage, HelloReply, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
 import { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
@@ -31,7 +31,7 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   let recorded: boolean;
   try {
     recorded = await withRunnerSession(deps.appUserPool, runner, async (client) => {
-      const { rows } = await client.query<{ ok: boolean }>("SELECT runner_hello_record($1, $2, $3, $4::boolean) AS ok", [message.protocol_version, message.binary_version, message.isolation, message.model_auth_present]);
+      const { rows } = await client.query<{ ok: boolean }>("SELECT runner_hello_record($1, $2, $3, $4::boolean, $5::text) AS ok", [message.protocol_version, message.binary_version, message.isolation, message.model_auth_present, message.facts?.kvm ?? null]);
       if (rows[0]?.ok !== true) return false;
       // D#605 FL-2: the machine's facts, when this runner sent them, through the definer that names the runner from the session. Same transaction as
       // the hello: a refusal rolls both back. No authorization path (request verification, the ticket, the job signer) reads them back.
@@ -60,7 +60,21 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   // D#845 watch mode: said only to a runner that DECLARED `watch_mode_v1` on this hello (a runner built before it parses the reply strictly and would lose its wake grant to an unknown key), at the
   // watch protocol or above, and only when this database can take what watch mode sends.
   const watchMode = message.protocol_version >= WATCH_MIN_PROTOCOL && (message.capabilities ?? []).includes(WATCH_MODE_HELLO_CAPABILITY) && (await ingestTakesWatchMode(deps));
-  return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}), ...(watchMode ? { capabilities: [WATCH_MODE_CAPABILITY] } : {}) }) };
+  // D#845 ON-6c: said only to a runner that DECLARED `kvm_fact_v1` on this hello, and only when migration 1047's column exists (read from the catalog, the way 1043 is). The runner sends `facts.kvm` from its next hello on.
+  const kvmFact = (message.capabilities ?? []).includes(KVM_FACT_HELLO_CAPABILITY) && (await runnersTakeKvm(deps));
+  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : [])];
+  return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}), ...(replyCapabilities.length > 0 ? { capabilities: replyCapabilities } : {}) }) };
+}
+
+/** True when migration 1047 is applied: `runners.kvm` exists. Read from the catalog, never assumed from the code's version; a failed read lists nothing. */
+export async function runnersTakeKvm(deps: RunnerCloudDeps): Promise<boolean> {
+  try {
+    const { rows } = await deps.appUserPool.query<{ ok: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.runners') AND attname = 'kvm' AND NOT attisdropped) AS ok");
+    return rows[0]?.ok === true;
+  } catch {
+    // fx-swallow-ok: a catalog read that fails says nothing about the column: the capability is simply not listed
+    return false;
+  }
 }
 
 /**

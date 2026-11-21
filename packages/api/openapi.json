@@ -31552,6 +31552,17 @@
                                       }
                                     ]
                                   },
+                                  "kvm": {
+                                    "type": "string",
+                                    "enum": [
+                                      "present",
+                                      "absent"
+                                    ]
+                                  },
+                                  "helper_missing": {
+                                    "type": "boolean",
+                                    "const": true
+                                  },
                                   "failure": {
                                     "anyOf": [
                                       {

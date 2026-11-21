@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS, ClaimMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage, HelloMessage,
   HeartbeatReply, HelloReply, SeqNotIncreasingReply, StopReply, WAKE_CAPABILITY, WakeGrant, jwkThumbprint, verifyRunnerRequest, type Ed25519Jwk, type LocalOnlyEvent,
-  MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply,
+  KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply,
   type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 
@@ -29,6 +29,13 @@ export interface FakeMemory {
   /** Answer the next upload with this status and code instead (consumed once). */
   forceError: { status: number; code: string } | undefined;
 }
+
+/**
+ * D#845 ON-6c: how this cloud treats the KVM fact. `listed`: a cloud with 1047, which lists `kvm_fact` in its hello reply to a runner that declared `kvm_fact_v1` and takes `facts.kvm`.
+ * `unlisted` (default, so a test that is not about the KVM fact sees the reply it always did): a cloud that knows the field but has no column (never lists it). `old`: a cloud built before it, whose strict parse refuses both the `kvm_fact_v1` capability and a `facts.kvm` key
+ * with 400 invalid_message and records nothing.
+ */
+export type FakeKvmCloud = "listed" | "unlisted" | "old";
 
 export interface FakeWake {
   enabled: boolean;
@@ -89,6 +96,7 @@ export interface StrictRunnerCloud {
   githubDown: number;
   wake: FakeWake;
   memory: FakeMemory;
+  kvmCloud: FakeKvmCloud;
   close(): Promise<void>;
 }
 
@@ -131,6 +139,7 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
     githubDown: 0,
     wake: { enabled: false, oldCloud: false, epoch: 0, dueAt: null, pollSeconds: 20, tokens: [], failNext: 0 },
     memory: { oldCloud: false, refuse: [], taken: new Map(), forceError: undefined },
+    kvmCloud: "unlisted",
     close: async () => undefined,
   };
   /** Whether the runner's latest accepted hello listed `wake_v1` (the real cloud keeps this in runner_capabilities). */
@@ -247,13 +256,16 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
       const message = schemas[route].safeParse(json);
       if (!message.success) return refuse(400, "invalid_message");
       if (route === "hello") {
+        const hello = message.data as { capabilities?: string[]; facts?: Record<string, unknown> };
+        const askedKvm = (hello.capabilities ?? []).includes(KVM_FACT_HELLO_CAPABILITY);
+        if (state.kvmCloud === "old" && (askedKvm || (hello.facts !== undefined && "kvm" in hello.facts))) return refuse(400, "invalid_message");
         const asked = ((message.data as { capabilities?: string[] }).capabilities ?? []).includes(WAKE_CAPABILITY);
         if (asked && state.wake.oldCloud) return refuse(400, "invalid_message");
         helloAskedWake = asked;
         const askedMemory = ((message.data as { capabilities?: string[] }).capabilities ?? []).includes(MEM_PROPOSAL_CAPABILITY);
         if (askedMemory && state.memory.oldCloud) return refuse(400, "invalid_message");
         helloAskedMemory = askedMemory;
-        return send(200, HelloReply.parse({ protocol_version: 1, ...grant() }));
+        return send(200, HelloReply.parse({ protocol_version: 1, ...grant(), ...(askedKvm && state.kvmCloud === "listed" ? { capabilities: [KVM_FACT_CAPABILITY] } : {}) }));
       }
       if (route === "claim") {
         // As the real route: a poll that names `sandbox_unavailable` takes no job, whatever is queued, and answers retry_after only.

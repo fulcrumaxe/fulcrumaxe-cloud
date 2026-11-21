@@ -17,6 +17,8 @@ export interface HostFactsInput {
   cpus: number;
   /** The engine this runner resolved (`chooseEngine`); the facts say it, so routing and the job gate read one answer. Default `os_sandbox`. */
   engine?: SandboxEngine;
+  /** D#845 ON-6c: the doctor's KVM reading. Only a plain `present` or `absent` is said; an unreadable device (or no reading at all) says nothing, so the cloud reads "unknown". */
+  kvm?: "present" | "absent" | "unreadable" | undefined;
 }
 
 const GIB = 1024 ** 3;
@@ -38,10 +40,10 @@ export function hostFactsOf(input: HostFactsInput): RunnerFacts | undefined {
   const arch = input.arch === "x64" ? "x64" : input.arch === "arm64" ? "arm64" : undefined;
   if (osName === undefined || arch === undefined) return undefined;
   const cpus = Math.min(256, Math.max(1, Number.isFinite(input.cpus) ? Math.trunc(input.cpus) : 1));
-  return { os: osName, arch, mem_gb_bucket: memBucketOf(input.totalMemBytes), cpus, sandbox_engine: input.engine ?? "os_sandbox" };
+  return { os: osName, arch, mem_gb_bucket: memBucketOf(input.totalMemBytes), cpus, sandbox_engine: input.engine ?? "os_sandbox", ...(input.kvm === "present" || input.kvm === "absent" ? { kvm: input.kvm } : {}) };
 }
 
-export const readHostFacts = (engine?: SandboxEngine): RunnerFacts | undefined => hostFactsOf({ platform: os.platform(), arch: os.arch(), totalMemBytes: os.totalmem(), cpus: os.availableParallelism(), ...(engine === undefined ? {} : { engine }) });
+export const readHostFacts = (engine?: SandboxEngine, kvm?: HostFactsInput["kvm"]): RunnerFacts | undefined => hostFactsOf({ platform: os.platform(), arch: os.arch(), totalMemBytes: os.totalmem(), cpus: os.availableParallelism(), ...(engine === undefined ? {} : { engine }), ...(kvm === undefined ? {} : { kvm }) });
 
 /**
  * The machine's host name as the default runner name: characters the name rule refuses are dropped (a host name is rarely anything but letters,

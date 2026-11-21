@@ -11,7 +11,7 @@ import { ROUTES } from '../src/routes/index.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 
 interface Identity { accountId: string; userId: string }
-interface Track { track: string; chosen_at: string | null; steps: { step: string; state?: string; completed_at: string | null; tier?: string | null }[] }
+interface Track { track: string; chosen_at: string | null; steps: { step: string; state?: string; completed_at: string | null; tier?: string | null; kvm?: string; helper_missing?: boolean }[] }
 interface Body { started_at: string; steps: unknown[]; tracks: Track[] }
 
 /** D#845 ON-5: the tracks in `GET /api/v1/onboarding` and `PUT /api/v1/onboarding/track`, through the real dispatcher against real Postgres. */
@@ -56,10 +56,10 @@ describe('D#845 ON-5: onboarding engine track routes', () => {
     await insertApiToken(appUserPool, { accountId: w.accountId, createdBy: w.userId, tokenHash: hashToken(plaintext), displayHint: 'fxat_...test', scopes, expiresAt: new Date(Date.now() + 86_400_000) });
     return plaintext;
   }
-  async function runner(w: Identity, auth: boolean | null, engine: 'microvm' | 'os_sandbox'): Promise<string> {
+  async function runner(w: Identity, auth: boolean | null, engine: 'microvm' | 'os_sandbox', kvm: 'present' | 'absent' | null = null): Promise<string> {
     const id = randomUUID();
-    await admin.query(`INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version, last_seen_at, model_auth_present) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', 22, now(), $6)`, [
-      id, w.accountId, w.userId, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: 'x'.repeat(43) }), randomUUID().replace(/-/g, '') + 'abcdefghijk', auth,
+    await admin.query(`INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version, last_seen_at, model_auth_present, kvm) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', 22, now(), $6, $7)`, [
+      id, w.accountId, w.userId, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: 'x'.repeat(43) }), randomUUID().replace(/-/g, '') + 'abcdefghijk', auth, kvm,
     ]);
     await admin.query(`INSERT INTO runner_facts (runner_id, account_id, os, arch, mem_gb_bucket, cpus, sandbox_engine) VALUES ($1, $2, 'linux', 'x64', 16, 8, $3)`, [id, w.accountId, engine]);
     return id;
@@ -94,6 +94,24 @@ describe('D#845 ON-5: onboarding engine track routes', () => {
       await runner(a, true, 'os_sandbox');
       expect(((await (await call(a, 'GET')).json()) as Body).tracks[1]!.steps[1]).toMatchObject({ step: 'claude', state: 'done' });
       expect(((await (await call(b, 'GET')).json()) as Body).tracks[1]!.steps[0]).toMatchObject({ tier: 'microvm' });
+    });
+
+    // D#845 ON-6c: the response carries the machine's KVM fact and helper_missing; an old machine's step has neither key.
+    it('the machine step carries kvm and helper_missing over the wire, and neither for a machine that never said', async () => {
+      const old = await who('owner');
+      await runner(old, null, 'os_sandbox');
+      const oldStep = ((await (await call(old, 'GET')).json()) as Body).tracks[1]!.steps[0]!;
+      expect(oldStep).toMatchObject({ step: 'machine', state: 'done', tier: 'standard' });
+      expect(Object.keys(oldStep)).not.toContain('kvm');
+      expect(Object.keys(oldStep)).not.toContain('helper_missing');
+      const noHelper = await who('owner');
+      await runner(noHelper, null, 'os_sandbox', 'present');
+      expect(((await (await call(noHelper, 'GET')).json()) as Body).tracks[1]!.steps[0]).toMatchObject({ kvm: 'present', helper_missing: true, tier: 'standard' });
+      const noKvm = await who('owner');
+      await runner(noKvm, null, 'os_sandbox', 'absent');
+      const noKvmStep = ((await (await call(noKvm, 'GET')).json()) as Body).tracks[1]!.steps[0]!;
+      expect(noKvmStep).toMatchObject({ kvm: 'absent' });
+      expect(Object.keys(noKvmStep)).not.toContain('helper_missing');
     });
 
     it('is still session-only and admin: a member and a token are refused', async () => {

@@ -52,6 +52,8 @@ const engineStepsSchema = z.array(
     state: z.enum(["done", "active", "pending", "failed"]),
     completed_at: z.string().nullable(),
     tier: z.enum(["microvm", "standard"]).nullable(),
+    kvm: z.enum(["present", "absent"]).optional(),
+    helper_missing: z.literal(true).optional(),
     failure: z.object({ code: z.string(), at: z.string() }).nullable(),
   }),
 );

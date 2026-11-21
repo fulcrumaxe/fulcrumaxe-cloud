@@ -60,7 +60,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -407,6 +407,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let engineBridgeAccepted = false;
     // D#845 watch mode: true once a hello reply listed the `watch_mode` capability (not a protocol number: clouds at 23 and 24 exist that cannot take the slim status).
     let cloudWatchMode = false;
+    // D#845 ON-6c: true once a hello reply listed the `kvm_fact` capability; only then does a hello carry `facts.kvm`.
+    let cloudKvmFact = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
     // D#587 B-5b-3a: the one engine this run reports, gates jobs by and runs them in, decided once here from the machine's engine line and whether this build composed a live microVM stack.
@@ -597,7 +599,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       noteVmBlock(vmClaimBlock(stateDir, engine, built !== undefined));
       // D#605 FL-2: say what this build and machine are, once per start, before the first claim. Best effort and no gate: a cloud that is older, a network
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
-      const facts = readHostFacts(engine);
+      // D#845 ON-6c: `facts.kvm` goes only on a hello after a reply that listed `kvm_fact` (a cloud built before it refuses the field); the first hello never carries it.
+      const factsPlain = readHostFacts(engine);
+      const factsWithKvm = readHostFacts(engine, engineFacts?.kvm);
+      let kvmSent = false;
       // D#749 V2b: the build's capabilities and, only while their settings and probe pass, `browser_chrome_v1` and `deploy_order_v1`. Said again when that set changes (see `betweenJobs`).
       // D#845 ON-6b: whether the machine holds model credentials. An API key is held by definition. A subscription runner holds them while the doctor's own Claude check passes
       // (the CLI is there, its version is supported and `auth status` says signed in); the same `inspect` answers both. Read at most once a minute (it starts the CLI), and a
@@ -618,7 +623,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         }
         return modelAuthValue;
       };
-      const helloMessage = async () => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(await verifyLocal.capabilities())] });
+      const helloMessage = async () => {
+        const facts = cloudKvmFact ? factsWithKvm : factsPlain;
+        kvmSent = facts?.kvm !== undefined;
+        return helloBody(facts);
+      };
+      // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
+      const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
       let advertisedAuth = firstHello.model_auth_present;
@@ -643,6 +655,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         hooks.onMemProposalAccepted?.(memProposalAccepted);
         engineBridgeAccepted = dropped !== undefined && !dropped.includes(ENGINE_BRIDGE_CAPABILITY);
         if (answer?.kind === "ok") cloudWatchMode = answer.watchMode === true;
+        if (answer?.kind === "ok") cloudKvmFact = answer.kvmFact === true;
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
@@ -720,7 +733,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           const nowMs = clock.now().getTime();
           const due = helloAnswered && nowMs - advertCheckedAt >= 30_000;
           if (due) advertCheckedAt = nowMs;
-          if (due && (JSON.stringify([...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(await verifyLocal.capabilities())]) !== advertised || (await modelAuth()) !== advertisedAuth)) {
+          // D#845 ON-6c: the reply to an earlier hello changed whether `facts.kvm` may be sent (it listed `kvm_fact`, or a later one stopped listing it): say so at once, not on the 30 second check.
+          const kvmStale = helloAnswered && (cloudKvmFact && factsWithKvm?.kvm !== undefined) !== kvmSent;
+          if (kvmStale || (due && (JSON.stringify(await capabilityList()) !== advertised || (await modelAuth()) !== advertisedAuth))) {
             const changed = await helloMessage();
             advertised = JSON.stringify(changed.capabilities);
             advertisedAuth = changed.model_auth_present;

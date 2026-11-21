@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, HelloReply, MIN_SUPPORTED_PROTOCOL_VERSION, WATCH_MODE_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, HelloReply, KVM_FACT_CAPABILITY, MIN_SUPPORTED_PROTOCOL_VERSION, WATCH_MODE_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { HANDOFF_PROTOCOL_VERSION } from "../src/handoff.js";
 import { protocolVersionSupported } from "../src/hello.js";
 
@@ -29,6 +29,12 @@ describe("which protocol versions hello accepts", () => {
   it("gates a handoff on the protocol package's own constant: one threshold, not two that can drift", () => {
     expect(HANDOFF_PROTOCOL_VERSION).toBe(HANDOFF_MIN_PROTOCOL_VERSION);
     expect(protocolVersionSupported(HANDOFF_PROTOCOL_VERSION)).toBe(true);
+  });
+
+  it("the hello reply's capabilities are a closed set: watch_mode and kvm_fact, each once; anything else, a repeat or a non-list is refused (D#845 ON-6c)", () => {
+    expect(HelloReply.parse({ protocol_version: 24, capabilities: [KVM_FACT_CAPABILITY] })).toEqual({ protocol_version: 24, capabilities: ["kvm_fact"] });
+    expect(HelloReply.parse({ protocol_version: 24, capabilities: [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY] })).toEqual({ protocol_version: 24, capabilities: ["watch_mode", "kvm_fact"] });
+    for (const bad of [["kvm_fact", "kvm_fact"], ["kvm_fact", "watch_mode", "kvm_fact"], ["kvm_fact_v1"], ["watch_mode", "kvm_fact", "other"]]) expect(() => HelloReply.parse({ protocol_version: 24, capabilities: bad }), JSON.stringify(bad)).toThrow();
   });
 
   it("the hello reply's capabilities are a closed set: watch_mode alone, once; anything else, a repeat or a non-list is refused", () => {

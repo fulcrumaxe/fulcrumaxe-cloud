@@ -464,6 +464,75 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
 
+  // D#845 ON-6c: `facts.kvm` is a handshake. The first hello never carries it; it goes on the hello after a reply that listed `kvm_fact`, to a cloud that takes it.
+  describe("hello facts carry the KVM reading only after the cloud listed kvm_fact", () => {
+    const vmFacts = (kvm: "present" | "absent" | "unreadable"): RunHost["vmFacts"] => async () => ({ kvm, helperSocket: "absent", helperSocketPath: "fictional-helper.sock", readMemAvailableBytes: async () => undefined }) as never;
+    const kvmOfHello = (n: number): unknown => (hellos()[n]!.body as { facts?: Record<string, unknown> }).facts?.kvm;
+    const declared = (n: number): boolean => ((hellos()[n]!.body as { capabilities?: string[] }).capabilities ?? []).includes("kvm_fact_v1");
+
+    it("a cloud that lists kvm_fact: the first hello declares it and carries no kvm, the second carries it (present and absent)", async () => {
+      cloud.kvmCloud = "listed";
+      for (const kvm of ["present", "absent"] as const) {
+        cloud.seen.length = 0;
+        const run = start({ host: { vmFacts: vmFacts(kvm) } });
+        await until(() => hellos().length >= 2, 20_000);
+        expect(declared(0)).toBe(true);
+        expect(hellos()[0]!.body as object).toHaveProperty("facts");
+        expect(kvmOfHello(0)).toBeUndefined();
+        expect(kvmOfHello(1)).toBe(kvm);
+        expect(await stop(run)).toMatchObject({ code: 0 });
+      }
+    });
+
+    it("a cloud built before it (strict, refuses the capability and the key): the runner never sends kvm, and the hello is the old one, byte for byte", async () => {
+      cloud.kvmCloud = "old";
+      const run = start({ host: { vmFacts: vmFacts("present") } });
+      await until(() => claims() >= 1);
+      const sent = hellos();
+      // The first hello declared the capability and was refused; the ladder then went again without it; no hello of any step carries kvm.
+      expect(declared(0)).toBe(true);
+      expect(sent.some((h) => "kvm" in ((h.body as { facts?: object }).facts ?? {}))).toBe(false);
+      const accepted = sent[sent.length - 1]!.body as { capabilities: string[] };
+      expect(accepted.capabilities).not.toContain("kvm_fact_v1");
+      expect(sent.filter((h) => (h.body as { capabilities?: string[] }).capabilities?.includes("kvm_fact_v1") !== true)).toHaveLength(1);
+      // Exactly one retry (kvm_fact_v1 alone dropped): the accepted list is the one a runner with no KVM reading sends, sandbox_commands_v1 included.
+      expect(sent).toHaveLength(2);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+      cloud.seen.length = 0;
+      cloud.kvmCloud = "unlisted";
+      const plain = start({ host: { vmFacts: vmFacts("unreadable") } });
+      await until(() => claims() >= 1);
+      const baseline = (hellos()[0]!.body as { capabilities: string[] }).capabilities;
+      expect(await stop(plain)).toMatchObject({ code: 0 });
+      expect(baseline).toContain("sandbox_commands_v1");
+      expect(accepted.capabilities).toEqual(baseline);
+    });
+
+    it("a cloud that knows the field but does not list it: no hello carries kvm", async () => {
+      cloud.kvmCloud = "unlisted";
+      const run = start({ host: { vmFacts: vmFacts("present") } });
+      await until(() => claims() >= 1);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(hellos()).toHaveLength(1);
+      expect(hellos().some((h) => "kvm" in ((h.body as { facts?: object }).facts ?? {}))).toBe(false);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+
+    it("says nothing when the device could not be read or no reading is made, even to a cloud that lists kvm_fact", async () => {
+      cloud.kvmCloud = "listed";
+      for (const over of [{ vmFacts: vmFacts("unreadable") }, {}] as Array<Partial<RunHost>>) {
+        cloud.seen.length = 0;
+        const run = start({ host: over });
+        await until(() => claims() >= 1);
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        expect(hellos().some((h) => "kvm" in ((h.body as { facts?: object }).facts ?? {}))).toBe(false);
+        expect(hellos()).toHaveLength(1);
+        expect(declared(0)).toBe(false);
+        expect(await stop(run)).toMatchObject({ code: 0 });
+      }
+    });
+  });
+
   // D#845 ON-6b: a subscription runner says it holds model credentials while the doctor's own Claude check passes (present, supported version, signed in).
   describe("model_auth_present follows the doctor's Claude check in subscription mode", () => {
     type Report = Awaited<ReturnType<RunHost["engine"]["inspect"]>>;

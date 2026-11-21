@@ -35,7 +35,7 @@ describe('engine track (pg)', () => {
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, $4, 'team')`, [repoId, accountId, inst, randomInt(1, 2_000_000_000)]);
     return { accountId, userId, repoId };
   }
-    async function runner(a: Acct, o: { hello?: boolean; revoked?: boolean; engine?: 'microvm' | 'os_sandbox'; auth?: boolean | null } = {}): Promise<string> {
+    async function runner(a: Acct, o: { hello?: boolean; revoked?: boolean; engine?: 'microvm' | 'os_sandbox'; auth?: boolean | null; kvm?: 'present' | 'absent' } = {}): Promise<string> {
     const id = randomUUID();
     const jkt = randomUUID().replace(/-/g, '') + 'abcdefghijk';
     await admin.query(
@@ -45,6 +45,7 @@ describe('engine track (pg)', () => {
     // A registered machine that has been heard from (last_seen_at) but never recorded a hello (no protocol version).
     if (o.hello === false) await admin.query(`UPDATE runners SET last_seen_at = now() WHERE id = $1`, [id]);
     if (o.hello !== false) await admin.query(`UPDATE runners SET protocol_version = 22, last_seen_at = now(), model_auth_present = $2 WHERE id = $1`, [id, o.auth ?? null]);
+    if (o.kvm) await admin.query(`UPDATE runners SET kvm = $2 WHERE id = $1`, [id, o.kvm]);
     if (o.revoked) await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [id]);
     if (o.engine) await admin.query(`INSERT INTO runner_facts (runner_id, account_id, os, arch, mem_gb_bucket, cpus, sandbox_engine) VALUES ($1, $2, 'linux', 'x64', 16, 8, $3)`, [id, a.accountId, o.engine]);
     return id;
@@ -82,6 +83,37 @@ describe('engine track (pg)', () => {
     const b = await account();
     await runner(b, { engine: 'microvm' });
     expect((await engine(b))[0]).toMatchObject({ state: 'done', tier: 'microvm' });
+  });
+
+  // D#845 ON-6c: the machine step carries the machine's KVM fact, and helper_missing when KVM is there and the engine is not microvm.
+  it('machine: kvm and helper_missing follow the most recently heard machine; a machine that never said kvm carries neither', async () => {
+    const a = await account();
+    await runner(a, { engine: 'os_sandbox' });
+    const old = (await engine(a))[0]!;
+    expect(old).toMatchObject({ state: 'done', tier: 'standard' });
+    expect(old).not.toHaveProperty('kvm');
+    expect(old).not.toHaveProperty('helper_missing');
+    const b = await account();
+    await runner(b, { engine: 'os_sandbox', kvm: 'absent' });
+    expect((await engine(b))[0]).toMatchObject({ kvm: 'absent', tier: 'standard' });
+    expect((await engine(b))[0]).not.toHaveProperty('helper_missing');
+    const c = await account();
+    await runner(c, { engine: 'os_sandbox', kvm: 'present' });
+    expect((await engine(c))[0]).toMatchObject({ kvm: 'present', helper_missing: true, tier: 'standard' });
+    const d = await account();
+    await runner(d, { engine: 'microvm', kvm: 'present' });
+    expect((await engine(d))[0]).toMatchObject({ kvm: 'present', tier: 'microvm' });
+    expect((await engine(d))[0]).not.toHaveProperty('helper_missing');
+  });
+
+  it('machine: a revoked machine\'s kvm is not read, and the newest heard machine wins', async () => {
+    const a = await account();
+    await runner(a, { engine: 'os_sandbox', kvm: 'absent', revoked: true });
+    expect((await engine(a))[0]).not.toHaveProperty('kvm');
+    await runner(a, { engine: 'os_sandbox', kvm: 'absent' });
+    await new Promise((r) => setTimeout(r, 15));
+    await runner(a, { engine: 'os_sandbox', kvm: 'present' });
+    expect((await engine(a))[0]).toMatchObject({ kvm: 'present', helper_missing: true });
   });
 
   it('claude: done while the latest hello says true; false, never said and a revoked machine leave it open', async () => {

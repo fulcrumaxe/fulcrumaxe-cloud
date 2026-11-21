@@ -38,7 +38,7 @@ describe('runner schema (0711)', () => {
 
   it('runners has exactly the Spec columns, plus isolation', async () => {
     expect(await columns('runners')).toEqual(
-      ['id', 'account_id', 'registered_by', 'public_key_jwk', 'jkt', 'credential_mode', 'isolation', 'allowed_repo_ids', 'allowed_roles', 'created_at', 'key_rotated_at', 'last_seen_at', 'protocol_version', 'binary_version', 'revoked_at', 'revoked_reason', 'verify_sign_in', 'verify_sign_in_at', 'model_auth_present'].sort(),
+      ['id', 'account_id', 'registered_by', 'public_key_jwk', 'jkt', 'credential_mode', 'isolation', 'allowed_repo_ids', 'allowed_roles', 'created_at', 'key_rotated_at', 'last_seen_at', 'protocol_version', 'binary_version', 'revoked_at', 'revoked_reason', 'verify_sign_in', 'verify_sign_in_at', 'model_auth_present', 'kvm'].sort(),
     );
   });
 
