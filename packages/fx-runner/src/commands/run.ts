@@ -415,7 +415,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
     // D#587 B-5b-3a: the one engine this run reports, gates jobs by and runs them in, decided once here from the machine's engine line and whether this build composed a live microVM stack.
-    const built = createLiveMicrovm(host.microvm);
+    const built = createLiveMicrovm(host.microvm, stateDir);
     if (built !== undefined) hooks.onMicrovmBuilt?.(built);
     const settingsAtStart = loadSettings(stateDir);
     const engineFacts = await host.vmFacts?.().catch(() => undefined); // fx-swallow-ok: facts that cannot be read are "unreadable" in the engine line, which is not microvm

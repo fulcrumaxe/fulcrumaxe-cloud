@@ -8,7 +8,7 @@
 import type { HostSandbox } from "../../sandbox/hostSandbox.js";
 import { createMicrovmSandbox, type MicrovmSandbox, type MicrovmSandboxConfig } from "./microvmSandbox.js";
 import { createEgressPolicyPort, type EgressStarters } from "./policyPort.js";
-import { createDaemonSdk, sandboxIdOf, type DaemonSdk } from "./sdkAdapter.js";
+import { createDaemonSdk, idOfRunner, runnerIdPrefix, type DaemonSdk } from "./sdkAdapter.js";
 import { assertNotRoot, Sandboxd, type SandboxdDeps } from "./sandboxd.js";
 import { createMicrovmVmPort } from "./vmPort.js";
 import type { GuestBindings, GuestRunHooks } from "./guestBindings.js";
@@ -42,6 +42,10 @@ export interface LiveMicrovmParts {
 export const CHECK_CLOSED = "microvm_check_closed";
 
 export interface LiveMicrovm {
+  /** The marker of every VM id this runner makes (`runnerIdPrefix` of its home): startup reaping ends only ids that carry it (FU-177). */
+  idPrefix: string;
+  /** The name-to-id map this stack makes every VM id with (`idOfRunner(idPrefix)`): what the helper knows a registry name as. */
+  idOf: (name: string) => string;
   /**
    * The microVM port in the shape `run` hands the job code (`HostSandbox`). Two members are the OS sandbox's own and have no VM meaning yet: `interrupt` does nothing (a take-over and a
    * handoff's checkpoint turn are not in VM runs, and `stop` ends the agent), and `checkLaunch` refuses with a fixed word, because the approved check of a VM run is built in a fresh VM (B-5b),
@@ -93,12 +97,15 @@ export function liveMicrovmComplete(parts: LiveMicrovmParts | undefined): parts 
   );
 }
 
-export function createLiveMicrovm(parts: LiveMicrovmParts | undefined): LiveMicrovm | undefined {
-  if (!liveMicrovmComplete(parts)) return undefined;
+/** `runnerHome` is the runner's state directory: the one thing two runners of one user differ in, so it makes the id marker. */
+export function createLiveMicrovm(parts: LiveMicrovmParts | undefined, runnerHome: string): LiveMicrovm | undefined {
+  if (!liveMicrovmComplete(parts) || runnerHome === "") return undefined;
   try {
+    const idPrefix = runnerIdPrefix(runnerHome);
+    const idOf = idOfRunner(idPrefix);
     const daemon = new Sandboxd({ ...parts.deps, boot: parts.boot });
     const policy = createEgressPolicyPort({ helper: parts.deps.helper, uid: parts.uid, egress: parts.egress });
-    const sdk = createDaemonSdk({ daemon, policy, template: parts.template, memMb: parts.memMb });
+    const sdk = createDaemonSdk({ daemon, policy, template: parts.template, memMb: parts.memMb, idOf });
     // the working copy crosses into the guest at the agent's start: the crossing wraps the guest runtime, so the port itself decides nothing about a working copy (B-5b)
     const crossing = createWorkspaceCrossing(parts.makeRuntime);
     const port: MicrovmSandbox = createMicrovmSandbox({ sdk, makeRuntime: crossing.makeRuntime });
@@ -106,9 +113,11 @@ export function createLiveMicrovm(parts: LiveMicrovmParts | undefined): LiveMicr
     const runHooks = parts.runHooks;
     const helper = parts.deps.helper;
     return {
+      idPrefix,
+      idOf,
       port: { ...port, interrupt: async () => undefined, checkLaunch: () => ({ refused: CHECK_CLOSED }) },
       sdk,
-      vmPort: (options) => createMicrovmVmPort({ sandbox: port, daemon, policy, idOf: sandboxIdOf, bindings: options.bindings ?? bindings, timeoutMs: options.timeoutMs, hooks: () => runHooks.forRun(options.runId), ...(options.persistent === undefined ? {} : { persistent: options.persistent }) }),
+      vmPort: (options) => createMicrovmVmPort({ sandbox: port, daemon, policy, idOf, bindings: options.bindings ?? bindings, timeoutMs: options.timeoutMs, hooks: () => runHooks.forRun(options.runId), ...(options.persistent === undefined ? {} : { persistent: options.persistent }) }),
       runHooks,
       reap: {
         list: async () => (await helper.list()).map((entry) => entry.sandboxId),

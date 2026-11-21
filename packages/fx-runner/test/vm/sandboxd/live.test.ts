@@ -5,6 +5,7 @@ import type { EgressStarters } from "../../../src/vm/sandboxd/policyPort.js";
 import { scriptedRuntime } from "../../sandboxPortContract.js";
 import { GuestBindings, GuestRunHooks, type RunEventHooks } from "../../../src/vm/sandboxd/guestBindings.js";
 import { makeRig, runCleanups, type Rig } from "./helpers.js";
+const TEST_HOME = "/tmp/fictional-runner-home";
 
 afterEach(runCleanups);
 
@@ -21,32 +22,41 @@ function parts(rig: Rig, over: Partial<LiveMicrovmParts> = {}): LiveMicrovmParts
 
 describe("createLiveMicrovm: the whole stack or nothing", () => {
   it("every part present composes the port and the SDK it uses", () => {
-    const live = createLiveMicrovm(parts(makeRig()));
+    const live = createLiveMicrovm(parts(makeRig()), TEST_HOME);
     expect(live).toBeDefined();
     expect(typeof live?.port.createSandbox).toBe("function");
     expect(typeof live?.sdk.managed).toBe("function");
   });
 
+  it("every VM id the stack makes carries the runner's marker, and a different home gets a different one (FU-177)", () => {
+    const a = createLiveMicrovm(parts(makeRig()), TEST_HOME);
+    const b = createLiveMicrovm(parts(makeRig()), "/tmp/fictional-runner-home-other");
+    expect(a?.idPrefix).toMatch(/^sb-[0-9a-f]{10}-$/);
+    expect(a?.idPrefix).not.toBe(b?.idPrefix);
+    expect(createLiveMicrovm(parts(makeRig()), "")).toBeUndefined();
+    expect(a?.idOf("rn-x").startsWith(a.idPrefix)).toBe(true); // the map a registry name is reaped through
+  });
+
   it("no parts at all, and each part left out in turn (including the guest runtime and the boot facts), is undefined", () => {
     const rig = makeRig();
-    expect(createLiveMicrovm(undefined)).toBeUndefined();
-    expect(createLiveMicrovm({})).toBeUndefined();
+    expect(createLiveMicrovm(undefined, TEST_HOME)).toBeUndefined();
+    expect(createLiveMicrovm({}, TEST_HOME)).toBeUndefined();
     for (const key of ["deps", "boot", "template", "memMb", "uid", "egress", "makeRuntime", "bindings", "readToken", "runHooks"] as const) {
       const without = { ...parts(rig), [key]: undefined };
-      expect(createLiveMicrovm(without), key).toBeUndefined();
+      expect(createLiveMicrovm(without, TEST_HOME), key).toBeUndefined();
       expect(liveMicrovmComplete(without), key).toBe(false);
     }
   });
 
   it("a part that is present but unusable is the same as absent: an empty template, a zero or fractional RAM, a root or non-integer uid", () => {
     const rig = makeRig();
-    for (const bad of [{ template: "" }, { memMb: 0 }, { memMb: 1.5 }, { uid: 0 }, { uid: 1.5 }, { uid: Number.NaN }]) expect(createLiveMicrovm(parts(rig, bad)), JSON.stringify(bad)).toBeUndefined();
+    for (const bad of [{ template: "" }, { memMb: 0 }, { memMb: 1.5 }, { uid: 0 }, { uid: 1.5 }, { uid: Number.NaN }]) expect(createLiveMicrovm(parts(rig, bad), TEST_HOME), JSON.stringify(bad)).toBeUndefined();
   });
 
   it("a daemon that refuses to be built (run as root, no euid) leaves the build unwired, not half-built", () => {
     const rig = makeRig();
-    expect(createLiveMicrovm({ ...parts(rig), deps: { ...parts(rig).deps!, euid: 0 } })).toBeUndefined();
-    expect(createLiveMicrovm({ ...parts(rig), deps: { ...parts(rig).deps!, euid: undefined } })).toBeUndefined();
+    expect(createLiveMicrovm({ ...parts(rig), deps: { ...parts(rig).deps!, euid: 0 } }, TEST_HOME)).toBeUndefined();
+    expect(createLiveMicrovm({ ...parts(rig), deps: { ...parts(rig).deps!, euid: undefined } }, TEST_HOME)).toBeUndefined();
   });
 
   it("doctor and run agree for a root process: liveMicrovmComplete is false exactly when createLiveMicrovm refuses the euid", () => {
@@ -54,21 +64,21 @@ describe("createLiveMicrovm: the whole stack or nothing", () => {
     for (const euid of [0, undefined, -1, 1.5, Number.NaN]) {
       const refused = { ...parts(rig), deps: { ...parts(rig).deps!, euid } };
       expect(liveMicrovmComplete(refused), String(euid)).toBe(false);
-      expect(createLiveMicrovm(refused), String(euid)).toBeUndefined();
+      expect(createLiveMicrovm(refused, TEST_HOME), String(euid)).toBeUndefined();
     }
     const good = parts(rig);
     expect(liveMicrovmComplete(good)).toBe(true);
-    expect(createLiveMicrovm(good)).toBeDefined();
+    expect(createLiveMicrovm(good, TEST_HOME)).toBeDefined();
   });
 
-  it("a fake VM started through the port shows in the inventory under the daemon's id (sb- and 32 hex), never the run's own name, and leaves the next list when deleted", async () => {
-    const live = createLiveMicrovm(parts(makeRig()))!;
+  it("a fake VM started through the port shows in the inventory under the daemon's id (sb-, the runner's marker and 22 hex), never the run's own name, and leaves the next list when deleted", async () => {
+    const live = createLiveMicrovm(parts(makeRig()), TEST_HOME)!;
     const source = daemonInventorySource(live.sdk);
     expect(await source.list()).toEqual([]);
     const handle = await live.port.createSandbox({ sandboxName: "rn-fix-branch-derived-name", retention: { persistent: false }, timeoutMs: 60_000 });
     const rows = await source.list();
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.name).toMatch(/^sb-[0-9a-f]{32}$/);
+    expect(rows[0]!.name).toMatch(/^sb-[0-9a-f]{10}-[0-9a-f]{22}$/);
     expect(JSON.stringify(rows)).not.toContain("branch-derived");
     await live.port.stop(handle);
     await live.port.deleteSandbox(handle);
@@ -76,7 +86,7 @@ describe("createLiveMicrovm: the whole stack or nothing", () => {
   });
 
   it("the check is closed on the VM port with a fixed word and an interrupt is a no-op, until the fresh-VM check exists", async () => {
-    const live = createLiveMicrovm(parts(makeRig()))!;
+    const live = createLiveMicrovm(parts(makeRig()), TEST_HOME)!;
     const handle = await live.port.createSandbox({ sandboxName: "rn-closed", retention: { persistent: false }, timeoutMs: 60_000 });
     expect(live.port.checkLaunch(handle, ["pnpm", "test"], false)).toEqual({ refused: CHECK_CLOSED });
     await expect(live.port.interrupt(handle)).resolves.toBeUndefined();
@@ -91,7 +101,7 @@ describe("createLiveMicrovm: the whole stack or nothing", () => {
     };
     const runHooks = new GuestRunHooks();
     runHooks.attach(() => ({ onLocalEvent: () => undefined, onNearLimit: () => undefined }));
-    const live = createLiveMicrovm(parts(makeRig(), { egress: counting, runHooks }))!;
+    const live = createLiveMicrovm(parts(makeRig(), { egress: counting, runHooks }), TEST_HOME)!;
     const source = daemonInventorySource(live.sdk);
     const bindings = new GuestBindings();
     const vm = live.vmPort({ timeoutMs: 60_000, runId: "run-a", bindings });
@@ -129,7 +139,7 @@ describe("the run's usage and relay sinks, and what startup reaping works over (
     const seen: string[] = [];
     const runHooks = new GuestRunHooks();
     runHooks.attach((runId) => sinks(runId, seen));
-    const live = createLiveMicrovm(parts(makeRig(), { runHooks }))!;
+    const live = createLiveMicrovm(parts(makeRig(), { runHooks }), TEST_HOME)!;
     const bindings = new GuestBindings();
     await live.vmPort({ timeoutMs: 60_000, runId: "run-a", bindings }).create("rn-a", "agent");
     await live.vmPort({ timeoutMs: 60_000, runId: "run-b", bindings }).create("rn-b", "agent");
@@ -139,7 +149,7 @@ describe("the run's usage and relay sinks, and what startup reaping works over (
   });
 
   it("with no sinks attached no VM is made: the refusal comes before the VM exists, so nothing is left to end and nothing is bound", async () => {
-    const live = createLiveMicrovm(parts(makeRig()))!; // `parts` hands over a `GuestRunHooks` nobody attached to
+    const live = createLiveMicrovm(parts(makeRig()), TEST_HOME)!; // `parts` hands over a `GuestRunHooks` nobody attached to
     const bindings = new GuestBindings();
     await expect(live.vmPort({ timeoutMs: 60_000, runId: "run-a", bindings }).create("rn-x", "agent")).rejects.toThrow("guest_hooks_unattached");
     expect(await daemonInventorySource(live.sdk).list()).toEqual([]);
@@ -148,13 +158,14 @@ describe("the run's usage and relay sinks, and what startup reaping works over (
 
   it("the reap source is the HELPER's list, so a VM an earlier process left is seen by a new stack, and ending it by id leaves nothing; an id the helper never knew is done", async () => {
     const rig = makeRig();
-    const earlier = createLiveMicrovm(parts(rig))!;
+    const earlier = createLiveMicrovm(parts(rig), TEST_HOME)!;
     await earlier.port.createSandbox({ sandboxName: "rn-left-behind", retention: { persistent: false }, timeoutMs: 60_000 });
-    const later = createLiveMicrovm(parts(rig))!; // the next process: same helper, a daemon with an empty table
+    const later = createLiveMicrovm(parts(rig), TEST_HOME)!; // the next process: same helper, a daemon with an empty table
     expect(await daemonInventorySource(later.sdk).list()).toEqual([]);
     const ids = await later.reap.list();
     expect(ids).toHaveLength(1);
-    expect(ids[0]).toMatch(/^sb-[0-9a-f]{32}$/);
+    expect(ids[0]).toMatch(/^sb-[0-9a-f]{10}-[0-9a-f]{22}$/);
+    expect(ids[0]!.startsWith(later.idPrefix)).toBe(true); // the marker the startup reap reads back
     await later.reap.port.releaseEgress(ids[0]!);
     await later.reap.port.delete(ids[0]!);
     expect(await later.reap.list()).toEqual([]);
