@@ -95,6 +95,24 @@ describe("the bindings (sandbox name -> handle and JobToken)", () => {
     expect(sb.specs[1]).toMatchObject({ id: "cli-1", withToken: true, user: "ubuntu" }); // a root request is overridden by the module's pin
   });
 
+  it("with three bindings, a slot and a launch reach their own VM, never the first one bound (FU-175)", async () => {
+    const log: string[] = [];
+    const b = new GuestBindings();
+    const [one, two, three] = [fakeSandbox("one", log), fakeSandbox("two", log), fakeSandbox("three", log)];
+    b.bind("one", one);
+    b.bind("two", two);
+    b.bind("three", three);
+    const slot = b.slot("three", token);
+    await slot.deliver(new AbortController().signal);
+    expect(log).toEqual(["three deliver"]);
+    expect(one.held).toBeUndefined();
+    expect(three.held?.toString()).toBe(SENTINEL);
+    await b.launch("two")({ id: "q-2", cmd: "claude", args: ["--version"] });
+    await slot.wipe();
+    expect(log).toEqual(["three deliver", "two plain", "three wipe"]);
+    expect(one.specs).toEqual([]);
+  });
+
   it("an unbound name, a name after unbind and a launch with no delivery are refused with the closed code, and the guest is not touched", async () => {
     const b = new GuestBindings();
     const sb = fakeSandbox("a");

@@ -92,7 +92,13 @@ describe("scenario: a runner's hello predates a cloud deploy that added a capabi
 
   it("a cloud that predates the capability drops it at hello; the cloud's deploy is not noticed by the running poll loop; only a restart picks it up", async () => {
     const overlap: boolean[] = [];
-    const clock = manualClock();
+    // The sign-in reading (`modelAuth`) bounds itself with a 12 s sleep on the injected clock. Here time moves in whole seconds per tick while the reading spawns a real process, so a
+    // virtual 12 s can pass before the process answers: the reading then times out (fail closed, model_auth_present false) and a sixth hello is said for THAT, which this scenario is not about.
+    // That wait is therefore kept on real time; every other wait stays on the manual clock.
+    const manual = manualClock();
+    const clock: typeof manual = Object.assign(Object.create(manual) as typeof manual, {
+      sleep: (ms: number, signal: AbortSignal) => (ms === 12_000 ? new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true }); }) : manual.sleep(ms, signal)),
+    });
     // The cloud before the deploy: it refuses the hello that lists the newest capability (sandbox_commands_v1, D#587 B-7b), then the one that still lists watch_mode_v1, then the one that still lists engine_bridge_v1, then the one that still lists overlap_facts_v1.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });

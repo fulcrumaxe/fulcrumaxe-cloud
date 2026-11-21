@@ -128,6 +128,23 @@ describe("interrupt (FU-173)", () => {
     expect(interrupted).toEqual([]);
   });
 
+  it("an interrupt asked in the same turn as a new start does not reach the previous, finished run's agent", async () => {
+    const { runtime, interrupted, starts } = gated();
+    const { port } = setup(runtime);
+    const handle = await create(port, "m-int-d");
+    const first = port.startDetached(handle, opts({ runId: "r0" }));
+    await started(starts, 1);
+    starts[0]!.release();
+    await first.hookFired;
+    const sent = port.interrupt(handle); // asked while the entry still names run 0's agent ...
+    const second = port.startDetached(handle, opts({ runId: "r1" })); // ... and a new start follows in the same turn
+    await started(starts, 2);
+    starts[1]!.release();
+    await sent;
+    await second.hookFired;
+    expect(interrupted).toEqual([]);
+  });
+
   it("with no run going, or none ever started, nothing is interrupted", async () => {
     const { runtime, interrupted, starts } = gated();
     const { port } = setup(runtime);
