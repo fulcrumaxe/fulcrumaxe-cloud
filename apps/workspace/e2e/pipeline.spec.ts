@@ -30,6 +30,7 @@ const REPOS = { ...REPOS_RAW, data: REPOS_RAW.data.map((r: { product: string }) 
 const IN_REVIEW = readFixture("getWorkItem", "200-in-review.json");
 const NEEDS_HUMAN = readFixture("getWorkItem", "200-needs-human.json");
 const TIMELINE = readFixture("getWorkItemTimeline", "200-ok.json");
+const CORRECTIONS = readFixture("listCorrections", "200-decided.json");
 
 const ID = LIST.data[0].id as string;
 const ID2 = "55555555-5555-4555-8555-555555555551";
@@ -51,6 +52,7 @@ interface Mock {
   reposStatus: number;
   itemReply: Record<string, { status: number; json: unknown }>;
   timelineStatus: number;
+  correctionsStatus: number;
   streamFrame: string | null;
 }
 
@@ -69,6 +71,7 @@ async function mockApi(page: Page): Promise<Mock> {
     reposStatus: 200,
     itemReply: {},
     timelineStatus: 200,
+    correctionsStatus: 200,
     streamFrame: null,
   };
   const json = (route: Route, status: number, body: unknown) =>
@@ -83,6 +86,9 @@ async function mockApi(page: Page): Promise<Mock> {
     if (url.pathname === "/api/v1/work-items") return mock.listStatus === 200 ? json(route, 200, mock.list) : json(route, mock.listStatus, err("unauthorized"));
     if (url.pathname.endsWith("/timeline")) {
       return mock.timelineStatus === 200 ? json(route, 200, TIMELINE) : json(route, mock.timelineStatus, err("internal"));
+    }
+    if (url.pathname.endsWith("/corrections")) {
+      return mock.correctionsStatus === 200 ? json(route, 200, CORRECTIONS) : json(route, mock.correctionsStatus, err("internal"));
     }
     const id = url.pathname.split("/").pop()!;
     const reply = mock.itemReply[id];
@@ -268,6 +274,14 @@ test.describe("D#37 WS-F1a: Pipeline app (mocked API)", () => {
     await cards(page, "in_progress").first().click();
     await expect(tid(page, "pl-history-row").first()).toBeVisible();
     expect(timelineCount(mock)).toBe(2);
+  });
+
+  test("detail: a decided correction is one history row, worded from its kind and attribution", async ({ page }) => {
+    await setup(page);
+    await cards(page, "in_progress").first().click();
+    await expect(tid(page, "pl-history-correction")).toHaveCount(1);
+    await expect(tid(page, "pl-history-correction")).toContainText("Priority change: assistant proposed, Ada accepted");
+    await expect(tid(page, "pl-history-correction").locator("time")).toHaveCount(1);
   });
 
   test("detail: a timeline error is a fixed sentence inside the detail and the board is unaffected", async ({ page }) => {

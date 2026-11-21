@@ -33,6 +33,7 @@ async function start(page: Page, runs: unknown[], ownPlan: number | undefined) {
     if (p === "/api/v1/work-items") return send(route, 200, { data: [{ ...LIST.data[0], stage: "in_progress", ...(ownPlan === undefined ? {} : { own_plan_api_equivalent_usd: ownPlan }) }], next_cursor: null });
     if (p === "/api/v1/repos") return send(route, 200, REPOS);
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
+    if (p.endsWith("/corrections")) return send(route, 200, { data: [] });
     if (p === "/api/v1/runs") return send(route, 200, { ...WORK, data: runs });
     return send(route, 404, { error: { code: "not_found", message: "x", request_id: "r" } });
   });
@@ -119,6 +120,7 @@ async function startState(page: Page, activity: Body, itemOver: Record<string, u
     if (p === "/api/v1/work-items") return send(route, 200, { data: [{ ...LIST.data[0], stage: "in_progress", ...itemOver }], next_cursor: null });
     if (p === "/api/v1/repos") return send(route, 200, REPOS);
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
+    if (p.endsWith("/corrections")) return send(route, 200, { data: [] });
     if (p.endsWith("/activity")) return send(route, 200, activity);
     if (p === "/api/v1/runs") return send(route, 200, { ...WORK, data: runs });
     return send(route, 404, { error: { code: "not_found", message: "x", request_id: "r" } });
