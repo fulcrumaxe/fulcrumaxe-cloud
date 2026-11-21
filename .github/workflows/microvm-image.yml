@@ -4,6 +4,7 @@ name: microVM image
 # the same, and then BOOTS the amd64 disk under the pinned Firecracker on this hosted runner: the answer to "does Firecracker run
 # on a free hosted x64 Linux runner with KVM" (D#587 B-1, acceptance 9). The arm64 disk is built, not booted (a hosted x64 runner
 # cannot). Started by hand only (Actions tab, or `gh workflow run microvm-image.yml`); it never runs on a pull request or a push.
+# It also builds, installs and starts fx-vmhelper (the owner opted in to this change on 2026-11-20) so the helper-backed real-VM tests run.
 # The build steps are the local action .github/actions/microvm-image, which microvm-image-release.yml shares.
 #
 # No secrets, no inputs, a read-only token, and the job runs only on the public plane, so the private plane never queues it.
@@ -59,8 +60,92 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           { ls -l /dev/kvm; lscpu | grep -E 'Model name|Virtualization|Hypervisor vendor'; echo "load: $(cat /proc/loadavg)"; } 2>&1 | tee "$W/host.txt"
+      # The helper-backed real-VM tests (microvmSandbox.real, workspaceCrossing.real) need the root helper, as production runs it. The
+      # steps below build it with the runner's Go (no toolchain is fetched: GOTOOLCHAIN=local), install it the way `fx-runner vm install`
+      # lays a machine out (the unit and the config come from the same `buildInstallPlan` the installer uses, so nothing is restated
+      # here), start it under systemd, and run the tests as this non-root user, with the helper's group for its socket directory.
+      - name: Build fx-vmhelper (no cgo, the runner's Go)
+        env:
+          GOTOOLCHAIN: local
+          CGO_ENABLED: "0"
+        run: |
+          go version
+          cd packages/fx-runner/vmhelper
+          go build -o "$W/fx-vmhelper" ./cmd/fx-vmhelper
+      - name: Render the helper's unit and config from the install plan
+        run: |
+          mkdir -p "$W/plan"
+          cat > "$W/plan/entry.ts" <<'EOF'
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { cpus } from "node:os";
+          import { buildInstallPlan } from "@REPO@/packages/fx-runner/src/vm/installPlan.ts";
+          const mem = Number(/MemTotal:\s+(\d+)/.exec(readFileSync(process.env.MEMINFO!, "utf8"))![1]);
+          const plan = buildInstallPlan({
+            cpus: cpus().length,
+            memTotalKb: mem,
+            smallestTemplateRamMb: 512,
+            runner: { user: process.env.RUNNER_USER!, uid: Number(process.env.RUNNER_UID), gid: Number(process.env.RUNNER_GID) },
+            takenUids: [],
+            takenGids: [],
+          });
+          writeFileSync(`${process.env.PLAN_DIR}/config.json`, plan.config.text);
+          writeFileSync(`${process.env.PLAN_DIR}/fx-vmhelper.service`, plan.unit.text);
+          EOF
+          sed -i "s|@REPO@|$GITHUB_WORKSPACE|" "$W/plan/entry.ts"
+          pnpm --filter @fulcrumaxe/fx-runner exec esbuild "$W/plan/entry.ts" --bundle --platform=node --format=esm --outfile="$W/plan/entry.mjs"
+          MEMINFO=/proc/meminfo RUNNER_USER="$(id -un)" RUNNER_UID="$(id -u)" RUNNER_GID="$(id -g)" PLAN_DIR="$W/plan" node "$W/plan/entry.mjs"
+          cat "$W/plan/config.json" "$W/plan/fx-vmhelper.service"
+      - name: Install the helper like production and start it
+        run: |
+          df -h / /mnt | tee -a "$W/host.txt"
+          sha() { sha256sum "$1" | cut -d' ' -f1; }
+          K="$(sha "$FX_VM_KERNEL")"; R="$(sha "$FX_VM_ROOTFS")"; A="$(sha "$GITHUB_WORKSPACE/infra/microvm-image/guest/agent.py")"
+          # The hosted image's /opt is mode 0777, and the helper refuses a binary whose path has a directory anyone can write.
+          sudo chmod 0755 /opt
+          sudo groupadd --system fx-vmhelper
+          sudo usermod -aG fx-vmhelper "$(id -un)"
+          O=/opt/fx-vmhelper
+          sudo install -d -m 0755 -o root -g root "$O" "$O/bin" "$O/templates" "$O/templates/fx-agent" /etc/fx-vmhelper
+          sudo install -d -m 0711 -o root -g root /var/lib/fx-vm
+          sudo install -d -m 0700 -o root -g root /var/lib/fx-vm-snapshots
+          sudo install -m 0755 -o root -g root "$W/fx-vmhelper" "$O/bin/fx-vmhelper"
+          sudo install -m 0755 -o root -g root "$W"/release-v*-x86_64/jailer-v*-x86_64 "$O/bin/jailer"
+          sudo install -m 0755 -o root -g root "$FX_VM_FIRECRACKER" "$O/bin/firecracker"
+          sudo install -m 0644 -o root -g root "$FX_VM_KERNEL" "$O/templates/fx-agent/kernel"
+          sudo install -m 0644 -o root -g root "$FX_VM_ROOTFS" "$O/templates/fx-agent/rootfs"
+          printf '{"fx-agent":{"kernel":"%s","rootfs":"%s"}}\n' "$K" "$R" | sudo tee "$O/template-manifest.json" > /dev/null
+          sudo chmod 0644 "$O/template-manifest.json"
+          sudo install -m 0600 -o root -g root "$W/plan/config.json" /etc/fx-vmhelper/config.json
+          # Found by this job: with `User=root` in the rendered unit, systemd 255 on this image starts the helper without CAP_SETUID in its
+          # effective set, and its own start-up check refuses (CapEff 0x08200041, pinned 0x082000c1). A system unit runs as root without
+          # that line, and then the check passes, so the line is dropped for this run only; the product's unit text is not changed here.
+          sed '/^User=root$/d' "$W/plan/fx-vmhelper.service" > "$W/plan/fx-vmhelper.service.run"
+          sudo install -m 0644 -o root -g root "$W/plan/fx-vmhelper.service.run" /etc/systemd/system/fx-vmhelper.service
+          # what a dispatched host tells the real-VM suites (see the header of the two test files)
+          T="vm-fx-agent-${K:0:12}"
+          jq -n --arg k "$K" --arg r "$R" --arg a "$A" --arg t "$T" '{arch:"amd64",digests:{kernel:$k,rootfs:$r,agent:$a},listing:{ok:true,paths:["\($t)/kernel-amd64-\($k)","\($t)/rootfs-amd64-\($r)","\($t)/agent-amd64-\($a)"]}}' > "$W/boot-facts.json"
+          {
+            echo "FX_VM_HELPER_SOCKET=/run/fx-vmhelper/helper.sock"
+            echo "FX_VM_TEMPLATE=fx-agent"
+            echo "FX_VM_AGENT=$GITHUB_WORKSPACE/infra/microvm-image/guest/agent.py"
+            echo "FX_VM_BOOT_FACTS=$W/boot-facts.json"
+          } >> "$GITHUB_ENV"
+          sudo systemctl daemon-reload
+          sudo systemctl start fx-vmhelper.service || { sudo journalctl -u fx-vmhelper --no-pager | tail -n 60; exit 1; }
+          for i in $(seq 1 20); do sudo test -S /run/fx-vmhelper/helper.sock && break; sleep 0.5; done
+          sudo systemctl status fx-vmhelper.service --no-pager | head -n 20
+          sudo test -S /run/fx-vmhelper/helper.sock
       - name: Boot the guest under Firecracker and run the probes (the whole vm test directory)
-        run: pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/vm 2>&1 | tee "$W/vitest.txt"
+        # sg gives the test process the helper's group (the socket directory is root:fx-vmhelper 0750; a usermod does not reach a running
+        # shell). The tests still run as this ordinary user, never as root: the helper-backed suites refuse root.
+        run: sg fx-vmhelper -c 'bash -o pipefail -c "pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/vm 2>&1 | tee $W/vitest.txt"'
+      - name: The helper's log and state (no secrets, it logs events only)
+        if: always()
+        run: |
+          sudo systemctl status fx-vmhelper.service --no-pager > "$W/helper-status.txt" 2>&1 || true
+          sudo journalctl -u fx-vmhelper --no-pager > "$W/helper.log" 2>&1 || true
+          sudo dmesg 2>/dev/null | tail -n 60 > "$W/dmesg.txt" || true
+          tail -n 80 "$W/helper.log" || true
       - name: Job summary
         if: always()
         run: |
@@ -93,8 +178,14 @@ jobs:
             /mnt/fxvm/report-a.txt
             /mnt/fxvm/report-b.txt
             /mnt/fxvm/vitest.txt
+            /mnt/fxvm/helper.log
+            /mnt/fxvm/helper-status.txt
+            /mnt/fxvm/dmesg.txt
             /mnt/fxvm/a/build.json
           if-no-files-found: warn
+      - name: Stop the helper
+        if: always()
+        run: sudo systemctl stop fx-vmhelper.service || true
       - name: Remove the registry
         if: always()
         run: docker rm -f fx-registry || true
