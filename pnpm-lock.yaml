@@ -181,6 +181,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@fulcrumaxe/fx-runner':
+        specifier: workspace:*
+        version: link:../../packages/fx-runner
       '@fulcrumaxe/runner-protocol':
         specifier: workspace:*
         version: link:../../packages/runner-protocol

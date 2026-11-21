@@ -115,6 +115,37 @@ function dateOf(bytes: Buffer | undefined): string | undefined {
   }
 }
 
+const BAD_TARGET_PATH: Exclude<TufOutcome, { ok: true }> = { ok: false, state: "refused", code: "bad_target_path", message: "the release file name is not a plain relative path" };
+
+function validTargetPath(targetPath: string): boolean {
+  return TARGET_PATH.test(targetPath) && targetPath.length <= 200 && !targetPath.split("/").some((segment) => segment.startsWith(".") || segment.includes(".."));
+}
+
+/** The one place a target is looked up: refresh the metadata (tuf-js verifies every role), find the target, and check what the metadata says about it. */
+async function lookup(updater: Updater, targetPath: string): Promise<{ ok: true; info: NonNullable<Awaited<ReturnType<Updater["getTargetInfo"]>>>; sha256: string } | { ok: false; outcome: Exclude<TufOutcome, { ok: true }> }> {
+  await updater.refresh();
+  const info = await updater.getTargetInfo(targetPath);
+  if (info === undefined) return { ok: false, outcome: { ok: false, state: "refused", code: "target_not_found", message: "the release metadata does not list that file" } };
+  const sha256 = info.hashes["sha256"];
+  if (sha256 === undefined || !SHA256_HEX.test(sha256) || !Number.isSafeInteger(info.length) || info.length < 0 || info.length > MAX_TARGET_BYTES) {
+    return { ok: false, outcome: { ok: false, state: "refused", code: "invalid_metadata", message: "the release metadata does not describe that file with a SHA-256 and a sensible length" } };
+  }
+  return { ok: true, info, sha256 };
+}
+
+/** The earliest `expires` (epoch ms) of the timestamp, snapshot and targets metadata `updater` trusts now; undefined when any is missing or unreadable. */
+function earliestExpiry(updater: Updater): number | undefined {
+  const trusted = (updater as unknown as { trustedSet?: Record<string, { signed?: { expires?: unknown } } | undefined> }).trustedSet;
+  const times = ["timestamp", "snapshot", "targets"].map((role) => {
+    const expires = trusted?.[role]?.signed?.expires;
+    return typeof expires === "string" ? Date.parse(expires) : Number.NaN;
+  });
+  return times.every(Number.isFinite) ? Math.min(...times) : undefined;
+}
+
+/** What `targetInfo` returns: the signed facts about one target. `expiresAt` is when the metadata that vouched for them stops being valid. */
+export type TargetInfoOutcome = { ok: true; path: string; length: number; sha256: string; expiresAt: number | undefined } | Exclude<TufOutcome, { ok: true }>;
+
 export class TufClient {
   private readonly build: TufBuildConfig;
   private readonly stateDir: string;
@@ -139,9 +170,7 @@ export class TufClient {
   async fetchTarget(targetPath: string): Promise<TufOutcome> {
     const { root, metadataBaseUrl, targetBaseUrl } = this.build;
     if (root === undefined || metadataBaseUrl === undefined || targetBaseUrl === undefined) return { ok: false, state: "not_configured", message: NOT_CONFIGURED_TEXT };
-    if (!TARGET_PATH.test(targetPath) || targetPath.length > 200 || targetPath.split("/").some((segment) => segment.startsWith(".") || segment.includes(".."))) {
-      return { ok: false, state: "refused", code: "bad_target_path", message: "the release file name is not a plain relative path" };
-    }
+    if (!validTargetPath(targetPath)) return BAD_TARGET_PATH;
 
     const dir = tufDir(this.stateDir);
     let pinned: PinnedFetcher | undefined;
@@ -150,13 +179,9 @@ export class TufClient {
       const opened = this.open(root, metadataBaseUrl, targetBaseUrl, dir);
       pinned = opened.pinned;
       const { updater, targets } = opened;
-      await updater.refresh();
-      const info = await updater.getTargetInfo(targetPath);
-      if (info === undefined) return { ok: false, state: "refused", code: "target_not_found", message: "the release metadata does not list that file" };
-      const expectedSha = info.hashes["sha256"];
-      if (expectedSha === undefined || !SHA256_HEX.test(expectedSha) || !Number.isSafeInteger(info.length) || info.length < 0 || info.length > MAX_TARGET_BYTES) {
-        return { ok: false, state: "refused", code: "invalid_metadata", message: "the release metadata does not describe that file with a SHA-256 and a sensible length" };
-      }
+      const found = await lookup(updater, targetPath);
+      if (!found.ok) return found.outcome;
+      const { info, sha256: expectedSha } = found;
       // A file left by an earlier download is never mistaken for this one.
       destination = path.join(targets, encodeURIComponent(info.path));
       rmSync(destination, { force: true });
@@ -172,6 +197,29 @@ export class TufClient {
       // fx-swallow-ok: fail closed; every failure becomes a typed refusal below, and the raw text is classified, never shown
       if (destination !== undefined) rmSync(destination, { force: true });
       return this.refusal(error, pinned, dir);
+    }
+  }
+
+  /**
+   * What the verified metadata says about one target (its SHA-256 and length), with nothing downloaded. It runs the same open, refresh and
+   * lookup as `fetchTarget`, under the same checks, and maps every failure through the same `refusal()`. The cloud's install route uses it to
+   * bake the verified facts into the script it serves; this is the only verifier it has.
+   */
+  async targetInfo(targetPath: string): Promise<TargetInfoOutcome> {
+    const { root, metadataBaseUrl, targetBaseUrl } = this.build;
+    if (root === undefined || metadataBaseUrl === undefined || targetBaseUrl === undefined) return { ok: false, state: "not_configured", message: NOT_CONFIGURED_TEXT };
+    if (!validTargetPath(targetPath)) return BAD_TARGET_PATH;
+    const dir = tufDir(this.stateDir);
+    let pinned: PinnedFetcher | undefined;
+    try {
+      const opened = this.open(root, metadataBaseUrl, targetBaseUrl, dir);
+      pinned = opened.pinned;
+      const found = await lookup(opened.updater, targetPath);
+      if (!found.ok) return found.outcome;
+      return { ok: true, path: found.info.path, length: found.info.length, sha256: found.sha256, expiresAt: earliestExpiry(opened.updater) };
+    } catch (error) {
+      // fx-swallow-ok: fail closed; every failure becomes a typed refusal, and the raw text is classified, never shown
+      return this.refusal(error, pinned, dir) as Exclude<TufOutcome, { ok: true }>;
     }
   }
 

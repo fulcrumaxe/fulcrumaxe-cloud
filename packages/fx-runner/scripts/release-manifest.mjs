@@ -11,15 +11,12 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ARTIFACT_NAMES } from "./install-render.mjs";
 import { SIDECAR_ARCHIVE } from "./sidecar.mjs";
 
-/** The platforms a release ships, and the file name each one has on the release page. The order is the order of the manifest. */
-export const ARTIFACT_NAMES = Object.freeze({
-  "darwin-arm64": "fx-runner-darwin-arm64",
-  "darwin-x64": "fx-runner-darwin-x64",
-  "linux-x64": "fx-runner-linux-x64",
-  "linux-arm64": "fx-runner-linux-arm64",
-});
+// The names are written down once, in install-render.mjs (the renderer the cloud's install route loads has to carry them, and it
+// imports nothing). They are re-exported here so every existing reader of this file is unchanged.
+export { ARTIFACT_NAMES };
 
 /**
  * D#749 V2c-2c: the manifest entry of the Playwright sidecar archive (scripts/sidecar.mjs): { version, artifact: "playwright-sidecar", sha256, size }. It has no platform (the library is plain JavaScript,
