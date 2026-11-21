@@ -3,6 +3,7 @@ import { ForbiddenError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import type { RunActionCtx } from '../runActions/request.js';
 import { emitDomainEvent } from '../domain-events/emit.js';
+import { planGateOf, readEngineCoverage, type EngineCoverage, type PlanGate } from './engineCoverage.js';
 
 /**
  * D#845 ON-5: the engine track of onboarding. The seven steps are DERIVED from current rows on every read, so a step reopens when what it stands for goes away.
@@ -27,6 +28,10 @@ export interface EngineStep {
   kvm?: 'present' | 'absent';
   /** D#845 ON-6c, machine step only: true when the machine has KVM but its engine is not microvm (so it could run microVMs and the helper is not set up). Left out otherwise. */
   helper_missing?: true;
+  /** D#845 ON-22, project step only: why the Engine plan does not cover one more engine (`plan_required`, `engine_quantity`, `plan_ended`, `unavailable`). Left out when it does, and when the caller did not say whether the plan is offered. Derived on every read. */
+  plan_gate?: PlanGate;
+  /** D#845 ON-22, project step only: the engines the plan pays for and the engines live now, when the plan has a quantity (the "Add an engine" prompt needs it). Counts only. */
+  engines?: { quantity: number; live: number };
   /** The stored failure for this step; null unless `state` is `failed`. */
   failure: { code: string; at: string } | null;
 }
@@ -37,6 +42,8 @@ export interface EngineSources {
   tier: EngineStep['tier'];
   /** The most recently heard machine's KVM fact; null when it never said. */
   kvm?: 'present' | 'absent' | null;
+  /** D#845 ON-22: whether the plan covers one more engine; absent when the caller did not supply the billing fact it needs. */
+  coverage?: EngineCoverage;
   failures: Partial<Record<EngineStepKey, { code: string; at: string }>>;
 }
 
@@ -66,7 +73,11 @@ export function buildEngineSteps(src: EngineSources): EngineStep[] {
       step === 'machine'
         ? { ...(src.kvm ? { kvm: src.kvm } : {}), ...(src.kvm === 'present' && src.tier === 'standard' ? { helper_missing: true as const } : {}) }
         : {};
-    return { step, state, completed_at, tier: step === 'machine' ? src.tier : null, ...machine, failure };
+    // A placed project needs no purchase prompt; only an ended plan still matters then (its engine is stopped).
+    const gate = step === 'project' && src.coverage ? planGateOf(src.coverage) : null;
+    const showGate = gate !== null && (gate === 'plan_ended' || completed_at === null);
+    const engines = step === 'project' && src.coverage && 'quantity' in src.coverage ? { engines: { quantity: src.coverage.quantity, live: src.coverage.live } } : {};
+    return { step, state, completed_at, tier: step === 'machine' ? src.tier : null, ...machine, ...(showGate ? { plan_gate: gate } : {}), ...engines, failure };
   });
 }
 
@@ -85,6 +96,8 @@ export async function readEngineSources(
   client: PoolClient,
   accountId: string,
   githubAppAt: string | null,
+  /** D#845 ON-22: whether the Engine plan can be bought. Leave it out and no coverage is read, so no step carries a plan gate. */
+  enginePlanOffered?: boolean,
 ): Promise<{ sources: EngineSources; runners: { id: string; heardAt: string }[] }> {
   const rn = (
     await client.query<{ id: string; last_seen_at: Date; sandbox_engine: string | null; kvm: string | null }>(
@@ -112,7 +125,7 @@ export async function readEngineSources(
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
   return {
-    sources: { done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
+    sources: { ...(enginePlanOffered === undefined ? {} : { coverage: await readEngineCoverage(client, accountId, enginePlanOffered) }), done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
     runners,
   };
 }

@@ -3609,6 +3609,11 @@ export interface Operations {
           tier: ("microvm" | "standard") | (null);
           kvm?: "present" | "absent";
           helper_missing?: true;
+          plan_gate?: "plan_required" | "engine_quantity" | "plan_ended" | "account_held" | "unavailable";
+          engines?: {
+            quantity: number;
+            live: number;
+          };
           failure: ({
             code: string;
             at: string;

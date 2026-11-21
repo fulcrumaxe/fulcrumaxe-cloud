@@ -93,14 +93,14 @@ describe("GET /api/health", () => {
     try {
       const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
       resetPlanDataCache();
-      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset"] });
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset", "engine_price_unset"] });
       const data = JSON.parse(process.env.FX_PLAN_DATA!);
       delete data.envelope;
       process.env.FX_PLAN_DATA = JSON.stringify(data);
       resetPlanDataCache();
       const operator = await call(env, bearer(OPERATOR_SECRET));
       expect(operator.status).toBe(200);
-      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset"] });
+      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset", "engine_price_unset"] });
       const anonymous = await call(env);
       expect(anonymous.status).toBe(200);
       expect(JSON.stringify(anonymous.body)).not.toContain("envelope_margin");
@@ -138,6 +138,36 @@ describe("GET /api/health", () => {
       process.env.FX_PLAN_DATA = JSON.stringify({ ...JSON.parse(process.env.FX_PLAN_DATA!), discovery: { ...discovery, analysisPerRunUsd: 0.37 } });
       resetPlanDataCache();
       expect((await call(env, bearer(OPERATOR_SECRET))).body).not.toMatchObject({ unconfigured: expect.arrayContaining(["analysis_unconfigured"]) });
+    } finally {
+      if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
+  it("D#845 ON-22: the operator is told, by a fixed code, when STRIPE_PRICE_ID_ENGINE is unset; with it set the code is gone; anonymous callers never see it", async () => {
+    const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
+    expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ unconfigured: expect.arrayContaining(["engine_price_unset"]) });
+    const set = await call({ ...env, STRIPE_PRICE_ID_ENGINE: "price_engine_test" }, bearer(OPERATOR_SECRET));
+    expect(set.status).toBe(200);
+    expect(JSON.stringify(set.body)).not.toContain("engine_price_unset");
+    expect(JSON.stringify((await call(env)).body)).not.toContain("engine_price");
+  });
+
+  it("D#845 ON-22 (ruling 36.3): the operator is told, by a fixed code, when the plan data has no enginePlan block, even with the Stripe price set; with the block the code is gone; anonymous callers never see it", async () => {
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET, STRIPE_PRICE_ID_ENGINE: "price_engine_test" };
+      resetPlanDataCache();
+      expect(JSON.stringify((await call(env, bearer(OPERATOR_SECRET))).body)).not.toContain("engine_plan_unconfigured");
+      const data = JSON.parse(process.env.FX_PLAN_DATA!);
+      delete data.enginePlan;
+      process.env.FX_PLAN_DATA = JSON.stringify(data);
+      resetPlanDataCache();
+      const operator = await call(env, bearer(OPERATOR_SECRET));
+      expect(operator.status).toBe(200);
+      expect(operator.body).toMatchObject({ ok: true, unconfigured: expect.arrayContaining(["engine_plan_unconfigured"]) });
+      expect(JSON.stringify(operator.body)).not.toContain("engine_price_unset");
+      expect(JSON.stringify((await call(env)).body)).not.toContain("engine_plan");
     } finally {
       if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
       resetPlanDataCache();
