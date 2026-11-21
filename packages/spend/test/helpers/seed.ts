@@ -16,6 +16,8 @@ import type { PoolClient } from 'pg';
 export interface SeedAccountOptions {
   plan?: 'starter' | 'team' | 'scale';
   status?: 'active' | 'past_due' | 'paused' | 'model_key_broken';
+  /** D#845 ON-22a: the subscription carries a hosted plan item (reserve() and checkHeadroom() require it). Default true. */
+  hostedPlanPaid?: boolean;
 }
 
 export async function seedAccount(
@@ -32,8 +34,8 @@ export async function seedAccount(
   // 'unsubscribed') disagrees with the derived value (security review
   // MUST-fix 4, Spec A5).
   await admin.query(
-    `INSERT INTO accounts (id, plan, stripe_customer_id, past_due_since, owner_paused_at, key_broken_at, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    `INSERT INTO accounts (id, plan, stripe_customer_id, past_due_since, owner_paused_at, key_broken_at, status, hosted_plan_paid)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       accountId,
       opts.plan ?? 'starter',
@@ -42,6 +44,7 @@ export async function seedAccount(
       status === 'paused' ? now : null,
       status === 'model_key_broken' ? now : null,
       status,
+      opts.hostedPlanPaid ?? true,
     ],
   );
 }

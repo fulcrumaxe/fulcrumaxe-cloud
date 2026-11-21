@@ -1,7 +1,8 @@
 import type { Pool } from "pg";
 import { z } from "zod";
-import { createCheckoutSession, defaultStripeClient, getBillingPortalUrl, setAccountBudgets, type StripeLike } from "@fx/billing";
+import { createCheckoutSession, defaultStripeClient, getBillingPortalUrl, setAccountBudgets, setEngineQuantity, type StripeLike } from "@fx/billing";
 import { getBudgets, getUsage } from "@fx/spend";
+import { countLiveEngines } from "@fx/core/src/onboarding/liveEngines.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
@@ -11,7 +12,8 @@ import { platformOpsPool } from "../sse/pools.js";
 export const billingLinkResponseSchema = z.object({ url: z.string().url() });
 
 const portalSessionBodySchema = z.object({ return_path: z.string().optional(), flow: z.enum(["change_plan"]).optional() }).strict();
-const checkoutSessionBodySchema = z.object({ plan: z.string(), success_path: z.string(), cancel_path: z.string() }).strict();
+const checkoutSessionBodySchema = z.object({ plan: z.string(), success_path: z.string(), cancel_path: z.string(), quantity: z.number().int().optional() }).strict();
+const engineQuantityBodySchema = z.object({ quantity: z.number().int() }).strict();
 
 /** Test seam: the Stripe client and the platform_ops pool the billing service runs on. */
 export const billingLinkDeps: { getStripe: () => StripeLike; getPlatformOpsPool: () => Pool } = {
@@ -34,7 +36,15 @@ function billingLinkError(reason: string): ApiError {
     case "no_stripe_customer":
       return new ApiError(409, "no_billing_account", "this account has no billing account yet");
     case "already_subscribed":
-      return new ApiError(409, "already_subscribed", "this account already has a subscription");
+      return new ApiError(409, "already_subscribed", "this account already has this plan");
+    case "no_subscription":
+      return new ApiError(409, "no_subscription", "this account has no paying subscription yet; choose the Engine plan to start one");
+    case "engine_quantity_in_use":
+      return new ApiError(409, "engine_quantity_in_use", "more engines are running than that quantity; park or stop an engine first");
+    case "payment_pending":
+      return new ApiError(402, "payment_pending", "the provider could not collect the payment for this change, so it was not applied; update your payment method in the billing portal and try again");
+    case "invalid_quantity":
+      return new ApiError(422, "invalid_quantity", "the quantity must be a whole number from 1 to 100");
     case "invalid_return_url":
       return new ApiError(422, "invalid_return_url", "a return path was not accepted");
     case "invalid_plan":
@@ -63,8 +73,9 @@ const linkRoute: Pick<RouteEntry, "method" | "minRole" | "idempotency" | "rateCl
 };
 
 const linkErrors = {
-  "409": "`no_billing_account` (portal: the account has no Stripe customer yet) or `already_subscribed` (checkout).",
-  "422": "`invalid_return_url` (a path that is not a plain absolute path on this app) or `invalid_plan`.",
+  "409": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
+  "402": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+  "422": "`invalid_return_url` (a path that is not a plain absolute path on this app), `invalid_plan` or `invalid_quantity`.",
   "502": "`internal_error`: the billing provider could not be reached. No detail is returned.",
   "503": "`billing_not_configured`: Stripe is not set up on this deployment.",
 };
@@ -212,7 +223,7 @@ export const billingRoutes: RouteEntry[] = [
     operationId: "createCheckoutSession",
     summary: "A Stripe Checkout link to subscribe to a plan",
     description:
-      "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. Returns only the checkout `url`.",
+      "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. Returns only the `url`.",
     extraResponses: linkErrors,
     bodySchema: checkoutSessionBodySchema,
     responseSchema: billingLinkResponseSchema,
@@ -222,12 +233,37 @@ export const billingRoutes: RouteEntry[] = [
       const result = await createCheckoutSession(billingCtx(ctx), {
         accountId: ctx.principal.accountId,
         plan: body.plan,
+        ...(body.quantity !== undefined ? { quantity: body.quantity } : {}),
         successPath: body.success_path,
         cancelPath: body.cancel_path,
         stripe,
       });
       if (!result.ok) throw billingLinkError(result.reason);
       return { url: result.url };
+    },
+  },
+  {
+    ...linkRoute,
+    path: "/api/v1/billing/engine-quantity",
+    sessionLimit: SESSION_LIMITS.stripe,
+    operationId: "setEngineQuantity",
+    summary: "Set how many engines the subscription pays for",
+    description:
+      "Session only, owner only. `quantity` is the new total, 1 to 100. A total below the number of engines running now is refused with 409 `engine_quantity_in_use` (park or stop an engine first); an account with no paying subscription gets 409 `no_subscription` and buys its first engines through the checkout route with `plan: \"engine\"`. The change is billed by the provider's own proration and shows in the account once the provider confirms it.",
+    extraResponses: linkErrors,
+    bodySchema: engineQuantityBodySchema,
+    responseSchema: z.object({ quantity: z.number().int() }),
+    async handler(ctx, input) {
+      const body = input.body as z.infer<typeof engineQuantityBodySchema>;
+      const stripe = billingLinkDeps.getStripe();
+      const result = await setEngineQuantity(billingCtx(ctx), {
+        accountId: ctx.principal.accountId,
+        quantity: body.quantity,
+        stripe,
+        liveEngines: () => countLiveEngines({ pool: ctx.pool, principal: { accountId: ctx.principal.accountId, userId: ctx.principal.userId } }),
+      });
+      if (!result.ok) throw billingLinkError(result.reason);
+      return { quantity: body.quantity };
     },
   },
 ];

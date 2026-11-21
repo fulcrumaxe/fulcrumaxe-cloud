@@ -8,7 +8,7 @@ import { RunnerTarget, type ExecutionRun } from "@fx/runner";
 import { runsPerDayOfAccountPlan } from "../src/runnerLimits.js";
 
 /** [pg] The daily cap on runner runs follows the account's own plan: a subscription plan has none, the runner-only tier keeps its figure. */
-type AccountState = "active" | "unsubscribed" | "hold" | "suspended" | "paused" | `past_due_${number}d`;
+type AccountState = "active" | "engine_only" | "unsubscribed" | "hold" | "suspended" | "paused" | `past_due_${number}d`;
 
 describe("runner daily limit by account plan [pg]", () => {
   let adminPool: Pool;
@@ -40,6 +40,8 @@ describe("runner daily limit by account plan [pg]", () => {
     const a = await seedAccount(admin, randomUUID());
     await admin.query("UPDATE accounts SET plan = $2 WHERE id = $1", [a.accountId, plan]);
     if (state === "unsubscribed") await admin.query("UPDATE accounts SET stripe_customer_id = NULL WHERE id = $1", [a.accountId]);
+    // D#845 ON-22a (ruling 35.2): an engine-only subscription is `active` and keeps the plan row, but carries no paid hosted plan item.
+    if (state === "engine_only") await admin.query("UPDATE accounts SET hosted_plan_paid = false WHERE id = $1", [a.accountId]);
     if (state === "hold") await admin.query("UPDATE accounts SET platform_hold_at = now() WHERE id = $1", [a.accountId]);
     if (state === "suspended") await admin.query("UPDATE accounts SET partner_suspended_at = now() WHERE id = $1", [a.accountId]);
     if (state === "paused") await admin.query("UPDATE accounts SET owner_paused_at = now() WHERE id = $1", [a.accountId]);
@@ -64,13 +66,20 @@ describe("runner daily limit by account plan [pg]", () => {
     expect(await target().admit(await accountWith("scale", cap() + 10, "past_due_2d"), admin)).toEqual({ admitted: true });
   });
 
-  it.each(["past_due_8d", "unsubscribed", "hold", "suspended", "paused"] as const)("a scale account that is %s keeps the runner tier's cap (admitted at it, refused past it)", async (state) => {
+  it.each(["past_due_8d", "unsubscribed", "hold", "suspended", "paused", "engine_only"] as const)("a scale account that is %s keeps the runner tier's cap (admitted at it, refused past it)", async (state) => {
     expect(await target().admit(await accountWith("scale", cap(), state), admin)).toEqual({ admitted: true });
     expect(await target().admit(await accountWith("scale", cap() + 1, state), admin)).toEqual({ admitted: false, reason: "runner_daily_limit" });
   });
 
   it("an unpaid default signup (starter, never checked out) is capped at the runner tier's figure", async () => {
     expect(await target().admit(await accountWith("starter", cap() + 1, "unsubscribed"), admin)).toEqual({ admitted: false, reason: "runner_daily_limit" });
+  });
+
+  it("an engine-only account on the default plan, and a returning Team customer who bought only engines, are capped at the runner tier's figure", async () => {
+    for (const plan of ["starter", "team"]) {
+      expect(await target().admit(await accountWith(plan, cap(), "engine_only"), admin)).toEqual({ admitted: true });
+      expect(await target().admit(await accountWith(plan, cap() + 1, "engine_only"), admin)).toEqual({ admitted: false, reason: "runner_daily_limit" });
+    }
   });
 
   it("the grace window is read at the clock the resolver is given", async () => {

@@ -120,6 +120,8 @@ describe('@fx/billing public export surface (security-review fix round 3, MUST 3
       // D#454 H2d: the reconciler's read-only key reader and its pinned client (neither can write an account).
       'stripeReconcileKeyFromEnv',
       'reconcileStripeClient',
+      // D#845 ON-22a: the engine quantity update (the engine price is bought through createCheckoutSession).
+      'setEngineQuantity',
       'IllegalStatusTransitionError', // a class, also typeof 'function'
     ]);
     const actualFunctionNames = Object.entries(billingPublic)

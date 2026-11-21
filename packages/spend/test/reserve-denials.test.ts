@@ -167,6 +167,19 @@ describe('reserve: denial reasons', () => {
     expect(result).toEqual({ decision: 'deny', reason: 'work_item_cap_exceeded' });
   });
 
+  it('account_not_active: an active account without a paid hosted plan item (an engine-only subscription, or a returning Team customer who bought only engines) is denied hosted spend, whatever its plan row says', async () => {
+    for (const plan of ['starter', 'team'] as const) {
+      const accountId = randomUUID();
+      const runId = randomUUID();
+      await seedAccount(admin, accountId, { plan, hostedPlanPaid: false });
+      await seedRun(admin, accountId, runId);
+      for (const extra of [{ estimateModelUsd: 5, monthlyModelBudgetUsd: 600 }, { trigger: 'foreground' as const, estimateComputeUsd: 1 }]) {
+        expect(await reserve(appUserPool, { accountId, runId, plan, ...extra })).toEqual({ decision: 'deny', reason: 'account_not_active' });
+      }
+      expect((await admin.query('SELECT count(*)::int AS n FROM spend_reservations WHERE account_id = $1', [accountId])).rows[0].n).toBe(0);
+    }
+  });
+
   it('account_not_active: a paused account is denied for an ordinary run', async () => {
     const accountId = randomUUID();
     const runId = randomUUID();

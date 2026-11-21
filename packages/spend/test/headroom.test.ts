@@ -184,6 +184,21 @@ describe('checkHeadroom: the read-only twin of reserve()', () => {
       setup: async (a) => seedConnection(a, 'broken', 'credits_exhausted'),
     },
     { name: 'account_not_active (paused)', expected: { decision: 'deny', reason: 'account_not_active' }, status: 'paused', params: base },
+    {
+      name: 'account_not_active (D#845 ON-22a: an engine-only subscription is active but holds no paid hosted plan item)',
+      expected: { decision: 'deny', reason: 'account_not_active' },
+      params: base,
+      setup: async (a) => void (await admin.query('UPDATE accounts SET hosted_plan_paid = false WHERE id = $1', [a])),
+    },
+    {
+      name: 'admit: a preview needs no hosted plan item',
+      expected: { decision: 'admit' },
+      params: { ...base, purpose: 'preview' },
+      setup: async (a) => {
+        await seedModelConnectionOk(admin, a);
+        await admin.query('UPDATE accounts SET hosted_plan_paid = false WHERE id = $1', [a]);
+      },
+    },
     { name: 'admit: past_due inside the seven day grace', expected: { decision: 'admit' }, status: 'past_due', params: base },
     { name: 'model_connection_not_ok (preview, no connection)', expected: { decision: 'deny', reason: 'model_connection_not_ok' }, params: { ...base, purpose: 'preview' } },
     {

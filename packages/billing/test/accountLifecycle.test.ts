@@ -97,6 +97,8 @@ describe('H10 account lifecycle (real Postgres)', () => {
     process.env.STRIPE_PRICE_ID_STARTER = 'price_test_starter';
     process.env.STRIPE_PRICE_ID_TEAM = 'price_test_team';
     process.env.STRIPE_PRICE_ID_SCALE = 'price_test_scale';
+    // D#845 ON-22a: every portal session names the pinned configuration (portalConfig.ts); these doubles answer for it by this explicit id.
+    process.env.STRIPE_PORTAL_CONFIGURATION_ID = 'bpc_test_pinned';
   });
 
   afterAll(async () => {
@@ -108,6 +110,7 @@ describe('H10 account lifecycle (real Postgres)', () => {
     delete process.env.STRIPE_PRICE_ID_STARTER;
     delete process.env.STRIPE_PRICE_ID_TEAM;
     delete process.env.STRIPE_PRICE_ID_SCALE;
+    delete process.env.STRIPE_PORTAL_CONFIGURATION_ID;
   });
 
   /** C7: every ctx-taking function's identity/tenancy carrier -- pool is fixed per test file, only principal varies. */
@@ -968,6 +971,7 @@ describe('H10 account lifecycle (real Postgres)', () => {
           sessions: {
             create: async (params) => {
               expect(params.customer).toBe('cus_portal_1');
+              expect(params.configuration).toBe('bpc_test_pinned');
               expect(params.return_url).toBe(`${APP_ORIGIN}/billing`);
               return { url: 'https://billing.stripe.test/session/fake' } as never;
             },
