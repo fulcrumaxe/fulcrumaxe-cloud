@@ -80,7 +80,7 @@ async function seedOneAccount(pool: Pool, index: number): Promise<void> {
   // `stripe_customer_id` and no markers derive to, or the INSERT trigger
   // rejects the row.
   await pool.query(
-    `INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`,
+    `INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`,
     [accountId, `cus_seed_${accountId}`],
   );
   await pool.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [userId, `seed-${index}@example.test`]);

@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { effectivePlan } from "@fx/plan-data";
 import { MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY } from "@fulcrumaxe/runner-protocol";
 import { RUNNER_ONLINE_SECONDS, runnerLiveSql } from "@fx/runner";
 import { RUNNER_PLAN_ID, runnerLimitsFor, type HostedRunnerLimits } from "@fx/spend";
@@ -47,8 +48,10 @@ export async function accountCeiling(
   client: PoolClient,
   input: { accountId: string; claimingRunnerId: string; nowMs: number; runnerPlan: RunnerLimits; hosted: HostedLimitsSource; wakeEnabled?: boolean },
 ): Promise<AccountCeiling> {
-  const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [input.accountId])).rows[0]?.plan;
-  if (plan === undefined) return FAIL_CLOSED;
+  const row = (await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [input.accountId])).rows[0];
+  if (row === undefined) return FAIL_CLOSED;
+  // D#845 ON-22a (ruling 42): the runner tier's figures unless the account carries a paid hosted plan item.
+  const plan = effectivePlan(row, RUNNER_PLAN_ID);
   if (plan === RUNNER_PLAN_ID) {
     return { total: input.runnerPlan.maxConcurrentRunnerJobs, heavy: input.runnerPlan.maxConcurrentHeavyRunnerJobs, perRepo: null };
   }

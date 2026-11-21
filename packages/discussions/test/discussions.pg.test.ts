@@ -92,6 +92,17 @@ describe("discussions.ts [pg]", () => {
     expect(Number(counterRows[0].bytes_used)).toBe(nearQuota);
   });
 
+  it("D#845 ON-22a (ruling 42): an engine-only account whose row still says a bigger plan gets the entry tier's storage quota; with a paid hosted plan item the bigger one", async () => {
+    expect(STORAGE_QUOTA_BYTES.scale).toBeGreaterThan(STORAGE_QUOTA_BYTES.starter);
+    const { accountId, owner } = await seedTenant();
+    await db.admin.query(`UPDATE accounts SET plan = 'scale', hosted_plan_paid = false WHERE id = $1`, [accountId]);
+    await db.admin.query(`INSERT INTO discussion_counters (account_id) VALUES ($1)`, [accountId]);
+    await db.admin.query(`UPDATE discussion_counters SET bytes_used = $2 WHERE account_id = $1`, [accountId, STORAGE_QUOTA_BYTES.starter - 10]);
+    await expect(createDiscussion(ctxFor(owner), { title: "over", kind: "feature", body: "x".repeat(1000) })).rejects.toMatchObject({ code: "storage_quota_exceeded" });
+    await db.admin.query(`UPDATE accounts SET hosted_plan_paid = true WHERE id = $1`, [accountId]);
+    await expect(createDiscussion(ctxFor(owner), { title: "fits", kind: "feature", body: "x".repeat(1000) })).resolves.toMatchObject({ title: "fits" });
+  });
+
   it("criterion 12: a body written by the system principal is redacted before insert", async () => {
     const { accountId } = await seedTenant();
     const fakeKey = "sk-ant-api03-" + "a".repeat(40);

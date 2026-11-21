@@ -12,7 +12,7 @@ export function pools(): { admin: Pool; app: Pool } {
 
 export async function seedAccount(admin: Pool): Promise<string> {
   const id = randomUUID();
-  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [id, `cus_test_${id}`]);
+  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [id, `cus_test_${id}`]);
   return id;
 }
 

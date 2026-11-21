@@ -84,6 +84,16 @@ describe('stream leases (D#31 API-5)', () => {
     }
   });
 
+  it('D#845 ON-22a (ruling 42): an engine-only account keeps the plan row of a former hosted plan but gets the entry tier\'s token cap, not that plan\'s', async () => {
+    expect(tokenStreamsPerTenant('scale')).toBeGreaterThan(tokenStreamsPerTenant('starter'));
+    const { accountId, userId } = await seedAccountWithMember(admin, { plan: 'scale', hostedPlanPaid: false });
+    const t = await token(accountId, userId);
+    const subject: LeaseSubject = { kind: 'token', accountId, principalKey: t.id };
+    const now = Date.now();
+    for (let i = 0; i < tokenStreamsPerTenant('starter'); i++) await acquireLease(app, subject, now);
+    await expect(acquireLease(app, subject, now)).rejects.toBeInstanceOf(StreamLimitError);
+  });
+
   it('a lease expires 90 s after its last renewal and its slot is then reusable', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin, { plan: 'starter' });
     const t = await token(accountId, userId);
@@ -175,7 +185,7 @@ describe('stream leases (D#31 API-5)', () => {
     const stub = {
       connect: async () => ({
         query: async (sql: string) => {
-          if (/count\(\*\) FILTER/.test(sql)) return { rows: [{ mine: 0, total: 0, plan: 'constructor' }] };
+          if (/count\(\*\) FILTER/.test(sql)) return { rows: [{ mine: 0, total: 0, plan: 'constructor', hosted_plan_paid: true }] };
           return { rows: [] };
         },
         release: () => {},

@@ -1,4 +1,5 @@
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
+import { effectivePlan } from "@fx/plan-data";
 import { isIP } from "node:net";
 import { RegisterMessage, RegisterResponse } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -53,8 +54,9 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
     // The mode comes back from the stored row (the code's own mode, copied by `runner_register`), in the same transaction.
     const body = await withTenant(deps.appUserPool, accountId, async (client) => {
       // Every plan has the plan data's limit (D#6 R2b criterion 12, D#605 FL-12a); plan data that cannot give one refuses the registration.
-      const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [accountId])).rows[0]?.plan;
-      const maxRunners = maxRunnersOf(deps, plan);
+      const planRow = (await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [accountId])).rows[0];
+      // D#845 ON-22a (ruling 42): the runner tier's machine limit unless the account carries a paid hosted plan item.
+      const maxRunners = maxRunnersOf(deps, planRow === undefined ? undefined : effectivePlan(planRow, "runner"));
       const result = provisioning
         ? await client.query<{ id: string }>("SELECT runner_provisioning_register($1, $2::jsonb, NULL, $3, $4) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners, clientIp])
         : await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL, $3) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners]);

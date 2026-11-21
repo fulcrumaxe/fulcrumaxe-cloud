@@ -121,9 +121,11 @@ async function applyStatusMarkers(client, accountId, status) {
             platform_hold_at = NULL,
             platform_hold_reason = NULL,
             key_broken_at = $5,
+            hosted_plan_paid = $6,
             updated_at = now()
       WHERE id = $1`,
-    [accountId, stripeCustomerId, pastDueSince, ownerPausedAt, keyBrokenAt],
+    // D#845 ON-22a: a fixture account that has a customer is on a hosted plan (the live specs expect hosted entitlements for an active account).
+    [accountId, stripeCustomerId, pastDueSince, ownerPausedAt, keyBrokenAt, stripeCustomerId !== null],
   );
 }
 

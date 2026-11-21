@@ -29,15 +29,32 @@ export function buildPriceMap(idsForPlan: (plan: PlanId) => string[] = stripePri
   return map;
 }
 
-export type PriceResolution = { known: true; plan: PlanId; priceId: string } | { known: false; priceId: string | null };
+export type PriceResolution =
+  | { known: true; plan: PlanId; priceId: string }
+  | { known: false; priceId: string | null; /** D#845 ON-22a: engine items and no hosted-plan item, so nothing is unknown and plan and cap are left alone. */ engineOnly?: true };
 
 /**
- * The plan a fetched subscription is for. Exactly one item whose price is
- * in the map resolves; any other shape (no item, several items, a price
- * not in the map) is unknown, and the caller leaves plan and cap alone.
+ * D#845 ON-22a: the engine line item(s) of a fetched subscription. `quantity` is the sum over items whose price is an engine price (a retired
+ * engine price still on an old subscription counts); null when none is configured at all, so the caller leaves what it stored alone.
  */
-export function resolveSubscriptionPlan(map: PriceMap, subscription: Stripe.Subscription): PriceResolution {
-  const items = subscription.items?.data ?? [];
+export function engineQuantityOf(subscription: Stripe.Subscription, enginePriceIds: readonly string[]): number | null {
+  if (enginePriceIds.length === 0) return null;
+  let total = 0;
+  for (const item of subscription.items?.data ?? []) {
+    if (item.price?.id && enginePriceIds.includes(item.price.id)) total += Math.max(0, Math.trunc(item.quantity ?? 1));
+  }
+  return total;
+}
+
+/**
+ * The plan a fetched subscription is for. Engine items are set aside (the engine price is never a plan); among the rest, exactly one item whose
+ * price is in the map resolves, and any other shape (several, a price not in the map) is unknown, so the caller leaves plan and cap alone. A
+ * subscription holding only engine items is `engineOnly`: an engine-only account has no hosted plan to resolve and nothing to flag.
+ */
+export function resolveSubscriptionPlan(map: PriceMap, subscription: Stripe.Subscription, enginePriceIds: readonly string[] = []): PriceResolution {
+  const all = subscription.items?.data ?? [];
+  const items = all.filter((item) => !(item.price?.id && enginePriceIds.includes(item.price.id)));
+  if (items.length === 0 && all.length > 0) return { known: false, priceId: null, engineOnly: true };
   if (items.length !== 1) return { known: false, priceId: null };
   const priceId = items[0]!.price?.id ?? null;
   if (!priceId) return { known: false, priceId: null };

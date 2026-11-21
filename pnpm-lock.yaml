@@ -448,6 +448,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/webhooks':
+        specifier: workspace:*
+        version: link:../webhooks
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -625,6 +628,9 @@ importers:
       '@fx/core':
         specifier: workspace:*
         version: link:../core
+      '@fx/plan-data':
+        specifier: workspace:*
+        version: link:../plan-data
       '@fx/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -1358,6 +1364,9 @@ importers:
       '@fx/gh-policy':
         specifier: workspace:*
         version: link:../gh-policy
+      '@fx/plan-data':
+        specifier: workspace:*
+        version: link:../plan-data
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner

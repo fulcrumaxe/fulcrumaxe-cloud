@@ -74,7 +74,7 @@ describe("a missed repositories-added webhook is repaired by a reconcile tick [p
     await admin.query("DELETE FROM installation_installers");
     accountId = randomUUID();
     installationId = randomUUID();
-    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [accountId, `cus_${accountId}`]);
+    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [accountId, `cus_${accountId}`]);
     await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')`, [installationId, accountId, GH_INSTALLATION]);
     await admin.query(`INSERT INTO installation_installers (gh_installation_id, app_kind, installer_gh_user_id) VALUES ($1, 'team', 1)`, [GH_INSTALLATION]);
     await admin.query(

@@ -16,6 +16,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@fx/plan-data": "workspace:*",
     "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",

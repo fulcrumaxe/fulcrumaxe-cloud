@@ -76,6 +76,13 @@ describe('D#605 FL-12a: the account runner concurrency setting', () => {
     }
   });
 
+  it('D#845 ON-22a (ruling 42): a former hosted-plan account with only engines reads the runner tier\'s fixed figures, not its old plan\'s setting', async () => {
+    const owner = await seedAccountWithMember(admin, { role: 'owner', plan: 'team', hostedPlanPaid: false });
+    const res = await call(owner, 'GET');
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Setting).toEqual({ applies: false, total: 0, per_repo: 0, default_total: 0, default_per_repo: 0, accepted: false });
+  });
+
   it('a raise without accept: true answers 400 and writes nothing; a member gets 403; a token cannot change it', async () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     const member = await addMember(owner.accountId, 'member');

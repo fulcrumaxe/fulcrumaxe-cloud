@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { effectivePlan } from "@fx/plan-data";
 import { z } from "zod";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
@@ -294,8 +295,9 @@ export const webhookEndpointRoutes: RouteEntry[] = [
       const sealed = sealWebhookSecret(kekSource, ctx.principal.accountId, id, plaintext);
 
       return withTenant(ctx.pool, ctx.principal.accountId, ctx.principal.userId, async (client) => {
-        const plan = await client.query<{ plan: PlanId }>(`SELECT plan FROM accounts WHERE id = $1`, [ctx.principal.accountId]);
-        const planId = plan.rows[0]?.plan;
+        const plan = await client.query<{ plan: PlanId; hosted_plan_paid: boolean }>(`SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1`, [ctx.principal.accountId]);
+        // D#845 ON-22a (ruling 42): the entry tier's cap unless the account carries a paid hosted plan item.
+        const planId = plan.rows[0] === undefined ? undefined : effectivePlan(plan.rows[0], "starter" as PlanId);
         if (!planId) {
           throw new NotFoundError(`account ${ctx.principal.accountId} not found`);
         }

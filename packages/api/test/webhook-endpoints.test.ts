@@ -218,6 +218,16 @@ describe('D#31 API-4b: webhook-endpoints routes', () => {
     expect(body.error.code).toBe('endpoint_limit_reached');
   });
 
+  it('D#845 ON-22a (ruling 42): an engine-only account whose row still says a larger plan gets the entry tier\'s endpoint cap', async () => {
+    expect(webhookEndpointLimitFor('scale')).toBeGreaterThan(webhookEndpointLimitFor('starter'));
+    const owner = await seedAccountWithMember(admin, { role: 'owner', plan: 'scale', hostedPlanPaid: false });
+    for (let i = 0; i < webhookEndpointLimitFor('starter'); i++) {
+      expect((await createEndpoint(owner, { url: `https://example${i}.com/hook`, event_types: ['pr.opened'] })).status).toBe(201);
+    }
+    const over = await createEndpoint(owner, { url: 'https://over-limit.example.com/hook', event_types: ['pr.opened'] });
+    expect([over.status, (await json<ErrorBody>(over)).error.code]).toEqual([409, 'endpoint_limit_reached']);
+  });
+
   it('endpoint cap holds under concurrency: N parallel creates at cap-1 yield exactly one 201 and the rest 409', async () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner', plan: 'starter' });
     for (let i = 0; i < webhookEndpointLimitFor('starter') - 1; i++) {

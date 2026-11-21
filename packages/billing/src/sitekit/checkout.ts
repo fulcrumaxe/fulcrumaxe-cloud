@@ -114,8 +114,8 @@ export async function createSitekitCheckout(ctx: BillingCtx, input: SitekitCheck
       `sitekit_checkout:${accountId}:${input.siteId}:${input.product}`,
     ]);
     if (!lock.rows[0]?.ok) return CHECKOUT_BUSY_RESULT;
-    const a = await client.query<{ stripe_customer_id: string | null; status: string }>(
-      'SELECT stripe_customer_id, status FROM accounts WHERE id = $1 AND deleted_at IS NULL',
+    const a = await client.query<{ stripe_customer_id: string | null; status: string; hosted_plan_paid: boolean }>(
+      'SELECT stripe_customer_id, status, hosted_plan_paid FROM accounts WHERE id = $1 AND deleted_at IS NULL',
       [accountId],
     );
     const e = await client.query<Entitlement>(
@@ -147,7 +147,8 @@ export async function createSitekitCheckout(ctx: BillingCtx, input: SitekitCheck
     const earlier = await closeEarlierSessions(client, accountId, input, entitlement);
     if (earlier) return earlier;
 
-    const coupon = account.status === 'active' ? sitekitBundleCouponFromEnv() : null;
+    // D#845 ON-22a (ruling 35.2): the bundle discount is for a paid hosted plan; an engine-only subscription is `active` too and gets none.
+    const coupon = account.status === 'active' && account.hosted_plan_paid ? sitekitBundleCouponFromEnv() : null;
     const mode = SITEKIT_PLANS[input.product].checkoutMode;
     let session;
     try {

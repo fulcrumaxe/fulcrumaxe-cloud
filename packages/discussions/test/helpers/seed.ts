@@ -12,8 +12,8 @@ export async function seedAccount(
   opts: { plan?: "starter" | "team" | "scale" } = {},
 ): Promise<void> {
   await admin.query(
-    `INSERT INTO accounts (id, plan, stripe_customer_id, status)
-     VALUES ($1, $2, $3, 'active')`,
+    `INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid)
+     VALUES ($1, $2, $3, 'active', true)`,
     [accountId, opts.plan ?? "starter", `cus_test_${accountId}`],
   );
 }

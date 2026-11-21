@@ -90,6 +90,7 @@ export { listSites, type SiteListCursor, type SiteListItem } from './sitekit/lis
 export { checkNoPaymentLinks, type PaymentLinkCheck } from './sitekit/paymentLinks.js';
 export { SITEKIT_PLANS, SITEKIT_PRICES_PROVISIONAL, type SitekitPlan, type SitekitProduct } from './sitekit/plans.js';
 export type { PriceMap } from './priceMap.js';
+export { setEngineQuantity, MAX_ENGINE_QUANTITY } from './engineItems.js';
 export { NO_REFUNDS_POLICY_VERSION } from './subscriptionSync.js';
 export { createPool, withPlatformOps } from './pg.js';
 // The plan source, re-exported read-only for the workspace's plan list (apps/web does not depend on @fx/spend).

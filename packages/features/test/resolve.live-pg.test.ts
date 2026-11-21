@@ -71,7 +71,7 @@ describe("D#8 C2: resolveExposure() tenant scoping, against real Postgres", () =
   /** accounts + users rows only -- see file header for why that's the whole seed this test needs. */
   async function seedMinimalAccount(accountId: string, userId: string): Promise<void> {
     await adminPool.query(
-      `INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`,
+      `INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`,
       [accountId, `cus_test_${accountId}`],
     );
     await adminPool.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [userId, `${userId}@example.test`]);

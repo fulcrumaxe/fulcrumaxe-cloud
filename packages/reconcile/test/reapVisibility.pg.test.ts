@@ -43,7 +43,7 @@ describe('terminal reap work is visible to the lap rule (real Postgres, platform
     const repoId = randomUUID();
     const itemId = randomUUID();
     const name = `ex-${accountId}-${repoId}-1`;
-    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [accountId, `cus_test_${accountId}`]);
+    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [accountId, `cus_test_${accountId}`]);
     await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, execution_mode) VALUES ($1, $2, $3, 'team', 'sandbox')`, [repoId, accountId, Math.floor(Math.random() * 1_000_000_000)]);
     await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, gh_number, provenance, stage) VALUES ($1, $2, $3, 'feature', 1, 'internal', $4)`, [itemId, accountId, repoId, stage]);
     await admin.query(

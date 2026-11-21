@@ -159,6 +159,16 @@ describe('D#31 API-3d: token, tenant and failed-auth rate limits', () => {
     });
   });
 
+  describe('D#845 ON-22a (ruling 42): the cap follows the paid hosted plan, not the plan row', () => {
+    it('an engine-only account whose row still says Scale is held to the entry tier\'s per-token cap', async () => {
+      expect(apiLimitsFor('scale').perTokenPerMinute).toBeGreaterThan(TOKEN_CAP);
+      const { accountId, userId } = await seedAccountWithMember(admin, { plan: 'scale', hostedPlanPaid: false });
+      const { plaintext } = await mintToken({ accountId, userId });
+      for (let i = 0; i < TOKEN_CAP; i++) expect((await dispatch(bearerRequest('http://localhost/api/v1/account', plaintext))).status).toBe(200);
+      expect((await dispatch(bearerRequest('http://localhost/api/v1/account', plaintext))).status).toBe(429);
+    });
+  });
+
   describe('criterion 4: the limit is plan data, not a constant in limits.ts', () => {
     afterEach(() => {
       // Restore Starter's figure so later tests in this file (and

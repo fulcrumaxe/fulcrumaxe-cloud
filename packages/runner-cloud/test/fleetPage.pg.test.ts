@@ -118,6 +118,17 @@ describe("the fleet page read [pg]", () => {
     expect((await list(f, f.m1, { ...runnerPlan, accountJobLimit: () => ({ jobs: 32, hosted: false }) })).account).toMatchObject({ limit: 32, capacity: 20 });
   });
 
+  it("D#845 ON-22a (ruling 42): the runner limit shown is the runner tier's unless the account carries a paid hosted plan item", async () => {
+    const f = await fresh();
+    await h.admin.query("UPDATE accounts SET plan = 'team', hosted_plan_paid = false WHERE id = $1", [f.accountId]);
+    const asked: string[] = [];
+    const deps = { accountJobLimit: () => ({ jobs: 16, hosted: false }), maxRunners: (plan: string) => (asked.push(plan), 5) };
+    expect((await list(f, f.m1, deps)).account).toMatchObject({ runner_limit: 5 });
+    await h.admin.query("UPDATE accounts SET hosted_plan_paid = true WHERE id = $1", [f.accountId]);
+    await list(f, f.m1, deps);
+    expect([asked[0], asked[asked.length - 1]]).toEqual(["runner", "team"]);
+  });
+
   it("takes a hosted account's own setting over the plan default, and reports no limit (not zero) while the plan data cannot say", async () => {
     const f = await fresh();
     await runner(f, f.a1, { capacity: [8, 0] });

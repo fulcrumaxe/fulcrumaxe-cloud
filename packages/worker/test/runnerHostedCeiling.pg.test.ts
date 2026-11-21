@@ -164,6 +164,15 @@ describe("the account ceiling by plan [pg]", () => {
       expect(result.perRepo.get(repos[1]!)).toBe(2);
     });
 
+    it("D#845 ON-22a (ruling 42): an account whose row still says a hosted plan but carries no paid hosted plan item (engine-only) gets the runner plan's flat figure, not the hosted ceiling", async () => {
+      await admin.query("UPDATE accounts SET plan = 'team', hosted_plan_paid = false WHERE id = $1", [A.accountId]);
+      const runner = await newRunner({ declared: [8, 4] });
+      const ceiling = await accountCeiling(admin, { accountId: A.accountId, claimingRunnerId: runner, nowMs: T0, runnerPlan: flat, hosted: hostedLimitsFromPlanData });
+      expect(ceiling).toEqual({ total: flat.maxConcurrentRunnerJobs, heavy: flat.maxConcurrentHeavyRunnerJobs, perRepo: null });
+      await admin.query("UPDATE accounts SET hosted_plan_paid = true WHERE id = $1", [A.accountId]);
+      expect((await accountCeiling(admin, { accountId: A.accountId, claimingRunnerId: runner, nowMs: T0, runnerPlan: flat, hosted: hostedLimitsFromPlanData })).perRepo).not.toBeNull();
+    });
+
     it("counts a runner that declares 8 light and 4 heavy as 8 in all, however high the setting is (the ceiling itself, not the runner's own cap)", async () => {
       await setting(20, 20);
       const wide = await newRunner({ declared: [8, 4] });

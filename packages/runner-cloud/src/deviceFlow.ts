@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomInt } from "node:crypto";
+import { effectivePlan } from "@fx/plan-data";
 import {
   DEVICE_LINK_WARNING,
   DEVICE_POLL_INTERVAL_SECONDS,
@@ -241,8 +242,9 @@ export async function lookupDeviceCode(deps: SessionDeps, principal: SessionPrin
 export async function approveDeviceCode(deps: SessionDeps, principal: SessionPrincipal, body: unknown): Promise<RunnerHttpResponse> {
   const { hash, parsed } = typedHash(deps, body, DeviceApproveBody);
   const out = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
-    const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [principal.accountId])).rows[0]?.plan;
-    const max = maxRunnersOf(deps, plan);
+    const planRow = (await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [principal.accountId])).rows[0];
+    // D#845 ON-22a (ruling 42): the runner tier's machine limit unless the account carries a paid hosted plan item.
+    const max = maxRunnersOf(deps, planRow === undefined ? undefined : effectivePlan(planRow, "runner"));
     return (await client.query<{ outcome: string; runner_id: string | null }>("SELECT outcome, runner_id FROM runner_device_approve($1, $2, $3)", [hash, parsed.name ?? null, max])).rows[0];
   }).catch(forbidden);
   if (out?.outcome !== "ok") return refuse(out?.outcome ?? "");

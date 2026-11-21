@@ -31,7 +31,7 @@ export async function seedAccountWithRepo(
   const defaultBranch = 'main';
 
   await admin.query(
-    `INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`,
+    `INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`,
     [accountId, `cus_test_${accountId}`],
   );
   await admin.query(
