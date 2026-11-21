@@ -30,6 +30,7 @@ import { findCliStubs } from "../daemon/cliStubs.js";
 import { ENGINE_LINES, engineLineOf, missingCaps, type VmHostFacts } from "../vm/limits.js";
 import { loadSettings } from "../runnerSettings.js";
 import { vmInstallChecks, type VmInstallFacts } from "../vm/doctorChecks.js";
+import { VM_CHECKS, fixText, preflightChecks, probeNetwork, type NetworkPorts, type PreflightFacts } from "../daemon/preflight.js";
 import { updatesLine } from "./update.js";
 import { userUnitInstalled } from "./service.js";
 
@@ -69,6 +70,10 @@ export interface DoctorHost {
   vm?: VmHostFacts | undefined;
   /** D#587 B-5b-3a: whether this build composed a live microVM stack (`liveMicrovmComplete`). Anything but `true` is "not wired", which fails a runner set to `microvm`, never passes it. */
   microvmWired?: boolean | undefined;
+  /** D#845 ON-21: where the preflight list reads the kernel (the bin edge) and resolves names. Left out, no preflight line is printed. */
+  preflight?: { kernel: (input: { uid: number | undefined; stateDir: string }) => Pick<PreflightFacts, "kvm" | "vt" | "cgroup" | "cgroupDelegated" | "diskFreeBytes" | "memAvailableBytes">; lookup: NetworkPorts["lookup"]; /** Replaceable by a test only. */ urls?: NetworkPorts["urls"] } | undefined;
+  /** The cloud origin to reach when the machine is not registered yet (`setup` passes the one it was given). A registration's own origin wins. */
+  cloudOrigin?: string | undefined;
   /** This program's version and real path, for the Updates line. Absent in tests that do not care. */
   update?: { version?: string | undefined; execPath?: string | undefined } | undefined;
 }
@@ -185,21 +190,64 @@ const LOGINCTL = "loginctl";
  * command wrote a user unit does it matter, so only then is `loginctl show-user` asked. The reading is `Linger=yes|no`; an answer that is
  * neither is reported as unchecked, never as a pass.
  */
-async function lingerCheck(host: DoctorHost, line: (level: Level, label: string, detail: string) => void): Promise<void> {
-  if (host.platform !== "linux" || host.home === undefined || host.uid === undefined) return;
-  let installed = false;
+type Linger = "yes" | "no" | "unknown";
+/** `loginctl show-user`'s `Linger=` reading; an answer that is neither yes nor no is unknown. Asked at most once per `doctor` run. */
+function lingerReader(host: DoctorHost): () => Promise<Linger> {
+  let asked: Promise<Linger> | undefined;
+  return () => {
+    asked ??= (async (): Promise<Linger> => {
+      if (host.platform !== "linux" || host.uid === undefined) return "unknown";
+      const result = await host.sandbox.run(LOGINCTL, ["show-user", String(host.uid), "--property=Linger"], LOGINCTL_ENV, LOGINCTL_TIMEOUT_MS);
+      const linger = result.code === 0 && !result.timedOut ? result.stdout.match(/^Linger=(yes|no)$/m)?.[1] : undefined;
+      return linger === "yes" || linger === "no" ? linger : "unknown";
+    })();
+    return asked;
+  };
+}
+
+/** Whether this command wrote a user unit: the only case in which logging out stops the runner. */
+function userUnitHere(host: DoctorHost): boolean {
+  if (host.platform !== "linux" || host.home === undefined || host.uid === undefined) return false;
   try {
-    installed = userUnitInstalled(host.home, host.xdgConfigHome);
+    return userUnitInstalled(host.home, host.xdgConfigHome);
   } catch {
     // fx-swallow-ok: a location that cannot be read is the same as no unit for this advisory check
-    installed = false;
+    return false;
   }
-  if (!installed) return;
-  const result = await host.sandbox.run(LOGINCTL, ["show-user", String(host.uid), "--property=Linger"], LOGINCTL_ENV, LOGINCTL_TIMEOUT_MS);
-  const linger = result.code === 0 && !result.timedOut ? result.stdout.match(/^Linger=(yes|no)$/m)?.[1] : undefined;
+}
+
+async function lingerCheck(host: DoctorHost, read: () => Promise<Linger>, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  if (!userUnitHere(host)) return;
+  const linger = await read();
   if (linger === "no") line("WARN", "Service", `Stops when you log out: run loginctl enable-linger ${host.userName ?? "<user>"} or use service install --system`);
   else if (linger === "yes") line("PASS", "Service", "the user service keeps running after you log out (lingering is on)");
   else line("INFO", "Service", "a user service is installed; whether it survives a logout could not be checked (loginctl did not answer)");
+}
+
+/**
+ * D#845 ON-21: the preflight list (`daemon/preflight.ts`) as doctor lines: one INFO line with the count, then one line per check that is not `ok`, each as
+ * `<code>: <fix>`. A check about running a microVM is a WARN unless the settings ask for the microVM engine (then it is a FAIL), so a machine without KVM
+ * keeps the exit code it had; a check about reaching the cloud, names, time or disk is a FAIL. Lingering is left to the Service line when a user unit is
+ * installed, which says the same thing. Only the codes and the fixed fix lines are printed: no host name, address or path.
+ */
+async function preflightCheck(ctx: CommandContext, host: DoctorHost, origin: string | undefined, readLinger: () => Promise<Linger>, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  if (host.platform !== "linux" || host.preflight === undefined) return;
+  let kernel: ReturnType<NonNullable<DoctorHost["preflight"]>["kernel"]>;
+  try {
+    kernel = host.preflight.kernel({ uid: host.uid, stateDir: ctx.stateDir });
+  } catch {
+    // fx-swallow-ok: a reader that throws is a set of readings that could not be made; each check then says it was not run
+    kernel = { kvm: "unknown", vt: "unknown", cgroup: "unknown", cgroupDelegated: "unknown", diskFreeBytes: undefined, memAvailableBytes: undefined };
+  }
+  const network = await probeNetwork({ fetchFn: ctx.fetchFn, lookup: host.preflight.lookup, now: ctx.now, cloudOrigin: origin, urls: host.preflight.urls });
+  const items = preflightChecks({ ...kernel, ...network, linger: await readLinger() });
+  const microvm = loadSettings(ctx.stateDir).sandboxEngine === "microvm";
+  const kept = items.filter((item) => item.level !== "ok" && !(item.check === "linger" && userUnitHere(host)));
+  line("INFO", "Preflight", `${items.filter((item) => item.level === "ok").length} of ${items.length} checks ok${kept.length === 0 ? "" : `, ${kept.length} to look at`}`);
+  for (const item of kept) {
+    const level: Level = item.level === "fail" && (!VM_CHECKS.has(item.check) || microvm) ? "FAIL" : "WARN";
+    line(level, "Preflight", `${item.code}: ${fixText(item, host.userName)}`);
+  }
 }
 
 /**
@@ -357,7 +405,9 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
   await limitsCheck(host, line);
   vmEngineCheck(ctx, host, line);
-  await lingerCheck(host, line);
+  const readLinger = lingerReader(host);
+  await preflightCheck(ctx, host, registration?.cloud_origin ?? host.cloudOrigin, readLinger, line);
+  await lingerCheck(host, readLinger, line);
   if (host.vmInstall !== undefined) for (const c of vmInstallChecks(await host.vmInstall(), { microvm: loadSettings(ctx.stateDir).sandboxEngine === "microvm" })) line(c.level, c.label, c.detail);
 
   // What a job's agent can run for a project's own tests (D#6 R4d-3), on the runner's own PATH. Missing node is a warning, not a failure: not every repository needs it.

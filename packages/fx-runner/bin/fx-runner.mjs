@@ -29,7 +29,8 @@ import { interopEntryPresent } from "../src/sandbox/platform.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
 import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
-import { vmHostFacts, vmHostFactsWithHelper } from "../scripts/vm-facts.mjs";
+import { readMemAvailableBytes, vmHostFacts, vmHostFactsWithHelper } from "../scripts/vm-facts.mjs";
+import { kernelFacts, resolver } from "../scripts/preflight-facts.mjs";
 import { createVmInstallHosts } from "../scripts/vm-install-host.mjs";
 import { buildRootArgv } from "../src/vm/install.js";
 import { createHelperSandboxes } from "../src/vm/helperSandboxes.js";
@@ -400,7 +401,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), microvmWired: liveMicrovmComplete(microvmParts), vmInstall: createVmInstallFacts({ tuf: vmTufPort }) },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), microvmWired: liveMicrovmComplete(microvmParts), vmInstall: createVmInstallFacts({ tuf: vmTufPort }), preflight: { kernel: (input) => kernelFacts({ ...input, readMemAvailableBytes: () => readMemAvailableBytes() }), lookup: resolver } },
   vmHost: vmBuildHost,
   // D#845 ON-3: `setup` and a code-less `register`. Ctrl-C is listened for only once one of them asks (every other command keeps the default), the one question is read from the
   // terminal only (a pipe or a timeout is no answer), and the service start is two fixed programs with a fixed environment, no shell.
