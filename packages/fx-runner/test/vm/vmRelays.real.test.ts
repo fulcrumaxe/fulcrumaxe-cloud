@@ -73,6 +73,20 @@ def git(url):
 print(json.dumps({"direct": connect("${DIRECT}"), "outside": connect("${OUTSIDE}"), "rewrittenTunnel": connect("${REWRITTEN}"), "rewritten": get("${REWRITTEN}"), "outsideReverse": get("${OUTSIDE}"), "model": get("${MODEL_HOST}"), "git": git("https://${GIT_HOST}/fx-test/repo.git"), "gitOutside": git("https://${OUTSIDE}/fx-test/repo.git")}))
 `;
 
+/** The guest CLI's own request to the model host, with the headers a CLI sends: its `authorization` and an `x-api-key`. */
+const PROBE_AUTH = `import json, socket
+s = socket.create_connection(("127.0.0.1", 80), timeout=60)
+s.sendall(("GET /auth HTTP/1.0\\r\\nHost: ${MODEL_HOST}\\r\\nauthorization: Bearer guest-cli-token\\r\\nx-api-key: guest-api-key\\r\\nConnection: close\\r\\n\\r\\n").encode())
+data = b""
+while True:
+    d = s.recv(65536)
+    if not d: break
+    data += d
+s.close()
+head, _, body = data.partition(b"\\r\\n\\r\\n")
+print(json.dumps({"model": {"status": head.split(b"\\r\\n")[0].decode(), "body": body.decode()}}))
+`;
+
 type Answer = { status: string; echo?: string; body?: string };
 
 describe.skipIf(!ready)("both egress relays of the image, from a program in a real guest (criterion 26a)", () => {
@@ -84,7 +98,7 @@ describe.skipIf(!ready)("both egress relays of the image, from a program in a re
   let sdk: ReturnType<typeof createDaemonSdk>;
   let tunnels: Decision[];
   let reverse: ReverseDecision[];
-  let upstreamSaw: Array<{ host: string | undefined; url: string | undefined; header: string | string[] | undefined; credential: string | string[] | undefined }>;
+  let upstreamSaw: Array<{ host: string | undefined; url: string | undefined; header: string | string[] | undefined; credential: string | string[] | undefined; authorization?: string | string[]; apiKey?: string | string[] }>;
   const sockets = new Set<net.Socket>();
 
   const pkt = (text: string): string => `${(text.length + 4).toString(16).padStart(4, "0")}${text}`;
@@ -97,8 +111,14 @@ describe.skipIf(!ready)("both egress relays of the image, from a program in a re
     // one certificate for every name the host side connects to; the endpoint checks it against the NAME it was asked for
     const cert = generateSelfSignedCert(REWRITTEN, 1, { dnsNames: [REWRITTEN, MODEL_HOST, GIT_HOST] });
     upstream = https.createServer({ key: cert.keyPem, cert: cert.certPem }, (req, res) => {
-      upstreamSaw.push({ host: req.headers.host, url: req.url, header: req.headers[HEADER], credential: req.headers["authorization"] ?? req.headers["x-api-key"] });
+      upstreamSaw.push({ host: req.headers.host, url: req.url, header: req.headers[HEADER], credential: req.headers["authorization"] ?? req.headers["x-api-key"], authorization: req.headers["authorization"], apiKey: req.headers["x-api-key"] });
       req.resume();
+      // the model stand-in requires the guest's own authorization on /auth, as the real model API requires its credential
+      if (req.headers.host === MODEL_HOST && req.url === "/auth" && req.headers["authorization"] === undefined) {
+        res.writeHead(401);
+        res.end("missing authorization");
+        return;
+      }
       if (req.headers.host === GIT_HOST) {
         // a git smart-HTTP advertisement for a repository with one branch
         res.writeHead(200, { "content-type": "application/x-git-upload-pack-advertisement" });
@@ -143,10 +163,10 @@ describe.skipIf(!ready)("both egress relays of the image, from a program in a re
   });
 
   /** Makes a VM under `networkPolicy`, runs the probe in it as the job's tools would be run (the runner's guest environment) and answers what each case got. */
-  async function probe(networkPolicy: unknown): Promise<Record<string, Answer>> {
+  async function probe(networkPolicy: unknown, program = PROBE): Promise<Record<string, Answer>> {
     const name = `relay-${randomBytes(6).toString("hex")}`;
     sandbox = await sdk.create({ teamId: "local", projectId: "local", token: "local", name, image: "microvm", timeout: 10 * 60_000, persistent: false, resources: { vcpus: 1 }, tags: {}, networkPolicy });
-    await sandbox.writeFiles([{ path: "/tmp/relay-probe.py", content: PROBE, mode: 0o755 }]);
+    await sandbox.writeFiles([{ path: "/tmp/relay-probe.py", content: program, mode: 0o755 }]);
     const command = await sandbox.runCommand({ cmd: "/usr/bin/python3", args: ["/tmp/relay-probe.py"], env: guestEnvOf({}), detached: true });
     let out = "";
     let errText = "";
@@ -201,5 +221,16 @@ describe.skipIf(!ready)("both egress relays of the image, from a program in a re
     expect(reverse.some((d) => d.outcome === "not_allowed" && d.host === GIT_HOST)).toBe(true);
     expect(tunnels.every((d) => d.outcome !== "allow")).toBe(true);
     expect(upstreamSaw.map((s) => s.host)).toEqual([MODEL_HOST]);
+  }, 420_000);
+
+  it("B-5b-RELAY-AUTH: the guest CLI's authorization reaches the model host through the plain route, and its x-api-key does not", async () => {
+    const answered = await probe({ allow: [MODEL_HOST] }, PROBE_AUTH);
+    // the stand-in refuses a request with no authorization, so a 200 means the header made it through the image's relay and the host's reverse endpoint
+    expect(answered["model"]!.status).toMatch(/^HTTP\/1\.[01] 200 OK$/);
+    expect(upstreamSaw).toHaveLength(1);
+    expect(upstreamSaw[0]!.host).toBe(MODEL_HOST);
+    expect(upstreamSaw[0]!.authorization).toBe("Bearer guest-cli-token");
+    expect(upstreamSaw[0]!.apiKey).toBeUndefined();
+    expect(reverse).toEqual([{ outcome: "allow", host: MODEL_HOST }]);
   }, 420_000);
 });
