@@ -11,24 +11,13 @@ import { randomBytes } from "node:crypto";
 import { lstatSync, mkdirSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { readPrivateFile, writePrivateFile } from "../config.js";
+import { compareVersions, isVersion } from "./release.js";
 
 export const UPDATE_STATE_FILE = "update.json";
 export const BINARY_NAME = "fx-runner";
 
-const SEMVER = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
-
-/** `x.y.z` only: a build tag, a pre-release or anything else is not a version this updater will install or compare. */
-export function isVersion(text: unknown): text is string {
-  return typeof text === "string" && SEMVER.test(text);
-}
-
-/** Negative when `a` is older than `b`, zero when equal, positive when newer. Both must pass `isVersion`. */
-export function compareVersions(a: string, b: string): number {
-  const x = a.split(".").map(Number);
-  const y = b.split(".").map(Number);
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return (x[i] as number) - (y[i] as number);
-  return 0;
-}
+/** The version rules live in release.ts (dependency-free, so the cloud's install route can use them); every existing importer still gets them from here. */
+export { compareVersions, isVersion };
 
 export const versionsDir = (stateDir: string): string => path.join(stateDir, "versions");
 export const binDir = (stateDir: string): string => path.join(stateDir, "bin");

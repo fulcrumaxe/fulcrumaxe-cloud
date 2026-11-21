@@ -86,6 +86,7 @@ export default defineWorkspace([
   "packages/pipeline",
   "packages/plan-data",
   "packages/reconcile",
+  "packages/release-verify",
   "packages/roles",
   "packages/runner",
   "packages/runner-cloud",

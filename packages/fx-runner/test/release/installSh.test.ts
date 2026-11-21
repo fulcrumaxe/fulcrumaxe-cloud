@@ -55,7 +55,7 @@ afterAll(() => {
   if (SHIM_DIR !== undefined) rmSync(SHIM_DIR, { recursive: true, force: true });
 });
 const SPAWN_TIMEOUT_MS = 20_000; // under the 30 s case timeout, so a hang is killed and reported by the harness, not left to vitest
-const BASE_TOOLS = ["grep", "sed", "tr", "cut", "head", "mktemp", "mkdir", "rmdir", "rm", "mv", "ln", "chmod", "cat"] as const;
+const BASE_TOOLS = ["grep", "sed", "tr", "cut", "head", "mktemp", "mkdir", "rmdir", "rm", "mv", "ln", "chmod", "cat", "wc", "readlink"] as const;
 
 type Platform = "darwin-arm64" | "darwin-x64" | "linux-x64" | "linux-arm64";
 const PLATFORMS: Platform[] = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
@@ -79,11 +79,13 @@ exit 64
 `;
 }
 
-function render(over: { version?: string; sha?: Partial<Record<Platform, string>>; text?: string } = {}): string {
+function render(over: { version?: string; sha?: Partial<Record<Platform, string>>; size?: Partial<Record<Platform, string>>; text?: string } = {}): string {
   let text = over.text ?? SCRIPT_TEXT;
   text = text.replace("@FX_VERSION@", over.version ?? VERSION);
   for (const p of PLATFORMS) text = text.replace(`@FX_SHA256_${p.toUpperCase().replace("-", "_")}@`, over.sha?.[p] ?? sha(artifactFor(p)));
-  return text;
+  for (const p of PLATFORMS) text = text.replace(`@FX_SIZE_${p.toUpperCase().replace("-", "_")}@`, over.size?.[p] ?? String(Buffer.byteLength(artifactFor(p))));
+  // The address is only there to be a well-formed one: every case reaches the fixture server through the FX_INSTALL_BASE_URL seam.
+  return text.replace("@FX_TARGET_BASE_URL@", "https://releases.example.invalid/").replace("@FX_TRUSTED_ROOT_SHA256@", "0".repeat(64));
 }
 
 interface Fixture {
@@ -373,7 +375,7 @@ describe.each(shells)("install.sh under %s", (shellName, shellPath) => {
       // the real curl flags were used, one request to the release path followed the redirect, and nothing else was fetched
       const curl = log(f, "curl");
       expect(curl).toHaveLength(1);
-      expect(curl[0]).toMatch(/--proto =https --proto-redir =https --tlsv1\.2 -fsSL -o \S+ https:\/\/127\.0\.0\.1:\d+\/v0\.1\.0\/fx-runner-linux-x64$/);
+      expect(curl[0]).toMatch(/--proto =https --proto-redir =https --tlsv1\.2 --max-filesize \d+ -fsSL -o \S+ https:\/\/127\.0\.0\.1:\d+\/v0\.1\.0\/fx-runner-linux-x64$/);
       expect(requests).toEqual(["/v0.1.0/fx-runner-linux-x64", "/objects/v0.1.0/fx-runner-linux-x64"]);
       expect(log(f, "doctor")).toEqual(["doctor --sandbox-only"]);
       expect(log(f, "sudo")).toEqual([]);
@@ -388,9 +390,99 @@ describe.each(shells)("install.sh under %s", (shellName, shellPath) => {
       expect(existsSync(installed(f))).toBe(true);
     }, T);
 
+    it("passes curl the baked size as its cap and links ~/.local/bin/fx-runner to the state directory's link, as the last step", async () => {
+      serveAll();
+      const f = fixture({ withDeps: true });
+      const r = await run(f, sh);
+      expect(r.code, r.out).toBe(0);
+      expect(log(f, "curl")[0]).toContain(`--max-filesize ${Buffer.byteLength(artifactFor("linux-x64"))} `);
+      const user = path.join(f.home, ".local", "bin", "fx-runner");
+      expect(lstatSync(user).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(user)).toBe(link(f));
+      expect(statSync(user).isFile()).toBe(true); // it resolves through both links to the installed file
+      expect(statSync(path.join(f.home, ".local", "bin")).mode & 0o777).toBe(0o755);
+    }, T);
+
+    it("a download longer than the baked size is refused (exit 1): the cap stops an announced length, the length check stops the rest", async () => {
+      serveAll();
+      served.set("/v0.1.0/fx-runner-linux-x64", Buffer.from(`${artifactFor("linux-x64")}${"#".repeat(4096)}\n`));
+      const f = fixture({ withDeps: true });
+      const r = await run(f, sh);
+      expect(r.code).toBe(1);
+      nothingInstalled(f);
+      expect(existsSync(path.join(f.home, ".local"))).toBe(false);
+      expect(log(f, "doctor")).toEqual([]);
+    }, T);
+
+    it("a download shorter than the baked size is refused by the length check before its hash is looked at", async () => {
+      serveAll();
+      served.set("/v0.1.0/fx-runner-linux-x64", Buffer.from(artifactFor("linux-x64").slice(0, -10)));
+      const f = fixture({ withDeps: true });
+      const r = await run(f, sh);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("bytes, not the");
+      expect(r.stderr).not.toContain("does not match the checksum");
+      nothingInstalled(f);
+    }, T);
+
+    it("refuses (exit 1) before downloading anything when ~/.local/bin/fx-runner is a file or a directory, and leaves it alone", async () => {
+      for (const kind of ["file", "directory"]) {
+        serveAll();
+        const f = fixture({ withDeps: true });
+        const user = path.join(f.home, ".local", "bin", "fx-runner");
+        mkdirSync(path.dirname(user), { recursive: true });
+        if (kind === "file") writeFileSync(user, "mine\n");
+        else mkdirSync(user);
+        const r = await run(f, sh);
+        expect(r.code, r.out).toBe(1);
+        expect(r.stderr).toContain("is not a symbolic link");
+        expect(requests).toEqual([]);
+        nothingInstalled(f);
+        expect(kind === "file" ? readFileSync(user, "utf8") : lstatSync(user).isDirectory()).toEqual(kind === "file" ? "mine\n" : true);
+      }
+    }, T);
+
+    it("replaces an older symbolic link of its own, and a rerun changes nothing", async () => {
+      serveAll();
+      const f = fixture({ withDeps: true });
+      const user = path.join(f.home, ".local", "bin", "fx-runner");
+      mkdirSync(path.dirname(user), { recursive: true });
+      symlinkSync("/nonexistent/old-fx-runner", user);
+      expect((await run(f, sh)).code).toBe(0);
+      expect(readlinkSync(user)).toBe(link(f));
+      const before = snapshot(f.home);
+      expect((await run(f, sh)).code).toBe(0);
+      expect(snapshot(f.home)).toEqual(before);
+    }, T);
+
+    it("uninstall removes the ~/.local/bin link when it points at this installation, and leaves one that points elsewhere", async () => {
+      serveAll();
+      const f = fixture({ withDeps: true });
+      const user = path.join(f.home, ".local", "bin", "fx-runner");
+      expect((await run(f, sh)).code).toBe(0);
+      expect((await run(f, sh, ["--uninstall"])).code).toBe(0);
+      expect(readdirSync(path.dirname(user))).not.toContain("fx-runner");
+      symlinkSync("/somewhere/else/fx-runner", user);
+      expect((await run(f, sh, ["--uninstall"])).code).toBe(0);
+      expect(readlinkSync(user)).toBe("/somewhere/else/fx-runner");
+    }, T);
+
+    it("refuses a copy with a missing or malformed size or download address (exit 2) before any request", async () => {
+      for (const text of [render({ size: { "linux-x64": "@FX_SIZE_LINUX_X64@" } }), render({ size: { "linux-arm64": "12ab" } }), render({ size: { "darwin-x64": "0" } }), render({ text: SCRIPT_TEXT.replace('FX_TARGET_BASE_URL="@FX_TARGET_BASE_URL@"', 'FX_TARGET_BASE_URL="http://insecure.example/"') })]) {
+        serveAll();
+        const f = fixture({ withDeps: true });
+        writeFileSync(f.script, text);
+        const r = await run(f, sh);
+        expect(r.code, r.out).toBe(2);
+        expect(requests).toEqual([]);
+        nothingInstalled(f);
+      }
+    }, T);
+
     it("a tampered download exits 1, installs nothing and leaves no staging directory", async () => {
       serveAll();
-      served.set("/v0.1.0/fx-runner-linux-x64", Buffer.from(`${artifactFor("linux-x64")}echo pwned\n`));
+      // The same length as the real file, so it is the checksum that refuses it.
+      served.set("/v0.1.0/fx-runner-linux-x64", Buffer.from(artifactFor("linux-x64").replace("fixture linux-x64", "pwned!! linux-x64")));
       const f = fixture({ withDeps: true });
       const r = await run(f, sh);
       expect(r.code).toBe(1);
@@ -426,7 +518,7 @@ describe.each(shells)("install.sh under %s", (shellName, shellPath) => {
       const broken = artifactFor("linux-x64", 1);
       served.set("/v0.1.0/fx-runner-linux-x64", Buffer.from(broken));
       const f = fixture({ withDeps: true });
-      writeFileSync(f.script, render({ sha: { "linux-x64": sha(broken) } }));
+      writeFileSync(f.script, render({ sha: { "linux-x64": sha(broken) }, size: { "linux-x64": String(Buffer.byteLength(broken)) } }));
       const r = await run(f, sh);
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("does not run on this machine");

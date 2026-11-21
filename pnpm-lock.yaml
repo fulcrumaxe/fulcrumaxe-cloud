@@ -181,6 +181,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@fulcrumaxe/release-verify':
+        specifier: workspace:*
+        version: link:../../packages/release-verify
       '@fulcrumaxe/runner-protocol':
         specifier: workspace:*
         version: link:../../packages/runner-protocol
@@ -764,6 +767,9 @@ importers:
 
   packages/fx-runner:
     dependencies:
+      '@fulcrumaxe/release-verify':
+        specifier: workspace:*
+        version: link:../release-verify
       '@fulcrumaxe/runner-protocol':
         specifier: workspace:*
         version: link:../runner-protocol
@@ -1227,6 +1233,25 @@ importers:
       stripe:
         specifier: ^17.4.0
         version: 17.7.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+
+  packages/release-verify:
+    dependencies:
+      tuf-js:
+        specifier: 6.0.0
+        version: 6.0.0(supports-color@10.2.2)
+    devDependencies:
+      '@tufjs/models':
+        specifier: 5.0.0
+        version: 5.0.0
+      '@types/node':
+        specifier: ^24.19.0
+        version: 24.19.0
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
