@@ -599,9 +599,29 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
       const facts = readHostFacts(engine);
       // D#749 V2b: the build's capabilities and, only while their settings and probe pass, `browser_chrome_v1` and `deploy_order_v1`. Said again when that set changes (see `betweenJobs`).
-      const helloMessage = async () => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(await verifyLocal.capabilities())] });
+      // D#845 ON-6b: whether the machine holds model credentials. An API key is held by definition. A subscription runner holds them while the doctor's own Claude check passes
+      // (the CLI is there, its version is supported and `auth status` says signed in); the same `inspect` answers both. Read at most once a minute (it starts the CLI), and a
+      // reading that fails counts as not ready (fail closed). `betweenJobs` compares it with what the last hello said, so a sign-in or sign-out is said on the next check.
+      let modelAuthAt = Number.NEGATIVE_INFINITY;
+      let modelAuthValue = false;
+      const modelAuth = async (): Promise<boolean> => {
+        if (credentials.mode === "api_key") return true;
+        const nowMs = clock.now().getTime();
+        if (nowMs - modelAuthAt < 60_000) return modelAuthValue;
+        modelAuthAt = nowMs;
+        try {
+          const report = await host.engine.inspect({ binaryPath, envOptions, stateDir, loginMode: "subscription" });
+          modelAuthValue = report.versionSupported && report.login === "yes";
+        } catch {
+          // fx-swallow-ok: a reading that cannot be made is "not signed in as far as we know"; the next minute asks again
+          modelAuthValue = false;
+        }
+        return modelAuthValue;
+      };
+      const helloMessage = async () => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(await verifyLocal.capabilities())] });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
+      let advertisedAuth = firstHello.model_auth_present;
       let advertCheckedAt = clock.now().getTime();
       const hello = await client.hello(firstHello).catch(() => undefined);
       // D#6 RUNNER-WAKE: the hello's grant, if the cloud sent one, seeds the wake state; every claim reply refreshes it.
@@ -700,9 +720,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           const nowMs = clock.now().getTime();
           const due = helloAnswered && nowMs - advertCheckedAt >= 30_000;
           if (due) advertCheckedAt = nowMs;
-          if (due && JSON.stringify([...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(await verifyLocal.capabilities())]) !== advertised) {
+          if (due && (JSON.stringify([...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(await verifyLocal.capabilities())]) !== advertised || (await modelAuth()) !== advertisedAuth)) {
             const changed = await helloMessage();
             advertised = JSON.stringify(changed.capabilities);
+            advertisedAuth = changed.model_auth_present;
             const answer = await client.hello(changed).catch(() => undefined);
             if (answer?.kind === "ok") takeHello(answer);
             else helloAnswered = false;
