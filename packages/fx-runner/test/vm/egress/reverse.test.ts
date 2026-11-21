@@ -334,10 +334,53 @@ describe("reverse endpoint: bodies and streaming", () => {
   });
 });
 
+describe("reverse endpoint: a host listed with no rules (the policy a job builds, a plain list of hosts)", () => {
+  const LIST = { allow: ["api.example.com", "pkg.example.com"] };
+  it("serves a listed host as itself: the guest's path, the host's name for the certificate, no header added, and the guest's credentials still dropped", async () => {
+    const h = await start({}, ANSWERS, LIST);
+    const r = await get(h, "api.example.com", "/v1/messages?beta=true", "Authorization: Bearer guest\r\nx-api-key: guest-key\r\nanthropic-version: 2023-06-01\r\n");
+    expect(r.status).toBe(200);
+    const s = seen[0]!;
+    expect(s.url).toBe("/v1/messages?beta=true");
+    expect(s.headers.host).toBe("api.example.com");
+    expect(s.headers["anthropic-version"]).toBe("2023-06-01");
+    expect(s.headers["x-forwarded-host"]).toBeUndefined();
+    for (const name of ["authorization", "x-api-key"]) expect(s.headers[name], name).toBeUndefined();
+    expect(h.lookups).toEqual(["api.example.com"]);
+    expect(h.decisions).toEqual([{ outcome: "allow", host: "api.example.com" }]);
+  });
+  it("still refuses a host that is not listed (exact match: a subdomain, a parent and a lookalike are other hosts) and resolves and sends nothing for it", async () => {
+    const h = await start({}, ANSWERS, LIST);
+    for (const host of ["evil.example.com", "sub.api.example.com", "example.com", "api.example.com.evil.test"]) {
+      const r = await get(h, host);
+      expect({ host, status: r.status, reason: refused(r) }).toEqual({ host, status: 403, reason: "not_allowed" });
+    }
+    expect(h.lookups).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+  it("refuses everything under deny-all and under an empty list", async () => {
+    for (const policy of ["deny-all", { allow: [] }]) {
+      const h = await start({}, ANSWERS, policy, `sb-${JSON.stringify(policy).length}`);
+      expect(refused(await get(h, "api.example.com"))).toBe("not_allowed");
+      expect(seen).toEqual([]);
+    }
+  });
+  it("applies the same address checks as the tunnel: a listed host that resolves to a private address is refused", async () => {
+    const h = await start({}, { "api.example.com": ["10.0.0.5"] }, LIST);
+    const r = await get(h, "api.example.com");
+    expect({ status: r.status, reason: refused(r) }).toEqual({ status: 403, reason: "blocked_address" });
+    expect(seen).toEqual([]);
+  });
+  it("does not widen a host whose rules it cannot apply: match and two-rule hosts stay refused", async () => {
+    const h = await start();
+    expect(refused(await get(h, "match.example.com"))).toBe("unsupported_rules");
+    expect(refused(await get(h, "two.example.com"))).toBe("unsupported_rules");
+  });
+});
+
 describe("reverse endpoint: what is refused", () => {
   const cases: Array<[string, string, string, number]> = [
     ["a host not in the policy", "GET / HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n", "not_allowed", 403],
-    ["a direct host (no rewrite, so the tunnel's job)", "GET / HTTP/1.1\r\nHost: pkg.example.com\r\nConnection: close\r\n\r\n", "unsupported_rules", 403],
     ["a rule with match", "GET / HTTP/1.1\r\nHost: match.example.com\r\nConnection: close\r\n\r\n", "unsupported_rules", 403],
     ["two rules", "GET / HTTP/1.1\r\nHost: two.example.com\r\nConnection: close\r\n\r\n", "unsupported_rules", 403],
     ["an absolute-form URL for another host", "GET http://evil.example.com/ HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n", "host_mismatch", 400],

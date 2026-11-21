@@ -66,6 +66,53 @@ describe("the approved check runs in the guest", () => {
     expect(outcome.body).toMatchObject({ exit_code: null, timed_out: true });
   }, 20_000);
 
+  /** A guest the way the production daemon's commands behave: a command's output is handed over when the command ends, not while it runs. */
+  const endDelivered = (guest: SdkSandbox): SdkSandbox =>
+    ({
+      ...guest,
+      async runCommand(params: Parameters<SdkSandbox["runCommand"]>[0]) {
+        const command = await guest.runCommand(params);
+        return {
+          ...command,
+          async *logs() {
+            await command.wait();
+            yield* command.logs();
+          },
+        };
+      },
+    }) as unknown as SdkSandbox;
+
+  it("a timed-out check keeps the bounded output it produced before the limit, even when the guest hands output over only when the command ends", async () => {
+    const g = guestWith({ "scripts/check.sh": "echo printed-before-the-limit\necho and-this-on-stderr >&2\nwhile :; do :; done\n" });
+    const outcome = await runGuestCheck({ check: { argv: ["sh", "scripts/check.sh"], dev_shell: false, timeout_s: 1 }, guest: endDelivered(g.guest), baseFile: baseFiles({}), now: NOW, paths: g.paths });
+    expect(outcome.body).toMatchObject({ exit_code: null, timed_out: true });
+    const output = outcome.body.summary.split(`${CHECK_HEADER_END}\n`)[1];
+    expect(output).toContain("printed-before-the-limit");
+    expect(output).toContain("and-this-on-stderr");
+    expect(Buffer.byteLength(outcome.body.summary)).toBeLessThanOrEqual(CHECK_SUMMARY_MAX_BYTES);
+  }, 30_000);
+
+  it("a command that prints a flood and then outlives its limit keeps only the end of what it printed", async () => {
+    const g = guestWith({ "scripts/check.sh": "i=0\nwhile [ $i -lt 4000 ]; do echo \"line-$i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i+1)); done\nwhile :; do :; done\n" });
+    const outcome = await runGuestCheck({ check: { argv: ["sh", "scripts/check.sh"], dev_shell: false, timeout_s: 2 }, guest: endDelivered(g.guest), baseFile: baseFiles({}), now: NOW, paths: g.paths });
+    expect(outcome.body.timed_out).toBe(true);
+    expect(outcome.body.summary).toContain("line-3999");
+    expect(outcome.body.summary).not.toContain("line-0 ");
+    expect(Buffer.byteLength(outcome.body.summary)).toBeLessThanOrEqual(CHECK_SUMMARY_MAX_BYTES);
+  }, 30_000);
+
+  it("a guest that never hands the output over does not hold a timed-out check past its limit by more than the drain wait", async () => {
+    const g = guestWith({ "scripts/check.sh": "echo started\nwhile :; do :; done\n" });
+    const silent = { ...g.guest, async runCommand(params: Parameters<SdkSandbox["runCommand"]>[0]) {
+      const command = await g.guest.runCommand(params);
+      return { ...command, async *logs() { await new Promise(() => undefined); }, async wait() { return new Promise(() => undefined); } };
+    } } as unknown as SdkSandbox;
+    const began = Date.now();
+    const outcome = await runGuestCheck({ check: { argv: ["sh", "scripts/check.sh"], dev_shell: false, timeout_s: 1 }, guest: silent, baseFile: baseFiles({}), now: NOW, paths: g.paths });
+    expect(outcome.body).toMatchObject({ exit_code: null, timed_out: true });
+    expect(Date.now() - began).toBeLessThan(25_000);
+  }, 40_000);
+
   it("the vector goes in as separate arguments: nothing is parsed by a shell, and the environment is the guest's closed one", async () => {
     const g = guestWith({ "scripts/check.sh": "echo \"$1\"\n" });
     const odd = "$(touch pwned);`touch pwned2`";
