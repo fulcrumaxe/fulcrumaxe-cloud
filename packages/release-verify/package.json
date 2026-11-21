@@ -1,0 +1,27 @@
+{
+  "name": "@fulcrumaxe/release-verify",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "The one verifier of the runner's signed release metadata (the TUF client, the build trust, the release selection) and the one renderer of install.sh. Neutral on purpose: the local runner uses it for its own updates, and the cloud's install route uses it to bake verified facts into the script it serves, so neither imports the other.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "tuf-js": "6.0.0"
+  },
+  "devDependencies": {
+    "@tufjs/models": "5.0.0",
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

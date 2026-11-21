@@ -13,6 +13,7 @@
     "typecheck": "node scripts/copy-workspace.mjs && node scripts/build-plane-publish.mjs && tsc --noEmit"
   },
   "dependencies": {
+    "@fulcrumaxe/release-verify": "workspace:*",
     "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/api": "workspace:*",
     "@fx/billing": "workspace:*",

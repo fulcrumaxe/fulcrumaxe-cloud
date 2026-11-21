@@ -63,12 +63,15 @@ describe("boundary: what the source may import, and every workspace import is de
   // D#694 B7-1: planePushGithub.ts imports the two queue documents it sends (runner-protocol keeps the strings; a test in @fx/github holds them equal to the pinned originals).
   const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/conflictAttest.ts", "src/daemon/conflictFacts.ts", "src/daemon/orderedFacts.ts", "src/daemon/planeMerge.ts", "src/daemon/planePush.ts", "src/daemon/planePushGithub.ts"];
 
-  it("src imports only itself, node built-ins, the protocol package and the TUF client", () => {
+  // The TUF client, the build trust and the release selection live in the neutral @fulcrumaxe/release-verify (D#845 ON-4a: the web app must not import this package, so the shared verifier cannot live here).
+  const RELEASE_VERIFY = /^@fulcrumaxe\/release-verify(?:\/(?:tuf|pinnedFetcher|buildConfig|trustedRoot|release))?$/;
+
+  it("src imports only itself, node built-ins, the protocol package, the shared release verifier and the TUF client", () => {
     const violations: string[] = [];
     for (const file of sourceFiles) {
       for (const match of readFileSync(file, "utf8").matchAll(specifier)) {
         const spec = match[1]!;
-        const ok = spec.startsWith("node:") || (spec.startsWith(".") && path.resolve(path.dirname(file), spec).startsWith(PACKAGE_DIR + path.sep)) || spec === "@fulcrumaxe/runner-protocol" || spec === PLANE_PUSH_SUBPATH || THIRD_PARTY.has(spec);
+        const ok = spec.startsWith("node:") || (spec.startsWith(".") && path.resolve(path.dirname(file), spec).startsWith(PACKAGE_DIR + path.sep)) || spec === "@fulcrumaxe/runner-protocol" || spec === PLANE_PUSH_SUBPATH || THIRD_PARTY.has(spec) || RELEASE_VERIFY.test(spec);
         if (!ok) violations.push(`${path.relative(PACKAGE_DIR, file)}: ${spec}`);
       }
     }
