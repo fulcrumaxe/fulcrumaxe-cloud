@@ -15,7 +15,28 @@ import type { GuestBinding, GuestLaunch } from "./guestRuntime.js";
 import { JobToken, JobTokenError, type JobTokenOptions, type TokenSandbox } from "./jobToken.js";
 import type { SdkSandbox } from "./sdkSlice.js";
 
-interface Bound { sandbox: TokenSandbox; token: JobToken }
+/** The sinks one run's guest events go to: its usage gate and its relay (the OS-sandbox path's `onLocalEvent` and `onNearLimit`). */
+export interface RunEventHooks {
+  onLocalEvent: NonNullable<GuestBinding["onLocalEvent"]>;
+  onNearLimit: NonNullable<GuestBinding["onNearLimit"]>;
+}
+
+/**
+ * The late-bound source of `RunEventHooks`: the entry point's stack is built before the run's usage gate and relay exist, so `run` attaches the factory once they do. A VM made before
+ * that, or by a build that never attaches, is refused (`guest_hooks_unattached`), never run without the sinks: spend and usage-limit reporting depend on them.
+ */
+export class GuestRunHooks {
+  private make: ((runId: string) => RunEventHooks) | undefined;
+  attach(make: (runId: string) => RunEventHooks): void {
+    this.make = make;
+  }
+  forRun(runId: string): RunEventHooks {
+    if (this.make === undefined) throw new Error("guest_hooks_unattached");
+    return this.make(runId);
+  }
+}
+
+interface Bound { sandbox: TokenSandbox; token: JobToken; timeoutMs?: number; hooks?: RunEventHooks }
 
 export interface GuestBindingsOptions {
   token?: JobTokenOptions;
@@ -27,11 +48,14 @@ export class GuestBindings {
   private readonly bound = new Map<string, Bound>();
   constructor(private readonly options: GuestBindingsOptions = {}) {}
 
-  /** Called when a VM is created. One binding per name: a name that is still bound is a wiring bug, refused rather than replaced. */
-  bind(name: string, sandbox: TokenSandbox): JobToken {
+  /**
+   * Called when a VM is created. One binding per name: a name that is still bound is a wiring bug, refused rather than replaced. `timeoutMs` is the wall-clock limit the VM was
+   * made with; the guest runtime's own command limit follows it (FU-170), so a long job is not cut short and a short one is not left running on a fixed fallback.
+   */
+  bind(name: string, sandbox: TokenSandbox, timeoutMs?: number, hooks?: RunEventHooks): JobToken {
     if (this.bound.has(name)) throw new Error("guest_already_bound");
     const token = new JobToken(sandbox, this.options.token);
-    this.bound.set(name, { sandbox, token });
+    this.bound.set(name, { sandbox, token, ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(hooks === undefined ? {} : { hooks }) });
     return token;
   }
 
@@ -68,6 +92,9 @@ export class GuestBindings {
   /** What `guestMakeRuntime` takes as its `bind`: the runtime for a guest gets that guest's launch, found by name. */
   readonly binding = (guest: SdkSandbox): GuestBinding => ({
     launch: this.launch(guest.name),
-    ...(this.options.timeoutMsOf === undefined ? {} : { timeoutMs: () => this.options.timeoutMsOf?.(guest.name) }),
+    // the run's usage and relay sinks, as bound with the VM: `guestMakeRuntime` spreads them into the runtime's config
+    ...this.bound.get(guest.name)?.hooks,
+    // always passed (FU-170): the limit this VM was bound with, else the port's own answer, else the runtime's bounded fallback
+    timeoutMs: () => this.bound.get(guest.name)?.timeoutMs ?? this.options.timeoutMsOf?.(guest.name),
   });
 }

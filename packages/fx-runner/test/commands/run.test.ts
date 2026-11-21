@@ -37,6 +37,7 @@ import { VERCEL_PROTECTED_BODY } from "../helpers/vercelProtected.js";
 import { makeRig, runCleanups } from "../vm/sandboxd/helpers.js";
 import { scriptedRuntime } from "../sandboxPortContract.js";
 import type { LiveMicrovm, LiveMicrovmParts } from "../../src/vm/sandboxd/live.js";
+import { GuestBindings, GuestRunHooks } from "../../src/vm/sandboxd/guestBindings.js";
 import type { VmHostFacts } from "../../src/vm/limits.js";
 import { RESTART_LINE, UNWIRED_LINE } from "../../src/vm/engineGate.js";
 
@@ -1404,6 +1405,9 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
       uid: 4711,
       egress: { startProxy: async () => ({ close: async () => undefined }), startReverse: async () => ({ close: async () => undefined }) },
       makeRuntime: () => scriptedRuntime(),
+      bindings: new GuestBindings(),
+      readToken: () => Buffer.from("test-token"),
+      runHooks: new GuestRunHooks(),
       ...over,
     };
   };
@@ -1452,8 +1456,8 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     const job = queuedJob();
     cloud.enqueue(job);
     fake.set("hang", "");
-    // each part left out in turn: the guest runtime and the boot facts are the two this build really lacks
-    for (const missing of ["makeRuntime", "boot", undefined] as const) {
+    // each part left out in turn (the production build now has them all; a build missing any one stays unwired), and no parts at all
+    for (const missing of ["deps", "boot", "template", "memMb", "uid", "egress", "makeRuntime", "bindings", "readToken", "runHooks", undefined] as const) {
       const before = claims();
       const parts = missing === undefined ? undefined : { ...wiredParts(), [missing]: undefined };
       const run = start({ host: { vmFacts: async () => goodFacts, ...(parts === undefined ? {} : { microvm: parts }) } });
@@ -1556,6 +1560,84 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     expect((await run.done).out).not.toContain(RESTART_LINE);
   }, 60_000);
 
+  // D#587 3c-iii: spend and usage-limit reporting, the claim loop's VM cap and startup reaping are what make the lift of `microvm_build_unwired` safe.
+  describe("what the claim loop does for a microvm run (3c-iii)", () => {
+    const entry = (id: string) => ({ sandboxId: id }) as never;
+    const helperWith = (listed: string[], seen: string[], failDelete: { on: boolean }) => (helper: ReturnType<typeof makeRig>["deps"]["helper"]) =>
+      ({
+        ...helper,
+        list: async () => (seen.push(`list@claims=${claims()}`), listed.map(entry)),
+        destroy: async (id: string) => {
+          seen.push(`destroy:${id}@claims=${claims()}`);
+          if (failDelete.on) throw new Error("helper refused");
+        },
+      }) as never;
+
+    it("a guest's usage_limit_reached, sent through the sinks `run` attached for a run, blocks every claim at the usage gate", async () => {
+      enableMicrovm("microvm");
+      let live: LiveMicrovm | undefined;
+      const clock = manualClock();
+      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts() }, hooks: { clock, onMicrovmBuilt: (built) => (live = built) } });
+      await until(() => claims() >= 1);
+      expect(claimBodies().at(-1)).toMatchObject({ capacity: { limited_by: null } });
+      // control: the loop keeps claiming while nothing is reported
+      const open = claims();
+      for (let i = 0; i < 200 && claims() < open + 2; i++) {
+        await clock.advance(5000);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(claims()).toBeGreaterThanOrEqual(open + 2);
+      live!.runHooks.forRun("run-from-a-vm").onLocalEvent({ seq: 1, ts: clock.now().toISOString(), type: "usage_limit_reached", reset_at: new Date(clock.now().getTime() + 3_600_000).toISOString() } as never);
+      await new Promise((resolve) => setTimeout(resolve, 50)); // a claim already in flight lands
+      const before = claims();
+      for (let i = 0; i < 6; i++) {
+        await clock.advance(5000);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(claims()).toBe(before); // the gate is shut: nothing is claimed in any class
+      expect((await stop(run)).code).toBe(0);
+    }, 60_000);
+
+    it("the VMs the helper still holds from an earlier process are ended BEFORE the first claim", async () => {
+      enableMicrovm("microvm");
+      const seen: string[] = [];
+      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, helperWith(["sb-left-1", "sb-left-2"], seen, { on: false })) } });
+      await until(() => claims() >= 1);
+      expect(seen).toEqual(["list@claims=0", "destroy:sb-left-1@claims=0", "destroy:sb-left-2@claims=0"]);
+      expect(lastBodyIsPaused()).toBe(false);
+      expect((await stop(run)).code).toBe(0);
+    }, 60_000);
+
+    it("a VM that cannot be ended holds claiming (a paused claim and a line saying so), and claiming opens once a later pass ends it", async () => {
+      enableMicrovm("microvm");
+      const seen: string[] = [];
+      const failing = { on: true };
+      const clock = manualClock();
+      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, helperWith(["sb-stuck"], seen, failing)) }, hooks: { clock } });
+      await until(() => claims() >= 1);
+      expect(lastBodyIsPaused()).toBe(true);
+      failing.on = false;
+      for (let i = 0; i < 200 && lastBodyIsPaused(); i++) {
+        await clock.advance(5000);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(lastBodyIsPaused()).toBe(false);
+      expect((await stop(run)).code).toBe(0);
+      expect((await run.done).out.join("\n")).toContain("vm_reap_pending");
+    }, 60_000);
+
+    it("a runner on an API key claims nothing in microvm mode and says why", async () => {
+      enableMicrovm("microvm");
+      saveRegistration(stateDir, { ...loadRegistration(stateDir)!, credential_mode: "api_key" });
+      writeApiKey(stateDir, process.getuid!(), ["sk-ant-", "api03-", "MICROVMKEY0123456789abcdef"].join("")); // gitleaks:allow
+      const run = start({ ctx: { uid: process.getuid!() }, host: { vmFacts: async () => goodFacts, microvm: wiredParts() } });
+      await until(() => claims() >= 1);
+      expect(lastBodyIsPaused()).toBe(true);
+      expect((await stop(run)).code).toBe(0);
+      expect((await run.done).out.join("\n")).toContain("microvm_api_key_unsupported");
+    }, 60_000);
+  });
+
   // Threat item 5: only a microvm run gets the daemon's lifecycle. An os_sandbox run with a complete stack answers a signed command as a runner without VMs does.
   describe("signed sandbox commands reach the daemon only on a microvm run", () => {
     type Ack = { outcome: string; refusal?: string };
@@ -1644,9 +1726,10 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, refusing as never) }, hooks: { remoteUrl: () => pathToFileURL(remote).href } });
     await until(() => cloud.runs.get(job.job.run_id)?.endedBy !== undefined, 30_000);
     const ended = cloud.runs.get(job.job.run_id)!.endedBy as Record<string, unknown>;
-    // 3c restores `sandbox_unavailable` here once `run` wires `deps.vm`; until then the job handler's missing-`deps.vm` refusal is the first closed code.
-    expect(ended).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "workspace_failed" });
+    // `run` wires `deps.vm`, so the job reaches the VM start: the helper's refusal ends it with the closed `sandbox_unavailable`. The helper's own error text (a private path) never travels (FU-165).
+    expect(ended).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "sandbox_unavailable" });
     expect(JSON.stringify(ended)).not.toContain("private");
+    expect(JSON.stringify(ended)).not.toContain("helper is gone");
     expect(fake.spawnCount()).toBe(0);
     expect(existsSync(path.join(fake.dir, "argv.txt"))).toBe(false);
     expect((await stop(run)).code).toBe(0);
