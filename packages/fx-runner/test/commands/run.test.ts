@@ -39,6 +39,7 @@ import { scriptedRuntime } from "../sandboxPortContract.js";
 import type { LiveMicrovm, LiveMicrovmParts } from "../../src/vm/sandboxd/live.js";
 import { GuestBindings, GuestRunHooks } from "../../src/vm/sandboxd/guestBindings.js";
 import type { VmHostFacts } from "../../src/vm/limits.js";
+import { idOfRunner, runnerIdPrefix } from "../../src/vm/sandboxd/sdkAdapter.js";
 import { RESTART_LINE, UNWIRED_LINE } from "../../src/vm/engineGate.js";
 
 let root: string;
@@ -1538,7 +1539,7 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
   };
   const sentHello = () => HelloMessage.parse(cloud.seen.find((s) => s.path === "/api/runner/hello")!.body);
 
-  it("a wired microvm runner reports microvm, and its claim lists the daemon's rows: a VM started through the port is there under sb- and 32 hex, and gone after it is deleted", async () => {
+  it("a wired microvm runner reports microvm, and its claim lists the daemon's rows: a VM started through the port is there under sb-, this runner's marker and 22 hex, and gone after it is deleted", async () => {
     enableMicrovm("microvm");
     let live: LiveMicrovm | undefined;
     const clock = manualClock();
@@ -1556,7 +1557,8 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     const handle = await live!.port.createSandbox({ sandboxName: "rn-run-branch-derived", retention: { persistent: false }, timeoutMs: 60_000 });
     await polls(() => claimBodies().some((b) => Array.isArray(b["sandboxes"]) && (b["sandboxes"] as unknown[]).length === 1));
     const rows = claimBodies().map((b) => b["sandboxes"] as Array<{ name: string }> | undefined).find((r) => r?.length === 1)!;
-    expect(rows[0]!.name).toMatch(/^sb-[0-9a-f]{32}$/);
+    expect(rows[0]!.name).toMatch(/^sb-[0-9a-f]{10}-[0-9a-f]{22}$/);
+    expect(rows[0]!.name.startsWith(runnerIdPrefix(stateDir))).toBe(true);
     expect(JSON.stringify(claimBodies())).not.toContain("branch-derived");
     await live!.port.stop(handle);
     await live!.port.deleteSandbox(handle);
@@ -1726,9 +1728,12 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     it("the VMs the helper still holds from an earlier process are ended BEFORE the first claim", async () => {
       enableMicrovm("microvm");
       const seen: string[] = [];
-      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, helperWith(["sb-left-1", "sb-left-2"], seen, { on: false })) } });
+      const own = idOfRunner(runnerIdPrefix(stateDir));
+      const [left1, left2] = [own("left-1"), own("left-2")];
+      const theirs = idOfRunner(runnerIdPrefix(`${stateDir}-other-runner`))("left-3"); // another runner's VM, same helper: listed and never ended
+      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, helperWith([left1, theirs, "sb-unmarked-1", left2], seen, { on: false })) } });
       await until(() => claims() >= 1);
-      expect(seen).toEqual(["list@claims=0", "destroy:sb-left-1@claims=0", "destroy:sb-left-2@claims=0"]);
+      expect(seen).toEqual(["list@claims=0", `destroy:${left1}@claims=0`, `destroy:${left2}@claims=0`]);
       expect(lastBodyIsPaused()).toBe(false);
       expect((await stop(run)).code).toBe(0);
     }, 60_000);
@@ -1738,7 +1743,7 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
       const seen: string[] = [];
       const failing = { on: true };
       const clock = manualClock();
-      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, helperWith(["sb-stuck"], seen, failing)) }, hooks: { clock } });
+      const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts({}, helperWith([idOfRunner(runnerIdPrefix(stateDir))("stuck")], seen, failing)) }, hooks: { clock } });
       await until(() => claims() >= 1);
       expect(lastBodyIsPaused()).toBe(true);
       failing.on = false;

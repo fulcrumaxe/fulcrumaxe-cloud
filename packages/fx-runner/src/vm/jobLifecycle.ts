@@ -17,6 +17,7 @@
  */
 import { admitVm, type MemAvailableReader, type MicrovmCaps, type VmRequest } from "./limits.js";
 import { CHECK_CLOSED } from "./sandboxd/live.js";
+import { isRunnerIdPrefix } from "./sandboxd/sdkAdapter.js";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 
 export const VM_JOB_CODES = ["vm_admission_refused", "vm_boot_failed", "vm_egress_unavailable", "vm_token_delivery_failed", "vm_workspace_failed", "vm_teardown_incomplete"] as const;
@@ -344,12 +345,17 @@ export async function runVmJob<Agent, Bundle, Applied, Checked>(deps: VmJobDeps<
 }
 
 /**
- * Start-up (and retry) reaping: deletes every listed VM the registry does not hold as a live job's, and every leftover. Never throws; counts what it could not remove.
+ * Start-up (and retry) reaping: deletes every listed VM carrying `prefix` (the runner's id marker, `runnerIdPrefix`) that the registry does not hold as a live job's, and every leftover.
+ * The registry holds sandbox NAMES and the helper knows only ids, so `idOf` (the runner's own name-to-id map, `idOfRunner(prefix)`) maps every registry entry before it is compared with the list
+ * or handed to `releaseEgress` and `delete`.
+ * A listed VM without the prefix is another runner's, or not ours at all, and is never touched, whatever its name looks like. An unusable prefix reaps nothing from the list. Never throws; counts what it could not remove.
  * An agent VM kept for a resume leaves the table once it is kept, so this deletes it too: nothing resumes a VM across a runner restart yet, and a kept one that
  * survives a restart is a leak. Resume wiring must keep its own record before this runs.
  */
-export async function reapVms(deps: { list(): Promise<readonly string[]>; port: Pick<VmPort, "releaseEgress" | "delete">; registry: VmRegistry }): Promise<{ reaped: number; failed: number }> {
-  const live = new Set(deps.registry.ids().filter((id) => !deps.registry.leftovers().includes(id)));
+export async function reapVms(deps: { prefix: string; idOf: (name: string) => string; list(): Promise<readonly string[]>; port: Pick<VmPort, "releaseEgress" | "delete">; registry: VmRegistry }): Promise<{ reaped: number; failed: number }> {
+  const leftovers = deps.registry.leftovers();
+  const live = new Set(deps.registry.ids().filter((name) => !leftovers.includes(name)).map((name) => deps.idOf(name)));
+  const nameOfId = new Map(leftovers.map((name) => [deps.idOf(name), name] as const));
   let ids: readonly string[] = [];
   try {
     ids = await deps.list();
@@ -358,22 +364,24 @@ export async function reapVms(deps: { list(): Promise<readonly string[]>; port: 
   }
   let reaped = 0;
   let failed = 0;
-  for (const id of new Set([...ids, ...deps.registry.leftovers()])) {
+  const mine = isRunnerIdPrefix(deps.prefix) ? ids.filter((id) => id.startsWith(deps.prefix)) : [];
+  for (const id of new Set([...mine, ...nameOfId.keys()])) {
     if (live.has(id)) continue;
     let ok = true;
     for (const end of [() => deps.port.releaseEgress(id), () => deps.port.delete(id)]) {
       try {
         await end();
       } catch {
-        // fx-swallow-ok: counted as failed; the id stays in the table for the next pass
+        // fx-swallow-ok: counted as failed; the name stays in the table for the next pass
         ok = false;
       }
     }
+    const name = nameOfId.get(id);
     if (ok) {
-      deps.registry.remove(id);
+      if (name !== undefined) deps.registry.remove(name);
       reaped++;
     } else {
-      deps.registry.markLeftover(id);
+      if (name !== undefined) deps.registry.markLeftover(name);
       failed++;
     }
   }

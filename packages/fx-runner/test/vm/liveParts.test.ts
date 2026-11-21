@@ -9,6 +9,7 @@ import type { TokenSandbox } from "../../src/vm/sandboxd/jobToken.js";
 import { createMicrovmParts } from "../../src/vm/liveParts.js";
 import { RUN_ID } from "../engines/claude/harness.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
+const TEST_HOME = "/tmp/fictional-runner-home";
 
 /**
  * D#587 B-5b-3c-iii: the entry point's parts of the live stack (`scripts/vm-live-parts.mjs`, what `bin/fx-runner.mjs` hands `run`), over fakes of the machine: the TUF listing, the
@@ -49,7 +50,7 @@ describe("the entry point supplies every part, and the stack is wired only with 
   it("a machine with a usable uid composes the whole stack; the parts are the production ones (boot facts, the template, its RAM, the guest runtime, the bindings)", () => {
     const { built } = parts();
     expect(liveMicrovmComplete(built)).toBe(true);
-    expect(createLiveMicrovm(built)).toBeDefined();
+    expect(createLiveMicrovm(built, TEST_HOME)).toBeDefined();
     expect(built.template).toBe("fx-agent");
     expect(built.memMb).toBe(512);
     expect(typeof built.boot.facts).toBe("function");
@@ -62,7 +63,7 @@ describe("the entry point supplies every part, and the stack is wired only with 
     for (const over of [{ euid: 0 }, { euid: undefined }, { uid: 0 }, { uid: undefined }]) {
       const { built } = parts(over);
       expect(liveMicrovmComplete(built), JSON.stringify(over)).toBe(false);
-      expect(createLiveMicrovm(built), JSON.stringify(over)).toBeUndefined();
+      expect(createLiveMicrovm(built, TEST_HOME), JSON.stringify(over)).toBeUndefined();
     }
   });
 
@@ -78,7 +79,7 @@ describe("the entry point supplies every part, and the stack is wired only with 
 describe("the model token is read at the entry point's reader only", () => {
   it("building the parts and the stack never reads the environment's token; each call of the reader is a fresh buffer, and zeroing one does not touch the next", () => {
     const { built, seen } = parts();
-    createLiveMicrovm(built);
+    createLiveMicrovm(built, TEST_HOME);
     expect(seen.env).not.toContain(SUBSCRIPTION_TOKEN_VAR);
     const first = built.readToken();
     expect(first.toString()).toBe(SENTINEL);

@@ -106,6 +106,8 @@ export function createVmClaimGuard(wiring: { live: LiveMicrovm; vm: NonNullable<
   const reapOnce = async (): Promise<void> => {
     let listFailed = false;
     const result = await reapVms({
+      prefix: live.idPrefix,
+      idOf: live.idOf,
       list: () =>
         live.reap.list().catch((err: unknown) => {
           listFailed = true;

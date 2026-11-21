@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { RUNNER_SETUP_DETAILS, runnerSetupText } from "@fulcrumaxe/runner-protocol";
 import type { MicrovmCaps } from "../../src/vm/limits.js";
+import { idOfRunner, sandboxIdOf, isRunnerIdPrefix, runnerIdPrefix } from "../../src/vm/sandboxd/sdkAdapter.js";
 import {
   OPERATOR_LINE_UNSUPPORTED_FIELDS, StepRefusal, VM_JOB_CODES, VmRegistry, reapVms, runVmJob, vmCapBlock, vmPortOf,
   type TokenSlot, type VmJobDeps, type VmJobSteps, type VmPort,
@@ -10,6 +11,26 @@ const SENTINEL_TOKEN = "SENTINEL-CREDENTIAL-VALUE-0001";
 const SENTINEL_PATH = "/home/sentinel-user/secret-repo";
 const SENTINEL_CMD = "curl --sentinel-command";
 const caps = (maxVms = 1): MicrovmCaps => ({ maxVms, maxVcpus: 4, maxMemoryMb: 4096, snapshotDir: "/var/lib/fx/snap", snapshotQuotaBytes: 10 ** 12 });
+const PREFIX = runnerIdPrefix("/tmp/fictional-runner-home-a");
+const OWN = idOfRunner(PREFIX);
+
+/** A fake helper that knows only ids: ending an id it does not hold changes nothing (the real one answers `unknown_sandbox`, which the live reap port counts as gone). */
+function idHelper(initial: string[]): { held: Set<string>; log: string[]; list: () => Promise<string[]>; port: Pick<VmPort, "releaseEgress" | "delete"> } {
+  const held = new Set(initial);
+  const log: string[] = [];
+  return {
+    held,
+    log,
+    list: async () => [...held],
+    port: {
+      releaseEgress: async (id) => void log.push(`release ${id}`),
+      delete: async (id) => {
+        log.push(`delete ${id}`);
+        held.delete(id);
+      },
+    },
+  };
+}
 const GIB = 1024 ** 3;
 
 interface Rig {
@@ -243,7 +264,11 @@ describe("teardown on every path (criterion 12)", () => {
     expect(r.log).toContain("release agent-1"); // and the listeners of the agent's VM were still closed
     expect(r.registry.leftovers()).toEqual(["agent-1"]);
     delete r.fail["delete:agent"];
-    expect(await reapVms({ list: async () => [], port: r.port, registry: r.registry })).toEqual({ reaped: 1, failed: 0 });
+    // the table holds the NAME the job used; the helper knows only the id. The reaper maps it, so the VM the helper still holds is the one ended, and the list need not show it.
+    const h = idHelper([OWN("agent-1")]);
+    expect(await reapVms({ prefix: PREFIX, idOf: OWN, list: async () => [], port: h.port, registry: r.registry })).toEqual({ reaped: 1, failed: 0 });
+    expect(h.log).toEqual([`release ${OWN("agent-1")}`, `delete ${OWN("agent-1")}`]);
+    expect([...h.held]).toEqual([]);
     expectClean(r);
   });
 
@@ -262,14 +287,62 @@ describe("teardown on every path (criterion 12)", () => {
     expect(out).toMatchObject({ ok: false, code: "bundle_refused", teardownIncomplete: true });
   });
 
-  it("start-up reaping removes an orphan the table never held, and skips a live job's VM", async () => {
+  it("start-up reaping removes an orphan the table never held, and skips a live job's VM registered by name when the list holds its mapped id", async () => {
     const r = rig();
-    r.live.add("orphan-1");
-    r.registry.add("live-1", "agent", { vcpus: 1, memoryMb: 512 });
-    const out = await reapVms({ list: async () => ["orphan-1", "live-1"], port: r.port, registry: r.registry });
+    r.registry.add("rn-live", "agent", { vcpus: 1, memoryMb: 512 }); // the table holds the name
+    const h = idHelper([OWN("rn-orphan"), OWN("rn-live")]);
+    const out = await reapVms({ prefix: PREFIX, idOf: OWN, list: h.list, port: h.port, registry: r.registry });
     expect(out).toEqual({ reaped: 1, failed: 0 });
-    expect(r.log).toContain("delete orphan-1");
-    expect(r.log).not.toContain("delete live-1");
+    expect(h.log).toContain(`delete ${OWN("rn-orphan")}`);
+    expect(h.log).not.toContain(`delete ${OWN("rn-live")}`);
+    expect([...h.held]).toEqual([OWN("rn-live")]);
+    expect(r.registry.ids()).toEqual(["rn-live"]);
+  });
+
+  it("a leftover that cannot be ended stays in the table by name and is counted failed; the next pass ends it", async () => {
+    const r = rig();
+    r.registry.add("rn-x", "agent", { vcpus: 1, memoryMb: 512 });
+    r.registry.markLeftover("rn-x");
+    const h = idHelper([OWN("rn-x")]);
+    let stuck = true;
+    const port: Pick<VmPort, "releaseEgress" | "delete"> = { releaseEgress: h.port.releaseEgress, delete: async (id) => { if (stuck) throw new Error("stuck"); await h.port.delete(id); } };
+    expect(await reapVms({ prefix: PREFIX, idOf: OWN, list: h.list, port, registry: r.registry })).toEqual({ reaped: 0, failed: 1 });
+    expect(r.registry.leftovers()).toEqual(["rn-x"]);
+    stuck = false;
+    expect(await reapVms({ prefix: PREFIX, idOf: OWN, list: h.list, port, registry: r.registry })).toEqual({ reaped: 1, failed: 0 });
+    expect([...h.held]).toEqual([]);
+    expect(r.registry.ids()).toEqual([]);
+  });
+
+  it("two runners of one uid with different homes never reap each other's VMs", async () => {
+    const a = runnerIdPrefix("/tmp/fictional-runner-home-a");
+    const b = runnerIdPrefix("/tmp/fictional-runner-home-b");
+    expect(a).not.toBe(b);
+    expect(runnerIdPrefix("/tmp/fictional-runner-home-a")).toBe(a); // stable across restarts
+    const unmarked = sandboxIdOf("rn-some-run");
+    const h = idHelper([idOfRunner(a)("rn-1"), idOfRunner(b)("rn-1"), unmarked, "sb-0000000000-x"]);
+    expect(await reapVms({ prefix: a, idOf: idOfRunner(a), list: h.list, port: h.port, registry: new VmRegistry() })).toEqual({ reaped: 1, failed: 0 });
+    expect([...h.held].sort()).toEqual([idOfRunner(b)("rn-1"), unmarked, "sb-0000000000-x"].sort());
+    expect(await reapVms({ prefix: b, idOf: idOfRunner(b), list: h.list, port: h.port, registry: new VmRegistry() })).toEqual({ reaped: 1, failed: 0 });
+    expect([...h.held].sort()).toEqual([unmarked, "sb-0000000000-x"].sort()); // unmarked VMs are never reaped by name guess
+  });
+
+  it("a runner reaps its own leftovers after a crash (a fresh table, the helper still lists them)", async () => {
+    const h = idHelper([OWN("rn-9"), OWN("rc-9")]);
+    const out = await reapVms({ prefix: PREFIX, idOf: OWN, list: h.list, port: h.port, registry: new VmRegistry() });
+    expect(out).toEqual({ reaped: 2, failed: 0 });
+    expect([...h.held]).toEqual([]);
+  });
+
+  it("an unusable prefix reaps nothing from the list, and ids made for a runner fit the helper's id pattern", async () => {
+    const h = idHelper(["anything", "sb-0123456789-x"]);
+    for (const prefix of ["", "sb-", "agent-", "sb-0123456789"]) {
+      expect(isRunnerIdPrefix(prefix)).toBe(false);
+      expect(await reapVms({ prefix, idOf: OWN, list: h.list, port: h.port, registry: new VmRegistry() })).toEqual({ reaped: 0, failed: 0 });
+    }
+    expect([...h.held]).toEqual(["anything", "sb-0123456789-x"]);
+    expect(OWN("rn-" + "a".repeat(200))).toMatch(/^[a-z0-9][a-z0-9-]{0,39}$/);
+    expect(() => idOfRunner("sb-")).toThrow("bad_runner_id_prefix");
   });
 });
 
