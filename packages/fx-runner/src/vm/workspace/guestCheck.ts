@@ -184,6 +184,39 @@ export interface FreshCheckInput {
 const SETUP_MARGIN_MS = 30 * 60_000;
 
 /**
+ * The approved check in a fresh VM THE CALLER ALREADY MADE (`runVmJob` makes and ends it, so the cap and the teardown table see it). The archive of the host's new tip is built
+ * first, then sent into that VM, and the check runs there; the VM is not deleted here. Any failure to get as far as the verdict is a closed `CheckNotRunReason`, never a pass.
+ */
+export function createCheckInVm(deps: { port: Pick<FreshCheckPort, "guestOf">; archive: (repoDir: string, commit: string) => Promise<WorkspaceArchive>; now: () => Date; paths?: GuestPaths }): (input: FreshCheckInput, vm: SandboxHandle) => Promise<CheckOutcome> {
+  return async (input, vm) => {
+    const failed = (reason: CheckNotRunReason, summary: string): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: `${summary}\n${CHECK_HEADER_END}\n`, reason } });
+    if (input.check.dev_shell) return failed("sandbox_refused", "the check needs the repository's Nix dev shell, which a microVM does not have");
+    if (input.signal?.aborted === true) return failed("start_failed", "the check could not be started");
+    let archive: WorkspaceArchive;
+    try {
+      archive = await deps.archive(input.repoDir, input.tip);
+    } catch {
+      // fx-swallow-ok: replaced by a closed reason; the error text could hold a path
+      return failed("start_failed", "the check could not be started: the new tip could not be archived");
+    }
+    try {
+      const guest = await deps.port.guestOf(vm);
+      await guest.updateNetworkPolicy(policyOf([...input.networkPolicy]));
+      try {
+        await sendWorkspace(guest, archive, deps.paths);
+      } catch {
+        // fx-swallow-ok: replaced by a closed reason; the error text could hold a path
+        return failed("start_failed", "the check could not be started: the new tip could not be sent into the check VM");
+      }
+      return await runGuestCheck({ check: input.check, guest, baseFile: input.baseFile, now: deps.now, ...(deps.paths === undefined ? {} : { paths: deps.paths }), ...(input.signal === undefined ? {} : { signal: input.signal }) });
+    } catch {
+      // fx-swallow-ok: replaced by a closed reason; the error text could hold a name or a path
+      return failed("sandbox_unavailable", "the sandbox could not start the check");
+    }
+  };
+}
+
+/**
  * The approved check in a FRESH VM (TL ruling 12). A guest the agent never had: made from the image, given the archive of the host's new tip, and deleted when the check ends.
  * The host decides the verdict from what the check reports there. Any failure to get that far is a closed `CheckNotRunReason`, never a pass.
  */

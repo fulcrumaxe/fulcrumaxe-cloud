@@ -8,8 +8,11 @@
 import type { HostSandbox } from "../../sandbox/hostSandbox.js";
 import { createMicrovmSandbox, type MicrovmSandbox, type MicrovmSandboxConfig } from "./microvmSandbox.js";
 import { createEgressPolicyPort, type EgressStarters } from "./policyPort.js";
-import { createDaemonSdk, type DaemonSdk } from "./sdkAdapter.js";
+import { createDaemonSdk, sandboxIdOf, type DaemonSdk } from "./sdkAdapter.js";
 import { assertNotRoot, Sandboxd, type SandboxdDeps } from "./sandboxd.js";
+import { createMicrovmVmPort } from "./vmPort.js";
+import type { GuestBindings } from "./guestBindings.js";
+import type { VmPort } from "../jobLifecycle.js";
 
 export interface LiveMicrovmParts {
   /** The daemon's dependencies except the boot facts (`productionDepsBase`). */
@@ -39,6 +42,8 @@ export interface LiveMicrovm {
   port: HostSandbox;
   /** The same SDK the port uses, for the inventory source and the signed stop, delete and reap commands. */
   sdk: DaemonSdk;
+  /** The production VM factory for `runVmJob` over this same port, daemon and egress policy port (B-5b-3c-ii). `persistent` makes the agent's VM keep a snapshot when stopped. */
+  vmPort(options: { timeoutMs: number; persistent?: boolean; bindings: GuestBindings }): VmPort;
 }
 
 type Complete = { [K in keyof LiveMicrovmParts]-?: NonNullable<LiveMicrovmParts[K]> };
@@ -72,7 +77,11 @@ export function createLiveMicrovm(parts: LiveMicrovmParts | undefined): LiveMicr
     const policy = createEgressPolicyPort({ helper: parts.deps.helper, uid: parts.uid, egress: parts.egress });
     const sdk = createDaemonSdk({ daemon, policy, template: parts.template, memMb: parts.memMb });
     const port: MicrovmSandbox = createMicrovmSandbox({ sdk, makeRuntime: parts.makeRuntime });
-    return { port: { ...port, interrupt: async () => undefined, checkLaunch: () => ({ refused: CHECK_CLOSED }) }, sdk };
+    return {
+      port: { ...port, interrupt: async () => undefined, checkLaunch: () => ({ refused: CHECK_CLOSED }) },
+      sdk,
+      vmPort: (options) => createMicrovmVmPort({ sandbox: port, daemon, policy, idOf: sandboxIdOf, bindings: options.bindings, timeoutMs: options.timeoutMs, ...(options.persistent === undefined ? {} : { persistent: options.persistent }) }),
+    };
   } catch {
     // fx-swallow-ok: a daemon that refuses to be built (run as root, no euid) is a build that is not wired; the error text is not kept
     return undefined;
