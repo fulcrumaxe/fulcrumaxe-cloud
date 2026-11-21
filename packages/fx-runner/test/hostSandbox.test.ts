@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,12 +7,13 @@ import { cleanEnv, type CleanEnvOptions } from "../src/job/cleanEnv.js";
 import { AgentRunFailed, HostSandboxRefused, createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import type { NetworkRule, StartDetachedOptions } from "../src/sandbox/port.js";
 import type { WslMachine } from "../src/sandbox/platform.js";
+import { tempDir } from "./helpers/tempTree.js";
 
 type Block = { filesystem: { allowWrite: string[]; denyWrite: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
 const HOME = "/home/jane";
 const ROOT_TABLE = "26 1 8:16 / / rw,relatime - ext4 /dev/sdb rw\n";
 /** The runner state directory must be writable: the per-job env file is made under it (D#6 C44-1). */
-const STATE = mkdtempSync(path.join(tmpdir(), "r4b13_state-"));
+const STATE = tempDir("r4b13_state-");
 
 function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envOptions?: CleanEnvOptions; mirrorsRoot?: string; wsl?: { denyPaths: readonly string[]; loopback: boolean }; machine?: WslMachine } = {}) {
   const blocks: Block[] = [];
@@ -35,7 +36,7 @@ function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envO
     },
     resume: async (handle) => ({ handle }),
   };
-  const tempRoot = mkdtempSync(path.join(tmpdir(), "r4b13_host-"));
+  const tempRoot = tempDir("r4b13_host-");
   const host = createHostSandbox({
     credentials: { mode: "subscription" },
     ...(over.envOptions === undefined ? {} : { envOptions: over.envOptions }),
@@ -53,7 +54,7 @@ function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envO
     tempRoot,
     workspaceRoot: tmpdir(),
   });
-  const workdir = mkdtempSync(path.join(tmpdir(), "r4b13_wd-"));
+  const workdir = tempDir("r4b13_wd-");
   const opts = (more: Partial<StartDetachedOptions> = {}): StartDetachedOptions => ({
     runId: "run-1", role: "executor", roleCard: "card", prompt: "p", model: "sonnet", workdir, capUsd: 0,
     networkPolicy: [{ host: "api.anthropic.com", purpose: "model" }], env: cleanEnv({ mode: "subscription" }), onEvent: () => undefined, ...more,

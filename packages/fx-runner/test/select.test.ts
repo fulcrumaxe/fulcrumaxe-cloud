@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SandboxRefused } from "../src/sandbox/platform.js";
 import { cleanEnv } from "../src/job/cleanEnv.js";
 import { commandOnPath, resolveSandboxTools, sandboxToolDirs, selectTier } from "../src/sandbox/select.js";
+import { tempDir } from "./helpers/tempTree.js";
 
 const linux = { platform: "linux", osrelease: "6.8.0-45-generic" };
 const has = (...names: string[]) => (name: string) => names.includes(name);
@@ -40,7 +40,7 @@ describe("tier selection: host_sandbox or a refusal, never an unsandboxed run", 
   });
 
   describe("the sandbox tools are found at setup as absolute paths", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "tan_tools-"));
+    const root = tempDir("tan_tools-");
     const store = (name: string, tools: string[]): string => {
       const dir = path.join(root, name, "bin");
       mkdirSync(dir, { recursive: true });

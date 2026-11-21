@@ -1,6 +1,6 @@
 import { createSocket, type Socket } from "node:dgram";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -10,6 +10,7 @@ import { startVerifyBrowserServer } from "../../src/verifyBrowser/server.js";
 import { chromiumSandboxRefused } from "../helpers/chromiumSandbox.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 import { useSourcePlaywright } from "./sourceLoader.js";
+import { tempDir } from "../helpers/tempTree.js";
 
 /**
  * D#749 V2c-2a: ONE real-browser test. A real Chromium (the browsers directory the dev shell exports, else a system Chrome or Chromium) is driven through the real
@@ -168,7 +169,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => udp.bind(0, "127.0.0.2", () => resolve()));
   udpPort = udp.address().port;
   udp.on("message", (m) => udpHits.push(`${m.length} bytes`));
-  const dir = mkdtempSync(path.join(tmpRoot(), "vb-state-"));
+  const dir = tempDir("vb-state-", tmpRoot());
   storage = path.join(dir, "storage-state.json");
   writeFileSync(storage, JSON.stringify({ cookies: [{ name: "sid", value: "ok", domain: "127.0.0.1", path: "/", expires: -1, httpOnly: false, secure: false, sameSite: "Lax" }], origins: [] }), { mode: 0o600 });
 });
@@ -180,7 +181,7 @@ afterAll(() => {
 });
 
 function job(withState: boolean) {
-  const jobDir = mkdtempSync(path.join(tmpRoot(), "vb-realjob-"));
+  const jobDir = tempDir("vb-realjob-", tmpRoot());
   jobs.push(jobDir);
   const input = new PassThrough();
   const output = new PassThrough();

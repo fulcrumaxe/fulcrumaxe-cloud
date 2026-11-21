@@ -1,5 +1,3 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AgentRuntime, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
@@ -7,6 +5,7 @@ import { createMemoryLedger, runJob } from "../src/job/runJob.js";
 import { createWorkspaceStore } from "../src/job/workspace.js";
 import { createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import { sampleJob } from "./helpers/sampleJob.js";
+import { tempDir } from "./helpers/tempTree.js";
 
 const RUN = "44444444-4444-4444-8444-444444444444";
 
@@ -31,7 +30,7 @@ function otherEngine(seen: { prompts: string[]; blocks: unknown[] }): (sandbox: 
 
 describe("a second engine runs through the same runJob and the same host tier, with no change to either", () => {
   it("done, with the other engine's own session id, under the tier's enabled sandbox block", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "r4b13_second-"));
+    const root = tempDir("r4b13_second-");
     const seen = { prompts: [] as string[], blocks: [] as unknown[] };
     const sandbox = createHostSandbox({
       credentials: { mode: "subscription" },
