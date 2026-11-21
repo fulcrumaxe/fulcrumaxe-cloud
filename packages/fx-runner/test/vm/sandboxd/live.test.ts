@@ -3,6 +3,7 @@ import { daemonInventorySource } from "../../../src/vm/sandboxd/management.js";
 import { CHECK_CLOSED, createLiveMicrovm, liveMicrovmComplete, type LiveMicrovmParts } from "../../../src/vm/sandboxd/live.js";
 import type { EgressStarters } from "../../../src/vm/sandboxd/policyPort.js";
 import { scriptedRuntime } from "../../sandboxPortContract.js";
+import { GuestBindings } from "../../../src/vm/sandboxd/guestBindings.js";
 import { makeRig, runCleanups, type Rig } from "./helpers.js";
 
 afterEach(runCleanups);
@@ -80,5 +81,41 @@ describe("createLiveMicrovm: the whole stack or nothing", () => {
     expect(live.port.checkLaunch(handle, ["pnpm", "test"], false)).toEqual({ refused: CHECK_CLOSED });
     await expect(live.port.interrupt(handle)).resolves.toBeUndefined();
     await live.port.deleteSandbox(handle);
+  });
+
+  it("the VM factory over the real daemon, adapter and port (fake helper and guest): egress and the guest are up after create, and release, stop, destroy and delete each leave nothing behind", async () => {
+    let open = 0;
+    const counting: EgressStarters = {
+      startProxy: async () => (open++, { close: async () => void open-- }),
+      startReverse: async () => (open++, { close: async () => void open-- }),
+    };
+    const live = createLiveMicrovm(parts(makeRig(), { egress: counting }))!;
+    const source = daemonInventorySource(live.sdk);
+    const bindings = new GuestBindings();
+    const vm = live.vmPort({ timeoutMs: 60_000, bindings });
+    await vm.create("rn-bound", "agent");
+    expect(bindings.tokenOf("rn-bound")).toBeDefined();
+    await vm.delete("rn-bound");
+    expect(bindings.tokenOf("rn-bound")).toBeUndefined();
+    await vm.create("rn-factory", "agent");
+    await vm.create("rc-factory", "check");
+    expect(open).toBe(4);
+    for (const id of ["rn-factory", "rc-factory"]) {
+      await vm.startEgress(id);
+      await vm.waitGuest(id, new AbortController().signal);
+    }
+    expect(await source.list()).toHaveLength(2);
+    // the agent's VM: listeners, then stop, then delete (a repeat is safe)
+    await vm.releaseEgress("rn-factory");
+    expect(open).toBe(2);
+    await vm.stop("rn-factory");
+    await expect(vm.startEgress("rn-factory")).rejects.toMatchObject({ code: "egress_down" });
+    await vm.delete("rn-factory");
+    await vm.delete("rn-factory");
+    // the check VM: destroy (no snapshot) ends it too
+    await vm.releaseEgress("rc-factory");
+    await vm.destroy("rc-factory");
+    expect(open).toBe(0);
+    expect(await source.list()).toEqual([]);
   });
 });

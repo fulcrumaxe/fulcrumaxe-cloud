@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, 
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CHECK_HEADER_END, CHECK_SUMMARY_MAX_BYTES } from "@fulcrumaxe/runner-protocol";
-import { createFreshVmCheck, pinnedNames, runGuestCheck, type FreshCheckPort } from "../../../src/vm/workspace/guestCheck.js";
+import { createCheckInVm, createFreshVmCheck, pinnedNames, runGuestCheck, type FreshCheckPort } from "../../../src/vm/workspace/guestCheck.js";
 import { runInGuest } from "../../../src/vm/workspace/guestWorkspace.js";
 import type { SdkSandbox } from "../../../src/vm/sandboxd/sdkSlice.js";
 import { buildWorkspaceArchive } from "../../../src/daemon/vmArchive.js";
@@ -258,15 +258,16 @@ describe("the check in a fresh VM", () => {
         return hit.guest.guest;
       },
     };
+    const archive = async (repoDir: string, commit: string) => (over.archiveFails === true ? Promise.reject(new Error("/host/secret/path")) : buildWorkspaceArchive({ git: gitLike, gitLarge: gitLike, scratchDir: scratch }, repoDir, commit));
     const step = createFreshVmCheck({
       port,
-      archive: async (repoDir, commit) => (over.archiveFails === true ? Promise.reject(new Error("/host/secret/path")) : buildWorkspaceArchive({ git: gitLike, gitLarge: gitLike, scratchDir: scratch }, repoDir, commit)),
+      archive,
       now: NOW,
       maxTimeoutMs: 24 * 3600_000,
       paths,
     });
     const base = { runId: "run-1", check: { argv: ["sh", "scripts/check.sh"], dev_shell: false, timeout_s: 30 }, repoDir: fx.repo, tip: fx.commit, baseFile: async () => null, networkPolicy: [{ host: "registry.example.test" }] as never };
-    return { step, base, made, deleted, fx };
+    return { step, base, made, deleted, fx, port, archive, paths };
   }
 
   it("runs on the archive of the tip in a VM of its own (never the agent's), applies the agent's network rules, and the host reads the verdict; the VM is deleted after", async () => {
@@ -279,6 +280,21 @@ describe("the check in a fresh VM", () => {
     expect(r.made[0]?.guest.sent.policies).toEqual([{ allow: ["registry.example.test"] }]);
     // the tree the check ran on is the tip's tree
     expect(execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: r.made[0]?.guest.paths.workspace, env: GIT_ENV(), encoding: "utf8" }).trim()).toBe(r.fx.tree);
+  });
+
+  it("in a VM the caller made: runs on the archive of the tip there, never creates or deletes a VM itself, and a VM it cannot reach ends closed", async () => {
+    const r = freshRig("echo checked-in-given-vm\nexit 0\n");
+    await r.port.createSandbox({ sandboxName: "rc-run-1", retention: { persistent: false }, timeoutMs: 1000 });
+    const inVm = createCheckInVm({ port: r.port, archive: r.archive, now: NOW, paths: r.paths });
+    const outcome = await inVm(r.base, { runId: "", sandboxName: "rc-run-1", sessionId: "" });
+    expect(outcome.passed).toBe(true);
+    expect(outcome.body.summary).toContain("checked-in-given-vm");
+    expect(r.made).toHaveLength(1);
+    expect(r.deleted).toEqual([]);
+    expect(r.made[0]?.guest.sent.policies).toEqual([{ allow: ["registry.example.test"] }]);
+    const missing = await inVm(r.base, { runId: "", sandboxName: "rc-other", sessionId: "" });
+    expect(missing).toMatchObject({ passed: false, body: { reason: "sandbox_unavailable" } });
+    expect(await createCheckInVm({ port: r.port, archive: async () => Promise.reject(new Error("/host/secret/path")), now: NOW })(r.base, { runId: "", sandboxName: "rc-run-1", sessionId: "" })).toMatchObject({ body: { reason: "start_failed" } });
   });
 
   it("a guest the agent had cannot make a check pass: a shim and a dotfile in the agent's VM change nothing, because the check never runs there", async () => {

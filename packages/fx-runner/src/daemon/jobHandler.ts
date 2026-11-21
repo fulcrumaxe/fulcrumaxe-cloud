@@ -51,7 +51,8 @@ import { startLease, type Clock, type Lease, type LeaseEnd, type EventRelay } fr
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { withAnswerFile } from "./answerFile.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
-import type { SandboxEngine } from "../vm/limits.js";
+import type { MemAvailableReader, MicrovmCaps, SandboxEngine, VmRequest } from "../vm/limits.js";
+import { runVmJob, StepRefusal, type TokenSlot, type VmPort, type VmRegistry, type VmStep } from "../vm/jobLifecycle.js";
 import { closedWord, observedClient, type StepSink } from "./stepLog.js";
 import type { JobWatch, WatchedJob } from "./watch.js";
 
@@ -109,8 +110,20 @@ export interface JobHandlerDeps {
     apply: (input: { bundle: Buffer; base: string; mirrorDir: string; workspace: string }) => Promise<AppliedBundle>;
     /** True when the sandbox is created persistent (a stop keeps a snapshot and a later start reopens the same working copy). Left to the wiring: it needs the snapshot directory and quota (B-6). */
     persistent?: boolean;
-    /** The approved check in a FRESH VM, given the archive of the host's new tip (`createFreshVmCheck`). Absent: a VM run's check is closed (`not_set_up`). */
-    freshCheck?: (input: FreshCheckInput) => Promise<CheckOutcome>;
+    /** The approved check in the fresh VM `runVmJob` made for it (`createCheckInVm`), given the archive of the host's new tip. Absent: a VM run's check is closed (`not_set_up`). */
+    freshCheck?: (input: FreshCheckInput, vm: SandboxHandle) => Promise<CheckOutcome>;
+    /**
+     * D#587 B-5b-3c-ii: the one orchestrator of a VM job, runVmJob: it makes, stops and deletes the agent's VM and the fresh check VM, enforces the cap, and tears both down on every
+     * way out. `runJob` is its agent step. The token step is a slot the wiring fills (3c-i): absent, a job that needs a token ends with `vm_token_delivery_failed`.
+     */
+    lifecycle: {
+      port: VmPort;
+      registry: VmRegistry;
+      caps: MicrovmCaps | undefined;
+      request: VmRequest;
+      readMemAvailableBytes: MemAvailableReader;
+      token?: { needed: (job: Job) => boolean; slot: (vm: string) => TokenSlot | undefined };
+    };
   };
   ledger: JobLedger;
   /** Git path B: the mirror, the workspace and the push. */
@@ -297,6 +310,35 @@ function stopOnAbort(port: SandboxPort, signal: AbortSignal, held: HeldSandbox):
     },
   };
 }
+
+/**
+ * A VM job's port for `runJob`: the VM already exists, made by runVmJob, so `createSandbox` hands out that one; `stop` ends only the agent (the VM stays up for the bundle
+ * read and is ended by `runVmJob`'s own steps), and `deleteSandbox` does nothing. One orchestrator makes and ends every VM; `runJob`'s own cleanup must not race it.
+ */
+function adoptedVm(port: SandboxPort, vm: { held: { handle?: SandboxHandle }; quiesce: (handle: SandboxHandle) => Promise<void> }): SandboxPort {
+  return {
+    ...port,
+    async createSandbox(opts) {
+      // TODO(3c-iii): `opts.timeoutMs` (the job's wall clock plus margin) is dropped here. The VM was made earlier, by `vmPort`, with the wiring's fixed `timeoutMs`, and there is no
+      // port call to change a running VM's limit; 3c-iii derives that limit from the job when it wires the production `vmPort`. A limit below a job's wall clock cuts the agent short (closed).
+      if (vm.held.handle === undefined || vm.held.handle.sandboxName !== opts.sandboxName) throw new GitPathError("workspace_failed");
+      return vm.held.handle;
+    },
+    stop: (handle) => vm.quiesce(handle),
+    deleteSandbox: async () => undefined,
+  };
+}
+
+const CLOSED_WORD = /^[a-z][a-z0-9_]{0,63}$/;
+/** A step's refusal: the error's own closed `code` when it is a plain snake_case word, else the step's fallback. The error text never travels. */
+const refusalOf = (error: unknown, fallback: string): StepRefusal => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return new StepRefusal(typeof code === "string" && CLOSED_WORD.test(code) ? code : fallback);
+};
+/** The steps whose failure means the VM could not be started: the job ends `sandbox_unavailable`, never on the OS sandbox. */
+const VM_START_STEPS: ReadonlySet<VmStep> = new Set(["admit", "register", "create", "egress", "guest_ready"]);
+/** How long a VM job waits for the agent step to unwind after its VM was torn down under it (a stop or a cancel). */
+const AGENT_UNWIND_MS = 5_000;
 
 /**
  * A port that says, on `step`, when the agent's turn starts and when it ends (with the kind of its last event, a closed word). It changes nothing the agent or the run sees:
@@ -522,7 +564,9 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     // which a guest must never see, so such a job runs on the host sandbox as it always did; a microVM runner with no host sandbox wired refuses it (below).
     const onHost = isBrowserJobRole(job.role) || job.browser_method !== undefined;
     const vmRun = deps.engine === "microvm" && !onHost;
-    const baseSandbox: SandboxPort = onHost && deps.hostSandbox !== undefined ? deps.hostSandbox : deps.sandbox;
+    /** The VM `runVmJob` made for this run: the agent step's port hands out this one (see `adoptedVm`). */
+    const adopted: HeldSandbox = {};
+    const baseSandbox: SandboxPort = onHost && deps.hostSandbox !== undefined ? deps.hostSandbox : vmRun && deps.vm !== undefined ? adoptedVm(deps.sandbox, { held: adopted, quiesce: deps.vm.quiesce }) : deps.sandbox;
     let usedPort: SandboxPort = baseSandbox;
     /** One journal line for this run (`stepLog.ts`). */
     const step: StepSink = (text) => deps.onStep?.(`fx-runner: run ${claimed.runId}: ${text}`);
@@ -669,21 +713,13 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           let vmNetwork: NetworkRule[] = [];
           const allowed = vmRun ? rememberingNetwork(narrow, (rules) => void (vmNetwork = rules)) : narrow;
           usedPort = allowed;
-          const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
+          /**
+           * Every host step after the agent, up to (not including) the approved check. It returns the check to run, or undefined when there is none (the outcome is then already in `checkHeld`).
+           * An OS-sandbox run runs the returned check at once (`afterAgent`). A microVM run reaches here through the host_apply step of runVmJob, after the agent's commits were read out of its
+           * guest and brought into the host copy (D#587 B-5b), and runs the check in the fresh VM `runVmJob` makes for it: the agent's VM is already quiesced and stopped.
+           */
+          const hostSteps = async (sandboxHandle: SandboxHandle, workspace: string): Promise<((checkVm?: SandboxHandle) => Promise<void>) | undefined> => {
             let agentStopFailed = false;
-            // D#587 B-5b: in a microVM the agent worked on the guest's copy. It is ended (the VM kept), its commits are read out as a bundle the host checks, and only a bundle that
-            // passes changes the host workspace; every step after this (the lockfile update, the scope test, the push) then sees what the agent made. A failure here is a closed code.
-            let vmQuiesced = false;
-            if (vmRun && deps.vm !== undefined) {
-              const vm = deps.vm;
-              await vm.quiesce(sandboxHandle);
-              vmQuiesced = true;
-              const collected = await vm.crossing.collect(job.run_id, await vm.guestOf(sandboxHandle));
-              if (collected !== null) {
-                const applied = await vm.apply({ bundle: collected.bundle, base: collected.base, mirrorDir: vmMirror, workspace });
-                step(`microVM commits brought in (${String(applied.commits)})`);
-              }
-            }
             // Before the check's before-and-after comparison of the protected files, so a placeholder is neither checked nor reported as a change.
             clearStubs(workspace);
             // The agent could not touch the lockfile; the runner does it, so the check's frozen install and the published change both see a lockfile that matches the manifests.
@@ -694,8 +730,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // result event, and a tool call's background process may still be running (CWE-367). `stop` ends the whole group and waits; the sandbox itself stays, so the check
             // below still launches under its rules. It runs for the check whether or not a lockfile update is wired.
             if (syncsLockfile || job.check !== undefined) {
-              // A microVM keeps running after its agent ends: `stop` would end the VM the runner reads the agent's commits out of.
-              const ended = await (vmQuiesced ? Promise.resolve() : allowed.stop(sandboxHandle)).then(() => true, () => false);
+              // A microVM's agent was ended by `runVmJob`'s steps (and its VM stopped) before this runs: there is no agent here to stop.
+              const ended = await (vmRun ? Promise.resolve() : allowed.stop(sandboxHandle)).then(() => true, () => false);
               if (!ended) {
                 agentStopFailed = true;
                 if (syncsLockfile) step("lockfile update ended (not run: the agent could not be stopped)");
@@ -772,27 +808,116 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               checkHeld.outcome = closed(`the check was not run: ${String(outside)} changed ${outside === 1 ? "file is" : "files are"} outside the Spec's file list`, "out_of_scope"); step(`check not run (out_of_scope, ${String(outside)} ${outside === 1 ? "file" : "files"})`);
               return;
             }
-            step(`check started (time limit ${String(check.timeout_s)} s)`);
-            try {
-              if (vmRun && freshCheck !== undefined) {
-                // the tip is read by the host the way the push reads it, from the host copy the verified bundle was brought into
-                const tip = await git.tip?.(job, workspace).catch(() => null);
-                checkHeld.outcome = tip === undefined || tip === null || !FULL_COMMIT_ID.test(tip)
-                  ? closed("the check was not run: the new tip could not be read", "start_failed")
-                  : await freshCheck({ runId: job.run_id, check, repoDir: workspace, tip, baseFile: (relative) => baseFile(mirror, pin, relative), networkPolicy: vmNetwork, signal: stopRun });
-              } else {
-                checkHeld.outcome = await checkStep!({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch!(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+            return async (checkVm) => {
+              step(`check started (time limit ${String(check.timeout_s)} s)`);
+              try {
+                if (vmRun && freshCheck !== undefined && checkVm !== undefined) {
+                  // the tip is read by the host the way the push reads it, from the host copy the verified bundle was brought into
+                  const tip = await git.tip?.(job, workspace).catch(() => null);
+                  checkHeld.outcome = tip === undefined || tip === null || !FULL_COMMIT_ID.test(tip)
+                    ? closed("the check was not run: the new tip could not be read", "start_failed")
+                    : await freshCheck({ runId: job.run_id, check, repoDir: workspace, tip, baseFile: (relative) => baseFile(mirror, pin, relative), networkPolicy: vmNetwork, signal: stopRun }, checkVm);
+                } else {
+                  checkHeld.outcome = await checkStep!({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch!(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+                }
+                if (checkHeld.outcome.passed && verdict !== null && verdict.derivedFresh.length > 0) checkHeld.outcome = { ...checkHeld.outcome, body: { ...checkHeld.outcome.body, derived_fresh: verdict.derivedFresh } };
+                const body = checkHeld.outcome.body;
+                step(`check ended (exit ${body.exit_code === null ? "none" : String(body.exit_code)}, ${String(body.duration_ms)} ms, timed_out ${String(body.timed_out)}${stopRun.aborted ? ", stopped" : ""}${body.reason === undefined ? "" : `, ${closedWord(body.reason)}`})`);
+              } catch {
+                // fx-swallow-ok: a check step that threw did not pass; the error text could hold a path
+                checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up");
+                step("check ended (not run: it is not set up on this runner)");
               }
-              if (checkHeld.outcome.passed && verdict !== null && verdict.derivedFresh.length > 0) checkHeld.outcome = { ...checkHeld.outcome, body: { ...checkHeld.outcome.body, derived_fresh: verdict.derivedFresh } };
-              const body = checkHeld.outcome.body;
-              step(`check ended (exit ${body.exit_code === null ? "none" : String(body.exit_code)}, ${String(body.duration_ms)} ms, timed_out ${String(body.timed_out)}${stopRun.aborted ? ", stopped" : ""}${body.reason === undefined ? "" : `, ${closedWord(body.reason)}`})`);
-            } catch {
-              // fx-swallow-ok: a check step that threw did not pass; the error text could hold a path
-              checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up");
-              step("check ended (not run: it is not set up on this runner)");
-            }
+            };
           };
-          result = withAnswerFile(job, await run(job, { ...deps.run, ...(vmRun ? { persistentSandbox: deps.vm?.persistent === true } : {}), afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger }), deps.verifyAnswer, claimed.runId);
+          const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
+            await (await hostSteps(sandboxHandle, workspace))?.();
+          };
+          const runOptions: RunJobDeps = { ...deps.run, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger };
+          const vm = vmRun ? deps.vm : undefined;
+          if (vm === undefined) result = withAnswerFile(job, await run(job, { ...runOptions, afterAgent }), deps.verifyAnswer, claimed.runId);
+          else {
+            // D#587 B-5b-3c-ii (TL ruling 22): `runVmJob` is the one orchestrator of a VM job. The agent step is `runJob` over the VM it made; it makes, stops and deletes both VMs, wipes the token
+            // and reads the agent's commits out in between, and ends them on every way out. The bundle, the host steps and the check are its steps; nothing of that is left to `runJob`.
+            const life = vm.lifecycle;
+            const names = { agent: `rn-${job.run_id}`, check: `rc-${job.run_id}` };
+            const handleOf = (name: string): SandboxHandle => ({ runId: "", sandboxName: name, sessionId: "" });
+            let agent: RunJobResult | undefined;
+            let agentRun: Promise<RunJobResult> | undefined;
+            const outcome = await runVmJob<RunJobResult, { bundle: Buffer; base: string } | null, ((checkVm?: SandboxHandle) => Promise<void>) | undefined, void>({
+              names,
+              port: life.port,
+              registry: life.registry,
+              caps: life.caps,
+              request: life.request,
+              readMemAvailableBytes: life.readMemAvailableBytes,
+              needsToken: life.token?.needed(job) === true,
+              token: life.token?.slot(names.agent),
+              // resume is not wired (a fix round starts a fresh VM), so a VM kept stopped would only leak: the agent's VM is deleted when the job ends
+              keepAgentVm: false,
+              signal: stopRun,
+              operatorLine: (line) => step(line),
+              log: (event) => { if (event.phase === "fail") step(`microVM step failed (${event.step})`); },
+              steps: {
+                // The working copy crosses at the agent's start (the crossing bound for this run above); this step is the check that it was bound.
+                workspaceIn: async () => {
+                  if (!bound) throw new StepRefusal("workspace_failed");
+                },
+                runAgent: async (name) => {
+                  adopted.handle = handleOf(name);
+                  // `persistentSandbox` here only tells `runJob` not to stop the VM when it ends (`runVmJob` ends it); the VM was made by `runVmJob`, so the flag is read by nothing else
+                  const ended = await (agentRun = run(job, { ...runOptions, persistentSandbox: true }));
+                  agent = ended;
+                  // the agent's process tree ends before the token is wiped and the bundle is read; a stop that fails is the step's failure
+                  const quiet = vm.quiesce(adopted.handle);
+                  if (ended.status !== "done") {
+                    await quiet.catch(() => undefined); // fx-swallow-ok: the VM is deleted next whatever this said; the agent's own result is what the job reports
+                    throw new StepRefusal(ended.status === "failed" && CLOSED_WORD.test(ended.reason) ? ended.reason : ended.status === "failed" ? "agent_exit" : ended.status);
+                  }
+                  await quiet;
+                  return ended;
+                },
+                bundleOut: async (name) => {
+                  try {
+                    return await vm.crossing.collect(job.run_id, await vm.guestOf(handleOf(name)));
+                  } catch (error) {
+                    throw refusalOf(error, "vm_workspace_failed");
+                  }
+                },
+                hostApply: async (collected) => {
+                  if (agent?.status !== "done") throw new StepRefusal("vm_workspace_failed");
+                  try {
+                    if (collected !== null) {
+                      const applied = await vm.apply({ bundle: collected.bundle, base: collected.base, mirrorDir: vmMirror, workspace: agent.workspace });
+                      step(`microVM commits brought in (${String(applied.commits)})`);
+                    }
+                    return await hostSteps(adopted.handle as SandboxHandle, agent.workspace);
+                  } catch (error) {
+                    throw refusalOf(error, "vm_workspace_failed");
+                  }
+                },
+                needsCheck: (go) => go !== undefined,
+                runCheck: async (name, go) => {
+                  await go?.(handleOf(name));
+                },
+              },
+            });
+            // a stop or a cancel ended the agent's VM under the agent step: it has unwound, or is given a moment to, before its result is read
+            if (agentRun !== undefined) await Promise.race([agentRun.catch(() => undefined), deps.clock.sleep(AGENT_UNWIND_MS, never)]); // fx-swallow-ok: the agent step's own outcome is read below
+            if (outcome.record.teardownIncomplete) step("microVM teardown incomplete (a leftover is kept for the reaper)");
+            const ended: RunJobResult | undefined = agent;
+            if (outcome.ok && ended !== undefined) result = withAnswerFile(job, ended, deps.verifyAnswer, claimed.runId);
+            // A VM that may still hold the token, or is still running, ends the job `vm_teardown_incomplete` whatever the agent's own reason was (criterion 24): the leftover must show in
+            // the job's result, not only in the operator's journal. The agent's reason is kept only when teardown completed.
+            else if (!outcome.ok && outcome.teardownIncomplete) result = { status: "failed", reason: "vm_teardown_incomplete", ...(ended?.status === "done" ? { workspace: ended.workspace } : {}) };
+            else if (!outcome.ok && ended !== undefined && ended.status !== "done") result = ended;
+            else {
+              const code = outcome.ok ? "vm_teardown_incomplete" : outcome.code;
+              const failedStep: VmStep = outcome.ok ? "teardown" : outcome.step;
+              const reason = VM_START_STEPS.has(failedStep) ? "sandbox_unavailable" : code === "vm_workspace_failed" ? "workspace_failed" : code;
+              result = { status: "failed", reason, ...(ended?.status === "done" ? { workspace: ended.workspace } : {}) };
+            }
+          }
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
