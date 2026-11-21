@@ -59,6 +59,24 @@ export class SandboxdSdkError extends Error {
 
 /** The daemon id a sandbox name maps to (the adapter keys everything by it; `deleteById` and the inventory speak in it). */
 export const sandboxIdOf = (name: string): string => `sb-${createHash("sha256").update(name).digest("hex").slice(0, 32)}`;
+
+const RUNNER_ID_PREFIX = /^sb-[0-9a-f]{10}-$/;
+/** True for a prefix made by `runnerIdPrefix`. */
+export function isRunnerIdPrefix(prefix: string): boolean {
+  return RUNNER_ID_PREFIX.test(prefix);
+}
+/**
+ * The marker one runner puts on every VM it creates (FU-177): `sb-` and 10 hex digits of the SHA-256 of its home, then `-`. The helper carries no label and lists only ids, so the marker
+ * lives in the id. Two runners of one user with different homes never share it, and an unmarked id (`sandboxIdOf`'s 32 hex digits, no `-` at that place) never matches it.
+ */
+export function runnerIdPrefix(runnerHome: string): string {
+  return `sb-${createHash("sha256").update(runnerHome).digest("hex").slice(0, 10)}-`;
+}
+/** The id a name maps to for the runner that owns `prefix`: the prefix, then 22 hex digits of the name's SHA-256 (36 characters in all, under the helper's 40). */
+export function idOfRunner(prefix: string): (name: string) => string {
+  if (!isRunnerIdPrefix(prefix)) throw new Error("bad_runner_id_prefix");
+  return (name) => `${prefix}${createHash("sha256").update(name).digest("hex").slice(0, 22)}`;
+}
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 /** The most a timer may be asked to wait: `setTimeout` overflows past 2^31-1 ms and would fire at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;

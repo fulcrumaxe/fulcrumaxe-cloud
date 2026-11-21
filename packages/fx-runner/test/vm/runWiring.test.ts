@@ -23,7 +23,7 @@ describe("run.ts chooses its engine from the machine, and the constant cannot co
 
   it("the choice is made from the engine line and from whether the live stack was composed", () => {
     expect(runSource).toMatch(/chooseEngine\(engineLineOf\(/);
-    expect(runSource).toMatch(/createLiveMicrovm\(host\.microvm\)/);
+    expect(runSource).toMatch(/createLiveMicrovm\(host\.microvm, stateDir\)/); // this runner's own state directory makes the id marker startup reaping reads back (FU-177)
   });
 
   it("the sandbox port is picked in one place, and a microvm engine with a throwing port never touches the OS port", () => {

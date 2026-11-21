@@ -7,6 +7,7 @@ import { createEventRelay } from "../../src/daemon/lease.js";
 import { createUsageGate } from "../../src/daemon/usageGate.js";
 import type { JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import { VmRegistry } from "../../src/vm/jobLifecycle.js";
+import { idOfRunner, sandboxIdOf, runnerIdPrefix } from "../../src/vm/sandboxd/sdkAdapter.js";
 import type { MicrovmCaps } from "../../src/vm/limits.js";
 import { GuestBindings } from "../../src/vm/sandboxd/guestBindings.js";
 import type { LiveMicrovm } from "../../src/vm/sandboxd/live.js";
@@ -160,12 +161,17 @@ describe("a VM run's guest events go where the OS-sandbox path's go (spend and u
   });
 });
 
+const RUNNER_HOME = "/tmp/fictional-runner-home-a";
+const OWN = idOfRunner(runnerIdPrefix(RUNNER_HOME));
+
 describe("the claim loop's part of the microVM path", () => {
   const apiKey = () => createVmClaimGuard({ ...guardRig({ subscription: false }) });
   function guardRig(over: { subscription?: boolean; listed?: string[]; deleteFails?: string[]; listFails?: boolean; maxVms?: number } = {}) {
     const calls: string[] = [];
     const state = { listed: over.listed ?? [], deleteFails: new Set(over.deleteFails ?? []), listFails: over.listFails === true };
     const live = {
+      idPrefix: runnerIdPrefix(RUNNER_HOME),
+      idOf: OWN,
       reap: {
         list: async () => {
           calls.push("list");
@@ -200,15 +206,35 @@ describe("the claim loop's part of the microVM path", () => {
   });
 
   it("a VM an earlier process left is ended before the first claim (egress released, then the VM deleted); a failed end holds claiming, and the next claim check tries again", async () => {
-    const r = guardRig({ listed: ["sb-left", "sb-stuck"], deleteFails: ["sb-stuck"] });
+    const left = OWN("rn-left");
+    const stuck = OWN("rn-stuck");
+    const r = guardRig({ listed: [left, stuck], deleteFails: [stuck] });
     const guard = createVmClaimGuard(r);
     await guard.start();
-    expect(r.calls).toEqual(["list", "release:sb-left", "delete:sb-left", "release:sb-stuck", "delete:sb-stuck"]);
+    expect(r.calls).toEqual(["list", `release:${left}`, `delete:${left}`, `release:${stuck}`, `delete:${stuck}`]);
     expect(guard.block()).toBe("vm_reap_pending"); // still held: and this check started another pass
     r.state.deleteFails.clear();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(guard.block()).toBeUndefined();
     expect(r.state.listed).toEqual([]);
+  });
+
+  it("the startup reap is called with this runner's own prefix: another runner's VMs and unmarked ones are listed and left alone", async () => {
+    const other = idOfRunner(runnerIdPrefix("/tmp/fictional-runner-home-b"))("rn-theirs");
+    const unmarked = sandboxIdOf("rn-unmarked");
+    const mine = OWN("rn-mine");
+    const r = guardRig({ listed: [mine, other, unmarked] });
+    await createVmClaimGuard(r).start();
+    expect(r.calls).toEqual(["list", `release:${mine}`, `delete:${mine}`]);
+    expect(r.state.listed).toEqual([other, unmarked]);
+  });
+
+  it("a live job registered by name is not reaped on a pass that finds its mapped id in the list", async () => {
+    const r = guardRig({ listed: [OWN("rn-live"), OWN("rn-orphan")] });
+    r.registry.add("rn-live", "agent", { vcpus: 1, memoryMb: 512 });
+    await createVmClaimGuard(r).start();
+    expect(r.calls).toEqual(["list", `release:${OWN("rn-orphan")}`, `delete:${OWN("rn-orphan")}`]);
+    expect(r.state.listed).toEqual([OWN("rn-live")]);
   });
 
   it("a helper list that cannot be read holds claiming: what is left is unknown", async () => {
