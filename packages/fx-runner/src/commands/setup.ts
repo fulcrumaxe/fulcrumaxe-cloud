@@ -54,10 +54,13 @@ export async function setupCommand(flags: Flags, ctx: CommandContext, host: Setu
   // The machine is read once: the same facts feed the checks, the approval page and the closing hint.
   const vm = host.doctor.vmInstall === undefined ? undefined : await host.doctor.vmInstall();
   const found: string[] = [];
-  await doctorCommand({ ...ctx, out: (line) => void found.push(line) }, { ...host.doctor, ...(vm === undefined ? {} : { vmInstall: async () => vm }) });
+  await doctorCommand({ ...ctx, out: (line) => void found.push(line) }, { ...host.doctor, cloudOrigin: origin, ...(vm === undefined ? {} : { vmInstall: async () => vm }) });
   const problems = problemLines(found);
   for (const line of problems) ctx.out(line);
   if (problems.some((line) => /^(FAIL|WARN)\s+(VM|microvm)/i.test(line))) ctx.out("The VM checks above do not stop setup: this machine registers on the standard tier (the operating-system sandbox).");
+
+  // D#845 ON-21: a failed KVM check is never a reason to stop; it only decides the tier, and the person is told which.
+  if (problems.some((line) => /^(FAIL|WARN)\s+Preflight:\s+kvm_/.test(line))) ctx.out("The KVM checks above do not stop setup: this machine registers on the standard tier (the operating-system sandbox).");
 
   const result = await deviceRegister(ctx, { origin, kvm: vm === undefined ? undefined : vm.kvm === "present" });
   ctx.out(`Registered runner ${result.runnerId} (${result.mode}) in account ${result.accountId}; if that is not the account you meant, run: fx-runner revoke. The key is saved under ${ctx.stateDir}.`);

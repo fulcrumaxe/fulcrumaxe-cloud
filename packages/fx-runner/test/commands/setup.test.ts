@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -81,6 +83,8 @@ interface Rig {
   afterPoll?: (() => void) | undefined;
   /** Called each time the CLI reads the clock: where a test makes the save fail after the key is written. */
   onNow?: (() => void) | undefined;
+  /** D#845 ON-21: the preflight host the doctor under `setup` reads; absent means the doctor prints no preflight line. */
+  preflight?: DoctorHost["preflight"] | undefined;
   /** What the terminal and the service start did, in order: "release" when the Ctrl-C listener was removed, "run" for each service command. */
   events: string[];
   runCode: number;
@@ -97,7 +101,7 @@ async function runSetup(argv: string[], vm: VmInstallFacts | undefined, over: Pa
       return rig.answers.shift();
     },
   };
-  const doctor: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, ...(vm === undefined ? {} : { vmInstall: async () => vm }) };
+  const doctor: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, ...(rig.preflight === undefined ? {} : { preflight: rig.preflight }), ...(vm === undefined ? {} : { vmInstall: async () => vm }) };
   const code = await runCli({
     argv,
     home: root,
@@ -200,6 +204,32 @@ describe("setup: the whole way", () => {
     expect(text(failed.rig)).toMatch(/FAIL\s+VM unit:/);
     expect(text(failed.rig)).toContain("registers on the standard tier");
     expect(loadRegistration(stateDir)).toBeDefined();
+  });
+
+  it("D#845 ON-21: the preflight fix lines come before the device flow, a failed KVM check says it registers on the standard tier, and nothing blocks", async () => {
+    const answers = createServer((_req, res) => res.end());
+    await new Promise<void>((resolve) => answers.listen(0, "127.0.0.1", resolve));
+    try {
+      const url = `http://127.0.0.1:${(answers.address() as AddressInfo).port}/`;
+      const preflight: DoctorHost["preflight"] = {
+        kernel: () => ({ kvm: "absent", vt: "no", cgroup: "v2", cgroupDelegated: "no", diskFreeBytes: 100 * 1024 ** 3, memAvailableBytes: 16 * 1024 ** 3 }),
+        lookup: async () => [{ address: "192.0.2.1", family: 4 }],
+        urls: { github: url, model_api: url, registry_npm: url, registry_pypi: url },
+      };
+      const { code, rig } = await runSetup(SETUP(), undefined, { preflight, onSleep: (n) => n === 1 && cloud.approve(cloud.codes[0]!.userCode) });
+      expect(code).toBe(0);
+      const out = text(rig);
+      expect(out).toMatch(/WARN\s+Preflight:\s+kvm_absent: No KVM on this machine/);
+      expect(out).toMatch(/WARN\s+Preflight:\s+kvm_no_vt: Turn on virtualization/);
+      expect(out).toMatch(/WARN\s+Preflight:\s+cgroup_no_delegate: Run `sudo fx-runner vm install` again/);
+      // The count line is informational, so it is not one of the problems that setup repeats.
+      expect(out).not.toMatch(/INFO\s+Preflight/);
+      expect(out.indexOf("kvm_absent")).toBeLessThan(out.indexOf("Your code:"));
+      expect(out).toContain("The KVM checks above do not stop setup: this machine registers on the standard tier");
+      expect(loadRegistration(stateDir)).toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => answers.close(() => resolve()));
+    }
   });
 
   it("a service that cannot be started is reported with the commands to run, after the registration is kept", async () => {
