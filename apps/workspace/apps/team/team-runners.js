@@ -122,7 +122,7 @@ const REFUSALS = {
   checkout_unsafe: "That copy is not safe to use: it, or a folder above it, can be changed by other people on this computer. Run chmod go-w on it (and on any folder above it that others can write in), then Connect again, or run the command below with the folder.",
   repo_root_invalid: "That folder cannot be used: it must be a real folder of yours, with no link in it, and a copy of this repo.",
   repo_not_paired: "This runner is not paired with this repo.",
-  engine_version_unusable: "That copy has no readable engine version (engine/manifest.json).",
+  engine_version_unusable: "That copy has no readable engine version (engine/manifest.json or .autonomous-team/engine-install.json).",
   state_dir_missing: "The engine's state folder for that copy does not exist yet. Start the engine once there, then try again.",
   state_dir_unreadable: "The engine's state folder for that copy cannot be read by the runner's user.",
   state_dir_shared: "Another connected repo already uses that state folder. Give this one its own.",

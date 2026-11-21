@@ -75,6 +75,17 @@ describe("engine-bridge enable", () => {
     expect(saved()).toEqual([]);
   });
 
+  it("enables an installed project, which has no engine directory and records its version in .autonomous-team/engine-install.json, and names both places when neither is there", async () => {
+    rmSync(path.join(repoRoot, "engine"), { recursive: true });
+    expect(await cli("engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot, "--state-dir", path.join(root, "s1"))).toBe(2);
+    expect(err.join("")).toContain("engine/manifest.json or .autonomous-team/engine-install.json");
+    expect(saved()).toEqual([]);
+    mkdirSync(path.join(repoRoot, ".autonomous-team"));
+    writeFileSync(path.join(repoRoot, ".autonomous-team", "engine-install.json"), JSON.stringify({ engine_version: "0.3.0" }), { mode: 0o644 });
+    expect(await cli("engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot, "--state-dir", path.join(root, "s1"))).toBe(0);
+    expect(saved()).toHaveLength(1);
+  });
+
   it("refuses a second repo on a state directory another repo has, the engine's shared default included, and takes it once the first is disabled", async () => {
     // No --state-dir and no AUTONOMOUS_TEAM_STATE_DIR: the engine's default, shared by every project on the machine.
     expect(await cli("engine-bridge", "enable", "--repo", "acme/widgets", "--repo-root", repoRoot)).toBe(0);

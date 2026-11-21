@@ -21,7 +21,7 @@ export interface BridgedRepo {
   full_name: string;
   /** The engine's state directory (`AUTONOMOUS_TEAM_STATE_DIR`), absolute and normalised. */
   state_dir: string;
-  /** The engine repository's root, absolute and normalised: `engine/manifest.json` is read below it. */
+  /** The engine repository's root, absolute and normalised: the engine version (`engine/manifest.json` or `.autonomous-team/engine-install.json`) is read below it. */
   repo_root: string;
 }
 
