@@ -1,7 +1,5 @@
 import { createServer as createHttpsServer, type Server } from "node:https";
-import { mkdtempSync } from "node:fs";
 import type { AddressInfo } from "node:net";
-import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { findChromium } from "../../src/verifyBrowser/driver.js";
@@ -10,6 +8,7 @@ import { generateSelfSignedCert } from "../helpers/selfSignedCert.js";
 import { chromiumSandboxRefused } from "../helpers/chromiumSandbox.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 import { useSourcePlaywright } from "./sourceLoader.js";
+import { tempDir } from "../helpers/tempTree.js";
 
 /**
  * D#749 V2c-2a: an https base origin through the origin proxy (a CONNECT tunnel to the base host and port), against a real Chromium. The certificate is self-signed, so the
@@ -52,7 +51,7 @@ useSourcePlaywright();
 
 describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")("an https base origin through the origin proxy", () => {
   it("loads over a CONNECT tunnel, reaches only the base origin, and refuses a redirect to another port", async () => {
-    const jobDir = mkdtempSync(path.join(tmpRoot(), "vb-https-"));
+    const jobDir = tempDir("vb-https-", tmpRoot());
     const input = new PassThrough();
     const output = new PassThrough();
     const server = startVerifyBrowserServer({ baseUrl: base, jobDir, input, output, hostEnv: process.env, executablePath: EXE, ignoreHttpsErrors: true });

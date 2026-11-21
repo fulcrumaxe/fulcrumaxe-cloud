@@ -1,5 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { REQUIRED_FLAGS } from "../../../src/engines/claude/argv.js";
@@ -8,10 +7,11 @@ import { cleanEnv } from "../../../src/job/cleanEnv.js";
 import { PACKAGE_DIR } from "../../helpers/srcFiles.js";
 import { DEFAULT_VERSION, FULL_HELP, countingSpawn, helpWithout, makeFake, type Fake } from "./harness.js";
 import { testLaunch } from "../../helpers/launch.js";
+import { tempDir as trackedDir } from "../../helpers/tempTree.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
-const tempDir = (): string => mkdtempSync(path.join(tmpdir(), "r4b12_pin-"));
+const tempDir = (): string => trackedDir("r4b12_pin-");
 
 function source(fake: Fake, over: { storedPath?: string; cacheDir?: string } = {}) {
   const counted = countingSpawn();

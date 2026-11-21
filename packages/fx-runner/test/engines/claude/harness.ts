@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SpawnFn } from "../../../src/engines/claude/capture.js";
+import { tempDir } from "../../helpers/tempTree.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 /** The build the committed fixtures were captured from. */
@@ -66,7 +66,7 @@ export interface Fake {
  * leftover process.
  */
 export function makeFake(opts: { stream?: string; auth?: string; version?: string; help?: string } = {}): Fake {
-  const dir = mkdtempSync(path.join(tmpdir(), "r4b12_fake-"));
+  const dir = tempDir("r4b12_fake-");
   const binary = path.join(dir, "bin", "agent");
   mkdirSync(path.dirname(binary));
   const script = `#!/bin/sh
@@ -123,7 +123,7 @@ export function countingSpawn(): { spawn: SpawnFn; spawns: string[] } {
 
 /** A temporary root with an empty workspace directory inside it. */
 export function makeWorkspace(): { root: string; workdir: string } {
-  const root = mkdtempSync(path.join(tmpdir(), "r4b12_ws-"));
+  const root = tempDir("r4b12_ws-");
   const workdir = path.join(root, "workspace");
   mkdirSync(workdir);
   return { root, workdir };

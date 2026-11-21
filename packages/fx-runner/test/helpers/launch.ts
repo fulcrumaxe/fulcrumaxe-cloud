@@ -1,8 +1,8 @@
-import { mkdtempSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { LaunchPlace } from "../../src/launchDir.js";
 import { tmpRoot } from "./tmpRoot.js";
+import { tempDir } from "./tempTree.js";
 
 let shared: string | undefined;
 
@@ -11,8 +11,17 @@ let shared: string | undefined;
  * directory and this process's working directory as the two places a launch may never be, exactly as the program's entry point gives them.
  */
 export function testLaunch(): LaunchPlace {
-  shared ??= mkdtempSync(path.join(tmpRoot(), "fxr-launch-"));
-  return { root: path.join(shared, "launch"), home: homedir(), processCwd: () => process.cwd(), uid: process.getuid?.() };
+  // The directory is made when the root is first read, not when the place is built: several files build one at module level and then
+  // skip every test (no usable bubblewrap), and a skipped file runs no cleanup hook, so a directory made at import would stay.
+  return {
+    get root() {
+      shared ??= tempDir("fxr-launch-", tmpRoot());
+      return path.join(shared, "launch");
+    },
+    home: homedir(),
+    processCwd: () => process.cwd(),
+    uid: process.getuid?.(),
+  };
 }
 
 /**

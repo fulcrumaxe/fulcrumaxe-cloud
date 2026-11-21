@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EngineEvent } from "@fulcrumaxe/runner-protocol";
@@ -15,6 +14,7 @@ import { openSessionStore, SESSION_FILE } from "../../src/engineHost/session.js"
 import { createSupervisor, RESUME_FAIL_WITHIN_MS, type HostEvent, type HostSpawnSpec, type Supervisor } from "../../src/engineHost/supervisor.js";
 import { createTicker, POLL_MS, TURN_MAX_MS, type TickEvent, type Ticker } from "../../src/engineHost/ticks.js";
 import { ENGINE_LOOP_MINUTES_KEY, ENGINE_START_DAY_KEY, loadSettings, SETTING_KEYS, SETTINGS_FILE, setSetting, unsetSetting } from "../../src/runnerSettings.js";
+import { tempDir } from "../helpers/tempTree.js";
 
 const uid = process.getuid?.() ?? -1;
 const SID = "5a7c1d0e-3b2f-4c8a-9d41-6e0b7f2a9c13";
@@ -81,7 +81,7 @@ interface World {
 let w: World;
 
 function setup(): World {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "fx-eb12c-"));
+  const dir = tempDir("fx-eb12c-");
   const state = path.join(dir, "state");
   const runnerState = path.join(dir, "runner");
   const checkout = path.join(dir, "repo");

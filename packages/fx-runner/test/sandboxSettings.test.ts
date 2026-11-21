@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CREDENTIAL_FLOOR, MODEL_HOST, SandboxGrantRefused, assertEnabledSandbox, assertPlainHost, sandboxSettings, SHARED_TEMP_DIRS } from "../src/sandbox/sandboxSettings.js";
 import { PACKAGE_DIR, srcFiles } from "./helpers/srcFiles.js";
+import { tempDir } from "./helpers/tempTree.js";
 
 /** D#6 RUNNER-CWD-1: the shared temp directories every job is denied, as the builder lists them (as written and where they really are). */
 const SHARED_TEMP = [...new Set(SHARED_TEMP_DIRS.flatMap((dir) => [dir, existsSync(dir) ? realpathSync(dir) : dir]))];
@@ -204,7 +204,7 @@ describe("the mirrors root (git path B, correction C25 section 2)", () => {
   });
 
   it("refuses a mirrors root that reaches the state directory through a symlink, and an objects directory that links out of its mirror", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "fxr-mirrorlink-"));
+    const dir = tempDir("fxr-mirrorlink-");
     const home = path.join(dir, "home");
     const state = path.join(home, ".fx-runner");
     mkdirSync(path.join(state, "inner"), { recursive: true });

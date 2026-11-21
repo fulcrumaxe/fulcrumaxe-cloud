@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { outcomeOf } from "../../../src/engines/claude/engine.js";
 import { planSession, readSessionIndex, recordSession } from "../../../src/engines/claude/session.js";
 import { engineFor, fixtureText, makeRig } from "./rig.js";
+import { tempDir } from "../../helpers/tempTree.js";
 
 const continues = { session_id: "sess-0001", branch: "fx/fix-1" };
 const index = { "sess-0001": { workspace: "/work/a" } };
@@ -24,7 +24,7 @@ describe("session planning", () => {
 
 describe("session index", () => {
   it("records ids and paths only, 0600, and ignores a bad id, a relative path and a damaged file", async () => {
-    const file = path.join(mkdtempSync(path.join(tmpdir(), "r4b12_idx-")), "sessions.json");
+    const file = path.join(tempDir("r4b12_idx-"), "sessions.json");
     expect(readSessionIndex(file)).toEqual({});
     await recordSession(file, "sess-0001", "/work/a");
     await recordSession(file, "bad id", "/work/b");
@@ -36,7 +36,7 @@ describe("session index", () => {
   });
 
   it("many sessions recorded at once all keep their entry, and no temp or lock file is left", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "r4b12_idx-"));
+    const dir = tempDir("r4b12_idx-");
     const file = path.join(dir, "sessions.json");
     const ids = Array.from({ length: 30 }, (_unused, n) => `sess-${String(n).padStart(4, "0")}`);
     await Promise.all(ids.map((id) => recordSession(file, id, `/work/${id}`)));
@@ -45,7 +45,7 @@ describe("session index", () => {
   });
 
   it("a writer waits for a held lock instead of replacing the file under it, then writes", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "r4b12_idx-"));
+    const dir = tempDir("r4b12_idx-");
     const file = path.join(dir, "sessions.json");
     writeFileSync(`${file}.lock`, "");
     const pending = recordSession(file, "sess-0001", "/work/a");
@@ -57,7 +57,7 @@ describe("session index", () => {
   });
 
   it("a lock left by a dead process is taken over once it is stale", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "r4b12_idx-"));
+    const dir = tempDir("r4b12_idx-");
     const file = path.join(dir, "sessions.json");
     writeFileSync(`${file}.lock`, "");
     const old = new Date(Date.now() - 60_000);

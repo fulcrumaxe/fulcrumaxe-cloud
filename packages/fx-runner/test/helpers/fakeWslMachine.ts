@@ -1,9 +1,9 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { PROBE_MARKER } from "../../src/sandbox/probe.js";
 import { CANARY_DIR, CMD_EXE, CMD_MARKER } from "../../src/sandbox/wslGate.js";
 import { fakeSandboxHost, type FakeSandboxHost } from "./fakeSandboxHost.js";
+import { tempDir } from "./tempTree.js";
 
 export const WSL2_KERNEL = "5.15.167.4-microsoft-standard-WSL2";
 export const CONF_OK = "[interop]\nenabled=false\nappendWindowsPath=false\n";
@@ -56,7 +56,7 @@ export interface WslMachineOptions {
 
 /** A directory with a bwrap and a socat in it (empty executables): what the search path must hold for the sandbox tool to be found. */
 export function toolDir(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "fx-wslgate-"));
+  const dir = tempDir("fx-wslgate-");
   const bin = path.join(dir, "bin");
   mkdirSync(bin);
   for (const name of ["bwrap", "socat"]) {

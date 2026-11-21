@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { socketTmpRoot } from "../../helpers/tmpRoot.js";
+import { removeTree } from "../../helpers/tempTree.js";
 import { vmAssetName, type BootDigests, type TargetListing } from "../../../src/vm/bootGate.js";
 import { agentAtVsockDir, type GuestAgent } from "../../../src/vm/sandboxd/guestAgent.js";
 import { createHelperClient } from "../../../src/vm/sandboxd/helperClient.js";
@@ -18,7 +19,7 @@ export const runCleanups = (): void => {
 export const onCleanup = (fn: () => void): void => void cleanups.push(fn);
 export const scratch =(): string => {
   const dir = mkdtempSync(path.join(socketTmpRoot(), "fxd-"));
-  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  cleanups.push(() => removeTree(dir));
   return dir;
 };
 

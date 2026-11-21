@@ -5,7 +5,9 @@ export default defineConfig({
     environment: "node",
     include: ["test/**/*.test.ts"],
     // The repo's model-call guard (see vitest.workspace.ts). It is test tooling only; nothing in src/ imports it.
-    setupFiles: ["../test-guard/src/setup.ts"],
+    setupFiles: ["../test-guard/src/setup.ts", "./test/bindTmp.ts"],
+    // Gives the run a temp root of its own and fails the run when entries remain in it (FU-169).
+    globalSetup: ["./test/globalSetup.ts"],
     restoreMocks: true,
     // Many files here drive real child processes, real bwrap and real repositories. Under load (a busy host, a
     // hosted CI merge queue) those take several seconds, so the 5 s default dropped merges. Hooks get the same.

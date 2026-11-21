@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createWorkspaceStore } from "../src/job/workspace.js";
+import { tempDir } from "./helpers/tempTree.js";
 
-const root = () => path.join(mkdtempSync(path.join(tmpdir(), "r4b13_wsroot-")), "workspaces");
+const root = () => path.join(tempDir("r4b13_wsroot-"), "workspaces");
 
 describe("workspace store", () => {
   it("makes an empty private directory per run, directly under its root", async () => {
@@ -28,7 +28,7 @@ describe("workspace store", () => {
     await store.discard(dir);
     expect(existsSync(dir)).toBe(false);
     await store.discard(dir);
-    const outside = mkdtempSync(path.join(tmpdir(), "r4b13_outside-"));
+    const outside = tempDir("r4b13_outside-");
     for (const target of [outside, r, path.join(r, "run-1", "sub"), path.join(r, "..")]) await expect(store.discard(target), target).rejects.toThrow(TypeError);
     expect(existsSync(outside)).toBe(true);
   });
