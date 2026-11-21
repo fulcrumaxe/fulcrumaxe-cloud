@@ -153,3 +153,12 @@ describe('payload: the engine.changed panels field (ON-23a)', () => {
     }
   });
 });
+
+describe('payload: the setup.changed ids (ON-5)', () => {
+  const ID = '0b5c3a1e-0000-4000-8000-000000000002';
+
+  it('keeps setup_id beside repo_id when each is a uuid, and drops anything else, free text included', () => {
+    expect(sanitizeWebhookPayload({ setup_id: ID, repo_id: ID })).toEqual({ setup_id: ID, repo_id: ID });
+    for (const bad of ['', 'not-a-uuid', `${ID} `, 7, null, { id: ID }]) expect(sanitizeWebhookPayload({ setup_id: bad as unknown, repo_id: ID })).toEqual({ repo_id: ID });
+  });
+});

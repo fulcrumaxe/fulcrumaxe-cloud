@@ -93,6 +93,8 @@ const FIELD_RULES: Record<string, (value: unknown) => PayloadValue> = {
   answeredOption: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
   // Engine bridge EB-5: the ids of `engine.changed` (a stream-only event, never a webhook type): which repo and session changed, and how far the session has got.
   repo_id: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
+  // D#845 ON-5: the id of `setup.changed` (stream-only, never a webhook type), beside `repo_id`.
+  setup_id: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
   session_id: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
   last_seq: (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null),
   // ON-23a: the panels the notice names. A closed set, each name once, in the set's own order; anything else (a non-array, an unknown name, a repeat) drops the whole field.

@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { SANDBOX_PINNED_VCPUS, PINNED_MEMORY_MB, computeComputeUsd } from "@fx/spend";
 import { ONBOARDING_STEPS, getOnboarding } from "@fx/core/src/onboarding/progress.js";
+import { ENGINE_STEPS, TRACKS, chooseTrack } from "@fx/core/src/onboarding/engineTrack.js";
+import { readMachineFacts } from "@fx/runner-cloud";
 import {
   PreviewExistsError as ServicePreviewExistsError,
   PreviewCapNotConfirmedError as ServiceCapNotConfirmedError,
@@ -43,10 +45,26 @@ export const onboardingDeps: {
 
 const serviceCtx = (ctx: RouteContext) => ({ pool: ctx.pool, principal: ctx.principal });
 
+const pipelineStepsSchema = z.array(z.object({ step: z.enum(ONBOARDING_STEPS), completed_at: z.string().nullable(), skipped: z.boolean() }));
+const engineStepsSchema = z.array(
+  z.object({
+    step: z.enum(ENGINE_STEPS),
+    state: z.enum(["done", "active", "pending", "failed"]),
+    completed_at: z.string().nullable(),
+    tier: z.enum(["microvm", "standard"]).nullable(),
+    failure: z.object({ code: z.string(), at: z.string() }).nullable(),
+  }),
+);
 const onboardingSchema = z.object({
   started_at: z.string(),
-  steps: z.array(z.object({ step: z.enum(ONBOARDING_STEPS), completed_at: z.string().nullable(), skipped: z.boolean() })),
+  steps: pipelineStepsSchema,
+  tracks: z.tuple([
+    z.object({ track: z.literal("pipeline"), steps: pipelineStepsSchema, chosen_at: z.string().nullable() }),
+    z.object({ track: z.literal("engine"), steps: engineStepsSchema, chosen_at: z.string().nullable() }),
+  ]),
 });
+const trackBodySchema = z.strictObject({ track: z.enum(TRACKS) });
+const trackResultSchema = z.object({ track: z.enum(TRACKS), chosen_at: z.string(), created: z.boolean() });
 
 const requestBodySchema = z.strictObject({ repo_id: z.string().uuid(), confirm_model_cap_usd: z.number() });
 const acceptedSchema = z.object({
@@ -116,14 +134,32 @@ export const onboardingRoutes: RouteEntry[] = [
     description:
       "Session only; a token is refused. Always six steps in order (`model_key`, `readonly_app`, `preview`, `pay`, `write_app`, `first_pr`); " +
       "`completed_at` is a server time, or null while the step is open. `skipped` is true for a step that is not open but was never done: the free `preview` once the plan is chosen without one (it then has no time; a preview that finishes later turns it into a done step with its real time). Choosing a plan does not wait for any earlier step. Works for an account that has not subscribed yet. " +
-      "`model_key` and `readonly_app` follow the current state, so they reopen when the model key is removed or stops working, or when the read-only GitHub App is uninstalled or suspended; the other steps are milestones that stay done.",
+      "`model_key` and `readonly_app` follow the current state, so they reopen when the model key is removed or stops working, or when the read-only GitHub App is uninstalled or suspended; the other steps are milestones that stay done. " +
+      "`steps` is the pipeline track and is also `tracks[0].steps`. `tracks` lists the pipeline track, then the engine track (`machine`, `claude`, `github_app`, `project`, `plan`, `install`, `live`), each with `chosen_at` (null until the person chooses it). " +
+      "Every engine step is derived from current rows on each read: `state` is `done`, `failed` (a stored failure for that step while its source is still false; it clears when the source turns true), `active` (the first step not done) or `pending`. `tier` is on `machine` only.",
     principals: ["session"],
     minRole: "admin",
     idempotency: "never",
     rateClass: "read",
     responseSchema: onboardingSchema,
     extraResponses: { "403": "Error `session_required` (a token) or `insufficient_role` (below admin)." },
-    handler: (ctx) => getOnboarding(serviceCtx(ctx)),
+    handler: (ctx) => getOnboarding(serviceCtx(ctx), { readMachineFacts: (accountId, userId) => readMachineFacts({ appUserPool: ctx.pool }, accountId, userId) }),
+  },
+  {
+    method: "PUT",
+    path: "/api/v1/onboarding/track",
+    operationId: "putOnboardingTrack",
+    summary: "Choose an onboarding track",
+    description:
+      "Session only, owner or admin; a token is refused. Body `{ track }`, `engine` or `pipeline`. Both may be chosen. Choosing a track already chosen changes nothing and writes no audit row (`created` is false); a new choice writes `onboarding.track_chosen`. Answers `{ track, chosen_at, created }`.",
+    principals: ["session"],
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    bodySchema: trackBodySchema,
+    responseSchema: trackResultSchema,
+    extraResponses: { "403": "Error `session_required` (a token) or `insufficient_role` (below admin).", "422": "A body that does not validate." },
+    handler: (ctx, input) => chooseTrack(serviceCtx(ctx), (input.body as z.infer<typeof trackBodySchema>).track),
   },
   {
     method: "POST",
