@@ -313,6 +313,20 @@ describe("device flow, cloud side [pg]", () => {
       expect((await approve(f, f.o1, { user_code: body.user_code, confirm: true })).status).toBe(200);
     });
 
+    it("D#845 ON-22a (ruling 42): the machine limit is asked for the runner tier unless the account carries a paid hosted plan item", async () => {
+      const f = await fresh();
+      await h.admin.query("UPDATE accounts SET plan = 'team', hosted_plan_paid = false WHERE id = $1", [f.accountId]);
+      const asked: Array<string | undefined> = [];
+      const { body } = await start();
+      const res = await approve(f, f.o1, { user_code: body.user_code, confirm: true }, { maxRunners: (plan: string) => (asked.push(plan), 1000) });
+      expect(res.status).toBe(200);
+      expect(asked).toEqual(["runner"]);
+      await h.admin.query("UPDATE accounts SET hosted_plan_paid = true WHERE id = $1", [f.accountId]);
+      const second = await start();
+      await approve(f, f.o1, { user_code: second.body.user_code, confirm: true }, { maxRunners: (plan: string) => (asked.push(plan), 1000) });
+      expect(asked).toEqual(["runner", "team"]);
+    });
+
     it("answers 503 for every call of the person while the server key is missing", async () => {
       const f = await fresh();
       const none = { deviceCodeKey: () => null };

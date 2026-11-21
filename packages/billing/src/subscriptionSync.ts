@@ -4,7 +4,8 @@ import type Stripe from 'stripe';
 import { planFor } from '@fx/spend';
 import { withPlatformOps } from './pg.js';
 import { applyCheckoutCompletedInTx, resolveAccountByCustomerId } from './accountLifecycle.js';
-import { buildPriceMap, resolveSubscriptionPlan, type PriceMap } from './priceMap.js';
+import { buildPriceMap, engineQuantityOf, resolveSubscriptionPlan, type PriceMap } from './priceMap.js';
+import { stripeEnginePriceIdsFromEnv } from './env.js';
 import type { StripeWebhookDeps, WebhookResponse } from './webhook.js';
 
 /** Version of the no-refunds terms accepted at checkout, stored beside `terms_accepted_at`. Bump on any wording change. */
@@ -130,7 +131,9 @@ export async function syncSubscriptionEvent(event: Stripe.Event, deps: StripeWeb
   if (subscription.livemode !== deps.livemode) {
     return respond(200, { received: true, handled: false, reason: 'livemode_mismatch' });
   }
-  const resolution = resolveSubscriptionPlan(priceMap, subscription);
+  const enginePriceIds = deps.enginePriceIds ?? stripeEnginePriceIdsFromEnv();
+  const resolution = resolveSubscriptionPlan(priceMap, subscription, enginePriceIds);
+  const engineQuantity = engineQuantityOf(subscription, enginePriceIds);
 
   const outcome = await withPlatformOps(
     deps.platformOpsPool,
@@ -154,7 +157,7 @@ export async function syncSubscriptionEvent(event: Stripe.Event, deps: StripeWeb
       ]);
       if (seen.length > 0) return { ok: true, deduped: true };
 
-      const applied = await applySubscriptionInTx(client, { accountId, subscription, customerId, clock, session, resolution });
+      const applied = await applySubscriptionInTx(client, { accountId, subscription, customerId, clock, session, resolution, engineQuantity });
       // Only a write is recorded as processed: a refusal or a stale fetch leaves the event free to be retried.
       if (!applied.applied) return applied.outcome;
       await client.query(
@@ -199,6 +202,8 @@ interface ApplyArgs {
   clock: string;
   session: Stripe.Checkout.Session | null;
   resolution: ReturnType<typeof resolveSubscriptionPlan>;
+  /** D#845 ON-22a: the summed engine item quantity of the fetched subscription; null when no engine price is configured (the stored value is left alone). */
+  engineQuantity: number | null;
 }
 
 /**
@@ -210,15 +215,16 @@ interface ApplyArgs {
  */
 async function applySubscriptionInTx(
   client: PoolClient,
-  { accountId, subscription, customerId, clock, session, resolution }: ApplyArgs,
+  { accountId, subscription, customerId, clock, session, resolution, engineQuantity }: ApplyArgs,
 ): Promise<{ outcome: Outcome; applied: boolean }> {
   const { rows } = await client.query<{
     stripe_subscription_id: string | null;
     stripe_subscription_status: string | null;
     stripe_customer_id: string | null;
+    engine_quantity_below_live_at: Date | null;
     stale_fetch: boolean;
   }>(
-    `SELECT stripe_subscription_id, stripe_subscription_status, stripe_customer_id,
+    `SELECT stripe_subscription_id, stripe_subscription_status, stripe_customer_id, engine_quantity_below_live_at,
             (stripe_synced_at IS NOT NULL AND stripe_synced_at > $2::timestamptz) AS stale_fetch
        FROM accounts WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
     [accountId, clock],
@@ -317,11 +323,36 @@ async function applySubscriptionInTx(
   if (ENDED_STATUSES.has(status)) sets.push('subscription_ended_at = COALESCE(subscription_ended_at, $6::timestamptz)');
   else if (clearsEnded) sets.push('subscription_ended_at = NULL');
 
+  // D#845 ON-22a (ruling 35.2): whether the subscription carries a recognised hosted-plan item. Written on EVERY apply, from the fetched items alone: an engine-only
+  // subscription, a hosted item that was removed and an unrecognised price all write false, so no gate reads a hosted entitlement off `plan` or a paying status.
+  params.push(resolution.known);
+  sets.push(`hosted_plan_paid = $${params.length}`);
+  // The engine item's quantity is mirrored from the fetched subscription, never from a request; the webhook stays the one writer of paid state.
+  let belowLive: { quantity: number; live: number } | null = null;
+  if (engineQuantity !== null) {
+    params.push(engineQuantity);
+    sets.push(`engine_quantity = $${params.length}`);
+    // Ruling 35.4: a quantity under the engines live now (a portal edit, an ops change) is recorded, never mirrored silently: a flag the readers check and one audit row per episode.
+    const { rows: liveRows } = await client.query<{ n: number }>('SELECT count(*)::int AS n FROM project_placements WHERE account_id = $1', [accountId]);
+    const live = liveRows[0]?.n ?? 0;
+    if (LIVE_STATUSES.has(status) && engineQuantity < live) {
+      belowLive = { quantity: engineQuantity, live };
+      if (row.engine_quantity_below_live_at === null) sets.push('engine_quantity_below_live_at = $6::timestamptz');
+    } else {
+      sets.push('engine_quantity_below_live_at = NULL');
+    }
+  }
   if (session?.consent?.terms_of_service === 'accepted') {
-    sets.push('terms_accepted_at = $6::timestamptz', 'terms_policy_version = $9');
     params.push(NO_REFUNDS_POLICY_VERSION);
+    sets.push('terms_accepted_at = $6::timestamptz', `terms_policy_version = $${params.length}`);
   }
   await client.query(`UPDATE accounts SET ${sets.join(', ')} WHERE id = $1`, params);
+  if (belowLive !== null && row.engine_quantity_below_live_at === null) {
+    await client.query(`SELECT audit_write_system($1, 'stripe_webhook', 'engine_quantity_below_live', $2::jsonb)`, [
+      accountId,
+      JSON.stringify({ subscriptionId: subscription.id, paidQuantity: belowLive.quantity, liveEngines: belowLive.live }),
+    ]);
+  }
   // D#483 S4-c (P6): this write moved the SUBSCRIPTION itself to active or trialing (it was another status, none, or a different
   // subscription before; recovering from past_due is not one). Derived from the subscription's own stored status, not the account's derived status, so an account that
   // pays while paused or with a broken model key still reports it; the discovery run then decides, when it starts, whether the
@@ -334,7 +365,7 @@ async function applySubscriptionInTx(
   const live = nowLive ? { accountId, subscriptionId: subscription.id } : undefined;
 
   let unknownPrice: { priceId: string | null } | undefined;
-  if (!resolution.known) {
+  if (!resolution.known && !resolution.engineOnly) {
     unknownPrice = { priceId: resolution.priceId };
     await recordUnknownPrice(client, accountId, resolution.priceId, subscription.id);
   }
@@ -394,6 +425,8 @@ export interface ApplyFetchedDeps {
   /** Whether the configured Stripe key is live-mode; a subscription of the other mode is refused. */
   livemode: boolean;
   priceMap?: PriceMap;
+  /** D#845 ON-22a: the engine price ids; defaults to the environment's. */
+  enginePriceIds?: readonly string[];
 }
 
 export interface ApplyFetchedResult {
@@ -441,11 +474,13 @@ export async function applyFetchedSubscription(
     // fx-swallow-ok: the refusal is returned to the caller as a reason code; the price-map error text names env vars only
     return { applied: false, reason: 'price_map_invalid' };
   }
-  const resolution = resolveSubscriptionPlan(priceMap, subscription);
+  const enginePriceIds = deps.enginePriceIds ?? stripeEnginePriceIdsFromEnv();
+  const resolution = resolveSubscriptionPlan(priceMap, subscription, enginePriceIds);
+  const engineQuantity = engineQuantityOf(subscription, enginePriceIds);
   const result = await withPlatformOps(deps.platformOpsPool, async (client) => {
     const resolved = await resolveAccountByCustomerId(client, customerId);
     if (!resolved) return { outcome: { ok: false, reason: 'account_not_found' } as Outcome, applied: false };
-    return applySubscriptionInTx(client, { accountId: resolved.accountId, subscription, customerId, clock, session: null, resolution });
+    return applySubscriptionInTx(client, { accountId: resolved.accountId, subscription, customerId, clock, session: null, resolution, engineQuantity });
   });
   const { outcome } = result;
   if (outcome.ok && outcome.unknownPrice) console.error(`billing_unknown_price ${outcome.unknownPrice.priceId ?? 'none'}`);

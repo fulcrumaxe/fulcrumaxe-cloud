@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Pool, PoolClient } from 'pg';
 import type { StripeLike } from '@fx/billing';
 import { createPool } from '@fx/db/src/pool.js';
+import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { handleApiRequest } from '../src/handler.js';
@@ -14,6 +15,7 @@ import { seedAccountWithMember } from './helpers/seed.js';
 
 const PORTAL = '/api/v1/billing/portal-session';
 const CHECKOUT = '/api/v1/billing/checkout-session';
+const ENGINE_QUANTITY = '/api/v1/billing/engine-quantity';
 const APP_ORIGIN = 'https://app.example';
 
 /** What no response may ever carry: a Stripe customer, subscription, payment intent, secret key or session id. */
@@ -29,12 +31,19 @@ interface Identity {
  * Stripe identifiers, so a route that echoed any of them would be caught.
  */
 class FakeStripe {
-  calls: { kind: 'portal' | 'checkout'; args: Record<string, unknown> }[] = [];
+  calls: { kind: 'portal' | 'checkout' | 'item_update'; args: Record<string, unknown> }[] = [];
+  /** D#845 ON-22a: the one subscription the account is billed on, as Stripe would answer a retrieve. */
+  engineQuantityNow = 4;
+  engineCustomer = 'cus_engine';
   failWith: Error | null = null;
+  /** D#845 ON-22a: the provider holds the change for payment (a pending update): the quantity stays and the subscription reports `pending_update`. */
+  holdPayment = false;
   checkoutUrl: string | null = 'https://checkout.stripe.test/pay/opaque';
 
   readonly client = {
     billingPortal: {
+      // D#845 ON-22a: the pinned configuration is checked once before use (active, no item change).
+      configurations: { retrieve: async (id: string) => ({ id, active: true, features: { subscription_update: { enabled: false } } }) },
       sessions: {
         create: async (args: Record<string, unknown>) => {
           this.calls.push({ kind: 'portal', args });
@@ -52,6 +61,21 @@ class FakeStripe {
         },
       },
     },
+    subscriptions: {
+      retrieve: async (id: string) => ({
+        id, customer: this.engineCustomer, status: 'active',
+        pending_update: this.holdPayment ? { expires_at: 1 } : null,
+        items: { data: [{ id: 'si_engine', quantity: this.engineQuantityNow, price: { id: 'price_test_engine' } }] },
+      }),
+    },
+    subscriptionItems: {
+      update: async (id: string, args: Record<string, unknown>) => {
+        this.calls.push({ kind: 'item_update', args: { id, ...args } });
+        if (this.failWith) throw this.failWith;
+        if (!this.holdPayment) this.engineQuantityNow = args.quantity as number;
+        return { id, quantity: args.quantity };
+      },
+    },
   } as unknown as StripeLike;
 }
 
@@ -64,7 +88,7 @@ describe('D#31 API-7e: billing links', () => {
   let stripe: FakeStripe;
   const originalDeps = { ...billingLinkDeps };
   const savedEnv: Record<string, string | undefined> = {};
-  const ENV_NAMES = ['APP_ORIGIN', 'STRIPE_SECRET_KEY', 'STRIPE_PRICE_ID_STARTER', 'BILLING_TERMS_URL'];
+  const ENV_NAMES = ['STRIPE_PORTAL_CONFIGURATION_ID', 'APP_ORIGIN', 'STRIPE_SECRET_KEY', 'STRIPE_PRICE_ID_STARTER', 'STRIPE_PRICE_ID_ENGINE', 'BILLING_TERMS_URL'];
   /** Every response this file provokes, so the identifier check runs over all of them. */
   const seen: { label: string; status: number; text: string; headers: string }[] = [];
 
@@ -88,6 +112,8 @@ describe('D#31 API-7e: billing links', () => {
     for (const name of ENV_NAMES) savedEnv[name] = process.env[name];
     process.env.APP_ORIGIN = APP_ORIGIN;
     process.env.STRIPE_PRICE_ID_STARTER = 'price_test_starter';
+    process.env.STRIPE_PRICE_ID_ENGINE = 'price_test_engine';
+    process.env.STRIPE_PORTAL_CONFIGURATION_ID = 'bpc_test_pinned';
     delete process.env.BILLING_TERMS_URL;
     stripe = new FakeStripe();
     billingLinkDeps.getStripe = () => stripe.client;
@@ -145,6 +171,7 @@ describe('D#31 API-7e: billing links', () => {
     expect(await res.json()).toEqual({ url: 'https://billing.stripe.test/portal/opaque' });
     expect(stripe.calls).toHaveLength(1);
     expect(stripe.calls[0]!.args.return_url).toBe(`${APP_ORIGIN}/billing/invoices`);
+    expect(stripe.calls[0]!.args.configuration).toBe('bpc_test_pinned');
   });
 
   it('portal: return_path defaults to /billing', async () => {
@@ -322,6 +349,88 @@ describe('D#31 API-7e: billing links', () => {
       }
     }
     expect(stripe.calls).toHaveLength(0);
+  });
+
+  describe('D#845 ON-22a engine quantity', () => {
+    async function billedOwner() {
+      const owner = await seedAccountWithMember(admin, { role: 'owner' });
+      stripe.engineCustomer = `cus_engine_${owner.accountId}`;
+      await admin.query(`UPDATE accounts SET stripe_customer_id = $2, stripe_subscription_id = 'sub_engine', stripe_subscription_status = 'active' WHERE id = $1`, [owner.accountId, stripe.engineCustomer]);
+      return owner;
+    }
+    async function place(who: Identity, n: number) {
+      for (let i = 0; i < n; i += 1) {
+        const repo = randomUUID();
+        await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product) VALUES ($1, $2, $3, 'p')`, [repo, who.accountId, Math.floor(Math.random() * 1e12)]);
+        const runner = await insertRunner(admin, who.accountId, who.userId);
+        await admin.query(`INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')`, [repo, who.accountId, runner]);
+      }
+    }
+    const code = async (res: Response) => ((await res.json()) as { error: { code: string } }).error.code;
+
+    it('an engine checkout sends the engine price and quantity; a bad quantity is 422 invalid_quantity before Stripe', async () => {
+      const owner = await seedAccountWithMember(admin, { role: 'owner', status: 'unsubscribed' });
+      const res = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'engine', quantity: 2 });
+      expect(res.status).toBe(200);
+      expect(stripe.calls[0]!.args.line_items).toEqual([{ price: 'price_test_engine', quantity: 2 }]);
+      for (const quantity of [0, 101]) {
+        const bad = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'engine', quantity });
+        expect([bad.status, await code(bad)], String(quantity)).toEqual([422, 'invalid_quantity']);
+      }
+      expect(stripe.calls).toHaveLength(1);
+    });
+
+    it('lowering below the engines live now is 409 engine_quantity_in_use and Stripe records no change; the live count itself is accepted', async () => {
+      const owner = await billedOwner();
+      await place(owner, 3);
+      const refused = await post(ENGINE_QUANTITY, owner, { quantity: 2 });
+      expect([refused.status, await code(refused)]).toEqual([409, 'engine_quantity_in_use']);
+      expect(stripe.calls).toHaveLength(0);
+      const ok = await post(ENGINE_QUANTITY, owner, { quantity: 3 });
+      expect([ok.status, await ok.json()]).toEqual([200, { quantity: 3 }]);
+      expect(stripe.calls).toEqual([{ kind: 'item_update', args: { id: 'si_engine', quantity: 3 } }]);
+    });
+
+    it('a raise is invoiced now and applies on payment; one the provider holds for payment is 402 payment_pending (copy without provider text), and a lowering keeps the default', async () => {
+      const owner = await billedOwner();
+      const ok = await post(ENGINE_QUANTITY, owner, { quantity: 5 });
+      expect([ok.status, await ok.json()]).toEqual([200, { quantity: 5 }]);
+      expect(stripe.calls[0]!.args).toEqual({ id: 'si_engine', quantity: 5, payment_behavior: 'pending_if_incomplete', proration_behavior: 'always_invoice' });
+      stripe.holdPayment = true;
+      const held = await post(ENGINE_QUANTITY, owner, { quantity: 8 });
+      expect([held.status, await code(held)]).toEqual([402, 'payment_pending']);
+      expect(stripe.engineQuantityNow).toBe(5);
+    });
+
+    it('an account with no paying subscription is 409 no_subscription; a bad quantity is 422 invalid_quantity', async () => {
+      const none = await seedAccountWithMember(admin, { role: 'owner', status: 'unsubscribed' });
+      const res = await post(ENGINE_QUANTITY, none, { quantity: 1 });
+      expect([res.status, await code(res)]).toEqual([409, 'no_subscription']);
+      const owner = await billedOwner();
+      const bad = await post(ENGINE_QUANTITY, owner, { quantity: 0 });
+      expect([bad.status, await code(bad)]).toEqual([422, 'invalid_quantity']);
+      expect((await post(ENGINE_QUANTITY, owner, { quantity: 1.5 })).status).toBe(422);
+      expect((await post(ENGINE_QUANTITY, owner, { quantity: 1, plan: 'x' })).status).toBe(422);
+      expect(stripe.calls).toHaveLength(0);
+    });
+
+    it('is owner-only and session-only: an admin is 403 insufficient_role and a token 403 session_required', async () => {
+      const owner = await billedOwner();
+      const adminUser = await addMember(owner.accountId, 'admin');
+      const a = await post(ENGINE_QUANTITY, adminUser, { quantity: 1 });
+      expect([a.status, await code(a)]).toEqual([403, 'insufficient_role']);
+      const t = await post(ENGINE_QUANTITY, { bearer: await mintToken(owner) }, { quantity: 1 });
+      expect([t.status, await code(t)]).toEqual([403, 'session_required']);
+      expect(stripe.calls).toHaveLength(0);
+    });
+
+    it('a Stripe failure is 502 internal_error with none of its text', async () => {
+      const owner = await billedOwner();
+      stripe.failWith = new Error('boom cus_leak sk_live_secret');
+      const res = await post(ENGINE_QUANTITY, owner, { quantity: 2 });
+      expect(res.status).toBe(502);
+      expect(JSON.stringify(await res.json())).not.toContain('boom');
+    });
   });
 
   it('no response body, header or error body from either route carries a Stripe identifier (every status above)', async () => {

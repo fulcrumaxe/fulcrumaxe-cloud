@@ -56,18 +56,19 @@ const PAST_DUE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * The daily cap on runner runs for one account. `accounts.plan` alone is not an entitlement (an unpaid signup defaults to a plan, and a
  * cancelled subscription keeps it), so no cap (`null`) needs both a subscription plan and a runnable account by the same test `reserve` uses:
- * the derived `accounts.status` is `active`, or it is `past_due` with `past_due_since` inside the grace window. A hold, a suspension, a pause,
+ * the account carries a paid hosted plan item (`hosted_plan_paid`, D#845 ON-22a) and the derived `accounts.status` is `active`, or it is `past_due` with `past_due_since` inside the grace window. A hold, a suspension, a pause,
  * an unsubscribed or cancelled account keeps the runner tier's figure from the plan data. Throws for a plan the data cannot answer for, or when
  * the row cannot be read: the target reads a throw as a refusal (fail closed).
  */
 export function runsPerDayOfAccountPlan(pool: Pool, now: () => Date = () => new Date()): (accountId: string) => Promise<number | null> {
   return async (accountId) => {
-    const row = await withTenant(pool, accountId, async (client) => (await client.query<{ plan: string; status: string; past_due_since: Date | null }>("SELECT plan, status, past_due_since FROM accounts WHERE id = $1", [accountId])).rows[0]);
+    const row = await withTenant(pool, accountId, async (client) => (await client.query<{ plan: string; status: string; past_due_since: Date | null; hosted_plan_paid: boolean }>("SELECT plan, status, past_due_since, hosted_plan_paid FROM accounts WHERE id = $1", [accountId])).rows[0]);
     if (row === undefined) throw new Error("runner limits: the account has no plan row");
     const limits = runnerLimitsFor(row.plan);
     if ("runsPerDay" in limits) return limits.runsPerDay;
     const withinGrace = row.status === "past_due" && row.past_due_since !== null && row.past_due_since.getTime() > now().getTime() - PAST_DUE_GRACE_MS;
-    if (row.status === "active" || withinGrace) return null;
+    // D#845 ON-22a (ruling 35.2): no cap needs a paid hosted plan item too; an engine-only subscription is `active` and keeps the row's plan.
+    if (row.hosted_plan_paid && (row.status === "active" || withinGrace)) return null;
     return runnerLimitsFor(RUNNER_PLAN_ID).runsPerDay;
   };
 }

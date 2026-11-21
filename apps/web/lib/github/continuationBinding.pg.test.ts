@@ -28,7 +28,7 @@ describe("the default storedGhRepoId query [pg]", () => {
     const accountId = randomUUID();
     const installationId = randomUUID();
     repoId = randomUUID();
-    await adminPool.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [accountId, `cus_${accountId}`]);
+    await adminPool.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [accountId, `cus_${accountId}`]);
     await adminPool.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, 5151, 'team')`, [installationId, accountId]);
     await adminPool.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, 'team', 'acme', 'widgets')`, [repoId, accountId, installationId, GH_ID]);
   }, 180_000);

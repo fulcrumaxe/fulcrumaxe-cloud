@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { effectivePlan } from "@fx/plan-data";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { apiLimitsFor, isPlanId, type PlanId } from "@fx/spend";
 import { RateLimitedError } from "../errors.js";
@@ -156,8 +157,9 @@ function ipv6Slash64Prefix(addr: string): string | null {
  * own brief states for its migration applies just as much to this one).
  */
 async function getAccountPlanId(client: PoolClient, accountId: string): Promise<PlanId> {
-  const { rows } = await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [accountId]);
-  const plan = rows[0]?.plan;
+  const { rows } = await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [accountId]);
+  // D#845 ON-22a (ruling 42): a plan row without a paid hosted plan item is the entry tier's figures, never a former hosted plan's.
+  const plan = rows[0] === undefined ? undefined : effectivePlan(rows[0], "starter");
   if (plan === undefined || !isPlanId(plan)) {
     throw new Error(`ratelimit: account ${accountId} has no resolvable plan`);
   }

@@ -78,7 +78,7 @@ describe("a runner run's pull request moves its item at once [pg]", () => {
     itemId = randomUUID();
     const installationId = randomUUID();
     ghInstallation = 4242 + ++seq;
-    await adminPool.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [accountId, `cus_${accountId}`]);
+    await adminPool.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [accountId, `cus_${accountId}`]);
     await adminPool.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')`, [installationId, accountId, ghInstallation]);
     const repoId = randomUUID();
     await adminPool.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, 9001, 'team')`, [repoId, accountId, installationId]);

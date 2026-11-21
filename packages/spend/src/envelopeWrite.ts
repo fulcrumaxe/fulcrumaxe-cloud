@@ -10,11 +10,11 @@ import type { PlanId } from './types.js';
  * reservations as spent (the same totals reserve() reads). Envelopes draw on the foreground budget, so that is the compute side.
  */
 export async function remainingAccountBudgetUsd(client: PoolClient, accountId: string, now: Date = new Date()): Promise<number> {
-  const { rows } = await client.query<{ plan: PlanId; budget: string | null }>('SELECT plan, model_budget_usd_month::text AS budget FROM accounts WHERE id = $1', [accountId]);
+  const { rows } = await client.query<{ plan: PlanId; budget: string | null; hosted_plan_paid: boolean }>('SELECT plan, hosted_plan_paid, model_budget_usd_month::text AS budget FROM accounts WHERE id = $1', [accountId]);
   const account = rows[0];
   if (!account) return 0;
   const model = Math.max(0, Number(account.budget ?? 0) - (await monthToDateUsd(client, accountId, 'model', now)));
-  const compute = Math.max(0, foregroundBudgetUsd(account.plan) - (await monthToDateUsd(client, accountId, 'foreground_compute', now)));
+  const compute = Math.max(0, (account.hosted_plan_paid === true ? foregroundBudgetUsd(account.plan) : 0) - (await monthToDateUsd(client, accountId, 'foreground_compute', now)));
   return model + compute;
 }
 

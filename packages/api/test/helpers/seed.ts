@@ -24,6 +24,8 @@ export interface SeedAccountOptions {
   plan?: 'starter' | 'team' | 'scale';
   status?: 'unsubscribed' | 'active' | 'past_due' | 'paused' | 'model_key_broken' | 'cancelled';
   stripeCustomerId?: string | null;
+  /** D#845 ON-22a: the account carries a paid hosted plan item (default: it has a Stripe customer). */
+  hostedPlanPaid?: boolean;
 }
 
 /**
@@ -63,9 +65,10 @@ export async function seedAccount(
   // rejects a row whose status (explicit or the column DEFAULT
   // 'unsubscribed') disagrees with the derived value.
   await admin.query(
-    `INSERT INTO accounts (id, plan, stripe_customer_id, past_due_since, owner_paused_at, key_broken_at, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [accountId, opts.plan ?? 'starter', stripeCustomerId, pastDueSince, ownerPausedAt, keyBrokenAt, status],
+    `INSERT INTO accounts (id, plan, stripe_customer_id, past_due_since, owner_paused_at, key_broken_at, status, hosted_plan_paid)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    // D#845 ON-22a: a seeded account that has a Stripe customer is on a hosted plan unless a test says otherwise.
+    [accountId, opts.plan ?? 'starter', stripeCustomerId, pastDueSince, ownerPausedAt, keyBrokenAt, status, opts.hostedPlanPaid ?? stripeCustomerId !== null],
   );
 }
 

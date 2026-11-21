@@ -17,6 +17,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@fx/plan-data": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/runtime": "workspace:*",
     "pg": "^8.13.1"

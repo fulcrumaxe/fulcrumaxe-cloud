@@ -26,7 +26,7 @@ interface Tenant {
 
 async function seedTenant(): Promise<Tenant> {
   const t = { accountId: randomUUID(), connectionId: randomUUID(), runId: randomUUID() };
-  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [t.accountId, `cus_${t.accountId}`]);
+  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [t.accountId, `cus_${t.accountId}`]);
   const sealed = seal({ kek: KEK, aad: buildAad(t.accountId, t.connectionId) }, PLAINTEXT);
   await admin.query(
     `INSERT INTO model_connections (id, account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint, status)
@@ -100,7 +100,7 @@ describe("[pg] model-connection read with several rows for one account (H14c-3-2
   const port = () => createModelConnectionPort(runnerPool);
   async function account(): Promise<string> {
     const accountId = randomUUID();
-    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [accountId, `cus_${accountId}`]);
+    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [accountId, `cus_${accountId}`]);
     return accountId;
   }
   async function add(accountId: string, status: string, validatedAt: string | null): Promise<string> {

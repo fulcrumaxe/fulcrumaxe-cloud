@@ -126,3 +126,61 @@ describe('the strict Stripe fake refuses what Stripe refuses', () => {
     expect((await call('GET', '/v1/subscriptions?customer=cus_a', auth(RK))).status).toBe(200);
   });
 });
+
+describe('D#845 ON-22a: subscription items (the contract the engine billing code is written against)', () => {
+  const form = { 'content-type': 'application/x-www-form-urlencoded' };
+  const w = (key: string, idem: string) => ({ ...auth(key), ...form, 'idempotency-key': idem });
+  function seed(id: string, items: { id: string; priceId: string; quantity: number }[], status: FakeSubscription['status'] = 'active'): FakeSubscription {
+    const sub: FakeSubscription = { id, customer: 'cus_a', status, created: 1_700_001_000, ended_at: null, cancel_at_period_end: false, current_period_end: 1_900_000_000, livemode: false, priceId: items[0]!.priceId, items };
+    server.world.subscriptions.push(sub);
+    return sub;
+  }
+
+  it('retrieves one subscription with its items and quantities; an unknown id is 404 resource_missing', async () => {
+    seed('sub_it1', [{ id: 'si_a', priceId: 'p_plan', quantity: 1 }, { id: 'si_b', priceId: 'p_engine', quantity: 3 }]);
+    const res = await call('GET', '/v1/subscriptions/sub_it1', auth(RK));
+    expect(res.json.items.data.map((i: any) => [i.id, i.price.id, i.quantity])).toEqual([['si_a', 'p_plan', 1], ['si_b', 'p_engine', 3]]);
+    expect((await call('GET', '/v1/subscriptions/sub_nope', auth(RK))).json.error.code).toBe('resource_missing');
+  });
+
+  it('updates an item quantity: secret key only, whole numbers 0 or more, a known proration, known parameters, an existing item, a live subscription', async () => {
+    const sub = seed('sub_it2', [{ id: 'si_c', priceId: 'p_engine', quantity: 2 }]);
+    expect((await call('POST', '/v1/subscription_items/si_c', w(RK, 'q0'), 'quantity=9')).status).toBe(403);
+    for (const [body, code] of [['quantity=-1', 'parameter_invalid_integer'], ['quantity=1.5', 'parameter_invalid_integer'], ['quantity=two', 'parameter_invalid_integer'], ['quantity=1&proration_behavior=sometimes', 'parameter_invalid_enum'], ['quantity=1&price=p_other', 'parameter_unknown']] as const) {
+      const res = await call('POST', '/v1/subscription_items/si_c', w(SK, `bad-${body}`), body);
+      expect([res.status, res.json.error.code], body).toEqual([400, code]);
+    }
+    expect((await call('POST', '/v1/subscription_items/si_nope', w(SK, 'q-nope'), 'quantity=1')).json.error.code).toBe('resource_missing');
+    expect(sub.items![0]!.quantity).toBe(2); // none of the refusals changed it
+    const ok = await call('POST', '/v1/subscription_items/si_c', w(SK, 'q-ok'), 'quantity=5&proration_behavior=none');
+    expect([ok.status, ok.json.quantity, ok.json.subscription]).toEqual([200, 5, 'sub_it2']);
+    expect(sub.items![0]!.quantity).toBe(5);
+    expect((await call('POST', '/v1/subscription_items/si_c', { ...auth(SK), ...form }, 'quantity=1')).status).toBe(400); // no Idempotency-Key
+    const replay = await call('POST', '/v1/subscription_items/si_c', w(SK, 'q-ok'), 'quantity=5&proration_behavior=none');
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+    expect((await call('POST', '/v1/subscription_items/si_c', w(SK, 'q-ok'), 'quantity=6')).json.error.type).toBe('idempotency_error');
+    seed('sub_it2c', [{ id: 'si_dead', priceId: 'p_engine', quantity: 1 }], 'canceled');
+    expect((await call('POST', '/v1/subscription_items/si_dead', w(SK, 'q-dead'), 'quantity=2')).status).toBe(400);
+  });
+
+  it('adds an item by a subscription update, and refuses a price already held, an unknown price once prices are registered, a bad quantity, an unknown item key and a canceled subscription', async () => {
+    const sub = seed('sub_it3', [{ id: 'si_e', priceId: 'p_plan', quantity: 1 }]);
+    const add = (price: string, extra = '') => `items[0][price]=${price}${extra}`;
+    const dup = await call('POST', '/v1/subscriptions/sub_it3', w(SK, 'a-dup'), add('p_plan'));
+    expect(dup.status).toBe(400);
+    expect(dup.json.error.message).toMatch(/same price/);
+    for (const [body, code] of [[add('p_engine', '&items[0][quantity]=x'), 'parameter_invalid_integer'], [add('p_engine', '&items[0][metadata]=1'), 'parameter_unknown'], ['items[0][quantity]=2', 'parameter_missing']] as const) {
+      expect((await call('POST', '/v1/subscriptions/sub_it3', w(SK, `a-${body}`), body)).json.error.code, body).toBe(code);
+    }
+    server.world.prices.add('p_plan');
+    expect((await call('POST', '/v1/subscriptions/sub_it3', w(SK, 'a-unknown'), add('p_engine', '&items[0][quantity]=2'))).json.error.code).toBe('resource_missing');
+    server.world.prices.add('p_engine');
+    expect(sub.items).toHaveLength(1);
+    const ok = await call('POST', '/v1/subscriptions/sub_it3', w(SK, 'a-ok'), add('p_engine', '&items[0][quantity]=2'));
+    expect(ok.status).toBe(200);
+    expect(ok.json.items.data.map((i: any) => [i.price.id, i.quantity])).toEqual([['p_plan', 1], ['p_engine', 2]]);
+    server.world.prices.clear();
+    seed('sub_it3c', [{ id: 'si_f', priceId: 'p_plan', quantity: 1 }], 'canceled');
+    expect((await call('POST', '/v1/subscriptions/sub_it3c', w(SK, 'a-dead'), add('p_engine'))).status).toBe(400);
+  });
+});

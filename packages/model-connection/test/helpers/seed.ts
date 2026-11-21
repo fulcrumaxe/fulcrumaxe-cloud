@@ -30,7 +30,7 @@ export async function seedAccountWithMember(
   // `status = 'active'` is spelled out explicitly: 0606's INSERT trigger
   // check rejects a row whose status disagrees with what stripe_customer_id
   // derives to (security review MUST-fix 4, Spec A5).
-  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [
+  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [
     accountId,
     `cus_test_${accountId}`,
   ]);

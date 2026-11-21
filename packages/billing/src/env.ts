@@ -82,6 +82,37 @@ export function assertStripePriceIdsConfigured(env: NodeJS.ProcessEnv = process.
     throw new Error(`${missing.join(', ')} must be set to a non-empty Stripe price id`);
   }
   assertSitekitPriceIdsConfigured(env);
+  assertEnginePriceIdConfigured(env);
+}
+
+/** D#845 ON-22a: the Engine plan's per-engine price. The same comma-separated list rule: the first entry is the price Checkout sells, every entry is recognised on a subscription. */
+export const STRIPE_PRICE_ID_ENGINE_ENV_VAR = 'STRIPE_PRICE_ID_ENGINE';
+
+/** Every price id configured for the engine line item; empty when unset (the plan is then not offered, and a fetched subscription's engine item is not recognised). */
+export function stripeEnginePriceIdsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return splitPriceList(env[STRIPE_PRICE_ID_ENGINE_ENV_VAR]);
+}
+
+/** The price Checkout sells for an engine; throws naming the variable when unset. */
+export function stripeEnginePriceIdFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const first = stripeEnginePriceIdsFromEnv(env)[0];
+  if (!first) throw new Error(`${STRIPE_PRICE_ID_ENGINE_ENV_VAR} must be set`);
+  return first;
+}
+
+/**
+ * D#845 ON-22a boot check. The Engine plan may be off (the variable unset): the plan is then not offered and health reports `engine_price_unset`. Set but blank (only separators), or sharing a price id
+ * with a hosted plan or a site-kit product, throws: a price id on two things would let one subscription line count as both. Names only; it never echoes a value.
+ */
+export function assertEnginePriceIdConfigured(env: NodeJS.ProcessEnv = process.env): void {
+  if (env[STRIPE_PRICE_ID_ENGINE_ENV_VAR] === undefined || env[STRIPE_PRICE_ID_ENGINE_ENV_VAR] === '') return;
+  const engine = stripeEnginePriceIdsFromEnv(env);
+  if (engine.length === 0) throw new Error(`${STRIPE_PRICE_ID_ENGINE_ENV_VAR} must be set to a non-empty Stripe price id`);
+  for (const name of [...Object.values(STRIPE_PRICE_ID_ENV_VAR), ...Object.values(SITEKIT_PRICE_ID_ENV_VAR)]) {
+    if (splitPriceList(env[name]).some((id) => engine.includes(id))) {
+      throw new Error(`a price id is listed under both ${STRIPE_PRICE_ID_ENGINE_ENV_VAR} and ${name}`);
+    }
+  }
 }
 
 /** D#69 B3: `true` only for a live-mode secret or restricted key. */

@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { effectivePlan } from "@fx/plan-data";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { isPlanId, planFor, type PlanId } from "@fx/spend";
 import { reportError } from "@fx/telemetry";
@@ -70,10 +71,11 @@ export async function acquireLease(pool: Pool, subject: LeaseSubject, nowMs: num
   const result = await withTenant(pool, subject.accountId, async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`stream_lease:${subject.accountId}`]);
     await client.query("DELETE FROM stream_leases WHERE account_id = $1 AND expires_at <= $2", [subject.accountId, now]);
-    const { rows } = await client.query<{ mine: number; total: number; plan: string | null }>(
+    const { rows } = await client.query<{ mine: number; total: number; plan: string | null; hosted_plan_paid: boolean | null }>(
       `SELECT count(*) FILTER (WHERE principal_key = $3)::int AS mine,
               count(*)::int AS total,
-              (SELECT plan FROM accounts WHERE id = $1) AS plan
+              (SELECT plan FROM accounts WHERE id = $1) AS plan,
+              (SELECT hosted_plan_paid FROM accounts WHERE id = $1) AS hosted_plan_paid
          FROM stream_leases WHERE account_id = $1 AND kind = $2`,
       [subject.accountId, subject.kind, subject.principalKey],
     );
@@ -83,10 +85,12 @@ export async function acquireLease(pool: Pool, subject: LeaseSubject, nowMs: num
         return { leaseId: null };
       }
     } else {
-      if (row.plan === null || !isPlanId(row.plan)) {
+      // D#845 ON-22a (ruling 42): the entry tier's cap unless the account carries a paid hosted plan item.
+      const plan = row.plan === null ? null : effectivePlan({ plan: row.plan, hosted_plan_paid: row.hosted_plan_paid }, "starter");
+      if (plan === null || !isPlanId(plan)) {
         throw new Error(`streams: account ${subject.accountId} has no resolvable plan`);
       }
-      if (row.total >= tokenStreamsPerTenant(row.plan as PlanId)) {
+      if (row.total >= tokenStreamsPerTenant(plan as PlanId)) {
         return { leaseId: null };
       }
     }

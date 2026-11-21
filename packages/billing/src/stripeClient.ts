@@ -21,6 +21,8 @@ export interface StripeLike {
   webhooks: Pick<Stripe.Webhooks, 'constructEvent'>;
   billingPortal: {
     sessions: Pick<Stripe.BillingPortal.SessionsResource, 'create'>;
+    /** D#845 ON-22a: the pinned portal configuration is looked up and created here (portalConfig.ts). Optional like `subscriptions.update`: without them no portal session is opened. */
+    configurations?: Partial<Pick<Stripe.BillingPortal.ConfigurationsResource, 'list' | 'create' | 'retrieve'>>;
   };
   checkout: {
     /** `retrieve` and `expire` (optional, like `subscriptions.update`): site-kit checkout uses them to close a site's earlier open sessions (D#3 K09c); without them it returns stripe_unavailable. */
@@ -28,6 +30,8 @@ export interface StripeLike {
   };
   /** D#69 B2: the webhook fetches the subscription (`retrieve`) instead of trusting the event body; `cancel` is for B3's close-account path; `update` (optional: the real client has it, older test fakes do not) sets a site-kit sync subscription to end with its period (D#3 K09b). */
   subscriptions: Pick<Stripe.SubscriptionsResource, 'retrieve' | 'cancel'> & Partial<Pick<Stripe.SubscriptionsResource, 'update'>>;
+  /** D#845 ON-22a: the engine item's quantity update (`POST /v1/subscription_items/{id}`). Optional like `subscriptions.update`: the real client has it, older test fakes do not. */
+  subscriptionItems?: Partial<Pick<Stripe.SubscriptionItemsResource, 'update'>>;
 }
 
 /**

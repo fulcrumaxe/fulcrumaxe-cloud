@@ -257,6 +257,14 @@ describe('approval envelopes', () => {
       expect(ok.version).toBe(1);
     });
 
+    it('D#845 ON-22a (ruling 42): without a paid hosted plan item there is no foreground compute allowance to count, whatever the plan row says', async () => {
+      const f = await fixture(null);
+      await admin.query('UPDATE accounts SET model_budget_usd_month = 20, hosted_plan_paid = false WHERE id = $1', [f.accountId]);
+      expect(await asPerson(f.accountId, f.userId, (c) => remainingAccountBudgetUsd(c, f.accountId))).toBe(20);
+      await admin.query('UPDATE accounts SET hosted_plan_paid = true WHERE id = $1', [f.accountId]);
+      expect(await asPerson(f.accountId, f.userId, (c) => remainingAccountBudgetUsd(c, f.accountId))).toBe(20 + foregroundBudgetUsd('starter'));
+    });
+
     it('the remaining budget is model left plus foreground compute left, with open reservations counted as spent', async () => {
       const f = await fixture(null);
       await admin.query('UPDATE accounts SET model_budget_usd_month = 20 WHERE id = $1', [f.accountId]);

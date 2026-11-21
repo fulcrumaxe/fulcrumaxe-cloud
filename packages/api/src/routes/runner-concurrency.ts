@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { effectivePlan } from "@fx/plan-data";
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { assertActiveMembership } from "@fx/core/src/tenancy/scopedAccess.js";
@@ -36,8 +37,10 @@ const putBodySchema = z
   .strict();
 
 async function readSetting(client: PoolClient, accountId: string): Promise<z.infer<typeof runnerConcurrencyResponseSchema>> {
-  const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [accountId])).rows[0]?.plan;
-  if (plan === undefined) throw new NotFoundError(`account ${accountId} not found`);
+  const row = (await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [accountId])).rows[0];
+  if (row === undefined) throw new NotFoundError(`account ${accountId} not found`);
+  // D#845 ON-22a (ruling 42): without a paid hosted plan item the runner tier's fixed figures apply, whatever the plan row says.
+  const plan = effectivePlan(row, RUNNER_PLAN_ID);
   if (plan === RUNNER_PLAN_ID) {
     return { applies: false, total: 0, per_repo: 0, default_total: 0, default_per_repo: 0, accepted: false };
   }

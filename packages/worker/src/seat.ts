@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { effectivePlan } from "@fx/plan-data";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { InstallationNotWritableError, assertWriteInstallation } from "@fx/github";
@@ -138,7 +139,7 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
     if (typeof ownerId !== "string" || !UUID_RE.test(ownerId)) return refuse("no_repo");
 
     return withTenant(deps.pool, accountId, async (client): Promise<SeatResult> => {
-      const account = (await client.query<{ plan: PlanId; budget: string }>("SELECT plan, model_budget_usd_month AS budget FROM accounts WHERE id = $1", [accountId])).rows[0];
+      const account = (await client.query<{ plan: PlanId; budget: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid, model_budget_usd_month AS budget FROM accounts WHERE id = $1", [accountId])).rows[0];
       if (account === undefined) return refuse("account_not_found");
 
       let repoId = ownerId;
@@ -221,7 +222,8 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
             trigger: "foreground",
             estimateModelUsd: capUsd,
             estimateComputeUsd,
-            plan: account.plan,
+            // D#845 ON-22a (ruling 42): the plan the spend is sized on is the entry tier unless the account carries a paid hosted plan item (reserve() refuses hosted spend without it anyway).
+            plan: effectivePlan(account, "starter" as PlanId),
             monthlyModelBudgetUsd,
             perSpawnCapUsd: capUsd,
             ...(envelopeFloorUsd !== undefined && { envelopeFloorUsd }),

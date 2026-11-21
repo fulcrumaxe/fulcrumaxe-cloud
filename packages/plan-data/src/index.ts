@@ -177,3 +177,13 @@ export function assistantSettings(): AssistantSettings {
     throw error;
   }
 }
+
+/**
+ * D#845 ON-22a (ruling 42): the plan a limit is keyed on. `accounts.plan` is a record of the last hosted plan, not an entitlement: an engine-only subscription is paying and keeps whatever the row says
+ * (the default for a new account, the last hosted plan for a returning one). Every limit read off the plan goes through here: the row's plan counts only while the account carries a paid hosted plan item
+ * (`accounts.hosted_plan_paid`, written by the billing sync alone); otherwise the caller's no-hosted tier applies (`'runner'` where the limits have a runner tier, `'starter'` - the entry tier every unpaid
+ * account already carries - where only hosted plans have figures). A missing fact reads as not paid.
+ */
+export function effectivePlan<P extends string, F extends string>(account: { plan: P; hosted_plan_paid: boolean | null | undefined }, noHostedTier: F): P | F {
+  return account.hosted_plan_paid === true ? account.plan : noHostedTier;
+}

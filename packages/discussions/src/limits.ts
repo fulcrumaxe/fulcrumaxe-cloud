@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { effectivePlan } from "@fx/plan-data";
 import { DiscussionsError } from "./operations.js";
 
 /**
@@ -74,10 +75,11 @@ export function utf8ByteLength(text: string): number {
  * touches no other row when the write would exceed it; otherwise returns
  * the locked `bytes_used` for the caller's own UPDATE. */
 async function reserveOrThrow(client: PoolClient, accountId: string, addedBytes: number): Promise<void> {
-  const { rows: planRows } = await client.query<{ plan: string }>(`SELECT plan FROM accounts WHERE id = $1`, [
+  const { rows: planRows } = await client.query<{ plan: string; hosted_plan_paid: boolean }>(`SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1`, [
     accountId,
   ]);
-  const plan = (planRows[0]?.plan ?? "starter") as PlanId;
+  // D#845 ON-22a (ruling 42): the entry tier's quota unless the account carries a paid hosted plan item.
+  const plan = (planRows[0] === undefined ? "starter" : effectivePlan(planRows[0], "starter")) as PlanId;
   const quota = STORAGE_QUOTA_BYTES[plan] ?? STORAGE_QUOTA_BYTES.starter;
 
   await client.query(`INSERT INTO discussion_counters (account_id) VALUES ($1) ON CONFLICT (account_id) DO NOTHING`, [

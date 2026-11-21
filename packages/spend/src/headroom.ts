@@ -44,11 +44,13 @@ export async function checkHeadroom(pool: Pool, params: HeadroomParams): Promise
       estimateComputeUsd > 0 ? (params.trigger === 'foreground' ? 'foreground_compute' : 'background_compute') : null;
 
     // 1. The account's status (reserve.ts step 1, with its seven day grace for a past_due account).
-    const accountRows = await client.query<{ status: string; past_due_since: Date | null }>('SELECT status, past_due_since FROM accounts WHERE id = $1', [params.accountId]);
+    const accountRows = await client.query<{ status: string; past_due_since: Date | null; hosted_plan_paid: boolean }>('SELECT status, past_due_since, hosted_plan_paid FROM accounts WHERE id = $1', [params.accountId]);
     const status = accountRows.rows[0]?.status;
     const pastDueSince = accountRows.rows[0]?.past_due_since ?? null;
     const withinGracePeriod = status === 'past_due' && pastDueSince !== null && pastDueSince.getTime() > now.getTime() - 7 * 24 * 60 * 60 * 1000;
     if (purpose !== 'preview' && status !== 'active' && !withinGracePeriod) return { decision: 'deny', reason: 'account_not_active' };
+    // D#845 ON-22a (ruling 35.2): the same paid-hosted-plan fact reserve() requires.
+    if (purpose !== 'preview' && accountRows.rows[0]?.hosted_plan_paid !== true) return { decision: 'deny', reason: 'account_not_active' };
     if (purpose === 'preview' && params.modelBrokeredBy !== 'operator_subscription') {
       const conn = await client.query(`SELECT 1 FROM model_connections WHERE account_id = $1 AND status = 'ok' LIMIT 1`, [params.accountId]);
       if (conn.rows.length === 0) return { decision: 'deny', reason: 'model_connection_not_ok' };

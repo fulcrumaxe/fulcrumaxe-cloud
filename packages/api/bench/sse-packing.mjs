@@ -254,7 +254,7 @@ async function main() {
   let remainingAcct = accountStreams;
   while (remainingRun + remainingAcct > 0) {
     const accountId = randomUUID();
-    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'scale', $2, 'active')`, [accountId, `cus_bench_${accountId}`]);
+    await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'scale', $2, 'active', true)`, [accountId, `cus_bench_${accountId}`]);
     const account = { accountId, runs: [], users: [] };
     accounts.push(account);
     const runs = Math.min(5, remainingRun);

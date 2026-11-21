@@ -341,6 +341,17 @@ describe("provisioning tokens [pg]", () => {
       expect((await tokenRow(t.id)).used_at).toBeNull();
     });
 
+    it("D#845 ON-22a (ruling 42): the machine limit is asked for the runner tier unless the account carries a paid hosted plan item", async () => {
+      const f = await fresh();
+      await h.admin.query("UPDATE accounts SET plan = 'team', hosted_plan_paid = false WHERE id = $1", [f.accountId]);
+      const asked: string[] = [];
+      const deps = { maxRunners: (plan: string) => (asked.push(plan), 50) };
+      expect((await register(newKey(), (await minted(f, f.o1)).token, { deps })).status).toBe(201);
+      await h.admin.query("UPDATE accounts SET hosted_plan_paid = true WHERE id = $1", [f.accountId]);
+      expect((await register(newKey(), (await minted(f, f.o1)).token, { deps })).status).toBe(201);
+      expect(asked).toEqual(["runner", "team"]);
+    });
+
     it("applies the plan's runner limit: 409 runner_limit past it, and a failed redemption leaves the token usable", async () => {
       const f = await fresh();
       await h.admin.query("UPDATE accounts SET plan = 'runner' WHERE id = $1", [f.accountId]);

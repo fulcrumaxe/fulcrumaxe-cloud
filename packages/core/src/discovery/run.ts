@@ -92,6 +92,7 @@ interface RunRow {
   gh_owner: string | null;
   gh_name: string | null;
   account_status: string;
+  hosted_plan_paid: boolean;
   frequency: string | null;
 }
 
@@ -106,7 +107,7 @@ export async function runDiscovery(deps: DiscoveryRunDeps, runId: string): Promi
   // 1. Claim the queued row and decide, from the CURRENT rows, whether it may read anything.
   const claimed = await withTenant(pool, accountId, async (client): Promise<DiscoveryOutcome | { go: RunRow }> => {
     const { rows } = await client.query<RunRow>(
-      `SELECT d.state, d.repo_id, r.installation_id, r.gh_owner, r.gh_name, a.status AS account_status,
+      `SELECT d.state, d.repo_id, r.installation_id, r.gh_owner, r.gh_name, a.status AS account_status, a.hosted_plan_paid,
               (SELECT s.frequency FROM discovery_settings s WHERE s.account_id = d.account_id AND s.repo_id = d.repo_id ORDER BY s.version DESC LIMIT 1) AS frequency
          FROM discovery_runs d
          JOIN repos r ON r.account_id = d.account_id AND r.id = d.repo_id
@@ -119,6 +120,8 @@ export async function runDiscovery(deps: DiscoveryRunDeps, runId: string): Promi
     if (!row || row.state !== 'queued') return { state: 'not_queued' };
     if (row.installation_id === null) return skip(client, runId, 'repo_not_connected');
     // No subscription is the free preview; every other non-active standing (past due, paused, model key broken, cancelled) is its own reason.
+    // D#845 ON-22a (ruling 35.2): an engine-only subscription is `active` but holds no hosted plan: it is the free preview here too.
+    if (row.account_status === 'active' && !row.hosted_plan_paid) return skip(client, runId, 'free_preview');
     if (row.account_status !== 'active') return skip(client, runId, row.account_status === 'unsubscribed' ? 'free_preview' : 'account_not_active');
     if (row.frequency === 'off') return skip(client, runId, 'discovery_off');
     if (!row.gh_owner || !row.gh_name) return skip(client, runId, 'repo_name_unknown');

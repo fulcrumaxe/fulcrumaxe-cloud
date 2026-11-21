@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
 import { seedAccount, type SeedRefs } from './helpers/seed.js';
+import { insertRunner } from './helpers/runnerFixtures.js';
 
 /**
  * D#2605 H02 security fix round 2, items 4 and 8: billing/lifecycle
@@ -80,6 +81,11 @@ describe('accounts privileges: billing/lifecycle columns are platform_ops-only',
     ['subscription_ended_at', `now()`],
     ['terms_accepted_at', `now()`],
     ['terms_policy_version', `'v1'`],
+    // D#845 ON-22a (migration 1048): the engine quantity is mirrored from the subscription by the webhook only.
+    ['engine_quantity', `3`],
+    // The paid-hosted-plan fact and the below-live flag are the sync's alone as well (ruling 35.2 and 35.4).
+    ['hosted_plan_paid', `true`],
+    ['engine_quantity_below_live_at', `now()`],
   ];
 
   it.each(SUBSCRIPTION_COLUMN_WRITES)('app_user cannot UPDATE %s (42501), platform_ops can', async (column, value) => {
@@ -94,6 +100,22 @@ describe('accounts privileges: billing/lifecycle columns are platform_ops-only',
     await expect(
       platformOpsPool.query(`UPDATE accounts SET ${column} = ${value} WHERE id = $1`, [accountId]),
     ).resolves.toMatchObject({ rowCount: 1 });
+  });
+
+  it('platform_ops counts an account\'s placements (one column, SELECT only) and reads nothing else of them (migration 1048, the sync\'s below-live check)', async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const b = await seedAccount(admin, randomUUID());
+    const runnerA = await insertRunner(admin, a.accountId, a.userId);
+    const runnerB = await insertRunner(admin, b.accountId, b.userId);
+    await admin.query(`INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person'), ($4, $5, $6, 'person')`, [a.repoId, a.accountId, runnerA, b.repoId, b.accountId, runnerB]);
+    const count = (id: string) => platformOpsPool.query<{ n: number }>('SELECT count(*)::int AS n FROM project_placements WHERE account_id = $1', [id]);
+    expect((await count(a.accountId)).rows[0]!.n).toBe(1);
+    expect((await count(randomUUID())).rows[0]!.n).toBe(0);
+    for (const sql of ['SELECT repo_id FROM project_placements', 'SELECT * FROM project_placements', 'SELECT runner_id FROM project_placements']) {
+      await expect(platformOpsPool.query(sql), sql).rejects.toMatchObject({ code: '42501' });
+    }
+    await expect(platformOpsPool.query(`UPDATE project_placements SET placed_by = 'auto' WHERE account_id = $1`, [a.accountId])).rejects.toMatchObject({ code: '42501' });
+    await expect(platformOpsPool.query('DELETE FROM project_placements WHERE account_id = $1', [a.accountId])).rejects.toMatchObject({ code: '42501' });
   });
 
   it('app_user cannot write partner_id or referred_by_partner_id (D#2607 item 8)', async () => {

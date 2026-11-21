@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { effectivePlan } from "@fx/plan-data";
 import { CHECK_JOB_MIN_PROTOCOL, LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS, runnerIgnoringWorkSql, runnerIsLive, runnerLastHeardAt, runnerLiveSql } from "@fx/runner";
@@ -267,8 +268,10 @@ export interface FleetRead {
 
 /** The plan's figures behind the account line. Plan data that cannot say reads as no figure (the page then says so), never as zero or a guess. */
 async function planFigures(deps: ReadDeps, client: PoolClient, accountId: string): Promise<{ limit: number | null; runnerLimit: number | null }> {
-  const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [accountId])).rows[0]?.plan;
-  if (plan === undefined) return { limit: null, runnerLimit: null };
+  const row = (await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [accountId])).rows[0];
+  if (row === undefined) return { limit: null, runnerLimit: null };
+  // D#845 ON-22a (ruling 42): the figures shown are the ones that apply: the runner tier's unless the account carries a paid hosted plan item.
+  const plan = effectivePlan(row, "runner");
   let runnerLimit: number | null = null;
   try {
     runnerLimit = deps.maxRunners ? deps.maxRunners(plan) : null;
