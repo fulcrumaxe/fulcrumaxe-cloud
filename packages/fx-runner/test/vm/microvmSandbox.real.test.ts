@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe } from "vitest";
+import { afterAll, afterEach, beforeAll, describe } from "vitest";
 import { createBootFactsSource } from "../../src/vm/bootFacts.js";
 import { signRelease, type SignedRelease } from "./helpers/signedRelease.js";
 import { startEgressProxy } from "../../src/vm/egress/proxy.js";
@@ -7,7 +7,7 @@ import { createHelperClient } from "../../src/vm/sandboxd/helperClient.js";
 import { createMicrovmSandbox } from "../../src/vm/sandboxd/microvmSandbox.js";
 import { createEgressPolicyPort } from "../../src/vm/sandboxd/policyPort.js";
 import { createProductionSandboxd } from "../../src/vm/sandboxd/production.js";
-import { createDaemonSdk } from "../../src/vm/sandboxd/sdkAdapter.js";
+import { createDaemonSdk, sandboxIdOf } from "../../src/vm/sandboxd/sdkAdapter.js";
 import { connectUnix } from "./sandboxd/helpers.js";
 import { describeEngineContract, type Difference } from "../sandbox/engineContract.js";
 
@@ -37,6 +37,11 @@ describe.skipIf(!ready)("microVM engine (real VMs, the production daemon and the
   const uid = process.geteuid?.() ?? -1;
   let daemon: ReturnType<typeof createProductionSandboxd> | undefined;
   let signed: SignedRelease | undefined;
+  // The helper holds a fixed number of sandboxes at once (`over_cap` past it): the contract tests leave theirs behind, so each test's are deleted after it.
+  const cleanups: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    for (const clean of cleanups.splice(0)) await clean().catch(() => undefined);
+  });
   beforeAll(async () => {
     const arch = process.arch === "arm64" ? "arm64" : "amd64";
     signed = await signRelease({ template: env.template as string, files: [{ kind: "kernel", arch, file: env.kernel as string }, { kind: "rootfs", arch, file: env.rootfs as string }, { kind: "agent", arch, file: env.agent as string }] });
@@ -54,16 +59,25 @@ describe.skipIf(!ready)("microVM engine (real VMs, the production daemon and the
       const policy = createEgressPolicyPort({ helper, uid, egress: { startProxy: startEgressProxy, startReverse: startReverseEndpoint } });
       const sdk = createDaemonSdk({ daemon: daemon as NonNullable<typeof daemon>, policy, template: env.template as string, memMb: 512 });
       const port = createMicrovmSandbox({ sdk, makeRuntime: () => runtime });
+      const made = port.createSandbox.bind(port);
+      port.createSandbox = async (opts) => {
+        const handle = await made(opts);
+        cleanups.push(() => port.deleteSandbox(handle));
+        return handle;
+      };
       return {
         port,
         env: () => ({}),
         workdir: "/work/job",
         timeoutMsOf: (handle) => port.timeoutMsOf(handle),
         interrupt: (handle) => port.interrupt(handle),
-        lose: async () => {
-          const id = daemon?.list()[0]?.name;
-          if (id === undefined) throw new Error("no sandbox to lose");
-          await sdk.deleteById(id);
+        // The daemon here is shared by every test in the file and earlier tests leave sandboxes in it, so "the first one listed" is not the one the test made.
+        lose: async (handle) => sdk.deleteById(sandboxIdOf(handle.sandboxName)),
+        guestFile: async (handle, file) => {
+          const ran = await port.runCommand(handle, { role: "plane_publish", cmd: "sh", args: ["-c", "stat -c %a -- \"$1\" && cat -- \"$1\"", "sh", file], env: {}, networkPolicy: [], timeoutMs: 20_000 });
+          if (ran.exitCode !== 0) return undefined;
+          const split = ran.stdout.indexOf("\n");
+          return { mode: Number.parseInt(ran.stdout.slice(0, split), 8), data: Buffer.from(ran.stdout.slice(split + 1), "utf8") };
         },
       };
     },

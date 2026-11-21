@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import { buildWorkspaceArchive } from "../../src/daemon/vmArchive.js";
+import { pinWorkspaceGit } from "../../src/daemon/hostRead.js";
 import { applyBundle } from "../../src/daemon/vmBundle.js";
 import { createGit } from "../../src/daemon/git.js";
 import type { BootDigests, TargetListing } from "../../src/vm/bootGate.js";
@@ -102,6 +103,8 @@ describe.skipIf(!ready)("a job's working copy in a real VM", () => {
       const hostWs = path.join(root, "host-ws");
       git(root, "clone", "-q", "--shared", mirror, hostWs);
       git(hostWs, "checkout", "-q", "-B", "fx/run", commit);
+      // the daemon pins a workspace right after its clone (mirror.ts) and `applyBundle` refuses one that is not pinned, so pin it the same way
+      await pinWorkspaceGit(g, hostWs, path.join(mirror, "objects"));
       await port.quiesce(handle);
       const collected = await crossing.collect("real-1", guest);
       expect(collected?.base).toBe(commit);

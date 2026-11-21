@@ -75,7 +75,10 @@ export interface FakeAgent {
 }
 
 /** A guest agent on `<dir>/v.sock`, behind Firecracker's `CONNECT` handshake. It runs exec for real (a new session, as agent.py does) and answers when the process ends. */
-export function startFakeAgent(dir: string): FakeAgent {
+/** The places the guest image mounts as tmpfs (infra/microvm-image/guest/init); everything else is on the read-only root disk. */
+const GUEST_WRITABLE = ["/tmp", "/var/tmp", "/var/log", "/var/cache", "/run", "/dev/shm", "/vercel"];
+
+export function startFakeAgent(dir: string, opts: { readOnlyRoot?: boolean } = {}): FakeAgent {
   const children = new Set<ChildProcess>();
   const agent: FakeAgent = { execs: [], execTokenFlags: [], pings: 0, ops: [], files: new Map(), close: () => undefined };
   const server = net.createServer((sock) => {
@@ -111,6 +114,7 @@ export function startFakeAgent(dir: string): FakeAgent {
     if (header["op"] === "put") {
       const p = String(header["path"]);
       if (!p.startsWith("/")) return send(sock, { ok: false, error: "ValueError: path must be absolute" });
+      if (opts.readOnlyRoot === true && !GUEST_WRITABLE.some((w) => p.startsWith(`${w}/`))) return send(sock, { ok: false, error: `OSError: [Errno 30] Read-only file system: ${JSON.stringify(path.posix.dirname(p))}` });
       agent.files.set(p, { data: Buffer.from(body), mode: Number(header["mode"] ?? 0o644) & 0o777 });
       return send(sock, { ok: true });
     }
@@ -300,7 +304,7 @@ export interface Rig {
   restart(): Sandboxd;
 }
 
-export function makeRig(over: { listing?: TargetListing; euid?: number; agentFor?: (dir: string) => GuestAgent; gid?: number; extra?: Partial<SandboxdDeps> } = {}): Rig {
+export function makeRig(over: { readOnlyRoot?: boolean; listing?: TargetListing; euid?: number; agentFor?: (dir: string) => GuestAgent; gid?: number; extra?: Partial<SandboxdDeps> } = {}): Rig {
   const free = { bytes: 1024 ** 4 };
   const clock = { t: 1_700_000_000 };
   const root = scratch();
@@ -310,7 +314,7 @@ export function makeRig(over: { listing?: TargetListing; euid?: number; agentFor
   helper.onStart = (id, dir) => {
     if (agents.has(id)) return;
     rmSync(path.join(dir, "v.sock"), { force: true }); // a fresh boot replaces whatever a dead VM left
-    agents.set(id, startFakeAgent(dir));
+    agents.set(id, startFakeAgent(dir, { readOnlyRoot: over.readOnlyRoot === true }));
   };
   const deps: SandboxdDeps = {
     euid: over.euid ?? process.geteuid?.(),
@@ -337,7 +341,7 @@ export function makeRig(over: { listing?: TargetListing; euid?: number; agentFor
     cleanups.push(() => stale.close());
   };
   helper.onResume = (id, snap, dir) => {
-    const agent = startFakeAgent(dir);
+    const agent = startFakeAgent(dir, { readOnlyRoot: over.readOnlyRoot === true });
     for (const [p, f] of savedFiles.get(snap) ?? []) agent.files.set(p, f);
     agents.set(id, agent);
   };
