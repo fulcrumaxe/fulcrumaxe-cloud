@@ -15,6 +15,8 @@ export interface StripeWebhookDeps {
   livemode: boolean;
   /** Price id -> plan. Tests inject one; production builds it from `STRIPE_PRICE_ID_*` per event. */
   priceMap?: PriceMap;
+  /** D#845 ON-22a: the engine price ids. Tests inject them; production reads `STRIPE_PRICE_ID_ENGINE` per event. */
+  enginePriceIds?: readonly string[];
   /** Price id -> site-kit product. Tests inject one; production builds it from `STRIPE_PRICE_ID_SITEKIT_*`. */
   sitekitPriceMap?: SitekitPriceMap;
   /**

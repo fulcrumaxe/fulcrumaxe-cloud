@@ -26265,6 +26265,16 @@
               }
             }
           },
+          "402": {
+            "description": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Error",
             "content": {
@@ -26286,7 +26296,7 @@
             }
           },
           "409": {
-            "description": "`no_billing_account` (portal: the account has no Stripe customer yet) or `already_subscribed` (checkout).",
+            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
             "content": {
               "application/json": {
                 "schema": {
@@ -26296,7 +26306,7 @@
             }
           },
           "422": {
-            "description": "`invalid_return_url` (a path that is not a plain absolute path on this app) or `invalid_plan`.",
+            "description": "`invalid_return_url` (a path that is not a plain absolute path on this app), `invalid_plan` or `invalid_quantity`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -26361,7 +26371,7 @@
       "post": {
         "operationId": "createCheckoutSession",
         "summary": "A Stripe Checkout link to subscribe to a plan",
-        "description": "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. Returns only the checkout `url`.",
+        "description": "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. Returns only the `url`.",
         "security": [
           {
             "session": []
@@ -26383,6 +26393,11 @@
                   },
                   "cancel_path": {
                     "type": "string"
+                  },
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -26427,6 +26442,16 @@
               }
             }
           },
+          "402": {
+            "description": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Error",
             "content": {
@@ -26448,7 +26473,7 @@
             }
           },
           "409": {
-            "description": "`no_billing_account` (portal: the account has no Stripe customer yet) or `already_subscribed` (checkout).",
+            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
             "content": {
               "application/json": {
                 "schema": {
@@ -26458,7 +26483,174 @@
             }
           },
           "422": {
-            "description": "`invalid_return_url` (a path that is not a plain absolute path on this app) or `invalid_plan`.",
+            "description": "`invalid_return_url` (a path that is not a plain absolute path on this app), `invalid_plan` or `invalid_quantity`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`internal_error`: the billing provider could not be reached. No detail is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`billing_not_configured`: Stripe is not set up on this deployment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/engine-quantity": {
+      "post": {
+        "operationId": "setEngineQuantity",
+        "summary": "Set how many engines the subscription pays for",
+        "description": "Session only, owner only. `quantity` is the new total, 1 to 100. A total below the number of engines running now is refused with 409 `engine_quantity_in_use` (park or stop an engine first); an account with no paying subscription gets 409 `no_subscription` and buys its first engines through the checkout route with `plan: \"engine\"`. The change is billed by the provider's own proration and shows in the account once the provider confirms it.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "quantity"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set how many engines the subscription pays for",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "quantity": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "quantity"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`invalid_return_url` (a path that is not a plain absolute path on this app), `invalid_plan` or `invalid_quantity`.",
             "content": {
               "application/json": {
                 "schema": {

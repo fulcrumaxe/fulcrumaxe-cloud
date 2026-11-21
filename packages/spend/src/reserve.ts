@@ -276,8 +276,8 @@ export async function reserveWith(client: PoolClient, params: ReserveParams): Pr
   // 'past_due' said nothing about whether the account was also paused or
   // key-broken, and `withinGracePeriod` alone would have silently
   // admitted through a real pause or a broken key for up to 7 days.
-  const accountRows = await client.query<{ status: string; past_due_since: Date | null }>(
-    'SELECT status, past_due_since FROM accounts WHERE id = $1',
+  const accountRows = await client.query<{ status: string; past_due_since: Date | null; hosted_plan_paid: boolean }>(
+    'SELECT status, past_due_since, hosted_plan_paid FROM accounts WHERE id = $1',
     [params.accountId],
   );
   const status = accountRows.rows[0]?.status;
@@ -287,6 +287,11 @@ export async function reserveWith(client: PoolClient, params: ReserveParams): Pr
     pastDueSince !== null &&
     pastDueSince.getTime() > now.getTime() - 7 * 24 * 60 * 60 * 1000;
   if (purpose !== 'preview' && status !== 'active' && !withinGracePeriod) {
+    return { decision: 'deny', reason: 'account_not_active' };
+  }
+  // D#845 ON-22a (ruling 35.2): hosted spend needs a PAID HOSTED PLAN ITEM on the subscription, not merely a paying standing. An engine-only subscription is `active` and
+  // keeps whatever `plan` the row had (the default for a new account, the last hosted plan for a returning one), so neither is read as an entitlement.
+  if (purpose !== 'preview' && accountRows.rows[0]?.hosted_plan_paid !== true) {
     return { decision: 'deny', reason: 'account_not_active' };
   }
   if (purpose === 'preview' && params.modelBrokeredBy !== 'operator_subscription') {

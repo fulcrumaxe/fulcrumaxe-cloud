@@ -256,7 +256,7 @@ export async function seedAccount(admin: PoolClient, accountId: string): Promise
   // with what stripe_customer_id/the marker columns derive to; since this
   // INSERT sets a customer id and no markers, that derived value is
   // 'active', so the literal has to say so too.
-  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [
+  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [
     accountId,
     `cus_test_${accountId}`,
   ]);

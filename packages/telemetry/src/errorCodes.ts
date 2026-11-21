@@ -128,6 +128,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "model_key_required",
   "never_imported",
   "no_billing_account",
+  // D#845 ON-22a: engine quantity on the subscription.
+  "no_subscription",
+  "engine_quantity_in_use",
+  "invalid_quantity",
+  "payment_pending",
   "no_repo",
   "not_applicable",
   "not_approvable",

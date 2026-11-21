@@ -123,10 +123,15 @@ describe('D#3 K09b site-kit checkout and cancel services (real Postgres, fake St
     process.env.STRIPE_COUPON_SITEKIT_BUNDLE = 'bundle_coupon';
     const active = await seed('owner');
     const none = await seed('owner', { status: 'unsubscribed', stripeCustomerId: null });
+    // D#845 ON-22a (ruling 35.2): an engine-only subscription is `active` too and holds no hosted plan: no discount.
+    const engineOnly = await seed('owner');
+    await admin.query('UPDATE accounts SET hosted_plan_paid = false WHERE id = $1', [engineOnly.accountId]);
     await checkout(active, 'setup');
     await checkout(none, 'setup');
+    await checkout(engineOnly, 'setup');
     expect(create.mock.calls[0]![0].discounts).toEqual([{ coupon: 'bundle_coupon' }]);
     expect(create.mock.calls[1]![0].discounts).toBeUndefined();
+    expect(create.mock.calls[2]![0].discounts).toBeUndefined();
   });
 
   it('setup_already_paid: a paid site is refused before Stripe is called, and no row is added', async () => {

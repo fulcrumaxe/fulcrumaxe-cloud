@@ -3021,9 +3021,20 @@ export interface Operations {
       plan: string;
       success_path: string;
       cancel_path: string;
+      quantity?: number;
     };
     response: {
       url: string;
+    };
+  };
+  setEngineQuantity: {
+    path: undefined;
+    query: undefined;
+    body: {
+      quantity: number;
+    };
+    response: {
+      quantity: number;
     };
   };
   getRunLimits: {
@@ -7261,6 +7272,17 @@ export const operations = {
   createCheckoutSession: {
     method: "POST",
     path: "/api/v1/billing/checkout-session",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  setEngineQuantity: {
+    method: "POST",
+    path: "/api/v1/billing/engine-quantity",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

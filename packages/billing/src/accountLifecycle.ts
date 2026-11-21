@@ -13,7 +13,9 @@ import {
 import { authorizeAccountWrite, authorizeAccountWriteInTx } from './authorize.js';
 import { recordAccountAction } from './audit.js';
 import { buildValidatedReturnUrl } from './returnUrl.js';
-import { appOriginFromEnv, stripePriceIdFromEnv } from './env.js';
+import { appOriginFromEnv, stripeEnginePriceIdFromEnv, stripeEnginePriceIdsFromEnv, stripePriceIdFromEnv } from './env.js';
+import { addItemToSubscription, isValidEngineQuantity } from './engineItems.js';
+import { ensurePortalConfigurationId } from './portalConfig.js';
 import { STRIPE_UNAVAILABLE_RESULT, noRefundsCheckoutLine, termsUrlFromEnv, type StripeLike } from './stripeClient.js';
 import type { BillingCtx } from './types.js';
 
@@ -469,9 +471,13 @@ export async function getBillingPortalUrl(
   if (!customerId) return { ok: false, reason: 'no_stripe_customer' };
   const subscriptionId = stored?.stripe_subscription_id ?? null;
 
+  // Ruling 35.4: every session names the pinned configuration, which does not let a customer edit the engine quantity; with none, no portal is opened.
+  const configuration = await ensurePortalConfigurationId(input.stripe);
+  if (!configuration) return STRIPE_UNAVAILABLE_RESULT;
   const create = (flowData?: Stripe.BillingPortal.SessionCreateParams.FlowData) =>
     input.stripe.billingPortal.sessions.create({
       customer: customerId,
+      configuration,
       return_url: returnUrl,
       ...(flowData ? { flow_data: flowData } : {}),
     });
@@ -503,12 +509,15 @@ const ALREADY_SUBSCRIBED_STATUSES: ReadonlySet<string> = new Set([
   'paused',
 ]);
 
-export type CheckoutSessionResult = { ok: true; url: string } | { ok: false; reason: string };
+/** `itemAdded`: the plan joined the account's existing subscription as an item (no checkout), and `url` is the validated success url. */
+export type CheckoutSessionResult = { ok: true; url: string; itemAdded?: true } | { ok: false; reason: string };
 
 export interface CreateCheckoutSessionInput {
   accountId: string;
-  /** A legal plan id (`isLegalPlan`) -- the plan the customer is buying. Never a Stripe price id, cap, status or customer id. */
+  /** A legal plan id (`isLegalPlan`) or `engine` (D#845 ON-22a) -- what the customer is buying. Never a Stripe price id, cap, status or customer id. */
   plan: string;
+  /** `engine` only: how many engines to buy (1 to MAX_ENGINE_QUANTITY, default 1). Any other plan sells one. */
+  quantity?: number;
   /** Absolute path only, same validation as GetBillingPortalUrlInput.returnUrl. Where Stripe sends the customer back after a completed checkout. */
   successPath: string;
   /** Absolute path only. Where Stripe sends the customer back if they cancel out of checkout. */
@@ -565,33 +574,45 @@ export async function createCheckoutSession(
   if (authFailure) return authFailure;
 
   const account = await withPlatformOps(ctx.pool, async (client) => {
-    const { rows } = await client.query<{ stripe_customer_id: string | null; stripe_subscription_status: string | null }>(
-      'SELECT stripe_customer_id, stripe_subscription_status FROM accounts WHERE id = $1 AND deleted_at IS NULL',
+    const { rows } = await client.query<{ stripe_customer_id: string | null; stripe_subscription_id: string | null; stripe_subscription_status: string | null }>(
+      'SELECT stripe_customer_id, stripe_subscription_id, stripe_subscription_status FROM accounts WHERE id = $1 AND deleted_at IS NULL',
       [input.accountId],
     );
     return rows[0] ?? null;
   });
   if (!account) return { ok: false, reason: 'account_not_found' };
 
-  // D#69 B14: an account already billed on a subscription changes it in the
-  // billing portal; a second Checkout would start a second, parallel charge.
-  if (account.stripe_subscription_status !== null && ALREADY_SUBSCRIBED_STATUSES.has(account.stripe_subscription_status)) {
-    return { ok: false, reason: 'already_subscribed' };
-  }
-
-  if (!isLegalPlan(input.plan)) return { ok: false, reason: 'invalid_plan' };
+  const isEngine = input.plan === 'engine';
+  if (!isEngine && !isLegalPlan(input.plan)) return { ok: false, reason: 'invalid_plan' };
+  const quantity = isEngine ? (input.quantity ?? 1) : 1;
+  if (isEngine && !isValidEngineQuantity(quantity)) return { ok: false, reason: 'invalid_quantity' };
+  const enginePriceIds = stripeEnginePriceIdsFromEnv();
+  if (isEngine && enginePriceIds.length === 0) return { ok: false, reason: 'invalid_plan' };
 
   const appOrigin = appOriginFromEnv();
   const successUrl = buildValidatedReturnUrl(input.successPath, appOrigin);
   const cancelUrl = buildValidatedReturnUrl(input.cancelPath, appOrigin);
   if (!successUrl || !cancelUrl) return { ok: false, reason: 'invalid_return_url' };
 
-  const priceId = stripePriceIdFromEnv(input.plan);
+  // D#69 B14, D#845 ON-22a: an account already billed on a subscription never gets a second Checkout (a second, parallel charge). A hosted plan or an
+  // engine it does not hold yet joins that ONE subscription as an item; `already_subscribed` means it already holds this one, or holds a hosted plan
+  // (changing hosted plans is the portal's job), or the subscription is not paying (settle it in the portal first).
+  if (account.stripe_subscription_status !== null && ALREADY_SUBSCRIBED_STATUSES.has(account.stripe_subscription_status)) {
+    if (!account.stripe_customer_id || !account.stripe_subscription_id) return { ok: false, reason: 'already_subscribed' };
+    const stored = { customerId: account.stripe_customer_id, subscriptionId: account.stripe_subscription_id, status: account.stripe_subscription_status };
+    if (!['active', 'trialing'].includes(stored.status)) return { ok: false, reason: 'already_subscribed' };
+    const price = isEngine ? stripeEnginePriceIdFromEnv() : stripePriceIdFromEnv(input.plan as PlanId);
+    // The held-items check and the write happen under the subscription's lock (ruling 35.6), and the charge is invoiced before the item applies (ruling 35.1).
+    const added = await addItemToSubscription(ctx.pool, input.stripe, stored, { price, quantity, kind: isEngine ? 'engine' : 'hosted' }, enginePriceIds);
+    return added.ok ? { ok: true, url: successUrl, itemAdded: true } : added;
+  }
+
+  const priceId = isEngine ? stripeEnginePriceIdFromEnv() : stripePriceIdFromEnv(input.plan as PlanId);
   try {
     const session = await input.stripe.checkout.sessions.create({
       mode: 'subscription',
       client_reference_id: input.accountId,
-      line_items: [{ price: priceId, quantity: 1 }],
+      line_items: [{ price: priceId, quantity }],
       success_url: successUrl,
       cancel_url: cancelUrl,
       metadata: { plan: input.plan },

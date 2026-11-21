@@ -65,3 +65,21 @@ describe('D#3 K09b boot check for STRIPE_PRICE_ID_SITEKIT_*', () => {
     expect(message).not.toContain('p_t');
   });
 });
+
+describe('D#845 ON-22a boot check for STRIPE_PRICE_ID_ENGINE', () => {
+  it('boots with the Engine plan off (unset or empty) and with a list configured', () => {
+    expect(bootError(good)).toBe('');
+    expect(bootError({ ...good, STRIPE_PRICE_ID_ENGINE: '' })).toBe('');
+    expect(bootError({ ...good, STRIPE_PRICE_ID_ENGINE: ' p_e , p_e_old ' })).toBe('');
+  });
+
+  it('a blank list throws naming only the variable', () => {
+    for (const bad of ['   ', ' , ']) expect(bootError({ ...good, STRIPE_PRICE_ID_ENGINE: bad })).toBe('STRIPE_PRICE_ID_ENGINE must be set to a non-empty Stripe price id');
+  });
+
+  it('a price id shared with a hosted plan or a site-kit product throws, naming the two variables and never the id', () => {
+    expect(bootError({ ...good, STRIPE_PRICE_ID_ENGINE: 'p_t' })).toBe('a price id is listed under both STRIPE_PRICE_ID_ENGINE and STRIPE_PRICE_ID_TEAM');
+    const kit = { ...good, STRIPE_PRICE_ID_SITEKIT_SETUP: 'p_setup', STRIPE_PRICE_ID_SITEKIT_SYNC: 'p_sync' };
+    expect(bootError({ ...kit, STRIPE_PRICE_ID_ENGINE: 'p_sync' })).toBe('a price id is listed under both STRIPE_PRICE_ID_ENGINE and STRIPE_PRICE_ID_SITEKIT_SYNC');
+  });
+});

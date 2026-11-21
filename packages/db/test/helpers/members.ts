@@ -43,7 +43,7 @@ async function makeAccount(admin: PoolClient): Promise<string> {
   // D#69 (migration 0606): status is derived from stripe_customer_id; see
   // packages/db/test/helpers/seed.ts's own comment on this same pattern,
   // including why `status = 'active'` is now spelled out explicitly.
-  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status) VALUES ($1, 'starter', $2, 'active')`, [
+  await admin.query(`INSERT INTO accounts (id, plan, stripe_customer_id, status, hosted_plan_paid) VALUES ($1, 'starter', $2, 'active', true)`, [
     accountId,
     `cus_test_${accountId}`,
   ]);

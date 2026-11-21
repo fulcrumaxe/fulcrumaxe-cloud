@@ -445,6 +445,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/webhooks':
+        specifier: workspace:*
+        version: link:../webhooks
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0

@@ -25,6 +25,8 @@ export interface SeedAccountOptions {
   /** D#69 B2: the subscription on file, and the clock of the last applied sync (a future value makes any event stale). */
   stripeSubscriptionId?: string | null;
   stripeSyncedAt?: Date | null;
+  /** D#845 ON-22a: the account's subscription carries a hosted plan item. Default true for every account that has a Stripe customer (a seeded subscription is a hosted plan unless a test says otherwise). */
+  hostedPlanPaid?: boolean;
 }
 
 /**
@@ -58,8 +60,8 @@ export async function seedAccount(
   // MUST-fix 4, Spec A5).
   await admin.query(
     `INSERT INTO accounts (id, plan, stripe_customer_id, past_due_since, owner_paused_at, key_broken_at, status,
-                           stripe_subscription_id, stripe_synced_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                           stripe_subscription_id, stripe_synced_at, hosted_plan_paid)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
       accountId,
       opts.plan ?? 'starter',
@@ -70,6 +72,7 @@ export async function seedAccount(
       status,
       opts.stripeSubscriptionId ?? null,
       opts.stripeSyncedAt ?? null,
+      opts.hostedPlanPaid ?? stripeCustomerId !== null,
     ],
   );
 }

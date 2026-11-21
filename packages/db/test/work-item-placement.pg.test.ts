@@ -475,6 +475,9 @@ describe('migration 0781 gives platform_ops nothing', () => {
            -- 0860 (D#7 DP11c) lets the resume_decision request definer read the item's halt epoch: that one column, for SELECT and no other privilege. What 0860
            -- grants is pinned in full (columns, privileges and policy text) in resume-decision.pg.test.ts, so a later widening fails there too.
            AND NOT (c.relname = 'work_items' AND a.attname = 'halt_epoch' AND p.privilege_type = 'SELECT')
+           -- 1048 (D#845 ON-22a) adds accounts.engine_quantity, which platform_ops writes through its table-wide privilege on accounts: the billing sync mirrors the engine item's quantity into it. The column's
+           -- grants (app_user cannot write it, platform_ops can) are pinned in accounts-privileges.test.ts, and 1048 grants platform_ops nothing else on these tables (its one-column SELECT on project_placements is outside them and pinned in accounts-privileges.test.ts).
+           AND NOT (c.relname = 'accounts' AND a.attname IN ('engine_quantity', 'hosted_plan_paid', 'engine_quantity_below_live_at'))
          ORDER BY 1`),
       policies: await q(`
         SELECT tablename || ' ' || policyname || ' ' || cmd || ' ' || coalesce(qual, '') || ' ' || coalesce(with_check, '') AS x FROM pg_policies
