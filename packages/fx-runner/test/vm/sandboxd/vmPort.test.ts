@@ -29,7 +29,7 @@ function rig(over: { state?: string; guestFails?: boolean; createFails?: boolean
       },
     },
     daemon: { teardown: async (id) => (log.push(`teardown ${id}`), over.teardown !== false), get: async (id) => (log.push(`get ${id}`), {} as never) },
-    bindings: { bind: (name) => (log.push(`bind ${name}`), {} as never), unbind: (name) => void log.push(`unbind ${name}`) },
+    bindings: { bind: (name, _sandbox, timeoutMs) => (log.push(`bind ${name} timeout=${String(timeoutMs)}`), {} as never), unbind: (name) => void log.push(`unbind ${name}`) },
     policy: { release: async (id) => void log.push(`release ${id}`) },
     idOf: (name) => `id-${name}`,
     timeoutMs: 123_000,
@@ -43,7 +43,7 @@ describe("the production VmPort", () => {
     const r = rig();
     await r.port.create("rn-1", "agent");
     await r.port.create("rc-1", "check");
-    expect(r.log).toEqual(["create rn-1 persistent=false timeout=123000", "get id-rn-1", "bind rn-1", "create rc-1 persistent=false timeout=123000", "get id-rc-1", "bind rc-1"]);
+    expect(r.log).toEqual(["create rn-1 persistent=false timeout=123000", "get id-rn-1", "bind rn-1 timeout=123000", "create rc-1 persistent=false timeout=123000", "get id-rc-1", "bind rc-1 timeout=123000"]);
   });
 
   it("the daemon's handle is bound by name when a VM is created and unbound when it is deleted or destroyed (and a repeat is safe)", async () => {
@@ -53,7 +53,7 @@ describe("the production VmPort", () => {
     await r.port.delete("rn-1");
     await r.port.destroy("rc-1");
     await r.port.delete("rn-1");
-    expect(r.log.filter((l) => l.startsWith("bind") || l.startsWith("unbind"))).toEqual(["bind rn-1", "bind rc-1", "unbind rn-1", "unbind rc-1", "unbind rn-1"]);
+    expect(r.log.filter((l) => l.startsWith("bind") || l.startsWith("unbind"))).toEqual(["bind rn-1 timeout=123000", "bind rc-1 timeout=123000", "unbind rn-1", "unbind rc-1", "unbind rn-1"]);
   });
 
   it("only the agent's VM is ever persistent: the check VM never keeps a snapshot", async () => {

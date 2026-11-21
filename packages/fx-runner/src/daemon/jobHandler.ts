@@ -32,7 +32,7 @@ import type { LockfileSync } from "./lockfileSync.js";
 import { scopeVerdict, type ChangedFiles } from "./scopeStep.js";
 import { readDerivedRules, verifyDerivedOutputs, type GeneratorFailure } from "./derivedStep.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
-import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
+import { cliModelFor, DEFAULT_WALL_CLOCK_MS, runJob, SANDBOX_MARGIN_MS,type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import type { NetworkRule, SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import type { WorkspaceStore } from "../job/workspace.js";
@@ -117,7 +117,8 @@ export interface JobHandlerDeps {
      * way out. `runJob` is its agent step. The token step is a slot the wiring fills (3c-i): absent, a job that needs a token ends with `vm_token_delivery_failed`.
      */
     lifecycle: {
-      port: VmPort;
+      /** The VM factory, or one made for the job's own limit: the function is given the VM wall-clock limit (`wallClockMs` plus the sandbox margin, as `runJob` asks for it). */
+      port: VmPort | ((options: { timeoutMs: number; runId: string }) => VmPort);
       registry: VmRegistry;
       caps: MicrovmCaps | undefined;
       request: VmRequest;
@@ -319,8 +320,8 @@ function adoptedVm(port: SandboxPort, vm: { held: { handle?: SandboxHandle }; qu
   return {
     ...port,
     async createSandbox(opts) {
-      // TODO(3c-iii): `opts.timeoutMs` (the job's wall clock plus margin) is dropped here. The VM was made earlier, by `vmPort`, with the wiring's fixed `timeoutMs`, and there is no
-      // port call to change a running VM's limit; 3c-iii derives that limit from the job when it wires the production `vmPort`. A limit below a job's wall clock cuts the agent short (closed).
+      // `opts.timeoutMs` (the job's wall clock plus margin) is not applied here: the VM was made earlier and no port call changes a running VM's limit. The caller makes the VM
+      // with that same number (`lifecycle.port`), so the VM's limit, the guest command's limit and this one agree.
       if (vm.held.handle === undefined || vm.held.handle.sandboxName !== opts.sandboxName) throw new GitPathError("workspace_failed");
       return vm.held.handle;
     },
@@ -846,7 +847,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             let agentRun: Promise<RunJobResult> | undefined;
             const outcome = await runVmJob<RunJobResult, { bundle: Buffer; base: string } | null, ((checkVm?: SandboxHandle) => Promise<void>) | undefined, void>({
               names,
-              port: life.port,
+              port: typeof life.port === "function" ? life.port({ timeoutMs: (deps.run.wallClockMs ?? DEFAULT_WALL_CLOCK_MS) + SANDBOX_MARGIN_MS, runId: claimed.runId }) : life.port,
               registry: life.registry,
               caps: life.caps,
               request: life.request,

@@ -6,6 +6,7 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
+import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { createRequire } from "node:module";
 import { isSea } from "node:sea";
@@ -20,7 +21,7 @@ import { CliError } from "../src/cliError.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { terminateGroup } from "../src/engines/claude/processGroup.js";
 import { resolveClaudePath } from "../src/engines/claude/pin.js";
-import { cleanEnv } from "../src/job/cleanEnv.js";
+import { SUBSCRIPTION_TOKEN_VAR, cleanEnv } from "../src/job/cleanEnv.js";
 import { haltDepsFrom, killEngineHost } from "../src/engineBridge/halt.js";
 import { createEngineBridgePorts } from "../src/engineBridge/ports.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
@@ -36,7 +37,9 @@ import { socketPath } from "../src/vm/unitRender.js";
 import { startEgressProxy } from "../src/vm/egress/proxy.js";
 import { startReverseEndpoint } from "../src/vm/egress/reverse.js";
 import { liveMicrovmComplete } from "../src/vm/sandboxd/live.js";
-import { productionDepsBase } from "../src/vm/sandboxd/production.js";
+import { createMicrovmParts } from "../src/vm/liveParts.js";
+import { LAYOUT } from "../src/vm/installPlan.js";
+import { readInstalledManifest } from "../scripts/vm-read-manifest.mjs";
 import { loadSettings } from "../src/runnerSettings.js";
 import { hostRefusal } from "../src/vm/rootApply.js";
 import { buildRemoveArgv } from "../src/vm/uninstall.js";
@@ -49,13 +52,6 @@ import { setPlaywrightLoader, sidecarFor } from "../src/verifyBrowser/loadPlaywr
 import { sidecarLibrary } from "./sidecarLibrary.mjs";
 import { swapSidecar, unpackSidecar, verifySidecar } from "../scripts/sidecar.mjs";
 
-// D#587 B-5b-3a: the parts of the live microVM stack this build has. The guest agent runtime (`makeRuntime`, B-5a-RT) and the boot facts (`boot`, `template`, `memMb`, B-5a-BF) have no
-// production source yet, so they are left out on purpose: `createLiveMicrovm` then returns nothing, a runner set to `microvm` claims nothing (`microvm_build_unwired`), and `doctor` says so.
-const microvmParts = {
-  deps: productionDepsBase({ helperSocket: socketPath(), host: { euid: process.geteuid?.(), platform: process.platform } }),
-  uid: process.getuid?.(),
-  egress: { startProxy: startEgressProxy, startReverse: startReverseEndpoint },
-};
 
 // D#6 RUNNER-CWD-1: where every program the kit starts without a directory of its own is started (a fresh empty directory under it each time),
 // and the two places such a start may never be: the home directory and this process's working directory (read at each start). No home, no launches.
@@ -306,6 +302,23 @@ let tufClient;
 const vmTuf = () => (tufClient ??= new TufClient({ stateDir: stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME) }));
 // One lazy port shared by the install hosts and the doctor facts; neither builds the client until it calls a method.
 const vmTufPort = { listTargets: (...args) => vmTuf().listTargets(...args), fetchTarget: (...args) => vmTuf().fetchTarget(...args) };
+// D#587 B-5b-3c-iii: every part of the live microVM stack. `createLiveMicrovm` wires it only when all of them are usable (`microvm_build_unwired` otherwise, so a runner set to `microvm`
+// claims nothing and never falls back to the OS sandbox). The boot facts come from the signed release listing (the TUF client above) and the installed manifest; the model token is
+// read in `readToken` and nowhere else, as a fresh buffer on each call.
+const microvmParts = createMicrovmParts({
+  euid: process.geteuid?.(),
+  uid: process.getuid?.(),
+  platform: process.platform,
+  helperSocket: socketPath(),
+  tuf: vmTufPort,
+  readManifest: () => readInstalledManifest(LAYOUT.templateManifest),
+  nodeArch: process.arch,
+  now: Date.now,
+  egress: { startProxy: startEgressProxy, startReverse: startReverseEndpoint },
+  logDir: () => path.join(stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME), "logs"),
+  // The one read of the model token for a VM run: a fresh buffer per call, zeroed by the token step after the send. Absent or empty is an empty buffer, which the token step refuses.
+  readToken: () => Buffer.from(process.env[SUBSCRIPTION_TOKEN_VAR] ?? "", "utf8"),
+});
 const vmInstallHosts = createVmInstallHosts({
   // Read when uninstall runs, not at start: it needs a home directory, and the verify server has none.
   get stateDir() {

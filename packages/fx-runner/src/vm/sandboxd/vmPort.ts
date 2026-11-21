@@ -13,7 +13,7 @@
 import type { SandboxHandle } from "../../sandbox/port.js";
 import type { VmKind, VmPort } from "../jobLifecycle.js";
 import type { MicrovmSandbox } from "./microvmSandbox.js";
-import type { GuestBindings } from "./guestBindings.js";
+import type { GuestBindings, RunEventHooks } from "./guestBindings.js";
 import type { Sandboxd } from "./sandboxd.js";
 
 export interface MicrovmVmPortParts {
@@ -28,6 +28,8 @@ export interface MicrovmVmPortParts {
   idOf: (name: string) => string;
   /** The port's wall-clock limit for a VM, in ms (the check VM's included). */
   timeoutMs: number;
+  /** The run's usage and relay sinks, asked for before a VM is made and bound with it. Throws when none can be had, so no VM is made without them. */
+  hooks?: () => RunEventHooks;
   /** Make the AGENT's VM persistent (a stop keeps a snapshot). The check VM is never persistent. */
   persistent?: boolean;
 }
@@ -54,8 +56,9 @@ export function createMicrovmVmPort(parts: MicrovmVmPortParts): VmPort {
       const persistent = kind === "agent" && parts.persistent === true;
       if (persistent) persistentIds.add(id);
       try {
+        const hooks = parts.hooks?.(); // before the VM exists: a refusal leaves nothing to end
         handles.set(id, await parts.sandbox.createSandbox({ sandboxName: id, retention: { persistent }, timeoutMs: parts.timeoutMs }));
-        parts.bindings.bind(id, await parts.daemon.get(parts.idOf(id))); // the daemon's own handle: the token and the guest's streams go through it, by name
+        parts.bindings.bind(id, await parts.daemon.get(parts.idOf(id)), parts.timeoutMs, hooks); // the daemon's own handle: the token and the guest's streams go through it, by name
       } catch (err) {
         persistentIds.delete(id);
         throw err; // a VM that was made is ended by the caller's teardown (it was registered first)

@@ -3,7 +3,7 @@ import { daemonInventorySource } from "../../../src/vm/sandboxd/management.js";
 import { CHECK_CLOSED, createLiveMicrovm, liveMicrovmComplete, type LiveMicrovmParts } from "../../../src/vm/sandboxd/live.js";
 import type { EgressStarters } from "../../../src/vm/sandboxd/policyPort.js";
 import { scriptedRuntime } from "../../sandboxPortContract.js";
-import { GuestBindings } from "../../../src/vm/sandboxd/guestBindings.js";
+import { GuestBindings, GuestRunHooks, type RunEventHooks } from "../../../src/vm/sandboxd/guestBindings.js";
 import { makeRig, runCleanups, type Rig } from "./helpers.js";
 
 afterEach(runCleanups);
@@ -16,7 +16,7 @@ const starters: EgressStarters = {
 /** Every part, built over the rig's fake helper and guest agent (fakes at the host-fact and helper seams; the daemon, adapter and port are the real ones). */
 function parts(rig: Rig, over: Partial<LiveMicrovmParts> = {}): LiveMicrovmParts {
   const { boot, ...deps } = rig.deps;
-  return { deps, boot, template: "fx-agent", memMb: 256, uid: 4711, egress: starters, makeRuntime: () => scriptedRuntime(), ...over };
+  return { deps, boot, template: "fx-agent", memMb: 256, uid: 4711, egress: starters, makeRuntime: () => scriptedRuntime(), bindings: new GuestBindings(), readToken: () => Buffer.from("t"), runHooks: new GuestRunHooks(), ...over };
 }
 
 describe("createLiveMicrovm: the whole stack or nothing", () => {
@@ -31,7 +31,7 @@ describe("createLiveMicrovm: the whole stack or nothing", () => {
     const rig = makeRig();
     expect(createLiveMicrovm(undefined)).toBeUndefined();
     expect(createLiveMicrovm({})).toBeUndefined();
-    for (const key of ["deps", "boot", "template", "memMb", "uid", "egress", "makeRuntime"] as const) {
+    for (const key of ["deps", "boot", "template", "memMb", "uid", "egress", "makeRuntime", "bindings", "readToken", "runHooks"] as const) {
       const without = { ...parts(rig), [key]: undefined };
       expect(createLiveMicrovm(without), key).toBeUndefined();
       expect(liveMicrovmComplete(without), key).toBe(false);
@@ -89,10 +89,12 @@ describe("createLiveMicrovm: the whole stack or nothing", () => {
       startProxy: async () => (open++, { close: async () => void open-- }),
       startReverse: async () => (open++, { close: async () => void open-- }),
     };
-    const live = createLiveMicrovm(parts(makeRig(), { egress: counting }))!;
+    const runHooks = new GuestRunHooks();
+    runHooks.attach(() => ({ onLocalEvent: () => undefined, onNearLimit: () => undefined }));
+    const live = createLiveMicrovm(parts(makeRig(), { egress: counting, runHooks }))!;
     const source = daemonInventorySource(live.sdk);
     const bindings = new GuestBindings();
-    const vm = live.vmPort({ timeoutMs: 60_000, bindings });
+    const vm = live.vmPort({ timeoutMs: 60_000, runId: "run-a", bindings });
     await vm.create("rn-bound", "agent");
     expect(bindings.tokenOf("rn-bound")).toBeDefined();
     await vm.delete("rn-bound");
@@ -117,5 +119,45 @@ describe("createLiveMicrovm: the whole stack or nothing", () => {
     await vm.destroy("rc-factory");
     expect(open).toBe(0);
     expect(await source.list()).toEqual([]);
+  });
+});
+
+describe("the run's usage and relay sinks, and what startup reaping works over (D#587 3c-iii)", () => {
+  const sinks = (runId: string, seen: string[]): RunEventHooks => ({ onLocalEvent: () => void seen.push(`event:${runId}`), onNearLimit: () => void seen.push(`near:${runId}`) });
+
+  it("a VM made for a run is bound with that run's own sinks, found by the run id; the runtime's binding carries them and another run's VM gets its own", async () => {
+    const seen: string[] = [];
+    const runHooks = new GuestRunHooks();
+    runHooks.attach((runId) => sinks(runId, seen));
+    const live = createLiveMicrovm(parts(makeRig(), { runHooks }))!;
+    const bindings = new GuestBindings();
+    await live.vmPort({ timeoutMs: 60_000, runId: "run-a", bindings }).create("rn-a", "agent");
+    await live.vmPort({ timeoutMs: 60_000, runId: "run-b", bindings }).create("rn-b", "agent");
+    await bindings.binding({ name: "rn-a" } as never).onLocalEvent?.({} as never);
+    bindings.binding({ name: "rn-b" } as never).onNearLimit?.({});
+    expect(seen).toEqual(["event:run-a", "near:run-b"]);
+  });
+
+  it("with no sinks attached no VM is made: the refusal comes before the VM exists, so nothing is left to end and nothing is bound", async () => {
+    const live = createLiveMicrovm(parts(makeRig()))!; // `parts` hands over a `GuestRunHooks` nobody attached to
+    const bindings = new GuestBindings();
+    await expect(live.vmPort({ timeoutMs: 60_000, runId: "run-a", bindings }).create("rn-x", "agent")).rejects.toThrow("guest_hooks_unattached");
+    expect(await daemonInventorySource(live.sdk).list()).toEqual([]);
+    expect(bindings.tokenOf("rn-x")).toBeUndefined();
+  });
+
+  it("the reap source is the HELPER's list, so a VM an earlier process left is seen by a new stack, and ending it by id leaves nothing; an id the helper never knew is done", async () => {
+    const rig = makeRig();
+    const earlier = createLiveMicrovm(parts(rig))!;
+    await earlier.port.createSandbox({ sandboxName: "rn-left-behind", retention: { persistent: false }, timeoutMs: 60_000 });
+    const later = createLiveMicrovm(parts(rig))!; // the next process: same helper, a daemon with an empty table
+    expect(await daemonInventorySource(later.sdk).list()).toEqual([]);
+    const ids = await later.reap.list();
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).toMatch(/^sb-[0-9a-f]{32}$/);
+    await later.reap.port.releaseEgress(ids[0]!);
+    await later.reap.port.delete(ids[0]!);
+    expect(await later.reap.list()).toEqual([]);
+    await expect(later.reap.port.delete(ids[0]!)).resolves.toBeUndefined();
   });
 });

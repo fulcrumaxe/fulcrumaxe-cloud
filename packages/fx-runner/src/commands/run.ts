@@ -30,8 +30,9 @@ import { createFootprintStore } from "../daemon/footprints.js";
 import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
 import { isDraining, isPaused, loadSettings, setDraining } from "../runnerSettings.js";
-import { engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
+import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
 import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
+import { createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
 import { daemonInventorySource, daemonSandboxLifecycle } from "../vm/sandboxd/management.js";
 import { createMicrovmGate } from "../daemon/microvmGate.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
@@ -491,6 +492,12 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     hooks.onMemoryOfferBuilt?.(memoryOfferDeps);
     // D#749 V2b: the local half of the post-merge verify stage. Off until the owner sets `verify.*` on this machine; what it advertises is decided by those settings and the probe.
     const verifyLocal = createVerifyLocal({ stateDir, uid: host.uid ?? -1, username: host.username ?? "", env: host.env ?? {}, platform: host.platform, capture: host.engine.installCapture, signal: stopped.signal, say: (line) => ctx.out(line), home, selfCommand: host.selfCommand, ...(ctx.bypass?.kind === "ok" && ctx.bypassFile !== undefined ? { bypass: { file: ctx.bypassFile, cloudOrigin: registration.cloud_origin } } : {}) });
+    // D#587 3c-iii: a microVM run's guest events go to the run's own usage gate and relay, exactly as the OS-sandbox path's do (below, `makeRuntime`). Attached before any VM can be made.
+    built?.runHooks.attach(runEventHooks({ usage, relay }));
+    // D#587 B-5b-3c-iii: a microVM run's crossing, archive, bundle apply, fresh check and lifecycle, joined over the one live stack. An `os_sandbox` run has none of it.
+    const vmDeps = vm === undefined ? undefined : createVmJobDeps({ live: vm, stateDir, capture: host.engine.capture, captureLarge: host.engine.captureLarge, envOptions, now: ctx.now, caps: () => completeCaps(loadSettings(stateDir).microvm), readMemAvailableBytes: engineFacts?.readMemAvailableBytes ?? (() => undefined), subscription: registration.credential_mode === "subscription" });
+    // the claim loop's own part: no claim on an API key, while startup reaping is held, or at the VM cap (the lifecycle's own registry)
+    const vmGuard = vm === undefined || vmDeps === undefined ? undefined : createVmClaimGuard({ live: vm, vm: vmDeps, subscription: registration.credential_mode === "subscription" });
     const handle = createJobHandler({
       engine,
       browserReady: (method) => verifyLocal.browserReady(method),
@@ -521,6 +528,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       git,
       ...(gitA === undefined ? {} : { gitA }),
       sandbox,
+      ...(vmDeps === undefined ? {} : { vm: vmDeps }),
       events: relay,
       shutdown: stopped.signal,
       spillRoot: ownSpillRoot,
@@ -542,15 +550,17 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const gate = createMicrovmGate({ engine: () => loadSettings(stateDir).sandboxEngine ?? "os_sandbox", facts: host.vmFacts, now: ctx.now, limitsBlocked: () => vmLimitsBlock(stateDir) !== undefined, inner: osGate });
     let lastReason: string | undefined;
     // The two local-only engine blocks are said once each time they begin (the claim loop's own lines are about the sandbox gate's reasons).
-    let lastVmBlock: ClaimBlock | undefined;
-    const noteVmBlock = (block: ClaimBlock | undefined): void => {
+    let lastVmBlock: ClaimBlock | VmRunBlock | undefined;
+    const noteVmBlock = (block: ClaimBlock | VmRunBlock | undefined): void => {
       if (block === lastVmBlock) return;
       lastVmBlock = block;
       if (block === "microvm_build_unwired") ctx.out(UNWIRED_LINE);
       else if (block === "microvm_restart_needed") ctx.out(RESTART_LINE);
+      else if (block === "microvm_api_key_unsupported") ctx.out("fx-runner: a runner on an API key cannot run jobs in a microVM yet (microvm_api_key_unsupported), so it claims nothing, and the OS sandbox is not used instead. Sign in with a subscription, or set the engine to os_sandbox");
+      else if (block === "vm_reap_pending") ctx.out("fx-runner: microVMs left by an earlier run could not all be ended (vm_reap_pending), so nothing is claimed until they are. Run: fx-runner doctor");
     };
     const vmBlocked = (): boolean => {
-      const block = vmClaimBlock(stateDir, engine, built !== undefined);
+      const block = vmClaimBlock(stateDir, engine, built !== undefined) ?? vmGuard?.block();
       noteVmBlock(block);
       return block !== undefined;
     };
@@ -704,6 +714,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           log: (line) => ctx.out(`fx-runner: ${line}`),
         });
       }
+      // D#587 3c-iii: the VMs an earlier process left are ended before the first claim; a failed pass holds claiming (`vm_reap_pending`) and each claim check tries once more.
+      await vmGuard?.start();
       const end = await pollLoop({
         client,
         wake,

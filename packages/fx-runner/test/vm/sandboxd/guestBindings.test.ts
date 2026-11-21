@@ -135,12 +135,20 @@ describe("the bindings (sandbox name -> handle and JobToken)", () => {
     await expect(b.launch("a")({ id: "late-1", cmd: "c", withToken: true })).rejects.toMatchObject({ code: "vm_token_delivery_failed" });
   });
 
-  it("the timeout hook follows the port's limit for that sandbox, and is absent when none was given", () => {
+  it("the timeout hook is always passed (FU-170): the limit the VM was bound with first, else the port's own answer, else nothing so the runtime's bounded fallback applies", () => {
     const limits = new Map([["a", 90_000]]);
     const b = new GuestBindings({ timeoutMsOf: (n) => limits.get(n) });
     expect(b.binding({ name: "a" } as never).timeoutMs?.()).toBe(90_000);
     expect(b.binding({ name: "zz" } as never).timeoutMs?.()).toBeUndefined();
-    expect(new GuestBindings().binding({ name: "a" } as never).timeoutMs).toBeUndefined();
+    const plain = new GuestBindings();
+    expect(typeof plain.binding({ name: "a" } as never).timeoutMs).toBe("function");
+    expect(plain.binding({ name: "a" } as never).timeoutMs?.()).toBeUndefined();
+    plain.bind("a", fakeSandbox("a"), 7_200_000);
+    expect(plain.binding({ name: "a" } as never).timeoutMs?.()).toBe(7_200_000);
+    plain.bind("b", fakeSandbox("b"));
+    expect(plain.binding({ name: "b" } as never).timeoutMs?.()).toBeUndefined();
+    plain.unbind("a");
+    expect(plain.binding({ name: "a" } as never).timeoutMs?.()).toBeUndefined();
   });
 });
 

@@ -9,7 +9,7 @@ import type { FreshCheckInput } from "../../src/vm/workspace/guestCheck.js";
 import { createJobHandler, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
-import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
+import { DEFAULT_WALL_CLOCK_MS, runJob, SANDBOX_MARGIN_MS, type RunJobDeps } from "../../src/job/runJob.js";
 import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { createWorkspaceStore } from "../../src/job/workspace.js";
 import { VmRegistry } from "../../src/vm/jobLifecycle.js";
@@ -106,7 +106,7 @@ function recordingPort(name: string, log: string[], starts: StartDetachedOptions
   } as SandboxPort & { guestOf: () => Promise<never> };
 }
 
-function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?: boolean; withCheck?: boolean; tip?: string | null; bundle?: Buffer; collectError?: string; persistent?: boolean; faults?: Faults; maxVms?: number; shutdown?: AbortSignal; token?: { needed: () => boolean; slot: (vm: string, log: string[]) => { deliver(): Promise<void>; wipe(): Promise<void> } | undefined }; resume?: boolean; fresh?: "pass" | "fail" | "none"; changed?: string[] | null; derived?: { table: unknown; files: Record<string, string> }; steps?: string[]; sleeps?: number[]; lockSeen?: Array<{ manifest: string | null; placeholderPresent: boolean }> } = {}) {
+function rig(over: { portTimeouts?: number[]; portRunIds?: string[]; wallClockMs?: number; engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?: boolean; withCheck?: boolean; tip?: string | null; bundle?: Buffer; collectError?: string; persistent?: boolean; faults?: Faults; maxVms?: number; shutdown?: AbortSignal; token?: { needed: () => boolean; slot: (vm: string, log: string[]) => { deliver(): Promise<void>; wipe(): Promise<void> } | undefined }; resume?: boolean; fresh?: "pass" | "fail" | "none"; changed?: string[] | null; derived?: { table: unknown; files: Record<string, string> }; steps?: string[]; sleeps?: number[]; lockSeen?: Array<{ manifest: string | null; placeholderPresent: boolean }> } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -133,15 +133,17 @@ function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?:
   const vmPort = recordingPort("vm", log, vmStarts, retentions, faults);
   const hostPort = recordingPort("host", log, hostStarts);
   // the production VM factory over the recording port: every VM the lifecycle makes, stops and ends shows in `log` as `vm.create`, `vm.stop`, `vm.delete`
+  const factory = (timeoutMs: number) => createMicrovmVmPort({ sandbox: vmPort as never, daemon: { teardown: async () => (log.push("vm.teardown"), faults.teardownOk !== false), get: async () => ({}) as never }, bindings: { bind: (name: string) => (log.push(`bind:${name.slice(0, 3)}`), {} as never), unbind: (name: string) => void log.push(`unbind:${name.slice(0, 3)}`) }, policy: { release: async (id: string) => { log.push(`release:${id.slice(0, 3)}`); if (faults.release === true) throw new Error("socket stuck"); } }, idOf: (name) => name, timeoutMs, ...(over.persistent === true ? { persistent: true } : {}) });
   const lifecycle = {
-    port: createMicrovmVmPort({ sandbox: vmPort as never, daemon: { teardown: async () => (log.push("vm.teardown"), faults.teardownOk !== false), get: async () => ({}) as never }, bindings: { bind: (name: string) => (log.push(`bind:${name.slice(0, 3)}`), {} as never), unbind: (name: string) => void log.push(`unbind:${name.slice(0, 3)}`) }, policy: { release: async (id: string) => { log.push(`release:${id.slice(0, 3)}`); if (faults.release === true) throw new Error("socket stuck"); } }, idOf: (name) => name, timeoutMs: 60_000, ...(over.persistent === true ? { persistent: true } : {}) }),
+    // a function when the test watches the per-job limit the handler asks the factory for; the plain port otherwise (both shapes are the handler's to take)
+    port: over.portTimeouts === undefined ? factory(60_000) : (options: { timeoutMs: number; runId: string }) => (over.portTimeouts?.push(options.timeoutMs), over.portRunIds?.push(options.runId), factory(options.timeoutMs)),
     registry: new VmRegistry(),
     caps: { maxVms: over.maxVms ?? 2, maxVcpus: 4, maxMemoryMb: 4096, snapshotDir: "/var/lib/fx/snap", snapshotQuotaBytes: 10 ** 12 },
     request: { vcpus: 1, memoryMb: 1024 },
     readMemAvailableBytes: () => 16 * 1024 ** 3,
     ...(over.token === undefined ? {} : { token: { needed: over.token.needed, slot: (vm: string) => over.token?.slot(vm, log) } }),
   };
-  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => (over.resume === true ? { kind: "resume", sessionId: "old", workspace: path.join(root, "work", "old") } : { kind: "fresh", branch: null }), defaultModel: "sonnet" };
+  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { ...(over.wallClockMs === undefined ? {} : { wallClockMs: over.wallClockMs }), workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => (over.resume === true ? { kind: "resume", sessionId: "old", workspace: path.join(root, "work", "old") } : { kind: "fresh", branch: null }), defaultModel: "sonnet" };
   const archive = { gz: Buffer.alloc(0), commit: TIP, commitText: Buffer.alloc(0), tree: "c".repeat(40), items: [] } as WorkspaceArchive;
   const rigClock: Clock = over.sleeps === undefined ? clock : { now: clock.now, sleep: (ms, signal) => (over.sleeps?.push(ms), clock.sleep(ms, signal)) };
   const deps: JobHandlerDeps = {
@@ -505,6 +507,22 @@ describe("a microVM job runs through runVmJob: every way it can end tears every 
     expect(bodies("/done").at(-1)?.check).toMatchObject({ reason: "out_of_scope" });
     clean(none);
     clean(outside);
+  });
+
+  it("each job's VM factory is made for that job's own wall clock plus the sandbox margin, the number runJob asks the sandbox for (3c-iii, the per-job limit)", async () => {
+    const seen: number[] = [];
+    const runIds: string[] = [];
+    const custom = rig({ portTimeouts: seen, portRunIds: runIds, wallClockMs: 90 * 60_000 });
+    const customJob = jobFor();
+    await custom.handler(await custom.claim(customJob));
+    const plain = rig({ portTimeouts: seen, portRunIds: runIds });
+    const plainJob = jobFor();
+    await plain.handler(await plain.claim(plainJob));
+    expect(seen).toEqual([90 * 60_000 + SANDBOX_MARGIN_MS, DEFAULT_WALL_CLOCK_MS + SANDBOX_MARGIN_MS]);
+    // the run id goes with it: the factory finds that run's usage and relay sinks by it (3c-iii)
+    expect(runIds).toEqual([customJob.run_id, plainJob.run_id]);
+    clean(custom);
+    clean(plain);
   });
 
   it("a VM that cannot be created ends the job sandbox_unavailable on no other sandbox: nothing starts, nothing is left in the table", async () => {
