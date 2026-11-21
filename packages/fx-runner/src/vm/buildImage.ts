@@ -111,7 +111,7 @@ export interface BuildInput {
   image: string;
   arches: readonly Arch[];
   outDir: string;
-  /** The directory holding `init` and `agent.py`. */
+  /** The directory holding `init`, `agent.py` and `relay.py`. */
   guestDir: string;
   host: BuildHost;
   crane?: string;
@@ -129,7 +129,7 @@ export async function buildImage(input: BuildInput): Promise<BuiltRootfs[]> {
   const answered = (await must(host, crane, ["digest", input.image])).trim();
   if (answered !== `sha256:${ref[1]}`) throw new CliError("the registry answered with a different digest than the one pinned; refusing to build", 1);
 
-  const guest = { init: path.join(input.guestDir, "init"), agent: path.join(input.guestDir, "agent.py") };
+  const guest = { init: path.join(input.guestDir, "init"), agent: path.join(input.guestDir, "agent.py"), relay: path.join(input.guestDir, "relay.py") };
   const guestSha = { init: await sha256File(guest.init), agent: await sha256File(guest.agent) };
   const epoch = String(lock.rootfs.sourceDateEpoch);
   const built: BuiltRootfs[] = [];
@@ -142,7 +142,8 @@ export async function buildImage(input: BuildInput): Promise<BuiltRootfs[]> {
     await must(host, crane, ["export", "--platform", `linux/${arch}`, input.image, tar]);
     copyFileSync(guest.init, path.join(stage, GUEST_DIR, "init"));
     copyFileSync(guest.agent, path.join(stage, GUEST_DIR, "agent.py"));
-    for (const name of ["init", "agent.py"]) chmodSync(path.join(stage, GUEST_DIR, name), 0o755);
+    copyFileSync(guest.relay, path.join(stage, GUEST_DIR, "relay.py")); // part of the disk, so of its digest; the release lists init and agent.py by their own digests
+    for (const name of ["init", "agent.py", "relay.py"]) chmodSync(path.join(stage, GUEST_DIR, name), 0o755);
     chmodSync(path.join(stage, GUEST_DIR), 0o755);
     await must(host, "tar", ["--append", "--file", tar, "--owner=0", "--group=0", "--numeric-owner", `--mtime=@${epoch}`, "--sort=name", "-C", stage, GUEST_DIR]);
     const { bytes, entries } = estimateImageBytes(await must(host, "tar", ["--list", "--verbose", "--numeric-owner", "--file", tar]));

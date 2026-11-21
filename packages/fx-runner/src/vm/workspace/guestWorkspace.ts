@@ -60,6 +60,9 @@ const UNPACK_SCRIPT = [
   'printf \'%s\\n\' "$BASE" >"$S/base"',
 ].join("\n");
 
+/** How long a killed command's output is waited for, after the kill. */
+const KILL_DRAIN_MS = 10_000;
+
 export interface WorkspaceArchive {
   /** The gzip-compressed tar the host built and checked. */
   gz: Buffer;
@@ -118,6 +121,11 @@ export async function runInGuest(guest: SdkSandbox, spec: { cmd: string; args: r
     const outcome = await Promise.race([finished, limit, stop]);
     if (outcome === "timeout" || outcome === "abort") {
       await command.kill("SIGKILL").catch(() => undefined); // fx-swallow-ok: the command is reported as timed out or stopped whether or not the kill reached it
+      // The guest hands over a command's output when the command ends, so what it printed before the limit reaches `onText` and `held` only now, after the kill. Wait
+      // for that, but only a short while: a guest that does not answer must not hold the caller past its limit by more than this.
+      let drainTimer: NodeJS.Timeout | undefined;
+      await Promise.race([finished.catch(() => undefined), new Promise<void>((resolve) => (drainTimer = setTimeout(resolve, KILL_DRAIN_MS)))]); // fx-swallow-ok: a failed read only means less output is shown
+      clearTimeout(drainTimer);
       return { exitCode: null, timedOut: outcome === "timeout", ...(outcome === "abort" ? { aborted: true as const } : {}), ...held };
     }
     return { exitCode: outcome.exitCode, timedOut: false, ...(stopped ? { stopped: true as const } : {}), ...held };

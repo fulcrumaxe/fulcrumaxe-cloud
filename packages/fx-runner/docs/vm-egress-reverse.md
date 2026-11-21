@@ -6,7 +6,7 @@ attributed to a sandbox by the socket it arrived on and never by anything the gu
 | Port | Socket | Serves |
 |------|--------|--------|
 | 5253 | `v.sock_5253` | `CONNECT host:443` tunnels to hosts the policy allows with no rules (package registry). |
-| 5254 | `v.sock_5254` | Plain HTTP, for hosts whose policy rule rewrites the request: a `forwardURL` or a header `transform`. |
+| 5254 | `v.sock_5254` | Plain HTTP, for hosts whose policy rule rewrites the request (a `forwardURL` or a header `transform`), and for a host the policy lists with no rules, which it serves as itself. |
 
 A rewritten host cannot be tunnelled, because the rewrite and the credential live inside the TLS session. The tunnel refuses it
 (`interception_required`, with an `x-egress-hint` header naming port 5254). The reverse endpoint terminates nothing: it takes the guest's plain
@@ -17,8 +17,10 @@ cookie, anything with token, key, secret or signature in its name, `x-forwarded-
 
 ## How the guest points at it
 
-The guest image runs a relay that listens on `127.0.0.1:80` and copies bytes to vsock port 5254 of the host (CID 2). Its `/etc/hosts` maps each
-rewritten policy host to `127.0.0.1`, and each tool is told to use plain HTTP for that host:
+The guest image runs two relays (`infra/microvm-image/guest/relay.py`, started by the guest's `init`, each started again if it ends): `127.0.0.1:5253` copies
+bytes to vsock port 5253 of the host (CID 2), and `127.0.0.1:80` to vsock port 5254. They accept only those two pairs, listen on the loopback only and
+decide nothing. The guest's hosts file maps `api.anthropic.com` and `github.com` (the runner's `REVERSE_HOSTS`) to `127.0.0.1`, and each tool is told
+to use plain HTTP for that host:
 
 - Model API: `ANTHROPIC_BASE_URL=http://api.anthropic.com` (the gateway host the same way). The request's Host header names the policy host, which is
   what the endpoint routes on. The key header is added on the host; the tool's own placeholder key is dropped.
@@ -26,8 +28,10 @@ rewritten policy host to `127.0.0.1`, and each tool is told to use plain HTTP fo
   its own base-URL setting.
 - Package registry: nothing. `registry.npmjs.org` is a direct host and goes through the CONNECT tunnel on 5253.
 
-Wiring the image (relay binary, `/etc/hosts`, tool config) belongs to the guest image rows; this endpoint only needs the Host header to name a
-policy host that has a route.
+A job's own policy is a plain list of hosts (`{ allow: ["api.anthropic.com"] }`), so a host listed with no rules is served here as itself: the same host
+the tunnel would open, with the same address checks, nothing added to the request and the guest's credential-shaped headers still dropped. Only an exact
+name in the policy counts. A host whose rules this endpoint cannot apply stays refused (`unsupported_rules`), and one that is not listed is `not_allowed`.
+The runner's own `inject` hook, when it is given one, still adds its headers last.
 
 ## What it refuses (a fixed answer, never an address)
 

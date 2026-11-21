@@ -1,6 +1,8 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import https from "node:https";
+import type net from "node:net";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { freemem } from "node:os";
 import path from "node:path";
@@ -16,8 +18,9 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { originHash } from "../../src/keyring.js";
 import { setSetting } from "../../src/runnerSettings.js";
-import { startEgressProxy } from "../../src/vm/egress/proxy.js";
-import { startReverseEndpoint } from "../../src/vm/egress/reverse.js";
+import { startEgressProxy, type Decision } from "../../src/vm/egress/proxy.js";
+import { startReverseEndpoint, TEST_HOOKS, type ReverseDecision } from "../../src/vm/egress/reverse.js";
+import { generateSelfSignedCert } from "../helpers/selfSignedCert.js";
 import { createMicrovmParts } from "../../src/vm/liveParts.js";
 import { TEMPLATES } from "../../src/vm/lock.js";
 import { parseMemAvailableBytes, type VmHostFacts } from "../../src/vm/limits.js";
@@ -26,6 +29,7 @@ import { guestMakeRuntime } from "../../src/vm/sandboxd/guestRuntime.js";
 import { createGuestAgent } from "../../src/vm/sandboxd/guestAgent.js";
 import { createHelperClient, HelperError, type Helper } from "../../src/vm/sandboxd/helperClient.js";
 import type { LiveMicrovmParts } from "../../src/vm/sandboxd/live.js";
+import type { EgressStarters } from "../../src/vm/sandboxd/policyPort.js";
 import { fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
 import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { shellSandboxUsable, testLaunch } from "../helpers/launch.js";
@@ -33,7 +37,7 @@ import { until } from "../helpers/manualClock.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { KEYRING, signedJob } from "../helpers/signedJob.js";
 import { socketTmpRoot } from "../helpers/tmpRoot.js";
-import { AGENT_PROBE, bwrapUsable, cliScript, DISKSCAN, FILE_IN_GUEST, HANG, onPath, osToolbin, CLI } from "./helpers/scriptedCli.js";
+import { AGENT_PROBE, bwrapUsable, cliScript, DISKSCAN, FILE_IN_GUEST, HANG, onPath, osToolbin, CLI, RELAYS } from "./helpers/scriptedCli.js";
 import { signRelease, type SignedRelease } from "./helpers/signedRelease.js";
 import { connectUnix } from "./sandboxd/helpers.js";
 
@@ -122,8 +126,6 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   let seenByPgrep: Map<string, number>;
   /** What the REAL helper said of each VM when it started: where its vsock directory is, and how many cgroup directories of that name the kernel showed (the controls for the leak checks below). */
   let vsockDirs: Map<string, string>;
-  /** Which of the vsock directory and its sockets were seen "present" while the VM ran (the control for the "gone" checks below). */
-  let vsockSeenPresent: Map<string, Set<string>>;
   let cgroupsSeen: Map<string, number>;
   const logLines: string[] = [];
   const started: Array<{ signals: EventEmitter; done: Promise<unknown> }> = [];
@@ -170,7 +172,6 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     injection = { prepare: false, destroy: false };
     seenByPgrep = new Map();
     vsockDirs = new Map();
-    vsockSeenPresent = new Map();
     cgroupsSeen = new Map();
     logLines.length = 0;
     cloud = await startStrictRunnerCloud();
@@ -210,16 +211,6 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   });
 
   /** The helper the daemon is given: the real one, recording each call, listing only this file's VMs, and refusing the call a test names. */
-  /** Records which of the vsock directory and the socket names are there now, while the VM is up. */
-  const VSOCK_NAMES = ["v.sock", "v.sock_5253", "v.sock_5254"];
-  const noteVsock = (id: string): void => {
-    const dir = vsockDirs.get(id);
-    if (dir === undefined) return;
-    const seen = vsockSeenPresent.get(id) ?? new Set<string>();
-    if (stateOf(dir) === "present") seen.add(dir);
-    for (const name of VSOCK_NAMES) if (stateOf(path.join(dir, name)) === "present") seen.add(path.join(dir, name));
-    vsockSeenPresent.set(id, seen);
-  };
   const wrapHelper = (real: Helper): Helper => ({
     ...real,
     prepare: async (p) => {
@@ -233,13 +224,11 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
       const started = await real.start(id);
       seenByPgrep.set(id, firecrackersFor(id)); // the control for the leak check below: this matcher can see a running VM here
       vsockDirs.set(id, started.vsockDir);
-      noteVsock(id);
       cgroupsSeen.set(id, cgroupDirsOf(id).length);
       return started;
     },
     destroy: async (id) => {
       calls.push({ verb: "destroy", id });
-      noteVsock(id); // the VM is still up here, and the relays have made their sockets by now
       if (injection.destroy) throw new HelperError("unavailable");
       return real.destroy(id);
     },
@@ -250,7 +239,7 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   const vmFacts = async (): Promise<VmHostFacts> => ({ kvm: "present", helperSocket: "present", helperSocketPath: env.helper as string, helperState: "ready", totalMemMb: 16384, cpus: 4, readMemAvailableBytes: () => parseMemAvailableBytes(readFileSync("/proc/meminfo", "utf8")) });
 
   /** The live parts, as the entry point makes them, with the CLI stand-in written into each guest before the CLI starts. */
-  const partsFor = (script: string, over: { silentGuest?: boolean } = {}): LiveMicrovmParts => {
+  const partsFor = (script: string, over: { silentGuest?: boolean; egress?: EgressStarters } = {}): LiveMicrovmParts => {
     const d = signed.digests(process.arch === "arm64" ? "arm64" : "amd64");
     const logDir = path.join(stateDir, "logs");
     mkdirSync(logDir, { recursive: true });
@@ -263,7 +252,7 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
       readManifest: () => JSON.stringify({ [TEMPLATES[0]]: { kernel: d.kernel, rootfs: d.rootfs } }),
       nodeArch: process.arch,
       now: Date.now,
-      egress: { startProxy: startEgressProxy, startReverse: startReverseEndpoint },
+      egress: over.egress ?? { startProxy: startEgressProxy, startReverse: startReverseEndpoint },
       logDir: () => logDir,
       readToken: () => Buffer.from(sentinel),
     });
@@ -372,14 +361,8 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
       const dir = vsockDirs.get(id);
       if (dir === undefined) continue; // the VM never started, so it has no directory to look for
       const jailRoot = path.dirname(path.dirname(dir));
-      const seen = vsockSeenPresent.get(id) ?? new Set<string>();
-      if (seen.has(dir)) expect(stateOf(dir), `the vsock directory of ${id} is still there`).toBe("gone");
-      else console.warn(`vmJob.real: the vsock directory ${dir} of ${id} was not seen while the VM ran; its "gone" check is skipped`);
-      for (const socket of VSOCK_NAMES) {
-        const file = path.join(dir, socket);
-        if (seen.has(file)) expect(stateOf(file), `${socket} of ${id} is still there`).toBe("gone");
-        else console.warn(`vmJob.real: ${socket} of ${id} was not seen while the VM ran; its "gone" check is skipped`);
-      }
+      expect(stateOf(dir), `the vsock directory of ${id} is still there`).toBe("gone");
+      for (const socket of ["v.sock", "v.sock_5253", "v.sock_5254"]) expect(stateOf(path.join(dir, socket)), `${socket} of ${id} is still there`).toBe("gone");
       const jail = stateOf(path.join(jailRoot, "jails", id));
       if (jail === "unreadable") console.warn(`vmJob.real: the jail directory of ${id} is below a directory this user may not search; only the helper's list says it is gone`);
       else expect(jail, `the jail directory of ${id} is still there`).toBe("gone");
@@ -387,16 +370,9 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   }
   /** The runner's inventory block (the `sandboxes` of a claim) names none of this test's VMs in the last claim that carried one. The runner's live table is internal to `run`; this is what the cloud was told. */
   function expectNoInventoryRow(): void {
-    const inventories = cloud.seen.filter((s) => s.path.endsWith("/claim")).map((s) => (s.body as { sandboxes?: Array<{ name: string }> } | undefined)?.sandboxes).filter((b): b is Array<{ name: string }> => b !== undefined);
-    const last = inventories[inventories.length - 1] ?? [];
-    for (const id of own) {
-      // control: some claim listed this VM while it ran; without that, "not listed now" cannot tell removed from never listed
-      if (!inventories.some((b) => b.some((r) => r.name === id))) {
-        console.warn(`vmJob.real: no claim ever listed ${id} in its inventory; the inventory check is skipped for it`);
-        continue;
-      }
-      expect(last.map((r) => r.name), `the runner's last inventory still lists ${id}`).not.toContain(id);
-    }
+    const reported = cloud.seen.filter((s) => s.path.endsWith("/claim") && (s.body as { sandboxes?: unknown } | undefined)?.sandboxes !== undefined);
+    const last = (reported[reported.length - 1]?.body as { sandboxes?: Array<{ name: string }> } | undefined)?.sandboxes ?? [];
+    for (const id of own) expect(last.map((r) => r.name), `the runner's last inventory still lists ${id}`).not.toContain(id);
   }
   function expectNoToken(): void {
     const needle = Buffer.from(sentinel);
@@ -597,6 +573,8 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     const runId = [...cloud.runs.keys()][0]!;
     const body = doneBody(runId)!;
     expect(body.check).toMatchObject({ exit_code: null, timed_out: true });
+    // what the check printed before the limit is kept (the guest hands output over when the command ends, which the kill brings about)
+    expect(body.check?.summary).toContain("started-and-will-not-finish");
     expect(runOf(runId)!.endedBy).toMatchObject({ type: "run_ended", reason: "check_failed" });
     expect(pushedTree()).toBe(expectedTree());
     expect(preparedIds()).toHaveLength(2);
@@ -620,4 +598,49 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     await expectNoVmLeft();
     expectNoToken();
   }, 420_000);
+
+  it("B-5b-RELAY: under the job's own policy the CLI reaches the model host through the image's relays, and git to github.com and a host outside the policy are refused", async () => {
+    // The upstream the host side reaches is a local TLS server for the model host's name (no call leaves the machine); the guest, its relays, the CONNECT listener and the reverse listener are all real.
+    const cert = generateSelfSignedCert("api.anthropic.com", 1, { dnsNames: ["api.anthropic.com"] });
+    const upstreamSeen: Array<{ method?: string; url?: string; host?: string }> = [];
+    const upstream = https.createServer({ key: cert.keyPem, cert: cert.certPem }, (req, res) => {
+      upstreamSeen.push({ ...(req.method === undefined ? {} : { method: req.method }), ...(req.url === undefined ? {} : { url: req.url }), ...(req.headers.host === undefined ? {} : { host: req.headers.host }) });
+      req.resume();
+      res.end("stub-model-answer");
+    });
+    const upstreamSockets = new Set<net.Socket>();
+    upstream.on("connection", (s: net.Socket) => void (upstreamSockets.add(s), s.once("close", () => upstreamSockets.delete(s))));
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const upstreamPort = (upstream.address() as net.AddressInfo).port;
+    const tunnels: Decision[] = [];
+    const reversed: ReverseDecision[] = [];
+    const lookup = async (): Promise<Array<{ address: string; family: number }>> => [{ address: "93.184.216.34", family: 4 }];
+    const egress: EgressStarters = {
+      startProxy: (o) => startEgressProxy({ ...o, lookup, onDecision: (d) => void tunnels.push(d) }),
+      startReverse: (o) => startReverseEndpoint({ ...o, lookup, onDecision: (d) => void reversed.push(d), [TEST_HOOKS]: { target: () => ({ address: "127.0.0.1", port: upstreamPort }), ca: cert.certPem } }),
+    };
+    try {
+      cloud.enqueue(queuedJob({ task: { kind: "implement", prompt: `${RELAYS}\n`, prompt_sha256: sha256Text(`${RELAYS}\n`) }, check: check("true") }));
+      const run = startRun(partsFor(scriptFor(), { egress }));
+      await waitFor("the job to be done", isDone, WAIT_MS);
+      const said = transcripts();
+      // the model host, by the CLI's base URL: the guest's name for it resolves to the loopback, the relay on port 80 carries it to the reverse listener, and the host made the TLS request itself
+      expect(said).toContain("relay_model=200:stub-model-answer");
+      expect(upstreamSeen).toEqual([{ method: "POST", url: "/v1/messages", host: "api.anthropic.com" }]);
+      // git to github.com is not in the job's policy, so it is refused by the host (the rewrite reached the reverse relay: the decision names github.com)
+      expect(said).toContain("relay_git=refused");
+      // a host outside the policy fails on both relays
+      expect(said).toContain("relay_outside_tunnel=failed_");
+      expect(said).toContain("relay_outside_reverse=http_403");
+      // the host's own decisions, which the guest cannot forge
+      expect(reversed).toEqual([{ outcome: "allow", host: "api.anthropic.com" }, { outcome: "not_allowed", host: "github.com" }, { outcome: "not_allowed", host: "outside.example.test" }]);
+      expect(tunnels).toEqual([{ outcome: "not_allowed", host: "outside.example.test" }]);
+      expect(await stopRun(run)).toMatchObject({ code: 0 });
+      await expectNoVmLeft();
+      expectNoToken();
+    } finally {
+      for (const s of upstreamSockets) s.destroy();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  }, 780_000);
 });

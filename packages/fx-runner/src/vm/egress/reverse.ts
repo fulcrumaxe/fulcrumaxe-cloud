@@ -9,7 +9,7 @@ import { assertVsockDir, listenOnSocket, plainHost, resolvePublic, type Lookup }
 
 /**
  * D#587 B-4a-ii: the reverse endpoint for the hosts the CONNECT tunnel refuses (`interception_required`): a model host with a header
- * transform, a host with a `forwardURL`. There is no TLS interception and no CA in the guest. The guest's tool is configured to speak plain
+ * transform, a host with a `forwardURL`. A host the policy lists with no rules (the plain list a job's own policy is) is served as itself (B-5b-RELAY). There is no TLS interception and no CA in the guest. The guest's tool is configured to speak plain
  * HTTP to the policy host's own name (its in-guest shim relays port 80 to this vsock socket, `v.sock_5254`); this endpoint makes the upstream
  * TLS request itself, to the validated `forwardURL` (or to the host), with full certificate verification, and attaches the credentials. The
  * guest never holds a credential, and any credential-shaped header it sends is dropped.
@@ -69,7 +69,10 @@ const HOP = new Set(["connection", "keep-alive", "proxy-connection", "proxy-auth
 /** A guest never supplies a credential: anything credential-shaped it sends is dropped, not just the well-known names. */
 const CREDENTIAL = /auth|token|api-?key|secret|credential|cookie|signature|^x-forwarded-|^vercel-/i;
 
-const refusalBody = (reason: ReverseRefusal): string => `egress refused: ${reason}\n`;
+/** How a host listed without rules is served: to itself, with nothing added. */
+const PLAIN_ROUTE: ReverseRoute = Object.freeze({ headers: Object.freeze({}) });
+
+const refusalBody =(reason: ReverseRefusal): string => `egress refused: ${reason}\n`;
 
 function hostOf(req: http.IncomingMessage): { host: string } | { refusal: ReverseRefusal } {
   const hosts = req.rawHeaders.filter((_, i) => i % 2 === 0 && req.rawHeaders[i]!.toLowerCase() === "host");
@@ -161,7 +164,10 @@ export async function startReverseEndpoint(o: ReverseOptions): Promise<ReverseEn
     const named = hostOf(req);
     if ("refusal" in named) return refuse(named.refusal);
     const host = (logged = named.host);
-    const route = policy.routes.get(host);
+    // A host the policy lists with no rules (the shape a job's own policy has: `{ allow: [host, ...] }`) is served as itself, unchanged: the same host
+    // the tunnel would open, over the same checks, and no header is added. Only an exact name in the policy counts, so a host that is not listed is
+    // refused whatever it is called, and a host whose rules this endpoint cannot apply (`match`, `response`, several rules) is still refused.
+    const route = policy.routes.get(host) ?? (policy.hosts.get(host) === "direct" ? PLAIN_ROUTE : undefined);
     if (!route) return refuse(policy.hosts.has(host) ? "unsupported_rules" : "not_allowed");
     const tail = tailOf(req);
     if (tail === undefined) return refuse("bad_path");
