@@ -48,6 +48,8 @@ import { connectUnix } from "./sandboxd/helpers.js";
  *
  * Needs, in the environment (a dispatched `microvm-image.yml` run sets all of them): FX_VM_HELPER_SOCKET, FX_VM_TEMPLATE, FX_VM_KERNEL, FX_VM_ROOTFS, FX_VM_AGENT. Runs as the ordinary
  * user, never as root, and skips with a message without them (or with little free memory). One job, so one VM at a time: run it behind the heavy-check lock.
+ * Two tests need more, and skip alone without it: the engine comparison needs a working bubblewrap and socat, and the root-on-the-host search needs FX_VM_HOST_SEARCH (the path of
+ * helpers/hostTokenSearch.sh, installed root-owned, which this test calls through `sudo -n`; the workflow installs it). The workflow's skip guard fails the job if either skips.
  *
  * What the test can see of the VMs is what the helper was asked: the helper handed to the daemon is wrapped, so every sandbox id this file made is known, the helper's list the runner
  * reaps from shows only those (a start-up reap must never end another suite's VMs), and a failure can be injected at the one call under test. The leak checks read the REAL helper.
@@ -529,6 +531,51 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     expect(runOf(runId)!.endedBy).toMatchObject({ type: "run_ended", reason: "runner_shutdown" });
     expect(preparedIds()).toHaveLength(1);
     await expectNoVmLeft();
+    expectNoToken();
+  }, 780_000);
+
+  /**
+   * The search as root on the host (D#587 3c-v): the token goes to the root-owned script on its standard input, so it is in no argument list, no file and no log. The script plants a control of its own,
+   * and says how many files it could look in, so "clean" cannot be a search of nothing. Its answer is only counts and paths; nothing of it can hold the token.
+   */
+  const hostSearch = process.env["FX_VM_HOST_SEARCH"];
+  const searchAsRoot = (): { status: number | null; stdout: string; stderr: string } => {
+    const out = spawnSync("sudo", ["-n", hostSearch as string], { input: `${sentinel}\n`, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" }, timeout: 600_000 });
+    expect(out.stdout.includes(sentinel) || out.stderr.includes(sentinel), "the host search printed the token").toBe(false);
+    return { status: out.status, stdout: out.stdout, stderr: out.stderr };
+  };
+  const filesSearched = (stdout: string): number => [...stdout.matchAll(/^dir=\S+ files=(\d+)$/gm)].reduce((n, m) => n + Number(m[1]), 0);
+  const expectRootFoundNothing = (out: { status: number | null; stdout: string; stderr: string }, when: string): void => {
+    expect(out, `the root search ${when}: ${out.stdout} ${out.stderr}`).toMatchObject({ status: 0 });
+    expect(out.stdout).toContain("control=found");
+    expect(out.stdout).toContain("result=clean");
+    expect(out.stdout).not.toContain("hit=");
+  };
+
+  it("26a (host): as root on the host, no file of the helper's jail or snapshot directories holds the token while the agent runs or after the job (with a planted control)", async (ctx) => {
+    if (hostSearch === undefined) {
+      console.warn("vmJob.real: FX_VM_HOST_SEARCH is not set, so the root-on-the-host token search is SKIPPED");
+      return ctx.skip();
+    }
+    cloud.enqueue(queuedJob({ task: { kind: "implement", prompt: `${HANG}\n`, prompt_sha256: sha256Text(`${HANG}\n`) }, check: check("true") }));
+    const run = startRun(partsFor(scriptFor()));
+    // the CLI is running in the guest, with the token in its environment, once its first line has reached the host's transcript
+    await until(() => {
+      try {
+        return transcripts().includes('"subtype":"init"');
+      } catch {
+        // fx-swallow-ok: the log directory is not there yet, which is "not running yet"
+        return false;
+      }
+    }, SHORT_WAIT_MS);
+    const during = searchAsRoot();
+    expect(await stopRun(run)).toMatchObject({ code: 0 });
+    await expectNoVmLeft();
+    const after = searchAsRoot();
+    expectRootFoundNothing(during, "while the agent ran");
+    // a running VM has files under the jail root (its jail, its disks); a search that saw none would be a search of nothing
+    expect(filesSearched(during.stdout), "the root search saw no file while the VM ran").toBeGreaterThan(0);
+    expectRootFoundNothing(after, "after the job");
     expectNoToken();
   }, 780_000);
 
