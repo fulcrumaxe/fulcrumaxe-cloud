@@ -46,7 +46,13 @@ function parseEngine(list) {
     const f = s.failure === undefined ? null : s.failure;
     if (f !== null && !(f && typeof f.code === "string" && f.code !== "" && validTime(f.at))) return null;
     if ((s.state === "failed") !== (f !== null)) return null;
-    steps.push({ step: s.step, state: s.state, completed_at: t, tier, failure: f === null ? null : { code: f.code, at: f.at } });
+    const entry = { step: s.step, state: s.state, completed_at: t, tier, failure: f === null ? null : { code: f.code, at: f.at } };
+    // D#845 ON-6c: the machine step's KVM fact and helper_missing, both optional. Anything but the closed values is "the machine has not said", never a failure of the whole track.
+    if (s.step === "machine") {
+      if (s.kvm === "present" || s.kvm === "absent") entry.kvm = s.kvm;
+      if (s.helper_missing === true) entry.helper_missing = true;
+    }
+    steps.push(entry);
   }
   return steps;
 }

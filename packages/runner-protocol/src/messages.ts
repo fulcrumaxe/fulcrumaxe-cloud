@@ -429,6 +429,8 @@ export const RUNNER_OS = ["linux", "macos"] as const;
 export const RUNNER_ARCH = ["x64", "arm64"] as const;
 export const RUNNER_MEM_GB_BUCKETS = [4, 8, 16, 32, 64, 128] as const;
 export const RUNNER_SANDBOX_ENGINES = ["os_sandbox", "microvm"] as const;
+/** D#845 ON-6c: whether the machine has a usable KVM device, from the runner's own doctor check. Absent (not sent) means the machine has not said. */
+export const RUNNER_KVM = ["present", "absent"] as const;
 export const RunnerFacts = z
   .object({
     os: z.enum(RUNNER_OS),
@@ -436,6 +438,8 @@ export const RunnerFacts = z
     mem_gb_bucket: z.union([z.literal(4), z.literal(8), z.literal(16), z.literal(32), z.literal(64), z.literal(128)]),
     cpus: safeInt.min(1).max(256),
     sandbox_engine: z.enum(RUNNER_SANDBOX_ENGINES),
+    // D#845 ON-6c: optional, so a runner built before it still validates and reads as "unknown" in the cloud. Display only: no decision reads it.
+    kvm: z.enum(RUNNER_KVM).optional(),
     // D#587 B-7a (protocol 21): the host limits and the template ids the runner can boot. Optional claims for routing and display, never for a decision.
     max_vms: safeInt.min(0).max(256).optional(),
     max_vcpus: safeInt.min(0).max(4096).optional(),

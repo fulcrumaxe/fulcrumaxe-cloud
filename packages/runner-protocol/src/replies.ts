@@ -85,13 +85,15 @@ export type ClaimReply = z.infer<typeof ClaimReply>;
 
 /**
  * What a cloud tells a runner it can do, beyond the protocol number (D#845). `watch_mode`: this cloud's ingest takes the slim status, the detail session and held holes (migration 1043). A protocol
- * number cannot say so: clouds at 23 and 24 exist that do not. The set is closed; the cloud lists a capability only when it is present, and sends the field only to a runner whose hello is at `WATCH_MIN_PROTOCOL` or above (an older runner parses the reply strictly).
+ * number cannot say so: clouds at 23 and 24 exist that do not. The set is closed; the cloud lists a capability only when it is present, and sends the field only to a runner that declared the matching hello capability (`watch_mode` also needs `WATCH_MIN_PROTOCOL` or above) (an older runner parses the reply strictly).
  */
 export const WATCH_MODE_CAPABILITY = "watch_mode" as const;
-export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY] as const;
+/** D#845 ON-6c: this cloud stores `facts.kvm` (migration 1047). Said only to a runner that declared `kvm_fact_v1`; the runner then sends `kvm` on its later hellos. */
+export const KVM_FACT_CAPABILITY = "kvm_fact" as const;
+export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY] as const;
 
 /** 200 from hello: the protocol version this cloud speaks, the wake grant for a runner that asked for one, and the capabilities of this cloud. */
-export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake, capabilities: z.array(z.enum(HELLO_REPLY_CAPABILITIES)).max(HELLO_REPLY_CAPABILITIES.length).optional() }).strict();
+export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake, capabilities: z.array(z.enum(HELLO_REPLY_CAPABILITIES)).max(HELLO_REPLY_CAPABILITIES.length).refine((list) => new Set(list).size === list.length, { message: "a capability appears once" }).optional() }).strict();
 export type HelloReply = z.infer<typeof HelloReply>;
 
 /** 429: a second claim inside `CLAIM_MIN_INTERVAL_SECONDS`. */

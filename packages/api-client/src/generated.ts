@@ -3596,6 +3596,8 @@ export interface Operations {
           state: "done" | "active" | "pending" | "failed";
           completed_at: string | null;
           tier: ("microvm" | "standard") | (null);
+          kvm?: "present" | "absent";
+          helper_missing?: true;
           failure: ({
             code: string;
             at: string;

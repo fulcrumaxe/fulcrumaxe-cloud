@@ -7,7 +7,7 @@ import { insertRunner } from './helpers/runnerFixtures.js';
 import { seedAccount, type SeedRefs } from './helpers/seed.js';
 
 const LOAD = 'runner_host_load_record(integer,integer,integer)';
-const HELLO = 'runner_hello_record(integer,text,text,boolean)';
+const HELLO = 'runner_hello_record(integer,text,text,boolean,text)';
 const COLS = ['host_mem_avail_mb', 'host_disk_free_mb', 'host_setups_running', 'host_load_at'];
 
 /** D#845 ON-1b (migration 1045): the machine's reported load, the hello's model-auth flag, and the two definers that write them. */

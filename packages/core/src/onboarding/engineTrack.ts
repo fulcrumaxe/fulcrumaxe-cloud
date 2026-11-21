@@ -23,6 +23,10 @@ export interface EngineStep {
   completed_at: string | null;
   /** The machine step's isolation tier; null on every other step, and on a machine that has not reported one. */
   tier: 'microvm' | 'standard' | null;
+  /** D#845 ON-6c, machine step only: what the machine's latest hello said about a usable KVM device. Left out when it did not say (a runner built before it): unknown, never a guess. */
+  kvm?: 'present' | 'absent';
+  /** D#845 ON-6c, machine step only: true when the machine has KVM but its engine is not microvm (so it could run microVMs and the helper is not set up). Left out otherwise. */
+  helper_missing?: true;
   /** The stored failure for this step; null unless `state` is `failed`. */
   failure: { code: string; at: string } | null;
 }
@@ -31,6 +35,8 @@ export interface EngineStep {
 export interface EngineSources {
   done: Record<EngineStepKey, string | null>;
   tier: EngineStep['tier'];
+  /** The most recently heard machine's KVM fact; null when it never said. */
+  kvm?: 'present' | 'absent' | null;
   failures: Partial<Record<EngineStepKey, { code: string; at: string }>>;
 }
 
@@ -56,7 +62,11 @@ export function buildEngineSteps(src: EngineSources): EngineStep[] {
     else if (failure) state = 'failed';
     else if (!activeTaken) state = 'active';
     if (state !== 'done' && state !== 'pending') activeTaken = true;
-    return { step, state, completed_at, tier: step === 'machine' ? src.tier : null, failure };
+    const machine =
+      step === 'machine'
+        ? { ...(src.kvm ? { kvm: src.kvm } : {}), ...(src.kvm === 'present' && src.tier === 'standard' ? { helper_missing: true as const } : {}) }
+        : {};
+    return { step, state, completed_at, tier: step === 'machine' ? src.tier : null, ...machine, failure };
   });
 }
 
@@ -77,8 +87,8 @@ export async function readEngineSources(
   githubAppAt: string | null,
 ): Promise<{ sources: EngineSources; runners: { id: string; heardAt: string }[] }> {
   const rn = (
-    await client.query<{ id: string; last_seen_at: Date; sandbox_engine: string | null }>(
-      `SELECT rn.id, rn.last_seen_at, f.sandbox_engine FROM runners rn LEFT JOIN runner_facts f ON f.account_id = rn.account_id AND f.runner_id = rn.id
+    await client.query<{ id: string; last_seen_at: Date; sandbox_engine: string | null; kvm: string | null }>(
+      `SELECT rn.id, rn.last_seen_at, rn.kvm, f.sandbox_engine FROM runners rn LEFT JOIN runner_facts f ON f.account_id = rn.account_id AND f.runner_id = rn.id
         WHERE rn.account_id = $1 AND rn.revoked_at IS NULL AND rn.protocol_version IS NOT NULL AND rn.last_seen_at IS NOT NULL ORDER BY rn.last_seen_at DESC, rn.id`,
       [accountId],
     )
@@ -102,7 +112,7 @@ export async function readEngineSources(
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
   return {
-    sources: { done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, failures },
+    sources: { done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
     runners,
   };
 }

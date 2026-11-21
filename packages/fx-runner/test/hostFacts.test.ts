@@ -27,6 +27,15 @@ describe("hostFactsOf", () => {
     expect(hostFactsOf(base)).toEqual({ os: "linux", arch: "x64", mem_gb_bucket: 16, cpus: 8, sandbox_engine: "os_sandbox" });
     expect(hostFactsOf({ ...base, platform: "darwin", arch: "arm64" })).toMatchObject({ os: "macos", arch: "arm64" });
   });
+  it("says the KVM reading only when it is a plain present or absent (D#845 ON-6c)", () => {
+    expect(hostFactsOf({ ...base, kvm: "present" })).toMatchObject({ kvm: "present" });
+    expect(hostFactsOf({ ...base, kvm: "absent" })).toMatchObject({ kvm: "absent" });
+    expect(hostFactsOf({ ...base, kvm: "unreadable" })).not.toHaveProperty("kvm");
+    expect(hostFactsOf({ ...base, kvm: undefined })).not.toHaveProperty("kvm");
+    expect(hostFactsOf(base)).not.toHaveProperty("kvm");
+    expect(readHostFacts("os_sandbox", "present")).toMatchObject({ kvm: "present" });
+    expect(readHostFacts("os_sandbox")).not.toHaveProperty("kvm");
+  });
   it("sends no facts at all for a machine the protocol does not name, rather than a wrong one", () => {
     expect(hostFactsOf({ ...base, platform: "win32" })).toBeUndefined();
     expect(hostFactsOf({ ...base, platform: "freebsd" })).toBeUndefined();

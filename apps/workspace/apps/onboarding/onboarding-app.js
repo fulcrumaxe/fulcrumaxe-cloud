@@ -161,7 +161,12 @@ function mountOnboarding(host) {
   /** The engine track's own error state: its steps could not be read, the pipeline track beside it is unaffected. */
   const engineUnreadable = () => h("section", { class: "ob-track", "data-testid": "ob-track-engine-error", "aria-label": "Engine setup" },
     h("p", { class: "ob-error", role: "alert", "data-testid": "ob-engine-error" }, ENGINE_UNREADABLE + " "), h("button", { type: "button", class: "ob-btn", "data-testid": "ob-engine-retry", onClick: load }, "Try again"));
-  const engineEnv = () => ({ ctx: { ...st.ctx, origin: window.location.origin, isAdmin: window.currentIsAdmin !== false }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp });
+  // D#845 ON-6c: the machine's KVM fact and helper_missing come from the machine step itself (the same machine the step's tier is read from), never from a second read.
+  const machineFacts = () => {
+    const m = st.parsed && st.parsed.engine ? st.parsed.engine[0] : null;
+    return m ? { ...(m.kvm ? { kvm: m.kvm } : {}), ...(m.helper_missing ? { helper_missing: true } : {}) } : {};
+  };
+  const engineEnv = () => ({ ctx: { ...st.ctx, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp });
   async function choose(track) {
     if (st.choosing) return;
     st.choosing = true;

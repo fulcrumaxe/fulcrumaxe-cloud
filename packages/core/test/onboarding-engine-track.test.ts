@@ -30,6 +30,38 @@ describe('buildEngineSteps', () => {
     expect(Object.values(stateOf(src(Object.fromEntries(ENGINE_STEPS.map((s) => [s, T(1)])))))).toEqual(Array(7).fill('done'));
   });
 
+  // D#845 ON-6c: every combination of the machine's KVM fact and tier. Only the machine step carries them; an unsaid fact leaves the key out.
+  describe('the machine step: kvm and helper_missing', () => {
+    const machine = (kvm: EngineSources['kvm'], tier: EngineSources['tier']) => buildEngineSteps(src({ machine: T(1) }, { kvm, tier }))[0]!;
+    const cases: [EngineSources['kvm'], EngineSources['tier'], { kvm?: string; helper_missing?: true }][] = [
+      [undefined, 'standard', {}],
+      [null, 'standard', {}],
+      [null, 'microvm', {}],
+      [null, null, {}],
+      ['absent', 'standard', { kvm: 'absent' }],
+      ['absent', 'microvm', { kvm: 'absent' }],
+      ['absent', null, { kvm: 'absent' }],
+      ['present', 'standard', { kvm: 'present', helper_missing: true }],
+      ['present', 'microvm', { kvm: 'present' }],
+      ['present', null, { kvm: 'present' }],
+    ];
+    for (const [kvm, tier, want] of cases) {
+      it(`kvm ${String(kvm)}, tier ${String(tier)}`, () => {
+        const m = machine(kvm, tier);
+        expect(m.kvm).toEqual(want.kvm);
+        expect(m.helper_missing).toEqual(want.helper_missing);
+        expect('kvm' in m).toBe(want.kvm !== undefined);
+        expect('helper_missing' in m).toBe(want.helper_missing !== undefined);
+      });
+    }
+    it('no other step carries either, whatever the machine says', () => {
+      for (const s of buildEngineSteps(src({}, { kvm: 'present', tier: 'standard' })).slice(1)) {
+        expect(s).not.toHaveProperty('kvm');
+        expect(s).not.toHaveProperty('helper_missing');
+      }
+    });
+  });
+
   it('a stored failure shows on its own step while the source is false, and takes the active place', () => {
     const failures = { plan: { code: 'survey_failed', at: T(3) } };
     const steps = buildEngineSteps(src({ machine: T(1) }, { failures }));

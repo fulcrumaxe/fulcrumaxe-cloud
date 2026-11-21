@@ -1134,7 +1134,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   const eng = (page: Page, id: string) => ob(page).locator(`[data-testid="ob-engine-${id}"]`);
   const lines = (page: Page, id: string) => eng(page, id).locator('[data-testid="ob-engine-line"]').allTextContents();
   /** The answer for an account that chose the engine track, with the engine's steps in these states. */
-  const states = (o: Record<string, string>, opts: { tier?: string | null; code?: string } = {}) => withEngine(ONB.new, engineTrack(o, opts));
+  const states = (o: Record<string, string>, opts: { tier?: string | null; code?: string; kvm?: "present" | "absent"; helper_missing?: true } = {}) => withEngine(ONB.new, engineTrack(o, opts));
   const ALL_DONE = { machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "done", live: "done" };
   const noOverflow = async (page: Page) => {
     await ob(page).evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
@@ -1287,6 +1287,30 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     await expect(eng(page, "machine")).toHaveAttribute("data-state", "done");
     expect(await eng(page, "machine").innerText()).not.toMatch(/fail|warn|error|problem|attention/i);
     await expect(ob(page).locator('[data-testid="ob-error"]')).toBeEmpty();
+  });
+
+  // D#845 ON-6c: the machine step carries the machine's KVM fact; the page says what it says and nothing else.
+  test("Standard isolation with KVM absent in the machine's facts says the no-KVM line, calmly", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard", kvm: "absent" }))] }), extra());
+    await bootToDesktop(page);
+    expect(await lines(page, "machine")).toEqual([`${BOX} connected · Standard isolation`, "This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project."]);
+    await expect(eng(page, "machine")).not.toHaveClass(/ob-failed/);
+    expect(await eng(page, "machine").innerText()).not.toMatch(/fail|warn|error|problem|attention/i);
+  });
+
+  test("Standard isolation with KVM present and the helper missing names the helper step, and never says the machine has no KVM", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard", kvm: "present", helper_missing: true }))] }), extra());
+    await bootToDesktop(page);
+    const text = await eng(page, "machine").innerText();
+    expect(text).toContain("sudo fx-runner vm install");
+    expect(text).not.toMatch(/no KVM/);
+    await expect(eng(page, "machine")).not.toHaveClass(/ob-failed/);
+  });
+
+  test("a MicroVM machine with KVM present says neither KVM line", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm", kvm: "present" }))] }), extra());
+    await bootToDesktop(page);
+    expect(await lines(page, "machine")).toEqual([`${BOX} connected · MicroVM isolation`]);
   });
 
   test("claude open on a machine that is offline: how long ago it was last seen", async ({ page }) => {

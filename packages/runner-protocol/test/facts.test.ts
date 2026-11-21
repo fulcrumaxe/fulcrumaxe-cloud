@@ -2,7 +2,18 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CURRENT_PROTOCOL_VERSION, HelloMessage, RUNNER_MESSAGES, RUNNER_NAME_MAX, RegisterMessage, RunnerFacts, isValidRunnerName } from "../src/messages.js";
+import { HELLO_REPLY_CAPABILITIES, KVM_FACT_CAPABILITY } from "../src/replies.js";
+import { KVM_FACT_HELLO_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
 import { nonStrictObjects } from "./helpers/schemaWalk.js";
+
+describe("the kvm_fact handshake names (D#845 ON-6c)", () => {
+  it("kvm_fact_v1 is a hello capability and kvm_fact is the reply's closed one", () => {
+    expect(KVM_FACT_HELLO_CAPABILITY).toBe("kvm_fact_v1");
+    expect(RUNNER_CAPABILITIES).toContain(KVM_FACT_HELLO_CAPABILITY);
+    expect(KVM_FACT_CAPABILITY).toBe("kvm_fact");
+    expect([...HELLO_REPLY_CAPABILITIES]).toEqual(["watch_mode", "kvm_fact"]);
+  });
+});
 
 const fixture = (name: string): Record<string, unknown> => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8")) as Record<string, unknown>;
 
@@ -49,6 +60,12 @@ describe("facts (criterion 1)", () => {
     for (const sandbox_engine of ["os_sandbox", "microvm"]) expect(hello({ ...good, sandbox_engine }), sandbox_engine).toBe(true);
     for (const mem_gb_bucket of [4, 8, 16, 32, 64, 128]) expect(hello({ ...good, mem_gb_bucket }), String(mem_gb_bucket)).toBe(true);
     for (const cpus of [1, 256]) expect(hello({ ...good, cpus }), String(cpus)).toBe(true);
+  });
+
+  it("kvm (D#845 ON-6c) is optional: a hello without it validates and reads as not said; present and absent are accepted; anything else is refused", () => {
+    expect(HelloMessage.parse({ ...fixture("hello-legacy.json"), facts: good }).facts?.kvm).toBeUndefined();
+    for (const kvm of ["present", "absent"]) expect(HelloMessage.parse({ ...fixture("hello-legacy.json"), facts: { ...good, kvm } }).facts?.kvm, kvm).toBe(kvm);
+    for (const kvm of ["", "yes", "Present", "unreadable", true, null, 1]) expect(hello({ ...good, kvm }), JSON.stringify(kvm)).toBe(false);
   });
 
   it("refuses an unknown key, a missing key, and any value outside its enum or range", () => {

@@ -38,6 +38,27 @@ describe("parseTracks and parseSteps", () => {
     }
   });
 
+  // D#845 ON-6c: the machine step's optional kvm and helper_missing are kept (closed values only), on the machine step only; an old body without them reads as unsaid.
+  it("keeps the machine step's kvm and helper_missing, drops anything outside the closed values, and reads an old body as unsaid", () => {
+    const body = fixture("200-new.json");
+    const withMachine = (extra) => parseTracks({ ...body, tracks: [body.tracks[0], { ...body.tracks[1], steps: body.tracks[1].steps.map((s, i) => (i === 0 ? { ...s, ...extra } : { ...s, kvm: "present", helper_missing: true })) }] }).engine;
+    const m = (extra) => withMachine(extra)[0];
+    expect(m({ kvm: "present", helper_missing: true })).toMatchObject({ kvm: "present", helper_missing: true });
+    expect(m({ kvm: "absent" })).toMatchObject({ kvm: "absent" });
+    expect(m({ kvm: "absent" })).not.toHaveProperty("helper_missing");
+    for (const bad of [{ kvm: "yes" }, { kvm: null }, { kvm: true }, { helper_missing: false }, { helper_missing: "true" }]) {
+      expect(m(bad), JSON.stringify(bad)).not.toHaveProperty("kvm");
+      expect(m(bad), JSON.stringify(bad)).not.toHaveProperty("helper_missing");
+    }
+    const old = parseTracks(body).engine[0];
+    expect(old).not.toHaveProperty("kvm");
+    expect(old).not.toHaveProperty("helper_missing");
+    for (const other of withMachine({}).slice(1)) {
+      expect(other).not.toHaveProperty("kvm");
+      expect(other).not.toHaveProperty("helper_missing");
+    }
+  });
+
   it("the gate and the strip read tracks[0], not the top-level list", () => {
     const body = fixture("200-new.json");
     const moved = { ...body, steps: [], tracks: [{ ...body.tracks[0], steps: fixture("200-complete.json").steps }, body.tracks[1]] };

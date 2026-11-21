@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
+import { CURRENT_PROTOCOL_VERSION } from "@fulcrumaxe/runner-protocol";
 import { CLAIM_PATH, HELLO_PATH, claimRun, runnerHello, type RunnerLeaseOps } from "../src/index.js";
+import { runnersTakeKvm } from "../src/hello.js";
 import { harness, newKey, registerKey, respond, signed, type Harness, type TestKey } from "./helpers.js";
 
 /**
@@ -100,5 +102,81 @@ describe("host load on the claim and model auth on the hello [pg]", () => {
     expect(await modelAuth(r.id)).toBe(true);
     expect((await hello(r.key, helloBody({ model_auth_present: false }))).status).toBe(200);
     expect(await modelAuth(r.id)).toBe(false);
+  });
+
+  // D#845 ON-6c: the hello's facts carry kvm, stored on runners.kvm by the hello definer on every hello.
+  describe("the hello stores the KVM fact (1047)", () => {
+    const kvmOf = async (id: string) => (await h.admin.query<{ k: string | null }>("SELECT kvm AS k FROM runners WHERE id = $1", [id])).rows[0]!.k;
+    const factsWith = (kvm?: string) => ({ os: "linux", arch: "x64", mem_gb_bucket: 16, cpus: 8, sandbox_engine: "os_sandbox", ...(kvm === undefined ? {} : { kvm }) });
+
+    it("stores present and absent, and an old runner's hello (facts without kvm, or no facts) reads as unknown", async () => {
+      const f = await seedF2(h.admin);
+      const r = await runnerAt(f, null);
+      expect(await kvmOf(r.id)).toBeNull();
+      expect((await hello(r.key, helloBody({ facts: factsWith("present") }))).status).toBe(200);
+      expect(await kvmOf(r.id)).toBe("present");
+      expect((await hello(r.key, helloBody({ facts: factsWith("absent") }))).status).toBe(200);
+      expect(await kvmOf(r.id)).toBe("absent");
+      expect((await hello(r.key, helloBody({ facts: factsWith() }))).status).toBe(200);
+      expect(await kvmOf(r.id)).toBeNull();
+      await hello(r.key, helloBody({ facts: factsWith("present") }));
+      const noFacts = helloBody();
+      delete (noFacts as { facts?: unknown }).facts;
+      expect((await hello(r.key, noFacts)).status).toBe(200);
+      expect(await kvmOf(r.id)).toBeNull();
+    });
+
+    // The hello reply as runners built before the KVM fact parse it (strict: only `protocol_version` and `wake`, plus the watch-mode `capabilities` of 1043 which they read on their own).
+    const replyKeys = (body: unknown): string[] => Object.keys(body as Record<string, unknown>).sort();
+
+    it("a runner that did NOT declare kvm_fact_v1 gets the old reply byte for byte: no capabilities key, whatever facts it sent", async () => {
+      const f = await seedF2(h.admin);
+      const r = await runnerAt(f, null);
+      for (const facts of [factsWith(), factsWith("present")]) {
+        const res = await hello(r.key, helloBody({ facts }));
+        expect(res.status).toBe(200);
+        expect(replyKeys(res.body)).toEqual(["protocol_version"]);
+      }
+      const watchOnly = await hello(r.key, helloBody({ protocol_version: CURRENT_PROTOCOL_VERSION, capabilities: ["watch_mode_v1"] }));
+      expect((watchOnly.body as { capabilities?: string[] }).capabilities).toEqual(["watch_mode"]);
+    });
+
+    it("a runner that declared kvm_fact_v1 is told kvm_fact (with watch_mode when it declared that too); the declaration is stored", async () => {
+      const f = await seedF2(h.admin);
+      const r = await runnerAt(f, null);
+      const only = await hello(r.key, helloBody({ capabilities: ["kvm_fact_v1"] }));
+      expect(only.body).toEqual({ protocol_version: CURRENT_PROTOCOL_VERSION, capabilities: ["kvm_fact"] });
+      expect((await h.admin.query<{ c: string[] }>("SELECT capabilities AS c FROM runner_capabilities WHERE runner_id = $1", [r.id])).rows[0]!.c).toEqual(["kvm_fact_v1"]);
+      const both = await hello(r.key, helloBody({ protocol_version: CURRENT_PROTOCOL_VERSION, capabilities: ["watch_mode_v1", "kvm_fact_v1"] }));
+      expect((both.body as { capabilities?: string[] }).capabilities).toEqual(["watch_mode", "kvm_fact"]);
+    });
+
+    it("the handshake end to end: the first hello (no kvm) stores unknown, the next one (kvm) stores it", async () => {
+      const f = await seedF2(h.admin);
+      const r = await runnerAt(f, null);
+      expect((await hello(r.key, helloBody({ capabilities: ["kvm_fact_v1"], facts: factsWith() }))).body).toMatchObject({ capabilities: ["kvm_fact"] });
+      expect(await kvmOf(r.id)).toBeNull();
+      expect((await hello(r.key, helloBody({ capabilities: ["kvm_fact_v1"], facts: factsWith("absent") }))).status).toBe(200);
+      expect(await kvmOf(r.id)).toBe("absent");
+    });
+
+    it("follows the database: without the kvm column the capability is not listed", async () => {
+      await h.admin.query("ALTER TABLE runners RENAME COLUMN kvm TO kvm_off");
+      try {
+        // The definer still names `kvm`, so the hello itself cannot record; what is pinned here is the listing function's catalog read.
+        expect(await runnersTakeKvm(h.deps())).toBe(false);
+      } finally {
+        await h.admin.query("ALTER TABLE runners RENAME COLUMN kvm_off TO kvm");
+      }
+      expect(await runnersTakeKvm(h.deps())).toBe(true);
+    });
+
+    it("a value outside the two answers is a 400 and stores nothing", async () => {
+      const f = await seedF2(h.admin);
+      const r = await runnerAt(f, null);
+      await hello(r.key, helloBody({ facts: factsWith("present") }));
+      for (const bad of ["yes", "", "unreadable"]) expect(await hello(r.key, helloBody({ facts: factsWith(bad) })), bad).toMatchObject({ status: 400 });
+      expect(await kvmOf(r.id)).toBe("present");
+    });
   });
 });
