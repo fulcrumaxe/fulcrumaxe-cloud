@@ -122,6 +122,8 @@ describe('@fx/billing public export surface (security-review fix round 3, MUST 3
       'reconcileStripeClient',
       // D#845 ON-22a: the engine quantity update (the engine price is bought through createCheckoutSession).
       'setEngineQuantity',
+      'enginePlanOffered',
+      'enginePricePerMonthUsd', // the Engine plan's price, from the plan data
       'IllegalStatusTransitionError', // a class, also typeof 'function'
     ]);
     const actualFunctionNames = Object.entries(billingPublic)

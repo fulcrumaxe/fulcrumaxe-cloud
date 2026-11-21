@@ -8,7 +8,8 @@ import { createCheckoutSession, getBillingPortalUrl } from '../src/accountLifecy
 import { ensurePortalConfigurationId, resetPortalConfigurationCache } from '../src/portalConfig.js';
 import { reserve } from '@fx/spend';
 import { captureReports } from './helpers/captureReports.js';
-import { setEngineQuantity, MAX_ENGINE_QUANTITY } from '../src/engineItems.js';
+import { setEngineQuantity, enginePlanOffered, MAX_ENGINE_QUANTITY } from '../src/engineItems.js';
+import { resetPlanDataCache } from '../../plan-data/src/index.js';
 import { countLiveEngines } from '@fx/core/src/onboarding/liveEngines.js';
 import { applyFetchedSubscription, readFetchClock } from '../src/subscriptionSync.js';
 import { buildPriceMap } from '../src/priceMap.js';
@@ -118,6 +119,25 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
     await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status) VALUES ($1, $2, 'executor', 'local', 'running')`, [runId, accountId]);
     return (await reserve(appPool, { accountId, runId, plan, trigger: 'foreground', estimateComputeUsd: 1 })).decision;
   }
+  describe('D#845 ON-22: whether the Engine plan is offered', () => {
+    it('needs both an engine price id and a price in the plan data; either one missing means not offered', () => {
+      const saved = process.env.FX_PLAN_DATA;
+      try {
+        expect(enginePlanOffered()).toBe(true);
+        delete process.env.STRIPE_PRICE_ID_ENGINE;
+        expect(enginePlanOffered()).toBe(false);
+        process.env.STRIPE_PRICE_ID_ENGINE = ENGINE;
+        const data = JSON.parse(saved!);
+        delete data.enginePlan;
+        process.env.FX_PLAN_DATA = JSON.stringify(data);
+        resetPlanDataCache();
+        expect(enginePlanOffered()).toBe(false);
+      } finally {
+        process.env.FX_PLAN_DATA = saved;
+        resetPlanDataCache();
+      }
+    });
+  });
 
   describe('an engine-only checkout', () => {
     it('sells the engine price at the asked quantity and nothing else, with no plan item', async () => {

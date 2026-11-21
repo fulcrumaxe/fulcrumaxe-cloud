@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { sessionSecretProblems } from "@fx/core/src/auth/session";
 import { analysisSettings, envelopeDefaultMarginPct, hostedSandboxCapacityStatus, planDataStatus } from "@fx/plan-data";
 import { partnerLayerOn } from "@fx/partners/host";
-import { outsideMeterOn } from "@fx/spend";
+import { enginePricePerMonthUsd, outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
 import { HUMAN_MERGE_ONLY_ENV, HUMAN_MERGE_ONLY_INVALID_CODE } from "@fx/db/src/humanMergeOnly";
 import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../../lib/env/check";
@@ -51,6 +51,10 @@ export function isOperator(authHeader: string | null, secret: string | undefined
  * is absent), so the two setting names stay spelled in one place; the worker reports an invalid value itself when it is built.
  */
 export const BRANCH_CLEANUP_SIGNER_UNCONFIGURED = "branch_cleanup_signer_unconfigured";
+/** D#845 ON-22: STRIPE_PRICE_ID_ENGINE is unset, so the Engine plan is not offered. The server still starts. */
+export const ENGINE_PRICE_UNSET = "engine_price_unset";
+/** D#845 ON-22 (ruling 36.3): the plan data has no `enginePlan` block (the per-engine price), so the Engine plan is not offered even with a Stripe price set. Named by this fixed code. */
+export const ENGINE_PLAN_UNCONFIGURED = "engine_plan_unconfigured";
 const GIT_TICKET_FEATURE = "Cloud-verified runner git";
 /** The two signing settings are the secret entries of that feature (the issuer and the public keys are the proxy's and are not secret). */
 const SIGNER_SETTINGS = new Set(ENV_MANIFEST.filter((e) => e.feature === GIT_TICKET_FEATURE && e.secret).map((e) => e.name));
@@ -68,7 +72,7 @@ function detail(report: EnvReport) {
     disabled: report.disabled,
     // D#483 S5-e1: a plan-data figure that is absent is named by a fixed code, never a value. Approval still works; the envelope pre-fill is the bare estimate.
     // D#598 P8b: the setup-request env-var check has no credential source bound yet, so it answers "unavailable" and Mark done is the way on.
-    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(analysisSettings().on ? [] : ["analysis_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : []), ...(report.disabled.some((d) => d.feature === MACHINE_FEATURE) ? [MACHINE_KEK_UNSET] : [])],
+    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(analysisSettings().on ? [] : ["analysis_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : []), ...(report.disabled.some((d) => d.feature === MACHINE_FEATURE) ? [MACHINE_KEK_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_PRICE_ID_ENGINE") ? [ENGINE_PRICE_UNSET] : []), ...(enginePricePerMonthUsd() === null ? [ENGINE_PLAN_UNCONFIGURED] : [])],
   };
 }
 

@@ -33,6 +33,8 @@ export interface OnboardingProgress {
 /** What the caller injects: ON-1b's machine-facts read lives in a package that depends on this one. Without it no machine counts as signed in to Claude. */
 export interface OnboardingDeps {
   readMachineFacts?: MachineFactsReader;
+  /** D#845 ON-22: whether the Engine plan can be bought here (billing knows; this package cannot import it). Without it the engine steps carry no plan gate. */
+  enginePlanOffered?: boolean;
 }
 
 /**
@@ -87,7 +89,7 @@ export async function getOnboarding(ctx: RunActionCtx, deps: OnboardingDeps = {}
     const readonly = (await client.query(`SELECT id, created_at FROM installations WHERE app_kind = 'team_readonly'`)).rows;
     const chosen = await readChosenTracks(client, accountId);
     const githubAppAt = iso(installations.filter((i) => i.app_kind === 'team').map((i) => i.created_at).sort((a, b) => a.getTime() - b.getTime())[0]);
-    const engine = await readEngineSources(client, accountId, githubAppAt);
+    const engine = await readEngineSources(client, accountId, githubAppAt, deps.enginePlanOffered);
     return { account, installations, items, previewIds, okKeys, chosen, engine, liveReadonly: readonly.filter((r) => live.has(r.id as string)).map((r) => r.created_at as Date) };
   });
   // Its own tenant read (a separate connection), after the transaction above is closed.

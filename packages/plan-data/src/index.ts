@@ -177,3 +177,19 @@ export function assistantSettings(): AssistantSettings {
     throw error;
   }
 }
+
+export type EnginePlanSettings = { on: true; priceUsdPerMonth: number } | { on: false; code: 'engine_plan_unconfigured' };
+
+/**
+ * D#845 ON-22: the Engine plan's per-engine price, read fail-closed. Plan data that is unavailable, or carries no `enginePlan` block, gives
+ * `{ on: false, code: 'engine_plan_unconfigured' }` and the plan is not offered. There is no default figure. Never throws on missing data.
+ */
+export function enginePlanSettings(): EnginePlanSettings {
+  try {
+    const e = loadPlanData().enginePlan;
+    return e === undefined ? { on: false, code: 'engine_plan_unconfigured' } : { on: true, priceUsdPerMonth: e.priceUsdPerMonth };
+  } catch (error) {
+    if (error instanceof PlanDataMissingError) return { on: false, code: 'engine_plan_unconfigured' };
+    throw error;
+  }
+}
