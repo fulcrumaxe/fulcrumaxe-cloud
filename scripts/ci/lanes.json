@@ -18,7 +18,7 @@
     {"glob":"THIRD-PARTY-NOTICES*","reason":"notices: rare, so kept serial"}
   ],
   "lanes": [
-    {"name":"runner","globs":["packages/runner/**","packages/runner-cloud/**","packages/runner-protocol/**","packages/fx-runner/**"]},
+    {"name":"runner","globs":["packages/runner/**","packages/runner-cloud/**","packages/runner-protocol/**","packages/fx-runner/**","nix/**"]},
     {"name":"workspace","globs":["apps/workspace/**"]},
     {"name":"web","globs":["apps/web/**"]},
     {"name":"docs","globs":["docs/**","wiki/**","**/*.md"],"exclude":["packages/**","apps/**"]}
