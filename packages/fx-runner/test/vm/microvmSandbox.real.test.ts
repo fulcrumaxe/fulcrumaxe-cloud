@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect } from "vitest";
 import { createBootFactsSource } from "../../src/vm/bootFacts.js";
 import { signRelease, type SignedRelease } from "./helpers/signedRelease.js";
 import { startEgressProxy } from "../../src/vm/egress/proxy.js";
@@ -49,8 +49,17 @@ describe.skipIf(!ready)("microVM engine (real VMs, the production daemon and the
     const boot = createBootFactsSource({ tuf: signed.client, template: env.template as string, nodeArch: process.arch, readManifest: () => JSON.stringify({ [env.template as string]: { kernel: d.kernel, rootfs: d.rootfs } }), now: Date.now });
     daemon = createProductionSandboxd({ helperSocket: env.helper as string, host: { euid: uid, platform: process.platform }, boot });
   });
+  // Every sandbox this file made, by the daemon id the helper lists it under. The cleanups above swallow a failed delete so one test's leftover cannot
+  // fail the next; this is where that failure is reported, as what it is, instead of as `over_cap` in some later test.
+  const madeIds = new Set<string>();
   afterAll(async () => {
-    await signed?.close();
+    try {
+      const left = (await createHelperClient(connectUnix(env.helper as string)).list()).map((e) => e.sandboxId).filter((id) => madeIds.has(id));
+      expect(left, "sandboxes this file created are still held by the helper (a delete failed)").toEqual([]);
+      expect(daemon?.list().map((row) => row.name) ?? [], "the daemon still lists sandboxes this file created").toEqual([]);
+    } finally {
+      await signed?.close();
+    }
   });
   describeEngineContract(
     "microVM engine (real VMs)",
@@ -62,6 +71,7 @@ describe.skipIf(!ready)("microVM engine (real VMs, the production daemon and the
       const made = port.createSandbox.bind(port);
       port.createSandbox = async (opts) => {
         const handle = await made(opts);
+        madeIds.add(sandboxIdOf(handle.sandboxName));
         cleanups.push(() => port.deleteSandbox(handle));
         return handle;
       };

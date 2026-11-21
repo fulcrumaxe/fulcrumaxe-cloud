@@ -5,6 +5,7 @@ name: microVM image
 # on a free hosted x64 Linux runner with KVM" (D#587 B-1, acceptance 9). The arm64 disk is built, not booted (a hosted x64 runner
 # cannot). Started by hand only (Actions tab, or `gh workflow run microvm-image.yml`); it never runs on a pull request or a push.
 # It also builds, installs and starts fx-vmhelper (the owner opted in to this change on 2026-11-20) so the helper-backed real-VM tests run.
+# A step after the vitest run fails the job if any helper-backed real suite ran no test (the owner opted in to that change too).
 # The build steps are the local action .github/actions/microvm-image, which microvm-image-release.yml shares.
 #
 # No secrets, no inputs, a read-only token, and the job runs only on the public plane, so the private plane never queues it.
@@ -140,7 +141,44 @@ jobs:
       - name: Boot the guest under Firecracker and run the probes (the whole vm test directory)
         # sg gives the test process the helper's group (the socket directory is root:fx-vmhelper 0750; a usermod does not reach a running
         # shell). The tests still run as this ordinary user, never as root: the helper-backed suites refuse root.
-        run: sg fx-vmhelper -c 'bash -o pipefail -c "pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/vm 2>&1 | tee $W/vitest.txt"'
+        run: sg fx-vmhelper -c 'bash -o pipefail -c "pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/vm --reporter=default --reporter=json --outputFile.json=$W/vitest.json 2>&1 | tee $W/vitest.txt"'
+      # The helper is installed and started above, so the helper-backed real suites MUST run here. Each of them skips quietly (with a warning)
+      # when an env var is missing, and a skipped file reports as passed: this step turns that into a failure. A file with no passed test
+      # (skipped, missing from the report, or empty) fails the job, and the message names the variables the file checks.
+      - name: The helper-backed real-VM suites ran (a skip is a failure)
+        run: |
+          cat > "$W/real-suites-ran.mjs" <<'EOF'
+          import { existsSync, readFileSync } from "node:fs";
+          const root = `${process.env.GITHUB_WORKSPACE}/packages/fx-runner/test/vm`;
+          const FIRECRACKER = ["FX_VM_FIRECRACKER", "FX_VM_KERNEL", "FX_VM_ROOTFS"];
+          const suites = {
+            "microvmSandbox.real": ["FX_VM_HELPER_SOCKET", "FX_VM_TEMPLATE", "FX_VM_KERNEL", "FX_VM_ROOTFS", "FX_VM_AGENT"],
+            "workspaceCrossing.real": ["FX_VM_HELPER_SOCKET", "FX_VM_TEMPLATE", "FX_VM_BOOT_FACTS"],
+            "vmJob.real": [], // required only if the file exists
+            "vmToken.real": FIRECRACKER,
+            "vmBoot.real": FIRECRACKER,
+            "vmStream.real": FIRECRACKER,
+          };
+          const report = JSON.parse(readFileSync(process.env.VITEST_JSON, "utf8"));
+          let bad = 0;
+          for (const [name, vars] of Object.entries(suites)) {
+            const file = `${root}/${name}.test.ts`;
+            if (!existsSync(file)) {
+              if (name === "vmJob.real") { console.log(`${name}: not in this tree, not required`); continue; }
+              console.log(`::error::${name}: the file is missing from the tree`); bad++; continue;
+            }
+            const run = report.testResults.find((r) => r.name === file);
+            const count = (status) => (run?.assertionResults ?? []).filter((t) => t.status === status).length;
+            const passed = count("passed"), skipped = count("skipped") + count("pending") + count("todo"), failed = count("failed");
+            console.log(`${name}: ${passed} passed, ${failed} failed, ${skipped} skipped${run === undefined ? " (not in the vitest report)" : ""}`);
+            if (passed > 0) continue;
+            bad++;
+            const unset = vars.filter((v) => !process.env[v]);
+            console.log(`::error::${name} ran no test: ${run === undefined ? "it is not in the report" : `${skipped} skipped`}. It checks ${vars.join(", ") || "(see the file header)"}; unset here: ${unset.join(", ") || "none (the file skipped for another reason, for instance running as root)"}`);
+          }
+          if (bad > 0) { console.log(`${bad} helper-backed real suite(s) did not run, and the helper is installed in this job, so this is a failure`); process.exit(1); }
+          EOF
+          VITEST_JSON="$W/vitest.json" node "$W/real-suites-ran.mjs"
       - name: The helper's log and state (no secrets, it logs events only)
         if: always()
         run: |
@@ -180,6 +218,7 @@ jobs:
             /mnt/fxvm/report-a.txt
             /mnt/fxvm/report-b.txt
             /mnt/fxvm/vitest.txt
+            /mnt/fxvm/vitest.json
             /mnt/fxvm/helper.log
             /mnt/fxvm/helper-status.txt
             /mnt/fxvm/dmesg.txt
