@@ -42,6 +42,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "slow_down",
   "runner_limit",
   "key_registered",
+  "token_bound_elsewhere",
   "denied",
   "consumed",
   "author_check_unavailable",
