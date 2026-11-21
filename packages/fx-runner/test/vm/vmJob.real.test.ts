@@ -12,9 +12,7 @@ import { CliError } from "../../src/cliError.js";
 import type { CommandContext } from "../../src/context.js";
 import { saveRegistration } from "../../src/config.js";
 import { endOfFailure } from "../../src/daemon/runEnded.js";
-import { REQUIRED_FLAGS } from "../../src/engines/claude/argv.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
-import { SUBSCRIPTION_TOKEN_VAR } from "../../src/job/cleanEnv.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { originHash } from "../../src/keyring.js";
 import { setSetting } from "../../src/runnerSettings.js";
@@ -25,6 +23,7 @@ import { TEMPLATES } from "../../src/vm/lock.js";
 import { parseMemAvailableBytes, type VmHostFacts } from "../../src/vm/limits.js";
 import { GuestBindings } from "../../src/vm/sandboxd/guestBindings.js";
 import { guestMakeRuntime } from "../../src/vm/sandboxd/guestRuntime.js";
+import { createGuestAgent } from "../../src/vm/sandboxd/guestAgent.js";
 import { createHelperClient, HelperError, type Helper } from "../../src/vm/sandboxd/helperClient.js";
 import type { LiveMicrovmParts } from "../../src/vm/sandboxd/live.js";
 import { fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
@@ -34,6 +33,7 @@ import { until } from "../helpers/manualClock.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { KEYRING, signedJob } from "../helpers/signedJob.js";
 import { socketTmpRoot } from "../helpers/tmpRoot.js";
+import { AGENT_PROBE, bwrapUsable, cliScript, DISKSCAN, FILE_IN_GUEST, HANG, onPath, osToolbin, CLI } from "./helpers/scriptedCli.js";
 import { signRelease, type SignedRelease } from "./helpers/signedRelease.js";
 import { connectUnix } from "./sandboxd/helpers.js";
 
@@ -58,53 +58,7 @@ if (!ready) console.warn("vmJob.real: FX_VM_HELPER_SOCKET, FX_VM_TEMPLATE, FX_VM
 
 type Done = ReturnType<typeof DoneMessage.parse>;
 const GB = 1024 ** 3;
-const AGENT_PROBE = "/tmp/fx-agent-probe";
-const CLI = "/tmp/fx-scripted-claude";
-const FILE_IN_GUEST = "written in the guest\n";
-const HANG = "FXMODE-HANG";
-
-/** The agent CLI stand-in: starts like the CLI (version and help), reads the prompt, writes one file and one commit in its workspace, a probe file outside it, and reports what its environment held (under labels the run log does not redact: it hides any value that follows the word token). */
-function cliScript(tokenSha: string, init: string, result: string): string {
-  return `#!/usr/bin/python3
-import hashlib, json, os, subprocess, sys, time
-REQ = ${JSON.stringify(REQUIRED_FLAGS)}
-INIT = ${JSON.stringify(init)}
-RESULT = ${JSON.stringify(result)}
-TOKEN_SHA = ${JSON.stringify(tokenSha)}
-VAR = ${JSON.stringify(SUBSCRIPTION_TOKEN_VAR)}
-PROBE = ${JSON.stringify(AGENT_PROBE)}
-if "--version" in sys.argv:
-    print("2.1.295 (Claude Code)"); sys.exit(0)
-if "--help" in sys.argv:
-    print("\\n".join("  " + f for f in REQ)); sys.exit(0)
-prompt = sys.stdin.read()
-def emit(o):
-    sys.stdout.write((o if isinstance(o, str) else json.dumps(o, separators=(",", ":"))) + "\\n"); sys.stdout.flush()
-emit(INIT)
-if ${JSON.stringify(HANG)} in prompt:
-    while True: time.sleep(0.05)
-tok = os.environ.get(VAR)
-facts = ["cli_sees=" + ("absent" if tok is None else "match" if hashlib.sha256(tok.strip().encode()).hexdigest() == TOKEN_SHA else "wrong")]
-scrub = os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB") == "1"
-facts.append("scrub_pin=" + str(scrub))
-# what the real CLI does with that pin: a child it starts (the Bash tool) gets the environment without the token
-child_env = {k: v for k, v in os.environ.items() if not (scrub and k == VAR)}
-child = subprocess.run(["sh", "-c", "printenv " + VAR + " >/dev/null && echo present || echo absent"], env=child_env, capture_output=True, text=True).stdout.strip()
-facts.append("child_sees=" + child)
-with open(PROBE, "w") as f:
-    f.write("probe written by the agent\\n")
-facts.append("probe_written=" + str(os.path.exists(PROBE)))
-with open("feature.txt", "w") as f:
-    f.write(${JSON.stringify(FILE_IN_GUEST)})
-ident = ["-c", "user.name=agent", "-c", "user.email=agent@example.test"]
-subprocess.run(["git"] + ident + ["add", "-A"], check=True)
-subprocess.run(["git"] + ident + ["commit", "-qm", "agent change"], check=True)
-facts.append("workdir=" + os.getcwd())
-r = json.loads(RESULT)
-r["result"] = "; ".join(facts)
-emit(r)
-`;
-}
+const CGROUP_ROOT = "/sys/fs/cgroup";
 
 type Call = { verb: "prepare" | "start" | "destroy"; id: string };
 interface Injection {
@@ -117,6 +71,23 @@ interface Injection {
 const firecrackersFor = (id: string): number => {
   const out = spawnSync("pgrep", ["-f", id], { encoding: "utf8" });
   return out.status === 0 ? out.stdout.split("\n").filter((l) => l !== "").length : 0;
+};
+
+/** The cgroup directories named for a sandbox id, below the cgroup mount (the helper makes one per VM and removes it with the VM). A tree this user cannot read answers none, which the control in `start` shows. */
+const cgroupDirsOf = (id: string): string[] => {
+  const out = spawnSync("find", [CGROUP_ROOT, "-maxdepth", "8", "-type", "d", "-name", id], { encoding: "utf8" });
+  return out.stdout.split("\n").filter((l) => l !== "");
+};
+
+/** What `lstat` says of a path: "present", "gone", or "unreadable" (a directory this user may not search says nothing of what is below it). */
+const stateOf = (file: string): "present" | "gone" | "unreadable" => {
+  try {
+    lstatSync(file);
+    return "present";
+  } catch (error) {
+    // fx-swallow-ok: the answer is the point; only ENOENT is "gone"
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "gone" : "unreadable";
+  }
 };
 
 /** Every regular file under `dir` that holds `needle`. A link is not followed, and a very large file is skipped (a disk image is not under here). */
@@ -149,11 +120,29 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   let own: Set<string>;
   let injection: Injection;
   let seenByPgrep: Map<string, number>;
+  /** What the REAL helper said of each VM when it started: where its vsock directory is, and how many cgroup directories of that name the kernel showed (the controls for the leak checks below). */
+  let vsockDirs: Map<string, string>;
+  /** Which of the vsock directory and its sockets were seen "present" while the VM ran (the control for the "gone" checks below). */
+  let vsockSeenPresent: Map<string, Set<string>>;
+  let cgroupsSeen: Map<string, number>;
   const logLines: string[] = [];
   const started: Array<{ signals: EventEmitter; done: Promise<unknown> }> = [];
 
   const git = (...args: string[]): string =>
     execFileSync("git", args, { env: { PATH: process.env["PATH"] ?? "", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+
+  /** A bare repository with one commit on `main`, which the runner reaches by file URL. */
+  const seedRemote = (name: string): string => {
+    const bare = path.join(root, `${name}.git`);
+    git("init", "--bare", "-b", "main", bare);
+    const seed = path.join(root, `${name}-seed`);
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", bare, "main");
+    return bare;
+  };
 
   beforeAll(async () => {
     const arch = process.arch === "arm64" ? "arm64" : "amd64";
@@ -180,6 +169,9 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     own = new Set();
     injection = { prepare: false, destroy: false };
     seenByPgrep = new Map();
+    vsockDirs = new Map();
+    vsockSeenPresent = new Map();
+    cgroupsSeen = new Map();
     logLines.length = 0;
     cloud = await startStrictRunnerCloud();
     // the host's own `claude` is never used by a microVM job; the runner still looks for one at start
@@ -196,14 +188,7 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     saveRegistration(stateDir, { version: 1, cloud_origin: cloud.origin, runner_id: randomUUID(), account_id: randomUUID(), credential_mode: "subscription", jkt: key.jkt, registered_at: new Date().toISOString() });
     cloud.trust(key.publicJwk);
     // the repository the job works on: one commit on `main`, served from a bare repository by file URL
-    remote = path.join(root, "remote.git");
-    git("init", "--bare", "-b", "main", remote);
-    const seed = path.join(root, "seed");
-    git("init", "-b", "main", seed);
-    writeFileSync(path.join(seed, "README.md"), "hello\n");
-    git("-C", seed, "add", "README.md");
-    git("-C", seed, "commit", "-m", "first");
-    git("-C", seed, "push", remote, "main");
+    remote = seedRemote("remote");
     setSetting(stateDir, "sandbox_engine", "microvm");
     for (const [k, v] of [["microvm.max_vms", "2"], ["microvm.max_vcpus", "4"], ["microvm.max_memory_mb", "4096"], ["microvm.snapshot_dir", path.join(home, "snaps")], ["microvm.snapshot_quota_bytes", "1073741824"]] as const) setSetting(stateDir, k, v);
   });
@@ -225,6 +210,16 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   });
 
   /** The helper the daemon is given: the real one, recording each call, listing only this file's VMs, and refusing the call a test names. */
+  /** Records which of the vsock directory and the socket names are there now, while the VM is up. */
+  const VSOCK_NAMES = ["v.sock", "v.sock_5253", "v.sock_5254"];
+  const noteVsock = (id: string): void => {
+    const dir = vsockDirs.get(id);
+    if (dir === undefined) return;
+    const seen = vsockSeenPresent.get(id) ?? new Set<string>();
+    if (stateOf(dir) === "present") seen.add(dir);
+    for (const name of VSOCK_NAMES) if (stateOf(path.join(dir, name)) === "present") seen.add(path.join(dir, name));
+    vsockSeenPresent.set(id, seen);
+  };
   const wrapHelper = (real: Helper): Helper => ({
     ...real,
     prepare: async (p) => {
@@ -237,10 +232,14 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
       calls.push({ verb: "start", id });
       const started = await real.start(id);
       seenByPgrep.set(id, firecrackersFor(id)); // the control for the leak check below: this matcher can see a running VM here
+      vsockDirs.set(id, started.vsockDir);
+      noteVsock(id);
+      cgroupsSeen.set(id, cgroupDirsOf(id).length);
       return started;
     },
     destroy: async (id) => {
       calls.push({ verb: "destroy", id });
+      noteVsock(id); // the VM is still up here, and the relays have made their sockets by now
       if (injection.destroy) throw new HelperError("unavailable");
       return real.destroy(id);
     },
@@ -251,7 +250,7 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   const vmFacts = async (): Promise<VmHostFacts> => ({ kvm: "present", helperSocket: "present", helperSocketPath: env.helper as string, helperState: "ready", totalMemMb: 16384, cpus: 4, readMemAvailableBytes: () => parseMemAvailableBytes(readFileSync("/proc/meminfo", "utf8")) });
 
   /** The live parts, as the entry point makes them, with the CLI stand-in written into each guest before the CLI starts. */
-  const partsFor = (script: string): LiveMicrovmParts => {
+  const partsFor = (script: string, over: { silentGuest?: boolean } = {}): LiveMicrovmParts => {
     const d = signed.digests(process.arch === "arm64" ? "arm64" : "amd64");
     const logDir = path.join(stateDir, "logs");
     mkdirSync(logDir, { recursive: true });
@@ -272,7 +271,8 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     const inner = guestMakeRuntime({ credentials: { mode: "subscription" }, logDir, agentPath: CLI }, bindings.binding);
     return {
       ...made,
-      deps: { ...made.deps, helper: wrapHelper(made.deps.helper) },
+      // a silent guest: the VM is real and is started by the real helper, but the runner's agent client never gets an answer from it (a connect that never completes), which is a guest that never answers
+      deps: { ...made.deps, helper: wrapHelper(made.deps.helper), ...(over.silentGuest === true ? { bootTimeoutMs: 4_000, agentFor: () => createGuestAgent(() => new Promise(() => undefined), 300) } : {}) },
       bindings,
       makeRuntime: (guest, job) => {
         const runtime = inner(guest, job);
@@ -282,7 +282,9 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   };
 
   const tool = fixtureText("stream.tooluse.synthetic.jsonl").split("\n").filter((l) => l !== "");
-  const scriptFor = (): string => cliScript(createHash("sha256").update(sentinel).digest("hex"), tool[0]!, tool.find((l) => l.includes('"type":"result"'))!);
+  /** The agent CLI stand-in's text: for the guest by default; `os` is the same program for the OS sandbox (this machine's interpreter and git), `scan` makes it hold the token as two halves so it can search for it. */
+  const scriptFor = (o: { os?: boolean; scan?: boolean } = {}): string =>
+    cliScript(createHash("sha256").update(sentinel).digest("hex"), tool[0]!, tool.find((l) => l.includes('"type":"result"'))!, { python: o.os === true ? (onPath("python3") as string) : "/usr/bin/python3", git: o.os === true ? (onPath("git") as string) : "git", ...(o.scan === true ? { needle: sentinel } : {}) });
 
   const queuedJob = (over: Parameters<typeof signedJob>[0] = {}) => signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString(), ...over });
   const check = (command: string) => ({ argv: ["sh", "-c", command], dev_shell: false, timeout_s: 120 });
@@ -292,11 +294,11 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     done: Promise<{ code: number; message: string }>;
   }
   /** Starts the real `run` command in the background, against the stand-in cloud. */
-  function startRun(parts: LiveMicrovmParts): Started {
+  function startRun(parts: LiveMicrovmParts | undefined, os?: { searchPath: string }): Started {
     const signals = new EventEmitter();
     const ctx: CommandContext = { stateDir, out: (l) => logLines.push(l), err: (l) => logLines.push(l), now: () => new Date(), fetchFn: fetch };
-    const host: RunHost = { home, platform: "linux", signals: signals as unknown as RunHost["signals"], pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost(), vmFacts, microvm: parts };
-    const hooks: RunHooks = { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: { read: () => ({ totalMemBytes: 64 * GB, availMemBytes: 60 * GB, load1: 0, cores: 32, freeDiskBytes: 500 * GB }) }, jobLimits: { enforced: true }, remoteUrl: () => pathToFileURL(remote).href };
+    const host: RunHost = { home, platform: "linux", signals: signals as unknown as RunHost["signals"], pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost(), ...(parts === undefined ? {} : { vmFacts, microvm: parts }) };
+    const hooks: RunHooks = { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: os?.searchPath ?? toolbin, probe: { read: () => ({ totalMemBytes: 64 * GB, availMemBytes: 60 * GB, load1: 0, cores: 32, freeDiskBytes: 500 * GB }) }, jobLimits: { enforced: true }, remoteUrl: () => pathToFileURL(remote).href };
     const done = runCommand(ctx, host, hooks).then(
       (code) => ({ code, message: "" }),
       (error: unknown) => {
@@ -363,6 +365,37 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
       // `pgrep -f` can only be trusted where it saw this VM run; where it could not see processes of another user it says so instead of passing for nothing
       if ((seenByPgrep.get(id) ?? 0) > 0) expect(firecrackersFor(id), `a firecracker process of ${id} is still running`).toBe(0);
       else console.warn(`vmJob.real: pgrep could not see the VM ${id} while it ran; the process check is skipped for it (the helper's list is the check)`);
+      // the cgroup: the kernel's own listing must show none of that name; where this user could not see one while the VM ran, the check says so instead of passing for nothing
+      if ((cgroupsSeen.get(id) ?? 0) > 0) expect(cgroupDirsOf(id), `a cgroup of ${id} is still there`).toEqual([]);
+      else if (vsockDirs.has(id)) console.warn(`vmJob.real: the cgroup tree showed no cgroup of ${id} while it ran; the cgroup check is skipped for it (cgroup directories named vms: ${spawnSync("find", [CGROUP_ROOT, "-maxdepth", "6", "-name", "vms"], { encoding: "utf8" }).stdout.trim() || "none readable"})`);
+      // the vsock directory (it holds both egress sockets, the guest's own socket and the proxy sockets) and the jail beside it: `<jail_root>/vsock/<id>` and `<jail_root>/jails/<id>`
+      const dir = vsockDirs.get(id);
+      if (dir === undefined) continue; // the VM never started, so it has no directory to look for
+      const jailRoot = path.dirname(path.dirname(dir));
+      const seen = vsockSeenPresent.get(id) ?? new Set<string>();
+      if (seen.has(dir)) expect(stateOf(dir), `the vsock directory of ${id} is still there`).toBe("gone");
+      else console.warn(`vmJob.real: the vsock directory ${dir} of ${id} was not seen while the VM ran; its "gone" check is skipped`);
+      for (const socket of VSOCK_NAMES) {
+        const file = path.join(dir, socket);
+        if (seen.has(file)) expect(stateOf(file), `${socket} of ${id} is still there`).toBe("gone");
+        else console.warn(`vmJob.real: ${socket} of ${id} was not seen while the VM ran; its "gone" check is skipped`);
+      }
+      const jail = stateOf(path.join(jailRoot, "jails", id));
+      if (jail === "unreadable") console.warn(`vmJob.real: the jail directory of ${id} is below a directory this user may not search; only the helper's list says it is gone`);
+      else expect(jail, `the jail directory of ${id} is still there`).toBe("gone");
+    }
+  }
+  /** The runner's inventory block (the `sandboxes` of a claim) names none of this test's VMs in the last claim that carried one. The runner's live table is internal to `run`; this is what the cloud was told. */
+  function expectNoInventoryRow(): void {
+    const inventories = cloud.seen.filter((s) => s.path.endsWith("/claim")).map((s) => (s.body as { sandboxes?: Array<{ name: string }> } | undefined)?.sandboxes).filter((b): b is Array<{ name: string }> => b !== undefined);
+    const last = inventories[inventories.length - 1] ?? [];
+    for (const id of own) {
+      // control: some claim listed this VM while it ran; without that, "not listed now" cannot tell removed from never listed
+      if (!inventories.some((b) => b.some((r) => r.name === id))) {
+        console.warn(`vmJob.real: no claim ever listed ${id} in its inventory; the inventory check is skipped for it`);
+        continue;
+      }
+      expect(last.map((r) => r.name), `the runner's last inventory still lists ${id}`).not.toContain(id);
     }
   }
   function expectNoToken(): void {
@@ -407,6 +440,7 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     expect(idx("destroy", agentVm!)).toBeLessThan(idx("prepare", checkVm!));
     expect(await stopRun(run)).toMatchObject({ code: 0 });
     await expectNoVmLeft();
+    expectNoInventoryRow();
     expectNoToken();
   }, 780_000);
 
@@ -497,4 +531,93 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     await expectNoVmLeft();
     expectNoToken();
   }, 780_000);
+
+  /** The tests of D#587 B-5b-3c-v: what the first file left open of criterion 26a. */
+  const isDone = (): boolean => [...cloud.runs.values()].some((r) => r.doneReply !== undefined);
+  const isEnded = (): boolean => [...cloud.runs.values()].some((r) => r.endedBy !== undefined);
+  /** One event as it is compared between engines: what it says, never its number, time or duration. */
+  const shapeOf = (e: { type: string; stage?: string; tool_name?: string; activity?: unknown; engine_version?: string; reason?: string; detail?: string; exit_code?: number; usage?: unknown }): string =>
+    JSON.stringify([e.type, e.stage, e.tool_name, e.activity, e.engine_version, e.reason, e.detail, e.exit_code, e.usage]);
+
+  it("26a (engines): the same scripted job on os_sandbox and on microvm pushes the same tree and reports the same events in the same order", async (ctx) => {
+    const osTools = bwrapUsable() ? osToolbin(root, scriptFor({ os: true }), fake.binary) : undefined;
+    if (osTools === undefined) {
+      const probe = onPath("bwrap") === undefined ? undefined : spawnSync(onPath("bwrap") as string, ["--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "true"], { encoding: "utf8" });
+      console.warn(`vmJob.real: the OS-sandbox side of the engine comparison cannot run here, so the comparison is SKIPPED. Tools: ${["bwrap", "socat", "git", "sh", "env", "python3"].map((t) => `${t}=${onPath(t) ?? "missing"}`).join(" ")}; bwrap probe: ${probe === undefined ? "not run" : `exit ${probe.status}: ${probe.stderr.trim()}`}`);
+      return ctx.skip();
+    }
+    const job = () => queuedJob({ check: check("test -f feature.txt") });
+    // the VM side
+    cloud.enqueue(job());
+    const vmRun = startRun(partsFor(scriptFor()));
+    await waitFor("the VM job to be done", isDone, WAIT_MS);
+    const vmId = [...cloud.runs.keys()][0]!;
+    const vmTree = pushedTree();
+    const vmEvents = runOf(vmId)!.events.map(shapeOf);
+    expect(await stopRun(vmRun)).toMatchObject({ code: 0 });
+    await expectNoVmLeft();
+    // the OS-sandbox side: the same job, a fresh repository, the engine setting flipped, and a runner started without the VM parts
+    remote = seedRemote("remote-os");
+    setSetting(stateDir, "sandbox_engine", "os_sandbox");
+    cloud.enqueue(job());
+    const osRun = startRun(undefined, { searchPath: osTools });
+    await waitFor("the OS-sandbox job to be done", () => [...cloud.runs.values()].filter((r) => r.doneReply !== undefined).length === 2, SHORT_WAIT_MS);
+    const osId = [...cloud.runs.keys()].find((id) => id !== vmId)!;
+    const osTree = pushedTree();
+    const osEvents = runOf(osId)!.events.map(shapeOf);
+    expect(await stopRun(osRun)).toMatchObject({ code: 0 });
+    expect(runOf(osId)!.endedBy).toBeUndefined();
+    // a comparison of two empty lists would be the same on any two engines
+    expect(vmEvents.length).toBeGreaterThan(0);
+    expect(osTree).toBe(expectedTree());
+    expect(osTree).toBe(vmTree);
+    expect(osEvents).toEqual(vmEvents);
+    expectNoToken();
+  }, 1_200_000);
+
+  it("26a (disk): the token is on no disk-backed file of the guest (found by a search as the guest's root, with a planted control), and nothing of the VMs is left on the host", async () => {
+    cloud.enqueue(queuedJob({ task: { kind: "implement", prompt: `${DISKSCAN}\n`, prompt_sha256: sha256Text(`${DISKSCAN}\n`) }, check: check("true") }));
+    const run = startRun(partsFor(scriptFor({ scan: true })));
+    await waitFor("the job to be done", isDone, 14 * 60_000);
+    const said = transcripts();
+    // the token was in the CLI's environment, so the scan ran in a guest that held it; the control file was found and nothing else was
+    expect(said).toContain("cli_sees=match");
+    // the guest's disks: none is writable (so there is nowhere on a disk to put the token), and a search of every file on them finds none
+    expect(said).toContain("disk_writable=none");
+    expect(said).toContain("disk_scan=clean");
+    expect(await stopRun(run)).toMatchObject({ code: 0 });
+    await expectNoVmLeft();
+    expectNoToken();
+  }, 1_000_000);
+
+  it("a check that outlives its time limit ends with the timeout outcome, the branch is still pushed, and both VMs are gone", async () => {
+    cloud.enqueue(queuedJob({ check: { argv: ["sh", "-c", "echo started-and-will-not-finish; sleep 900"], dev_shell: false, timeout_s: 60 } }));
+    const run = startRun(partsFor(scriptFor()));
+    await waitFor("the job to be done", isDone, WAIT_MS);
+    const runId = [...cloud.runs.keys()][0]!;
+    const body = doneBody(runId)!;
+    expect(body.check).toMatchObject({ exit_code: null, timed_out: true });
+    expect(runOf(runId)!.endedBy).toMatchObject({ type: "run_ended", reason: "check_failed" });
+    expect(pushedTree()).toBe(expectedTree());
+    expect(preparedIds()).toHaveLength(2);
+    expect(await stopRun(run)).toMatchObject({ code: 0 });
+    await expectNoVmLeft();
+    expectNoToken();
+  }, 780_000);
+
+  it("a guest that never answers ends the job with the closed setup reason, runs nothing, and the VM the helper started is ended", async () => {
+    cloud.enqueue(queuedJob({ check: check("true") }));
+    const run = startRun(partsFor(scriptFor(), { silentGuest: true }));
+    await waitFor("the run to be ended", isEnded, SHORT_WAIT_MS);
+    const runId = [...cloud.runs.keys()][0]!;
+    const end = endOfFailure("sandbox_unavailable")!;
+    expect(runOf(runId)!.endedBy).toMatchObject({ type: "run_ended", reason: end.reason, ...(end.detail === undefined ? {} : { detail: end.detail }) });
+    expect(doneBody(runId)).toBeUndefined();
+    // the VM really was started (so there was something that never answered), and only one was ever made: the check VM is never reached
+    expect(calls.filter((c) => c.verb === "start")).toHaveLength(1);
+    expect(preparedIds()).toHaveLength(1);
+    expect(await stopRun(run)).toMatchObject({ code: 0 });
+    await expectNoVmLeft();
+    expectNoToken();
+  }, 420_000);
 });
