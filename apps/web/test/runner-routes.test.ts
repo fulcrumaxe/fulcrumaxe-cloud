@@ -12,6 +12,8 @@ import { revokeTokenHandler } from "../app/api/runners/provisioning-tokens/[id]/
 import { revokeRunnerHandler } from "../app/api/runners/[id]/revoke/handler";
 import { revokeAllHandler } from "../app/api/runners/revoke-all/handler";
 import { listRunnersHandler } from "../app/api/runners/handler";
+import { listMachinesHandler } from "../app/api/machines/handler";
+import { moveProjectHandler } from "../app/api/runners/repos/[id]/move/handler";
 import { approveRunHandler } from "../app/api/runners/runs/[id]/approve/handler";
 import { executionModeHandler, getRepoModeHandler } from "../app/api/runners/repos/[id]/execution-mode/handler";
 import { listApprovalsHandler } from "../app/api/runners/approvals/handler";
@@ -159,6 +161,10 @@ describe("a runner-signed request is not a session (every route outside api/runn
       () => planConsentHandler(signedNext(`${ORIGIN}/api/runners/x/plan-consent`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => getPlanApprovalDialHandler(signedNext(`${ORIGIN}/api/runners/repos/x/plan-approval-dial`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => putPlanApprovalDialHandler(signedNext(`${ORIGIN}/api/runners/repos/x/plan-approval-dial`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      // D#845 MC-10a: the machine list and the project move are session routes too.
+      () => listMachinesHandler(signedNext(`${ORIGIN}/api/machines`)),
+      () => listMachinesHandler(signedNext(`${ORIGIN}/api/machines`, { authorization: "Bearer fxat_notarealtoken" })),
+      () => moveProjectHandler(signedNext(`${ORIGIN}/api/runners/repos/x/move`, { authorization: "Bearer fxat_notarealtoken" }), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       // D#6 R7a: the sandbox allowances of a repo.
       () => getSandboxAllowancesHandler(signedNext(`${ORIGIN}/api/runners/repos/x/sandbox-allowances`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => putSandboxAllowancesHandler(signedNext(`${ORIGIN}/api/runners/repos/x/sandbox-allowances`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),

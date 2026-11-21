@@ -255,6 +255,13 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#845 MC-10a: the Machines app reads the account's machines when it opens; the fixture account has none.
+    if (urlPath === "/api/machines" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ machines: [] }));
+      return;
+    }
+
     // D#37 WS-F1a: opening the Pipeline app lists work items (its repos read is the Repos block above).
     // GET only, body from the contract fixture; item, timeline and error cases are mocked by pipeline.spec.ts.
     if (urlPath === "/api/v1/work-items" && req.method === "GET") {

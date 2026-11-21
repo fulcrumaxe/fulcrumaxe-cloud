@@ -63,6 +63,9 @@ interface Mock {
   checkReplies: Array<Record<string, unknown>>;
   /** D#587 B-7b-ii: when set, a POST to a sandbox-commands route is refused with this status and code instead of queuing a command. */
   sandboxRefusal: { status: number; code: string } | null;
+  /** D#845 MC-10a: what GET /api/machines answers, and whether it fails. */
+  machines: unknown[];
+  machinesFail: boolean;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -72,7 +75,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
   const mock: Mock = {
-    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, gets: 0, getFails: false, checkReplies: [], sandboxRefusal: null, ...tweak,
+    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, gets: 0, getFails: false, checkReplies: [], sandboxRefusal: null, machines: [], machinesFail: false, ...tweak,
   };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
@@ -83,12 +86,13 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     await route.fulfill({ response: res, json: { ...(await res.json()), is_admin: mock.isAdmin } });
   });
   await page.route("**/api/v1/events", () => new Promise<void>(() => {}));
-  await page.route((u) => u.pathname.startsWith("/api/runners") || (u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events"), async (route) => {
+  await page.route((u) => u.pathname.startsWith("/api/runners") || u.pathname === "/api/machines" || (u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events"), async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
     if ((req.headers()["accept"] ?? "").includes("text/event-stream")) return route.fulfill({ status: 200, contentType: "text/event-stream", body: "event: idle\ndata: {}\n\n" });
     if (p.startsWith("/api/v1/runs/")) mock.runFetches.push(p.split("/")[4]!);
     if (p === "/api/v1/repos") return json(route, 200, REPOS);
+    if (p === "/api/machines") return mock.machinesFail ? json(route, 503, { error: { code: "unavailable", message: SERVER_TEXT, request_id: "r" } }) : json(route, 200, { machines: mock.machines });
     if (p === "/api/runners") {
       mock.gets++;
       if (mock.getFails) return json(route, 503, { error: { code: "unavailable", message: SERVER_TEXT, request_id: "r" } });
@@ -162,6 +166,7 @@ const open = async (page: Page) => {
   const win = page.locator(WIN);
   await expect(win).toBeVisible();
   await expect(win).not.toHaveClass(/opening/);
+  await press(t(page, "runners-tab-fleet")); // D#845 MC-10a: the app opens on Machines; the fleet page is its third tab
   await expect(t(page, "runners-account")).toBeVisible();
   return win;
 };
@@ -607,6 +612,72 @@ test.describe("D#587 B-7b-ii: the sandboxes of a runner", () => {
     await press(sb(page).locator('[data-testid="runners-sandbox-delete_sandbox"]').nth(0));
     expect(await axeSeriousOrCritical(page, "dialog[open]"), "confirmation").toEqual([]);
     await press(page.locator('[data-testid="runners-sandbox-cancel"]'));
+    await clean(page, errors);
+  });
+});
+
+const machine = (over: Record<string, unknown> = {}) => ({ id: R1, name: "Desktop", tier: "microvm", live: true, claude: true, running: null, ...over });
+const openMachines = async (page: Page) => {
+  await page.locator('.dock-icon[data-app-id="runners"]').click();
+  await expect(page.locator(WIN)).toBeVisible();
+  await expect(page.locator(WIN)).not.toHaveClass(/opening/);
+};
+
+test.describe("D#845 MC-10a: the Machines app", () => {
+  test("opens on Machines with three tabs, and every row shows kind, tier, liveness, Claude and capacity by name", async ({ page }) => {
+    const { errors } = await setup(page, {
+      machines: [
+        machine({ running: { repo_id: REPO_WEB, name: "acme/web" } }),
+        machine({ id: R2, name: "", tier: "standard", live: false, claude: false }),
+        machine({ id: R3, name: "\u202Eevil", tier: null }),
+      ],
+    });
+    await openMachines(page);
+    await expect(page.locator(`${WIN} [role=tab]`)).toHaveText(["Machines", "Servers", "Fleet"]);
+    await expect(t(page, "runners-tab-machines")).toHaveAttribute("aria-selected", "true");
+    const rows = t(page, "runners-machine");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0)).toContainText("MicroVM isolation");
+    await expect(rows.nth(0)).toContainText("Online");
+    await expect(rows.nth(0)).toContainText("Running acme/web");
+    await expect(rows.nth(1)).toContainText("Unnamed machine");
+    await expect(rows.nth(1)).toContainText("Standard isolation: one project on this machine (no KVM)");
+    await expect(rows.nth(1)).toContainText("Offline");
+    await expect(rows.nth(1).locator('[data-testid="runners-machine-capacity"]')).toHaveText("Free");
+    await expect(rows.nth(2)).toContainText("Isolation not reported yet");
+    await expect(page.locator(`${WIN} [data-testid="runners-machine-name"] bdi`)).toHaveCount(3);
+    await clean(page, errors);
+  });
+
+  test("empty, load error with Retry, the tab keys, and a member told why they cannot add", async ({ page }) => {
+    const { mock, errors } = await setup(page, { machinesFail: true, role: "member", isAdmin: false });
+    await openMachines(page);
+    await expect(t(page, "runners-machines-error")).toHaveText("Machines couldn't be loaded");
+    mock.machinesFail = false;
+    await press(t(page, "runners-machines-retry"));
+    await expect(t(page, "runners-machines-empty")).toHaveText("No machines yet");
+    await expect(t(page, "runners-addm-open")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "runners-reason")).toHaveText("Only owners and admins can add a machine.");
+    await t(page, "runners-tab-machines").focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(t(page, "runners-servers-unavailable")).toHaveText("Hetzner Cloud servers aren't available right now");
+    await page.keyboard.press("ArrowRight");
+    await expect(t(page, "runners-account")).toBeVisible();
+    await clean(page, errors);
+  });
+
+  test("Add a machine offers two choices; the Hetzner choice goes to Servers", async ({ page }) => {
+    const { errors } = await setup(page);
+    await openMachines(page);
+    await press(t(page, "runners-addm-open"));
+    const dlg = page.locator("dialog[open]");
+    await expect(dlg.locator("h3")).toHaveText(["A computer or server I have", "A new Hetzner Cloud server"]);
+    await expect(dlg).toContainText("fx-runner setup --cloud-url");
+    await expect(page.locator('dialog [data-testid="runners-addm-kvm"]')).toContainText("sudo fx-runner vm install");
+    expect(await axeSeriousOrCritical(page, "dialog[open]")).toEqual([]);
+    await press(page.locator('dialog [data-testid="runners-addm-servers"]'));
+    await expect(t(page, "runners-servers-unavailable")).toBeVisible();
+    await expect(t(page, "runners-tab-servers")).toBeFocused();
     await clean(page, errors);
   });
 });

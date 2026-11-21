@@ -15,7 +15,7 @@ export const VERIFY_START_APPS: Readonly<Record<string, string>> = {
   pipeline: 'Pipeline',
   repos: 'Repos',
   roles: 'Roles',
-  runners: 'Runners',
+  runners: 'Machines',
   runs: 'Runs',
   'site-review': 'Site review',
   team: 'Team',

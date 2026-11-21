@@ -26,6 +26,7 @@ health/route.ts
 internal/errors/digest/route.ts
 internal/reconcile/release/route.ts
 internal/run-actions/kick/route.ts
+machines/route.ts
 mode/route.ts
 rum/route.ts
 runner/claim/route.ts
@@ -71,6 +72,7 @@ runners/registration-codes/route.ts
 runners/provisioning-tokens/[id]/route.ts
 runners/provisioning-tokens/route.ts
 runners/repos/[id]/execution-mode/route.ts
+runners/repos/[id]/move/route.ts
 runners/repos/[id]/plan-approval-dial/route.ts
 runners/repos/[id]/sandbox-allowances/route.ts
 runners/revoke-all/route.ts
