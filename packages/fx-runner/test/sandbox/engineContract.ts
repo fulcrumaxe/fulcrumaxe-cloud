@@ -29,6 +29,8 @@ export interface EngineSubject {
   /** A directory the engine accepts as the job's working directory. */
   workdir: string;
   timeoutMsOf(handle: SandboxHandle): number | undefined;
+  /** The engine's `interrupt`: SIGINT to the agent once it exists. */
+  interrupt(handle: SandboxHandle): Promise<void>;
   /** Makes the sandbox vanish as it would behind the port's back (a delete from the management plane, a daemon restart). */
   lose(handle: SandboxHandle): Promise<void>;
   /** The microVM engine's guest, read back: what a `put` stored. */
@@ -119,6 +121,22 @@ export function describeEngineContract(name: string, factory: (runtime: AgentRun
       expect((outcome.error as SandboxNotFoundError).sandboxName).toBe("e-lost");
       if (differs("lossShape")) expect(outcome.launchedRejects).toBe(true);
       expect(await subject.port.sandboxExists(handle)).toBe(false);
+    });
+
+    it("interrupt reaches the agent of a run that is going, once, and does nothing (and does not throw) for a sandbox that is gone", async () => {
+      const interrupted: string[] = [];
+      const runtime = Object.assign(scriptedRuntime({ hold: true }), { interrupt: (agent: { runId: string }) => void interrupted.push(agent.runId) });
+      const subject = factory(runtime);
+      const handle = await subject.port.createSandbox(sandboxOpts("e-interrupt"));
+      const { hookFired } = subject.port.startDetached(handle, startOpts(subject));
+      await subject.interrupt(handle);
+      expect(interrupted).toEqual(["run-1"]);
+      runtime.release();
+      await hookFired;
+      await subject.port.deleteSandbox(handle);
+      await expect(subject.interrupt(handle)).resolves.toBeUndefined();
+      await expect(subject.interrupt({ runId: "", sandboxName: "e-interrupt-never-made", sessionId: "s" })).resolves.toBeUndefined();
+      expect(interrupted).toEqual(["run-1"]);
     });
 
     it("stop and delete may be repeated: twice after a run, and on a sandbox that is gone", async () => {

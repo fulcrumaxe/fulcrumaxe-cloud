@@ -15,10 +15,18 @@ import type { Arch } from "../lock.js";
 import { SandboxdCommand, type CommandSpec } from "./command.js";
 import { HelperError, SANDBOX_ID, type Helper, type PreparedReply } from "./helperClient.js";
 import type { GuestAgent } from "./guestAgent.js";
+import { STREAM_ID, type GuestStream } from "./streamCommand.js";
 import { FileError, MAX_FILE_BYTES, checkGuestPath, guestFileMode, type FileContent } from "./files.js";
 import { DEFAULT_KEEP_LAST, DEFAULT_SNAPSHOT_TTL_SECONDS, MAX_KEEP_LAST, MIB, admitSnapshot, loadStore, newSnapshotId, saveStore, snapshotNeedBytes, type SnapshotDeps, type SnapshotMeta } from "./snapshots.js";
 
-export type SandboxState = "creating" | "running" | "stopping" | "stopped";
+/** What a stop needs of a running command, whichever way it runs (a one-shot exec, or a stream). */
+interface TrackedCommand { kill(signal: "SIGKILL"): Promise<void>; wait(): Promise<unknown>; abort?(): void }
+/** One command on the streaming exec; `withToken` and `user` are as in `CommandSpec`. */
+export interface StreamSpec { id: string; cmd: string; args?: string[]; cwd?: string; env?: Record<string, string>; stdin?: Buffer; timeoutS?: number; withToken?: boolean; user?: "root" | "ubuntu" }
+/** The most stream ids one VM's agent is given in its run. */
+const MAX_STREAM_IDS = 4096;
+
+export type SandboxState ="creating" | "running" | "stopping" | "stopped";
 /** `retention` is the port's: a persistent sandbox is snapshotted by `stop` and restored by `get(name, {resume})`; the default is not persistent. */
 export interface CreateParams { name: string; template: string; vcpus: number; memMb: number; retention?: { persistent: boolean; keepLastSnapshots?: number } }
 /** One file to write; `size` is required (and exact) when `content` is not a Buffer. */
@@ -80,7 +88,9 @@ interface Record_ {
   /** Oldest first. Only a persistent sandbox has any. */
   snapshots: SnapshotMeta[];
   agent?: GuestAgent;
-  commands: Set<SandboxdCommand>;
+  commands: Set<TrackedCommand>;
+  /** Every stream id given to this VM's agent (the agent keeps an id for its whole run, so one is never reused); cleared when the VM is destroyed. */
+  streamIds?: Set<string>;
   starting: Set<Promise<unknown>>;
   stopping?: Promise<void>;
   /** The resume in flight: a second `get(name, { resume })` shares it instead of starting another. */
@@ -119,6 +129,8 @@ export class Sandbox {
   readFile(path: string, sink: (chunk: Buffer) => void | Promise<void>): Promise<number> { return this.daemon.readFile(this.name, path, sink); }
   stop(): Promise<void> { return this.daemon.stop(this.name); }
   delete(): Promise<void> { return this.daemon.delete(this.name); }
+  /** A command on the guest's streaming exec: output as it arrives, a `kill` by id, the exit status once every frame is read. The sandbox's stop ends it. */
+  runStream(spec: StreamSpec): Promise<GuestStream> { return this.daemon.runStream(this.name, spec); }
 }
 
 export class Sandboxd {
@@ -346,6 +358,30 @@ export class Sandboxd {
     return command;
   }
 
+  /** Refuses a bad id or one this VM's agent has seen. The command is counted among the sandbox's running ones, so a stop or delete kills it and ends its stream. */
+  async runStream(name: string, spec: StreamSpec): Promise<GuestStream> {
+    const rec = this.get_(name);
+    const agent = this.runningAgent(name);
+    if (!STREAM_ID.test(spec.id)) throw new SandboxdError(400, "bad_request");
+    const ids = (rec.streamIds ??= new Set());
+    if (ids.has(spec.id) || ids.size >= MAX_STREAM_IDS) throw new SandboxdError(409, "conflict");
+    ids.add(spec.id);
+    const { id, cmd, args, withToken, ...rest } = spec;
+    const starting = agent.streamInGuest({ ...rest, id, argv: [cmd, ...(args ?? [])], ...(withToken === true ? { token: true } : {}) }).then((stream) => {
+      const tracked: TrackedCommand = { kill: () => stream.kill("SIGKILL"), wait: () => stream.done, abort: () => stream.abort() };
+      rec.commands.add(tracked); // before `starting` settles, so a stop that waits for it finds the command
+      const gone = (): void => void rec.commands.delete(tracked);
+      stream.done.then(gone, gone);
+      return stream;
+    });
+    rec.starting.add(starting);
+    try {
+      return await starting;
+    } finally {
+      rec.starting.delete(starting);
+    }
+  }
+
   private runningAgent(name: string): GuestAgent {
     const rec = this.get_(name);
     if (rec.state !== "running" || rec.agent === undefined) throw new SandboxdError(409, "not_running");
@@ -496,7 +532,9 @@ export class Sandboxd {
     await within(Promise.allSettled([...rec.starting]), this.deps.startWaitMs ?? 30_000);
     await Promise.allSettled([...rec.commands].map((c) => c.kill("SIGKILL")));
     await within(Promise.allSettled([...rec.commands].map((c) => c.wait())), this.deps.pollMs ?? 100);
+    for (const c of rec.commands) c.abort?.(); // a stream the kill did not end goes with the VM
     rec.commands.clear();
+    rec.streamIds?.clear();
     if (reservation !== undefined) {
       // a delivery already in flight lands (or is given up on) before the wipe; one that is still pending after the bound means no snapshot
       await within(Promise.allSettled([...(rec.delivering ?? [])]), this.deps.startWaitMs ?? 30_000);

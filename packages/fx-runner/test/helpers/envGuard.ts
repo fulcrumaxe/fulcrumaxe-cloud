@@ -187,6 +187,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
   "src/vm/sandboxd/command.ts": ["crypto"], // D#587 B-2b-iii: a random command id and pid-file name; no process is started here, the command runs in the guest through the agent
   "src/vm/sandboxd/guestAgent.ts": ["net", "stream"], // D#587 B-2b-iii: the guest agent client: a Unix-socket connection to the sandbox's vsock proxy and the Duplex type it is handed; no process is started
+  "src/vm/sandboxd/streamCommand.ts": ["stream"], // D#587 B-5a-RT-1: the Duplex type of the connection it is handed; frames are read off that socket on demand, no process is started
   "src/vm/sandboxd/helperClient.ts": ["stream"], // D#587 B-2b-iii: the helper client takes an injected Duplex and speaks framed JSON over it; only the stream type is named
   "src/vm/sandboxd/files.ts": ["path"], // D#587 B-2b-iii-b: the guest path rules of file transfer (joins and normalises names); no file on this host is opened here
   "src/vm/sandboxd/production.ts": ["net", "stream"], // D#587 B-2b-iii-b: the Unix-socket connection to the helper and the Duplex type; the euid and platform arrive from the caller

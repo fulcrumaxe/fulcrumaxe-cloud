@@ -18,7 +18,7 @@ the child's pipes only as fast as the host reads the frames; `kill` (by `id`) si
 for an id the agent never ran, and returns the recorded result for a command that already ended. The old one-shot `exec` is unchanged.
 
 A streaming client must treat any frame other than `data` or `exit` as fatal, and a stream that closes without an `exit` frame as a
-lost command. After the leader exits the agent ends the stream within 5 s whatever output still arrives; before that it kills the
+lost command. Every byte the leader wrote is framed before the `exit` frame, however slowly the host reads (what its pipes hold when it is seen gone is owed in full). After that the agent ends the stream within 5 s whatever output background processes still produce; before that it kills the
 command's remaining processes, including ones that left the process group with `setsid`. They are found by a marker variable
 (`FX_CMD_ID`, set last in the command's environment), not by cgroup or subreaper (ordinary commands get no cgroup; only token launches do, below), and a subreaper
 would have to reap strangers' children. A process that clears its environment escapes the sweep; the guest treats code it runs as
@@ -28,6 +28,9 @@ The guest files are inside the root disk, so a change to `agent.py` changes the 
 image's entry in the signed update metadata. No digest of the agent is committed to the repo: the release workflow computes it from the
 checked-in file, checks it against the build, and signs it in `microvm-image-release.yml`. A new image is therefore published by a release
 run of that workflow, not by this change.
+
+The agent sets SIGINT and SIGQUIT back to their default action when it starts, because `guest/init` starts it with `&` from a non-interactive shell,
+which leaves both ignored, and every command would inherit that; a `kill` with `SIGINT` could then never interrupt anything.
 
 ## The subscription token
 

@@ -30,6 +30,7 @@ describeEngineContract(
       env: () => cleanEnv({ mode: "subscription" }),
       workdir: mkdtempSync(path.join(tmpdir(), "b5a_work-")),
       timeoutMsOf: (handle) => host.timeoutMsOf(handle),
+      interrupt: (handle) => host.interrupt(handle),
       lose: (handle) => host.deleteSandbox(handle),
     };
   },
@@ -47,6 +48,7 @@ describeEngineContract(
       env: () => ({}),
       workdir: "/work/job",
       timeoutMsOf: (handle) => port.timeoutMsOf(handle),
+      interrupt: (handle) => port.interrupt(handle),
       lose: async () => {
         const id = rig.daemon.list()[0]?.name;
         if (id === undefined) throw new Error("no sandbox to lose");
