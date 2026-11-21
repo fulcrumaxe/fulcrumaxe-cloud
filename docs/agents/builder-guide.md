@@ -169,6 +169,7 @@ The rules live in `packages/db/migrations/README.md`. In short:
   `packages/db/migrations/1031_engine_halt.sql`, #992) needs its own check in
   `packages/db/scripts/test-neon-shape.sh` that pins the exact function signatures, their ACLs and
   the role's privileges.
+- A column held to a closed set of words by a `CHECK` (as `runner_sandbox_status.reason` is, with nine words since migration 1044) has the set pinned in `packages/db/scripts/test-neon-shape.sh`. Widen the set in a migration and the pinned pattern in the same change, in the order the words appear in the constraint, or the shape check fails.
 - Run before you report: `bash packages/db/scripts/check-migration-order.sh --base origin/main`,
   `bash packages/db/scripts/test-neon-shape.sh`, `node scripts/ci/check-migration-compat.mjs`, and
   the whole `packages/db` suite (`pnpm --filter @fx/db test`), including the inventory tests above.
