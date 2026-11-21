@@ -62,6 +62,8 @@ export interface VmJobSteps<Agent, Bundle, Applied, Checked> {
   hostApply(bundle: Bundle, signal: AbortSignal): Promise<Applied>;
   /** The approved check, in the fresh VM. Absent until B-5b's fresh-VM check merges: the job then ends with `CHECK_CLOSED`. */
   runCheck?(vm: string, applied: Applied, signal: AbortSignal): Promise<Checked>;
+  /** False when the host steps left nothing to check (no check on the job, out of scope, no change): the check VM is then never made. Absent: always checked. */
+  needsCheck?(applied: Applied): boolean;
 }
 
 interface Entry { kind: VmKind; request: VmRequest; state: "running" | "stopped"; leftover: boolean }
@@ -100,7 +102,7 @@ export interface VmJobRecord {
 }
 
 export type VmJobOutcome<Agent, Applied, Checked> =
-  | { ok: true; agent: Agent; applied: Applied; check: Checked; record: VmJobRecord }
+  | { ok: true; agent: Agent; applied: Applied; check: Checked | undefined; record: VmJobRecord }
   | { ok: false; step: VmStep; code: string; teardownIncomplete: boolean; record: VmJobRecord };
 
 export interface VmJobDeps<Agent, Bundle, Applied, Checked> {
@@ -255,7 +257,7 @@ export async function runVmJob<Agent, Bundle, Applied, Checked>(deps: VmJobDeps<
     durationMs: Math.max(0, Math.trunc(now() - started)),
   });
 
-  let result: { agent: Agent; applied: Applied; check: Checked } | undefined;
+  let result: { agent: Agent; applied: Applied; check: Checked | undefined } | undefined;
   let failure: Failed | undefined;
   try {
     await step("admit", "vm_admission_refused", async () => {
@@ -295,15 +297,18 @@ export async function runVmJob<Agent, Bundle, Applied, Checked>(deps: VmJobDeps<
     await step("stop_agent", "vm_teardown_incomplete", () => port.stop(deps.names.agent));
     registry.markStopped(deps.names.agent);
     const applied = await step("host_apply", "vm_workspace_failed", () => steps.hostApply(bundle, signal));
-    if (steps.runCheck === undefined) throw new Failed("check", CHECK_CLOSED);
-    const runCheck = steps.runCheck.bind(steps);
-    await step("check_vm", "vm_admission_refused", async () => {
-      admit("check");
-      registry.add(deps.names.check, "check", deps.request);
-      registered.add(deps.names.check);
-    });
-    await bringUp(deps.names.check, "check", ["check_vm", "check_vm", "check_vm"]);
-    const check = await step("check", "vm_workspace_failed", () => runCheck(deps.names.check, applied, signal), 0);
+    let check: Checked | undefined;
+    if (steps.needsCheck === undefined || steps.needsCheck(applied)) {
+      if (steps.runCheck === undefined) throw new Failed("check", CHECK_CLOSED);
+      const runCheck = steps.runCheck.bind(steps);
+      await step("check_vm", "vm_admission_refused", async () => {
+        admit("check");
+        registry.add(deps.names.check, "check", deps.request);
+        registered.add(deps.names.check);
+      });
+      await bringUp(deps.names.check, "check", ["check_vm", "check_vm", "check_vm"]);
+      check = await step("check", "vm_workspace_failed", () => runCheck(deps.names.check, applied, signal), 0);
+    }
     result = { agent, applied, check };
   } catch (err) {
     // fx-swallow-ok: the error is replaced by its closed code (`Failed`), and teardown below runs whatever it was; no text of it may travel

@@ -12,6 +12,8 @@ import { createFileLedger } from "../../src/daemon/ledger.js";
 import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
 import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { createWorkspaceStore } from "../../src/job/workspace.js";
+import { VmRegistry } from "../../src/vm/jobLifecycle.js";
+import { createMicrovmVmPort } from "../../src/vm/sandboxd/vmPort.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import type { SandboxPort, StartDetachedOptions } from "../../src/sandbox/port.js";
 import type { WorkspaceSource } from "../../src/vm/workspace/crossing.js";
@@ -37,24 +39,49 @@ afterEach(async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+/** What the VM side of the rig can be made to do wrong. A create fails for the agent's VM (`rn-`) or the check VM (`rc-`). */
+interface Faults {
+  create?: "agent" | "check";
+  state?: "stopped";
+  guest?: true;
+  stop?: true;
+  deleteAgent?: true;
+  agentFails?: true;
+  hang?: () => void;
+  quiesce?: true;
+  release?: true;
+  teardownOk?: false;
+}
+
 /** A port that records every call into `log` under its own name. */
-function recordingPort(name: string, log: string[], starts: StartDetachedOptions[] = [], retentions: boolean[] = []): SandboxPort {
+function recordingPort(name: string, log: string[], starts: StartDetachedOptions[] = [], retentions: boolean[] = [], faults: Faults = {}): SandboxPort {
   const handle = { runId: "", sandboxName: `${name}-sb` };
   const event = (runId: string): NormalizedEvent => ({ runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s", agentOutput: { verdict: "done" } });
   return {
     async createSandbox(opts) {
       log.push(`${name}.create`);
       retentions.push(opts.retention.persistent);
+      if (faults.create !== undefined && opts.sandboxName.startsWith(faults.create === "agent" ? "rn-" : "rc-")) throw new Error("/home/sentinel/secret refused");
       return { ...handle, sandboxName: opts.sandboxName };
     },
-    startDetached: (h, opts) => (log.push(`${name}.agent`), starts.push(opts), { handle: h, hookFired: Promise.resolve(event(opts.runId)) }),
+    startDetached: (h, opts) => {
+      log.push(`${name}.agent`);
+      starts.push(opts);
+      if (faults.hang !== undefined) {
+        faults.hang();
+        return { handle: h, hookFired: new Promise<never>(() => undefined) };
+      }
+      return { handle: h, hookFired: faults.agentFails === true ? Promise.reject(new Error("agent died")) : Promise.resolve(event(opts.runId)) };
+    },
     resume: (h, _s, _p, opts) => (log.push(`${name}.resume`), { handle: h, hookFired: Promise.resolve(event(opts.runId)) }),
     async extendTimeout() {},
     async stop() {
       log.push(`${name}.stop`);
+      if (faults.stop === true) throw new Error("stop refused");
     },
-    async deleteSandbox() {
+    async deleteSandbox(h) {
       log.push(`${name}.delete`);
+      if (faults.deleteAgent === true && h.sandboxName.startsWith("rn-")) throw new Error("delete refused");
     },
     async measure() {
       return [];
@@ -69,10 +96,17 @@ function recordingPort(name: string, log: string[], starts: StartDetachedOptions
     async sandboxExists() {
       return true;
     },
-  };
+    async sandboxState() {
+      return faults.state ?? "running";
+    },
+    async guestOf() {
+      if (faults.guest === true) throw new Error("no guest");
+      return { name: "guest" } as never;
+    },
+  } as SandboxPort & { guestOf: () => Promise<never> };
 }
 
-function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?: boolean; withCheck?: boolean; tip?: string | null; bundle?: Buffer; collectError?: string; persistent?: boolean; resume?: boolean; fresh?: "pass" | "fail" | "none"; changed?: string[] | null; derived?: { table: unknown; files: Record<string, string> }; steps?: string[]; lockSeen?: Array<{ manifest: string | null; placeholderPresent: boolean }> } = {}) {
+function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?: boolean; withCheck?: boolean; tip?: string | null; bundle?: Buffer; collectError?: string; persistent?: boolean; faults?: Faults; maxVms?: number; shutdown?: AbortSignal; token?: { needed: () => boolean; slot: (vm: string, log: string[]) => { deliver(): Promise<void>; wipe(): Promise<void> } | undefined }; resume?: boolean; fresh?: "pass" | "fail" | "none"; changed?: string[] | null; derived?: { table: unknown; files: Record<string, string> }; steps?: string[]; sleeps?: number[]; lockSeen?: Array<{ manifest: string | null; placeholderPresent: boolean }> } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -83,6 +117,7 @@ function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?:
   const archives: Array<{ mirror: string; commit: string }> = [];
   const checks: CheckStepInput[] = [];
   const freshChecks: FreshCheckInput[] = [];
+  const freshHandles: string[] = [];
   const applied: Array<{ bundle: Buffer; base: string; mirrorDir: string; workspace: string }> = [];
   const gits: Array<ReturnType<typeof fakeGitPath>> = [];
   const makeGit = (name: string) => {
@@ -94,14 +129,26 @@ function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?:
     return git;
   };
   const retentions: boolean[] = [];
-  const vmPort = recordingPort("vm", log, vmStarts, retentions);
+  const faults: Faults = over.faults ?? {};
+  const vmPort = recordingPort("vm", log, vmStarts, retentions, faults);
   const hostPort = recordingPort("host", log, hostStarts);
+  // the production VM factory over the recording port: every VM the lifecycle makes, stops and ends shows in `log` as `vm.create`, `vm.stop`, `vm.delete`
+  const lifecycle = {
+    port: createMicrovmVmPort({ sandbox: vmPort as never, daemon: { teardown: async () => (log.push("vm.teardown"), faults.teardownOk !== false), get: async () => ({}) as never }, bindings: { bind: (name: string) => (log.push(`bind:${name.slice(0, 3)}`), {} as never), unbind: (name: string) => void log.push(`unbind:${name.slice(0, 3)}`) }, policy: { release: async (id: string) => { log.push(`release:${id.slice(0, 3)}`); if (faults.release === true) throw new Error("socket stuck"); } }, idOf: (name) => name, timeoutMs: 60_000, ...(over.persistent === true ? { persistent: true } : {}) }),
+    registry: new VmRegistry(),
+    caps: { maxVms: over.maxVms ?? 2, maxVcpus: 4, maxMemoryMb: 4096, snapshotDir: "/var/lib/fx/snap", snapshotQuotaBytes: 10 ** 12 },
+    request: { vcpus: 1, memoryMb: 1024 },
+    readMemAvailableBytes: () => 16 * 1024 ** 3,
+    ...(over.token === undefined ? {} : { token: { needed: over.token.needed, slot: (vm: string) => over.token?.slot(vm, log) } }),
+  };
   const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => (over.resume === true ? { kind: "resume", sessionId: "old", workspace: path.join(root, "work", "old") } : { kind: "fresh", branch: null }), defaultModel: "sonnet" };
   const archive = { gz: Buffer.alloc(0), commit: TIP, commitText: Buffer.alloc(0), tree: "c".repeat(40), items: [] } as WorkspaceArchive;
+  const rigClock: Clock = over.sleeps === undefined ? clock : { now: clock.now, sleep: (ms, signal) => (over.sleeps?.push(ms), clock.sleep(ms, signal)) };
   const deps: JobHandlerDeps = {
-    client, keyring: KEYRING, clock, run, sandbox: vmPort, ledger: createFileLedger(path.join(root, `jobs-${++rigs}.json`), ledgerOptions()), git: makeGit("b"), gitA: makeGit("a"), events: createEventRelay(),
+    client, keyring: KEYRING, clock: rigClock, run, sandbox: vmPort, ledger: createFileLedger(path.join(root, `jobs-${++rigs}.json`), ledgerOptions()), git: makeGit("b"), gitA: makeGit("a"), events: createEventRelay(),
     recordSession: async () => {}, heartbeatMs: 1e9, flushMs: 1e9, runJobFn: runJob, browserReady: () => undefined,
     ...(over.steps === undefined ? {} : { onStep: (line: string) => void over.steps?.push(line) }),
+    ...(over.shutdown === undefined ? {} : { shutdown: over.shutdown }),
     ...(over.engine === undefined ? { engine: "microvm" as const } : { engine: over.engine }),
     ...(over.noHost === true ? {} : { hostSandbox: hostPort }),
     ...(over.noVm === true ? {} : {
@@ -128,9 +175,13 @@ function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?:
           return { tip: "f".repeat(40), commits: 1 };
         },
         archive: async (mirror: string, commit: string) => (archives.push({ mirror, commit }), archive),
-        quiesce: async () => void log.push("vm.quiesce"),
+        quiesce: async () => {
+          log.push("vm.quiesce");
+          if (faults.quiesce === true) throw new Error("agent would not stop");
+        },
+        lifecycle,
         ...(over.persistent === true ? { persistent: true } : {}),
-        ...(over.withCheck === true && over.fresh !== "none" ? { freshCheck: async (input: FreshCheckInput): Promise<CheckOutcome> => (log.push("fresh_check"), freshChecks.push(input), over.fresh === "fail" ? { passed: false, body: { exit_code: 1, duration_ms: 2, timed_out: false, skipped_tests: null, summary: "failed in the fresh VM" } } : { passed: true, body: { exit_code: 0, duration_ms: 1, timed_out: false, skipped_tests: null, summary: "" } }) } : {}),
+        ...(over.withCheck === true && over.fresh !== "none" ? { freshCheck: async (input: FreshCheckInput, vm: { sandboxName: string }): Promise<CheckOutcome> => (log.push("fresh_check"), freshChecks.push(input), freshHandles.push(vm.sandboxName), over.fresh === "fail" ? { passed: false, body: { exit_code: 1, duration_ms: 2, timed_out: false, skipped_tests: null, summary: "failed in the fresh VM" } } : { passed: true, body: { exit_code: 0, duration_ms: 1, timed_out: false, skipped_tests: null, summary: "" } }) } : {}),
       },
     }),
     ...(over.lockSeen === undefined ? {} : {
@@ -145,7 +196,7 @@ function rig(over: { engine?: "microvm" | "os_sandbox"; noHost?: boolean; noVm?:
     ...(over.changed === undefined ? {} : { changedFiles: async (workspace: string, base: string) => (base === "HEAD" ? [] : (log.push(`changed:${workspace}`), over.changed ?? null)) }),
   };
   return {
-    handler: createJobHandler(deps), log, retentions, gits, vmStarts, hostStarts, sources, archives, checks, freshChecks, applied,
+    handler: createJobHandler(deps), log, lifecycle, retentions, gits, vmStarts, hostStarts, sources, archives, checks, freshChecks, freshHandles, applied,
     async claim(job: ReturnType<typeof jobFor>) {
       cloud.enqueue(signedJob(job));
       const claimed = await client.claim();
@@ -248,11 +299,12 @@ const bodies = (suffix: string): Array<Record<string, unknown>> => cloud.seen.fi
 describe("the approved check in a microVM job runs in a fresh VM, after the host has the agent's commits", () => {
   const BUNDLE = Buffer.from("bundle");
 
-  it("the agent is quiesced, its commits are brought in, then the check runs in a fresh VM; the host check step is never called, and the VM the agent used is stopped and deleted after", async () => {
+  it("the agent is quiesced, its commits are read out, its VM is stopped, the commits are brought in, then the check runs in a fresh VM; the host check step is never called, and both VMs are deleted after", async () => {
     const r = rig({ withCheck: true, bundle: BUNDLE });
     await r.handler(await r.claim(jobFor({ check: CHECK })));
-    const order = r.log.filter((l) => ["vm.agent", "vm.quiesce", "collect", "apply", "fresh_check", "check", "vm.stop", "vm.delete"].includes(l));
-    expect(order).toEqual(["vm.agent", "vm.quiesce", "collect", "apply", "fresh_check", "vm.stop", "vm.delete"]);
+    const order = r.log.filter((l) => ["vm.create", "vm.agent", "vm.quiesce", "collect", "apply", "fresh_check", "check", "vm.stop", "vm.delete"].includes(l));
+    // the agent's VM is stopped before the check VM exists (so a cap of one VM never deadlocks); the check VM is the second create
+    expect(order).toEqual(["vm.create", "vm.agent", "vm.quiesce", "collect", "vm.stop", "apply", "vm.create", "fresh_check", "vm.delete", "vm.delete"]);
     expect(r.checks).toEqual([]);
     expect(bodies("/done")[0]?.check).toMatchObject({ exit_code: 0, timed_out: false });
     // the agent got the same vector as a deny entry, on its start
@@ -351,7 +403,7 @@ describe("the agent's commits come out of the guest before anything on the host 
   it("the agent is quiesced, then the bundle is collected and applied to the host workspace against the commit the run started from, then the check runs", async () => {
     const r = rig({ withCheck: true, bundle: BUNDLE });
     await r.handler(await r.claim(jobFor({ check: CHECK })));
-    expect(r.log.filter((l) => ["vm.agent", "vm.quiesce", "collect", "apply", "fresh_check", "vm.stop", "vm.delete"].includes(l))).toEqual(["vm.agent", "vm.quiesce", "collect", "apply", "fresh_check", "vm.stop", "vm.delete"]);
+    expect(r.log.filter((l) => ["vm.agent", "vm.quiesce", "collect", "apply", "fresh_check", "vm.stop", "vm.delete"].includes(l))).toEqual(["vm.agent", "vm.quiesce", "collect", "vm.stop", "apply", "fresh_check", "vm.delete", "vm.delete"]);
     expect(r.applied).toHaveLength(1);
     expect(r.applied[0]).toMatchObject({ bundle: BUNDLE, base: TIP, mirrorDir: expect.stringMatching(/^\/mirrors\/b\//) as string });
     expect(r.applied[0]?.workspace).toContain(path.join(root, "work"));
@@ -379,12 +431,14 @@ describe("the agent's commits come out of the guest before anything on the host 
     expect(r.log).not.toContain("apply");
   });
 
-  it("a bundle the host refuses ends the run with that closed code: the check is not run and the VM is still stopped and deleted", async () => {
+  it("a bundle the host refuses ends the run with that closed code: the check is not run, no check VM is made, and the agent's VM is still deleted", async () => {
     const r = rig({ withCheck: true, collectError: "bundle_tree" });
     expect(await r.handler(await r.claim(jobFor({ check: CHECK })))).toMatchObject({ status: "failed", reason: "bundle_tree" });
     expect(r.log).not.toContain("fresh_check");
     expect(r.log).not.toContain("apply");
-    expect(r.log.slice(-3)).toEqual(["vm.stop", "vm.delete", "unbind"]);
+    expect(r.log.slice(-4)).toEqual(["release:rn-", "vm.delete", "unbind:rn-", "unbind"]);
+    expect(r.log.filter((l) => l === "vm.create")).toHaveLength(1);
+    expect(r.lifecycle.registry.ids()).toEqual([]);
   });
 
   it("a fix round starts a fresh VM from the branch tip, never a resume of an earlier session; an OS-sandbox runner resumes as before", async () => {
@@ -399,7 +453,7 @@ describe("the agent's commits come out of the guest before anything on the host 
     expect(os.gits[0]?.calls.some((c) => c.startsWith("resume"))).toBe(true);
   });
 
-  it("the sandbox is persistent only when the wiring says so, and then it is deleted at the end without a stop (a stop would write a snapshot only to delete it)", async () => {
+  it("the agent's VM is persistent only when the wiring says so; either way it is stopped before the host steps and deleted when the job ends (resume is not wired, so none is kept)", async () => {
     const off = rig();
     await off.handler(await off.claim(jobFor()));
     expect(off.retentions).toEqual([false]);
@@ -407,7 +461,207 @@ describe("the agent's commits come out of the guest before anything on the host 
     const on = rig({ persistent: true });
     await on.handler(await on.claim(jobFor()));
     expect(on.retentions).toEqual([true]);
-    expect(on.log).not.toContain("vm.stop");
+    expect(on.log.filter((l) => l === "vm.stop")).toHaveLength(1);
     expect(on.log).toContain("vm.delete");
+    expect(on.lifecycle.registry.ids()).toEqual([]);
+  });
+});
+
+/** What a job's whole life looks like at the end: every VM ended, no listener, nothing left in the teardown table. */
+const clean = (r: ReturnType<typeof rig>): void => {
+  expect(r.lifecycle.registry.ids()).toEqual([]);
+  expect(r.log.filter((l) => l.startsWith("host."))).toEqual([]);
+};
+const created = (r: ReturnType<typeof rig>): number => r.log.filter((l) => l === "vm.create").length;
+const deleted = (r: ReturnType<typeof rig>): number => r.log.filter((l) => l === "vm.delete").length;
+
+describe("a microVM job runs through runVmJob: every way it can end tears every VM down", () => {
+  const BUNDLE = Buffer.from("bundle");
+  const withCheck = { withCheck: true, bundle: BUNDLE } as const;
+
+  it("the full order of one job, from a recorded log: admit and create, egress and guest checks, the agent, quiesce, bundle out, stop, apply, the check VM, the check, then both VMs end", async () => {
+    const r = rig(withCheck);
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("completed");
+    const steps = ["bind", "vm.create", "vm.agent", "vm.quiesce", "collect", "release:rn-", "vm.stop", "apply", "fresh_check", "unbind"];
+    expect(r.log.filter((l) => steps.includes(l) || l.startsWith("release:") || l === "vm.create" || l === "vm.delete")).toEqual(["bind", "vm.create", "vm.agent", "vm.quiesce", "collect", "vm.stop", "apply", "vm.create", "fresh_check", "release:rc-", "vm.delete", "release:rn-", "vm.delete", "unbind"]);
+    clean(r);
+  });
+
+  it("with max_vms = 1 the check never deadlocks on the cap: the agent's VM is stopped before the check VM is made", async () => {
+    const r = rig({ ...withCheck, maxVms: 1 });
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("completed");
+    expect(created(r)).toBe(2);
+    expect(r.freshChecks).toHaveLength(1);
+    clean(r);
+  });
+
+  it("a job with no check never makes a check VM, and neither does a check the host steps decided not to run", async () => {
+    const none = rig({ bundle: BUNDLE });
+    await none.handler(await none.claim(jobFor()));
+    expect(created(none)).toBe(1);
+    const outside = rig({ ...withCheck, changed: ["infra/prod/plan.tf"] });
+    await outside.handler(await outside.claim(jobFor({ check: CHECK, scope: ["src/**"] })));
+    expect(created(outside)).toBe(1);
+    expect(bodies("/done").at(-1)?.check).toMatchObject({ reason: "out_of_scope" });
+    clean(none);
+    clean(outside);
+  });
+
+  it("a VM that cannot be created ends the job sandbox_unavailable on no other sandbox: nothing starts, nothing is left in the table", async () => {
+    const r = rig({ faults: { create: "agent" } });
+    expect(await r.handler(await r.claim(jobFor()))).toEqual({ status: "failed", reason: "sandbox_unavailable" });
+    expect(r.vmStarts).toEqual([]);
+    expect(r.log).toContain("vm.delete");
+    clean(r);
+  });
+
+  it("egress that is not up, a guest that does not answer and a cap that is reached each end the job sandbox_unavailable and delete the VM they made", async () => {
+    for (const faults of [{ state: "stopped" }, { guest: true }] as const) {
+      const r = rig({ faults });
+      expect(await r.handler(await r.claim(jobFor())), JSON.stringify(faults)).toEqual({ status: "failed", reason: "sandbox_unavailable" });
+      expect(r.vmStarts).toEqual([]);
+      expect(deleted(r)).toBe(1);
+      clean(r);
+    }
+    const capped = rig({ maxVms: 1 });
+    capped.lifecycle.registry.add("held-by-another-job", "agent", { vcpus: 1, memoryMb: 1024 });
+    expect(await capped.handler(await capped.claim(jobFor()))).toEqual({ status: "failed", reason: "sandbox_unavailable" });
+    expect(created(capped)).toBe(0);
+    expect(capped.lifecycle.registry.ids()).toEqual(["held-by-another-job"]);
+  });
+
+  it("an agent that fails ends the job with the agent's own reason; the VM is deleted and no bundle is read", async () => {
+    const r = rig({ ...withCheck, faults: { agentFails: true } });
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("failed");
+    expect(r.log).not.toContain("collect");
+    expect(created(r)).toBe(1);
+    expect(deleted(r)).toBe(1);
+    clean(r);
+  });
+
+  it("an agent that will not stop (quiesce fails) ends the job before any bundle is read; the VM is deleted", async () => {
+    const r = rig({ ...withCheck, faults: { quiesce: true } });
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("failed");
+    expect(r.log).not.toContain("collect");
+    expect(r.log).not.toContain("apply");
+    expect(deleted(r)).toBe(1);
+    clean(r);
+  });
+
+  it("a cancel from the cloud or a daemon stop in the middle of the agent's turn ends the job aborted: the VM is ended and nothing is pushed or checked", async () => {
+    const stop = new AbortController();
+    const r = rig({ ...withCheck, shutdown: stop.signal, faults: { hang: () => queueMicrotask(() => stop.abort()) } });
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("aborted");
+    expect(r.log).not.toContain("collect");
+    expect(r.freshChecks).toEqual([]);
+    expect(deleted(r)).toBe(1);
+    clean(r);
+  });
+
+  it("a stop that fails after the bundle is out ends the job and still deletes the VM; the host steps and the check never ran", async () => {
+    const r = rig({ ...withCheck, faults: { stop: true } });
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("failed");
+    expect(r.log).not.toContain("apply");
+    expect(r.freshChecks).toEqual([]);
+    expect(deleted(r)).toBe(1);
+    clean(r);
+  });
+
+  it("a check VM that cannot be made ends the job and deletes the agent's VM and the one it tried", async () => {
+    const r = rig({ ...withCheck, faults: { create: "check" } });
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("failed");
+    expect(r.freshChecks).toEqual([]);
+    expect(created(r)).toBe(2);
+    expect(deleted(r)).toBe(2);
+    clean(r);
+  });
+
+  it("a delete that fails is reported, not hidden: the job fails, the other VM is still deleted, and the leftover stays in the table for the reaper", async () => {
+    const r = rig({ ...withCheck, faults: { deleteAgent: true } });
+    expect((await r.handler(await r.claim(jobFor({ check: CHECK })))).status).toBe("failed");
+    expect(deleted(r)).toBe(2);
+    expect(r.lifecycle.registry.leftovers()).toHaveLength(1);
+    expect(r.lifecycle.registry.ids()).toEqual(r.lifecycle.registry.leftovers());
+  });
+
+  it("an agent that fails and a token wipe that fails end the job vm_teardown_incomplete, not the agent's reason; the VM is destroyed, never kept or deleted", async () => {
+    const wipeFails = { needed: () => true, slot: (_vm: string, log: string[]) => ({ deliver: async () => void log.push("deliver"), wipe: async () => { log.push("wipe"); throw new Error("unconfirmed"); } }) };
+    const r = rig({ ...withCheck, persistent: true, faults: { agentFails: true }, token: wipeFails });
+    expect(await r.handler(await r.claim(jobFor({ check: CHECK })))).toEqual({ status: "failed", reason: "vm_teardown_incomplete" });
+    expect(r.log).toContain("wipe");
+    expect(r.log).not.toContain("collect");
+    expect(r.log).not.toContain("vm.stop");
+    expect(r.freshChecks).toEqual([]);
+  });
+
+  it("an agent that fails and a delete of its VM that fails end the job vm_teardown_incomplete, and the leftover stays for the reaper", async () => {
+    const steps: string[] = [];
+    const r = rig({ ...withCheck, steps, faults: { agentFails: true, deleteAgent: true } });
+    expect(await r.handler(await r.claim(jobFor({ check: CHECK })))).toEqual({ status: "failed", reason: "vm_teardown_incomplete" });
+    expect(r.lifecycle.registry.leftovers()).toHaveLength(1);
+    expect(steps.some((l) => l.includes("microVM teardown incomplete (a leftover is kept for the reaper)"))).toBe(true);
+  });
+
+  it("an agent that fails with a teardown that completed keeps the agent's own reason, and no teardown line is journaled", async () => {
+    const steps: string[] = [];
+    const r = rig({ ...withCheck, steps, faults: { agentFails: true } });
+    const out = await r.handler(await r.claim(jobFor({ check: CHECK })));
+    expect(out).toMatchObject({ status: "failed" });
+    expect(out).not.toMatchObject({ reason: "vm_teardown_incomplete" });
+    expect(steps.some((l) => l.includes("teardown incomplete"))).toBe(false);
+  });
+
+  it("the check runs in the check VM (rc-<run>), never in the agent's VM (rn-<run>)", async () => {
+    const r = rig(withCheck);
+    const job = jobFor({ check: CHECK });
+    expect((await r.handler(await r.claim(job))).status).toBe("completed");
+    expect(r.freshHandles).toEqual([`rc-${job.run_id}`]);
+  });
+
+  it("the handler gives the agent step a bounded moment to unwind after its VM is ended (AGENT_UNWIND_MS)", async () => {
+    const sleeps: number[] = [];
+    const r = rig({ sleeps });
+    expect((await r.handler(await r.claim(jobFor()))).status).toBe("completed");
+    expect(sleeps).toContain(5_000);
+  });
+
+  it("a listener that will not close is reported the same way, and the VM is still deleted", async () => {
+    const r = rig({ faults: { release: true } });
+    expect((await r.handler(await r.claim(jobFor()))).status).toBe("failed");
+    expect(deleted(r)).toBe(1);
+    expect(r.lifecycle.registry.leftovers()).toHaveLength(1);
+  });
+
+  it("the token step is a slot between the guest check and the agent: delivered before the agent starts, wiped after it ends and before the bundle is read", async () => {
+    const r = rig({ token: { needed: () => true, slot: (_vm, log) => ({ deliver: async () => void log.push("deliver"), wipe: async () => void log.push("wipe") }) } });
+    expect((await r.handler(await r.claim(jobFor()))).status).toBe("completed");
+    const order = r.log.filter((l) => ["vm.create", "deliver", "vm.agent", "vm.quiesce", "wipe", "collect"].includes(l));
+    expect(order).toEqual(["vm.create", "deliver", "vm.agent", "vm.quiesce", "wipe", "collect"]);
+    clean(r);
+  });
+
+  it("a job that needs a token while none is wired ends vm_token_delivery_failed: the agent never starts and the VM is deleted", async () => {
+    const r = rig({ token: { needed: () => true, slot: () => undefined } });
+    expect(await r.handler(await r.claim(jobFor()))).toEqual({ status: "failed", reason: "vm_token_delivery_failed" });
+    expect(r.vmStarts).toEqual([]);
+    expect(deleted(r)).toBe(1);
+    clean(r);
+  });
+
+  it("a token the guest could not wipe ends the VM with no snapshot (destroy) and the job fails", async () => {
+    const wiped: string[] = [];
+    const r = rig({ persistent: true, token: { needed: () => true, slot: () => ({ deliver: async () => void wiped.push("deliver"), wipe: async () => { wiped.push("wipe"); throw new Error("token still there"); } }) } });
+    expect((await r.handler(await r.claim(jobFor()))).status).toBe("failed");
+    expect(wiped).toEqual(["deliver", "wipe"]);
+    expect(r.log).toContain("vm.teardown");
+    expect(r.log).not.toContain("vm.stop");
+    clean(r);
+  });
+
+  it("the OS-sandbox path never touches the lifecycle: no VM is registered, made or ended by it", async () => {
+    const r = rig({ engine: "os_sandbox", withCheck: true });
+    await r.handler(await r.claim(jobFor({ check: CHECK })));
+    expect(r.lifecycle.registry.ids()).toEqual([]);
+    expect(r.log.filter((l) => l.startsWith("release:") || l === "vm.teardown")).toEqual([]);
   });
 });

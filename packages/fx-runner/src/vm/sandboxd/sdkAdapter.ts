@@ -57,7 +57,8 @@ export class SandboxdSdkError extends Error {
   }
 }
 
-const idOf = (name: string): string => `sb-${createHash("sha256").update(name).digest("hex").slice(0, 32)}`;
+/** The daemon id a sandbox name maps to. */
+export const idOf = (name: string): string => `sb-${createHash("sha256").update(name).digest("hex").slice(0, 32)}`;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 /** The most a timer may be asked to wait: `setTimeout` overflows past 2^31-1 ms and would fire at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
