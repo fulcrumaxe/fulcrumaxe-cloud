@@ -179,7 +179,17 @@ describe("the engine track's states (criterion 1: one fixture and one copy asser
     expect(micro.lines).toEqual(["box-1 connected · MicroVM isolation"]);
     expect(micro.word).toBe("Done");
     const std = at(track({ machine: "done" }, { tier: "standard" }), "machine");
-    expect(std.lines).toEqual(["box-1 connected · Standard isolation", NO_KVM]);
+    expect(std.lines).toEqual(["box-1 connected · Standard isolation"]); // ON-6b: the hardware is not known, so no claim about KVM
+    const absent = at(track({ machine: "done" }, { tier: "standard" }), "machine", { machine: { kvm: "absent" } });
+    expect(absent.lines).toEqual(["box-1 connected · Standard isolation", NO_KVM]);
+    const present = at(track({ machine: "done" }, { tier: "standard" }), "machine", { machine: { kvm: "present" } });
+    expect(present.lines).toEqual(["box-1 connected · Standard isolation"]); // KVM there, nothing said about the helper: never the no-KVM line
+    const noHelper = at(track({ machine: "done" }, { tier: "standard" }), "machine", { machine: { kvm: "present", helper_missing: true } });
+    expect(noHelper.lines).toEqual(["box-1 connected · Standard isolation", "box-1 can run microVMs. Run sudo fx-runner vm install on it."]);
+    expect(noHelper.commands.map((c) => c.text)).toEqual(["sudo fx-runner vm install"]);
+    expect(text(noHelper)).not.toContain(NO_KVM);
+    const micro2 = at(track({ machine: "done" }, { tier: "microvm" }), "machine", { machine: { kvm: "absent" } });
+    expect(micro2.lines).toEqual(["box-1 connected · MicroVM isolation"]);
     expect(NO_KVM).toBe("This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project.");
     expect(at(track({ machine: "done" }), "machine").lines).toEqual(["box-1 connected"]); // a machine that has not said its tier
   });

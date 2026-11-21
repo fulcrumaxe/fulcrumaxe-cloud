@@ -143,7 +143,10 @@ export function describeStep(steps, i, ctx = {}) {
     case "machine":
       if (step.state === "done") {
         v.lines.push(nm + " connected" + (step.tier === "microvm" ? " · MicroVM isolation" : step.tier === "standard" ? " · Standard isolation" : ""));
-        if (step.tier === "standard" && m.kvm !== "present") v.lines.push(NO_KVM);
+        // D#845 ON-6b: the Standard tier follows the configured engine, not the hardware, so "no KVM" is said only when the machine's facts say KVM is absent. With KVM present
+        // the machine can run microVMs and lacks the helper; a machine that has not said (no `kvm`) gets neither line, since neither would be known.
+        if (step.tier === "standard" && m.kvm === "absent") v.lines.push(NO_KVM);
+        else if (step.tier === "standard" && m.kvm === "present" && m.helper_missing) fix("microvm_helper_missing");
       } else if (m.doctor_reason === "microvm_helper_not_ready" || m.doctor_reason === "microvm_helper_out_of_date") fix(m.doctor_reason);
       else if (m.helper_missing) fix("microvm_helper_missing");
       else if (m.linked_silent) { v.lines.push("Not started yet. On " + nm + " run fx-runner service status"); v.commands.push({ label: "", text: "fx-runner service status" }); }

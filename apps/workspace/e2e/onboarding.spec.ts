@@ -1278,10 +1278,11 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     expect(await lines(page, "github_app")).toEqual(["Finish Sign in to Claude on the machine first"]);
   });
 
-  test("no KVM is normal: Standard isolation, the fixed line, and no failure styling, word or copy", async ({ page }) => {
+  test("Standard isolation says nothing about KVM while the machine's facts do not (the tier follows the engine setting, not the hardware), with no failure styling, word or copy", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard" }))] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "machine")).toEqual([`${BOX} connected · Standard isolation`, "This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project."]);
+    expect(await lines(page, "machine")).toEqual([`${BOX} connected · Standard isolation`]);
+    expect(await eng(page, "machine").innerText()).not.toMatch(/KVM/);
     await expect(eng(page, "machine")).not.toHaveClass(/ob-failed/);
     await expect(eng(page, "machine")).toHaveAttribute("data-state", "done");
     expect(await eng(page, "machine").innerText()).not.toMatch(/fail|warn|error|problem|attention/i);

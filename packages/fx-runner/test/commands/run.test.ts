@@ -96,7 +96,9 @@ type Signals = EventEmitter & RunHost["signals"];
 const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
-const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost() });
+// D#845 ON-6b: the hello now reads the CLI's sign-in through `inspect`, which starts the fake CLI; the default host answers it without a spawn so the tests that count spawns still count jobs only. Tests of the reading itself pass their own `inspect`.
+const quietInspect = (kit: RunHost["engine"]): RunHost["engine"] => ({ ...kit, inspect: async () => ({ version: "2.1.0", minimumVersion: "2.0.0", versionSupported: true, login: "yes" }) as Awaited<ReturnType<RunHost["engine"]["inspect"]>> });
+const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: quietInspect(createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable })), sandbox: fakeSandboxHost() });
 
 /** A machine with room for everything: the composed-daemon tests are about other things than this machine's free memory. */
 const GB = 1024 ** 3;
@@ -460,6 +462,60 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1", "sandbox_commands_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
     expect(cloud.seen.some((s) => s.path === "/api/runner/wake")).toBe(false);
     expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+
+  // D#845 ON-6b: a subscription runner says it holds model credentials while the doctor's own Claude check passes (present, supported version, signed in).
+  describe("model_auth_present follows the doctor's Claude check in subscription mode", () => {
+    type Report = Awaited<ReturnType<RunHost["engine"]["inspect"]>>;
+    const reportOf = (over: Partial<Report>): Report => ({ version: "2.1.0", minimumVersion: "2.0.0", versionSupported: true, login: "yes", ...over }) as Report;
+    const withInspect = (inspect: () => Promise<Report>): { host: Partial<RunHost> } => ({ host: { engine: { ...createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), inspect } } });
+    const authOf = (i: number): unknown => (hellos()[i]!.body as { model_auth_present: boolean }).model_auth_present;
+    const firstHelloWith = async (inspect: () => Promise<Report>): Promise<unknown> => {
+      const run = start(withInspect(inspect));
+      await until(() => claims() >= 1);
+      const sent = authOf(0);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+      return sent;
+    };
+
+    it("is true when the CLI is signed in on a supported version", async () => {
+      expect(await firstHelloWith(async () => reportOf({}))).toBe(true);
+    });
+    it("is false when signed out, unknown, too old, unreadable, or when the check fails", async () => {
+      expect(await firstHelloWith(async () => reportOf({ login: "no" }))).toBe(false);
+      cloud.seen.length = 0;
+      expect(await firstHelloWith(async () => reportOf({ login: "unknown" }))).toBe(false);
+      cloud.seen.length = 0;
+      expect(await firstHelloWith(async () => reportOf({ versionSupported: false }))).toBe(false);
+      cloud.seen.length = 0;
+      expect(await firstHelloWith(async () => reportOf({ version: undefined, versionSupported: false, login: "unknown" }))).toBe(false);
+      cloud.seen.length = 0;
+      expect(await firstHelloWith(async () => { throw new Error("no claude"); })).toBe(false);
+    });
+    it("stays true for an API-key runner without running the check", async () => {
+      saveRegistration(stateDir, { ...loadRegistration(stateDir)!, credential_mode: "api_key" });
+      writeApiKey(stateDir, process.getuid!(), ["sk-ant-", "api03-", "COMPOSEDKEY0123456789abcd"].join("")); // gitleaks:allow
+      const inspect = vi.fn(async () => reportOf({ login: "no" }));
+      const run = start({ ...withInspect(inspect), ctx: { uid: process.getuid!() } });
+      await until(() => claims() >= 1);
+      expect(authOf(0)).toBe(true);
+      expect(inspect).not.toHaveBeenCalled();
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+    it("says the change again on a later hello when the person signs in or out", async () => {
+      let login: "yes" | "no" = "no";
+      const clock = manualClock();
+      const run = start({ ...withInspect(async () => reportOf({ login })), hooks: { clock } });
+      await until(() => claims() >= 1);
+      expect(authOf(0)).toBe(false);
+      login = "yes";
+      while (hellos().length < 2) await clock.advance(5000);
+      expect(authOf(1)).toBe(true);
+      login = "no";
+      while (hellos().length < 3) await clock.advance(5000);
+      expect(authOf(2)).toBe(false);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
   });
 });
 
