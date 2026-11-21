@@ -12,7 +12,7 @@ import { assertVsockDir, listenOnSocket, plainHost, resolvePublic, type Lookup }
  * transform, a host with a `forwardURL`. A host the policy lists with no rules (the plain list a job's own policy is) is served as itself (B-5b-RELAY). There is no TLS interception and no CA in the guest. The guest's tool is configured to speak plain
  * HTTP to the policy host's own name (its in-guest shim relays port 80 to this vsock socket, `v.sock_5254`); this endpoint makes the upstream
  * TLS request itself, to the validated `forwardURL` (or to the host), with full certificate verification, and attaches the credentials. The
- * guest never holds a credential, and any credential-shaped header it sends is dropped.
+ * guest never holds a runner credential, and any credential-shaped header it sends is dropped, except `authorization` on the plain route (the guest's own model credential, B-5b-RELAY-AUTH).
  *
  * Per request, in order, each failure a fixed answer that names the class and never an address: method, framing (conflicting length headers,
  * a second Host, an upgrade), the Host header names a host that has a route in THIS sandbox's policy (a request line naming another host is
@@ -72,7 +72,7 @@ const CREDENTIAL = /auth|token|api-?key|secret|credential|cookie|signature|^x-fo
 /** How a host listed without rules is served: to itself, with nothing added. */
 const PLAIN_ROUTE: ReverseRoute = Object.freeze({ headers: Object.freeze({}) });
 
-const refusalBody =(reason: ReverseRefusal): string => `egress refused: ${reason}\n`;
+const refusalBody = (reason: ReverseRefusal): string => `egress refused: ${reason}\n`;
 
 function hostOf(req: http.IncomingMessage): { host: string } | { refusal: ReverseRefusal } {
   const hosts = req.rawHeaders.filter((_, i) => i % 2 === 0 && req.rawHeaders[i]!.toLowerCase() === "host");
@@ -123,7 +123,15 @@ function framingOk(req: http.IncomingMessage): boolean {
 
 function upstreamHeaders(req: http.IncomingMessage, route: ReverseRoute, host: string, extra: Record<string, string> | undefined): http.OutgoingHttpHeaders {
   const out: http.OutgoingHttpHeaders = {};
-  for (const [name, value] of Object.entries(req.headers)) if (value !== undefined && !HOP.has(name) && !CREDENTIAL.test(name)) out[name] = value;
+  // B-5b-RELAY-AUTH: only the plain route (a host listed with no rules, served as itself) lets the guest's own `authorization` through, so the
+  // guest's tool can sign its own model calls. The route's SHAPE decides, never the host name: a transform or `forwardURL` route is the runner's
+  // credential path and still drops every guest credential. A host-side `inject` value is applied after this and replaces it.
+  const passAuthorization = route === PLAIN_ROUTE;
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (value === undefined || HOP.has(name)) continue;
+    if (CREDENTIAL.test(name) && !(passAuthorization && name === "authorization")) continue;
+    out[name] = value;
+  }
   Object.assign(out, route.headers, extra);
   // The body is re-framed here, from the framing Node's own parser accepted (framingOk): the guest's headers are never copied.
   if (req.headers["transfer-encoding"] !== undefined) out["transfer-encoding"] = "chunked";
