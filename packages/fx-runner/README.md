@@ -221,10 +221,15 @@ Mirrored networking shares loopback with Windows. The runner asks `wslinfo --net
 The settings doctor looks for, in `/etc/wsl.conf` (then run `wsl --shutdown` from Windows):
 
 ```
+[boot]
+command = "sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/WSLInterop'"
+
 [interop]
 enabled=false
 appendWindowsPath=false
 ```
+
+The `[boot]` command is there because on current WSL `enabled=false` alone leaves the `WSLInterop` entry registered, and the runner's gate refuses a machine where that entry exists.
 
 The cost of the interop setting: no `.exe` launches from WSL2 while the runner is installed.
 
