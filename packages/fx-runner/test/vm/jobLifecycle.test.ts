@@ -464,3 +464,103 @@ describe("teardown covers only what this run registered", () => {
     expect([...r.live]).toEqual(["check-1"]);
   });
 });
+
+describe("the wipe after a job that ended before its quiesce (criterion 24)", () => {
+  const failRun = (code?: string): Partial<Steps> => ({ runAgent: async () => { throw code === undefined ? new Error("agent exploded") : new StepRefusal(code); } });
+
+  it.each([
+    ["the agent threw", failRun(), "agent_failed"],
+    ["the agent refused with a closed word", failRun("agent_failed"), "agent_failed"],
+  ])("%s: the token is wiped once, before the VM is ended, and the job keeps its own code", async (_name, over, code) => {
+    const r = rig();
+    const out = await runVmJob(deps(r, { needsToken: true, token: tokenSlot(r) }, steps(r, over)));
+    expect(out).toMatchObject({ ok: false, step: "run", code, teardownIncomplete: false });
+    expect(r.log.indexOf("token wipe")).toBeGreaterThan(r.log.indexOf("token deliver"));
+    expect(r.log.indexOf("token wipe")).toBeLessThan(r.log.indexOf("delete agent-1"));
+    expect(r.log.filter((l) => l === "token wipe")).toHaveLength(1);
+    expectClean(r);
+  });
+
+  it("a cancel (abort) during the run still wipes before the VM is ended", async () => {
+    const r = rig();
+    const abort = new AbortController();
+    const out = await runVmJob(deps(r, { needsToken: true, token: tokenSlot(r), signal: abort.signal }, steps(r, { runAgent: () => { setTimeout(() => abort.abort(), 10); return new Promise<never>(() => undefined); } })));
+    expect(out).toMatchObject({ ok: false, step: "run", code: "aborted" });
+    expect(r.log).toContain("token wipe");
+    expect(r.log.indexOf("token wipe")).toBeLessThan(r.log.indexOf("delete agent-1"));
+    expectClean(r);
+  });
+
+  it("a wipe that is not confirmed on such a path destroys the VM (never keeps it), and the job ends vm_teardown_incomplete at the step it failed in", async () => {
+    const r = rig();
+    const out = await runVmJob(deps(r, { needsToken: true, keepAgentVm: true, token: tokenSlot(r, { wipe: async () => { throw new Error("unconfirmed"); } }) }, steps(r, failRun())));
+    expect(out).toMatchObject({ ok: false, step: "run", code: "vm_teardown_incomplete", teardownIncomplete: true });
+    expect(out.record).toMatchObject({ code: "vm_teardown_incomplete", teardownIncomplete: true });
+    expect(r.log).toContain("destroy agent-1");
+    expect(r.log).not.toContain("delete agent-1");
+    expect(r.log.some((l) => l.startsWith("stop "))).toBe(false);
+  });
+
+  it("a wipe that answers only after its bound is ended by the bound, and the late answer does not clear the unconfirmed state", async () => {
+    const r = rig();
+    const out = await runVmJob(deps(r, { stepTimeoutMs: 40, needsToken: true, keepAgentVm: true, token: tokenSlot(r, { wipe: () => new Promise<void>((resolve) => setTimeout(resolve, 120)) }) }, steps(r, failRun())));
+    expect(out).toMatchObject({ ok: false, code: "vm_teardown_incomplete", teardownIncomplete: true });
+    expect(r.log).toContain("destroy agent-1");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(r.log).not.toContain("delete agent-1");
+  });
+
+  it("a wipe whose answer lands while teardown is still ending the check and agent VMs does not turn the destroy into a delete", async () => {
+    const r = rig();
+    const release = r.port.releaseEgress.bind(r.port);
+    r.port.releaseEgress = async (id) => {
+      await new Promise((resolve) => setTimeout(resolve, 150)); // teardown is inside this window when the wipe answers (at 80 ms, after the 40 ms bound)
+      return release(id);
+    };
+    const out = await runVmJob(deps(r, { stepTimeoutMs: 40, needsToken: true, keepAgentVm: true, token: tokenSlot(r, { wipe: () => new Promise<void>((resolve) => setTimeout(resolve, 80)) }) }, steps(r, failRun())));
+    expect(out).toMatchObject({ ok: false, code: "vm_teardown_incomplete", teardownIncomplete: true });
+    expect(r.log).toContain("destroy agent-1");
+    expect(r.log).not.toContain("delete agent-1");
+  });
+
+  describe("a cancel that lands as the agent returns, before the quiesce step starts", () => {
+    const cancelAtReturn = (abort: AbortController): Partial<Steps> => ({ runAgent: async () => { queueMicrotask(() => abort.abort()); return "agent-result"; } });
+
+    it("still wipes the token before the VM is ended, and a confirmed wipe ends the job with the cancel's own code", async () => {
+      const r = rig();
+      const abort = new AbortController();
+      const out = await runVmJob(deps(r, { needsToken: true, keepAgentVm: true, token: tokenSlot(r), signal: abort.signal }, steps(r, cancelAtReturn(abort))));
+      expect(out).toMatchObject({ ok: false, step: "quiesce", code: "aborted", teardownIncomplete: false });
+      expect(r.log.filter((l) => l === "token wipe")).toHaveLength(1);
+      expect(r.log.indexOf("token wipe")).toBeLessThan(r.log.indexOf("delete agent-1"));
+      expectClean(r);
+    });
+
+    it("an unconfirmed wipe there destroys the VM and ends the job vm_teardown_incomplete", async () => {
+      const r = rig();
+      const abort = new AbortController();
+      const out = await runVmJob(deps(r, { needsToken: true, keepAgentVm: true, token: tokenSlot(r, { wipe: async () => { throw new Error("unconfirmed"); } }), signal: abort.signal }, steps(r, cancelAtReturn(abort))));
+      expect(out).toMatchObject({ ok: false, step: "quiesce", code: "vm_teardown_incomplete", teardownIncomplete: true });
+      expect(r.log).toContain("destroy agent-1");
+      expect(r.log).not.toContain("delete agent-1");
+    });
+  });
+
+  it("a job that needs no token, and a failure before the token step, never call the wipe", async () => {
+    const r = rig();
+    await runVmJob(deps(r, { needsToken: false, token: tokenSlot(r) }, steps(r, failRun())));
+    expect(r.log).not.toContain("token wipe");
+    const r2 = rig();
+    await runVmJob(deps(r2, { needsToken: true, token: tokenSlot(r2) }, steps(r2, { workspaceIn: async () => { throw new Error("x"); } })));
+    expect(r2.log).not.toContain("token wipe");
+    expect(r2.log).not.toContain("token deliver");
+  });
+
+  it("a failed delivery also asks for the wipe, and a confirmed one leaves the job's own code", async () => {
+    const r = rig();
+    const out = await runVmJob(deps(r, { needsToken: true, token: tokenSlot(r, { deliver: async () => { throw new Error("x"); } }) }));
+    expect(out).toMatchObject({ ok: false, step: "token", code: "vm_token_delivery_failed", teardownIncomplete: false });
+    expect(r.log).toContain("token wipe");
+    expectClean(r);
+  });
+});

@@ -494,8 +494,10 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
     timeoutMsOf: (handle) => entries.get(handle.sandboxName)?.timeoutMs,
     async interrupt(handle) {
       const entry = entries.get(handle.sandboxName);
-      await entry?.agentUp?.catch(noop); // the agent may still be starting: it is interrupted once it exists
-      if (entry?.running === true && entry.runtime !== undefined && entry.agent !== undefined) await entry.runtime.interrupt?.(entry.agent);
+      // the agent may still be starting: it is interrupted once it exists. The start awaited is the one that was current NOW (FU-173): a run that ended and a new one that
+      // began while this waited is not interrupted, so a late call never reaches a turn it was not meant for.
+      const awaited = await entry?.agentUp?.then((agent: unknown) => agent, () => undefined);
+      if (entry?.running === true && entry.runtime !== undefined && entry.agent !== undefined && awaited === entry.agent) await entry.runtime.interrupt?.(entry.agent);
     },
     async guestOf(handle) {
       const guest = await open(handle.sandboxName, false);

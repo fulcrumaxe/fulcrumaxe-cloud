@@ -280,10 +280,16 @@ export async function runVmJob<Agent, Bundle, Applied, Checked>(deps: VmJobDeps<
       });
     }
     const agent = await step("run", "agent_failed", () => steps.runAgent(deps.names.agent, signal), 0);
+    let quiesceWipeRan = false;
     try {
-      await step("quiesce", "vm_teardown_incomplete", () => wipeOnce()); // bounded like every other step: no answer in time is an unconfirmed wipe
+      // bounded like every other step: no answer in time is an unconfirmed wipe
+      await step("quiesce", "vm_teardown_incomplete", () => {
+        quiesceWipeRan = true;
+        return wipeOnce();
+      });
     } finally {
-      quiesceOver = true;
+      // only a wipe that actually started can answer late; an abort set before the step began never reached it, and teardown wipes instead
+      if (quiesceWipeRan) quiesceOver = true;
     }
     const bundle = await step("bundle_out", "vm_workspace_failed", () => steps.bundleOut(deps.names.agent, signal));
     await step("stop_agent", "vm_teardown_incomplete", () => port.stop(deps.names.agent));
@@ -307,12 +313,27 @@ export async function runVmJob<Agent, Bundle, Applied, Checked>(deps: VmJobDeps<
   // teardown, on every path: the check VM first (never kept), then the agent's
   let incomplete = false;
   deps.log?.({ step: "teardown", phase: "start" });
+  // A job that ended before its quiesce still wipes, before its VM is ended (criterion 24): bounded, and not by the abort that may have ended the job. An unconfirmed wipe
+  // is the same state as at quiesce: the VM is destroyed, never kept.
+  if (tokenTouched && !wiped && !wipeFailed) {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([wipeOnce(), new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("wipe_unconfirmed")), stepMs)))]);
+    } catch {
+      // fx-swallow-ok: wipeOnce has already latched `wipeFailed`; teardown below destroys the VM instead of keeping it
+      quiesceOver = true; // an answer that comes later must not clear the unconfirmed state teardown is acting on
+      wipeFailed = true;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   for (const id of [deps.names.check, deps.names.agent]) if (registered.has(id)) incomplete = !(await teardownVm(id)) || incomplete;
   deps.log?.({ step: "teardown", phase: incomplete || wipeFailed ? "fail" : "ok" });
 
   if (failure === undefined && result !== undefined && !incomplete && !wipeFailed) return { ok: true, ...result, record: record(true, { teardownIncomplete: false }) };
   const ended = failure ?? new Failed("teardown", "vm_teardown_incomplete");
-  const code = failure === undefined ? "vm_teardown_incomplete" : ended.code;
+  // an unconfirmed token wipe ends the job vm_teardown_incomplete whatever else ended it (criterion 24)
+  const code = failure === undefined || wipeFailed ? "vm_teardown_incomplete" : ended.code;
   const teardownIncomplete = incomplete || wipeFailed;
   return { ok: false, step: ended.step, code, teardownIncomplete, record: record(false, { step: ended.step, code, teardownIncomplete }) };
 }
