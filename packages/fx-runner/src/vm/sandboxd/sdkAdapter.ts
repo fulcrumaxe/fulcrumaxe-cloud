@@ -57,7 +57,8 @@ export class SandboxdSdkError extends Error {
   }
 }
 
-const idOf = (name: string): string => `sb-${createHash("sha256").update(name).digest("hex").slice(0, 32)}`;
+/** The daemon id a sandbox name maps to (the adapter keys everything by it; `deleteById` and the inventory speak in it). */
+export const sandboxIdOf = (name: string): string => `sb-${createHash("sha256").update(name).digest("hex").slice(0, 32)}`;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 /** The most a timer may be asked to wait: `setTimeout` overflows past 2^31-1 ms and would fire at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
@@ -123,7 +124,7 @@ export interface DaemonSdk extends VercelSandboxSdk, LimitControl {
 export function createDaemonSdk(config: AdapterConfig): DaemonSdk {
   const { daemon, policy, template, memMb } = config;
   const now = config.now ?? Date.now;
-  const idFor = config.idOf ?? idOf;
+  const idFor = config.idOf ?? sandboxIdOf;
   const metas = new Map<string, Meta>(); // id -> meta
   if (policy === undefined) throw new Error("createDaemonSdk: a network policy port is required");
 

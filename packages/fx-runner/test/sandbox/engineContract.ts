@@ -33,8 +33,8 @@ export interface EngineSubject {
   interrupt(handle: SandboxHandle): Promise<void>;
   /** Makes the sandbox vanish as it would behind the port's back (a delete from the management plane, a daemon restart). */
   lose(handle: SandboxHandle): Promise<void>;
-  /** The microVM engine's guest, read back: what a `put` stored. */
-  guestFile?(handle: SandboxHandle, path: string): { data: Buffer; mode: number } | undefined;
+  /** What a guest holds at `path`, read back by the engine's own means (a fake guest answers at once, a real one through a command). */
+  guestFile?(handle: SandboxHandle, path: string): Promise<{ data: Buffer; mode: number } | undefined> | { data: Buffer; mode: number } | undefined;
 }
 
 const sandboxOpts = (name: string) => ({ sandboxName: name, retention: { persistent: false }, timeoutMs: 60_000 });
@@ -212,12 +212,12 @@ export function describeEngineContract(name: string, factory: (runtime: AgentRun
         return;
       }
       const text = "héllo\nwörld ☃\n";
-      await subject.port.writeFiles(handle, [{ path: "/fx/in/a.txt", content: text, mode: 0o600 }, { path: "/fx/in/b.txt", content: "" }]);
-      const a = subject.guestFile?.(handle, "/fx/in/a.txt");
+      await subject.port.writeFiles(handle, [{ path: "/tmp/fx-in/a.txt", content: text, mode: 0o600 }, { path: "/tmp/fx-in/b.txt", content: "" }]);
+      const a = await subject.guestFile?.(handle, "/tmp/fx-in/a.txt");
       expect(a?.data.equals(Buffer.from(text, "utf8"))).toBe(true);
       expect(a?.mode).toBe(0o600);
-      expect(subject.guestFile?.(handle, "/fx/in/b.txt")).toMatchObject({ mode: 0o644 });
-      expect(subject.guestFile?.(handle, "/fx/in/b.txt")?.data.length).toBe(0);
+      expect(await subject.guestFile?.(handle, "/tmp/fx-in/b.txt")).toMatchObject({ mode: 0o644 });
+      expect((await subject.guestFile?.(handle, "/tmp/fx-in/b.txt"))?.data.length).toBe(0);
       let session: string | undefined;
       const ran = await subject.port.runCommand(handle, { ...command, onSession: (id) => void (session = id) });
       expect(ran).toMatchObject({ exitCode: 3, timedOut: false, stdout: "oé", stderr: "e", truncated: false });
