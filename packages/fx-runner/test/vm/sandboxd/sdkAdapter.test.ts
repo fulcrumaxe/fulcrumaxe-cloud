@@ -594,6 +594,34 @@ describe("the limit as an absolute value (LimitControl)", () => {
     await vi.waitFor(() => expect(woken.status).toBe("stopped"), { timeout: 2000 });
   });
 
+  // FU-139 part 1: two mutants survived. Each test below fails when the guard it names is taken out.
+  it("armTimeoutAt on a stopped sandbox starts no timer at all (a timer on a stopped sandbox would be left behind)", async () => {
+    const { sdk } = build();
+    const sandbox = await sdk.create(params("lc-notimer", { timeout: 60_000 }));
+    await sandbox.stop();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const before = vi.getTimerCount();
+      await sdk.armTimeoutAt("lc-notimer", 50);
+      expect(vi.getTimerCount()).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+    await sandbox.delete();
+  });
+
+  it("setTimeoutMs and armTimeoutAt queued behind a delete answer 404, and do not write to the deleted sandbox's record", async () => {
+    const { sdk } = build();
+    const sandbox = await sdk.create(params("lc-gone", { timeout: 60_000 }));
+    const deleting = sandbox.delete();
+    const setting = sdk.setTimeoutMs("lc-gone", 1000);
+    const arming = sdk.armTimeoutAt("lc-gone", 1000);
+    await deleting;
+    await expect(setting).rejects.toMatchObject({ response: { status: 404 } });
+    await expect(arming).rejects.toMatchObject({ response: { status: 404 } });
+    expect(sandbox.timeout).toBe(60_000);
+  });
+
   it("armTimeoutAt on a sandbox with no live timer does nothing, and a bad value or an unknown name is refused", async () => {
     const { sdk } = build();
     const sandbox = await sdk.create(params("lc-down", { timeout: 60_000 }));

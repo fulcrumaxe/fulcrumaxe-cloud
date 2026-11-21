@@ -40,6 +40,8 @@ import type { SdkSandbox, VercelCredentials, VercelSandboxSdk } from "./sdkSlice
 
 /** How much longer the VM's own timer runs than the port's. */
 export const VM_BACKSTOP_MS = 30_000;
+/** The default deadline for a start's or a command's setup phase (FU-139). */
+export const SETUP_MS = 60_000;
 /** The most each of stdout and stderr that `runCommand` keeps; more sets `truncated`. */
 export const RUN_COMMAND_MAX_OUTPUT_CHARS = 256 * 1024;
 /** The most a timer may be asked to wait (`setTimeout` overflows past 2^31-1 ms). The limit, and the VM's limit with its backstop, stay at or under it. */
@@ -54,7 +56,7 @@ const LOCAL: VercelCredentials = { teamId: "local", projectId: "local", token: "
 
 /** Why a start or a call was refused. Closed set; the message never carries a value from a job. */
 export class MicrovmSandboxRefused extends Error {
-  constructor(readonly code: "network_rule_forbidden" | "bad_workdir" | "env_not_clean" | "sandbox_allowance_forbidden" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "not_running" | "bad_request") {
+  constructor(readonly code: "network_rule_forbidden" | "bad_workdir" | "env_not_clean" | "sandbox_allowance_forbidden" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "not_running" | "bad_request" | "setup_timeout") {
     super(code);
     this.name = "MicrovmSandboxRefused";
   }
@@ -65,6 +67,8 @@ export interface MicrovmSandboxConfig {
   sdk: Pick<VercelSandboxSdk, "create" | "get"> & LimitControl;
   /** Builds the agent runtime for one job from the guest's own command slice. */
   makeRuntime(guest: SdkSandbox, opts: StartDetachedOptions): InterruptibleRuntime;
+  /** The longest the setup of a start or a command may take (open, session, policy, the guest's own call) before it is ended and the sandbox is free again. Default `SETUP_MS`. */
+  setupMs?: number;
 }
 
 /** An agent runtime that can also be sent an interrupt (SIGINT: it ends the agent's turn cleanly), as the host engine's can. */
@@ -102,11 +106,15 @@ interface Entry {
   busy: boolean;
   timer?: NodeJS.Timeout;
   expired: boolean;
+  /** Policy writes of this sandbox run one after another: the tail settles when the last one issued has answered (or failed). */
+  policyTail: Promise<void>;
 }
 
 const noop = (): void => {
   // fx-swallow-ok: this only marks a promise as handled; whoever awaits it still sees the rejection
 };
+
+const noopValue = (): void => undefined;
 
 const statusOf = (err: unknown): number | undefined => (typeof err === "object" && err !== null ? (err as { response?: { status?: unknown } }).response?.status : undefined) as number | undefined;
 const isGone = (err: unknown): boolean => statusOf(err) === 404 || statusOf(err) === 410;
@@ -128,8 +136,46 @@ function assertJob(opts: StartDetachedOptions): void {
   if (opts.allowances !== undefined || (opts.extraReadPaths !== undefined && opts.extraReadPaths.length > 0) || opts.spillDir !== undefined) throw new MicrovmSandboxRefused("sandbox_allowance_forbidden");
 }
 
+/** Shared with the setup body: `over` turns true once the deadline has passed, and the body then does nothing more with an effect. */
+interface SetupGate {
+  readonly over: boolean;
+}
+
+/** Throws once the deadline has passed: called before every step of a setup body that changes something. */
+function alive(gate: SetupGate): void {
+  if (gate.over) throw new MicrovmSandboxRefused("setup_timeout");
+}
+
+/** Settles with `body`'s result, or fails with `setup_timeout` once `ms` pass. `late` runs on whatever `work` produces after that, to undo it. */
+function setupBound<T>(body: (gate: SetupGate) => Promise<T>, ms: number, late?: (value: T) => Promise<unknown>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let over = false;
+    const gate: SetupGate = {
+      get over() {
+        return over;
+      },
+    };
+    const timer = setTimeout(() => {
+      over = true;
+      reject(new MicrovmSandboxRefused("setup_timeout"));
+    }, ms);
+    body(gate).then(
+      (value) => {
+        clearTimeout(timer);
+        if (over) void late?.(value).catch(noop);
+        else resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        if (!over) reject(err);
+      },
+    );
+  });
+}
+
 export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandbox {
   const { sdk } = config;
+  const setupMs = config.setupMs ?? SETUP_MS;
   const entries = new Map<string, Entry>();
   const making = new Set<string>();
 
@@ -146,6 +192,21 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
       }
       throw err;
     }
+  }
+
+  /**
+   * Writes the policy of one owner. A write waits for every earlier one on this sandbox to answer, so a late answer of an abandoned setup
+   * can never land over a newer owner's policy; an owner whose deadline has passed by then writes nothing.
+   */
+  function writePolicy(entry: Entry | undefined, gate: SetupGate, guest: SdkSandbox, rules: readonly NetworkRule[]): Promise<void> {
+    if (entry === undefined) return guest.updateNetworkPolicy(policyOf(rules)).then(() => undefined);
+    const run = (async () => {
+      await entry.policyTail;
+      alive(gate);
+      await guest.updateNetworkPolicy(policyOf(rules));
+    })();
+    entry.policyTail = run.then(noopValue, noopValue);
+    return run;
   }
 
   function arm(entry: Entry): void {
@@ -177,25 +238,34 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
 
     let last: NormalizedEvent | undefined;
     const agentUp = (async () => {
-      // a stopped sandbox boots again, closed; the job's own policy is then in force before the agent exists
-      const before = await open(name, false);
-      const woke = before.status !== "running";
-      const guest = woke ? await open(name, true) : before;
-      if (woke) entry.vmDeadline = entry.launchedAt + (guest.timeout ?? 0); // the daemon re-arms a woken VM's timer a moment after this start began, so counting from here never overstates it
-      // the VM's timer must outlast the port's deadline by the backstop: the idle time before this start, or a limit extended while the VM was down, may have eaten it
-      const need = (entry.deadline ?? Date.now()) + VM_BACKSTOP_MS;
-      if (entry.vmDeadline < need) {
-        // the live timer is set to that deadline; the total a later wake arms with is not touched (it is the port's limit plus the backstop, always)
-        await sdk.armTimeoutAt(name, Math.max(need - Date.now(), 1));
-        entry.vmDeadline = need;
-      }
-      await guest.updateNetworkPolicy(policyOf(opts.networkPolicy));
-      await opts.onSession?.(guest.currentSession().sessionId);
-      try {
-        await opts.onStage?.("sandbox_ready");
-      } catch {
-        // fx-swallow-ok: the stage callback is best effort and never fails a launch
-      }
+      // the setup phase has a deadline: a call that never answers ends the start, and `running` clears with it (FU-139)
+      const guest = await setupBound(async (gate) => {
+        // a stopped sandbox boots again, closed; the job's own policy is then in force before the agent exists
+        const before = await open(name, false);
+        const woke = before.status !== "running";
+        alive(gate);
+        const awake = woke ? await open(name, true) : before;
+        alive(gate);
+        if (woke) entry.vmDeadline = entry.launchedAt + (awake.timeout ?? 0); // the daemon re-arms a woken VM's timer a moment after this start began, so counting from here never overstates it
+        // the VM's timer must outlast the port's deadline by the backstop: the idle time before this start, or a limit extended while the VM was down, may have eaten it
+        const need = (entry.deadline ?? Date.now()) + VM_BACKSTOP_MS;
+        if (entry.vmDeadline < need) {
+          // the live timer is set to that deadline; the total a later wake arms with is not touched (it is the port's limit plus the backstop, always)
+          await sdk.armTimeoutAt(name, Math.max(need - Date.now(), 1));
+          alive(gate);
+          entry.vmDeadline = need;
+        }
+        await writePolicy(entry, gate, awake, opts.networkPolicy);
+        alive(gate);
+        await opts.onSession?.(awake.currentSession().sessionId);
+        alive(gate);
+        try {
+          await opts.onStage?.("sandbox_ready");
+        } catch {
+          // fx-swallow-ok: the stage callback is best effort and never fails a launch
+        }
+        return awake;
+      }, setupMs);
       const runtime = config.makeRuntime(guest, job);
       const { role, roleCard, prompt, model, capUsd } = opts;
       const started = await runtime.start({
@@ -266,7 +336,7 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
               () => Promise.reject(new MicrovmSandboxRefused("bad_request")),
             );
           });
-        entries.set(name, { timeoutMs: opts.timeoutMs, vmDeadline: Date.now() + opts.timeoutMs + VM_BACKSTOP_MS, launchedAt: 0, running: false, busy: false, expired: false });
+        entries.set(name, { timeoutMs: opts.timeoutMs, vmDeadline: Date.now() + opts.timeoutMs + VM_BACKSTOP_MS, launchedAt: 0, running: false, busy: false, expired: false, policyTail: Promise.resolve() });
         return { runId: "", sandboxName: name, sessionId: sandbox.currentSession().sessionId };
       } finally {
         making.delete(name);
@@ -337,12 +407,17 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
       if (entry?.running === true || entry?.busy === true) throw new MicrovmSandboxRefused("sandbox_busy");
       if (entry !== undefined) entry.busy = true;
       try {
-        const guest = await open(handle.sandboxName, false);
-        if (guest.status !== "running") throw new MicrovmSandboxRefused("not_running");
-        const sessionId = guest.currentSession().sessionId;
-        await opts.onSession?.(sessionId);
-        await guest.updateNetworkPolicy(policyOf(opts.networkPolicy));
-        const command = await guest.runCommand({ cmd: opts.cmd, args: [...opts.args], env: guestEnvOf(opts.env), detached: true });
+        const { sessionId, command } = await setupBound(async (gate) => {
+          const guest = await open(handle.sandboxName, false);
+          alive(gate);
+          if (guest.status !== "running") throw new MicrovmSandboxRefused("not_running");
+          const session = guest.currentSession().sessionId;
+          await opts.onSession?.(session);
+          alive(gate);
+          await writePolicy(entry, gate, guest, opts.networkPolicy);
+          alive(gate); // the command starts only while its own deadline still holds
+          return { sessionId: session, command: await guest.runCommand({ cmd: opts.cmd, args: [...opts.args], env: guestEnvOf(opts.env), detached: true }) };
+        }, setupMs, (late) => late.command.kill("SIGKILL")); // a command that starts after the deadline is killed, never left running
         const held = { stdout: "", stderr: "" };
         let truncated = false;
         let timedOut = false;
