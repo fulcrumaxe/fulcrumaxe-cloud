@@ -17,6 +17,7 @@ import { chromiumSandboxRefused } from "../helpers/chromiumSandbox.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
 import { BASE, rig } from "./harness.js";
 import { useSourcePlaywright } from "./sourceLoader.js";
+import { tempDir } from "../helpers/tempTree.js";
 
 /**
  * D#749: the Vercel protection bypass for the verify browser. Every value here is a made-up one. The header goes only to the base origin, only when that origin is the registered
@@ -24,7 +25,7 @@ import { useSourcePlaywright } from "./sourceLoader.js";
  */
 const FAKE = "fake-bypass-value-0123456789";
 const base = parseBase(BASE)!;
-const root = mkdtempSync(path.join(tmpRoot(), "pw-bypass-"));
+const root = tempDir("pw-bypass-", tmpRoot());
 const UID = process.getuid?.() ?? 0;
 
 describe("headersWithBypass", () => {
@@ -192,7 +193,7 @@ describe.skipIf(EXE === undefined || NO_SANDBOX || process.platform !== "linux")
   });
 
   async function session(extra: { bypassSecret?: string; cloudOrigin?: string }): Promise<{ outputs: string[]; call: (name: string, args?: unknown) => Promise<string>; stop: () => Promise<void> }> {
-    const jobDir = mkdtempSync(path.join(tmpRoot(), "vb-bypass-"));
+    const jobDir = tempDir("vb-bypass-", tmpRoot());
     const input = new PassThrough();
     const output = new PassThrough();
     const server = startVerifyBrowserServer({ baseUrl: appBase, jobDir, input, output, hostEnv: process.env, executablePath: EXE, ...extra });

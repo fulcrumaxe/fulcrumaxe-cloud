@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { SandboxGrantRefused, assertEnabledSandbox, sandboxSettings, SHARED_TEMP_DIRS } from "../src/sandbox/sandboxSettings.js";
+import { tempDir } from "./helpers/tempTree.js";
 
 /** D#6 RUNNER-CWD-1: the shared temp directories every job is denied, as the builder lists them (as written and where they really are). */
 const SHARED_TEMP = [...new Set(SHARED_TEMP_DIRS.flatMap((dir) => [dir, existsSync(dir) ? realpathSync(dir) : dir]))];
@@ -62,7 +62,7 @@ describe("R4b1-4: the sandbox hardening the security review asked for", () => {
   });
 
   it("follows symlinks: a grant that is, or sits in, a link into a protected place is refused, and so is a link out of its root", () => {
-    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "tr_link-")));
+    const root = realpathSync(tempDir("tr_link-"));
     const home = path.join(root, "home");
     mkdirSync(path.join(home, ".ssh"), { recursive: true });
     mkdirSync(path.join(root, "ws"));

@@ -1,6 +1,4 @@
-import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanEnv } from "../../src/job/cleanEnv.js";
 import { createHostSandbox } from "../../src/sandbox/hostSandbox.js";
@@ -9,6 +7,7 @@ import { createMicrovmSandbox } from "../../src/vm/sandboxd/microvmSandbox.js";
 import { scriptedRuntime } from "../sandboxPortContract.js";
 import { makeRig, runCleanups } from "../vm/sandboxd/helpers.js";
 import { ALLOWED_DIFFERENCES, describeEngineContract, type Difference } from "./engineContract.js";
+import { tempDir } from "../helpers/tempTree.js";
 
 afterEach(runCleanups);
 
@@ -21,15 +20,15 @@ describeEngineContract(
       credentials: { mode: "subscription" },
       makeRuntime: () => runtime,
       home: "/home/contract-user",
-      stateDir: mkdtempSync(path.join(tmpdir(), "b5a_state-")),
+      stateDir: tempDir("b5a_state-"),
       binaryDir: "/opt/claude/bin",
-      tempRoot: mkdtempSync(path.join(tmpdir(), "b5a_temp-")),
+      tempRoot: tempDir("b5a_temp-"),
       workspaceRoot: tmpdir(),
     });
     return {
       port: host,
       env: () => cleanEnv({ mode: "subscription" }),
-      workdir: mkdtempSync(path.join(tmpdir(), "b5a_work-")),
+      workdir: tempDir("b5a_work-"),
       timeoutMsOf: (handle) => host.timeoutMsOf(handle),
       interrupt: (handle) => host.interrupt(handle),
       lose: (handle) => host.deleteSandbox(handle),

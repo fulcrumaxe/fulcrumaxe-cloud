@@ -10,11 +10,30 @@ import (
 	"fx-vmhelper/internal/protocol"
 )
 
+// reopenTree gives the owner access back to every directory under dir (links are not followed), so the test's
+// temporary directory can be removed even when the test stopped part-way with directories closed (chmod 0): a
+// closed directory left behind makes t.TempDir's own removal fail, and the tree stays in the temp directory for good.
+func reopenTree(dir string) {
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() {
+		return
+	}
+	_ = os.Chmod(dir, 0o700)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		reopenTree(filepath.Join(dir, e.Name()))
+	}
+}
+
 // A sandbox that closes a directory it owns (chmod 0, also a directory inside one) must not make removal
 // fail for good: taking a directory over sets its mode to 0700 before it is opened. A non-root owner has
 // the same position as root after the take-over, so this test needs no root.
 func TestDestroyRemovesDirectoriesTheSandboxClosed(t *testing.T) {
-	m, _ := newMgr(t, 2, &fakeLauncher{})
+	m, root := newMgr(t, 2, &fakeLauncher{})
+	t.Cleanup(func() { reopenTree(root) })
 	if _, c := m.Prepare(prep("box-a")); c != protocol.OK {
 		t.Fatal(c)
 	}

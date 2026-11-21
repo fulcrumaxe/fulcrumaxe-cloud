@@ -1,10 +1,9 @@
-import { mkdtempSync } from "node:fs";
-import path from "node:path";
 import { PassThrough } from "node:stream";
 import { ToolError, type DriverConfig, type PageDriver } from "../../src/verifyBrowser/driver.js";
 import { startVerifyBrowserServer, type ServerOptions } from "../../src/verifyBrowser/server.js";
 import type { RawElement } from "../../src/verifyBrowser/snapshot.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
+import { tempDir } from "../helpers/tempTree.js";
 
 export const BASE = "https://app.example.test";
 
@@ -123,7 +122,7 @@ export interface Rig {
 }
 
 export function rig(pages: Record<string, FakePage>, extra: Partial<ServerOptions> = {}, startJourney = true): Rig {
-  const jobDir = mkdtempSync(path.join(tmpRoot(), "vb-job-"));
+  const jobDir = tempDir("vb-job-", tmpRoot());
   const input = new PassThrough();
   const output = new PassThrough();
   let made: FakeDriver | undefined;
