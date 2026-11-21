@@ -12,6 +12,7 @@ import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { DeployOrderClaimMessage, DeployOrderReportMessage } from "./deployOrder.js";
 import { ENGINE_BRIDGE_CAPABILITY, RUNNER_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, SESSION_ID_PATTERN } from "./job.js";
 import { SandboxCommandAcks } from "./sandboxCommands.js";
+import { PREFLIGHT_CODES } from "./preflight.js";
 
 /** The isolation tiers a runner can report. Display only. There is no "none". */
 export const ISOLATION_TIERS = ["microvm", "vm_container", "container", "host_sandbox"] as const;
@@ -440,6 +441,8 @@ export const RunnerFacts = z
     sandbox_engine: z.enum(RUNNER_SANDBOX_ENGINES),
     // D#845 ON-6c: optional, so a runner built before it still validates and reads as "unknown" in the cloud. Display only: no decision reads it.
     kvm: z.enum(RUNNER_KVM).optional(),
+    // D#845 ON-21b: the preflight codes that are not `ok`, a closed list, each once; an empty list says every check passed. Sent only after a reply that listed `preflight`. Display only.
+    preflight: z.array(z.enum(PREFLIGHT_CODES)).max(PREFLIGHT_CODES.length).refine((list) => new Set(list).size === list.length, { message: "a code appears once" }).optional(),
     // D#587 B-7a (protocol 21): the host limits and the template ids the runner can boot. Optional claims for routing and display, never for a decision.
     max_vms: safeInt.min(0).max(256).optional(),
     max_vcpus: safeInt.min(0).max(4096).optional(),

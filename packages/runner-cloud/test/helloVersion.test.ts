@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, HelloReply, KVM_FACT_CAPABILITY, MIN_SUPPORTED_PROTOCOL_VERSION, WATCH_MODE_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, HelloReply, KVM_FACT_CAPABILITY, MIN_SUPPORTED_PROTOCOL_VERSION, PREFLIGHT_CAPABILITY, WATCH_MODE_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { HANDOFF_PROTOCOL_VERSION } from "../src/handoff.js";
 import { protocolVersionSupported } from "../src/hello.js";
 
@@ -34,7 +34,9 @@ describe("which protocol versions hello accepts", () => {
   it("the hello reply's capabilities are a closed set: watch_mode and kvm_fact, each once; anything else, a repeat or a non-list is refused (D#845 ON-6c)", () => {
     expect(HelloReply.parse({ protocol_version: 24, capabilities: [KVM_FACT_CAPABILITY] })).toEqual({ protocol_version: 24, capabilities: ["kvm_fact"] });
     expect(HelloReply.parse({ protocol_version: 24, capabilities: [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY] })).toEqual({ protocol_version: 24, capabilities: ["watch_mode", "kvm_fact"] });
-    for (const bad of [["kvm_fact", "kvm_fact"], ["kvm_fact", "watch_mode", "kvm_fact"], ["kvm_fact_v1"], ["watch_mode", "kvm_fact", "other"]]) expect(() => HelloReply.parse({ protocol_version: 24, capabilities: bad }), JSON.stringify(bad)).toThrow();
+    // D#845 ON-21b: `preflight` joins the closed set.
+    expect(HelloReply.parse({ protocol_version: 24, capabilities: [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY] })).toEqual({ protocol_version: 24, capabilities: ["watch_mode", "kvm_fact", "preflight"] });
+    for (const bad of [["preflight", "preflight"], ["preflight_v1"], ["kvm_fact", "preflight", "other"], ["kvm_fact", "kvm_fact"], ["kvm_fact", "watch_mode", "kvm_fact"], ["kvm_fact_v1"], ["watch_mode", "kvm_fact", "other"]]) expect(() => HelloReply.parse({ protocol_version: 24, capabilities: bad }), JSON.stringify(bad)).toThrow();
   });
 
   it("the hello reply's capabilities are a closed set: watch_mode alone, once; anything else, a repeat or a non-list is refused", () => {

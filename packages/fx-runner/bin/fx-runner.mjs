@@ -243,6 +243,9 @@ const engineHostEnv = Object.fromEntries(
     LANG: process.env.LANG,
   }).filter(([, v]) => v !== undefined),
 );
+// D#845 ON-21: the readers behind the preflight list, given to `doctor` and (D#845 ON-21b) to `run`, which reports the codes only.
+const preflightReaders = { kernel: (input) => kernelFacts({ ...input, readMemAvailableBytes: () => readMemAvailableBytes() }), lookup: resolver };
+
 const engineHostRuntime = {
   platform: process.platform,
   // The path the job runner resolves (its clean search path, as `doctor` and `run` use), never the PATH of whatever shell or service started this; then the same version and flag check every job gets.
@@ -369,6 +372,8 @@ runCli({
     xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
     // D#842 EB-3c: the engine bridge's halt path and dial ceiling keeper, bound to the machine through the same kill-path dependencies `engine-host stop` uses. Without them `run` never starts the bridge.
     engineBridge: createEngineBridgePorts(engineHaltDeps),
+    // D#845 ON-21b: the same kernel readings and resolver `doctor` uses; `run` reports the codes of its preflight on the hello only to a cloud that listed the `preflight` capability.
+    preflight: preflightReaders,
     // D#587 B-5a part 3: what a runner set to `microvm` checks before every claim until it passes: KVM, the helper's socket and the helper's own answer.
     vmFacts: () => vmHostFactsWithHelper(),
     microvm: microvmParts,
@@ -388,7 +393,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), microvmWired: liveMicrovmComplete(microvmParts), vmInstall: createVmInstallFacts({ tuf: vmTufPort }), preflight: { kernel: (input) => kernelFacts({ ...input, readMemAvailableBytes: () => readMemAvailableBytes() }), lookup: resolver } },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), microvmWired: liveMicrovmComplete(microvmParts), vmInstall: createVmInstallFacts({ tuf: vmTufPort }), preflight: preflightReaders },
   vmHost: vmBuildHost,
   // D#845 ON-3: `setup` and a code-less `register`. Ctrl-C is listened for only once one of them asks (every other command keeps the default), the one question is read from the
   // terminal only (a pipe or a timeout is no answer), and the service start is two fixed programs with a fixed environment, no shell.

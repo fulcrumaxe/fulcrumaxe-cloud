@@ -1,4 +1,4 @@
-import { HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
 import { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
@@ -28,6 +28,8 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
     const tooNew = message.protocol_version > current;
     throw new RunnerHttpError(426, tooNew ? "protocol_too_new" : "upgrade_required", tooNew ? "this runner speaks a newer protocol than this cloud" : "this runner is too old to talk to the cloud", { current_protocol_version: current, minimum_protocol_version: min });
   }
+  // D#845 ON-21b: whether migration 1051's column and definer exist, read from the catalog before the transaction (a failed read says no). Decides both the write below and the reply's capability.
+  const takesPreflight = await runnersTakePreflight(deps);
   let recorded: boolean;
   try {
     recorded = await withRunnerSession(deps.appUserPool, runner, async (client) => {
@@ -44,6 +46,8 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
       // D#483 S4-b2c: the capabilities, rewritten on EVERY hello (none sent is none stored), so a runner that is downgraded stops being offered
       // what it can no longer run. Same definer shape and the same transaction.
       await client.query("SELECT runner_capabilities_record($1::text[])", [message.capabilities ?? []]);
+      // D#845 ON-21b: the preflight codes, rewritten on EVERY hello of a database that has them (none sent is NULL, "not said"), so a downgraded runner stops being credited. Same transaction, same session-named runner.
+      if (takesPreflight) await client.query("SELECT runner_preflight_record($1::text[])", [message.facts?.preflight ?? null]);
       return true;
     });
   } catch (error) {
@@ -62,8 +66,21 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   const watchMode = message.protocol_version >= WATCH_MIN_PROTOCOL && (message.capabilities ?? []).includes(WATCH_MODE_HELLO_CAPABILITY) && (await ingestTakesWatchMode(deps));
   // D#845 ON-6c: said only to a runner that DECLARED `kvm_fact_v1` on this hello, and only when migration 1047's column exists (read from the catalog, the way 1043 is). The runner sends `facts.kvm` from its next hello on.
   const kvmFact = (message.capabilities ?? []).includes(KVM_FACT_HELLO_CAPABILITY) && (await runnersTakeKvm(deps));
-  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : [])];
+  // D#845 ON-21b: said only to a runner that DECLARED `preflight_v1` on this hello, and only when migration 1051 is present. The runner sends `facts.preflight` from its next hello on.
+  const preflight = (message.capabilities ?? []).includes(PREFLIGHT_HELLO_CAPABILITY) && takesPreflight;
+  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : []), ...(preflight ? [PREFLIGHT_CAPABILITY] : [])];
   return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}), ...(replyCapabilities.length > 0 ? { capabilities: replyCapabilities } : {}) }) };
+}
+
+/** True when migration 1051 is applied: `runners.preflight` exists. Read from the catalog, never assumed from the code's version; a failed read says no, so nothing is written and the capability is not listed. */
+export async function runnersTakePreflight(deps: RunnerCloudDeps): Promise<boolean> {
+  try {
+    const { rows } = await deps.appUserPool.query<{ ok: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.runners') AND attname = 'preflight' AND NOT attisdropped) AS ok");
+    return rows[0]?.ok === true;
+  } catch {
+    // fx-swallow-ok: a catalog read that fails says nothing about the column: the capability is simply not listed
+    return false;
+  }
 }
 
 /** True when migration 1047 is applied: `runners.kvm` exists. Read from the catalog, never assumed from the code's version; a failed read lists nothing. */

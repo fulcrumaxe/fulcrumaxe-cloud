@@ -7,7 +7,7 @@
 import { h, timeNode } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import {
-  CHECK_READ_FAILED, SANDBOX_ACTION, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, heldBackText, loadRepoChoices, provText, runnerLimitText, sandboxCommandText, sandboxConfirm, sandboxControls, sandboxLine, sandboxQuotaLines, sandboxStatusText, stateParts, versionText,
+  CHECK_READ_FAILED, SANDBOX_ACTION, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, NO_PREFLIGHT, PREFLIGHT_OK, preflightLines, heldBackText, loadRepoChoices, provText, runnerLimitText, sandboxCommandText, sandboxConfirm, sandboxControls, sandboxLine, sandboxQuotaLines, sandboxStatusText, stateParts, versionText,
 } from "./runners-fleet.js";
 
 const FULC = window.FULC;
@@ -288,7 +288,8 @@ function mountApp(contentEl) {
         ...line("Repos", r.state === "revoked" ? "None" : r.repos.length === 0 ? "No repos" : h("bdi", null, r.repos.join(", "))),
         ...line("Credential", MODE_WORDS[r.mode] || "Unknown"),
         ...line("Labels", r.labels.length === 0 ? "None" : h("bdi", null, r.labels.join(", "))),
-        ...line("Machine", factsText(r))),
+        ...line("Machine", factsText(r)),
+        ...line("Preflight", preflightLines(r) === null ? NO_PREFLIGHT : preflightLines(r).length === 0 ? PREFLIGHT_OK : h("ul", { class: "runners-preflight", "data-testid": "runners-preflight" }, preflightLines(r).map((t) => h("li", null, t))))),
       provText(r) ? h("p", { class: "runners-muted", "data-testid": "runners-prov" }, provText(r)) : null,
       r.sandboxes ? sandboxSection(r, isAdmin, pending) : null,
       controls.length ? h("div", { class: "runners-controls" }, controls) : null,
