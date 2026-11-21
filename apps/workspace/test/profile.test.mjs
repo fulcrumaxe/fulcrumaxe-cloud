@@ -10,7 +10,7 @@
 //   2. A real-build check against the actual profiles/cloud.json and
 //      shell/ tree, which is the only way to exercise WS-B acceptance
 //      criteria 2 and 3 (no .wasm/automerge/xterm/crdt paths, no dropped-
-//      app stylesheet, <=135 files referenced at boot, <=BOOT_BUDGET.maxBrotliBytes (320 KB) total
+//      app stylesheet, <=136 files referenced at boot, <=BOOT_BUDGET.maxBrotliBytes (320 KB) total
 //      brotli for those files) without a browser.
 
 import { afterEach, describe, expect, it } from "vitest";

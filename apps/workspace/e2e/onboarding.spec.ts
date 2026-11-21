@@ -10,12 +10,15 @@ import { fileURLToPath } from "node:url";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { bootToDesktop } from "./helpers/boot";
+import { engineTrack, pipelineOnly, withChosen, withEngine, withSteps } from "./helpers/onboarding-body";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const fx = (...p: string[]) => JSON.parse(readFileSync(join(DIR, "..", "..", "..", "packages", "api", "fixtures", "v1", ...p), "utf8"));
 const PLANS = JSON.parse(readFileSync(join(DIR, "plans-fixture.json"), "utf8"));
-const ONB = { new: fx("getOnboarding", "200-new.json"), step3: fx("getOnboarding", "200-step3.json"), pay: fx("getOnboarding", "200-pay.json"), done: fx("getOnboarding", "200-complete.json") };
-const doneUpTo = (n: number) => ({ ...ONB.new, steps: ONB.new.steps.map((s: object, i: number) => ({ ...s, completed_at: i < n ? `2026-09-20T09:0${i}:00.000Z` : null })) });
+// Every pipeline test starts from an account that chose the pipeline track (a first visit offers the track choice instead; RAW_NEW is that visit).
+const RAW_NEW = fx("getOnboarding", "200-new.json");
+const ONB = { new: pipelineOnly(RAW_NEW), step3: pipelineOnly(fx("getOnboarding", "200-step3.json")), pay: pipelineOnly(fx("getOnboarding", "200-pay.json")), done: pipelineOnly(fx("getOnboarding", "200-complete.json")) };
+const doneUpTo = (n: number) => withSteps(ONB.new, ONB.new.steps.map((s: object, i: number) => ({ ...s, completed_at: i < n ? `2026-09-20T09:0${i}:00.000Z` : null })));
 const PV = (name: string) => fx("getOnboardingPreview", name);
 const REQ = (name: string) => fx("requestPreview", name);
 const ALL_REPOS = fx("listRepos", "200-page.json");
@@ -715,15 +718,13 @@ test.describe("no placeholder words in the Onboarding window", () => {
 
 // ONBOARDING-PAY-ANYTIME: choosing a plan is possible from the first screen, and the preview is optional, never a gate.
 test.describe("pay at any step, and the skipped preview", () => {
-  const SKIPPED = fx("getOnboarding", "200-skipped.json");
+  const SKIPPED = pipelineOnly(fx("getOnboarding", "200-skipped.json"));
   /** The server's answer for a paid account: `done` names the steps that are done; the preview is skipped unless it has a time. */
-  const paid = (done: string[] = [], previewTime: string | null = null) => ({
-    ...SKIPPED,
-    steps: SKIPPED.steps.map((s: { step: string; completed_at: string | null; skipped: boolean }) => {
+  const paid = (done: string[] = [], previewTime: string | null = null) =>
+    withSteps(SKIPPED, SKIPPED.steps.map((s: { step: string; completed_at: string | null; skipped: boolean }) => {
       if (s.step === "preview") return previewTime ? { ...s, completed_at: previewTime, skipped: false } : s;
       return done.includes(s.step) ? { ...s, completed_at: "2026-09-20T09:30:00.000Z" } : s;
-    }),
-  });
+    }));
   const ahead = (page: Page) => ob(page).locator('[data-testid="ob-skip-ahead"]');
   const skipPreview = (page: Page) => ob(page).locator('[data-testid="ob-skip-preview"]');
   const picker = (page: Page) => ob(page).locator('[data-testid="ob-step-pay"] .subscription-gate-plan');
@@ -898,7 +899,7 @@ test.describe("step 3, live progress", () => {
   const PLACEHOLDER = /\b(null|undefined|nan)\b/i;
   /** Words that would call our compute free. The panel's compute line must never match. */
   const FREE = /\b(free|no charge|no cost|at no cost|zero cost|complimentary)\b/i;
-  const SKIPPED = fx("getOnboarding", "200-skipped.json");
+  const SKIPPED = pipelineOnly(fx("getOnboarding", "200-skipped.json"));
   const state = (page: Page) => ob(page).locator('[data-testid="ob-preview-state"]');
   const stageStates = (page: Page) =>
     ob(page).locator('[data-testid="ob-stages"] > li').evaluateAll((els) => els.map((e) => `${(e as HTMLElement).dataset.testid!.replace("ob-stage-", "")}:${(e as HTMLElement).dataset.status}`));
@@ -1054,7 +1055,7 @@ test.describe("step 3, live progress", () => {
     await setup(page, m);
     await bootToDesktop(page);
     await ob(page).locator('[data-testid="ob-preview-start"]').click();
-    m.onboarding = [json({ ...SKIPPED, steps: SKIPPED.steps.map((s: { step: string }) => (s.step === "preview" ? { ...s, completed_at: "2026-09-20T09:55:00.000Z", skipped: false } : s)) })];
+    m.onboarding = [json(withSteps(SKIPPED, SKIPPED.steps.map((s: { step: string }) => (s.step === "preview" ? { ...s, completed_at: "2026-09-20T09:55:00.000Z", skipped: false } : s))))];
     await page.clock.runFor(3000);
     await expect(ob(page).locator('[data-testid="ob-result"]')).toBeVisible();
     await expect(ob(page).locator('[data-testid="ob-choose-plan"]')).toHaveCount(0);
@@ -1104,5 +1105,318 @@ test.describe("step 3, live progress", () => {
     const reads = count(m, "GET /api/v1/onboarding/preview");
     await page.clock.runFor(60_000);
     expect(count(m, "GET /api/v1/onboarding/preview")).toBe(reads);
+  });
+});
+
+// D#845 ON-6: the engine track and the track choice. Same shell, same fixtures; the engine's steps come from tracks[1] of the answer, the machine's name
+// from /api/runners and the price from /api/plans. Desktop, tablet and phone all run every test.
+test.describe("the engine track and the track choice (D#845 ON-6)", () => {
+  const BOX = "build-box-1";
+  const PLACEHOLDER = /\b(null|undefined|nan)\b/i;
+  interface Extra { track: Reply; trackPuts: unknown[]; machine: { name: string; state: string; minutesAgo: number } | null }
+  const extra = (o: Partial<Extra> = {}): Extra => ({ track: json({ track: "engine", chosen_at: "2026-11-20T10:00:00.000Z", created: true }), trackPuts: [], machine: { name: BOX, state: "online_idle", minutesAgo: 1 }, ...o });
+  /** `setup` plus the read of the runners and the write of the choice that the engine track makes. `onPut` may change what the next read answers. */
+  async function engineSetup(page: Page, m: Mock, x: Extra, onPut?: (track: string) => void) {
+    const problems = await setup(page, m);
+    await page.route((u) => u.pathname === "/api/runners", async (route) => {
+      if (x.machine === null) return route.fulfill({ json: { runners: [] } });
+      const now = await page.evaluate(() => Date.now());
+      return route.fulfill({ json: { runners: [{ id: "r1", name: x.machine.name, state: x.machine.state, last_seen_at: new Date(now - x.machine.minutesAgo * 60000).toISOString() }] } });
+    });
+    await page.route((u) => u.pathname === "/api/v1/onboarding/track", async (route) => {
+      const body = route.request().postDataJSON();
+      x.trackPuts.push(body);
+      if (onPut) onPut(body.track);
+      return answer(route, x.track);
+    });
+    return problems;
+  }
+  const eng = (page: Page, id: string) => ob(page).locator(`[data-testid="ob-engine-${id}"]`);
+  const lines = (page: Page, id: string) => eng(page, id).locator('[data-testid="ob-engine-line"]').allTextContents();
+  /** The answer for an account that chose the engine track, with the engine's steps in these states. */
+  const states = (o: Record<string, string>, opts: { tier?: string | null; code?: string } = {}) => withEngine(ONB.new, engineTrack(o, opts));
+  const ALL_DONE = { machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "done", live: "done" };
+  const noOverflow = async (page: Page) => {
+    await ob(page).evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    expect(await ob(page).locator('[data-testid="ob-app"]').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  };
+  const noPlaceholder = async (page: Page) => expect(await ob(page).innerText()).not.toMatch(PLACEHOLDER);
+  const withEnginePlan = (price: number) => [...PLANS.plans, { id: "engine", price_usd_month: price, repo_limit: 1 }];
+
+  test("a first visit offers the choice and nothing else; choosing the engine saves it and shows its steps", async ({ page }) => {
+    const x = extra();
+    const m = mock({ onboarding: [json(RAW_NEW)] });
+    await engineSetup(page, m, x, () => { m.onboarding = [json(states({ machine: "active" }))]; });
+    await bootToDesktop(page);
+    const choice = ob(page).locator('[data-testid="ob-choice"]');
+    await expect(choice).toBeVisible();
+    await expect(choice.locator("button")).toHaveText(["Run the engine on my machine or server", "Let the cloud run builds"]);
+    await expect(ob(page).locator('ol[aria-label="Setup steps"], [data-testid="ob-track-engine"], [data-testid="ob-add-other"]')).toHaveCount(0);
+    await noOverflow(page);
+    await noPlaceholder(page);
+    await ob(page).locator('[data-testid="ob-choose-engine"]').click();
+    await expect(ob(page).locator('[data-testid="ob-track-engine"]')).toBeVisible();
+    expect(x.trackPuts).toEqual([{ track: "engine" }]);
+    await expect(choice).toHaveCount(0);
+  });
+
+  test("choosing the cloud-builds track shows the six pipeline steps", async ({ page }) => {
+    const x = extra({ track: json({ track: "pipeline", chosen_at: "2026-11-20T10:00:00.000Z", created: true }) });
+    const m = mock({ onboarding: [json(RAW_NEW)] });
+    await engineSetup(page, m, x, () => { m.onboarding = [json(ONB.new)]; });
+    await bootToDesktop(page);
+    await ob(page).locator('[data-testid="ob-choose-pipeline"]').click();
+    await expect(ob(page).locator('ol[aria-label="Setup steps"] > li')).toHaveCount(6);
+    expect(x.trackPuts).toEqual([{ track: "pipeline" }]);
+  });
+
+  test("a choice that could not be saved says so and keeps the choice on screen", async ({ page }) => {
+    const x = extra({ track: err(500, "internal_error") });
+    await engineSetup(page, mock({ onboarding: [json(RAW_NEW)] }), x);
+    await bootToDesktop(page);
+    await ob(page).locator('[data-testid="ob-choose-engine"]').click();
+    await expect(ob(page).locator('[data-testid="ob-choice-error"]')).toHaveText("Your choice couldn't be saved. Try again.");
+    await expect(ob(page).locator('[data-testid="ob-choose-engine"]')).toBeEnabled();
+    expect(x.trackPuts).toHaveLength(1);
+    await noPlaceholder(page);
+  });
+
+  test("a refused choice (a member, or a token) reads as the owners-and-admins message", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(RAW_NEW)] }), extra({ track: err(403, "insufficient_role") }));
+    await bootToDesktop(page);
+    await ob(page).locator('[data-testid="ob-choose-pipeline"]').click();
+    await expect(ob(page).locator('[data-testid="ob-choice-error"]')).toHaveText("Only owners and admins can see setup progress.");
+  });
+
+  test("'Add the other track' stays after the cloud-builds track is chosen, adds the engine track, and goes when both are chosen", async ({ page }) => {
+    const x = extra();
+    const m = mock({ onboarding: [json(withEngine(ONB.new, engineTrack({ machine: "active" }), null))] });
+    await engineSetup(page, m, x, () => { m.onboarding = [json(withEngine(ONB.new, engineTrack({ machine: "active" }), "2026-11-20T10:00:00.000Z"))]; });
+    await bootToDesktop(page);
+    const add = ob(page).locator('[data-testid="ob-add-other"]');
+    await expect(add).toHaveText("Add the other track");
+    await expect(add).toHaveAttribute("aria-label", "Add the other track: Run the engine on my machine or server");
+    await expect(ob(page).locator('ol[aria-label="Setup steps"]')).toBeVisible();
+    await expect(ob(page).locator('[data-testid="ob-track-engine"]')).toHaveCount(0);
+    await add.click();
+    await expect(ob(page).locator('[data-testid="ob-track-engine"]')).toBeVisible();
+    await expect(ob(page).locator('ol[aria-label="Setup steps"]')).toBeVisible(); // both, in the order they were chosen
+    await expect(add).toHaveCount(0);
+    expect(x.trackPuts).toEqual([{ track: "engine" }]);
+    await noOverflow(page);
+  });
+
+  test("the engine track alone offers 'Add the other track' for the cloud-builds track", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(withChosen(states({ machine: "active" }), { pipeline: null }))] }), extra());
+    await bootToDesktop(page);
+    await expect(ob(page).locator('[data-testid="ob-track-engine"]')).toBeVisible();
+    await expect(ob(page).locator('ol[aria-label="Setup steps"]')).toHaveCount(0);
+    await expect(ob(page).locator('[data-testid="ob-add-other"]')).toHaveText("Add the other track");
+    await expect(ob(page).locator('[data-testid="ob-add-other"]')).toHaveAttribute("aria-label", "Add the other track: Let the cloud run builds");
+  });
+
+  test("an account with pipeline progress and no recorded choice keeps its steps and is not asked to choose", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(withChosen(ONB.step3, { pipeline: null }))] }), extra());
+    await bootToDesktop(page);
+    await expect(ob(page).locator('ol[aria-label="Setup steps"] > li')).toHaveCount(6);
+    await expect(ob(page).locator('[data-testid="ob-choice"]')).toHaveCount(0);
+    await expect(ob(page).locator('[data-testid="ob-add-other"]')).toHaveText("Add the other track");
+  });
+
+  test("machine step open: the prerequisites, then the commands from this origin; Copy copies exactly the text shown", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const m = mock({ onboarding: [json(states({ machine: "active" }))], plans: withEnginePlan(29) });
+    await engineSetup(page, m, extra({ machine: null }));
+    await bootToDesktop(page);
+    const origin = new URL(page.url()).origin;
+    await expect(ob(page).locator('[data-testid="ob-prereq-line"]')).toHaveText([
+      "A Claude subscription",
+      "A GitHub account",
+      "A computer running Linux, macOS or Windows with WSL2, or a Hetzner Cloud account",
+      "Price: $29.00 a month per engine",
+      "Time to Live: usually 15–30 minutes",
+    ]);
+    const shown = await eng(page, "machine").locator('[data-testid="ob-cmd"]').allTextContents();
+    expect(shown).toEqual(["curl -fsSL https://claude.ai/install.sh | bash", "claude", `curl -fsSL ${origin}/install.sh | sh`, `fx-runner setup --cloud-url ${origin}`]);
+    expect(await lines(page, "machine")).toEqual([`It prints a code. Open ${origin}/link and type the code there.`, "Waiting for your machine…"]);
+    const copies = eng(page, "machine").locator('[data-testid="ob-copy"]');
+    await expect(copies).toHaveCount(4);
+    for (let i = 0; i < shown.length; i++) {
+      await copies.nth(i).click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(shown[i]);
+    }
+    await expect(ob(page).locator('[data-testid="ob-live"]')).toHaveText("Copied");
+    for (const id of ["claude", "github_app", "project", "plan", "install", "live"]) expect(await lines(page, id)).toEqual(["Finish Connect a machine first"]);
+    await expect(eng(page, "claude").locator('[data-testid="ob-engine-state"]')).toHaveText("Waiting");
+    await noOverflow(page);
+    await noPlaceholder(page);
+  });
+
+  test("the price in the prerequisites is plan data: another Engine plan price changes the line", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "active" }))], plans: withEnginePlan(41) }), extra());
+    await bootToDesktop(page);
+    await expect(ob(page).locator('[data-testid="ob-prereq-line"]').nth(3)).toHaveText("Price: $41.00 a month per engine");
+  });
+
+  test("no Engine plan in the plan data: the line does not invent a price", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "active" }))] }), extra());
+    await bootToDesktop(page);
+    await expect(ob(page).locator('[data-testid="ob-prereq-line"]').nth(3)).toHaveText("Price: shown when you choose a plan");
+  });
+
+  test("machine done on microVM, claude open: the machine is named from the runners list and the next step is current", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra());
+    await bootToDesktop(page);
+    expect(await lines(page, "machine")).toEqual([`${BOX} connected · MicroVM isolation`]);
+    await expect(eng(page, "machine").locator('[data-testid="ob-engine-state"]')).toContainText("Done");
+    await expect(eng(page, "machine").locator("time")).toHaveCount(1);
+    expect(await lines(page, "claude")).toEqual([`Run claude on ${BOX} and sign in`]);
+    await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveText("claude");
+    await expect(ob(page).locator('[data-testid="ob-track-engine"] [aria-current="step"]')).toHaveAttribute("data-testid", "ob-engine-claude");
+    await expect(ob(page).locator('[data-testid="ob-prereq"]')).toHaveCount(0); // the list is for before the first command
+    expect(await lines(page, "github_app")).toEqual(["Finish Sign in to Claude on the machine first"]);
+  });
+
+  test("no KVM is normal: Standard isolation, the fixed line, and no failure styling, word or copy", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard" }))] }), extra());
+    await bootToDesktop(page);
+    expect(await lines(page, "machine")).toEqual([`${BOX} connected · Standard isolation`, "This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project."]);
+    await expect(eng(page, "machine")).not.toHaveClass(/ob-failed/);
+    await expect(eng(page, "machine")).toHaveAttribute("data-state", "done");
+    expect(await eng(page, "machine").innerText()).not.toMatch(/fail|warn|error|problem|attention/i);
+    await expect(ob(page).locator('[data-testid="ob-error"]')).toBeEmpty();
+  });
+
+  test("claude open on a machine that is offline: how long ago it was last seen", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra({ machine: { name: BOX, state: "offline", minutesAgo: 14 } }));
+    await bootToDesktop(page);
+    expect(await lines(page, "claude")).toEqual([`${BOX} was last seen 14 min ago`]);
+    await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveCount(0);
+  });
+
+  test("with no runners list the copy says 'your machine' and prints no placeholder", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra({ machine: null }));
+    await bootToDesktop(page);
+    expect(await lines(page, "machine")).toEqual(["your machine connected · MicroVM isolation"]);
+    await noPlaceholder(page);
+  });
+
+  test("a failed step: the word, the heavier border and its fixed sentence; the failure code is never shown", async ({ page }) => {
+    const body = states({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "failed" }, { tier: "microvm", code: "survey_timeout" });
+    await engineSetup(page, mock({ onboarding: [json(body)] }), extra());
+    await bootToDesktop(page);
+    await expect(eng(page, "plan")).toHaveClass(/ob-failed/);
+    await expect(eng(page, "plan").locator('[data-testid="ob-engine-state"]')).toHaveText("Needs attention");
+    expect(await lines(page, "plan")).toEqual(["The survey stopped. Try again, or write your own plan"]);
+    expect(await ob(page).innerText()).not.toContain("survey_timeout");
+  });
+
+  test("a failure code nobody has heard of reads as a generic stop", async ({ page }) => {
+    const body = states({ ...ALL_DONE, install: "failed", live: "pending" }, { tier: "microvm", code: "brand_new_code" });
+    await engineSetup(page, mock({ onboarding: [json(body)] }), extra());
+    await bootToDesktop(page);
+    expect(await lines(page, "install")).toEqual(["This step stopped. Try again."]);
+  });
+
+  test("every state of the list has its word: done, needs attention and waiting", async ({ page }) => {
+    const body = states({ machine: "done", claude: "done", github_app: "done", project: "failed", plan: "pending" }, { tier: "microvm", code: "mirror_failed" });
+    await engineSetup(page, mock({ onboarding: [json(body)] }), extra());
+    await bootToDesktop(page);
+    await expect(ob(page).locator('[data-testid="ob-engine-state"]')).toContainText(["Done", "Done", "Done", "Needs attention", "Waiting", "Waiting", "Waiting"]);
+    expect(await lines(page, "project")).toEqual([`Couldn't fetch the repository to ${BOX}. Try again`]);
+    expect(await lines(page, "plan")).toEqual(["Finish Choose a project first"]);
+  });
+
+  test("GitHub App open offers Open Repos; the unpaid desktop keeps Machines and Team off (the unpaid-desktop ruling)", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "done", github_app: "active" }, { tier: "microvm" }))] }), extra());
+    await bootToDesktop(page);
+    await expect(eng(page, "github_app").locator('[data-testid="ob-engine-open_repos"]')).toHaveText("Open Repos");
+    const ids = await page.evaluate(() => (window as unknown as Shell).FULCApps.ids());
+    expect(ids).not.toContain("runners");
+    expect(ids).not.toContain("team");
+  });
+
+  test("once the engine is live, an open desktop offers Open Team, which opens it", async ({ page }) => {
+    await engineSetup(page, mock({ access: "open", onboarding: [json(states(ALL_DONE, { tier: "microvm" }))] }), extra());
+    await bootToDesktop(page);
+    await page.evaluate(() => (window as unknown as Shell).FULCWM.open("onboarding"));
+    await expect(ob(page)).toBeVisible();
+    const team = eng(page, "live").locator('[data-testid="ob-engine-open_team"]');
+    await expect(team).toHaveText("Open Team");
+    await team.click();
+    await expect(win(page, "team")).toBeVisible();
+  });
+
+  test("the unpaid desktop offers no button it cannot open on a finished engine track", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states(ALL_DONE, { tier: "microvm" }))] }), extra());
+    await bootToDesktop(page);
+    await expect(eng(page, "live")).toBeVisible();
+    await expect(eng(page, "live").locator("button")).toHaveCount(0);
+  });
+
+  test("a long machine name wraps: no sideways scroll, and every control is at least 44 px", async ({ page }) => {
+    const long = "x".repeat(120);
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard" }))] }), extra({ machine: { name: long, state: "online_idle", minutesAgo: 0 } }));
+    await bootToDesktop(page);
+    await expect(eng(page, "machine")).toContainText(long);
+    await noOverflow(page);
+    for (const box of await ob(page).locator('[data-testid="ob-app"] button:visible').evaluateAll((els) => els.map((e) => e.getBoundingClientRect().toJSON()))) {
+      expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.width).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  test("hostile text in a machine name is shown as text, never as markup", async ({ page }) => {
+    const name = '<img src=x onerror="window.__owned=1"><b>pwn</b>';
+    const problems = await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra({ machine: { name, state: "online_idle", minutesAgo: 0 } }));
+    await bootToDesktop(page);
+    await expect(eng(page, "machine")).toContainText(name);
+    await expect(eng(page, "machine").locator("bdi").first()).toHaveText(name); // the name sits in <bdi>, as text
+    expect(await eng(page, "machine").locator("img, b").count()).toBe(0);
+    expect(await page.evaluate(() => (window as unknown as { __owned?: number }).__owned)).toBeUndefined();
+    expect(problems).toEqual([]);
+  });
+
+  test("an unreadable answer is the error with Try again, and the screen recovers", async ({ page }) => {
+    const m = mock({ access: "open", onboarding: [err(500, "internal_error")] }); // an unpaid desktop would fail closed to the gate on a 500
+    await engineSetup(page, m, extra());
+    await bootToDesktop(page);
+    await page.evaluate(() => (window as unknown as Shell).FULCWM.open("onboarding"));
+    await expect(ob(page).locator('[data-testid="ob-error"]')).toContainText("Your setup progress couldn't be loaded.");
+    m.onboarding = [json(states({ machine: "active" }))];
+    await ob(page).locator('[data-testid="ob-retry"]').click();
+    await expect(ob(page).locator('[data-testid="ob-track-engine"]')).toBeVisible();
+    await expect(ob(page).locator('[data-testid="ob-error"]')).toBeEmpty();
+  });
+
+  test("an engine track the app cannot read shows its own error beside a healthy pipeline track, never a half-drawn list", async ({ page }) => {
+    const both = { ...ONB.new, tracks: [{ ...ONB.new.tracks[0], chosen_at: "2026-11-20T08:00:00.000Z" }, ONB.new.tracks[1]] };
+    await engineSetup(page, mock({ onboarding: [json(withEngine(both as typeof ONB.new, engineTrack({ machine: "active" }).slice(1)))] }), extra());
+    await bootToDesktop(page);
+    await page.evaluate(() => (window as unknown as Shell).FULCWM.open("onboarding"));
+    await expect(ob(page).locator('[data-testid="ob-engine-error"]')).toContainText("The engine setup couldn't be loaded.");
+    await expect(ob(page).locator('[data-testid="ob-step-model_key"]')).toBeVisible();
+    await expect(ob(page).locator('[data-testid="ob-error"]')).toBeEmpty();
+    await expect(ob(page).locator('[data-testid="ob-track-engine"]')).toHaveCount(0);
+  });
+
+  test("a member is told only owners and admins can see setup progress, with no track on screen", async ({ page }) => {
+    await engineSetup(page, mock({ access: "open", isAdmin: false, onboarding: [err(403, "insufficient_role")] }), extra());
+    await bootToDesktop(page);
+    await page.evaluate(() => (window as unknown as Shell).FULCWM.open("onboarding"));
+    await expect(ob(page).locator('[data-testid="ob-error"]')).toContainText("Only owners and admins can see setup progress.");
+    await expect(ob(page).locator('[data-testid="ob-choice"], [data-testid="ob-track-engine"]')).toHaveCount(0);
+  });
+
+  test("axe finds nothing on the choice or on the engine track", async ({ page }) => {
+    const m = mock({ onboarding: [json(RAW_NEW)] });
+    await engineSetup(page, m, extra(), () => { m.onboarding = [json(states({ machine: "done", claude: "failed" }, { tier: "standard", code: "claude_too_old" }))]; });
+    await bootToDesktop(page);
+    await expect(ob(page).locator('[data-testid="ob-choice"]')).toBeVisible();
+    expect((await new AxeBuilder({ page }).include('.fulc-window[data-app-id="onboarding"]').analyze()).violations).toEqual([]);
+    await ob(page).locator('[data-testid="ob-choose-engine"]').click();
+    await expect(ob(page).locator('[data-testid="ob-track-engine"]')).toBeVisible();
+    expect((await new AxeBuilder({ page }).include('.fulc-window[data-app-id="onboarding"]').analyze()).violations).toEqual([]);
   });
 });

@@ -1,4 +1,5 @@
-// D#37 WS-F9a: the Onboarding app. Six steps, in the server's order, read from GET /api/v1/onboarding.
+// D#37 WS-F9a: the Onboarding app. Two tracks, read from GET /api/v1/onboarding (`tracks`): the pipeline track's six steps (this file) and, since D#845 ON-6,
+// the engine track's seven (onboarding-engine.js). The first visit offers the choice; "Add the other track" stays while only one is chosen.
 //
 // Rules this file keeps:
 //   * Progress belongs to the server. The current step is the first one whose completed_at is null, the times shown
@@ -15,7 +16,7 @@
 //   * Every node comes from h(); the server's text is never parsed as markup.
 import { h, timeNode } from "../_lib/dom.js";
 import { api, ApiFailure } from "../_lib/api.js";
-import { isOpenStep, parseSteps } from "../../core/onboarding-mode.js";
+import { isOpenStep, parseTracks, shownTracks } from "../../core/onboarding-mode.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { mountPreview } from "./onboarding-preview.js";
 
@@ -29,7 +30,8 @@ const LABELS = {
 };
 const HANDOFF = { model_key: ["model-key", "Open Model Key"], readonly_app: ["repos", "Open Repos"], write_app: ["repos", "Open Repos"], first_pr: ["runs", "Open Runs"] };
 // Domain events after which step 1 or 2 may have changed.
-const LIVE_EVENTS = ["model_connection.changed", "model_connection.broken", "installation.changed"];
+// (D#845: a setup that moved, too: it changes what the engine track's steps show.)
+const LIVE_EVENTS = ["model_connection.changed", "model_connection.broken", "installation.changed", "setup.changed"];
 // The repo list step 3 offers follows the account's repos too (a detach or a sync changes it without changing a step),
 // so this event re-reads that list only, not the steps.
 const REPO_EVENT = "repos.changed";
@@ -40,10 +42,20 @@ const TEXT = {
 };
 const FORBIDDEN = "Only owners and admins can see setup progress.";
 const LOAD_FAILED = "Your setup progress couldn't be loaded.";
+const ENGINE_UNREADABLE = "The engine setup couldn't be loaded.";
+const CHOICE = { engine: "Run the engine on my machine or server", pipeline: "Let the cloud run builds" };
+const ADD_OTHER = "Add the other track";
+const CHOICE_FAILED = "Your choice couldn't be saved. Try again.";
+// The engine track's words live in onboarding-engine.js, fetched only when that track is on screen (a static import would be one more boot request).
+let engineModule = null;
+const loadEngine = () => (engineModule = engineModule || import("./onboarding-engine.js").catch((e) => { engineModule = null; throw e; }));
+const CHOICE_TITLE = "Choose how to set up your workspace";
+/** An optional read: a failure leaves that detail out (the steps then show their generic state); only an abort passes through. */
+const soft = (p) => p.catch((e) => { if (e && e.name === "AbortError") throw e; return null; });
 
 function mountOnboarding(host) {
   const abort = new AbortController();
-  const st = { steps: null, error: "" };
+  const st = { steps: null, parsed: null, eng: null, error: "", ctx: {}, price: null, choosing: false, choiceError: "" };
   let destroyed = false, busy = false, again = false, preview = null, payShown = false;
   // The plan picker opens once, into payHost, and stays until pay is done. The server decides when pay is done.
   function showPlans() {
@@ -88,6 +100,20 @@ function mountOnboarding(host) {
       body.replaceChildren(st.error ? "" : h("p", { class: "ob-muted" }, "Loading your setup progress…"));
       return;
     }
+    const shown = shownTracks(st.parsed);
+    // The track choice on the first visit; otherwise each chosen track in the order it was chosen, with "Add the other track" while one is missing.
+    const parts = (pipelineNodes) => [
+      ...(shown.length === 0 ? [choiceScreen()] : shown.flatMap((t) => [shown.length > 1 ? h("h3", { class: "ob-sub" }, CHOICE[t]) : "", ...(t === "pipeline" ? pipelineNodes : [st.parsed.engine ? st.eng.engineSection(st.parsed.engine, engineEnv()) : engineUnreadable()])])),
+      shown.length === 1 ? h("button", { type: "button", class: "ob-btn", "data-testid": "ob-add-other", "aria-label": ADD_OTHER + ": " + CHOICE[shown[0] === "engine" ? "pipeline" : "engine"], onClick: () => choose(shown[0] === "engine" ? "pipeline" : "engine") }, ADD_OTHER) : "",
+    ].filter(Boolean);
+    if (!shown.includes("pipeline")) {
+      if (preview) { preview.destroy(); preview = null; }
+      payShown = false;
+      payHost.replaceChildren();
+      // dom-insert-ok: parts() builds every entry with h() and drops the empty ones with filter(Boolean)
+      body.replaceChildren(...parts([]));
+      return;
+    }
     const current = st.steps.findIndex(isOpenStep);
     const payOpen = st.steps.find((s) => s.step === "pay").completed_at === null;
     if (!payOpen && payShown) {
@@ -122,7 +148,42 @@ function mountOnboarding(host) {
       return li;
     });
     const skipAhead = payOpen && !payShown ? planButton(TEXT.skipAhead, "ob-skip-ahead") : "";
-    body.replaceChildren(current === -1 ? h("p", { "data-testid": "ob-complete" }, "Setup is complete.") : "", skipAhead, h("ol", { class: "ob-steps", "aria-label": "Setup steps" }, items));
+    // dom-insert-ok: parts() builds every entry with h() and drops the empty ones with filter(Boolean)
+    body.replaceChildren(...parts([current === -1 ? h("p", { "data-testid": "ob-complete" }, "Setup is complete.") : "", skipAhead, h("ol", { class: "ob-steps", "aria-label": "Setup steps" }, items)]));
+  }
+
+  function choiceScreen() {
+    return h("div", { class: "ob-choice", "data-testid": "ob-choice" }, h("h3", { class: "ob-sub" }, CHOICE_TITLE),
+      ["engine", "pipeline"].map((t) => h("button", { type: "button", class: "ob-btn ob-btn-primary", "data-testid": "ob-choose-" + t, disabled: st.choosing, onClick: () => choose(t) }, CHOICE[t])),
+      st.choiceError ? h("p", { class: "ob-error", role: "alert", "data-testid": "ob-choice-error" }, st.choiceError) : "");
+  }
+  const canOpen = (id) => !!(window.FULCApps && window.FULCApps.get(id)); // an app the unpaid desktop keeps off is not offered
+  /** The engine track's own error state: its steps could not be read, the pipeline track beside it is unaffected. */
+  const engineUnreadable = () => h("section", { class: "ob-track", "data-testid": "ob-track-engine-error", "aria-label": "Engine setup" },
+    h("p", { class: "ob-error", role: "alert", "data-testid": "ob-engine-error" }, ENGINE_UNREADABLE + " "), h("button", { type: "button", class: "ob-btn", "data-testid": "ob-engine-retry", onClick: load }, "Try again"));
+  const engineEnv = () => ({ ctx: { ...st.ctx, origin: window.location.origin, isAdmin: window.currentIsAdmin !== false }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp });
+  async function choose(track) {
+    if (st.choosing) return;
+    st.choosing = true;
+    st.choiceError = "";
+    render();
+    let saved = false;
+    try {
+      await api("PUT", "/api/v1/onboarding/track", { track }, abort.signal);
+      saved = true;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      st.choiceError = e instanceof ApiFailure && e.status === 403 ? FORBIDDEN : CHOICE_FAILED;
+    }
+    st.choosing = false;
+    if (saved) await load();
+    else render();
+  }
+  /** The details the engine track's copy joins in: the machine's name (from the runners list) and the Engine plan's price. Either may be missing. */
+  async function readExtras() {
+    const [runners, plans] = await Promise.all([soft(api("GET", "/api/runners", undefined, abort.signal)), soft(api("GET", "/api/plans", undefined, abort.signal))]);
+    st.ctx = st.eng.machineContext(runners, Date.now());
+    st.price = st.eng.enginePrice(plans);
   }
 
   async function load() {
@@ -133,12 +194,17 @@ function mountOnboarding(host) {
     }
     busy = true;
     try {
-      const steps = parseSteps(await api("GET", "/api/v1/onboarding", undefined, abort.signal));
-      if (!steps) throw new Error("shape");
-      st.steps = steps;
+      const parsed = parseTracks(await api("GET", "/api/v1/onboarding", undefined, abort.signal));
+      if (!parsed) throw new Error("shape");
+      if (parsed.engine && shownTracks(parsed).includes("engine")) {
+        st.eng = await loadEngine();
+        await readExtras();
+      }
+      st.parsed = parsed;
+      st.steps = parsed.pipeline;
       st.error = "";
       // WS-F9b: the shell's finish-setup strip follows what this app has just read (owners/admins only; no-op otherwise).
-      if (window.FULCOnboardingMode && window.FULCOnboardingMode.reportSteps) window.FULCOnboardingMode.reportSteps(steps);
+      if (window.FULCOnboardingMode && window.FULCOnboardingMode.reportSteps) window.FULCOnboardingMode.reportSteps(parsed.pipeline);
     } catch (e) {
       if (e && e.name === "AbortError") return;
       st.error = e instanceof ApiFailure && e.status === 403 ? FORBIDDEN : LOAD_FAILED;

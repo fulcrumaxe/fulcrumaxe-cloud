@@ -11,6 +11,8 @@ import { ONBOARDING_APPS, enterOnboardingMode, isOpenStep, parseSteps, resolveAc
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "getOnboarding");
 const fixture = (name) => JSON.parse(readFileSync(join(V1, name), "utf8"));
+/** A body whose pipeline steps are `steps`, in both places the API carries them (the top-level list and `tracks[0]`). */
+const withSteps = (body, steps) => ({ ...body, steps, tracks: [{ ...body.tracks[0], steps }, body.tracks[1]] });
 const reply = (status, body) => vi.fn(() => Promise.resolve({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) }));
 
 describe("resolveAccess: which screen a signed-in session gets", () => {
@@ -41,7 +43,7 @@ describe("resolveAccess: which screen a signed-in session gets", () => {
   for (const reverted of ["model_key", "readonly_app"]) {
     it(`no_subscription + every other step done but ${reverted} open again: onboarding mode, not the gate`, async () => {
       const done = fixture("200-complete.json");
-      const body = { ...done, steps: done.steps.map((s) => (s.step === reverted ? { ...s, completed_at: null } : s)) };
+      const body = withSteps(done, done.steps.map((s) => (s.step === reverted ? { ...s, completed_at: null } : s)));
       const doFetch = reply(200, body);
       expect(await resolveAccess({ workspace_access: "no_subscription" }, doFetch)).toBe("onboarding");
       expect(doFetch).toHaveBeenCalledTimes(1);
@@ -51,7 +53,7 @@ describe("resolveAccess: which screen a signed-in session gets", () => {
   // Paid without a preview: the skipped preview does not hold the account in onboarding mode on its own.
   it("no_subscription + everything done or skipped: the gate, not onboarding mode", async () => {
     const done = fixture("200-complete.json");
-    const body = { ...done, steps: done.steps.map((s) => (s.step === "preview" ? { ...s, completed_at: null, skipped: true } : s)) };
+    const body = withSteps(done, done.steps.map((s) => (s.step === "preview" ? { ...s, completed_at: null, skipped: true } : s)));
     expect(await resolveAccess({ workspace_access: "no_subscription" }, reply(200, body))).toBe("gate");
   });
 
@@ -70,9 +72,9 @@ describe("resolveAccess: which screen a signed-in session gets", () => {
     expect(await resolveAccess(s, vi.fn(() => Promise.reject(new TypeError("offline"))))).toBe("gate");
     expect(await resolveAccess(s, vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new SyntaxError("x")) })))).toBe("gate");
     const bad = fixture("200-new.json");
-    for (const body of [null, "x", {}, { steps: [] }, { ...bad, steps: bad.steps.slice(1) }, { ...bad, steps: [...bad.steps].reverse() },
-      { ...bad, steps: bad.steps.map((x, i) => (i ? x : { ...x, completed_at: "not a time" })) },
-      { ...bad, steps: bad.steps.map((x, i) => (i ? x : { ...x, completed_at: undefined })) }]) {
+    for (const body of [null, "x", {}, { steps: [] }, { steps: bad.steps }, withSteps(bad, bad.steps.slice(1)), withSteps(bad, [...bad.steps].reverse()),
+      withSteps(bad, bad.steps.map((x, i) => (i ? x : { ...x, completed_at: "not a time" }))),
+      withSteps(bad, bad.steps.map((x, i) => (i ? x : { ...x, completed_at: undefined })))]) {
       expect(await resolveAccess(s, reply(200, body))).toBe("gate");
     }
   });
@@ -99,7 +101,7 @@ describe("parseSteps", () => {
   it("reads skipped: false when the body has none, and keeps true for the preview with no time", () => {
     expect(parseSteps(fixture("200-new.json")).every((s) => s.skipped === false)).toBe(true);
     const old = fixture("200-new.json");
-    expect(parseSteps({ ...old, steps: old.steps.map((s) => ({ step: s.step, completed_at: s.completed_at })) }).every((s) => s.skipped === false)).toBe(true);
+    expect(parseSteps(withSteps(old, old.steps.map((s) => ({ step: s.step, completed_at: s.completed_at })))).every((s) => s.skipped === false)).toBe(true);
     const steps = parseSteps(fixture("200-skipped.json"));
     expect(steps.filter((s) => s.skipped).map((s) => s.step)).toEqual(["preview"]);
     expect(steps.find((s) => s.step === "preview").completed_at).toBeNull();
@@ -107,9 +109,9 @@ describe("parseSteps", () => {
 
   it("refuses a skipped step that also has a time, and a skipped that is not a boolean", () => {
     const body = fixture("200-skipped.json");
-    for (const bad of [{ ...body, steps: body.steps.map((x) => (x.step === "pay" ? { ...x, skipped: true } : x)) },
-      { ...body, steps: body.steps.map((x) => (x.step === "preview" ? { ...x, skipped: "yes" } : x)) },
-      { ...body, steps: body.steps.map((x) => (x.step === "preview" ? { ...x, skipped: null } : x)) }]) {
+    for (const bad of [withSteps(body, body.steps.map((x) => (x.step === "pay" ? { ...x, skipped: true } : x))),
+      withSteps(body, body.steps.map((x) => (x.step === "preview" ? { ...x, skipped: "yes" } : x))),
+      withSteps(body, body.steps.map((x) => (x.step === "preview" ? { ...x, skipped: null } : x)))]) {
       expect(parseSteps(bad)).toBeNull();
     }
   });
@@ -175,7 +177,7 @@ describe("the registry limit (app-registry.js restrictTo)", () => {
 
 // D#37 WS-F9b: the finish-setup strip. The pure rules here; the drawn strip is in e2e/setup-strip.spec.ts.
 describe("the finish-setup strip rules", () => {
-  const steps = (name, patch = {}) => parseSteps({ ...fixture(name), steps: fixture(name).steps.map((s) => (patch[s.step] ? { ...s, ...patch[s.step] } : s)) });
+  const steps = (name, patch = {}) => parseSteps(withSteps(fixture(name), fixture(name).steps.map((s) => (patch[s.step] ? { ...s, ...patch[s.step] } : s))));
   const open = (id) => ({ [id]: { completed_at: null } });
 
   it("shows while a step is open and never when every step is done or skipped", async () => {
