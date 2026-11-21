@@ -5,6 +5,11 @@ name: microVM image
 # on a free hosted x64 Linux runner with KVM" (D#587 B-1, acceptance 9). The arm64 disk is built, not booted (a hosted x64 runner
 # cannot). Started by hand only (Actions tab, or `gh workflow run microvm-image.yml`); it never runs on a pull request or a push.
 # It also builds, installs and starts fx-vmhelper (the owner opted in to this change on 2026-11-20) so the helper-backed real-VM tests run.
+# A step after the vitest run fails the job if any helper-backed real suite ran no test (the owner opted in to that change too).
+# On 2026-11-21 the owner opted in to two more additions, both here: bubblewrap and socat are installed (apt) so the OS-sandbox side of
+# the vmJob.real engine comparison runs instead of skipping, and a root-owned search script is installed that the vmJob.real test calls
+# through `sudo -n`, to look for the job token in the helper's jail and snapshot directories as root (the token goes to it on standard input).
+# A helper-backed suite is NOT found by name: a new one must be added by hand to `suites` in the guard step below, or it can skip unseen.
 # The build steps are the local action .github/actions/microvm-image, which microvm-image-release.yml shares.
 #
 # No secrets, no inputs, a read-only token, and the job runs only on the public plane, so the private plane never queues it.
@@ -41,6 +46,18 @@ jobs:
           node-version: 24.11.0
       - name: Install dependencies
         run: corepack enable && pnpm install --frozen-lockfile --filter "@fulcrumaxe/fx-runner..."
+      # The OS-sandbox side of the vmJob.real engine comparison needs bubblewrap and socat on PATH. The probe is information only: the line it
+      # writes to host.txt tells a skipped comparison (a restriction on unprivileged user namespaces) from a missing tool.
+      - name: Install bubblewrap and socat (for the engine comparison)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          sudo install -d -o "$(id -u)" -g "$(id -g)" "$W"
+          {
+            echo "bubblewrap: $(bwrap --version) socat: $(socat -V | sed -n 2p)"
+            echo "apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>&1)"
+            echo "bwrap probe: $(bwrap --unshare-user --unshare-pid --ro-bind / / true 2>&1 && echo ok)"
+          } 2>&1 | tee -a "$W/host.txt"
       - name: Build the root disks, twice, and compare
         uses: ./.github/actions/microvm-image
       - name: Pinned kernel and Firecracker (x86_64)
@@ -116,11 +133,10 @@ jobs:
           printf '{"fx-agent":{"kernel":"%s","rootfs":"%s"}}\n' "$K" "$R" | sudo tee "$O/template-manifest.json" > /dev/null
           sudo chmod 0644 "$O/template-manifest.json"
           sudo install -m 0600 -o root -g root "$W/plan/config.json" /etc/fx-vmhelper/config.json
-          # Found by this job: with `User=root` in the rendered unit, systemd 255 on this image starts the helper without CAP_SETUID in its
-          # effective set, and its own start-up check refuses (CapEff 0x08200041, pinned 0x082000c1). A system unit runs as root without
-          # that line, and then the check passes, so the line is dropped for this run only; the product's unit text is not changed here.
-          sed '/^User=root$/d' "$W/plan/fx-vmhelper.service" > "$W/plan/fx-vmhelper.service.run"
-          sudo install -m 0644 -o root -g root "$W/plan/fx-vmhelper.service.run" /etc/systemd/system/fx-vmhelper.service
+          # The unit is installed exactly as the installer renders it. It carries no User= line: with `User=root` written out, systemd 255
+          # on this image started the helper without CAP_SETUID in its effective set (CapEff 0x08200041, pinned 0x082000c1).
+          if grep -q '^User=' "$W/plan/fx-vmhelper.service"; then echo "the rendered unit carries a User= line"; exit 1; fi
+          sudo install -m 0644 -o root -g root "$W/plan/fx-vmhelper.service" /etc/systemd/system/fx-vmhelper.service
           # what a dispatched host tells the real-VM suites (see the header of the two test files)
           T="vm-fx-agent-${K:0:12}"
           jq -n --arg k "$K" --arg r "$R" --arg a "$A" --arg t "$T" '{arch:"amd64",digests:{kernel:$k,rootfs:$r,agent:$a},listing:{ok:true,paths:["\($t)/kernel-amd64-\($k)","\($t)/rootfs-amd64-\($r)","\($t)/agent-amd64-\($a)"]}}' > "$W/boot-facts.json"
@@ -134,11 +150,65 @@ jobs:
           sudo systemctl start fx-vmhelper.service || { sudo journalctl -u fx-vmhelper --no-pager | tail -n 60; exit 1; }
           for i in $(seq 1 20); do sudo test -S /run/fx-vmhelper/helper.sock && break; sleep 0.5; done
           sudo systemctl status fx-vmhelper.service --no-pager | head -n 20
+          # the proof for the unit text: the running helper's own capability sets (pinned effective set 0x082000c1)
+          HPID="$(systemctl show -p MainPID --value fx-vmhelper.service)"
+          { echo "helper main pid $HPID"; grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):' "/proc/$HPID/status"; } | tee -a "$W/host.txt"
           sudo test -S /run/fx-vmhelper/helper.sock
+      # The vmJob.real host search runs as root through `sudo -n`, from a copy that is root-owned and not writable by the test user. It reads the
+      # token from standard input, prints only counts and paths, and plants its own control; the token is in no log and no artifact.
+      - name: Install the root-on-host token search (vmJob.real calls it through sudo -n)
+        run: |
+          sudo install -m 0755 -o root -g root packages/fx-runner/test/vm/helpers/hostTokenSearch.sh /usr/local/sbin/fx-host-token-search
+          sudo -n true
+          echo "FX_VM_HOST_SEARCH=/usr/local/sbin/fx-host-token-search" >> "$GITHUB_ENV"
       - name: Boot the guest under Firecracker and run the probes (the whole vm test directory)
         # sg gives the test process the helper's group (the socket directory is root:fx-vmhelper 0750; a usermod does not reach a running
         # shell). The tests still run as this ordinary user, never as root: the helper-backed suites refuse root.
-        run: sg fx-vmhelper -c 'bash -o pipefail -c "pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/vm 2>&1 | tee $W/vitest.txt"'
+        run: sg fx-vmhelper -c 'bash -o pipefail -c "pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/vm --reporter=default --reporter=json --outputFile.json=$W/vitest.json 2>&1 | tee $W/vitest.txt"'
+      # The helper is installed and started above, so the helper-backed real suites MUST run here. Each of them skips quietly (with a warning)
+      # when an env var is missing, and a skipped file reports as passed: this step turns that into a failure. A file with no passed test
+      # (skipped, missing from the report, or empty) fails the job, and the message names the variables the file checks.
+      - name: The helper-backed real-VM suites ran (a skip is a failure)
+        run: |
+          cat > "$W/real-suites-ran.mjs" <<'EOF'
+          import { existsSync, readFileSync } from "node:fs";
+          const root = `${process.env.GITHUB_WORKSPACE}/packages/fx-runner/test/vm`;
+          const FIRECRACKER = ["FX_VM_FIRECRACKER", "FX_VM_KERNEL", "FX_VM_ROOTFS"];
+          const suites = {
+            "microvmSandbox.real": ["FX_VM_HELPER_SOCKET", "FX_VM_TEMPLATE", "FX_VM_KERNEL", "FX_VM_ROOTFS", "FX_VM_AGENT"],
+            "workspaceCrossing.real": ["FX_VM_HELPER_SOCKET", "FX_VM_TEMPLATE", "FX_VM_BOOT_FACTS"],
+            "vmJob.real": ["FX_VM_HELPER_SOCKET", "FX_VM_TEMPLATE", "FX_VM_KERNEL", "FX_VM_ROOTFS", "FX_VM_AGENT"],
+            "vmToken.real": FIRECRACKER,
+            "vmBoot.real": FIRECRACKER,
+            "vmStream.real": FIRECRACKER,
+          };
+          // Tests of a suite that skip ALONE when a tool or variable is missing; each must pass too (a test is matched by the text its title holds).
+          const mustRun = { "vmJob.real": ["26a (engines)", "26a (host)"] };
+          const report = JSON.parse(readFileSync(process.env.VITEST_JSON, "utf8"));
+          let bad = 0;
+          for (const [name, vars] of Object.entries(suites)) {
+            const file = `${root}/${name}.test.ts`;
+            if (!existsSync(file)) {
+              console.log(`::error::${name}: the file is missing from the tree`); bad++; continue;
+            }
+            const run = report.testResults.find((r) => r.name === file);
+            const count = (status) => (run?.assertionResults ?? []).filter((t) => t.status === status).length;
+            const passed = count("passed"), skipped = count("skipped") + count("pending") + count("todo"), failed = count("failed");
+            console.log(`${name}: ${passed} passed, ${failed} failed, ${skipped} skipped${run === undefined ? " (not in the vitest report)" : ""}`);
+            for (const part of passed > 0 ? (mustRun[name] ?? []) : []) {
+              const t = (run?.assertionResults ?? []).find((x) => `${x.title} ${x.fullName}`.includes(part));
+              if (t?.status === "passed") continue;
+              bad++;
+              console.log(`::error::${name}: the test "${part}" did not pass (${t === undefined ? "not in the report" : t.status}); it skips alone when a tool or variable is missing here (FX_VM_HOST_SEARCH=${process.env.FX_VM_HOST_SEARCH ?? "unset"}; the bubblewrap probe is in host.txt)`);
+            }
+            if (passed > 0) continue;
+            bad++;
+            const unset = vars.filter((v) => !process.env[v]);
+            console.log(`::error::${name} ran no test: ${run === undefined ? "it is not in the report" : `${skipped} skipped`}. It checks ${vars.join(", ") || "(see the file header)"}; unset here: ${unset.join(", ") || "none (the file skipped for another reason, for instance running as root)"}`);
+          }
+          if (bad > 0) { console.log(`${bad} helper-backed real suite(s) did not run, and the helper is installed in this job, so this is a failure`); process.exit(1); }
+          EOF
+          VITEST_JSON="$W/vitest.json" node "$W/real-suites-ran.mjs"
       - name: The helper's log and state (no secrets, it logs events only)
         if: always()
         run: |
@@ -178,6 +248,7 @@ jobs:
             /mnt/fxvm/report-a.txt
             /mnt/fxvm/report-b.txt
             /mnt/fxvm/vitest.txt
+            /mnt/fxvm/vitest.json
             /mnt/fxvm/helper.log
             /mnt/fxvm/helper-status.txt
             /mnt/fxvm/dmesg.txt
