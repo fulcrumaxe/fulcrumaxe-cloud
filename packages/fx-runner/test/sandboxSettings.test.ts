@@ -113,9 +113,11 @@ describe("only an enabled block goes to the engine", () => {
 describe("one builder", () => {
   it("only sandboxSettings.ts names the keys that open the sandbox, and the engine takes the block as an input", () => {
     const owners = (pattern: RegExp): string[] => srcFiles().filter(([, text]) => pattern.test(text)).map(([name]) => name);
-    expect(owners(/strictAllowlist|failIfUnavailable/)).toEqual([path.join("src", "sandbox", "sandboxSettings.ts")]);
+    // D#587 B-5a-RT-3: the second builder is the guest's own, over the image's fixed layout (the host's reads the host's file system and takes the host's home and state paths).
+    const builders = [path.join("src", "sandbox", "sandboxSettings.ts"), path.join("src", "vm", "guestSandboxSettings.ts")];
+    expect(owners(/strictAllowlist|failIfUnavailable/).sort()).toEqual(builders.sort());
     // The engine refuses an open block through assertEnabledSandbox; it names no escape key itself.
-    expect(owners(/allowUnsandboxedCommands/)).toEqual([path.join("src", "sandbox", "sandboxSettings.ts")]);
+    expect(owners(/allowUnsandboxedCommands/).sort()).toEqual(builders.sort());
     expect(readFileSync(path.join(PACKAGE_DIR, "src", "engines", "claude", "engine.ts"), "utf8")).not.toMatch(/allowUnsandboxedCommands\s*:/);
     expect(readFileSync(path.join(PACKAGE_DIR, "src", "engines", "claude", "settingsFile.ts"), "utf8")).toContain("sandbox: Record<string, unknown>");
   });

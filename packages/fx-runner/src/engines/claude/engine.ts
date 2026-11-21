@@ -21,8 +21,8 @@ import { createRunLog } from "./stream.js";
 import { HOST_USAGE_LIMITS, PERMISSION_MODE_FORCED, runAgentStream, type AgentStreamEnd } from "./streamRun.js";
 
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
-const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CLI_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+export const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const CLI_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 export { PERMISSION_MODE_FORCED };
 
 export interface EngineConfig {

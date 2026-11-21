@@ -84,7 +84,7 @@ function readCache(file: string): FlagCache {
   }
 }
 
-function missingFlags(help: string): string[] {
+export function missingFlags(help: string): string[] {
   return REQUIRED_FLAGS.filter((flag) => !new RegExp(`(?:^|[\\s,|])${flag}(?=[\\s,<\\[=|]|$)`, "m").test(help));
 }
 

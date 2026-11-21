@@ -7,6 +7,12 @@ import { IMPORT_SPECIFIER, PACKAGE_DIR, filesUnder, srcFiles } from "../../helpe
 
 const ENGINE_DIR = path.join(PACKAGE_DIR, "src", "engines", "claude");
 
+/**
+ * D#587 B-5a-RT-3: the guest runtime runs the CLI in a VM with the engine's own argument list, settings builders, binary checks and stream handling, so a guest
+ * run is read exactly as a host run is. These three files, and only these, import from the engine directory for that reason.
+ */
+const GUEST_RUNTIME_FILES: readonly string[] = [path.join("src", "vm", "guestSandboxSettings.ts"), path.join("src", "vm", "sandboxd", "guestJobFiles.ts"), path.join("src", "vm", "sandboxd", "guestRuntime.ts")];
+
 describe("engine-neutral", () => {
   it("createClaudeEngine returns the protocol package's AgentRuntime", () => {
     const check: (config: Parameters<typeof createClaudeEngine>[0]) => AgentRuntime = createClaudeEngine;
@@ -24,6 +30,8 @@ describe("engine-neutral", () => {
           'export { createClaudeEngine, outcomeOf } from "./engines/claude/engine.js";',
           'export type { EngineConfig, EngineStartOptions, RunOutcome } from "./engines/claude/engine.js";',
         ]);
+      } else if (GUEST_RUNTIME_FILES.includes(name)) {
+        expect(importsEngine, name).toBe(true);
       } else {
         expect(importsEngine, name).toBe(false);
       }
