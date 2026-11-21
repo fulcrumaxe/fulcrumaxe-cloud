@@ -610,6 +610,13 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "root_not_offered",
   // Engine bridge decisions: an answer to a decision that was not asked. (already_answered is listed above.)
   "not_asked",
+  // D#845 MC-9: placing and moving a project on a machine.
+  "machine_single_project",
+  "machine_not_eligible",
+  "no_eligible_machine",
+  "project_already_placed",
+  "project_not_placed",
+  "state_carry_unavailable",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.
   "confirmation_required",
 ];

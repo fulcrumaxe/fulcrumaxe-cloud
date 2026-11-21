@@ -554,6 +554,8 @@ export function capacityFreeSlots(capacity: ClaimCapacity, running: { light: num
  */
 export const HOST_LOAD_MAX_MB = 100_000_000;
 export const HOST_LOAD_MAX_SETUPS = 1000;
+/** A runner sends its host load at most once in this many seconds (the cloud judges a reading stale by a multiple of it). */
+export const HOST_LOAD_MIN_INTERVAL_SECONDS = 60;
 export const HostLoad = z.object({ mem_avail_mb: safeInt.min(0).max(HOST_LOAD_MAX_MB), disk_free_mb: safeInt.min(0).max(HOST_LOAD_MAX_MB), setups_running: safeInt.min(0).max(HOST_LOAD_MAX_SETUPS) }).strict();
 export type HostLoad = z.infer<typeof HostLoad>;
 
