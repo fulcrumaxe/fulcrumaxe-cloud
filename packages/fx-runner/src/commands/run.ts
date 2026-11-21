@@ -96,6 +96,8 @@ import { MAX_SOCKET_PATH_BYTES, findTmux, tmuxEnv } from "../watch/tmux.js";
 
 export const LEDGER_FILE = "jobs.ledger";
 const DEFAULT_MODEL = "sonnet";
+/** The most one reading of the CLI's sign-in may take, whatever its probes do (FU-174). */
+const MODEL_AUTH_LIMIT_MS = 12_000;
 
 /** What `run` needs from the machine it runs on. Only `bin/fx-runner.mjs` fills it in, from the real program. */
 export interface RunHost {
@@ -624,12 +626,19 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         const nowMs = clock.now().getTime();
         if (nowMs - modelAuthAt < 60_000) return modelAuthValue;
         modelAuthAt = nowMs;
+        // One limit over the whole reading (FU-174): `inspect` runs up to three probes of 10 s each, which on a hung CLI would hold the hello and the claim loop for ~30 s once a minute.
+        const limit = new AbortController();
         try {
-          const report = await host.engine.inspect({ binaryPath, envOptions, stateDir, loginMode: "subscription" });
-          modelAuthValue = report.versionSupported && report.login === "yes";
+          const outcome = await Promise.race([
+            host.engine.inspect({ binaryPath, envOptions, stateDir, loginMode: "subscription" }),
+            clock.sleep(MODEL_AUTH_LIMIT_MS, limit.signal).then(() => "timed_out" as const),
+          ]);
+          modelAuthValue = outcome !== "timed_out" && outcome.versionSupported && outcome.login === "yes";
         } catch {
           // fx-swallow-ok: a reading that cannot be made is "not signed in as far as we know"; the next minute asks again
           modelAuthValue = false;
+        } finally {
+          limit.abort();
         }
         return modelAuthValue;
       };
