@@ -571,6 +571,18 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
       expect(inspect).not.toHaveBeenCalled();
       expect(await stop(run)).toMatchObject({ code: 0 });
     });
+    it("a reading that never answers is cut at one overall limit and counts as not signed in, so the first hello is not held for the probes' sum (FU-174)", async () => {
+      const clock = manualClock();
+      const inspect = vi.fn(() => new Promise<Report>(() => undefined)); // a hung CLI: no probe ever answers
+      const run = start({ ...withInspect(inspect), hooks: { clock } });
+      await until(() => inspect.mock.calls.length >= 1);
+      expect(hellos()).toHaveLength(0);
+      await clock.advance(11_000); // under the limit: still waiting
+      expect(hellos()).toHaveLength(0);
+      while (hellos().length < 1) await clock.advance(1000); // past it: the hello goes with `false`
+      expect(authOf(0)).toBe(false);
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    });
     it("says the change again on a later hello when the person signs in or out", async () => {
       let login: "yes" | "no" = "no";
       const clock = manualClock();

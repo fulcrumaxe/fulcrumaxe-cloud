@@ -101,6 +101,8 @@ interface Entry {
   agent?: AgentHandle;
   /** Settles when the agent process exists (or its start failed). A stop waits on this, never on the run's end. */
   agentUp?: Promise<unknown>;
+  /** Counts the starts of this sandbox, bumped before anything awaits: an interrupt keeps the count it saw, so it can tell a start made after it asked (FU-173). */
+  starts?: number;
   running: boolean;
   /** A `runCommand` or `writeFiles` is in flight: set before its first await, cleared when it ends. */
   busy: boolean;
@@ -237,6 +239,7 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
     const job = { ...opts, env: guestEnvOf(opts.env) };
 
     let last: NormalizedEvent | undefined;
+    entry.starts = (entry.starts ?? 0) + 1;
     const agentUp = (async () => {
       // the setup phase has a deadline: a call that never answers ends the start, and `running` clears with it (FU-139)
       const guest = await setupBound(async (gate) => {
@@ -496,8 +499,10 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
       const entry = entries.get(handle.sandboxName);
       // the agent may still be starting: it is interrupted once it exists. The start awaited is the one that was current NOW (FU-173): a run that ended and a new one that
       // began while this waited is not interrupted, so a late call never reaches a turn it was not meant for.
+      // A start made after this call (even in the same microtask turn) moves `starts`, and the handle the entry still holds then is the previous run's: nothing is interrupted.
+      const seen = entry?.starts;
       const awaited = await entry?.agentUp?.then((agent: unknown) => agent, () => undefined);
-      if (entry?.running === true && entry.runtime !== undefined && entry.agent !== undefined && awaited === entry.agent) await entry.runtime.interrupt?.(entry.agent);
+      if (entry?.running === true && entry.starts === seen && entry.runtime !== undefined && entry.agent !== undefined && awaited === entry.agent) await entry.runtime.interrupt?.(entry.agent);
     },
     async guestOf(handle) {
       const guest = await open(handle.sandboxName, false);
