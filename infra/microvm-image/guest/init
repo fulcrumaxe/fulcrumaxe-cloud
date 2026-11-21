@@ -24,10 +24,16 @@ for d in /var/log /var/cache; do mount -t tmpfs -o mode=0755 tmpfs "$d"; done
 # The home directory and the work directory: owned by ubuntu (uid 1000), empty at every boot.
 mount -t tmpfs -o mode=0755,uid=1000,gid=1000 tmpfs /vercel
 install -d -o 1000 -g 1000 /vercel/sandbox
-printf '127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n' > /run/hosts
+# The two hosts the reverse relay serves (REVERSE_HOSTS in guestEnv.ts, held to this line by a test) resolve to the loopback, where relay.py listens on port 80.
+printf '127.0.0.1 localhost api.anthropic.com github.com\n::1 localhost ip6-localhost ip6-loopback\n' > /run/hosts
 mount --bind /run/hosts /etc/hosts
 echo fx-agent > /proc/sys/kernel/hostname
 ip link set lo up
+# The guest side of the two egress relays (relay.py): the CONNECT proxy at 127.0.0.1:5253 and the reverse endpoint at 127.0.0.1:80, each carried to
+# the host over vsock. Each runs under a loop that starts it again, so a relay that ends is back within a second; they run as root (port 80).
+for pair in "5253 5253" "80 5254"; do
+  ( while :; do /usr/bin/python3 -I /usr/lib/fx/relay.py $pair; sleep 1; done ) &
+done
 echo "FXMARK init_done uptime=$(cut -d' ' -f1 /proc/uptime)"
 /usr/bin/python3 -I /usr/lib/fx/agent.py &
 agent=$!

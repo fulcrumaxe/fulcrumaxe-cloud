@@ -183,6 +183,8 @@ describe.skipIf(!mke2fsOk)("buildImage, with the real tar and mke2fs", () => {
     const listing = await real.run("debugfs", ["-R", "ls -l /usr/lib/fx", file], {});
     expect(listing.output).toMatch(/init/);
     expect(listing.output).toMatch(/agent\.py/);
+    expect(listing.output).toMatch(/relay\.py/);
+    expect((await real.run("debugfs", ["-R", "stat /usr/lib/fx/relay.py", file], {})).output).toMatch(/Mode:\s+0755/);
     const stat = await real.run("debugfs", ["-R", "stat /usr/lib/fx/init", file], {});
     expect(stat.output).toMatch(/Mode:\s+0755/);
     expect(stat.output).toMatch(/User:\s+0\s+Group:\s+0/);
@@ -198,7 +200,7 @@ describe.skipIf(!mke2fsOk)("buildImage, with the real tar and mke2fs", () => {
     writeFileSync(path.join(tree, "etc", "extra"), "x");
     expect((await buildImage({ lock: LOCK, image: IMAGE, arches: ["amd64"], outDir: tmp(), guestDir: GUEST_DIR, host: withTree(tree), crane: "crane" }))[0]!.sha256).not.toBe(base);
     const guest = tmp();
-    for (const name of ["init", "agent.py"]) writeFileSync(path.join(guest, name), readFileSync(path.join(GUEST_DIR, name)));
+    for (const name of ["init", "agent.py", "relay.py"]) writeFileSync(path.join(guest, name), readFileSync(path.join(GUEST_DIR, name)));
     writeFileSync(path.join(guest, "init"), `${readFileSync(path.join(GUEST_DIR, "init"), "utf8")}# changed\n`);
     const tree2 = imageTree();
     const changedGuest = (await buildImage({ lock: LOCK, image: IMAGE, arches: ["amd64"], outDir: tmp(), guestDir: guest, host: withTree(tree2), crane: "crane" }))[0]!.sha256;
