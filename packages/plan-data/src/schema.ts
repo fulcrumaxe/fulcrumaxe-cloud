@@ -17,6 +17,10 @@ const scalingBudget = z
   })
   .strict();
 
+const watchSchema = z
+  .object({ perRepo: count.positive(), perAccount: count.positive(), maxSessionMinutes: count.positive(), idleMinutes: count.positive() })
+  .strict();
+
 const planSchema = z
   .object({
     foreground: flatBudget,
@@ -42,6 +46,12 @@ const planSchema = z
       .object({ maxRunners: count.positive(), defaultAccountJobs: count.positive(), defaultPerRepoJobs: count.positive() })
       .strict()
       .optional(),
+    /**
+     * D#845 ON-24b: how many people may watch one engine live. `perRepo` and `perAccount` cap concurrent watchers; a view ends after
+     * `maxSessionMinutes`, or `idleMinutes` with no input. Optional so data that predates it still loads; the watch route then answers
+     * "unavailable", never a default. `scripts/ops/plan-data-check.mjs` requires it on every plan.
+     */
+    watch: watchSchema.optional(),
   })
   .strict();
 
@@ -67,6 +77,8 @@ const runnerPlanSchema = z
         previews: z.boolean(),
       })
       .strict(),
+    /** D#845 ON-24b: the runner tier's watch figures (same shape as a plan's). Optional like a plan's. */
+    watch: watchSchema.optional(),
     provisional: z.boolean(),
     source: z.string().min(1),
   })
