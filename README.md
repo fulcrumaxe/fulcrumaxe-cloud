@@ -46,17 +46,40 @@ engine-host start | stop | status | resume`), which gets scheduled messages and 
 bridge's commands and keeps its session across restarts
 (`packages/fx-runner/src/engineHost/`; see `docs/packages/runner.md`). A machine with
 no credential can be linked to an account by a code a signed-in owner or admin types at
-`/link`; the cloud side is merged and the runner does not call it yet
-(`packages/runner-cloud/src/deviceFlow.ts`, `apps/web/app/link/page.tsx`).
+`/link`. `fx-runner setup --cloud-url <url>` does it in one go: it runs the `doctor` checks and
+prints any that failed (they never stop setup; a machine with no KVM registers on the standard
+tier), shows the code, waits for the approval, saves the registration, then installs and starts
+the per-user service. It refuses at once, sending nothing, when the machine already holds a
+registration, and on a machine with KVM and no VM helper it ends by pointing at `sudo fx-runner
+vm install` (`packages/fx-runner/src/commands/setup.ts`, `packages/fx-runner/src/deviceRegister.ts`,
+`packages/runner-cloud/src/deviceFlow.ts`, `apps/web/app/link/page.tsx`).
 The Team app's watch switch names the runner it means and lists the account's
-runners with the command that connects one (`apps/workspace/apps/team/`). That command is
-`fx-runner engine-bridge enable --repo <owner/name>` with the repo name filled in: the runner
-finds the engine's checkout and its state folder itself, and refuses, changing nothing, when it
-finds none, several, or one in a scan that hit its limit
-(`packages/fx-runner/src/engineBridge/discover.ts`). The protocol
-(version 22) also defines the signed jobs, commands and capabilities for setting a
-project up on a person's own machine; the cloud's shapes are merged and the runner does
-not act on them yet (`packages/runner-protocol/src/machineJobs.ts`).
+runners with the command that connects one (`apps/workspace/apps/team/`). Better still, the
+Team app has **Connect** and **Disconnect** buttons: one press asks a runner the account owns
+to find the engine's checkout and turn the bridge on (or off) for that repo, and the screen
+says in plain words what happened. When the runner's search for the checkout stopped early (it
+has time and entry limits), the screen says so and asks for the folder instead of guessing
+(`apps/workspace/apps/team/team-runners.js`, `packages/api/src/routes/engine-bridge-connect.ts`).
+The command it shows is `fx-runner engine-bridge enable --repo <owner/name>` with the repo name
+filled in: the runner finds the checkout and its state folder itself, and refuses, changing
+nothing, when it finds none, several, or one in a scan that hit its limit
+(`packages/fx-runner/src/engineBridge/discover.ts`). It reads the engine's version from
+`engine/manifest.json`, or, in a project that has the engine installed, from
+`.autonomous-team/engine-install.json`
+(`packages/fx-runner/src/engineBridge/engineVersion.ts`).
+
+The bridge has a **watch mode**. While nobody has the repo open in the Team app, the runner
+sends one small status line in place of the three regular heartbeats and keeps the detailed
+events on the machine; when someone opens it, the cloud tells the runner to watch (a watch is
+never asked for more than ten minutes ahead, and the runner keeps it on for 15 more minutes after it ends)
+and the held events go up
+(`packages/fx-runner/src/engineBridge/watchState.ts`, `packages/fx-runner/src/engineBridge/detailSpool.ts`).
+
+The protocol (version 26) also defines the signed jobs, commands and capabilities for
+setting a project up on a person's own machine; the cloud's shapes are merged and the runner does
+not act on them yet (`packages/runner-protocol/src/machineJobs.ts`). The cloud does keep what
+each machine last said about its free memory, free disk, running setups and whether it holds
+model credentials, for placement and display only (`packages/runner-cloud/src/machineFacts.ts`).
 
 The local runner is also growing a second sandbox engine, Firecracker microVMs, that
 does not need the customer's own sandbox tooling. A small root service, the VM helper
@@ -68,8 +91,15 @@ An adapter puts the hosted sandbox port's SDK slice on the daemon, with each san
 policy in force before anything runs in it (`packages/fx-runner/src/vm/sandboxd/sdkAdapter.ts`,
 `policyPort.ts`). The VM helper's install plan, its unit text and a NixOS module
 (`services.fx-vmhelper`, `nix/fx-vmhelper.nix`) are written, and nothing applies them yet
-(`packages/fx-runner/src/vm/installPlan.ts`).
-`fx-runner run` does not use the daemon yet. The cloud already takes a runner's sandbox
+(`packages/fx-runner/src/vm/installPlan.ts`). What a VM boots from is the template the machine
+has installed plus the signed release listing the runner verified, with no setting that skips
+the check (`packages/fx-runner/src/vm/bootFacts.ts`). The pieces that move a job's work in and
+out are built too: the working copy goes into the guest, the agent's commits come back out as a
+bundle that the host checks and applies, and the approved check runs in a fresh VM the agent
+never had (`packages/fx-runner/src/vm/workspace/`). A runner can be set to the microVM engine
+(`sandbox_engine`), and then it claims nothing until its machine can start a VM.
+`fx-runner run` does not run jobs in a microVM yet: the guest's agent runtime is not
+wired in, so nothing here is usable for real work yet. The cloud already takes a runner's sandbox
 inventory and host limits, and an owner or admin can queue signed stop, delete and reap
 commands for a runner's sandboxes (`packages/runner-cloud/src/sandboxCommands.ts`; see
 `docs/packages/runner.md`).
@@ -129,7 +159,7 @@ packages/
                       Dockerfile build plan, network policy, ensure-env step
   features/           feature-exposure catalogue and emergency floor
   fx-runner/          the local runner: job verification, role tools, the
-                      Claude engine, the daemon, the verify browser, the engine
+                      Claude engine, the daemon, `setup`, the verify browser, the engine
                       bridge and the engine host
   gh-policy/          pure decision engine for the GitHub proxy
   github/             GitHub App webhook intake, event mapping, installation
@@ -153,7 +183,8 @@ packages/
   runner/             hosted-sandbox orchestration: network policy, run
                       status and resume, funding
   runner-cloud/       the cloud side of the local runner: registration,
-                      the device-code link flow, claims, events, the merge order
+                      the device-code link flow, claims, events, the merge order,
+                      the machine facts read model
   runner-protocol/    wire protocol between the cloud and a runner
   runtime/            model/runtime adapters: local, production, fake
   sitekit-checks/ sitekit-claims/ sitekit-pipeline/ sitekit-publish-gates/
@@ -248,7 +279,7 @@ Numbering blocks with files at HEAD:
 | `0400` | decision policy (dial history and receipts) |
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
-| `0800`–`1041` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes. `1036_onboarding_tables.sql` adds the onboarding tables (the track an account chose, a repository's setup, the plan draft a person reviews, the published engine versions) and the table of pending device codes, and `1037_device_registration.sql` adds the functions that start, look up, approve, deny and poll a device code. `1038_engine_halt_by.sql` records who set an engine halt, and `1039_engine_notice_panels.sql` makes each engine change notice name the panels it touches and wakes open streams on it. `1040_runner_sandbox_inventory.sql` stores the sandbox list and host limits a runner reports, and `1041_sandbox_commands.sql` stores the signed stop, delete and reap commands queued for a runner's sandboxes |
+| `0800`–`1046` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes. `1036_onboarding_tables.sql` adds the onboarding tables (the track an account chose, a repository's setup, the plan draft a person reviews, the published engine versions) and the table of pending device codes, and `1037_device_registration.sql` adds the functions that start, look up, approve, deny and poll a device code. `1038_engine_halt_by.sql` records who set an engine halt, and `1039_engine_notice_panels.sql` makes each engine change notice name the panels it touches and wakes open streams on it. `1040_runner_sandbox_inventory.sql` stores the sandbox list and host limits a runner reports, and `1041_sandbox_commands.sql` stores the signed stop, delete and reap commands queued for a runner's sandboxes. `1042_engine_bridge_connect.sql` adds the Connect and Disconnect commands and what a runner says it bridges, `1043_engine_watch.sql` the watch command, the slim status and the detail session, `1044_runner_sandbox_status_microvm_reasons.sql` the four reasons a microVM runner gives for not claiming, `1045_runner_host_load_model_auth.sql` a machine's last reported load and whether it holds model credentials, and `1046_engine_ack_incomplete.sql` the flag that says a checkout search was cut short |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -366,6 +397,11 @@ Sources:
 - `packages/db/migrations/1037_device_registration.sql`
 - `packages/db/migrations/1038_engine_halt_by.sql`
 - `packages/db/migrations/1039_engine_notice_panels.sql`
+- `packages/db/migrations/1042_engine_bridge_connect.sql`
+- `packages/db/migrations/1043_engine_watch.sql`
+- `packages/db/migrations/1044_runner_sandbox_status_microvm_reasons.sql`
+- `packages/db/migrations/1045_runner_host_load_model_auth.sql`
+- `packages/db/migrations/1046_engine_ack_incomplete.sql`
 - `packages/fx-runner/src/engineBridge/`
 - `packages/fx-runner/src/engineHost/`
 - `packages/runner-cloud/src/deviceFlow.ts`
