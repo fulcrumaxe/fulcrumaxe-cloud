@@ -178,6 +178,22 @@ export function assistantSettings(): AssistantSettings {
   }
 }
 
+export type EnginePlanSettings = { on: true; priceUsdPerMonth: number } | { on: false; code: 'engine_plan_unconfigured' };
+
+/**
+ * D#845 ON-22: the Engine plan's per-engine price, read fail-closed. Plan data that is unavailable, or carries no `enginePlan` block, gives
+ * `{ on: false, code: 'engine_plan_unconfigured' }` and the plan is not offered. There is no default figure. Never throws on missing data.
+ */
+export function enginePlanSettings(): EnginePlanSettings {
+  try {
+    const e = loadPlanData().enginePlan;
+    return e === undefined ? { on: false, code: 'engine_plan_unconfigured' } : { on: true, priceUsdPerMonth: e.priceUsdPerMonth };
+  } catch (error) {
+    if (error instanceof PlanDataMissingError) return { on: false, code: 'engine_plan_unconfigured' };
+    throw error;
+  }
+}
+
 /**
  * D#845 ON-22a (ruling 42): the plan a limit is keyed on. `accounts.plan` is a record of the last hosted plan, not an entitlement: an engine-only subscription is paying and keeps whatever the row says
  * (the default for a new account, the last hosted plan for a returning one). Every limit read off the plan goes through here: the row's plan counts only while the account carries a paid hosted plan item
