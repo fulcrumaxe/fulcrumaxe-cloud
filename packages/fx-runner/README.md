@@ -63,6 +63,24 @@ It only calls out (no listening socket).
   reach GitHub) with the engine's session id, and write the local session index.
 - `pollLoop.ts`: the claim loop: waits the `retry_after` the cloud gives, backs off on errors, stops on SIGTERM or SIGINT.
 
+## The model credential, and what keeps it from the tools the agent runs
+
+The agent CLI holds the runner's model token in its environment. Two things keep that token away from the Bash tool and the other programs the CLI starts, and they
+do different jobs:
+
+- **The scrub.** The runner starts the CLI with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, which makes the CLI remove its credentials from the environment of every
+  program it starts. This is what stops the token reaching a tool by ordinary inheritance (a child gets its parent's environment).
+- **`--unshare-pid`.** In the OS sandbox, the CLI starts its Bash tool under bubblewrap in a PID namespace of its own, so the tool cannot see the CLI's process and
+  cannot read its `/proc/<pid>/environ`. That is all it does for the token. It does **not** stop inheritance (the scrub does), it does not hide a copy that a
+  program writes to a file or the network on purpose, and it protects nothing if bubblewrap cannot start, in which case the run ends instead of running the tool
+  unconfined.
+
+In a microVM the guest changes this in three ways. The token is not in the CLI's environment when the VM starts: it is sent over the vsock to a private memory-only
+directory in the guest after the VM is up, and it reaches exactly one program, the CLI, started as the ordinary user (never root) in its own cgroup. After the
+job, and after a failed job, the runner removes the file and kills every process in the token's cgroups, and the VM is stopped or snapshotted only after the guest
+confirms that none is left; a wipe that is not confirmed ends the job as `vm_teardown_incomplete` and the VM is ended without a snapshot. The scrub stays on in
+the guest, so it is still what keeps the token from the tools. The runner never writes the token to the job's files, its command lines, its logs or its events.
+
 ## Command line
 
 `bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME`, `FX_RUNNER_PROTECTION_BYPASS_FILE`, `FX_RUNNER_SEARCH_ROOTS` (extra colon-separated, absolute roots that `engine-bridge enable` searches for the engine's checkout; the current directory is looked up too) and `XDG_CACHE_HOME` by name and hands everything else to

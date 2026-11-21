@@ -18,6 +18,7 @@ const fakeSandbox = (over: Partial<TokenSandbox> = {}): TokenSandbox => ({
   deliverToken: async (t) => void t.fill(0),
   wipeToken: async () => undefined,
   runCommand: async () => undefined as never,
+  runStream: async () => undefined as never,
   stop: async () => undefined,
   delete: async () => undefined,
   ...over,
@@ -48,6 +49,31 @@ describe("delivery and launch", () => {
     await jt.deliver(sentinel);
     await jt.launch({ cmd: "x", user: "root", withToken: false } as never);
     expect(seen[0]).toMatchObject({ withToken: true, user: "ubuntu" });
+  });
+
+  it("launchStream: the same pins as launch (the token flag on, the ordinary user), whatever the caller asks for", async () => {
+    const seen: unknown[] = [];
+    const jt = new JobToken(fakeSandbox({ runStream: async (s) => (seen.push(s), undefined as never) }));
+    await jt.deliver(sentinel);
+    await jt.launchStream({ id: "cli-1", cmd: "x", args: ["a"], env: { A: "b" }, stdin: Buffer.from("prompt"), timeoutS: 9, user: "root", withToken: false } as never);
+    expect(seen[0]).toMatchObject({ id: "cli-1", cmd: "x", args: ["a"], env: { A: "b" }, timeoutS: 9, withToken: true, user: "ubuntu" });
+  });
+
+  it("launchStream: refused before a delivery, during a wipe, after one and once a wipe is unconfirmed, and nothing reaches the guest", async () => {
+    const seen: unknown[] = [];
+    let failWipe = false;
+    const jt = new JobToken(fakeSandbox({ runStream: async (s) => (seen.push(s), undefined as never), wipeToken: async () => { if (failWipe) throw new Error("x"); } }));
+    await expect(jt.launchStream({ id: "a-1", cmd: "x" })).rejects.toMatchObject({ code: "vm_token_delivery_failed" });
+    await jt.deliver(sentinel);
+    const wiping = jt.wipe();
+    await expect(jt.launchStream({ id: "a-2", cmd: "x" })).rejects.toMatchObject({ code: "vm_token_delivery_failed" });
+    await wiping;
+    await expect(jt.launchStream({ id: "a-3", cmd: "x" })).rejects.toMatchObject({ code: "vm_token_delivery_failed" });
+    await jt.deliver(sentinel);
+    failWipe = true;
+    await expect(jt.wipe()).rejects.toMatchObject({ code: "vm_teardown_incomplete" });
+    await expect(jt.launchStream({ id: "a-4", cmd: "x" })).rejects.toMatchObject({ code: "vm_token_delivery_failed" });
+    expect(seen).toEqual([]);
   });
 
   it("refuses a launch before a delivery, during a wipe and after one, and sends nothing to the guest", async () => {

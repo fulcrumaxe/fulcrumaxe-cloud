@@ -9,6 +9,8 @@
  * holder writes on purpose to disk or the network, and the caller's own source of the token, which `read` must hand over as a fresh buffer.
  */
 import type { CommandSpec, SandboxdCommand } from "./command.js";
+import type { StreamSpec } from "./sandboxd.js";
+import type { GuestStream } from "./streamCommand.js";
 
 /** The only two ways this module ends a job; each is a closed code of criterion 23, with no free text. */
 export type JobTokenCode = "vm_token_delivery_failed" | "vm_teardown_incomplete";
@@ -24,6 +26,7 @@ export interface TokenSandbox {
   deliverToken(token: Buffer): Promise<void>;
   wipeToken(): Promise<void>;
   runCommand(spec: CommandSpec & { signal?: AbortSignal }): Promise<SandboxdCommand>;
+  runStream(spec: StreamSpec): Promise<GuestStream>;
   stop(): Promise<void>;
   delete(): Promise<void>;
 }
@@ -48,6 +51,7 @@ function bounded<T>(work: Promise<T>, ms: number, signal?: AbortSignal): Promise
 }
 
 type Launch = Omit<CommandSpec, "withToken" | "user"> & { signal?: AbortSignal };
+type StreamLaunch = Omit<StreamSpec, "withToken" | "user">;
 
 export class JobToken {
   /** idle: no token in the guest. held: one may be there. blocked: a wipe was not confirmed, so the VM may still hold it. */
@@ -79,6 +83,12 @@ export class JobToken {
   launch(spec: Launch): Promise<SandboxdCommand> {
     if (this.state !== "held" || this.wiping !== undefined) return Promise.reject(new JobTokenError("vm_token_delivery_failed"));
     return this.sandbox.runCommand({ ...spec, withToken: true, user: "ubuntu" });
+  }
+
+  /** The streaming twin of `launch`: the agent CLI's one token launch, read as it arrives. The same pins and the same refusals. */
+  launchStream(spec: StreamLaunch): Promise<GuestStream> {
+    if (this.state !== "held" || this.wiping !== undefined) return Promise.reject(new JobTokenError("vm_token_delivery_failed"));
+    return this.sandbox.runStream({ ...spec, withToken: true, user: "ubuntu" });
   }
 
   /**

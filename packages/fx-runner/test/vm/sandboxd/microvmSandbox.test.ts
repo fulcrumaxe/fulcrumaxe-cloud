@@ -82,6 +82,66 @@ function setup(runtime: AgentRuntime = scriptedRuntime()) {
 const opts = (over: Partial<StartDetachedOptions> = {}): StartDetachedOptions => ({ runId: "r1", role: "executor", roleCard: "c", prompt: "p", model: "sonnet", workdir: "/work/job", capUsd: 1, networkPolicy: [], env: {}, onEvent: () => undefined, ...over });
 const create = (port: ReturnType<typeof setup>["port"], name: string, timeoutMs = 60_000): Promise<SandboxHandle> => port.createSandbox({ sandboxName: name, retention: { persistent: false }, timeoutMs });
 
+/** FU-173: an interrupt reaches only the agent whose start it waited for, and only while a run is going. */
+describe("interrupt (FU-173)", () => {
+  /** A runtime whose starts the test releases or fails one by one, and which records every interrupt it is sent. */
+  function gated() {
+    const interrupted: string[] = [];
+    const starts: Array<{ runId: string; release(): void; fail(): void }> = [];
+    const runtime: AgentRuntime & { interrupt(handle: { runId: string }): void } = {
+      start: (o) => new Promise((resolve, reject) => void starts.push({ runId: o.runId, release: () => resolve({ handle: { runId: o.runId, done: Promise.resolve() } }), fail: () => reject(new Error("refused")) })),
+      stop: async () => undefined,
+      resume: async (handle) => ({ handle }),
+      interrupt: (handle) => void interrupted.push(handle.runId),
+    };
+    return { runtime, interrupted, starts };
+  }
+  const started = async (starts: unknown[], n: number): Promise<void> => vi.waitFor(() => expect(starts.length).toBe(n));
+
+  it("while the agent is still starting, the interrupt is delivered to that agent once it exists", async () => {
+    const { runtime, interrupted, starts } = gated();
+    const { port } = setup(runtime);
+    const handle = await create(port, "m-int-a");
+    const run = port.startDetached(handle, opts({ runId: "r1" }));
+    await started(starts, 1);
+    const sent = port.interrupt(handle);
+    starts[0]!.release();
+    await sent;
+    expect(interrupted).toEqual(["r1"]);
+    await run.hookFired;
+  });
+
+  it("a start that fails while the interrupt waits is not interrupted through the previous run's handle, which the entry still holds", async () => {
+    const { runtime, interrupted, starts } = gated();
+    const { port } = setup(runtime);
+    const handle = await create(port, "m-int-b");
+    const first = port.startDetached(handle, opts({ runId: "r0" }));
+    await started(starts, 1);
+    starts[0]!.release();
+    await first.hookFired; // run 0 is over; the entry still names its agent
+    const second = port.startDetached(handle, opts({ runId: "r1" }));
+    second.hookFired.catch(() => undefined);
+    await started(starts, 2);
+    const sent = port.interrupt(handle);
+    starts[1]!.fail();
+    await sent;
+    expect(interrupted).toEqual([]);
+  });
+
+  it("with no run going, or none ever started, nothing is interrupted", async () => {
+    const { runtime, interrupted, starts } = gated();
+    const { port } = setup(runtime);
+    const handle = await create(port, "m-int-c");
+    await port.interrupt(handle);
+    const run = port.startDetached(handle, opts({ runId: "r1" }));
+    await started(starts, 1);
+    starts[0]!.release();
+    await run.hookFired;
+    await port.interrupt(handle);
+    expect(interrupted).toEqual([]);
+  });
+});
+
 describe("the microVM engine's own promises", () => {
   it("a sandbox is created closed, and a job's hosts are in force before its agent exists", async () => {
     const { port, log } = setup();
