@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CONFINED_READ_ROLES, PROPOSAL_VERIFIER_RUNNER_TOOLS, VERIFIER_READ_GUARD_SCRIPT } from "@fulcrumaxe/runner-protocol";
 import { roleToolsDigest as cloudDigest } from "@fx/runner";
@@ -14,6 +13,7 @@ import { ROLE_TOOLS, roleToolsDigest, roleToolsFor } from "../src/job/roleTools.
 import { protectedPaths } from "../src/sandbox/sandboxSettings.js";
 import { RUNNER_BUILD_CAPABILITIES } from "../src/version.js";
 import { KEYRING, NOW, jobFor, signRaw } from "./helpers/signedJob.js";
+import { tempDir } from "./helpers/tempTree.js";
 
 const SANDBOX = { enabled: true, filesystem: { denyRead: ["~"] } };
 const PROTECTED = protectedPaths({ home: "/home/jane", stateDir: "/home/jane/.fx-runner", binaryDir: "/home/jane/.local/bin" });
@@ -86,7 +86,7 @@ describe(`the ${ROLE} settings file`, () => {
   });
 
   it("refuses a checkout that is not its own real path (a link on the way to it)", () => {
-    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "s4b2c2_ws-")));
+    const root = realpathSync(tempDir("s4b2c2_ws-"));
     const real = path.join(root, "real");
     mkdirSync(real);
     symlinkSync(real, path.join(root, "link"));
@@ -97,7 +97,7 @@ describe(`the ${ROLE} settings file`, () => {
 });
 
 describe(`the read guard for ${ROLE}, run the way the CLI runs a command hook (sh -c <command>)`, () => {
-  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "s4b2c2_guard-")));
+  const root = realpathSync(tempDir("s4b2c2_guard-"));
   const ws = path.join(root, "checkout");
   mkdirSync(path.join(ws, "src"), { recursive: true });
   mkdirSync(path.join(root, "outside"));

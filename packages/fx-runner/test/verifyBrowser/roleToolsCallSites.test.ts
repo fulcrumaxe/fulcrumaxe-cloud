@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEPLOY_VERIFIER_ROLE, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
@@ -10,6 +10,7 @@ import { protectedPaths } from "../../src/sandbox/sandboxSettings.js";
 import { RUN_ID, engineFor, makeRig } from "../engines/claude/rig.js";
 import { sampleJob } from "../helpers/sampleJob.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
+import { tempDir } from "../helpers/tempTree.js";
 
 /**
  * D#749 V2c-2b (from the V2c-1 review): EVERY `roleToolsFor` call in the runner takes the job's signed browser method, or a playwright job would launch, resume, take over or be
@@ -28,7 +29,7 @@ vi.mock("../../src/job/roleTools.js", async (original) => {
   };
 });
 
-const root = mkdtempSync(path.join(tmpRoot(), "pw-sites-"));
+const root = tempDir("pw-sites-", tmpRoot());
 const SERVER: VerifyServerSpec = { command: "/opt/fx/fx-runner", args: [], baseUrl: "https://app.example.test/", executable: "/opt/chrome/chromium", storageState: "/h/.config/fx-runner/verify/s.json" };
 const seen = (role: string) => calls.filter((c) => c.role === role).map((c) => c.method);
 beforeEach(() => void (calls.length = 0));

@@ -1,6 +1,4 @@
-import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import { buildSandboxEnv, createFakeSandbox, type SandboxPort } from "@fx/runner";
@@ -11,6 +9,7 @@ import { createDaemonSdk } from "../src/vm/sandboxd/sdkAdapter.js";
 import { createMicrovmSandbox } from "../src/vm/sandboxd/microvmSandbox.js";
 import { describeSandboxPortContract } from "./sandboxPortContract.js";
 import { makeRig, runCleanups } from "./vm/sandboxd/helpers.js";
+import { tempDir } from "./helpers/tempTree.js";
 
 // The two copies of the port must stay assignable to each other. If either side drifts, `tsc` fails here.
 const asReal = (port: FxSandboxPort): SandboxPort => port;
@@ -42,12 +41,12 @@ describeSandboxPortContract("hostSandbox", (runtime) => {
     credentials: { mode: "subscription" },
     makeRuntime: () => runtime,
     home: "/home/contract-user",
-    stateDir: mkdtempSync(path.join(tmpdir(), "r4b13_state-")),
+    stateDir: tempDir("r4b13_state-"),
     binaryDir: "/opt/claude/bin",
-    tempRoot: mkdtempSync(path.join(tmpdir(), "r4b13_contract-")),
+    tempRoot: tempDir("r4b13_contract-"),
     workspaceRoot: tmpdir(),
   });
-  return { port: host, env: () => cleanEnv({ mode: "subscription" }), workdir: mkdtempSync(path.join(tmpdir(), "r4b13_work-")), timeoutMsOf: (handle) => host.timeoutMsOf(handle) };
+  return { port: host, env: () => cleanEnv({ mode: "subscription" }), workdir: tempDir("r4b13_work-"), timeoutMsOf: (handle) => host.timeoutMsOf(handle) };
 }, { reportsOutcomes: true });
 
 afterEach(runCleanups);
