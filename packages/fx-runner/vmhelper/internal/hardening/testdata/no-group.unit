@@ -4,7 +4,6 @@ After=local-fs.target
 
 [Service]
 Type=simple
-User=root
 ExecStart=/usr/libexec/fx/helper -config /etc/fx/helper.json
 Restart=on-failure
 RuntimeDirectory=fx-vmhelper

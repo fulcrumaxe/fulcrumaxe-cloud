@@ -205,7 +205,9 @@ func (p Pinned) RenderUnit(u UnitParams) (string, error) {
 		return "", errors.New("unit parameters must be clean absolute paths and a plain group name")
 	}
 	var b strings.Builder
-	b.WriteString("[Unit]\nDescription=fx-vmhelper: root service for the local runner's microVM sandboxes\nAfter=local-fs.target\n\n[Service]\nType=simple\nUser=root\n")
+	// No User= line: a system unit runs as root without one, and with User=root written out systemd 255 starts the helper without
+	// CAP_SETUID in its effective set (see TestUnitHasNoUserDirective).
+	b.WriteString("[Unit]\nDescription=fx-vmhelper: root service for the local runner's microVM sandboxes\nAfter=local-fs.target\n\n[Service]\nType=simple\n")
 	if u.Group != "" {
 		b.WriteString("Group=" + u.Group + "\n")
 	}

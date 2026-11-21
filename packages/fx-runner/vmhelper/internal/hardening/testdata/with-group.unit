@@ -4,7 +4,6 @@ After=local-fs.target
 
 [Service]
 Type=simple
-User=root
 Group=fx-vmhelper
 ExecStart=/opt/fx-vmhelper/bin/fx-vmhelper -config /etc/fx-vmhelper/config.json
 Restart=on-failure

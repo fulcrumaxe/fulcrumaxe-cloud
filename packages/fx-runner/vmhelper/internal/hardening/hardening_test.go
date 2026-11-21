@@ -57,7 +57,7 @@ func TestUnitCarriesEveryPinnedValue(t *testing.T) {
 	if u["RuntimeDirectory"] != p.RuntimeDirectory || u["RuntimeDirectoryMode"] != p.RuntimeDirectoryMode {
 		t.Error("runtime directory differs")
 	}
-	if u["User"] != "root" || u["Group"] != "example-runner" || u["ExecStart"] != "/opt/example/fx-vmhelper -config /etc/example/vmhelper.json" {
+	if _, hasUser := u["User"]; hasUser || u["Group"] != "example-runner" || u["ExecStart"] != "/opt/example/fx-vmhelper -config /etc/example/vmhelper.json" {
 		t.Errorf("%v", u)
 	}
 	if u["ReadWritePaths"] != "/sys/fs/cgroup /srv/example-jails /srv/example-snapshots" {
@@ -66,6 +66,32 @@ func TestUnitCarriesEveryPinnedValue(t *testing.T) {
 }
 
 // The values the Spec names, stated here so that a change to the file shows up as a test failure.
+// A system unit runs as root without a User= line. With User=root written out, systemd 255 (the ubuntu-24.04 hosted image) starts the
+// helper with CAP_SETUID missing from its effective set (CapEff 0x08200041, pinned 0x082000c1) and the start-up check refuses.
+func TestUnitHasNoUserDirective(t *testing.T) {
+	data, err := os.ReadFile("hardening.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []string{"", "example-runner"} {
+		u := params
+		u.Group = g
+		text, err := p.RenderUnit(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "User=") {
+				t.Fatalf("unit (group %q) must not carry %q: it costs the helper CAP_SETUID under systemd 255", g, line)
+			}
+		}
+	}
+}
+
 func TestSpecValues(t *testing.T) {
 	p := Load()
 	want := map[string]string{

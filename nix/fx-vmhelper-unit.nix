@@ -21,7 +21,8 @@ let
     in map (line: "${k}=${line}\n") (if builtins.isList v then v else [ v ]);
 in
 assert checked;
-"[Unit]\nDescription=fx-vmhelper: root service for the local runner's microVM sandboxes\nAfter=local-fs.target\n\n[Service]\nType=simple\nUser=root\n"
+# No User= line: a system unit runs as root without one, and with User=root written out systemd 255 starts the helper with a reduced effective set.
+"[Unit]\nDescription=fx-vmhelper: root service for the local runner's microVM sandboxes\nAfter=local-fs.target\n\n[Service]\nType=simple\n"
 + (if group != "" then "Group=${group}\n" else "")
 + "ExecStart=${helperPath} -config ${configPath}\nRestart=on-failure\n"
 + "RuntimeDirectory=${pinned.runtime_directory}\nRuntimeDirectoryMode=${pinned.runtime_directory_mode}\n"
