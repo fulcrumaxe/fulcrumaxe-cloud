@@ -7,13 +7,27 @@
 //
 // The checksums always come from the manifest, which is the one place the hashes are computed. A manifest must hold all four platforms
 // of one version, each with a SHA-256; a rendered file that still contains an `@FX_` placeholder is refused and nothing is written.
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { renderTemplate } from "./install-render.mjs";
 import { ARTIFACT_NAMES, SIDECAR_ENTRY } from "./release-manifest.mjs";
 import { SIDECAR_ARCHIVE } from "./sidecar.mjs";
 
-const upper = (platform) => platform.toUpperCase().replace(/-/g, "_");
+// The renderer is install-render.mjs (the cloud's install route loads the same file); it is re-exported so callers of this file keep working.
+export { renderTemplate };
+
+/** Where the release copy of install.sh downloads from: this repository's GitHub release assets. `FX_RELEASE_REPO` (owner/name) names another one. */
+export function githubTargetBase(repo = process.env.FX_RELEASE_REPO ?? "fulcrumaxe/fulcrumaxe-cloud") {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("FX_RELEASE_REPO must look like owner/name");
+  return `https://github.com/${repo}/releases/download/`;
+}
+
+/** The SHA-256 of the root this runner build compiles in (tuf/1.root.json). The script names it in a comment for audit; it is not a check there. */
+export function trustedRootSha256() {
+  return createHash("sha256").update(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "tuf", "1.root.json"))).digest("hex");
+}
 
 /** The manifest entries, checked: every platform present once, one version, a 64-digit SHA-256 each. */
 export function loadManifest(file) {
@@ -42,17 +56,6 @@ export function loadManifest(file) {
   return { version: [...versions][0], entries, sidecar: sidecars[0] };
 }
 
-/** Fills `@FX_VERSION@`, `@FX_SHA256_<PLATFORM>@` and `@FX_FILE_<PLATFORM>@`. Throws if any `@FX_` is left. */
-export function renderTemplate(text, manifest) {
-  let out = text.replaceAll("@FX_VERSION@", manifest.version);
-  for (const entry of manifest.entries) {
-    out = out.replaceAll(`@FX_SHA256_${upper(entry.platform)}@`, entry.sha256).replaceAll(`@FX_FILE_${upper(entry.platform)}@`, ARTIFACT_NAMES[entry.platform]);
-  }
-  const left = out.match(/@FX_[A-Z0-9_]*@?/g);
-  if (left !== null) throw new Error(`placeholders left after rendering: ${[...new Set(left)].join(", ")}`);
-  return out;
-}
-
 export function checksumsText(manifest) {
   const lines = manifest.entries.map((entry) => `${entry.sha256}  ${ARTIFACT_NAMES[entry.platform]}\n`);
   if (manifest.sidecar !== undefined) lines.push(`${manifest.sidecar.sha256}  ${SIDECAR_ARCHIVE}\n`);
@@ -71,7 +74,8 @@ function main(argv) {
   try {
     const manifest = loadManifest(need("--manifest"));
     let text;
-    if (command === "install" || command === "formula") text = renderTemplate(readFileSync(need("--template"), "utf8"), manifest);
+    if (command === "install") text = renderTemplate(readFileSync(need("--template"), "utf8"), manifest, { targetBaseUrl: githubTargetBase(), trustedRootSha256: trustedRootSha256() });
+    else if (command === "formula") text = renderTemplate(readFileSync(need("--template"), "utf8"), manifest);
     else if (command === "checksums") text = checksumsText(manifest);
     else throw new Error("usage: release-render.mjs <install|formula|checksums> --manifest <file> [--template <file>] --out <file>");
     writeFileSync(need("--out"), text);

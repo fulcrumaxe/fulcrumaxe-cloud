@@ -27,6 +27,7 @@ import { constants, chmodSync, closeSync, copyFileSync, linkSync, lstatSync, mkd
 import path from "node:path";
 import { SIDECAR_DIR } from "../verifyBrowser/loadPlaywright.js";
 import type { TufClient } from "./tuf.js";
+import { newestRelease } from "./release.js";
 import { compareVersions, installedVersions, isVersion, layoutIsSafe, linkedVersion, loadUpdateState, saveUpdateState, switchLink, versionBinary, versionInstalled, versionsDir, stableBinary, type UpdateState } from "./versions.js";
 
 /** What the program's entry point knows and does for the updater; nothing under `src/` starts a program or reads the environment. */
@@ -267,12 +268,7 @@ export class Updater {
       else if (listed.state !== "not_configured") this.record({ ...rest, checkFailed: reason });
       return { ok: false, state: listed.state === "paused" ? "paused" : listed.state === "not_configured" ? "not_configured" : "refused", message: listed.state === "paused" ? `updates paused: ${reason}` : listed.message };
     }
-    let best: string | undefined;
-    for (const target of listed.paths) {
-      const match = target.match(/^v([^/]+)\/fx-runner-([a-z0-9-]+)$/);
-      if (match === null || match[2] !== platform || !isVersion(match[1])) continue;
-      if (best === undefined || compareVersions(match[1], best) > 0) best = match[1];
-    }
+    const best = newestRelease(listed.paths, [platform]);
     const next: UpdateState = { ...state, lastCheck: stamp };
     delete next.paused;
     delete next.checkFailed;

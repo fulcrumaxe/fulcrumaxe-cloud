@@ -6,11 +6,15 @@
 #
 # What it does, in order:
 #   1. refuses native Windows and WSL, notes the macOS preview, and picks the artifact for this machine;
-#   2. downloads that artifact over HTTPS and checks its SHA-256 against the value baked into THIS copy of the script (R6-5
-#      writes the values in when it renders the release copy; an unrendered copy refuses to install). The script's own trust
-#      is HTTPS to GitHub Releases; later updates are verified through the signed update metadata, not here;
+#   2. downloads that artifact over HTTPS and checks its length and SHA-256 against the values baked into THIS copy of the
+#      script (the renderer writes them in; an unrendered copy refuses to install). The copy served by the cloud has them
+#      from release metadata the cloud verified through TUF; the release-page copy has them from the release manifest. In
+#      both cases the script's own trust is HTTPS to whoever served it, and nothing in this script verifies TUF metadata.
+#      The runner that gets installed verifies its later updates itself, from a root compiled into it (for audit only, not
+#      a check made here: SHA-256 of that root is @FX_TRUSTED_ROOT_SHA256@);
 #   3. installs into <state dir>/versions/<version>/ and links <state dir>/bin/fx-runner (a rerun is idempotent, a new
-#      version lands beside the old one);
+#      version lands beside the old one), then links ~/.local/bin/fx-runner to that (it refuses, changing nothing, when
+#      ~/.local/bin/fx-runner exists and is not a symbolic link);
 #   4. on Linux, offers to install a missing bwrap or socat (shows the exact command, asks first, asks even as root);
 #   5. runs `fx-runner doctor --sandbox-only`; a failed probe leaves fx-runner installed and exits 3;
 #   6. checks that Claude Code is installed (absolute path, version at least MIN_CLAUDE_VERSION). It never downloads it;
@@ -31,8 +35,10 @@
 #     bin/fx-runner a symlink or absent, otherwise nothing is changed;
 #   - uninstall removes only bin/fx-runner (then bin/, if that leaves it empty) and versions/.
 #
+#   - the download is capped at the baked size (curl --max-filesize) and must be exactly that long before its SHA-256 is looked at.
+#
 # Test seams (all harmless in real use): FX_INSTALL_BASE_URL replaces the release download base (it must still be https, and
-# the baked checksum still has to match), FX_INSTALL_OS_RELEASE_FILE, FX_INSTALL_PROC_VERSION_FILE and
+# the baked length and checksum still have to match), FX_INSTALL_OS_RELEASE_FILE, FX_INSTALL_PROC_VERSION_FILE and
 # FX_INSTALL_NIXOS_MARKER replace the os-release file, /proc/version and the NixOS marker file.
 
 set -eu
@@ -43,6 +49,12 @@ FX_SHA256_DARWIN_ARM64="@FX_SHA256_DARWIN_ARM64@"
 FX_SHA256_DARWIN_X64="@FX_SHA256_DARWIN_X64@"
 FX_SHA256_LINUX_X64="@FX_SHA256_LINUX_X64@"
 FX_SHA256_LINUX_ARM64="@FX_SHA256_LINUX_ARM64@"
+FX_SIZE_DARWIN_ARM64="@FX_SIZE_DARWIN_ARM64@"
+FX_SIZE_DARWIN_X64="@FX_SIZE_DARWIN_X64@"
+FX_SIZE_LINUX_X64="@FX_SIZE_LINUX_X64@"
+FX_SIZE_LINUX_ARM64="@FX_SIZE_LINUX_ARM64@"
+# Ends in a slash; the file is downloaded from "$FX_TARGET_BASE_URL"v<version>/<file>.
+FX_TARGET_BASE_URL="@FX_TARGET_BASE_URL@"
 
 # --- constants other files must agree with (each one has a test) ---
 # The release file names: exactly the output of `node scripts/release-manifest.mjs --names`.
@@ -62,7 +74,6 @@ PKG_PACMAN="pacman -S --needed bubblewrap socat"
 NIXOS_CONFIG_LINE="environment.systemPackages = [ pkgs.bubblewrap pkgs.socat ];"
 GENERIC_DEPS_LINE="Install bubblewrap (bwrap) and socat with your package manager, and allow unprivileged user namespaces (user.max_user_namespaces above 0)."
 
-FX_RELEASE_REPO="fulcrumaxe/fulcrumaxe-cloud"
 CLAUDE_INSTALL_LINE="curl -fsSL https://claude.ai/install.sh | bash"
 
 # --- helpers (definitions only; nothing runs until main is called on the last line) ---
@@ -126,6 +137,24 @@ check_sha() {
     *[!0-9a-f]* | '') die 2 "this copy of install.sh has no checksum for $1; download install.sh from a release page." ;;
   esac
   [ "${#2}" = 64 ] || die 2 "this copy of install.sh has a malformed checksum for $1"
+}
+
+check_size() {
+  # $1 = platform, $2 = value: a plain positive decimal number of bytes
+  case $2 in
+    *[!0-9]* | '' | 0*) die 2 "this copy of install.sh has no valid size for $1" ;;
+  esac
+  [ "${#2}" -le 12 ] || die 2 "this copy of install.sh has a malformed size for $1"
+}
+
+# Refuses, and changes nothing, when ~/.local/bin/fx-runner exists and is not a symbolic link (a file or directory of the
+# person's own). A missing HOME means no link is made.
+check_user_link() {
+  [ -n "${HOME:-}" ] || return 0
+  _p=$HOME/.local/bin/fx-runner
+  if [ -e "$_p" ] && [ ! -L "$_p" ]; then
+    die 1 "$_p exists and is not a symbolic link, so this installer will not replace it. Nothing was changed."
+  fi
 }
 
 # --- C16: sandbox dependencies (Linux) ---
@@ -269,6 +298,10 @@ main() {
     if [ -e "$FX_HOME/registration.json" ] || [ -e "$FX_HOME/runner-key.pem" ]; then
       note "your registration and keys in $FX_HOME stay. To remove this runner from the cloud, run 'fx-runner revoke' first (it needs the binary this command removes)."
     fi
+    # The link in ~/.local/bin goes only when it is a symbolic link that points at this installation's own link.
+    if [ -n "${HOME:-}" ] && [ -L "$HOME/.local/bin/fx-runner" ] && [ "$(readlink "$HOME/.local/bin/fx-runner")" = "$FX_HOME/bin/fx-runner" ]; then
+      rm -f "$HOME/.local/bin/fx-runner"
+    fi
     rm -f "$FX_HOME/bin/fx-runner"
     # rmdir fails, harmlessly, when bin/ holds anything else
     if [ -d "$FX_HOME/bin" ]; then rmdir "$FX_HOME/bin" 2>/dev/null || note "$FX_HOME/bin holds other files and stays."; fi
@@ -318,10 +351,10 @@ main() {
   done)
   [ -n "$ARTIFACT" ] || die 2 "no release file for $PLATFORM"
   case $PLATFORM in
-    darwin-arm64) WANT_SHA=$FX_SHA256_DARWIN_ARM64 ;;
-    darwin-x64) WANT_SHA=$FX_SHA256_DARWIN_X64 ;;
-    linux-x64) WANT_SHA=$FX_SHA256_LINUX_X64 ;;
-    linux-arm64) WANT_SHA=$FX_SHA256_LINUX_ARM64 ;;
+    darwin-arm64) WANT_SHA=$FX_SHA256_DARWIN_ARM64 WANT_SIZE=$FX_SIZE_DARWIN_ARM64 ;;
+    darwin-x64) WANT_SHA=$FX_SHA256_DARWIN_X64 WANT_SIZE=$FX_SIZE_DARWIN_X64 ;;
+    linux-x64) WANT_SHA=$FX_SHA256_LINUX_X64 WANT_SIZE=$FX_SIZE_LINUX_X64 ;;
+    linux-arm64) WANT_SHA=$FX_SHA256_LINUX_ARM64 WANT_SIZE=$FX_SIZE_LINUX_ARM64 ;;
     *) die 2 "no release file for $PLATFORM" ;;
   esac
 
@@ -337,6 +370,14 @@ main() {
   check_sha darwin-x64 "$FX_SHA256_DARWIN_X64"
   check_sha linux-x64 "$FX_SHA256_LINUX_X64"
   check_sha linux-arm64 "$FX_SHA256_LINUX_ARM64"
+  check_size darwin-arm64 "$FX_SIZE_DARWIN_ARM64"
+  check_size darwin-x64 "$FX_SIZE_DARWIN_X64"
+  check_size linux-x64 "$FX_SIZE_LINUX_X64"
+  check_size linux-arm64 "$FX_SIZE_LINUX_ARM64"
+  case $FX_TARGET_BASE_URL in
+    https://*/) ;;
+    *) die 2 "this copy of install.sh has no download address (it must be an https address that ends in /)" ;;
+  esac
 
   # --- tools ---
   command -v curl >/dev/null 2>&1 || die 1 "curl is required"
@@ -351,8 +392,8 @@ main() {
   VERSION_DIR=$FX_HOME/versions/$FX_VERSION
   BIN=$VERSION_DIR/fx-runner
   LINK=$FX_HOME/bin/fx-runner
-  BASE_URL=${FX_INSTALL_BASE_URL:-https://github.com/$FX_RELEASE_REPO/releases/download}
-  URL=$BASE_URL/v$FX_VERSION/$ARTIFACT
+  if [ -n "${FX_INSTALL_BASE_URL:-}" ]; then BASE_URL=${FX_INSTALL_BASE_URL%/}/; else BASE_URL=$FX_TARGET_BASE_URL; fi
+  URL=${BASE_URL}v$FX_VERSION/$ARTIFACT
 
   # --- the state directory exists and is a safe place; nothing inside it is a symlink we would follow ---
   umask 077
@@ -362,6 +403,7 @@ main() {
   fi
   check_home_not_precious
   check_layout "$FX_VERSION"
+  check_user_link
 
   # --- download, check, install ---
   if [ -f "$BIN" ] && [ ! -L "$BIN" ] && [ "$(sha_of "$BIN")" = "$WANT_SHA" ]; then
@@ -371,8 +413,13 @@ main() {
     trap 'rm -rf "$STAGE"' EXIT
     trap 'exit 1' HUP INT TERM
     say "Downloading $ARTIFACT $FX_VERSION ..."
-    if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$STAGE/$ARTIFACT" "$URL"; then
+    if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$WANT_SIZE" -fsSL -o "$STAGE/$ARTIFACT" "$URL"; then
       die 1 "the download failed: $URL"
+    fi
+    # curl's cap only sees a length the server announces; the file on disk must be exactly the signed length.
+    GOT_SIZE=$(wc -c <"$STAGE/$ARTIFACT" | tr -d ' ')
+    if [ "$GOT_SIZE" != "$WANT_SIZE" ]; then
+      die 1 "the downloaded file is $GOT_SIZE bytes, not the $WANT_SIZE this installer expects. Nothing was installed."
     fi
     GOT_SHA=$(sha_of "$STAGE/$ARTIFACT")
     if [ "$GOT_SHA" != "$WANT_SHA" ]; then
@@ -393,6 +440,18 @@ main() {
   # inside a directory the old one pointed at (mv onto a symlink to a directory moves into it).
   rm -f "$LINK"
   ln -s "../versions/$FX_VERSION/fx-runner" "$LINK"
+
+  # --- the link on the person's PATH. Last step of the install, so a failure above never touches ~/.local/bin. ---
+  if [ -n "${HOME:-}" ]; then
+    check_user_link
+    (
+      umask 022
+      mkdir -p "$HOME/.local/bin"
+    ) || die 1 "cannot create $HOME/.local/bin"
+    rm -f "$HOME/.local/bin/fx-runner"
+    ln -s "$LINK" "$HOME/.local/bin/fx-runner" || die 1 "cannot link $HOME/.local/bin/fx-runner"
+    say "Linked $HOME/.local/bin/fx-runner."
+  fi
 
   if [ "$OS" = linux ]; then offer_deps; fi
 
