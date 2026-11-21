@@ -16,7 +16,8 @@ const ROLES: Role[] = ["executor", "code-reviewer", PLANE_PUBLISH_ROLE as Role];
 
 describe("the microVM guest env table", () => {
   it("pins the guest CONNECT relay address the guest image must listen on", () => {
-    expect(MICROVM_CONNECT_RELAY).toBe("http://127.0.0.1:5253");
+    // the address itself is held to the runner's own table by `packages/fx-runner/test/vm/guestEnvPins.test.ts`; a literal here would only pin a copy of it
+    expect(MICROVM_CONNECT_RELAY).toMatch(/^http:\/\/127\.0\.0\.1:\d{2,5}$/);
   });
 
   it("has no CA variable, for every role and both modes", () => {

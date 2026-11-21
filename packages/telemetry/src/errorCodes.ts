@@ -348,6 +348,13 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "microvm_helper_missing",
   "microvm_helper_not_ready",
   "microvm_helper_out_of_date",
+  // D#587 B-5b-3b: how a run in a microVM can end without a result (protocol 27).
+  "vm_admission_refused",
+  "vm_boot_failed",
+  "vm_egress_unavailable",
+  "vm_token_delivery_failed",
+  "vm_workspace_failed",
+  "vm_teardown_incomplete",
   // Cloud-verified runner git ticket (D#6 R5a-2b): the ticket route refused a run that is not cloud-verified.
   "not_cloud_verified",
   // D#598 P1f-2: the public-push token and report routes (and the report check's own refusal code).

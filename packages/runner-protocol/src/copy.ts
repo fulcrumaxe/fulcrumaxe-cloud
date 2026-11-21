@@ -152,6 +152,13 @@ export const GIT_PATH_LINES = {
   review_sha_not_in_mirror: "The runner's copy of the repository does not have the commit to review on any branch, so the review did not start. If the pull request comes from a fork, it cannot be reviewed on your machine. Otherwise, review again.",
   context_spill_unwritable: "The runner could not save the longer text this run's prompt points to, so it did not start the agent with a reference to a file that is not there. Check the disk space and folder permissions on that machine, then Build again.",
   sandbox_unusable: "The sandbox on the runner machine could not start the agent's shell, so the run was stopped before the agent began. Update fx-runner and the Claude Code install on that machine, then Build again.",
+  // D#587 B-5b-3b: a run in a microVM that ended without a result. Each says what happened and what to do; none holds a path, an id or text from the agent.
+  vm_admission_refused: "The runner machine had no room to start a virtual machine for this run (its limits or free memory), so the run did not start. Free memory or raise the VM limits in the runner's settings, then Build again.",
+  vm_boot_failed: "The runner could not start or reach the virtual machine for this run, so the run was stopped. Check that the VM helper is installed and ready on that machine (fx-runner doctor), then Build again.",
+  vm_egress_unavailable: "The runner could not open the network path for this run's virtual machine, so the run did not start. Check the VM helper and its socket on that machine (fx-runner doctor), then Build again.",
+  vm_token_delivery_failed: "The runner could not hand the model credential to the virtual machine, so the agent did not start. Sign in to Claude again on that machine, then Build again.",
+  vm_workspace_failed: "The runner could not move the working copy into or out of the virtual machine, so the run was stopped. Nothing was published. Build again.",
+  vm_teardown_incomplete: "The runner could not confirm that this run's virtual machine was fully cleaned up. The machine was shut down and the run's work was not kept. Run fx-runner doctor on that machine, then Build again.",
   // The cloud has no git ticket key, so the fault is on the cloud side; the runner needs no change.
   git_ticket_unavailable: "The cloud is not set up for Cloud-verified runs yet (it cannot sign git access for your runner). An admin needs to finish the setup; your runner is fine.",
 } as const;
