@@ -16,6 +16,8 @@ export const FILE_IN_GUEST = "written in the guest\n";
 export const HANG = "FXMODE-HANG";
 /** A prompt that holds this word makes the program search every disk-backed file of the guest for the token, with a planted control. */
 export const DISKSCAN = "FXMODE-DISKSCAN";
+/** A prompt that holds this word makes the program call out the way the real CLI and git would: the model host by its base URL, github.com for git, and a host outside the policy by both relays. */
+export const RELAYS = "FXMODE-RELAYS";
 
 export interface ScriptTools {
   /** The interpreter the program starts under: the guest's own, or this machine's for the OS sandbox. */
@@ -82,6 +84,28 @@ if ${JSON.stringify(DISKSCAN)} in prompt:
     if found_control != [control]: facts.append("disk_scan=control_missed(rc=%s,err=%s)" % (out.returncode, out.stderr.strip()[:200].replace(";", ",").replace("\\n", " ")))
     elif hits: facts.append("disk_scan=found:" + ",".join(hits))
     else: facts.append("disk_scan=clean")
+if ${JSON.stringify(RELAYS)} in prompt:
+    # The calls a job's tools make, through the guest's own relays and the environment the runner set (ANTHROPIC_BASE_URL, the proxy variables, git's rewrite): each is reported as what it got, never raised.
+    import http.client, urllib.error, urllib.request
+    def attempt(f):
+        try: return f()
+        except urllib.error.HTTPError as e: return "http_%d" % e.code
+        except Exception as e: return "failed_" + type(e).__name__
+    def model():
+        req = urllib.request.Request(os.environ.get("ANTHROPIC_BASE_URL", "") + "/v1/messages", data=b"{}", headers={"content-type": "application/json", "x-api-key": "guest-placeholder"})
+        with urllib.request.urlopen(req, timeout=60) as r: return "%d:%s" % (r.status, r.read().decode().strip()[:120])
+    def git_remote():
+        out = subprocess.run([GIT, "ls-remote", "https://github.com/fx-test/repo.git"], capture_output=True, text=True, timeout=60)
+        return "ok:" + out.stdout.strip()[:120] if out.returncode == 0 else "refused"
+    def tunnel(): return "%d" % urllib.request.urlopen("https://outside.example.test/", timeout=60).status
+    def reverse():
+        c = http.client.HTTPConnection("127.0.0.1", 80, timeout=60)
+        c.request("GET", "/", headers={"Host": "outside.example.test"})
+        return "http_%d" % c.getresponse().status
+    facts.append("relay_model=" + attempt(model))
+    facts.append("relay_git=" + attempt(git_remote))
+    facts.append("relay_outside_tunnel=" + attempt(tunnel))
+    facts.append("relay_outside_reverse=" + attempt(reverse))
 with open(PROBE, "w") as f:
     f.write("probe written by the agent\\n")
 facts.append("probe_written=" + str(os.path.exists(PROBE)))
