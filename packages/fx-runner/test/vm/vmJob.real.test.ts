@@ -28,6 +28,7 @@ import { GuestBindings } from "../../src/vm/sandboxd/guestBindings.js";
 import { guestMakeRuntime } from "../../src/vm/sandboxd/guestRuntime.js";
 import { createGuestAgent } from "../../src/vm/sandboxd/guestAgent.js";
 import { createHelperClient, HelperError, type Helper } from "../../src/vm/sandboxd/helperClient.js";
+import { probeSettings, sandboxLaunch, type SandboxHost } from "../../src/sandbox/probe.js";
 import type { LiveMicrovmParts } from "../../src/vm/sandboxd/live.js";
 import type { EgressStarters } from "../../src/vm/sandboxd/policyPort.js";
 import { fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
@@ -52,6 +53,8 @@ import { connectUnix } from "./sandboxd/helpers.js";
  *
  * Needs, in the environment (a dispatched `microvm-image.yml` run sets all of them): FX_VM_HELPER_SOCKET, FX_VM_TEMPLATE, FX_VM_KERNEL, FX_VM_ROOTFS, FX_VM_AGENT. Runs as the ordinary
  * user, never as root, and skips with a message without them (or with little free memory). One job, so one VM at a time: run it behind the heavy-check lock.
+ * Two tests need more, and skip alone without it: the engine comparison needs a working bubblewrap and socat, and the root-on-the-host search needs FX_VM_HOST_SEARCH (the path of
+ * helpers/hostTokenSearch.sh, installed root-owned, which this test calls through `sudo -n`; the workflow installs it). The workflow's skip guard fails the job if either skips.
  *
  * What the test can see of the VMs is what the helper was asked: the helper handed to the daemon is wrapped, so every sandbox id this file made is known, the helper's list the runner
  * reaps from shows only those (a start-up reap must never end another suite's VMs), and a failure can be injected at the one call under test. The leak checks read the REAL helper.
@@ -118,6 +121,11 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
   let cloud: StrictRunnerCloud;
   let fake: Fake;
   let toolbin: string;
+  /** The directories the OS-sandbox tool directories were made in, removed after the suite. */
+  const osToolRoots: string[] = [];
+  /** The search path and tool directory of the OS-sandbox run of the engine comparison, kept for the diagnostics below. */
+  let osSearchPath: string | undefined;
+  let osToolDir: string | undefined;
   let key: ReturnType<typeof generateRunnerKey>;
   let sentinel: string;
   let calls: Call[];
@@ -152,6 +160,7 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     realHelper = createHelperClient(connectUnix(env.helper as string));
   }, 120_000);
   afterAll(async () => {
+    for (const dir of osToolRoots.splice(0)) rmSync(dir, { recursive: true, force: true });
     await signed?.close();
   });
 
@@ -304,12 +313,83 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     return run.done;
   };
 
+  /**
+   * What a red run needs to be read without a second dispatch: every run's posted events in full, how it ended (the `run_ended` event and the done reply), and the tail of each log file
+   * the runner wrote under its state directory (the agent's stderr is there). The token and anything shaped like one is replaced, so this text may be printed.
+   */
+  function runDiagnostics(): string {
+    const scrub = (text: string): string => text.split(sentinel).join("[token]").replace(/sk-ant-[A-Za-z0-9_-]+/g, "[token]");
+    const parts: string[] = [];
+    for (const [runId, run] of cloud.runs) {
+      parts.push(`run ${runId}: ended by ${JSON.stringify(run.endedBy ?? null)}; done reply ${JSON.stringify(run.doneReply ?? null)}`);
+      for (const event of run.events) parts.push(`  event ${JSON.stringify(event)}`);
+    }
+    // The runner's own lines saying why an agent turn ended (the cause, exit code and stderr tail of an agent that did not start), whatever else it logged.
+    for (const line of logLines) if (line.includes("agent turn ended")) parts.push(`runner journal: ${line}`);
+    const walk = (dir: string, depth: number): string[] => {
+      if (depth > 4) return [];
+      try {
+        return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? walk(path.join(dir, entry.name), depth + 1) : entry.isFile() && /\.(log|err|stderr)$/.test(entry.name) ? [path.join(dir, entry.name)] : []));
+      } catch {
+        // fx-swallow-ok: a directory that is not there says nothing; this is a diagnostic only
+        return [];
+      }
+    };
+    for (const file of [...walk(stateDir, 0), ...walk(path.join(home, ".cache"), 0)].slice(0, 12)) {
+      try {
+        parts.push(`log ${path.relative(home, file)} (tail):\n${readFileSync(file, "utf8").slice(-3000)}`);
+      } catch {
+        // fx-swallow-ok: an unreadable log is left out of the diagnostic
+      }
+    }
+    if (osSearchPath !== undefined && [...cloud.runs.values()].some((run) => run.endedBy?.reason === "agent_failed")) parts.push(...sandboxLaunchNotes(osSearchPath, osToolDir));
+    return scrub(parts.join("\n"));
+  }
+
+  /**
+   * Why an OS-sandbox agent may not have started, for a run that ended `agent_failed`: the bare bubblewrap command with a network namespace, then the runner's own launch (the arguments
+   * the sandbox probe builds from the job's rules, through its exported builder) running a trivial command and the agent stand-in. Each prints its exit code and the start of its error output.
+   */
+  function sandboxLaunchNotes(searchPath: string, toolDir: string | undefined): string[] {
+    const notes: string[] = [];
+    const env = { PATH: searchPath, HOME: home, LC_ALL: "C" };
+    const bwrap = onPath("bwrap");
+    const note = (what: string, command: string, args: readonly string[]): void => {
+      const out = spawnSync(command, args, { env, encoding: "utf8", timeout: 20_000 });
+      notes.push(`probe ${what}: exit ${out.status === null ? `none (${out.signal ?? out.error?.message ?? "no signal"})` : out.status}; stdout ${JSON.stringify(out.stdout.slice(0, 300))}; stderr ${JSON.stringify(out.stderr.slice(0, 1500))}`);
+    };
+    if (bwrap === undefined) return ["probe: bwrap is not on the path"];
+    const shell = onPath("sh") ?? "sh";
+    note("bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / sh -c true", bwrap, ["--unshare-user", "--unshare-pid", "--unshare-net", "--ro-bind", "/", "/", shell, "-c", "true"]);
+    const host: SandboxHost = {
+      run: async () => ({ code: null, stdout: "", stderr: "", timedOut: false }),
+      isDir: (target) => lstatSync(target, { throwIfNoEntry: false })?.isDirectory() === true,
+      isFile: (target) => lstatSync(target, { throwIfNoEntry: false })?.isFile() === true,
+      readText: () => undefined,
+      sysctl: async () => undefined,
+    };
+    const input = { platform: process.platform, home, stateDir, binaryDir: path.dirname(fake.binary), searchPath };
+    const trivial = [shell, "-c", "true"];
+    const shim = toolDir === undefined ? undefined : [path.join(toolDir, "claude"), "--version"];
+    for (const [label, command] of [["a trivial command", trivial], ...(shim === undefined ? [] : [["the agent stand-in --version", shim] as const])] as const) {
+      const launch = sandboxLaunch(input, probeSettings(input), searchPath, command, host);
+      if (!launch.ok) {
+        notes.push(`probe the runner's launch for ${label}: not built (${JSON.stringify(launch.result)})`);
+        continue;
+      }
+      notes.push(`the runner's launch for ${label}: ${launch.tool} ${launch.args.join(" ")}`);
+      note(`the runner's launch for ${label}`, launch.tool, launch.args);
+    }
+    return notes;
+  }
+
+
   /** Waits for a condition; a timeout says what the runner printed and which requests the cloud saw, so a red run explains itself. */
   async function waitFor(what: string, condition: () => boolean, ms: number): Promise<void> {
     try {
       await until(condition, ms);
     } catch {
-      throw new Error(`timed out waiting for ${what}\nthe runner said:\n${logLines.slice(-40).join("\n")}\nthe cloud saw: ${cloud.seen.map((s) => s.path).slice(-20).join(" ")}\nthe helper was asked: ${JSON.stringify(calls)}`);
+      throw new Error(`timed out waiting for ${what}\nthe runner said:\n${logLines.slice(-40).join("\n")}\nthe cloud saw: ${cloud.seen.map((s) => s.path).slice(-20).join(" ")}\nthe helper was asked: ${JSON.stringify(calls)}\n${runDiagnostics()}`);
     }
   }
   const runOf = (runId: string) => cloud.runs.get(runId);
@@ -508,6 +588,51 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     expectNoToken();
   }, 780_000);
 
+  /**
+   * The search as root on the host (D#587 3c-v): the token goes to the root-owned script on its standard input, so it is in no argument list, no file and no log. The script plants a control of its own,
+   * and says how many files it could look in, so "clean" cannot be a search of nothing. Its answer is only counts and paths; nothing of it can hold the token.
+   */
+  const hostSearch = process.env["FX_VM_HOST_SEARCH"];
+  const searchAsRoot = (): { status: number | null; stdout: string; stderr: string } => {
+    const out = spawnSync("sudo", ["-n", hostSearch as string], { input: `${sentinel}\n`, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" }, timeout: 600_000 });
+    expect(out.stdout.includes(sentinel) || out.stderr.includes(sentinel), "the host search printed the token").toBe(false);
+    return { status: out.status, stdout: out.stdout, stderr: out.stderr };
+  };
+  const filesSearched = (stdout: string): number => [...stdout.matchAll(/^dir=\S+ files=(\d+)$/gm)].reduce((n, m) => n + Number(m[1]), 0);
+  const expectRootFoundNothing = (out: { status: number | null; stdout: string; stderr: string }, when: string): void => {
+    expect(out, `the root search ${when}: ${out.stdout} ${out.stderr}`).toMatchObject({ status: 0 });
+    expect(out.stdout).toContain("control=found");
+    expect(out.stdout).toContain("result=clean");
+    expect(out.stdout).not.toContain("hit=");
+  };
+
+  it("26a (host): as root on the host, no file of the helper's jail or snapshot directories holds the token while the agent runs or after the job (with a planted control)", async (ctx) => {
+    if (hostSearch === undefined) {
+      console.warn("vmJob.real: FX_VM_HOST_SEARCH is not set, so the root-on-the-host token search is SKIPPED");
+      return ctx.skip();
+    }
+    cloud.enqueue(queuedJob({ task: { kind: "implement", prompt: `${HANG}\n`, prompt_sha256: sha256Text(`${HANG}\n`) }, check: check("true") }));
+    const run = startRun(partsFor(scriptFor()));
+    // the CLI is running in the guest, with the token in its environment, once its first line has reached the host's transcript
+    await until(() => {
+      try {
+        return transcripts().includes('"subtype":"init"');
+      } catch {
+        // fx-swallow-ok: the log directory is not there yet, which is "not running yet"
+        return false;
+      }
+    }, SHORT_WAIT_MS);
+    const during = searchAsRoot();
+    expect(await stopRun(run)).toMatchObject({ code: 0 });
+    await expectNoVmLeft();
+    const after = searchAsRoot();
+    expectRootFoundNothing(during, "while the agent ran");
+    // a running VM has files under the jail root (its jail, its disks); a search that saw none would be a search of nothing
+    expect(filesSearched(during.stdout), "the root search saw no file while the VM ran").toBeGreaterThan(0);
+    expectRootFoundNothing(after, "after the job");
+    expectNoToken();
+  }, 780_000);
+
   /** The tests of D#587 B-5b-3c-v: what the first file left open of criterion 26a. */
   const isDone = (): boolean => [...cloud.runs.values()].some((r) => r.doneReply !== undefined);
   const isEnded = (): boolean => [...cloud.runs.values()].some((r) => r.endedBy !== undefined);
@@ -516,7 +641,11 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     JSON.stringify([e.type, e.stage, e.tool_name, e.activity, e.engine_version, e.reason, e.detail, e.exit_code, e.usage]);
 
   it("26a (engines): the same scripted job on os_sandbox and on microvm pushes the same tree and reports the same events in the same order", async (ctx) => {
-    const osTools = bwrapUsable() ? osToolbin(root, scriptFor({ os: true }), fake.binary) : undefined;
+    // The runner hides the shared temp directories (`/tmp` and the like) from a job, so the agent stand-in cannot sit in this test's own directory there. It is made, unique to this test, under
+    // the working directory (a place the job's view of the machine still shows), and removed after the suite.
+    const osToolRoot = mkdtempSync(path.join(process.cwd(), ".fxr-os-tools-"));
+    osToolRoots.push(osToolRoot);
+    const osTools = bwrapUsable() ? osToolbin(osToolRoot, scriptFor({ os: true }), fake.binary) : undefined;
     if (osTools === undefined) {
       const probe = onPath("bwrap") === undefined ? undefined : spawnSync(onPath("bwrap") as string, ["--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "true"], { encoding: "utf8" });
       console.warn(`vmJob.real: the OS-sandbox side of the engine comparison cannot run here, so the comparison is SKIPPED. Tools: ${["bwrap", "socat", "git", "sh", "env", "python3"].map((t) => `${t}=${onPath(t) ?? "missing"}`).join(" ")}; bwrap probe: ${probe === undefined ? "not run" : `exit ${probe.status}: ${probe.stderr.trim()}`}`);
@@ -536,7 +665,12 @@ describe.skipIf(!ready)("a whole job through the real run path, in real microVMs
     remote = seedRemote("remote-os");
     setSetting(stateDir, "sandbox_engine", "os_sandbox");
     cloud.enqueue(job());
-    const osRun = startRun(undefined, { searchPath: osTools });
+    // The runner leaves a tool out when its install directory sits under its home directory inside the shared temp directory (a grant there is refused), and this test's tool
+    // directory is such a place. So the system copy of the version-control tool, in its own system directory, comes after it on the search path, as a production machine resolves it.
+    rmSync(path.join(osTools, "git"), { force: true });
+    osToolDir = osTools;
+    osSearchPath = [osTools, path.dirname(onPath("git") as string)].join(path.delimiter);
+    const osRun = startRun(undefined, { searchPath: osSearchPath });
     await waitFor("the OS-sandbox job to be done", () => [...cloud.runs.values()].filter((r) => r.doneReply !== undefined).length === 2, SHORT_WAIT_MS);
     const osId = [...cloud.runs.keys()].find((id) => id !== vmId)!;
     const osTree = pushedTree();

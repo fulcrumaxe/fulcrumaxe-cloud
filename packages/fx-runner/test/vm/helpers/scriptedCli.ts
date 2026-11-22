@@ -134,9 +134,12 @@ export function bwrapUsable(): boolean {
   return spawnSync(bwrap, ["--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "true"], { encoding: "utf8" }).status === 0;
 }
 
+/** The file name the CLI stand-in has in the OS sandbox's tool directory (its search-path name is a link to it). */
+export const STAND_IN = "agent-stand-in";
+
 /**
- * A tool directory for a run on the OS sandbox: the real bubblewrap, socat and git, and a `claude` that runs the shared program (the program file sits beside it, so the sandbox can read
- * it), except for `auth`, which answers from `authBinary` (the harness' fake). Returns the directory, or undefined where a tool is missing.
+ * A tool directory for a run on the OS sandbox: the real bubblewrap, socat and git, and a CLI-named link to a program that runs the shared program (the program file sits beside it, so the sandbox can
+ * read it), except for `auth`, which answers from `authBinary` (the harness' fake). Returns the directory, or undefined where a tool is missing.
  */
 export function osToolbin(root: string, script: string, authBinary: string): string | undefined {
   const dir = path.join(root, "os-toolbin");
@@ -149,7 +152,10 @@ export function osToolbin(root: string, script: string, authBinary: string): str
   const python = onPath("python3");
   if (python === undefined) return undefined;
   writeFileSync(path.join(dir, "agent.py"), script);
-  writeFileSync(path.join(dir, "claude"), `#!/bin/sh\ncase "$1" in auth) exec ${authBinary} "$@";; esac\nexec ${python} ${path.join(dir, "agent.py")} "$@"\n`);
-  chmodSync(path.join(dir, "claude"), 0o755);
+  writeFileSync(path.join(dir, STAND_IN), `#!/bin/sh\ncase "$1" in auth) exec ${authBinary} "$@";; esac\nexec ${python} ${path.join(dir, "agent.py")} "$@"\n`);
+  chmodSync(path.join(dir, STAND_IN), 0o755);
+  // The runner looks for the CLI's name on the search path and starts the REAL PATH of what it finds (it resolves links). So the program is kept under a name of its own and the CLI's name is a link to it,
+  // the way the host-mode tests' fake is (bin/agent). Were the file itself given the CLI's name, the repo's model-call guard (FX_FORBID_MODEL_CALLS=1, set on hosted CI) would refuse to start it, as it must any program of that name.
+  symlinkSync(STAND_IN, path.join(dir, "claude"));
   return dir;
 }

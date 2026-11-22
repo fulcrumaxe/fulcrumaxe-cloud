@@ -30,6 +30,7 @@
     "@fx/runner": "workspace:*",
     "@fx/runtime": "workspace:*",
     "@fx/sitekit-checks": "workspace:*",
+    "@fx/test-guard": "workspace:*",
     "@fx/trust": "workspace:*",
     "@tufjs/models": "5.0.0",
     "@types/node": "^24.19.0",
