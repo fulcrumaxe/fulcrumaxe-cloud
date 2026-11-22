@@ -39,6 +39,8 @@ function billingLinkError(reason: string): ApiError {
       return new ApiError(409, "already_subscribed", "this account already has this plan");
     case "no_subscription":
       return new ApiError(409, "no_subscription", "this account has no paying subscription yet; choose the Engine plan to start one");
+    case "subscription_not_paying":
+      return new ApiError(409, "subscription_not_paying", "the subscription is not being paid right now; settle the payment in the billing portal first");
     case "engine_quantity_in_use":
       return new ApiError(409, "engine_quantity_in_use", "more engines are running than that quantity; park or stop an engine first");
     case "payment_pending":
@@ -73,7 +75,7 @@ const linkRoute: Pick<RouteEntry, "method" | "minRole" | "idempotency" | "rateCl
 };
 
 const linkErrors = {
-  "409": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
+  "409": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription`, `subscription_not_paying` (the stored standing is past due, unpaid, incomplete or paused, or its ids are missing) or `engine_quantity_in_use` (engine quantity).",
   "402": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
   "422": "`invalid_return_url` (a path that is not a plain absolute path on this app), `invalid_plan` or `invalid_quantity`.",
   "502": "`internal_error`: the billing provider could not be reached. No detail is returned.",
@@ -223,7 +225,7 @@ export const billingRoutes: RouteEntry[] = [
     operationId: "createCheckoutSession",
     summary: "A Stripe Checkout link to subscribe to a plan",
     description:
-      "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. Returns only the `url`.",
+      "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. An engine checkout on a subscription that already holds engines sets the total to the larger of what it holds and `quantity`, and writes nothing when nothing is raised. Returns only the `url`.",
     extraResponses: linkErrors,
     bodySchema: checkoutSessionBodySchema,
     responseSchema: billingLinkResponseSchema,

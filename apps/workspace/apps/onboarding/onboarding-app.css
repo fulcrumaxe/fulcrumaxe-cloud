@@ -108,3 +108,4 @@
 .ob-cmd-label { flex: 1 1 100%; opacity: 0.9; }
 .ob-code { flex: 1 1 14rem; min-width: 0; padding: 6px 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
 .ob-failed { border-color: #ff6b6b; border-width: 2px; }
+.ob-link { background: none; border: 0; padding: 0; font: inherit; color: var(--accent, #1aff80); text-decoration: underline; cursor: pointer; }

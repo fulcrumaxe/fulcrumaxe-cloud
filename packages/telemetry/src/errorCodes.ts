@@ -171,6 +171,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "setup_already_paid",
   "sitekit_prices_provisional",
   "stream_limit",
+  "subscription_not_paying",
   "sync_already_active",
   "sync_not_active",
   "tokens_not_available",

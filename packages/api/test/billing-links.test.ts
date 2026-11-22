@@ -424,6 +424,29 @@ describe('D#31 API-7e: billing links', () => {
       expect(stripe.calls).toHaveLength(0);
     });
 
+    it('D#845 ON-22c: an engine checkout on held engines is an adjust over the real route: below the held total no write, above it one update, never already_subscribed', async () => {
+      const owner = await billedOwner();
+      const same = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'engine', quantity: 2 });
+      expect(same.status).toBe(200);
+      expect(stripe.calls).toHaveLength(0);
+      const up = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'engine', quantity: 6 });
+      expect(up.status).toBe(200);
+      expect(stripe.calls.map((c) => c.kind)).toEqual(['item_update']);
+      expect(stripe.engineQuantityNow).toBe(6);
+    });
+
+    it('D#845 ON-22c: a standing that is not paying is 409 subscription_not_paying on both engine routes, with the code in the body; hosted checkout keeps already_subscribed', async () => {
+      const owner = await billedOwner();
+      await admin.query(`UPDATE accounts SET stripe_subscription_status = 'past_due' WHERE id = $1`, [owner.accountId]);
+      const q = await post(ENGINE_QUANTITY, owner, { quantity: 2 });
+      expect([q.status, await code(q)]).toEqual([409, 'subscription_not_paying']);
+      const c = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'engine', quantity: 2 });
+      expect([c.status, await code(c)]).toEqual([409, 'subscription_not_paying']);
+      const hosted = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'team' });
+      expect([hosted.status, await code(hosted)]).toEqual([409, 'already_subscribed']);
+      expect(stripe.calls).toHaveLength(0);
+    });
+
     it('a Stripe failure is 502 internal_error with none of its text', async () => {
       const owner = await billedOwner();
       stripe.failWith = new Error('boom cus_leak sk_live_secret');
