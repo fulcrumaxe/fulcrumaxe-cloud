@@ -143,9 +143,9 @@ describe('machine tables [pg]', () => {
     });
 
     it('a server cannot name another account\'s credential, and a status or deleted stamp must agree', async () => {
-      await expect(server(a, credB, tokenA)).rejects.toMatchObject({ code: PG_ERROR.FOREIGN_KEY_VIOLATION });
-      await expect(server(a, credA, tokenA, `status='deleted'`)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
-      await expect(server(a, credA, tokenA, `status='nope'`)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      await expect(server(a, credB, await token(a))).rejects.toMatchObject({ code: PG_ERROR.FOREIGN_KEY_VIOLATION });
+      await expect(server(a, credA, await token(a), `status='deleted'`)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      await expect(server(a, credA, await token(a), `status='nope'`)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
     });
 
     it('a credential: one active per account and provider, sealed columns present exactly while live', async () => {
@@ -285,8 +285,7 @@ describe('machine tables [pg]', () => {
 
     it('servers: only a server deleted over 400 days ago goes (one 400 days 1 hour old goes, one 399 days 23 hours old stays)', async () => {
       const cred = await credential(b, true);
-      const tok = await token(b);
-      const mk = async (days: string) => (await admin.query(`INSERT INTO managed_servers (account_id, kind, credential_id, name, provisioning_token_id, created_by, status, deleted_at, deleted_by) VALUES ($1, 'hetzner_cloud', $2, 'gone', $3, $4, 'deleted', now() - $5::interval, $4) RETURNING id`, [b.accountId, cred, tok, b.userId, days])).rows[0].id as string;
+      const mk = async (days: string) => (await admin.query(`INSERT INTO managed_servers (account_id, kind, credential_id, name, provisioning_token_id, created_by, status, deleted_at, deleted_by) VALUES ($1, 'hetzner_cloud', $2, 'gone', $3, $4, 'deleted', now() - $5::interval, $4) RETURNING id`, [b.accountId, cred, await token(b), b.userId, days])).rows[0].id as string;
       const oldId = await mk('400 days 1 hour');
       const keptId = await mk('399 days 23 hours');
       expect(await prune('machine_servers_prune')).toBe(1);
@@ -308,7 +307,7 @@ describe('machine tables [pg]', () => {
          VALUES ($1, $2, 'code_ready', $3, $3, now() - interval '10 minutes', now() - interval '5 minutes', $4) RETURNING id`,
         [a.accountId, runnerA1, randomBytes(9), a.userId],
       )).rows[0].id as string;
-      const srv = (await admin.query(`INSERT INTO managed_servers (account_id, kind, credential_id, name, provisioning_token_id, created_by, status, deleted_at, deleted_by) VALUES ($1, 'hetzner_cloud', $2, 'gone', $3, $4, 'deleted', now() - interval '401 days', $4) RETURNING id`, [a.accountId, credARemoved, tokenA, a.userId])).rows[0].id as string;
+      const srv = (await admin.query(`INSERT INTO managed_servers (account_id, kind, credential_id, name, provisioning_token_id, created_by, status, deleted_at, deleted_by) VALUES ($1, 'hetzner_cloud', $2, 'gone', $3, $4, 'deleted', now() - interval '401 days', $4) RETURNING id`, [a.accountId, credARemoved, await token(a), a.userId])).rows[0].id as string;
       const state = async () => (await admin.query(
         `SELECT (SELECT count(*)::int FROM machine_usage_daily WHERE model_tier = 'ancient') AS usage,
                 (SELECT status || ':' || (auth_url_ct IS NULL)::text FROM machine_login_requests WHERE id = $1) AS login,
@@ -346,11 +345,10 @@ describe('machine tables [pg]', () => {
 
     it('the servers prune keeps one deleted 399 days 23 hours ago and drops one deleted 400 days 1 hour ago by its own edge, with the policy relaxed', async () => {
       const cred = await credential(b, true);
-      const tok = await token(b);
       await admin.query('BEGIN');
       try {
         await admin.query(`ALTER POLICY machine_ops_prune ON managed_servers USING (NULLIF(current_setting('app.account_id', true), '') IS NULL)`);
-        const mk = async (interval: string) => (await admin.query(`INSERT INTO managed_servers (account_id, kind, credential_id, name, provisioning_token_id, created_by, status, deleted_at, deleted_by) VALUES ($1, 'hetzner_cloud', $2, 'gone', $3, $4, 'deleted', now() - $5::interval, $4) RETURNING id`, [b.accountId, cred, tok, b.userId, interval])).rows[0].id as string;
+        const mk = async (interval: string) => (await admin.query(`INSERT INTO managed_servers (account_id, kind, credential_id, name, provisioning_token_id, created_by, status, deleted_at, deleted_by) VALUES ($1, 'hetzner_cloud', $2, 'gone', $3, $4, 'deleted', now() - $5::interval, $4) RETURNING id`, [b.accountId, cred, await token(b), b.userId, interval])).rows[0].id as string;
         const kept = await mk('399 days 23 hours');
         const dropped = await mk('400 days 1 hour');
         await admin.query(`SELECT machine_servers_prune(100)`);

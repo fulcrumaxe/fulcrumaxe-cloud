@@ -5,6 +5,7 @@ import { RegisterMessage, RegisterResponse } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { MAX_BODY_BYTES, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { PROVISIONING_TOKEN_PREFIX, hashProvisioningToken } from "./provisioningTokens.js";
+import { boundSourceIp } from "./boundSourceIp.js";
 import { hashRegistrationCode } from "./registrationCodes.js";
 import { verifySelfSignedRequest } from "./verifyRunnerRequest.js";
 
@@ -57,6 +58,15 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
       const planRow = (await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [accountId])).rows[0];
       // D#845 ON-22a (ruling 42): the runner tier's machine limit unless the account carries a paid hosted plan item.
       const maxRunners = maxRunnersOf(deps, planRow === undefined ? undefined : effectivePlan(planRow, "runner"));
+      // A token that belongs to a rented server's row is redeemable only from that server's address (D#845 MC-5). Checked before the definer, in this
+      // transaction: a refusal rolls back and the token stays unused. A token no server row holds is unbound, as before.
+      if (provisioning) {
+        const bound = (await client.query<{ bound: boolean; ip: string | null }>("SELECT bound, ip FROM runner_provisioning_token_bound_ip($1)", [codeHash])).rows[0];
+        if (bound?.bound === true) {
+          const source = boundSourceIp(req.headers);
+          if (bound.ip === null || source === undefined || source !== bound.ip) throw new RunnerHttpError(403, "token_bound_elsewhere", "this token can be used only from the server it was made for");
+        }
+      }
       const result = provisioning
         ? await client.query<{ id: string }>("SELECT runner_provisioning_register($1, $2::jsonb, NULL, $3, $4) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners, clientIp])
         : await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL, $3) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners]);
