@@ -20,8 +20,9 @@ const ALLOWED: Record<string, string> = {
   "packages/runner-protocol/src/messages.ts": "the schema of the claim block and of the hello facts",
   "packages/runner-cloud/src/hello.ts": "stores the host limits through the definer",
   "packages/runner-cloud/src/claim.ts": "stores the inventory through the definer; nothing in the claim's decisions reads it back",
+  "packages/runner-cloud/src/heartbeat.ts": "stores the inventory a held run's heartbeat carries through the definer; nothing in the heartbeat's decisions reads it back",
   "packages/fx-runner/src/daemon/sandboxInventory.ts": "the runner's reporter and the inventory source",
-  "packages/fx-runner/src/daemon/client.ts": "puts the block on the claim",
+  "packages/fx-runner/src/daemon/client.ts": "puts the block on the claim and on the heartbeat",
   "packages/fx-runner/src/commands/run.ts": "wires the default source",
   "packages/fx-runner/src/commands/doctor.ts": "the runner's own local microvm caps (runnerSettings), not the cloud inventory tables",
   "packages/fx-runner/src/vm/limits.ts": "the runner's own local microvm caps (runnerSettings), not the cloud inventory tables",
@@ -98,7 +99,7 @@ describe("no security decision reads the sandbox inventory or the host limits", 
   });
 
   it("the claim and hello routes only write: no select of the new tables, and nothing in the claim reads a stored limit", () => {
-    for (const file of ["packages/runner-cloud/src/claim.ts", "packages/runner-cloud/src/hello.ts"]) {
+    for (const file of ["packages/runner-cloud/src/claim.ts", "packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/heartbeat.ts"]) {
       const text = readFileSync(path.join(repoRoot, file), "utf8");
       expect(text, file).not.toMatch(/(FROM|JOIN)\s+runner_sandbox/i);
       expect(text, file).not.toMatch(/(FROM|JOIN)\s+runner_facts/i);

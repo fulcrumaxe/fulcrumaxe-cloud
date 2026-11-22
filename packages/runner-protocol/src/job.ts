@@ -73,7 +73,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1", "watch_mode_v1", "kvm_fact_v1", "preflight_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1", "watch_mode_v1", "kvm_fact_v1", "preflight_v1", "heartbeat_inventory_v1"] as const;
 /** D#587 B-7b: a runner that lists it can receive signed sandbox commands on its claim reply and ack them on its next claim (sandboxCommands.ts). It gates no role and needs protocol 21. */
 export const SANDBOX_COMMAND_CAPABILITY = "sandbox_commands_v1" as const;
 /**
@@ -106,6 +106,11 @@ export const KVM_FACT_HELLO_CAPABILITY = "kvm_fact_v1" as const;
  * the first hello never carries it. A cloud built before the field refuses it (its `RunnerFacts` is strict), so the release order is never relied on. It gates no role.
  */
 export const PREFLIGHT_HELLO_CAPABILITY = "preflight_v1" as const;
+/**
+ * D#587 FU-179: a runner that lists `heartbeat_inventory_v1` on its hello may put its sandbox inventory (`sandboxes`) on a heartbeat while a run is held, but only after a hello reply that listed
+ * `heartbeat_inventory`. A cloud built before it refuses the field (its heartbeat message is strict), so the release order is never relied on. It gates no role. It needs protocol 21 or later.
+ */
+export const HEARTBEAT_INVENTORY_HELLO_CAPABILITY = "heartbeat_inventory_v1" as const;
 /** The engine bridge: a runner that lists it sends engine events, pulls signed engine commands and asks for decisions (engineEvents.ts, engineCommands.ts). It gates no role. */
 export const ENGINE_BRIDGE_CAPABILITY = "engine_bridge_v1" as const;
 /** D#6 PUBLIC-MERGE PR2a: `plane_merge_v1` gates no role either. A runner that lists it can claim and execute a merge order (messages.ts, plane-merge-*). */

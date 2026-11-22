@@ -92,7 +92,9 @@ export const WATCH_MODE_CAPABILITY = "watch_mode" as const;
 export const KVM_FACT_CAPABILITY = "kvm_fact" as const;
 /** D#845 ON-21b: this cloud stores `facts.preflight` (migration 1051). Said only to a runner that declared `preflight_v1`; the runner then sends the codes on its later hellos. */
 export const PREFLIGHT_CAPABILITY = "preflight" as const;
-export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY] as const;
+/** D#587 FU-179: this cloud takes `sandboxes` on a heartbeat. Said only to a runner that declared `heartbeat_inventory_v1` at protocol 21 or later. */
+export const HEARTBEAT_INVENTORY_CAPABILITY = "heartbeat_inventory" as const;
+export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY, HEARTBEAT_INVENTORY_CAPABILITY] as const;
 
 /** 200 from hello: the protocol version this cloud speaks, the wake grant for a runner that asked for one, and the capabilities of this cloud. */
 export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake, capabilities: z.array(z.enum(HELLO_REPLY_CAPABILITIES)).max(HELLO_REPLY_CAPABILITIES.length).refine((list) => new Set(list).size === list.length, { message: "a capability appears once" }).optional() }).strict();
@@ -117,7 +119,7 @@ export type HandoffSignal = z.infer<typeof HandoffSignal>;
  * reply from a cloud older than D#599 parses unchanged. The schema stays strict, so a runner built before `handoff` existed refuses a
  * reply that carries it; the cloud therefore sends it only to a run whose runner can read it (D#599 HO-2a).
  */
-export const HeartbeatReply = z.object({ continue: z.literal(true), lease_expires_at: utcTimestamp, handoff: HandoffSignal.optional() }).strict();
+export const HeartbeatReply = z.object({ continue: z.literal(true), lease_expires_at: utcTimestamp, handoff: HandoffSignal.optional(), sandboxes_recorded: z.literal(true).optional() }).strict();
 export type HeartbeatReply = z.infer<typeof HeartbeatReply>;
 
 /** 200 from events: `accepted` rows were newly written, `duplicates` were dropped by the database guard. */

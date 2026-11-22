@@ -1683,6 +1683,8 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     await until(() => claims() >= 1);
     expect(sentHello().facts).toMatchObject({ sandbox_engine: "microvm" });
     expect(claimBodies()[0]).toMatchObject({ sandboxes: [] });
+    // D#587 FU-179: a runner that reports an inventory declares the heartbeat handshake capability; the first hello never carries the field itself.
+    expect(sentHello().capabilities).toContain("heartbeat_inventory_v1");
     const handle = await live!.port.createSandbox({ sandboxName: "rn-run-branch-derived", retention: { persistent: false }, timeoutMs: 60_000 });
     await polls(() => claimBodies().some((b) => Array.isArray(b["sandboxes"]) && (b["sandboxes"] as unknown[]).length === 1));
     const rows = claimBodies().map((b) => b["sandboxes"] as Array<{ name: string }> | undefined).find((r) => r?.length === 1)!;
@@ -1704,6 +1706,7 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     expect(built).toBe(true);
     expect(sentHello().facts).toMatchObject({ sandbox_engine: "os_sandbox" });
     expect(Object.keys(claimBodies()[0]!)).toEqual(["capacity"]);
+    expect(sentHello().capabilities ?? []).not.toContain("heartbeat_inventory_v1");
     expect((await stop(run)).code).toBe(0);
   }, 60_000);
 

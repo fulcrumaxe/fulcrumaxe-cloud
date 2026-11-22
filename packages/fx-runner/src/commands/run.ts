@@ -61,7 +61,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -418,6 +418,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let cloudKvmFact = false;
     // D#845 ON-21b: true once a hello reply listed the `preflight` capability; only then does a hello carry `facts.preflight`.
     let cloudPreflight = false;
+    // D#587 FU-179: true once a hello reply listed `heartbeat_inventory`; only then does a heartbeat carry the sandbox inventory.
+    let cloudHeartbeatInventory = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
     // D#587 B-5b-3a: the one engine this run reports, gates jobs by and runs them in, decided once here from the machine's engine line and whether this build composed a live microVM stack.
@@ -428,7 +430,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const engine = chooseEngine(engineLineOf({ platform: host.platform, engine: settingsAtStart.unreadable === true ? "invalid" : (settingsAtStart.sandboxEngine ?? "os_sandbox"), caps: settingsAtStart.microvm, facts: engineFacts }), built !== undefined);
     /** The live stack only when this run's engine is `microvm`: an `os_sandbox` runner reports no inventory and takes no signed VM command. */
     const vm = engine === "microvm" ? built : undefined;
-    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(vm !== undefined && readHostFacts(engine)?.sandbox_engine === "microvm" ? { sandboxInventory: createInventoryReporter({ source: daemonInventorySource(vm.sdk), now: ctx.now }) } : {}),
+    // One reporter serves the claim and the heartbeat, so the two share what was last sent. A host with no VM stack has none.
+    const inventoryReporter = vm !== undefined && readHostFacts(engine)?.sandbox_engine === "microvm" ? createInventoryReporter({ source: daemonInventorySource(vm.sdk), now: ctx.now }) : undefined;
+    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
       // D#845 ON-1b: the machine's load rides the claim, but only for a build that advertises `project_setup_v1` (none does yet, so today the claim body is unchanged). No setup runs here yet: the count is 0.
       ...((RUNNER_BUILD_CAPABILITIES as readonly string[]).includes(PROJECT_SETUP_CAPABILITY) ? { hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => 0, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
@@ -675,7 +679,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return helloBody(facts);
       };
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
@@ -703,6 +707,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         if (answer?.kind === "ok") cloudWatchMode = answer.watchMode === true;
         if (answer?.kind === "ok") cloudKvmFact = answer.kvmFact === true;
         if (answer?.kind === "ok") cloudPreflight = answer.preflight === true;
+        if (answer?.kind === "ok") cloudHeartbeatInventory = answer.heartbeatInventory === true;
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list

@@ -10,7 +10,7 @@ import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { DeployOrderClaimMessage, DeployOrderReportMessage } from "./deployOrder.js";
-import { ENGINE_BRIDGE_CAPABILITY, RUNNER_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, SESSION_ID_PATTERN } from "./job.js";
+import { ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, RUNNER_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, SESSION_ID_PATTERN } from "./job.js";
 import { SandboxCommandAcks } from "./sandboxCommands.js";
 import { PREFLIGHT_CODES } from "./preflight.js";
 
@@ -479,6 +479,9 @@ export const HelloMessage = z
     if (hello.capabilities?.includes(SANDBOX_COMMAND_CAPABILITY) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "sandbox_commands_v1 needs a protocol version that speaks sandbox commands", path: ["capabilities"] });
     }
+    if (hello.capabilities?.includes(HEARTBEAT_INVENTORY_HELLO_CAPABILITY) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "heartbeat_inventory_v1 needs a protocol version that speaks the sandbox inventory", path: ["capabilities"] });
+    }
     const f = hello.facts;
     if (f && (f.max_vms !== undefined || f.max_vcpus !== undefined || f.max_memory_mb !== undefined || f.bootable_templates !== undefined) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "host limits need a protocol version that speaks them", path: ["facts"] });
@@ -564,7 +567,8 @@ export type HostLoad = z.infer<typeof HostLoad>;
 
 export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional(), sandboxes: SandboxInventory.optional(), sandbox_acks: SandboxCommandAcks.optional(), host_load: HostLoad.optional() }).strict();
 
-export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
+/** D#587 FU-179: `sandboxes` is the same block a claim carries, sent only after a hello reply that listed `heartbeat_inventory`; the cloud answers `sandboxes_recorded: true` once it stored it. */
+export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration, sandboxes: SandboxInventory.optional() }).strict();
 
 /** D#6 R5a-2b (C27 section 1.1): a cloud-verified run asks for a git ticket. The run and generation are checked against the lease; nothing else travels. */
 export const GitTicketMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();

@@ -12,7 +12,7 @@ export const CLAIM_PATH = "/api/runner/claim";
 const CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS = 3600;
 
 /** The definer answers 22023 for an inventory it refuses (a runner below protocol 21, or a list the schema should have stopped, such as a date that is out of range: 22007 and 22008): the same 400 as any bad message. */
-async function refuseBadInventory<T>(run: () => Promise<T>): Promise<T> {
+export async function refuseBadInventory<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {

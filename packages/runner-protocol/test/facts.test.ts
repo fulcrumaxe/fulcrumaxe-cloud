@@ -12,7 +12,7 @@ describe("the kvm_fact handshake names (D#845 ON-6c)", () => {
     expect(KVM_FACT_HELLO_CAPABILITY).toBe("kvm_fact_v1");
     expect(RUNNER_CAPABILITIES).toContain(KVM_FACT_HELLO_CAPABILITY);
     expect(KVM_FACT_CAPABILITY).toBe("kvm_fact");
-    expect([...HELLO_REPLY_CAPABILITIES]).toEqual(["watch_mode", "kvm_fact", "preflight"]);
+    expect([...HELLO_REPLY_CAPABILITIES]).toEqual(["watch_mode", "kvm_fact", "preflight", "heartbeat_inventory"]);
   });
   it("preflight_v1 is a hello capability and preflight is the reply's closed one (D#845 ON-21b)", () => {
     expect(PREFLIGHT_HELLO_CAPABILITY).toBe("preflight_v1");

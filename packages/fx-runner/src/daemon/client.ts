@@ -7,7 +7,7 @@ import {
   CURRENT_PROTOCOL_VERSION, MACHINE_ONBOARDING_MIN_PROTOCOL, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimMessage, DeployOrderClaimReply, DeployOrderReportMessage, DeployOrderReportReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
@@ -108,7 +108,7 @@ export interface DoneInput {
 
 export interface RunnerClient {
   /** D#605 FL-2: says what this build and machine are. Best effort: the caller keeps going on any answer, and a cloud that predates `facts` answers 400. */
-  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant; /** Capabilities an older cloud refused and the hello went again without; absent when none was dropped. */ dropped?: string[]; /** True when the cloud's hello reply lists the `watch_mode` capability (its ingest takes the slim status and the detail session); absent otherwise. Never a protocol number: clouds at 23 and 24 exist that cannot. */ watchMode?: true; /** True when the cloud's hello reply lists `kvm_fact`: this cloud stores `facts.kvm`, so the runner may send it on its next hello. */ kvmFact?: true; /** True when the cloud's hello reply lists `preflight` (D#845 ON-21b): this cloud stores `facts.preflight`, so the runner may send the codes on its next hello. */ preflight?: true } | CallError>;
+  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant; /** Capabilities an older cloud refused and the hello went again without; absent when none was dropped. */ dropped?: string[]; /** True when the cloud's hello reply lists the `watch_mode` capability (its ingest takes the slim status and the detail session); absent otherwise. Never a protocol number: clouds at 23 and 24 exist that cannot. */ watchMode?: true; /** True when the cloud's hello reply lists `kvm_fact`: this cloud stores `facts.kvm`, so the runner may send it on its next hello. */ kvmFact?: true; /** True when the cloud's hello reply lists `preflight` (D#845 ON-21b): this cloud stores `facts.preflight`, so the runner may send the codes on its next hello. */ preflight?: true; /** True when the cloud's hello reply lists `heartbeat_inventory`: this cloud takes `sandboxes` on a heartbeat. */ heartbeatInventory?: true } | CallError>;
   /** D#6 RUNNER-WAKE: the no-database wake check, with the token of the grant held. Never a claim: it hands out nothing. */
   wake(token: string): Promise<WakeResult>;
   /**
@@ -163,6 +163,11 @@ export interface RunnerClientConfig {
    * like the inventory it is used only at protocol 21 or later, and never on a status poll. The acks count as sent once the cloud answered 200.
    */
   sandboxCommands?: SandboxCommandReceiver;
+  /**
+   * D#587 FU-179: true once a hello reply listed `heartbeat_inventory`. Only then does a heartbeat carry the sandbox inventory (from the same reporter a claim uses, so the two share one
+   * "last sent" state). A runner holding a run sends no claim, so this is how a VM that exists while the job runs reaches the cloud. It counts as sent once the cloud answered `sandboxes_recorded`.
+   */
+  heartbeatInventory?: () => boolean;
   protocolVersion?: number;
 }
 
@@ -196,11 +201,12 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // `mem_proposal_v1` (D#601 MEM-6) is the newest, so it goes first (the runner then offers no memory proposal), then `tip_publish_v1` (D#598 P1g-3a-3) (the runner then never asks to publish the branch tip), then `ordered_facts_v1` (D#483 S5-j2c2) (the runner computes and sends no ordering fact), then `conflict_facts_v1` (D#519 MQ4-e2-a) (no `conflict` field on a merge report), then `discovery_analyst` (D#483 S4-f4) (a cloud without it just never offers the analyst), then `plane_merge_queue_v1` (D#694 B7-1), then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
       // D#845 ON-21b: `preflight_v1` is the newest capability of all, so it goes before everything else: an old cloud refuses the hello only because of it, so the one retry costs that capability alone (and `kvm_fact_v1` and the rest stay), and the runner never sends `facts.preflight`.
       // D#845 ON-6c: `kvm_fact_v1` goes before everything else: an old cloud refuses the hello only because of it, so the one retry costs that capability alone and `sandbox_commands_v1` and the browser and deploy ones stay.
+      // D#587 FU-179: `heartbeat_inventory_v1` is newer still, so it is dropped first, before `preflight_v1`: an old cloud refuses the hello only because of it, and the one retry costs that capability alone (the runner then sends no inventory on a heartbeat).
       // D#749 V2b/V2c-1: `browser_playwright_v1`, `browser_chrome_v1` and `deploy_order_v1` follow `kvm_fact_v1` and `sandbox_commands_v1` (above): a cloud without them keeps every other capability.
       // D#845 watch mode: `watch_mode_v1` is the newest build capability, so it goes first after those three (and after `kvm_fact_v1`, which is dropped before all of them): a cloud without it keeps every other capability and watch mode stays off.
       // D#842 EB-3c: `engine_bridge_v1` was the newest build capability, so it goes first after those three (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability and the bridge stays off.
       // D#483 S5-j2e-RUNNER: `overlap_facts_v1` is the newest build capability, so it goes first after the three browser/deploy ones: a cloud without it keeps every other capability.
-      for (const drop of [PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
+      for (const drop of [HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -214,7 +220,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       const watch = body.success && Array.isArray(capabilities) && capabilities.includes("watch_mode") ? { watchMode: true as const } : {};
       const kvm = body.success && Array.isArray(capabilities) && capabilities.includes("kvm_fact") && !dropped.includes(KVM_FACT_HELLO_CAPABILITY) ? { kvmFact: true as const } : {};
       const preflight = body.success && Array.isArray(capabilities) && capabilities.includes("preflight") && !dropped.includes(PREFLIGHT_HELLO_CAPABILITY) ? { preflight: true as const } : {};
-      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake, ...watch, ...kvm, ...preflight, ...left } : { kind: "ok", ...watch, ...kvm, ...preflight, ...left };
+      const beat = body.success && Array.isArray(capabilities) && capabilities.includes("heartbeat_inventory") && !dropped.includes(HEARTBEAT_INVENTORY_HELLO_CAPABILITY) ? { heartbeatInventory: true as const } : {};
+      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake, ...watch, ...kvm, ...preflight, ...beat, ...left } : { kind: "ok", ...watch, ...kvm, ...preflight, ...beat, ...left };
     },
 
     async wake(token) {
@@ -263,9 +270,11 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
     },
 
     async heartbeat(runId, leaseGeneration) {
-      const reply = await send(HEARTBEAT_PATH, HeartbeatMessage.parse({ run_id: runId, lease_generation: leaseGeneration }));
+      const inventory = config.heartbeatInventory?.() === true && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= SANDBOX_INVENTORY_MIN_PROTOCOL ? await config.sandboxInventory?.next() : undefined;
+      const reply = await send(HEARTBEAT_PATH, HeartbeatMessage.parse({ run_id: runId, lease_generation: leaseGeneration, ...(inventory === undefined ? {} : { sandboxes: inventory.rows }) }));
       if (reply?.status === 200) {
         const parsed = HeartbeatReply.safeParse(reply.body);
+        if (parsed.success && parsed.data.sandboxes_recorded === true) inventory?.commit();
         return parsed.success ? { kind: "ok", leaseExpiresAt: parsed.data.lease_expires_at, ...(parsed.data.handoff === undefined ? {} : { handoff: { deadline: parsed.data.handoff.deadline } }) } : fail(reply, "invalid_reply");
       }
       if (reply?.status === 409) {
