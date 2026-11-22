@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { ENGINE_COMMAND_PURPOSE, signEngineCommand } from "../src/engineCommands.js";
 import { JobSignatureError, canonicalJson } from "../src/jobSignature.js";
 import { HelloMessage, MACHINE_ONBOARDING_MIN_PROTOCOL, MIN_SUPPORTED_PROTOCOL_VERSION } from "../src/messages.js";
-import { MACHINE_JOB_CAPABILITY, MACHINE_JOB_KINDS, MACHINE_JOB_MAX_LIFE_S, ENGINE_TARBALL_HOSTS, MachineJob, SetupProgressBody, deviceFlowOffered, isEngineTarballUrl, loginCommandOffered, machineJobOffered, signMachineJob, taskKindOffered, verifyMachineJob, type MachineJob as Job, type RunnerOffer } from "../src/machineJobs.js";
+import { COLDSTART_STEPS } from "../src/coldstartStatus.js";
+import { MACHINE_JOB_CAPABILITY, MACHINE_JOB_KINDS, MACHINE_JOB_MAX_LIFE_S, ENGINE_TARBALL_HOSTS, MachineJob, MachineJobClaimMessage, MachineJobClaimReply, MACHINE_JOB_FINAL_STEP, SETUP_FAILURE_CODES, SETUP_RUNNER_STEPS, SETUP_SUB_STEPS, SetupProgressBody, deviceFlowOffered, isEngineTarballUrl, loginCommandOffered, machineJobOffered, signMachineJob, taskKindOffered, verifyMachineJob, type MachineJob as Job, type RunnerOffer } from "../src/machineJobs.js";
 import { DEVICE_REGISTER_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY, RUNNER_CAPABILITIES, SURVEY_CAPABILITY, TASK_KINDS, TASK_KIND_CAPABILITY } from "../src/job.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -168,7 +169,7 @@ describe("what a runner is offered", () => {
 });
 
 describe("setup progress body", () => {
-  const body = (over: Record<string, unknown> = {}) => ({ seq: 3, sub_step: "deps", state: "started", ...over });
+  const body = (over: Record<string, unknown> = {}) => ({ job_id: ID, seq: 3, sub_step: "deps", state: "started", ...over });
   const good = (value: unknown): boolean => SetupProgressBody.safeParse(value).success;
   it("takes the engine's four states and a coldstart failure code", () => {
     for (const state of ["started", "ok"]) expect(good(body({ state })), state).toBe(true);
@@ -176,9 +177,22 @@ describe("setup progress body", () => {
     expect(good(body({ state: "failed", failure_code: "missing_topic:vision_doc" }))).toBe(true);
     expect(good(body({ state: "skipped" }))).toBe(true);
     expect(good(body({ state: "skipped", failure_code: "cloud_owned" }))).toBe(true);
-    expect(good(body({ state: "ok", bundle_bytes: 4096, sub_step: "bundle" }))).toBe(true);
+    expect(good(body({ state: "ok", bundle_bytes: 4096, sub_step: "bundle_out" }))).toBe(true);
   });
-  it("refuses a failed step with no code, a code on a started or ok step, and anything outside the closed shape", () => {
+  it("takes every setup failure code, with a closed reason", () => {
+    for (const failure_code of SETUP_FAILURE_CODES) expect(good(body({ state: "failed", failure_code })), failure_code).toBe(true);
+    expect(good(body({ state: "failed", failure_code: "bundle_refused", failure_reason: "workflow" }))).toBe(true);
+    expect(SETUP_FAILURE_CODES).toEqual(expect.arrayContaining(["engine_checksum", "engine_unsupported", "job_silent", "job_overran", "job_expired", "vm_boot_failed", "kind_unsupported"]));
+  });
+  it("names the job, and only a sub-step of the closed list that keeps the runner's names apart from the engine's", () => {
+    expect(good({ seq: 3, sub_step: "deps", state: "started" })).toBe(false);
+    expect(good(body({ job_id: "not-a-uuid" }))).toBe(false);
+    for (const sub_step of SETUP_SUB_STEPS) expect(good(body({ sub_step })), sub_step).toBe(true);
+    expect([...SETUP_SUB_STEPS].sort()).toEqual([...COLDSTART_STEPS, ...SETUP_RUNNER_STEPS].sort());
+    expect([...COLDSTART_STEPS].filter((step) => (SETUP_RUNNER_STEPS as readonly string[]).includes(step))).toEqual([]);
+    for (const sub_step of ["archive", "Deps", "a/b", "bundle ", "deps2", ""]) expect(good(body({ sub_step })), sub_step).toBe(false);
+  });
+  it("refuses a failed step with no code, a code on a started or ok step, a reason with no code or a topic, and anything outside the closed shape", () => {
     expect(good(body({ state: "failed" }))).toBe(false);
     expect(good(body({ state: "ok", failure_code: "deps_failed" }))).toBe(false);
     expect(good(body({ state: "started", failure_code: "interrupted" }))).toBe(false);
@@ -186,11 +200,23 @@ describe("setup progress body", () => {
     expect(good(body({ state: "failed", failure_code: "missing_topic" }))).toBe(false);
     expect(good(body({ state: "failed", failure_code: "missing_topic:Bad Id" }))).toBe(false);
     expect(good(body({ state: "failed", failure_code: "deps_failed:x" }))).toBe(false);
+    expect(good(body({ state: "failed", failure_code: "missing_topic:identity", failure_reason: "identity" }))).toBe(false);
+    expect(good(body({ failure_reason: "workflow" }))).toBe(false);
+    expect(good(body({ state: "failed", failure_code: "bundle_refused", failure_reason: "Work Flow" }))).toBe(false);
     expect(good(body({ state: "done" }))).toBe(false);
-    expect(good(body({ sub_step: "Deps" }))).toBe(false);
-    expect(good(body({ sub_step: "a/b" }))).toBe(false);
     expect(good(body({ seq: -1 }))).toBe(false);
     expect(good(body({ bundle_bytes: -1 }))).toBe(false);
     expect(good(body({ log: "text" }))).toBe(false);
+  });
+  it("ends a job on one step only: the last runner step, for project_setup, and no other kind has one", () => {
+    expect(MACHINE_JOB_FINAL_STEP).toEqual({ project_setup: SETUP_RUNNER_STEPS[SETUP_RUNNER_STEPS.length - 1] });
+  });
+  it("has a closed claim reply: one signed job, or a retry hint, never both", () => {
+    const signedJob = signMachineJob(jobOf("project_setup"), "job-key-1", privateKey);
+    expect(MachineJobClaimReply.safeParse({ retry_after: 60 }).success).toBe(true);
+    expect(MachineJobClaimReply.safeParse({ signed_job: signedJob }).success).toBe(true);
+    expect(MachineJobClaimReply.safeParse({ retry_after: 60, signed_job: signedJob }).success).toBe(false);
+    expect(MachineJobClaimReply.safeParse({ retry_after: 0 }).success).toBe(false);
+    expect(MachineJobClaimMessage.safeParse({ extra: 1 }).success).toBe(false);
   });
 });

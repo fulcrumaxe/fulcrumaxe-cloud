@@ -18,6 +18,7 @@ const ABSENT_ON_PURPOSE: Record<string, string> = {
   "wake.transport": "only on an idle claim answer",
   merge_order: "only on a claim answer that holds a run back",
   deploy_order: "only on a claim answer that holds a run back",
+  machine_job: "only on a claim answer that holds a run back",
   "sandbox_commands": "signed sandbox commands ride on a claim answer for a runner that lists sandbox_commands_v1: at most five, every field short and fixed in shape (envelope)",
   "sandbox_commands.command": "signed sandbox commands ride on a claim answer for a runner that lists sandbox_commands_v1: at most five, every field short and fixed in shape (envelope)",
   "sandbox_commands.command.purpose": "signed sandbox commands ride on a claim answer for a runner that lists sandbox_commands_v1: at most five, every field short and fixed in shape (envelope)",

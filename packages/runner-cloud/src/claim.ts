@@ -3,6 +3,7 @@ import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { deployOrderWaiting } from "./deployOrder.js";
 import { exchangeSandboxCommands } from "./sandboxCommands.js";
+import { offeredMachineJobs } from "./machineJob.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 import { configuredWakeKey, wakeGrantFor, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
@@ -114,7 +115,10 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // (`DEPLOY_ORDER_ELIGIBLE_SQL`), and it joins the runner's latest hello, so a runner without `deploy_order_v1` finds none and is never sent the key.
       let deployOrder = false;
       if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) deployOrder = await deployOrderWaiting(client, runner);
-      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, sandboxCommands };
+      // D#845 ON-8a: whether a machine job waits for THIS runner and it may be offered it (not held, its latest hello's capability, protocol 22, its sandbox engine for a microVM job): `machineJobOffered`, the same rule the pickup applies.
+      let machineJob = false;
+      if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) machineJob = (await offeredMachineJobs(client, runner)).length > 0;
+      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, machineJob, sandboxCommands };
     }),
   ));
   const wait = gate.waited;
@@ -132,6 +136,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     ...(gate.mergeOrder ? { merge_order: true as const } : {}),
     // Only ever `true`, and only for a runner whose own rows say a deploy order waits for it; the runner then calls deploy-order-claim.
     ...(gate.deployOrder ? { deploy_order: true as const } : {}),
+    // Only ever `true`, and only for a runner that may be offered a waiting machine job; the runner then calls machine-job/claim.
+    ...(gate.machineJob ? { machine_job: true as const } : {}),
     // D#587 B-7b: only a runner that listed `sandbox_commands_v1` is ever handed any (the query joins its latest hello); absent when there are none.
     ...(gate.sandboxCommands.length > 0 ? { sandbox_commands: gate.sandboxCommands } : {}),
   };

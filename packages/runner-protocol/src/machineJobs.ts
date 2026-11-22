@@ -121,22 +121,50 @@ export function verifyMachineJob(signed: unknown, keyring: JobKeyring, runnerId:
   }
 }
 
+/** The runner's own VM job codes (fx-runner's `VM_JOB_CODES`, pinned equal by a test there): a setup fails with one when its sandbox could not be made. */
+export const SETUP_VM_JOB_CODES = ["vm_admission_refused", "vm_boot_failed", "vm_egress_unavailable", "vm_token_delivery_failed", "vm_workspace_failed", "vm_teardown_incomplete"] as const;
+/** What a setup may fail with besides the engine's own coldstart codes: a closed list of the runner's and the cloud's steps. */
+export const SETUP_FAILURE_CODES = [
+  "engine_fetch_failed", "engine_checksum", "engine_archive_refused", "plan_fetch_failed", "plan_checksum", "plan_invalid", "setup_status_refused", "bootstrap_failed", "finalize_failed",
+  "bundle_refused", "push_failed", "direct_raced", "pr_open_failed", "labels_failed", "kind_unsupported", "job_expired", "job_silent", "job_overran", "engine_unsupported", ...SETUP_VM_JOB_CODES,
+] as const;
+/** The runner's own steps. None reuses a coldstart name (`bundle_out` is not `bundle`, `gh_labels` is not `labels`). */
+export const SETUP_RUNNER_STEPS = ["engine_fetch", "plan_fetch", "sandbox_boot", "workspace_in", "bootstrap", "finalize", "bundle_out", "push", "pr_open", "gh_labels"] as const;
+export type SetupRunnerStep = (typeof SETUP_RUNNER_STEPS)[number];
+/** The step whose `ok` report ends a job of that kind `done` (and frees the runner's slot). A kind with no entry is never ended by a step report. */
+export const MACHINE_JOB_FINAL_STEP: Partial<Record<MachineJobKind, SetupRunnerStep>> = { project_setup: "gh_labels" };
+/** Every sub-step a progress report may name: the runner's steps and the engine's eight coldstart steps. Closed. */
+export const SETUP_SUB_STEPS = ["engine_fetch", "plan_fetch", "sandbox_boot", "workspace_in", "bootstrap", "preflight", "interview", "wiring", "deps", "labels", "sandbox_hook", "bundle", "done", "finalize", "bundle_out", "push", "pr_open", "gh_labels"] as const;
+export const SETUP_FAILURE_REASON_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
+
 /**
- * The body of `POST /api/runner/setup/:setup_id/progress`. Closed. `state` takes the engine's coldstart states, `skipped` included. `sub_step` is a short lowercase name; the set of names is closed by
- * the row that owns the setup state machine, not here. `failure_code` is a coldstart code, with `missing_topic:<id>` for a missing topic.
+ * The body of `POST /api/runner/setup/:setup_id/progress`. Closed. `job_id` names the machine job the report belongs to, so a late report from an earlier attempt is told from the current one. `state` takes
+ * the engine's coldstart states, `skipped` included. `failure_code` is a coldstart code (`missing_topic:<id>` carries its topic) or one of `SETUP_FAILURE_CODES`; `failure_reason` is one closed word that
+ * refines a code (`bundle_refused` with `workflow`), never free text.
  */
-export const SETUP_SUB_STEP_PATTERN = /^[a-z][a-z_]{0,31}$/;
 export const SetupProgressBody = strict({
+  job_id: z.string().uuid(),
   seq: safeInt.min(0),
-  sub_step: z.string().regex(SETUP_SUB_STEP_PATTERN),
+  sub_step: z.enum(SETUP_SUB_STEPS),
   state: ColdstartState,
-  failure_code: ColdstartCode.optional(),
+  failure_code: z.union([ColdstartCode, z.enum(SETUP_FAILURE_CODES)]).optional(),
+  failure_reason: z.string().regex(SETUP_FAILURE_REASON_PATTERN).optional(),
   bundle_bytes: z.number().int().min(0).max(2_147_483_647).optional(),
 }).superRefine((body, ctx) => {
-  // A failed step names its code; a skipped one may (`cloud_owned`); a started or ok one names none.
+  // A failed step names its code; a skipped one may (`cloud_owned`); a started or ok one names none. A reason needs a code, and a code that already carries its topic takes none.
   if ((body.state === "failed" && body.failure_code === undefined) || ((body.state === "started" || body.state === "ok") && body.failure_code !== undefined)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a failed step names its code and a started or ok one names none", path: ["failure_code"] });
+  if (body.failure_reason !== undefined && (body.failure_code === undefined || body.failure_code.includes(":"))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a reason needs a code that has no topic", path: ["failure_reason"] });
 });
 export type SetupProgressBody = z.infer<typeof SetupProgressBody>;
+export const SetupProgressReply = strict({ recorded: z.literal(true) });
+
+/** D#845 ON-8a: where a runner told `machine_job: true` on a claim reply takes its one job, and where it reports on a setup. */
+export const MACHINE_JOB_CLAIM_PATH = "/api/runner/machine-job/claim";
+export const setupProgressPath = (setupId: string): string => `/api/runner/setup/${setupId}/progress`;
+export const MachineJobClaimMessage = strict({});
+/** One signed job, handed over once, or nothing for this runner now. */
+export const MachineJobClaimReply = z.union([strict({ signed_job: SignedMachineJob }), strict({ retry_after: safeInt.min(1).max(3600) })]);
+export type MachineJobClaimReply = z.infer<typeof MachineJobClaimReply>;
 
 /** The capability each machine job kind needs on the runner's latest hello. */
 export const MACHINE_JOB_CAPABILITY: Readonly<Record<MachineJobKind, RunnerCapability>> = Object.freeze({
