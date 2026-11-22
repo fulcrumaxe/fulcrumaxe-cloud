@@ -54,6 +54,13 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "unknown_size",
   "create_failed",
   "cleanup_failed",
+  // D#845 MC-7: delete a server.
+  "projects_placed",
+  "server_creating",
+  "project_removal_unavailable",
+  "credential_changed",
+  "leases_not_failed",
+  "registration_timeout",
   "hetzner_unauthorized",
   "hetzner_forbidden",
   "hetzner_resource_limit_exceeded",

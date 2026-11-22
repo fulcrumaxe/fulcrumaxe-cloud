@@ -71,6 +71,8 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
         ? await client.query<{ id: string }>("SELECT runner_provisioning_register($1, $2::jsonb, NULL, $3, $4) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners, clientIp])
         : await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL, $3) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners]);
       const id = result.rows[0]!.id;
+      // D#845 MC-7: a server's token links the new runner to the server's row, in this same transaction (a no-op for a token no server row holds).
+      if (provisioning) await client.query("SELECT managed_server_link_runner($1, $2::uuid)", [codeHash, id]);
       // D#605 FL-2: the runner's own name, as the default name of the row this registration just made. The definer accepts only a runner created by
       // this very transaction (migration 0789), so it is never a rename. No name: nothing is written, and the row reads as an unnamed runner.
       if (message.name !== undefined) await client.query("SELECT runner_name_initial($1::uuid, $2)", [id, message.name]);

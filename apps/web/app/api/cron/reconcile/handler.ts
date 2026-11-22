@@ -23,6 +23,8 @@ import {
   RECONCILE_ROUTE,
   runTick,
   sandboxInventoryJob,
+  createMachineServerSweep,
+  type MachineSweepStart,
   sandboxReapJobs,
   type OpsAlertSink,
   type ReconcileJob,
@@ -33,6 +35,7 @@ import {
   type TickSummary,
 } from "@fx/reconcile";
 import { getWorker } from "../../../../lib/worker";
+import { startMachineSweep } from "../../../../lib/machineServers";
 import { cronAuthorized } from "../../../../lib/cronAuth";
 
 const [TERMINAL_JOB, CREDITS_JOB] = FAST_RECONCILE_JOBS;
@@ -93,6 +96,8 @@ export interface ReconcileHandlerDeps {
   enabled: boolean;
   platformOpsPool: TickDeps["pool"];
   reportError: ReportError;
+  /** D#845 MC-7: starts the queued orphan sweep of one credential. Absent (a test double): the sweep job reports not_configured. */
+  startMachineSweep?: ((a: MachineSweepStart) => Promise<unknown>) | undefined;
   /** The raw FX_SANDBOX_REAP_MODE: unset is dry_run, off | dry_run | on are themselves, anything else is off (and reported). */
   sandboxReapMode?: string | undefined;
   /**
@@ -244,6 +249,7 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
     platformOpsPool: cachedPlatformOpsPool,
     reportError,
     sandboxReapMode: process.env.FX_SANDBOX_REAP_MODE,
+    startMachineSweep,
     getWorker,
     readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),
     capacityPass: async () => (await getWorker())?.capacityClaimPass(),
@@ -285,6 +291,7 @@ export async function reconcileHandler(
         stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelKeyHealth: modelKeyHealthJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelCreditsRevalidate: modelCreditsRevalidateJobFromEnv(deps.platformOpsPool, deps.reportError),
+        machine: [createMachineServerSweep(deps.startMachineSweep ?? null)],
         sandbox: [...sandboxReapJobs(worker, sandboxDeps), sandboxInventoryJob(worker, sandboxDeps)],
       }),
       enabled: deps.enabled,

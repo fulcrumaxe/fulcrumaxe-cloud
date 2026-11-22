@@ -76,6 +76,7 @@ describe("GET /api/cron/reconcile: the tick", () => {
       "sandbox_reap_ephemeral",
       "sandbox_reap_idle",
       "sandbox_inventory",
+      "machine_server_sweep",
       "github_installations",
       "github_repos",
       "stripe_subscriptions",
