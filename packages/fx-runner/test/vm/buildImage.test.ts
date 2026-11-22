@@ -46,7 +46,7 @@ function fakeHost(over: { digest?: string; mke2fs?: string; writesNothing?: bool
       if (file === "tar") return { code: 0, output: "" };
       if (file === "mke2fs" && args[0] === "-V") return { code: 0, output: over.mke2fs ?? "mke2fs 1.47.2 (20-Feb-2025)\n\tUsing EXT2FS Library version 1.47.2\n" };
       if (file === "mke2fs") {
-        if (!over.writesNothing) writeFileSync(args[args.length - 1]!, fakeDisk(current));
+        if (!(over.writesNothing && env?.["MKE2FS_CONFIG"] !== undefined)) writeFileSync(args[args.length - 1]!, fakeDisk(current));
         return { code: 0, output: "" };
       }
       return { code: 127, output: "not found" };
@@ -71,7 +71,7 @@ describe("buildImage, with the programs replaced", () => {
     expect(exports.map((c) => c.args.slice(0, 4))).toEqual([["export", "--platform", "linux/amd64", IMAGE], ["export", "--platform", "linux/arm64", IMAGE]]);
     const append = calls.find((c) => c.file === "tar" && c.args[0] === "--append")!;
     expect(append.args).toEqual(expect.arrayContaining(["--owner=0", "--group=0", "--numeric-owner", "--mtime=@1700000000", "usr/lib/fx"]));
-    const mk = calls.filter((c) => c.file === "mke2fs" && c.args[0] !== "-V");
+    const mk = calls.filter((c) => c.file === "mke2fs" && c.args[0] !== "-V" && c.env?.["MKE2FS_CONFIG"] !== undefined);
     expect(mk).toHaveLength(2);
     expect(mk[0]!.args).toEqual(expect.arrayContaining(["-F", "-t", "ext4", "^has_journal", LOCK.rootfs.fsUuid, `hash_seed=${LOCK.rootfs.hashSeed},root_owner=0:0`, "-d"]));
     expect(mk[0]!.env).toMatchObject({ SOURCE_DATE_EPOCH: "1700000000", E2FSPROGS_FAKE_TIME: "1700000000", LC_ALL: "C.UTF-8" });
