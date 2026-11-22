@@ -24,6 +24,8 @@ const SETTINGS = "/api/v1/account/settings";
 const PLANS = "/api/plans";
 const CHECKOUT = "/api/v1/billing/checkout-session";
 const PORTAL = "/api/v1/billing/portal-session";
+const ENGINE = "/api/v1/billing/engine";
+const ENGINE_QTY = "/api/v1/billing/engine-quantity";
 // Fixed relative paths: the server accepts only plain absolute paths on this app.
 const BACK_PATH = "/";
 
@@ -92,12 +94,105 @@ function planLimits(p) {
   return parts.join(", ");
 }
 
+// ── D#845 ON-22c: the Engines row. Read from the account's synced state (GET /api/v1/billing/engine), changed through the two billing routes, re-read after every answer. ──
+// The one place this file does arithmetic: plus and minus send the synced total +1 or -1 (the server decides whether it is allowed); nothing shown is computed from a click.
+export const ENGINE_COPY = {
+  loading: "Loading engines...",
+  failed: "Engines couldn't be loaded.",
+  none: "No Engine plan yet.",
+  ownerOnly: "Only the account owner can change engines.",
+  parkFirst: "Park or stop an engine to go lower.",
+  pastDue: "Payment overdue. Engines keep running through the grace period, then stop.",
+  notPaying: "The subscription isn't being paid right now. Settle the payment in the billing portal.",
+  endedOn: (date) => "The Engine plan ended on " + date + ". Choose plan to start again.",
+  ended: "The Engine plan has ended.",
+  added: "Engine added. This updates when the provider confirms the change.",
+  removed: "Engine removed. The unused part of this month is credited to your next invoice.",
+  paymentPending: "The charge wasn't collected, so nothing changed. Update your payment method and try again.",
+  noSubscription: "This account has no paying plan yet.",
+};
+/** A refused change, by the server's closed `code` first and then by status; `hint` says what the row then offers. Nothing the server wrote is shown. */
+export const ENGINE_REFUSED = {
+  engine_quantity_in_use: { text: "More engines are running than that number. Park or stop an engine first." },
+  no_subscription: { text: ENGINE_COPY.noSubscription, hint: "no_subscription" },
+  subscription_not_paying: { text: ENGINE_COPY.notPaying, hint: "not_paying" },
+  payment_pending: { text: ENGINE_COPY.paymentPending, hint: "payment" },
+  already_subscribed: { text: "This account already has that plan. Use plus or minus to change the number of engines." },
+};
+export const ENGINE_BY_STATUS = { 403: "Only the account owner can change the Engine plan.", 422: "That quantity isn't accepted." };
+export const ENGINE_FAILED = "The Engine plan couldn't be changed. Try again.";
+export function engineRefusal(e) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (Object.hasOwn(ENGINE_REFUSED, code)) return ENGINE_REFUSED[code];
+  const status = e && typeof e.status === "number" ? e.status : 0;
+  return { text: Object.hasOwn(ENGINE_BY_STATUS, status) ? ENGINE_BY_STATUS[status] : ENGINE_FAILED };
+}
+const priceWords = (n) => (typeof n === "number" && Number.isFinite(n) ? (Number.isInteger(n) ? "$" + n : money(n)) + " a month per live engine" : "");
+
+/**
+ * What the row says and offers for a read body. `ui` is { failed, hint }: a failed read, and the standing a refusal just taught (`no_subscription`, `not_paying`, `payment`).
+ * Returns null when the row is hidden, else { kind, price, paid, live, lines, choose, portal, plus, minus, hint, retry }; plus/minus are null or { disabled }.
+ */
+export function engineModel(body, ui = {}) {
+  if (ui.failed) return { kind: "failed", lines: [ENGINE_COPY.failed], retry: true };
+  if (!body) return { kind: "loading", lines: [ENGINE_COPY.loading] };
+  if (body.offered !== true) return null;
+  const owner = body.can_change === true;
+  const kind = ui.hint === "not_paying" ? "not_paying" : body.state;
+  const m = { kind, price: priceWords(body.price_usd_month), paid: kind === "ended" || kind === "none" ? null : body.paid_quantity, live: body.live_count, lines: [], choose: false, portal: false, plus: null, minus: null, hint: "", retry: false };
+  const atMin = body.paid_quantity <= body.min_quantity;
+  if (kind === "none") m.lines.push(ENGINE_COPY.none);
+  else if (kind === "ended") m.lines.push(dateWords(body.ended_at) ? ENGINE_COPY.endedOn(dateWords(body.ended_at)) : ENGINE_COPY.ended);
+  else if (kind === "past_due") m.lines.push(ENGINE_COPY.pastDue);
+  else if (kind === "not_paying") m.lines.push(ENGINE_COPY.notPaying);
+  if (!owner) {
+    m.lines.push(ENGINE_COPY.ownerOnly);
+    return m;
+  }
+  if (kind === "none" || kind === "ended" || ui.hint === "no_subscription") m.choose = true;
+  if (kind === "past_due" || kind === "not_paying" || ui.hint === "payment") m.portal = true;
+  if (kind === "active" || kind === "past_due" || kind === "not_paying") {
+    const frozen = kind === "not_paying";
+    m.plus = { disabled: frozen || kind === "past_due" || body.paid_quantity >= body.max_quantity };
+    m.minus = { disabled: frozen || atMin };
+    if (!frozen && atMin && body.live_count > 0) m.hint = ENGINE_COPY.parkFirst;
+  }
+  return m;
+}
+
+/** The row as DOM. `act` is { total(n), choose(), portal(), retry() }; `notice` is the one live-region node, kept by the caller so a redraw never re-announces. */
+export function engineNode(m, body, act, notice, busy) {
+  if (!m) return null;
+  const btn = (id, label, props, onClick) => h("button", { type: "button", class: "bb-btn", "data-testid": "bb-engine-" + id, "data-hold": props.hold ? "1" : "0", disabled: busy || props.hold, onClick, ...(props.aria ? { "aria-label": props.aria } : {}) }, label);
+  return h("section", { class: "bb-card", "data-testid": "bb-engines", "data-state": m.kind },
+    h("h3", { class: "bb-title" }, "Engines"),
+    m.kind === "loading" ? h("p", { class: "bb-muted", "data-testid": "bb-engine-loading" }, ...m.lines) : null,
+    m.kind === "failed" ? h("p", { class: "bb-muted", role: "alert", "data-testid": "bb-engine-failed" }, m.lines[0] + " ", btn("retry", "Try again", {}, act.retry)) : null,
+    m.kind === "loading" || m.kind === "failed" ? null : [
+      m.price ? h("p", { class: "bb-muted", "data-testid": "bb-engine-price" }, m.price) : null,
+      h("dl", { class: "bb-facts" },
+        m.paid === null ? null : h("div", { class: "bb-row" }, h("dt", { class: "bb-label" }, "Engines paid for"), h("dd", { class: "bb-value", "data-testid": "bb-engine-paid" }, String(body.paid_quantity))),
+        h("div", { class: "bb-row" }, h("dt", { class: "bb-label" }, "Engines live"), h("dd", { class: "bb-value", "data-testid": "bb-engine-live" }, String(body.live_count)))),
+      m.paid === null ? null : h("p", { class: "bb-muted", "data-testid": "bb-engine-summary" }, body.paid_quantity + " paid, " + body.live_count + " live"),
+      m.lines.map((t) => h("p", { class: "bb-muted", "data-testid": "bb-engine-line" }, t)),
+      h("div", { class: "bb-inline" },
+        m.minus ? btn("minus", "-", { hold: m.minus.disabled, aria: "Remove an engine" }, () => act.total(body.paid_quantity - 1)) : null,
+        m.plus ? btn("plus", "+", { hold: m.plus.disabled, aria: "Add an engine" }, () => act.total(body.paid_quantity + 1)) : null,
+        m.choose ? btn("choose", "Choose plan", {}, act.choose) : null,
+        m.portal ? btn("portal", "Open billing portal", {}, act.portal) : null),
+      m.hint ? h("p", { class: "bb-muted", "data-testid": "bb-engine-hint" }, m.hint) : null,
+    ],
+    notice);
+}
+
 export function mountBudgetBilling(host) {
   const abort = new AbortController();
   const state = {
     usage: undefined,
     budgets: undefined,
     account: undefined,
+    engine: undefined,
+    engineHint: "",
     plans: undefined,
     plansUnavailable: false,
     failed: {},
@@ -130,8 +225,11 @@ export function mountBudgetBilling(host) {
   const usageHost = h("div");
   const modelHost = h("div");
   const plansHost = h("div");
+  const engineHost = h("div");
+  // Kept for good: a redraw replaces the row but never this node, so an answer is announced once.
+  const engineNotice = h("p", { class: "bb-muted", role: "status", "aria-live": "polite", "data-testid": "bb-engine-notice" });
   const shareHost = h("div");
-  root.append(noticeEl, bannerHost, planHost, usageHost, modelHost, partnerEl, plansHost, shareHost);
+  root.append(noticeEl, bannerHost, planHost, usageHost, modelHost, partnerEl, plansHost, engineHost, shareHost);
   host.replaceChildren(root);
 
   function paintNotice(text, isError) {
@@ -173,6 +271,7 @@ export function mountBudgetBilling(host) {
   /** Only the two controls change on a tick, so the view is not rebuilt and focus stays where it is. */
   function syncWaitControls() {
     for (const el of root.querySelectorAll('[data-testid="bb-portal"], [data-testid="bb-resume"], [data-testid^="bb-subscribe-"], [data-testid^="bb-change-"]')) el.disabled = state.busy || waiting();
+    for (const el of root.querySelectorAll('[data-testid^="bb-engine-"][data-hold]')) el.disabled = state.busy || waiting() || el.getAttribute("data-hold") === "1";
   }
 
   // ── data ──────────────────────────────────────────────────────────────
@@ -207,9 +306,12 @@ export function mountBudgetBilling(host) {
     render();
   }
 
-  const loadAll = () =>
-    Promise.all([read("usage", USAGE), read("budgets", BUDGETS), read("account", ACCOUNT), read("plans", PLANS)]).then(render);
+  const loadAll = () => {
+    state.engineHint = ""; // what a refusal taught lasts until the next full read
+    return Promise.all([read("usage", USAGE), read("budgets", BUDGETS), read("account", ACCOUNT), read("plans", PLANS), read("engine", ENGINE)]).then(render);
+  };
   const loadUsage = () => read("usage", USAGE).then(render);
+  const loadEngine = () => read("engine", ENGINE).then(render);
 
   // ── actions ───────────────────────────────────────────────────────────
 
@@ -271,6 +373,49 @@ export function mountBudgetBilling(host) {
         else if (e && e.name !== "AbortError") setNotice("The billing page couldn't be opened. Try again.", true);
       }
     }, focusId || "bb-portal");
+  }
+
+  // The engine change routes answer for the owner only. After every answer, good or refused, the row reads the synced state again: what it shows is never a number worked out from the click.
+  function changeEngines(total) {
+    const raising = total > state.engine.paid_quantity;
+    run(async () => {
+      state.engineHint = "";
+      engineNotice.textContent = "";
+      try {
+        await api("POST", ENGINE_QTY, { quantity: total }, abort.signal);
+        engineNotice.textContent = raising ? ENGINE_COPY.added : ENGINE_COPY.removed;
+      } catch (e) {
+        if (e && e.name === "AbortError") throw e;
+        if (isRateLimited(e)) startWait(e);
+        else {
+          const r = engineRefusal(e);
+          state.engineHint = r.hint || "";
+          engineNotice.textContent = r.text;
+        }
+      }
+      await read("engine", ENGINE);
+    }, "bb-engine-" + (raising ? "plus" : "minus"));
+  }
+
+  // "Choose plan": the checkout Onboarding uses. A subscription that is paid takes the engine as an item and the answer is this app's own address.
+  function chooseEngines() {
+    run(async () => {
+      state.engineHint = "";
+      engineNotice.textContent = "";
+      try {
+        const res = await api("POST", CHECKOUT, { plan: "engine", quantity: 1, success_path: BACK_PATH, cancel_path: BACK_PATH }, abort.signal);
+        goTo(res && res.url);
+      } catch (e) {
+        if (e && e.name === "AbortError") throw e;
+        if (isRateLimited(e)) startWait(e);
+        else {
+          const r = engineRefusal(e instanceof ApiFailure ? e : null);
+          state.engineHint = r.hint || "";
+          engineNotice.textContent = r.text;
+          await read("engine", ENGINE);
+        }
+      }
+    }, "bb-engine-choose");
   }
 
   function setShare(value) {
@@ -414,7 +559,8 @@ export function mountBudgetBilling(host) {
       setText(exhaustedEl, EXHAUSTED);
       nodes.push(exhaustedEl);
     }
-    if (Object.values(state.failed).some(Boolean)) {
+    // The Engines row says its own read failed, beside a page that still works.
+    if (Object.entries(state.failed).some(([k, v]) => v && k !== "engine")) {
       if (loadErrText.data !== LOAD_FAILED + " ") loadErrText.data = LOAD_FAILED + " ";
       nodes.push(loadErrEl);
     }
@@ -606,6 +752,8 @@ export function mountBudgetBilling(host) {
     );
   }
 
+  const engineView = () => engineNode(engineModel(state.engine, { failed: state.failed.engine === true, hint: state.engineHint }), state.engine, { total: changeEngines, choose: chooseEngines, portal: () => openPortal(undefined, "bb-engine-portal"), retry: loadEngine }, engineNotice, state.busy || waiting());
+
   function shareView() {
     if (!state.account) return null;
     const on_ = state.account.share_public_figures === true;
@@ -648,6 +796,7 @@ export function mountBudgetBilling(host) {
     put(usageHost, usageView());
     put(modelHost, modelView());
     put(plansHost, plansView());
+    put(engineHost, engineView());
     put(shareHost, shareView());
     if (focusId && document.activeElement !== active) {
       const target = root.querySelector(`[data-testid="${focusId}"]`);

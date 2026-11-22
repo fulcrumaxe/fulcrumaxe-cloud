@@ -186,8 +186,8 @@ export async function raiseEngineToAtLeast(pool: BillingCtx['pool'], stripe: Str
   });
 }
 
-/** Standings that count as a subscription the account holds (a hosted checkout answers already_subscribed on them). */
-const HELD_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'paused']);
+/** Standings that count as a subscription the account holds: a checkout (hosted or engine) answers already_subscribed on them, and the engine routes read them as a held plan. One list for both. */
+export const HELD_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'paused']);
 export type EngineStanding = { kind: 'none' } | { kind: 'not_paying' } | { kind: 'paying'; stored: StoredSubscription };
 export type EngineAccountRow = { stripe_customer_id: string | null; stripe_subscription_id: string | null; stripe_subscription_status: string | null; engine_quantity: number | null };
 export const ENGINE_ACCOUNT_SQL = 'SELECT stripe_customer_id, stripe_subscription_id, stripe_subscription_status, engine_quantity FROM accounts WHERE id = $1 AND deleted_at IS NULL';

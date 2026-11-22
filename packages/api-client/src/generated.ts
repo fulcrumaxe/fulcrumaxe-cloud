@@ -2947,6 +2947,23 @@ export interface Operations {
       authorize_url: string;
     };
   };
+  getEngineBilling: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      offered: boolean;
+      price_usd_month: number | null;
+      paid_quantity: number;
+      live_count: number;
+      min_quantity: number;
+      max_quantity: number;
+      state: "none" | "active" | "past_due" | "not_paying" | "ended";
+      ended_at: string | null;
+      can_change: boolean;
+      as_of: string | null;
+    };
+  };
   getUsage: {
     path: undefined;
     query: undefined;
@@ -7269,6 +7286,17 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: true,
+  },
+  getEngineBilling: {
+    method: "GET",
+    path: "/api/v1/billing/engine",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
   },
   getUsage: {
     method: "GET",

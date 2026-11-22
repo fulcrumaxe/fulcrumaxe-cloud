@@ -23,6 +23,7 @@ const ACCOUNT = fixture("getAccount", "200-ok.json");
 const PLANS = JSON.parse(readFileSync(join(DIR, "plans-fixture.json"), "utf8"));
 const CHECKOUT = fixture("createCheckoutSession", "200-ok.json");
 const PORTAL = fixture("createPortalSession", "200-ok.json");
+const ENGINE_BODY = fixture("getEngineBilling", "200-ok.json");
 
 const CSP = "script-src 'self'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'";
 const WIN = `#windows-container .fulc-window[data-app-id="budget-billing"]`;
@@ -44,6 +45,8 @@ interface Opts {
   patchBudgets?: (route: Route) => Promise<void>;
   patchSettings?: (route: Route) => Promise<void>;
   link?: (route: Route) => Promise<void>;
+  /** GET /api/v1/billing/engine (the Engines row); the default is the contract fixture. */
+  engine?: (route: Route) => Promise<void>;
   /** Keep the page clock stopped from boot on, so only the test's runFor moves it (the app's 15 s read deadline cannot run out in real time either). */
   paused?: boolean;
 }
@@ -99,6 +102,8 @@ async function boot(page: Page, opts: Opts = {}): Promise<Seen> {
     if (opts.link) return opts.link(route);
     return json(route, 200, req.url().endsWith("checkout-session") ? CHECKOUT : PORTAL);
   });
+  // Registered after the generic billing route above, so it wins for the one read.
+  await page.route("**/api/v1/billing/engine", (route) => (opts.engine ? opts.engine(route) : json(route, 200, ENGINE_BODY)));
   await page.route("**/api/plans", (route) => {
     seen.plans++;
     if (opts.plansUnavailable) return json(route, 503, err("plan_data_unavailable"));
@@ -886,5 +891,157 @@ test.describe("D#37 WS-F6: Budget & Billing (accessibility, axe, 8 themes)", () 
   test("partner-billed account", async ({ page }) => {
     await boot(page, { admin: true, account: { partner_billed: true } });
     expect(await axeSeriousOrCritical(page)).toEqual([]);
+  });
+});
+
+// ── D#845 ON-22c-2: the Engines row. A stateful stand-in for the billing routes that holds the contract a real one does: a strict JSON body, whole totals from 1 to 100,
+// nothing below the engines live (409 engine_quantity_in_use), a raise applied only once the provider confirms it (until then the read keeps the old number), and a raise
+// whose charge is refused answers 402 payment_pending and changes nothing. Nothing here reaches Stripe, and no paid key is involved.
+interface EngineWorld { paid: number; live: number; pending: number | null; state: string; owner: boolean; declineNext: boolean; posts: unknown[]; reads: number; endedAt: string | null }
+const engineWorld = (over: Partial<EngineWorld> = {}): EngineWorld => ({ paid: 3, live: 2, pending: null, state: "active", owner: true, declineNext: false, posts: [], reads: 0, endedAt: null, ...over });
+const engineBody = (w: EngineWorld) => ({ ...ENGINE_BODY, paid_quantity: w.state === "ended" ? 0 : w.paid, live_count: w.live, min_quantity: Math.max(w.live, 1), state: w.state, can_change: w.owner, ended_at: w.endedAt });
+async function engineWorldRoutes(page: Page, w: EngineWorld) {
+  await page.route("**/api/v1/billing/engine", (route) => {
+    w.reads++;
+    return json(route, 200, engineBody(w));
+  });
+  await page.route("**/api/v1/billing/engine-quantity", async (route) => {
+    const body = route.request().postDataJSON();
+    w.posts.push(body);
+    if (!w.owner) return json(route, 403, err("insufficient_role"));
+    if (!body || typeof body.quantity !== "number" || !Number.isInteger(body.quantity) || Object.keys(body).length !== 1 || body.quantity < 1 || body.quantity > 100) return json(route, 422, err("invalid_quantity"));
+    if (w.state === "ended" || w.state === "none") return json(route, 409, err("no_subscription"));
+    if (w.state === "not_paying") return json(route, 409, err("subscription_not_paying"));
+    if (body.quantity < w.live) return json(route, 409, err("engine_quantity_in_use"));
+    if (body.quantity > w.paid) {
+      if (w.declineNext) { w.declineNext = false; return json(route, 402, err("payment_pending")); }
+      w.pending = body.quantity;
+    } else w.paid = body.quantity;
+    return json(route, 200, { quantity: body.quantity });
+  });
+}
+const confirmPending = (w: EngineWorld) => { if (w.pending !== null) w.paid = w.pending; w.pending = null; };
+async function reopen(page: Page) {
+  await page.reload();
+  await bootToDesktop(page, { keepPaused: false });
+  await wm(page, "open");
+  await expect(tid(page, "bb-plan")).toBeVisible();
+}
+
+test.describe("D#845 ON-22c-2: Budget & Billing Engines row", () => {
+  test("raise, unpaid raise, lower and a refusal below the live count; the row shows the synced value after each reload", async ({ page }) => {
+    const w = engineWorld();
+    const seen = await boot(page, { owner: true });
+    await engineWorldRoutes(page, w);
+    await reopen(page);
+    await expect(tid(page, "bb-engine-price")).toHaveText("$17 a month per live engine");
+    await expect(tid(page, "bb-engine-paid")).toHaveText("3");
+    await expect(tid(page, "bb-engine-live")).toHaveText("2");
+
+    // Raise: accepted, and the row keeps the synced 3 until the provider confirms.
+    await tid(page, "bb-engine-plus").click();
+    await expect(tid(page, "bb-engine-notice")).toHaveText("Engine added. This updates when the provider confirms the change.");
+    await expect(tid(page, "bb-engine-paid")).toHaveText("3");
+    confirmPending(w);
+    await reopen(page);
+    await expect(tid(page, "bb-engine-paid")).toHaveText("4");
+
+    // An unpaid raise changes nothing and offers the portal.
+    w.declineNext = true;
+    await tid(page, "bb-engine-plus").click();
+    await expect(tid(page, "bb-engine-notice")).toHaveText("The charge wasn't collected, so nothing changed. Update your payment method and try again.");
+    await expect(tid(page, "bb-engine-portal")).toBeVisible();
+    await reopen(page);
+    await expect(tid(page, "bb-engine-paid")).toHaveText("4");
+
+    // Lower: a credit, applied now.
+    await tid(page, "bb-engine-minus").click();
+    await expect(tid(page, "bb-engine-notice")).toHaveText("Engine removed. The unused part of this month is credited to your next invoice.");
+    await expect(tid(page, "bb-engine-paid")).toHaveText("3");
+    await reopen(page);
+    await expect(tid(page, "bb-engine-paid")).toHaveText("3");
+
+    // Below the live count: refused. The race (another tab started an engine after the read) is the 409 the server sends; the row re-reads.
+    w.live = 3;
+    await tid(page, "bb-engine-minus").click();
+    await expect(tid(page, "bb-engine-notice")).toHaveText("More engines are running than that number. Park or stop an engine first.");
+    await expect(tid(page, "bb-engine-minus")).toBeDisabled();
+    await expect(tid(page, "bb-engine-hint")).toHaveText("Park or stop an engine to go lower.");
+    await reopen(page);
+    await expect(tid(page, "bb-engine-paid")).toHaveText("3");
+    await expect(tid(page, "bb-engine-live")).toHaveText("3");
+    expect(w.posts).toEqual([{ quantity: 4 }, { quantity: 5 }, { quantity: 3 }, { quantity: 2 }]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("two rapid clicks send one request, and the buttons are off while it is in flight", async ({ page }) => {
+    const w = engineWorld();
+    await boot(page, { owner: true });
+    await engineWorldRoutes(page, w);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route("**/api/v1/billing/engine-quantity", async (route) => { w.posts.push(route.request().postDataJSON()); await gate; await json(route, 200, { quantity: 4 }); });
+    await reopen(page);
+    await tid(page, "bb-engine-plus").dblclick({ noWaitAfter: true });
+    await expect(tid(page, "bb-engine-plus")).toBeDisabled();
+    await expect(tid(page, "bb-engine-minus")).toBeDisabled();
+    release();
+    await expect(tid(page, "bb-engine-notice")).toHaveText(/Engine added/);
+    expect(w.posts).toHaveLength(1);
+  });
+
+  test("a non-owner sees the numbers and no buttons", async ({ page }) => {
+    const w = engineWorld({ owner: false });
+    await boot(page, {});
+    await engineWorldRoutes(page, w);
+    await reopen(page);
+    await expect(tid(page, "bb-engine-paid")).toHaveText("3");
+    await expect(tid(page, "bb-engines")).toContainText("Only the account owner can change engines.");
+    await expect(page.locator(`${WIN} [data-testid="bb-engines"] button`)).toHaveCount(0);
+  });
+
+  const STATES: [string, Partial<EngineWorld>, string, string[], string[]][] = [
+    ["past due", { state: "past_due" }, "Payment overdue. Engines keep running through the grace period, then stop.", ["bb-engine-portal", "bb-engine-minus"], ["bb-engine-plus"]],
+    ["not paying", { state: "not_paying" }, "The subscription isn't being paid right now. Settle the payment in the billing portal.", ["bb-engine-portal"], ["bb-engine-plus", "bb-engine-minus"]],
+    ["none", { state: "none", paid: 0, live: 0 }, "No Engine plan yet.", ["bb-engine-choose"], []],
+    ["ended with a date", { state: "ended", endedAt: "2026-11-01T00:00:00.000Z" }, "The Engine plan ended on Nov 1, 2026. Choose plan to start again.", ["bb-engine-choose"], []],
+    ["ended without one", { state: "ended" }, "The Engine plan has ended.", ["bb-engine-choose"], []],
+  ];
+  for (const [label, over, line, shown, off] of STATES) {
+    test(`${label}: its sentence, the controls it allows and none it does not`, async ({ page }) => {
+      await boot(page, { owner: true });
+      await engineWorldRoutes(page, engineWorld(over));
+      await reopen(page);
+      await expect(tid(page, "bb-engines")).toContainText(line);
+      for (const id of shown) await expect(tid(page, id)).toBeVisible();
+      for (const id of off) await expect(tid(page, id)).toBeDisabled();
+      expect(await page.locator(`${WIN} [data-testid="bb-engines"]`).innerText()).not.toMatch(JUNK);
+    });
+  }
+
+  test("Choose plan sends the engine checkout and follows the returned link", async ({ page }) => {
+    const seen = await boot(page, { owner: true });
+    await engineWorldRoutes(page, engineWorld({ state: "none", paid: 0, live: 0 }));
+    await reopen(page);
+    await tid(page, "bb-engine-choose").click();
+    await expect.poll(() => seen.sent.some((x) => x.path === "/api/v1/billing/checkout-session")).toBe(true);
+    expect(seen.sent.find((x) => x.path === "/api/v1/billing/checkout-session")!.body).toEqual({ plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" });
+  });
+
+  test("a failed read says so, leaves the plan list standing, and Try again reads it", async ({ page }) => {
+    const w = engineWorld();
+    let fail = true;
+    await boot(page, { owner: true, engine: (route) => (fail ? json(route, 500, err("boom")) : json(route, 200, engineBody(w))) });
+    await expect(tid(page, "bb-engine-failed")).toContainText("Engines couldn't be loaded.");
+    await expect(tid(page, "bb-load-error")).toHaveCount(0);
+    await expect(tid(page, "bb-plans")).toBeVisible();
+    fail = false;
+    await tid(page, "bb-engine-retry").click();
+    await expect(tid(page, "bb-engine-paid")).toHaveText("3");
+  });
+
+  test("not offered: no Engines row at all", async ({ page }) => {
+    await boot(page, { owner: true, engine: (route) => json(route, 200, { ...ENGINE_BODY, offered: false, price_usd_month: null }) });
+    await expect(tid(page, "bb-engines")).toHaveCount(0);
   });
 });

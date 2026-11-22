@@ -1,0 +1,12 @@
+{
+  "offered": true,
+  "price_usd_month": 17,
+  "paid_quantity": 3,
+  "live_count": 2,
+  "min_quantity": 2,
+  "max_quantity": 100,
+  "state": "active",
+  "ended_at": null,
+  "can_change": true,
+  "as_of": "2026-11-20T10:00:00.000Z"
+}

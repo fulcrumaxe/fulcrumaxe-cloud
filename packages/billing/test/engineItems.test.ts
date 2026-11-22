@@ -711,7 +711,7 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
       const results = await Promise.all([createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 2 })), createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 3 }))]);
       expect(results.every((r) => r.ok)).toBe(true);
       expect(t.fake.items!.filter((i) => i.priceId === ENGINE)).toHaveLength(1);
-      expect(t.fake.items!.find((i) => i.priceId === ENGINE)!.quantity).toBeGreaterThanOrEqual(2);
+      expect(t.fake.items!.find((i) => i.priceId === ENGINE)!.quantity).toBe(3);
     });
   });
 });

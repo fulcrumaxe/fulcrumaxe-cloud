@@ -25725,6 +25725,158 @@
         }
       }
     },
+    "/api/v1/billing/engine": {
+      "get": {
+        "operationId": "getEngineBilling",
+        "summary": "The account's Engine plan: price, engines paid for and live, standing",
+        "description": "Session only, any member. Read from the account's synced billing rows and the engines live now: no billing-provider call is made. `state` is `none` (no engines paid for), `active`, `past_due` (inside the seven day grace), `not_paying` (unpaid, incomplete, paused, or its ids are missing) or `ended`. `min_quantity` is the engines live now (at least 1), `max_quantity` is 100. `can_change` is true for the owner. A change shows here once the provider confirms it.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account's Engine plan: price, engines paid for and live, standing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "offered": {
+                      "type": "boolean",
+                      "description": "False when the plan data carries no Engine plan or no engine price is configured: the row is hidden."
+                    },
+                    "price_usd_month": {
+                      "description": "The Engine plan's price per live engine a month, from the plan data; null when it is not offered.",
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "paid_quantity": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "Engines the subscription pays for, as last synced; 0 for an ended plan."
+                    },
+                    "live_count": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "Engines live now."
+                    },
+                    "min_quantity": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "The lowest total a change may ask for: the engines live now, and at least 1."
+                    },
+                    "max_quantity": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "active",
+                        "past_due",
+                        "not_paying",
+                        "ended"
+                      ]
+                    },
+                    "ended_at": {
+                      "description": "When the subscription ended (the synced `subscription_ended_at`); null when it has not, or the grace period ran out first.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "can_change": {
+                      "type": "boolean",
+                      "description": "True for the account owner on a session. The change routes stay owner-only whatever this says."
+                    },
+                    "as_of": {
+                      "description": "When the subscription was last synced from the provider; null before the first sync.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "offered",
+                    "price_usd_month",
+                    "paid_quantity",
+                    "live_count",
+                    "min_quantity",
+                    "max_quantity",
+                    "state",
+                    "ended_at",
+                    "can_change",
+                    "as_of"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/usage": {
       "get": {
         "operationId": "getUsage",
