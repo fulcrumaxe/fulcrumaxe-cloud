@@ -158,6 +158,10 @@ export async function setEngineQuantity(ctx: BillingCtx, input: { accountId: str
  * the total becomes max(current, quantity): a request at or below what is held makes no provider write at all and still answers ok.
  */
 async function changeEngineUnlocked(stripe: StripeLike, stored: StoredSubscription, fetched: Stripe.Subscription, quantity: number, engineIds: readonly string[], raiseOnly: boolean): Promise<EngineResult> {
+  // An earlier raise is still waiting for payment (`pending_if_incomplete` holds it as `pending_update`, and the item's quantity has not moved). Every engine change is refused with `payment_pending`
+  // and no write, a lowering included: Stripe voids the pending update and its invoice on any later update that carries a non-empty `items` list, so a lowering would silently cancel the raise the
+  // customer is still paying for. The pending update is applied by payment or dropped by expiry; the caller retries after either. Read under the subscription's lock, so two raises cannot both pass.
+  if (fetched.pending_update) return PAYMENT_PENDING_RESULT;
   const engineItems = (fetched.items?.data ?? []).filter((i) => isEngineItem(i, engineIds));
   if (engineItems.length === 0) return addUnlocked(stripe, stored, fetched, { price: stripeEnginePriceIdFromEnv(), quantity, kind: 'engine' }, engineIds);
   // Two engine items (a retired price beside the current one) cannot be set to one total by one item update: fail closed and leave it to ops.

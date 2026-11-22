@@ -494,6 +494,67 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
     });
   });
 
+  describe('a raise already waiting for payment', () => {
+    const attempt = (t: Awaited<ReturnType<typeof billed>>, quantity: number) => setEngineQuantity(ctx(t), { liveEngines: live(t), accountId: t.accountId, quantity, stripe: like() });
+
+    it('a second raise answers payment_pending with no write; once the pending update clears, a raise works', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
+      server.world.paymentOutcome = 'declined';
+      expect(await attempt(t, 4)).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toHaveLength(1);
+      server.seen.length = 0;
+      expect(await attempt(t, 6)).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toEqual([]);
+      expect(t.fake.pending_update).toMatchObject({ changes: [{ kind: 'set', quantity: 4 }] });
+      expect(server.world.invoices.map((i) => i.status)).toEqual(['open']);
+      // The pending update expires: nothing applied, and a new raise is sent.
+      expect(server.expirePending(t.sub)).toBe(true);
+      server.world.paymentOutcome = 'paid';
+      expect(await attempt(t, 6)).toEqual({ ok: true });
+      expect(t.fake.items![0]!.quantity).toBe(6);
+      expect(writes()).toHaveLength(1);
+    });
+
+    it('a raise after the pending one was paid works from the new quantity', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
+      server.world.paymentOutcome = 'declined';
+      expect(await attempt(t, 4)).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(server.payPending(t.sub)).toBe(true);
+      server.world.paymentOutcome = 'paid';
+      expect(await attempt(t, 5)).toEqual({ ok: true });
+      expect(t.fake.items![0]!.quantity).toBe(5);
+    });
+
+    it('a lowering while a raise is pending is refused too, with no write: it would void the pending raise', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 3 }]);
+      server.world.paymentOutcome = 'declined';
+      expect(await attempt(t, 5)).toEqual({ ok: false, reason: 'payment_pending' });
+      server.seen.length = 0;
+      expect(await attempt(t, 1)).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toEqual([]);
+      expect(t.fake.pending_update).toMatchObject({ changes: [{ kind: 'set', quantity: 5 }] });
+      expect(t.fake.items![0]!.quantity).toBe(3);
+    });
+
+    it('two concurrent raises with the first unpaid end with exactly one write', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
+      server.world.paymentOutcome = 'declined';
+      const results = await Promise.all([attempt(t, 4), attempt(t, 5)]);
+      expect(results).toEqual([{ ok: false, reason: 'payment_pending' }, { ok: false, reason: 'payment_pending' }]);
+      expect(writes()).toHaveLength(1);
+      expect(server.world.invoices).toHaveLength(1);
+    });
+
+    it('an engine checkout raise (raiseEngineToAtLeast) while a raise is pending writes nothing', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
+      server.world.paymentOutcome = 'declined';
+      expect(await attempt(t, 4)).toEqual({ ok: false, reason: 'payment_pending' });
+      server.seen.length = 0;
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 7 }))).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toEqual([]);
+    });
+  });
+
   describe('per-call idempotency and read-back (ruling 35.3)', () => {
     it('2 -> 5 -> 2 -> 5 ends at 5: every call carries its own key, so no earlier stored answer stands in for a later request', async () => {
       const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
