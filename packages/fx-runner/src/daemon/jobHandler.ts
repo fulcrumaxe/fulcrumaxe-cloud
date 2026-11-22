@@ -35,7 +35,8 @@ import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, DEFAULT_WALL_CLOCK_MS, runJob, SANDBOX_MARGIN_MS,type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import { AgentRunFailed } from "../sandbox/agentOutcome.js";
-import { describeStartFailure } from "../sandbox/startFailure.js";
+import { journalHome, journalSecrets } from "../job/cleanEnv.js";
+import { describeStartFailure, describeThrown } from "../sandbox/startFailure.js";
 import type { NetworkRule, SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import type { WorkspaceStore } from "../job/workspace.js";
 import type { WorkspaceCrossing } from "../vm/workspace/crossing.js";
@@ -359,20 +360,26 @@ function rememberingNetwork(port: SandboxPort, remember: (rules: NetworkRule[]) 
 /**
  * What the local log may say about a turn that ended in an error: the error's own closed `code` when it has one (a refusal before the agent starts has one, and
  * without it every such end read the same), and for an agent that never started or ended before its first output, its redacted start-failure diagnostic.
- * Never the error's text. The detail stays in this machine's log: the run's `run_ended` carries only its closed reason.
+ * An error with neither says its name and the first line of its message (or a non-Error value as a string), redacted and capped at 300 characters. The detail stays in this machine's log: the run's `run_ended` carries only its closed reason.
  */
-function errorDetail(error: unknown): string {
-  const code = (error as { code?: unknown } | null)?.code;
-  const failure = error instanceof AgentRunFailed ? error.startFailure : undefined;
-  return `${typeof code === "string" ? `: ${closedWord(code)}` : ""}${failure === undefined ? "" : `; ${describeStartFailure(failure)}`}`;
+export function errorDetail(error: unknown, secrets: readonly string[] = [], home?: string): string {
+  try {
+    const code = (error as { code?: unknown } | null)?.code;
+    const failure = error instanceof AgentRunFailed ? error.startFailure : undefined;
+    if (typeof code !== "string" && failure === undefined) return `; thrown=${JSON.stringify(describeThrown(error, secrets, home))}`;
+    return `${typeof code === "string" ? `: ${closedWord(code)}` : ""}${failure === undefined ? "" : `; ${describeStartFailure(failure)}`}`;
+  } catch {
+    // fx-swallow-ok: an error whose `code` getter throws is logged as unprintable; the journal line must never become an unhandled rejection
+    return `; thrown=${JSON.stringify("unprintable")}`;
+  }
 }
 
-function narrated(port: SandboxPort, step: StepSink): SandboxPort {
+function narrated(port: SandboxPort, step: StepSink, secrets: readonly string[] = [], home?: string): SandboxPort {
   const watch = <T extends { hookFired: Promise<{ type: string } | undefined> }>(started: T, what: string): T => {
     step(`agent turn ${what}`);
     started.hookFired.then(
       (event) => step(`agent turn ended (${event === undefined ? "no_result" : closedWord(event.type)})`),
-      (error: unknown) => step(`agent turn ended (error${errorDetail(error)})`),
+      (error: unknown) => step(`agent turn ended (error${errorDetail(error, secrets, home)})`),
     );
     return started;
   };
@@ -722,7 +729,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const granted = vmRun ? baseSandbox : withReadGrants(baseSandbox, git.readGrants(job));
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
           const spilled = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
-          const narrow = deps.onStep === undefined ? spilled : narrated(spilled, step);
+          const narrow = deps.onStep === undefined ? spilled : narrated(spilled, step, journalSecrets(deps.run.credentials), deps.checkHome ?? journalHome());
           // The network rules the agent's VM ran under: the check's fresh VM gets the same ones (TL ruling 12).
           let vmNetwork: NetworkRule[] = [];
           const allowed = vmRun ? rememberingNetwork(narrow, (rules) => void (vmNetwork = rules)) : narrow;

@@ -55,6 +55,28 @@ export function notStarted(error: unknown, secrets: readonly string[], home?: st
   return { cause: "spawn_failed", ...(typeof code === "string" && ERRNO.test(code) ? { errno: code } : {}), tail: redactedTail(message, secrets, home) };
 }
 
+/** What the local log keeps of an uncoded error. */
+export const THROWN_CHARS = 300;
+
+/**
+ * One log line's worth about an error that has no closed `code`: its `name` and the first line of its message (or `String(value)` for a rejection that is not an Error),
+ * through the same redaction as the stderr tail (secrets, then home paths, then control and direction characters), capped at `THROWN_CHARS`.
+ * It stays on this machine's log; nothing here reaches the protocol.
+ */
+export function describeThrown(error: unknown, secrets: readonly string[] = [], home?: string): string {
+  let raw: string;
+  try {
+    const firstLine = (text: string): string => text.split(/\r\n|\r|\n/, 1)[0] ?? "";
+    raw = error instanceof Error ? `${String(error.name)}: ${firstLine(String(error.message))}` : firstLine(String(error));
+  } catch {
+    // fx-swallow-ok: a value that cannot be printed (a throwing getter or toString) is logged as "unprintable"; the log line must never throw
+    raw = "unprintable";
+  }
+  let text = redactText(raw, secrets);
+  if (home !== undefined && home.length > 1) text = text.split(home).join("~");
+  return text.replace(HOME_PATH, "~").replace(CONTROL, " ").slice(0, THROWN_CHARS);
+}
+
 /** One log line's worth: closed words and numbers, then the tail as a JSON string (so it stays one line). */
 export function describeStartFailure(failure: StartFailure): string {
   const parts = [`cause=${failure.cause}`];
