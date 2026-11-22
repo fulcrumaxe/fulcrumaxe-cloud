@@ -2,7 +2,8 @@ import { HeartbeatMessage, HeartbeatReply, StopReply, type StopReason } from "@f
 import { reportError } from "@fx/telemetry";
 import { handoffDeadlineFor } from "./handoff.js";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
-import { verifyRunnerRequest } from "./verifyRunnerRequest.js";
+import { refuseBadInventory } from "./claim.js";
+import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
 export const HEARTBEAT_PATH = "/api/runner/heartbeat";
 
@@ -33,5 +34,18 @@ export async function heartbeatRun(deps: RunnerCloudDeps, req: RunnerHttpRequest
     return null;
   });
   const handoff = deadline === null ? {} : { handoff: { requested: true as const, deadline: deadline.toISOString() } };
-  return { status: 200, body: HeartbeatReply.parse({ continue: true, lease_expires_at: result.leaseExpiresAt.toISOString(), ...handoff }) };
+  // D#587 FU-179: the sandbox inventory a runner sends while it holds a run (it has no claim then). Stored after the lease is extended, through the same definer a claim uses, and never allowed to fail the
+  // heartbeat: a lease that a refused or failed inventory write would cost is worse than a stale list. `sandboxes_recorded` tells the runner it was stored, so it sends the same list again otherwise.
+  let recorded = false;
+  if (message.sandboxes !== undefined) {
+    const rows = message.sandboxes;
+    recorded = await asRunner(() => refuseBadInventory(() => withRunnerSession(deps.appUserPool, runner, (client) => client.query("SELECT runner_sandboxes_record($1::jsonb)", [JSON.stringify(rows)])))).then(
+      () => true,
+      (error: unknown) => {
+        reportError(error, { stage: "runner.heartbeat_inventory", route: HEARTBEAT_PATH });
+        return false;
+      },
+    );
+  }
+  return { status: 200, body: HeartbeatReply.parse({ continue: true, lease_expires_at: result.leaseExpiresAt.toISOString(), ...handoff, ...(recorded ? { sandboxes_recorded: true as const } : {}) }) };
 }

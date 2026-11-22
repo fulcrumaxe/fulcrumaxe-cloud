@@ -1,4 +1,4 @@
-import { HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { HEARTBEAT_INVENTORY_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
 import { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
@@ -68,7 +68,9 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   const kvmFact = (message.capabilities ?? []).includes(KVM_FACT_HELLO_CAPABILITY) && (await runnersTakeKvm(deps));
   // D#845 ON-21b: said only to a runner that DECLARED `preflight_v1` on this hello, and only when migration 1051 is present. The runner sends `facts.preflight` from its next hello on.
   const preflight = (message.capabilities ?? []).includes(PREFLIGHT_HELLO_CAPABILITY) && takesPreflight;
-  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : []), ...(preflight ? [PREFLIGHT_CAPABILITY] : [])];
+  // D#587 FU-179: said only to a runner that DECLARED `heartbeat_inventory_v1` on this hello at protocol 21 or later, and only when the inventory definer (migration 1040) exists. The runner then puts `sandboxes` on its heartbeats.
+  const heartbeatInventory = message.protocol_version >= SANDBOX_INVENTORY_MIN_PROTOCOL && (message.capabilities ?? []).includes(HEARTBEAT_INVENTORY_HELLO_CAPABILITY) && (await runnersTakeInventory(deps));
+  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : []), ...(preflight ? [PREFLIGHT_CAPABILITY] : []), ...(heartbeatInventory ? [HEARTBEAT_INVENTORY_CAPABILITY] : [])];
   return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}), ...(replyCapabilities.length > 0 ? { capabilities: replyCapabilities } : {}) }) };
 }
 
@@ -79,6 +81,17 @@ export async function runnersTakePreflight(deps: RunnerCloudDeps): Promise<boole
     return rows[0]?.ok === true;
   } catch {
     // fx-swallow-ok: a catalog read that fails says nothing about the column: the capability is simply not listed
+    return false;
+  }
+}
+
+/** True when migration 1040 is applied: `runner_sandboxes_record` exists. Read from the catalog; a failed read lists nothing. */
+export async function runnersTakeInventory(deps: RunnerCloudDeps): Promise<boolean> {
+  try {
+    const { rows } = await deps.appUserPool.query<{ ok: boolean }>("SELECT to_regproc('public.runner_sandboxes_record') IS NOT NULL AS ok");
+    return rows[0]?.ok === true;
+  } catch {
+    // fx-swallow-ok: a catalog read that fails says nothing about the function: the capability is simply not listed
     return false;
   }
 }
