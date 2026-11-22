@@ -336,7 +336,7 @@ describe("reverse endpoint: bodies and streaming", () => {
 
 describe("reverse endpoint: a host listed with no rules (the policy a job builds, a plain list of hosts)", () => {
   const LIST = { allow: ["api.example.com", "pkg.example.com"] };
-  it("serves a listed host as itself: the guest's path, the host's name for the certificate, no header added, and the guest's credentials still dropped", async () => {
+  it("serves a listed host as itself: the guest's path, the host's name for the certificate, no header added, the guest's authorization passed through and its other credentials dropped", async () => {
     const h = await start({}, ANSWERS, LIST);
     const r = await get(h, "api.example.com", "/v1/messages?beta=true", "Authorization: Bearer guest\r\nx-api-key: guest-key\r\nanthropic-version: 2023-06-01\r\n");
     expect(r.status).toBe(200);
@@ -345,9 +345,30 @@ describe("reverse endpoint: a host listed with no rules (the policy a job builds
     expect(s.headers.host).toBe("api.example.com");
     expect(s.headers["anthropic-version"]).toBe("2023-06-01");
     expect(s.headers["x-forwarded-host"]).toBeUndefined();
-    for (const name of ["authorization", "x-api-key"]) expect(s.headers[name], name).toBeUndefined();
+    expect(s.headers.authorization).toBe("Bearer guest");
+    expect(s.headers["x-api-key"]).toBeUndefined();
     expect(h.lookups).toEqual(["api.example.com"]);
     expect(h.decisions).toEqual([{ outcome: "allow", host: "api.example.com" }]);
+  });
+  it("passes only authorization: every other credential-shaped header is still dropped on the plain route", async () => {
+    const h = await start({}, ANSWERS, LIST);
+    const r = await get(h, "api.example.com", "/v1/messages", "Authorization: Bearer guest\r\nx-api-key: k\r\nCookie: a=b\r\nProxy-Authorization: Basic x\r\nx-custom-token: t\r\nx-app-secret: s\r\nx-forwarded-for: 6.6.6.6\r\nVercel-Forwarded-For: 1.1.1.1\r\n");
+    expect(r.status).toBe(200);
+    const s = seen[0]!;
+    expect(s.headers.authorization).toBe("Bearer guest");
+    for (const name of ["x-api-key", "cookie", "proxy-authorization", "x-custom-token", "x-app-secret", "x-forwarded-for", "vercel-forwarded-for"]) expect(s.headers[name], name).toBeUndefined();
+  });
+  it("a host-side inject value replaces the guest's authorization on the plain route", async () => {
+    const h = await start({ inject: (host) => (host === "api.example.com" ? { authorization: "Bearer host-side" } : undefined) }, ANSWERS, LIST);
+    expect((await get(h, "api.example.com", "/v1/messages", "Authorization: Bearer guest\r\n")).status).toBe(200);
+    expect(seen[0]!.headers.authorization).toBe("Bearer host-side");
+  });
+  it("drops the guest's authorization on a transform route and on a forwardURL route", async () => {
+    const h = await start();
+    expect((await get(h, "api.example.com", "/v1/messages", "Authorization: Bearer guest\r\n")).status).toBe(200);
+    expect((await get(h, "git.example.com", "/r.git/info/refs", "Authorization: Bearer guest\r\n")).status).toBe(200);
+    expect(seen).toHaveLength(2);
+    for (const s of seen) expect(s.headers.authorization).toBeUndefined();
   });
   it("still refuses a host that is not listed (exact match: a subdomain, a parent and a lookalike are other hosts) and resolves and sends nothing for it", async () => {
     const h = await start({}, ANSWERS, LIST);
