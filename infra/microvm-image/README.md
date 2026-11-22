@@ -61,6 +61,17 @@ started by `packages/fx-runner/scripts/vm-main.mjs`) exports the image by digest
   `--disable-nls`): otherwise it cannot convert a non-ASCII link target and fails, and a disk that was never written must never be used.
 - The same image digest and the same `mke2fs` give the same bytes. `lock.json` names the version the pins were made with.
 
+- **A local build needs an e2fsprogs built with libarchive** (`HAVE_ARCHIVE_H` defined at configure time). Many distribution packages
+  are not (Debian-family and the NixOS `e2fsprogs` are not, as of 1.47.4), and such an `mke2fs` stops with `you need libarchive to be able to
+  process tarballs`. The build finds `mke2fs` once on your PATH, or takes `--mke2fs <path>`, and runs that one binary for the version check,
+  for a small tar probe (which names libarchive when it fails) and for the build, so a different `mke2fs` can never be checked than the one
+  that runs. The build's own environment has no PATH of its own; give a path, not a bare name, when the program is not on yours.
+- **On NixOS** there is no such `mke2fs` in the system. What worked (11-22): configure and build e2fsprogs 1.47.2 or newer inside
+  `nix-shell -p libarchive gettext pkg-config gcc gnumake` (the configure step must report libarchive found), then run `fx-runner vm
+  build-image ... --mke2fs <that build>/misc/mke2fs` from the same shell with that shell's libarchive library directory on
+  `LD_LIBRARY_PATH` (`mke2fs` loads libarchive when it runs; use a libarchive from the same nix closure as the build, not a mix). The build
+  host passes `LD_LIBRARY_PATH` on to `mke2fs`.
+
 The hosted workflow `microvm-image.yml` does all of this, twice, and boots the amd64 disk under Firecracker; `microvm-image-release.yml`
 publishes the files and signs their digests.
 

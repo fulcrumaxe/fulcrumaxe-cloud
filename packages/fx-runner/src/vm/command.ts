@@ -1,5 +1,5 @@
 /**
- * `fx-runner vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64] [--lock <file>] [--guest-dir <dir>]`
+ * `fx-runner vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64] [--lock <file>] [--guest-dir <dir>] [--mke2fs <path>]`
  *
  * With no `--arch` it builds both architectures and prints one `rootfs <arch> sha256:<hex>` line for each. The image names no
  * job, no host path and no credential; a job never names an image at all (the job schema has no such field, and a test pins that).
@@ -11,8 +11,8 @@ import { INSTALL_USAGE, installCommand, rootApplyCommand, type InstallHost, type
 import { UNINSTALL_USAGE, rootRemoveCommand, uninstallCommand, type UninstallHost } from "./uninstall.js";
 import { ARCHES, TEMPLATES, parseLock, type Arch } from "./lock.js";
 
-export const VM_USAGE = "usage: fx-runner vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64] [--lock <file>] [--guest-dir <dir>]";
-const FLAGS =["template", "image", "out", "arch", "lock", "guest-dir"] as const;
+export const VM_USAGE = "usage: fx-runner vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64] [--lock <file>] [--guest-dir <dir>] [--mke2fs <path>]";
+const FLAGS =["template", "image", "out", "arch", "lock", "guest-dir", "mke2fs"] as const;
 
 /** What `vm install` and its root side need from the machine; only `bin/fx-runner.mjs` supplies them. */
 export interface VmInstallHosts {
@@ -75,7 +75,7 @@ export async function vmCommand(args: readonly string[], host: BuildHost, out: (
     // fx-swallow-ok: a fixed sentence replaces the node error, which carries the path
     throw new CliError("the image lock could not be read; run from the repository root or pass --lock", 2);
   }
-  const built = await buildImage({ lock: parseLock(lockText), image, arches: arch === undefined ? ARCHES : [arch as Arch], outDir, guestDir: flags.get("guest-dir") ?? "infra/microvm-image/guest", host });
+  const built = await buildImage({ lock: parseLock(lockText), image, arches: arch === undefined ? ARCHES : [arch as Arch], outDir, guestDir: flags.get("guest-dir") ?? "infra/microvm-image/guest", host, ...(flags.has("mke2fs") ? { mke2fs: flags.get("mke2fs")! } : {}) });
   for (const b of built) out(`rootfs ${b.arch} sha256:${b.sha256} size ${b.size}`);
   const first = built[0];
   if (first !== undefined) out(`agent sha256:${first.agentSha256}\ninit sha256:${first.initSha256}\nmke2fs ${first.mke2fs}`);

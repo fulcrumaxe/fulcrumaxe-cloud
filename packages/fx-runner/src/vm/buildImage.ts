@@ -9,7 +9,7 @@
  * an argument list, through `BuildHost`, which a test replaces.
  */
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, copyFileSync, createReadStream, ftruncateSync, mkdirSync, openSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, chmodSync, closeSync, copyFileSync, createReadStream, ftruncateSync, mkdirSync, openSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CliError } from "../cliError.js";
 import type { Arch, VmLock } from "./lock.js";
@@ -17,6 +17,8 @@ import type { Arch, VmLock } from "./lock.js";
 export interface BuildHost {
   /** Starts `file` with `args` (no shell) and an environment of exactly `env` plus PATH. `output` is stdout then stderr. */
   run(file: string, args: readonly string[], env?: Readonly<Record<string, string>>): Promise<{ code: number | null; output: string }>;
+  /** The absolute path of the program `name` on the caller's own PATH, or undefined when none is there. A host without it starts programs by name. */
+  resolve?(name: string): string | undefined;
 }
 
 export interface BuiltRootfs {
@@ -105,6 +107,43 @@ export async function mke2fsVersion(host: BuildHost, mke2fs: string): Promise<st
   return `${match[1]}.${match[2]}.${match[3]}`;
 }
 
+/**
+ * The one `mke2fs` a build uses: an absolute path, found once on the caller's PATH (or the `--mke2fs` value), so the version check, the tar probe
+ * and the build all start the same binary. The build's own environment carries no PATH of its own, so a program started by bare name could be
+ * another binary than the one the version check saw (11-22: a system mke2fs without libarchive ran after a libarchive one was checked).
+ */
+export function pickMke2fs(host: BuildHost, given: string | undefined): string {
+  const want = given ?? "mke2fs";
+  if (want.includes("/")) return path.resolve(want);
+  const found = host.resolve?.(want);
+  if (host.resolve !== undefined && found === undefined) throw new CliError(`${want} was not found on PATH; install e2fsprogs 1.47.1 or newer built with libarchive, or pass --mke2fs <path>`, 2);
+  return found ?? want;
+}
+
+const NO_LIBARCHIVE = "this mke2fs cannot read a tar archive because it was built without libarchive (or cannot load it); use an e2fsprogs built with libarchive (HAVE_ARCHIVE_H), put its libarchive on LD_LIBRARY_PATH if it is not in a system path, and pass it with --mke2fs <path>";
+
+/** Makes a one-file disk from a tiny tar with this exact mke2fs, so a missing libarchive is named before the real image is exported. */
+export async function mke2fsTarSupport(host: BuildHost, mke2fs: string, workDir: string): Promise<void> {
+  const probe = mkdtempSync(path.join(workDir, "probe-"));
+  try {
+    mkdirSync(path.join(probe, "src"));
+    writeFileSync(path.join(probe, "src", "f"), "x");
+    const tar = path.join(probe, "p.tar");
+    await must(host, "tar", ["--create", "--file", tar, "-C", path.join(probe, "src"), "f"]);
+    const disk = path.join(probe, "p.ext4");
+    const fd = openSync(disk, "w");
+    ftruncateSync(fd, 4 * MIB);
+    closeSync(fd);
+    const r = await host.run(mke2fs, ["-q", "-F", "-t", "ext4", "-d", tar, disk], { LC_ALL: "C.UTF-8" });
+    if (r.code !== 0 || !hasExt4Magic(disk)) {
+      if (/libarchive|tarball/i.test(r.output)) throw new CliError(`${mke2fs}: ${NO_LIBARCHIVE}`);
+      throw new CliError(`${mke2fs} could not build a disk from a tar archive (exit ${r.code ?? "signal"}): ${r.output.trim().split("\n").slice(-2).join(" | ").slice(0, 300)}`);
+    }
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+}
+
 export interface BuildInput {
   lock: VmLock;
   /** `repository@sha256:<64 hex>`: a tag, or a digest that is not 64 hex digits, is refused. */
@@ -123,8 +162,10 @@ export async function buildImage(input: BuildInput): Promise<BuiltRootfs[]> {
   const ref = input.image.match(DIGEST_REF);
   if (ref === null) throw new CliError("--image must name the image by digest (repository@sha256:<64 hex digits>); a tag is refused", 2);
   const crane = input.crane ?? "crane";
-  const mke2fs = input.mke2fs ?? "mke2fs";
+  const mke2fs = pickMke2fs(host, input.mke2fs);
   const version = await mke2fsVersion(host, mke2fs);
+  mkdirSync(outDir, { recursive: true });
+  await mke2fsTarSupport(host, mke2fs, outDir);
   // The registry must answer with the digest we asked for; crane export checks it again while it downloads.
   const answered = (await must(host, crane, ["digest", input.image])).trim();
   if (answered !== `sha256:${ref[1]}`) throw new CliError("the registry answered with a different digest than the one pinned; refusing to build", 1);

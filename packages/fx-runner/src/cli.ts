@@ -111,8 +111,9 @@ Commands:
   logs <run id>      Print the local transcript of a run on this machine.
   vm install [--yes] [--dry-run]
                      Install the VM helper: shows every file, user, group and limit it makes, asks once, then runs one sudo call that applies them and undoes them all if any step fails. --dry-run shows the root steps and makes no root call.
-  vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64]
-                     Make the read-only root disk of the microVM guest from a digest-pinned image, for amd64 and arm64, and print the sha256 of each. Needs crane, tar and mke2fs 1.47.1 or newer; no root.
+  vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64] [--mke2fs <path>]
+                     Make the read-only root disk of the microVM guest from a digest-pinned image, for amd64 and arm64, and print the sha256 of each. Needs crane, tar and mke2fs 1.47.1 or newer built with libarchive; no root.
+                     mke2fs is found once on PATH, or given with --mke2fs; that one binary is version-checked, probed for tar support, and used for the build.
   credentials set-api-key | clear-api-key | status
                      Store (from standard input only), remove or check the API key of an api_key runner. status prints "stored" or "not stored".
   service install | uninstall [--system --user <account>]
