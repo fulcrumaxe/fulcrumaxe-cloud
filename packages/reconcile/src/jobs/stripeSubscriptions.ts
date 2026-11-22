@@ -43,6 +43,7 @@ interface AccountRow {
   id: string;
   stripe_customer_id: string;
   stripe_subscription_id: string | null;
+  stripe_subscription_status: string | null;
 }
 
 /** Subscriptions that no longer bill. `canceled` is the only one this job acts on, and only with `ended_at`. */
@@ -88,7 +89,7 @@ export function createStripeSubscriptionsJob<S extends FetchedSubscription>(deps
       const budget = (): JobResult => ({ cursor: done, wrapped: false });
 
       const { rows } = await ctx.pool.query<AccountRow>(
-        `SELECT id, stripe_customer_id, stripe_subscription_id
+        `SELECT id, stripe_customer_id, stripe_subscription_id, stripe_subscription_status
            FROM accounts
           WHERE stripe_customer_id IS NOT NULL AND deleted_at IS NULL
             AND ($1::uuid IS NULL OR id > $1::uuid)
@@ -97,6 +98,8 @@ export function createStripeSubscriptionsJob<S extends FetchedSubscription>(deps
         [ctx.cursor, cap],
       );
 
+      let drifted = false;
+      try {
       for (const row of rows) {
         if (ctx.signal.aborted || ctx.msLeft() <= 0 || !ctx.calls.take(1)) return budget();
 
@@ -131,6 +134,8 @@ export function createStripeSubscriptionsJob<S extends FetchedSubscription>(deps
           const target = pick(row, subs, report);
           if (target) {
             const result = await deps.apply(target, clock);
+            // Drift: Stripe's standing for the subscription differs from the mirror's, and the repair was written.
+            if (result.applied && (row.stripe_subscription_id !== target.id || row.stripe_subscription_status !== target.status)) drifted = true;
             if (result.duplicate) report(new Error('a second live subscription sits next to the one on file'));
             else if (!result.applied && result.reason !== 'stale_fetch') report(new Error(`subscription not applied: ${result.reason ?? 'unknown'}`));
           }
@@ -145,6 +150,10 @@ export function createStripeSubscriptionsJob<S extends FetchedSubscription>(deps
 
       // A short batch means the estate ran out: the cursor wrapped.
       return rows.length < cap ? { cursor: null, wrapped: true } : { cursor: done, wrapped: false };
+      } finally {
+        // One closed-code line per run, however many accounts drifted: no ids, no counts, no amounts.
+        if (drifted) report(new Error('the account mirror differed from Stripe and was repaired'), 'stripe_mirror_drift');
+      }
     },
   };
 }

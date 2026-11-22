@@ -445,10 +445,14 @@ describe('D#3 K09a site-kit webhook routing (real Postgres, fake Stripe, no netw
         id: `evt_${randomUUID()}`, object: 'event', type: 'customer.subscription.updated', livemode: false,
         data: { object: { id: subscriptionId, object: 'subscription', customer, ...(metadata ? { metadata } : {}) } },
       });
-    const invoiceEvent = (subscriptionId: string, customer: string, metadata?: Record<string, string>) =>
+    const invoiceEvent = (subscriptionId: string, customer: string, metadata?: Record<string, string>, dahlia = false) =>
       JSON.stringify({
         id: `evt_${randomUUID()}`, object: 'event', type: 'invoice.paid', livemode: false,
-        data: { object: { id: 'in_x', object: 'invoice', customer, subscription: subscriptionId, ...(metadata ? { subscription_details: { metadata } } : {}) } },
+        data: {
+          object: dahlia
+            ? { id: 'in_x', object: 'invoice', customer, parent: { type: 'subscription_details', subscription_details: { subscription: subscriptionId, ...(metadata ? { metadata } : {}) } } }
+            : { id: 'in_x', object: 'invoice', customer, subscription: subscriptionId, ...(metadata ? { subscription_details: { metadata } } : {}) },
+        },
       });
     const unknownPrice = { status: 500, body: { error: 'unknown_price' } };
 
@@ -474,6 +478,7 @@ describe('D#3 K09a site-kit webhook routing (real Postgres, fake Stripe, no netw
     it.each([
       ['a subscription event', (sub: string, cus: string) => subEvent(sub, cus, MARK)],
       ['an invoice event', (sub: string, cus: string) => invoiceEvent(sub, cus, MARK)],
+      ['a dahlia-shaped invoice event', (sub: string, cus: string) => invoiceEvent(sub, cus, MARK, true)],
     ])('with no site-kit price configured, %s carrying the marker is refused from the signed event, with no Stripe call', async (_label, build) => {
       const f = await seed(true);
       const before = await account(f.accountId);

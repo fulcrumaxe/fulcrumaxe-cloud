@@ -43,14 +43,25 @@ export function rawCheckoutSessionCompleted(
   });
 }
 
-type InvoiceParams = EventParams & { stripeCustomerId: string; subscriptionId?: string | null };
-const rawInvoice = (type: string, p: InvoiceParams) =>
-  rawEvent(p, type, {
-    id: 'in_test_1',
-    object: 'invoice',
-    customer: p.stripeCustomerId,
-    subscription: p.subscriptionId === undefined ? defaultSubscriptionId(p.stripeCustomerId) : p.subscriptionId,
-  });
+/**
+ * `acacia` is the pinned API version's invoice (the subscription id at the top level). `dahlia` is the shape Stripe documents from
+ * 2025-03-31 (basil) on, which the staging endpoint (2026-08-26.dahlia) delivers: no top-level `subscription`, the id under
+ * `parent.subscription_details`. `dahlia-expanded` carries the subscription as an expanded object.
+ */
+export type InvoiceShape = 'acacia' | 'dahlia' | 'dahlia-expanded';
+type InvoiceParams = EventParams & { stripeCustomerId: string; subscriptionId?: string | null; shape?: InvoiceShape };
+function invoiceObject(p: InvoiceParams): Record<string, unknown> {
+  const subscription = p.subscriptionId === undefined ? defaultSubscriptionId(p.stripeCustomerId) : p.subscriptionId;
+  const base = { id: 'in_test_1', object: 'invoice', customer: p.stripeCustomerId };
+  const shape = p.shape ?? 'acacia';
+  if (shape === 'acacia') return { ...base, subscription };
+  const value = shape === 'dahlia-expanded' && subscription ? { id: subscription, object: 'subscription' } : subscription;
+  return {
+    ...base,
+    parent: { type: 'subscription_details', quote_details: null, subscription_details: { subscription: value, metadata: {} } },
+  };
+}
+const rawInvoice = (type: string, p: InvoiceParams) => rawEvent(p, type, invoiceObject(p));
 export const rawInvoicePaid = (p: InvoiceParams) => rawInvoice('invoice.paid', p);
 export const rawInvoicePaymentFailed = (p: InvoiceParams) => rawInvoice('invoice.payment_failed', p);
 

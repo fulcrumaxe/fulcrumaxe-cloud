@@ -100,6 +100,31 @@ describe('D#69 B2 subscription sync (real Postgres, fake Stripe, no network)', (
   });
 
   describe('B4/B5 one fetch per handled event', () => {
+    it.each(['acacia', 'dahlia', 'dahlia-expanded'] as const)('an invoice.paid in the %s shape is fetched by its subscription id and applied', async (shape) => {
+      const a = await seed();
+      fetches(a, { status: 'past_due' });
+      const res = await deliver(rawInvoicePaid({ eventId: evt(), stripeCustomerId: a.cus, subscriptionId: a.sub, shape }));
+      expect(res.body).not.toMatchObject({ reason: 'no_subscription' });
+      expect(fake.retrieve).toHaveBeenCalledTimes(1);
+      expect((await row(a.accountId)).stripe_subscription_status).toBe('past_due');
+    });
+
+    it.each(['acacia', 'dahlia', 'dahlia-expanded'] as const)('an invoice.payment_failed in the %s shape is fetched and applied', async (shape) => {
+      const a = await seed();
+      fetches(a, { status: 'past_due' });
+      const res = await deliver(rawInvoicePaymentFailed({ eventId: evt(), stripeCustomerId: a.cus, subscriptionId: a.sub, shape }));
+      expect(res.body).not.toMatchObject({ reason: 'no_subscription' });
+      expect(fake.retrieve).toHaveBeenCalledTimes(1);
+      expect((await row(a.accountId)).status).toBe('past_due');
+    });
+
+    it('a dahlia invoice with no subscription (a one-off invoice) is still not fetched', async () => {
+      const a = await seed();
+      const res = await deliver(rawInvoicePaid({ eventId: evt(), stripeCustomerId: a.cus, subscriptionId: null, shape: 'dahlia' }));
+      expect(res.body).toMatchObject({ handled: false, reason: 'no_subscription' });
+      expect(fake.retrieve).not.toHaveBeenCalled();
+    });
+
     it('an event with no subscription id is not fetched', async () => {
       const a = await seed();
       expect((await deliver(paid(a, null))).body).toMatchObject({ handled: false, reason: 'no_subscription' });

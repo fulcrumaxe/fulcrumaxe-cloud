@@ -38,7 +38,7 @@ export interface StripeLike {
  * D#69 B1: the Stripe API version this code is written against, pinned
  * so a Stripe-side default bump can never change the shape of a fetched
  * subscription under us (at this version `Invoice.subscription` is still a
- * top-level field). Typed as the SDK's `LatestApiVersion`, so tsc fails if
+ * top-level field; an endpoint on a later version sends it under `parent.subscription_details`, which `invoiceSubscriptionIdOf` reads too). Typed as the SDK's `LatestApiVersion`, so tsc fails if
  * the literal drifts from the installed SDK (stripe@17.7.0).
  */
 export const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2025-02-24.acacia';
