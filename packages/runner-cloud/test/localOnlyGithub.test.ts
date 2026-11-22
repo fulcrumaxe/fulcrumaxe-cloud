@@ -93,6 +93,12 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
       { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest", alsoOn: "gate1Status" },
       { id: "A18", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1QueueEntries, variables: exactly owner, name, branch }", only: "gate1Attest" },
+      { id: "A19", method: "GET", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: "none", only: "engineRemove" },
+      { id: "A20", method: "GET", paths: ["/repos/{owner}/{repo}/git/trees/{sha}"], query: ["recursive"], body: "none", only: "engineRemove" },
+      { id: "A21", method: "GET", paths: ["/repos/{owner}/{repo}/git/ref/heads/{branch}"], query: [], body: "none", only: "engineRemove" },
+      { id: "A22", method: "POST", paths: ["/repos/{owner}/{repo}/git/trees"], query: [], body: "{ base_tree, tree: 1 to 500 deletions { path, mode, type: blob, sha: null } }", only: "engineRemove" },
+      { id: "A23", method: "POST", paths: ["/repos/{owner}/{repo}/git/commits"], query: [], body: "{ message, tree, parents: [one commit] }", only: "engineRemove" },
+      { id: "A24", method: "POST", paths: ["/repos/{owner}/{repo}/git/refs"], query: [], body: "{ ref: refs/heads/fx/engine-remove-<major.minor.patch>, sha }", only: "engineRemove" },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });

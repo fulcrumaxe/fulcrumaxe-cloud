@@ -14,7 +14,7 @@ import type { PrCloseHttp } from "@fx/worker";
  * A refusal is logged as one line with the rule it broke and nothing else (never a path, a name or a body), and thrown unchanged:
  * the caller's catch turns it into a fixed code, so a refused call reads as "GitHub unavailable" and never as a green answer.
  */
-export function fenceInstallationHttp(http: InstallationHttp, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean } = {}): LocalGitHubHttp {
+export function fenceInstallationHttp(http: InstallationHttp, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean } = {}): LocalGitHubHttp {
   const fenced = localOnlyGithub({
     async request(req) {
       if (req.method !== "GET" && req.method !== "POST" && req.method !== "PUT" && req.method !== "PATCH") throw new LocalOnlyGithubError("not_allowlisted");
@@ -54,6 +54,15 @@ export function fenceForPrClose(http: InstallationHttp): PrCloseHttp {
 
 const isListOrClose = (req: { method: string; path: string }): boolean =>
   (req.method === "GET" && /^\/repos\/[^/?#]+\/[^/?#]+\/pulls$/.test(req.path)) || (req.method === "PATCH" && /^\/repos\/[^/?#]+\/[^/?#]+\/pulls\/[0-9]{1,10}$/.test(req.path));
+
+/**
+ * D#845 ON-16b: the client that builds the engine removal pull request. The `merge_gate` installation client already holds contents and pull requests
+ * write on ONE repository; the fence narrows it to the removal's calls (A19 to A24 and A1 to A4) with the merge (A10) left out, so it can read paths and
+ * blob ids and write one commit on one `fx/engine-remove-<v>` branch and one pull request, and nothing else (no delete, no status, no other ref).
+ */
+export async function openForEngineRemoval(open: Open, target: InstallationHttpTarget): Promise<LocalGitHubHttp> {
+  return fenceInstallationHttp(await open("merge_gate", { ...target, allowGraphql: true }), { exclude: ["A10"], engineRemove: true });
+}
 
 /**
  * Opens the `read` or `merge_gate` client for a repository, as the plain client for a sandbox repo and the fenced one for a `runner_local` repo.

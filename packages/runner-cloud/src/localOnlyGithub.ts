@@ -259,7 +259,7 @@ export interface LocalOnlyAllowlistEntry {
   query: readonly string[];
   body: string;
   /** Present on an opt-in entry: it holds only on a client built with that option, and every other client refuses it. */
-  only?: "gate1Attest";
+  only?: "gate1Attest" | "engineRemove";
   /** An opt-in entry that ALSO holds on a client built with this read-only option (A17 alone). */
   alsoOn?: "gate1Status";
 }
@@ -284,9 +284,22 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A16", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1LabelEvents, variables: exactly owner, name, number, optional cursor }", only: "gate1Attest" },
     { id: "A17", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1Status, variables: exactly owner, name, sha }", only: "gate1Attest", alsoOn: "gate1Status" },
     { id: "A18", method: "POST", paths: ["/graphql"], query: [], body: "{ query: Gate1QueueEntries, variables: exactly owner, name, branch }", only: "gate1Attest" },
+    // D#845 ON-16b: the engine removal pull request, built through the data API. Opt-in (`engineRemove`); on that client ONLY these and A1 to A4 hold.
+    { id: "A19", method: "GET", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: "none", only: "engineRemove" },
+    { id: "A20", method: "GET", paths: ["/repos/{owner}/{repo}/git/trees/{sha}"], query: ["recursive"], body: "none", only: "engineRemove" },
+    { id: "A21", method: "GET", paths: ["/repos/{owner}/{repo}/git/ref/heads/{branch}"], query: [], body: "none", only: "engineRemove" },
+    { id: "A22", method: "POST", paths: ["/repos/{owner}/{repo}/git/trees"], query: [], body: "{ base_tree, tree: 1 to 500 deletions { path, mode, type: blob, sha: null } }", only: "engineRemove" },
+    { id: "A23", method: "POST", paths: ["/repos/{owner}/{repo}/git/commits"], query: [], body: "{ message, tree, parents: [one commit] }", only: "engineRemove" },
+    { id: "A24", method: "POST", paths: ["/repos/{owner}/{repo}/git/refs"], query: [], body: "{ ref: refs/heads/fx/engine-remove-<major.minor.patch>, sha }", only: "engineRemove" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
+/**
+ * The only entries an `engineRemove` client holds besides its own: the repository, the pull request list, A4 opening a pull request only from the removal branch,
+ * and A1 narrowed to the PullRequestFiles read. Every other write is refused there. Known limit: that the commit holds deletions ONLY is the builder's code
+ * (`buildEngineRemovalPr`), not the fence: A23 takes any tree sha, so the fence alone cannot tell a deletions-only tree from another.
+ */
+const ENGINE_REMOVE_BASE_IDS: readonly string[] = ["A1", "A2", "A3", "A4"];
 const NOT_ALLOWLISTED = "not_allowlisted";
 const ACCEPT_RULE = "accept";
 /** The media type every forwarded call carries. */
@@ -395,6 +408,19 @@ const GATE1_STATUS_VARIABLES: Readonly<Record<keyof typeof GATE1_STATUS_DOCUMENT
 const GATE1_QUEUE_VARIABLES: Readonly<Record<keyof typeof GATE1_QUEUE_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   Gate1QueueEntries: (v) => hasExactKeys(v, ["owner", "name", "branch"]) && ownerOrName(v.owner) && ownerOrName(v.name) && str(v.branch, REF_NAME),
 };
+const ENGINE_REMOVE_REF = /^refs\/heads\/fx\/engine-remove-[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
+const TREE_PATH = /^(?!\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^\u0000-\u001f\u007f\\]{1,500}$/;
+const isSha = (v: unknown): boolean => typeof v === "string" && SHA.test(v);
+/** A22: only deletions (sha null) of files and links, from one base tree. A23: one commit on one parent. A24: only the removal branch. */
+const engineRemoveBodyFits = (id: string, body: unknown): boolean => {
+  if (!isPlainObject(body)) return false;
+  if (id === "A24") return hasExactKeys(body, ["ref", "sha"]) && typeof body.ref === "string" && ENGINE_REMOVE_REF.test(body.ref) && isSha(body.sha);
+  if (id === "A23") return hasExactKeys(body, ["message", "tree", "parents"]) && typeof body.message === "string" && body.message.length >= 1 && body.message.length <= 500 && isSha(body.tree) && Array.isArray(body.parents) && body.parents.length === 1 && isSha(body.parents[0]);
+  return (
+    hasExactKeys(body, ["base_tree", "tree"]) && isSha(body.base_tree) && Array.isArray(body.tree) && body.tree.length >= 1 && body.tree.length <= 500 &&
+    body.tree.every((e) => isPlainObject(e) && hasExactKeys(e, ["path", "mode", "type", "sha"]) && typeof e.path === "string" && TREE_PATH.test(e.path) && (e.mode === "100644" || e.mode === "100755" || e.mode === "120000") && e.type === "blob" && e.sha === null)
+  );
+};
 const FX_GATE1_FAILURE_DESCRIPTIONS: readonly string[] = Object.values(FX_GATE1_DESCRIPTIONS.failure);
 /** A7's extra shape on the attester's client: `fx-gate1`, with success and the one success text, or failure and one of the failure texts. */
 const gate1StatusFits = (body: Record<string, unknown>): boolean =>
@@ -409,10 +435,10 @@ function documentBodyFits(body: unknown, documents: Readonly<Record<string, stri
 }
 
 /** Whether the body has the shape the entry names. */
-function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: boolean): boolean {
+function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: boolean, engineRemove = false): boolean {
   switch (entry.id) {
     case "A1":
-      return documentBodyFits(body, GITHUB_GRAPHQL_DOCUMENTS, VARIABLES);
+      return documentBodyFits(body, GITHUB_GRAPHQL_DOCUMENTS, VARIABLES, engineRemove ? "PullRequestFiles" : undefined);
     case "A12":
       return documentBodyFits(body, MERGE_QUEUE_READ_DOCUMENTS, QUEUE_VARIABLES, "MergeQueueRead");
     case "A13":
@@ -427,12 +453,17 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, GATE1_STATUS_DOCUMENTS, GATE1_STATUS_VARIABLES, "Gate1Status");
     case "A18":
       return documentBodyFits(body, GATE1_QUEUE_DOCUMENTS, GATE1_QUEUE_VARIABLES, "Gate1QueueEntries");
+    case "A22":
+    case "A23":
+    case "A24":
+      return engineRemoveBodyFits(entry.id, body);
     case "A4":
       return (
         isPlainObject(body) &&
         hasExactKeys(body, ["title", "head", "base", "body", "draft"]) &&
         typeof body.title === "string" && body.title.length >= 1 && body.title.length <= 256 &&
         str(body.head, REF_NAME) &&
+        (!engineRemove || (typeof body.head === "string" && ENGINE_REMOVE_REF.test(`refs/heads/${body.head}`))) &&
         str(body.base, REF_NAME) &&
         typeof body.body === "string" && body.body.length <= 65536 &&
         typeof body.draft === "boolean"
@@ -464,19 +495,21 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
 const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
   head: (v) => REF_NAME.test(v) && !v.includes(".."),
   base: (v) => REF_NAME.test(v) && !v.includes(".."),
+  recursive: (v) => v === "1",
   state: (v) => v === "open" || v === "closed" || v === "all",
   per_page: (v) => /^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100,
   page: (v) => /^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100,
 };
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean } = {}): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean } = {}): string | null {
+  const engineRemove = options.engineRemove === true;
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (e.only === undefined || gate1Attest || (gate1Status && e.alsoOn === "gate1Status")) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || gate1Attest || (gate1Status && e.alsoOn === "gate1Status"))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -513,12 +546,13 @@ export interface LocalOnlyGithub extends GithubClient {
  * cloud cannot call merge on it at all and a runner or a person merges there. `gate1Attest` turns on the opt-in entries (A14 to A16, and A7's
  * `fx-gate1` shape) for this client only. `gate1Status` turns on A17 alone (a read), and nothing that writes.
  */
-export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean } = {}): LocalOnlyGithub {
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean } = {}): LocalOnlyGithub {
   const exclude = options.exclude ?? [];
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
+  const engineRemove = options.engineRemove === true;
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status });
+    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove });
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });
