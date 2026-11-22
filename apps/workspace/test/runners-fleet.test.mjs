@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { launchRunId } from "../apps/runs/runs-storage.js";
 import {
   ACTION_SENTENCES, ADD_REPO_SENTENCES, CHECK_READ_FAILED, ADD_SENTENCES, CHECK_POLL_MS, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, agoText, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, heldBackText, loadRepoChoices, parseLabels,
-  provText, readFleet, readRunner, runnerLimitText, stateParts, versionText,
+  NO_PREFLIGHT, PREFLIGHT_OK, preflightLines, provText, readFleet, readRunner, runnerLimitText, stateParts, versionText,
 } from "../apps/runners/runners-fleet.js";
 
 const ME = "33333333-3333-4333-8333-333333333333";
@@ -41,6 +41,28 @@ function fakeCall(routes) {
   });
   return { call, log };
 }
+
+// D#845 ON-21b: the Machines row's preflight line, from what the cloud sends (a { code, fix } pair per code, the fix being the cloud's one fixed line).
+describe("the preflight line of a Machines row", () => {
+  const withPreflight = (preflight) => readRunner(wire({ facts: { os: "linux", arch: "x64", engine: "os_sandbox", ...(preflight === undefined ? {} : { preflight }) } }));
+  it("shows each reported code's fixed line once, in the order sent", () => {
+    const r = withPreflight([{ code: "kvm_absent", fix: "No KVM here" }, { code: "unchecked:disk", fix: "Could not run" }, { code: "unchecked:memory", fix: "Could not run" }]);
+    expect(preflightLines(r)).toEqual(["No KVM here", "Could not run"]);
+  });
+  it("a machine that has not said (no key, null, or no facts at all) reads as not reported, never as all passing", () => {
+    for (const r of [withPreflight(undefined), withPreflight(null), readRunner(wire({ facts: null }))]) expect(preflightLines(r)).toBeNull();
+    expect(NO_PREFLIGHT).toBe("Not reported yet");
+  });
+  it("an empty list is every check passing", () => {
+    expect(preflightLines(withPreflight([]))).toEqual([]);
+    expect(PREFLIGHT_OK).toBe("All checks passed");
+  });
+  it("only { code, fix } pairs of short strings are kept: anything else the body holds never reaches the screen", () => {
+    const r = withPreflight([{ code: "dns_failed", fix: "Fixed line" }, { code: "x" }, { fix: "no code" }, null, "dns_failed", { code: "a", fix: "" }, { code: "b", fix: 5 }, { code: "c", fix: "x".repeat(401) }]);
+    expect(preflightLines(r)).toEqual(["Fixed line"]);
+    expect(withPreflight("dns_failed").facts.preflight).toBeNull();
+  });
+});
 
 describe("reading a runner", () => {
   it("keeps a name, and words a runner nobody named from the cloud's placeholder; no text is ever null or undefined", () => {

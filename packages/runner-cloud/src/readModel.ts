@@ -192,7 +192,7 @@ export interface RunnerRow {
   has_name: boolean;
   labels: string[];
   /** What the runner reported on `hello` (os, arch, sandbox engine); null before it has. Display only: no decision reads it. */
-  facts: { os: string; arch: string; engine: string } | null;
+  facts: ReportedFacts | null;
   /** The runs it holds now with a live lease, for the page to link. `label` is "<role> · owner/name", never null. */
   current_runs: Array<{ id: string; label: string }>;
   /** `runner_settings.paused_at` and `draining` as set, before the online test; `state` above is the one word to show. */
@@ -292,13 +292,24 @@ async function planFigures(deps: ReadDeps, client: PoolClient, accountId: string
   return { limit: stored?.total_jobs ?? figure.jobs, runnerLimit };
 }
 
+/**
+ * What a runner reported about its machine. `preflight` (D#845 ON-21b): the codes of its preflight that are not `ok`, each with its one fixed line, from the closed set only; `null` when the
+ * runner has not said (an old runner, or none yet), which is not the same as `[]` (every check passed).
+ */
+export interface ReportedFacts {
+  os: string;
+  arch: string;
+  engine: string;
+  preflight: Array<{ code: string; fix: string }> | null;
+}
+
 /** What a runner reported about its machine (os, arch, sandbox engine), by runner id. Read by fleetList.ts alone: this file is in the import graph of the request verifier, which must never name the facts (FL-2 acceptance 4). */
-export type ReportedFactsLoader = (client: PoolClient, accountId: string) => Promise<Map<string, { os: string; arch: string; engine: string }>>;
+export type ReportedFactsLoader = (client: PoolClient, accountId: string) => Promise<Map<string, ReportedFacts>>;
 
 export async function readFleet(deps: ReadDeps, accountId: string, userId: string | null, loadReported?: ReportedFactsLoader): Promise<FleetRead> {
   const now = (deps.now ?? (() => new Date()))();
   const min = deps.minSupportedProtocolVersion ?? MIN_SUPPORTED_PROTOCOL_VERSION;
-  const read = async (client: PoolClient): Promise<{ runners: RawRunner[]; repos: Map<string, string>; runs: RawRunnerRun[]; plan: { limit: number | null; runnerLimit: number | null }; reported: Map<string, { os: string; arch: string; engine: string }> }> => {
+  const read = async (client: PoolClient): Promise<{ runners: RawRunner[]; repos: Map<string, string>; runs: RawRunnerRun[]; plan: { limit: number | null; runnerLimit: number | null }; reported: Map<string, ReportedFacts> }> => {
     const runners = (
       await client.query<RawRunner>(
         `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { SANDBOX_PINNED_VCPUS, PINNED_MEMORY_MB, computeComputeUsd } from "@fx/spend";
 import { ONBOARDING_STEPS, getOnboarding } from "@fx/core/src/onboarding/progress.js";
 import { ENGINE_STEPS, TRACKS, chooseTrack } from "@fx/core/src/onboarding/engineTrack.js";
+import { PREFLIGHT_CODES } from "@fulcrumaxe/runner-protocol";
 import { readMachineFacts } from "@fx/runner-cloud";
 import { enginePlanOffered } from "@fx/billing";
 import { PLAN_GATES } from "@fx/core/src/onboarding/engineCoverage.js";
@@ -58,6 +59,8 @@ const engineStepsSchema = z.array(
     helper_missing: z.literal(true).optional(),
     plan_gate: z.enum(PLAN_GATES as [string, ...string[]]).optional(),
     engines: z.object({ quantity: z.number().int(), live: z.number().int() }).optional(),
+    // D#845 ON-21b: the preflight codes that are not ok, only members of the closed set, each with its one fixed line. Left out when the machine did not say.
+    preflight: z.array(z.object({ code: z.enum(PREFLIGHT_CODES), fix: z.string() })).optional(),
     failure: z.object({ code: z.string(), at: z.string() }).nullable(),
   }),
 );

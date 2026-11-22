@@ -164,7 +164,7 @@ function mountOnboarding(host) {
   // D#845 ON-6c: the machine's KVM fact and helper_missing come from the machine step itself (the same machine the step's tier is read from), never from a second read.
   const machineFacts = () => {
     const m = st.parsed && st.parsed.engine ? st.parsed.engine[0] : null;
-    return m ? { ...(m.kvm ? { kvm: m.kvm } : {}), ...(m.helper_missing ? { helper_missing: true } : {}) } : {};
+    return m ? { ...(m.kvm ? { kvm: m.kvm } : {}), ...(m.helper_missing ? { helper_missing: true } : {}), ...(m.preflight ? { preflight: m.preflight } : {}) } : {};
   };
   const engineEnv = () => ({ ctx: { ...st.ctx, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
   // D#845 ON-22: the project step's purchase buttons. Checkout is the existing one (the server never sells a second subscription: an account that already pays gets the item added, and the answer is its own success path).

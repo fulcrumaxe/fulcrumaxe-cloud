@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
+import { PREFLIGHT_FIX } from '@fulcrumaxe/runner-protocol';
 import { createPool } from '@fx/db/src/pool.js';
 import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
@@ -11,7 +12,7 @@ import { ROUTES } from '../src/routes/index.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 
 interface Identity { accountId: string; userId: string }
-interface Track { track: string; chosen_at: string | null; steps: { step: string; state?: string; completed_at: string | null; tier?: string | null; kvm?: string; helper_missing?: boolean }[] }
+interface Track { track: string; chosen_at: string | null; steps: { step: string; state?: string; completed_at: string | null; tier?: string | null; kvm?: string; helper_missing?: boolean; preflight?: { code: string; fix: string }[] }[] }
 interface Body { started_at: string; steps: unknown[]; tracks: Track[] }
 
 /** D#845 ON-5: the tracks in `GET /api/v1/onboarding` and `PUT /api/v1/onboarding/track`, through the real dispatcher against real Postgres. */
@@ -56,10 +57,10 @@ describe('D#845 ON-5: onboarding engine track routes', () => {
     await insertApiToken(appUserPool, { accountId: w.accountId, createdBy: w.userId, tokenHash: hashToken(plaintext), displayHint: 'fxat_...test', scopes, expiresAt: new Date(Date.now() + 86_400_000) });
     return plaintext;
   }
-  async function runner(w: Identity, auth: boolean | null, engine: 'microvm' | 'os_sandbox', kvm: 'present' | 'absent' | null = null): Promise<string> {
+  async function runner(w: Identity, auth: boolean | null, engine: 'microvm' | 'os_sandbox', kvm: 'present' | 'absent' | null = null, preflight: string[] | null = null): Promise<string> {
     const id = randomUUID();
-    await admin.query(`INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version, last_seen_at, model_auth_present, kvm) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', 22, now(), $6, $7)`, [
-      id, w.accountId, w.userId, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: 'x'.repeat(43) }), randomUUID().replace(/-/g, '') + 'abcdefghijk', auth, kvm,
+    await admin.query(`INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version, last_seen_at, model_auth_present, kvm, preflight) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', 22, now(), $6, $7, $8::text[])`, [
+      id, w.accountId, w.userId, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: 'x'.repeat(43) }), randomUUID().replace(/-/g, '') + 'abcdefghijk', auth, kvm, preflight,
     ]);
     await admin.query(`INSERT INTO runner_facts (runner_id, account_id, os, arch, mem_gb_bucket, cpus, sandbox_engine) VALUES ($1, $2, 'linux', 'x64', 16, 8, $3)`, [id, w.accountId, engine]);
     return id;
@@ -112,6 +113,24 @@ describe('D#845 ON-5: onboarding engine track routes', () => {
       const noKvmStep = ((await (await call(noKvm, 'GET')).json()) as Body).tracks[1]!.steps[0]!;
       expect(noKvmStep).toMatchObject({ kvm: 'absent' });
       expect(Object.keys(noKvmStep)).not.toContain('helper_missing');
+    });
+
+    // D#845 ON-21b: the machine step carries the preflight codes with their fixed lines; a machine that never said has no key, an empty list is kept, and another account's codes never show.
+    it('the machine step carries the preflight codes over the wire, only members of the closed set, and nothing for a machine that never said', async () => {
+      const old = await who('owner');
+      await runner(old, null, 'os_sandbox');
+      expect(Object.keys(((await (await call(old, 'GET')).json()) as Body).tracks[1]!.steps[0]!)).not.toContain('preflight');
+      const w = await who('owner');
+      await runner(w, null, 'os_sandbox', 'absent', ['dns_failed', 'kvm_absent']);
+      const step = ((await (await call(w, 'GET')).json()) as Body).tracks[1]!.steps[0]!;
+      expect(step.preflight).toEqual([
+        { code: 'kvm_absent', fix: PREFLIGHT_FIX.kvm_absent },
+        { code: 'dns_failed', fix: PREFLIGHT_FIX.dns_failed },
+      ]);
+      const allOk = await who('owner');
+      await runner(allOk, null, 'microvm', 'present', []);
+      expect(((await (await call(allOk, 'GET')).json()) as Body).tracks[1]!.steps[0]!.preflight).toEqual([]);
+      expect(JSON.stringify(await (await call(old, 'GET')).json())).not.toContain('dns_failed');
     });
 
     it('is still session-only and admin: a member and a token are refused', async () => {

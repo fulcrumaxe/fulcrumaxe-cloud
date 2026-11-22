@@ -90,7 +90,9 @@ export type ClaimReply = z.infer<typeof ClaimReply>;
 export const WATCH_MODE_CAPABILITY = "watch_mode" as const;
 /** D#845 ON-6c: this cloud stores `facts.kvm` (migration 1047). Said only to a runner that declared `kvm_fact_v1`; the runner then sends `kvm` on its later hellos. */
 export const KVM_FACT_CAPABILITY = "kvm_fact" as const;
-export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY] as const;
+/** D#845 ON-21b: this cloud stores `facts.preflight` (migration 1051). Said only to a runner that declared `preflight_v1`; the runner then sends the codes on its later hellos. */
+export const PREFLIGHT_CAPABILITY = "preflight" as const;
+export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY] as const;
 
 /** 200 from hello: the protocol version this cloud speaks, the wake grant for a runner that asked for one, and the capabilities of this cloud. */
 export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake, capabilities: z.array(z.enum(HELLO_REPLY_CAPABILITIES)).max(HELLO_REPLY_CAPABILITIES.length).refine((list) => new Set(list).size === list.length, { message: "a capability appears once" }).optional() }).strict();

@@ -197,9 +197,9 @@ test.describe("D#605 FL-9: the fleet page", () => {
   test("a row shows every part by name and words: state, version, runs, capacity, check-in, repos, mode, labels, facts, and the account line", async ({ page }) => {
     const { errors } = await setup(page, {
       runners: [
-        runner({ current_runs: [{ id: "88888888-8888-4888-8888-888888888881", label: "fulcrumaxe executor · acme/web" }], state: "busy", load_label: "Busy · 1 of 8" }),
+        runner({ current_runs: [{ id: "88888888-8888-4888-8888-888888888881", label: "fulcrumaxe executor · acme/web" }], state: "busy", load_label: "Busy · 1 of 8", facts: { os: "macos", arch: "arm64", engine: "os_sandbox", preflight: [{ code: "dns_failed", fix: "This machine can't resolve names. Check `/etc/resolv.conf`" }] } }),
         runner({ id: R2, name: "Unnamed runner (Bo Builder)", has_name: false, registered_by: { id: ME, name: "Bo Builder" }, labels: [], facts: null, binary_version: null, last_seen_at: null, capacity: null, state: "offline", provisioning: { minted_by: { id: ME, name: "Ada Admin" }, first_ip: "203.0.113.9" } }),
-        runner({ id: R3, name: "Old box", state: "outdated", binary_version: "0.1.0", draining: false }),
+        runner({ id: R3, name: "Old box", state: "outdated", binary_version: "0.1.0", draining: false, facts: { os: "linux", arch: "x64", engine: "microvm", preflight: [] } }),
       ],
       account: { limit: 16, capacity: 20, running: 1, runner_count: 3, runner_limit: 5 },
     });
@@ -223,6 +223,11 @@ test.describe("D#605 FL-9: the fleet page", () => {
     await expect(rows.nth(1)).toContainText("Never");
     await expect(rows.nth(1).locator('[data-testid="runners-prov"]')).toHaveText("Made from a token by Ada Admin · first seen at 203.0.113.9");
     await expect(rows.nth(2)).toContainText("0.1.0 · Update needed");
+    // D#845 ON-21b: the preflight line of the Machines row: a reported code with the cloud's fixed line, every check passing, and a machine that has not said.
+    await expect(rows.nth(0).locator('[data-testid="runners-preflight"]')).toHaveText("This machine can't resolve names. Check `/etc/resolv.conf`");
+    await expect(rows.nth(2)).toContainText("All checks passed");
+    await expect(rows.nth(2).locator('[data-testid="runners-preflight"]')).toHaveCount(0);
+    await expect(rows.nth(1).locator('[data-testid="runners-preflight"]')).toHaveCount(0);
     await clean(page, errors);
   });
 

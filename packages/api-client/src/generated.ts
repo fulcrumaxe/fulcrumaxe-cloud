@@ -3614,6 +3614,10 @@ export interface Operations {
             quantity: number;
             live: number;
           };
+          preflight?: Array<{
+            code: "kvm_absent" | "kvm_no_access" | "kvm_no_vt" | "cgroup_v1" | "cgroup_no_delegate" | "linger_off" | "net_ipv6_only" | "dns_failed" | "clock_skew" | "disk_low" | "vm_memory_low" | "net_blocked:cloud" | "net_blocked:github" | "net_blocked:model_api" | "net_blocked:registry_npm" | "net_blocked:registry_pypi" | "unchecked:kvm_device" | "unchecked:kvm_access" | "unchecked:kvm_vt" | "unchecked:cgroup_v2" | "unchecked:cgroup_delegate" | "unchecked:linger" | "unchecked:net_cloud" | "unchecked:net_github" | "unchecked:net_model_api" | "unchecked:net_registry_npm" | "unchecked:net_registry_pypi" | "unchecked:net_ipv4" | "unchecked:dns" | "unchecked:clock" | "unchecked:disk" | "unchecked:memory";
+            fix: string;
+          }>;
           failure: ({
             code: string;
             at: string;

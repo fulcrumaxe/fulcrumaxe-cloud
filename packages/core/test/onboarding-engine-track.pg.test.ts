@@ -1,6 +1,7 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
+import { PREFLIGHT_FIX } from '@fulcrumaxe/runner-protocol';
 import { createPool } from '@fx/db/src/pool.js';
 import { nextGhInstallationId } from '@fx/db/test/helpers/seed.js';
 import { withTenant } from '../src/tenancy/withTenant.js';
@@ -35,7 +36,7 @@ describe('engine track (pg)', () => {
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, $4, 'team')`, [repoId, accountId, inst, randomInt(1, 2_000_000_000)]);
     return { accountId, userId, repoId };
   }
-    async function runner(a: Acct, o: { hello?: boolean; revoked?: boolean; engine?: 'microvm' | 'os_sandbox'; auth?: boolean | null; kvm?: 'present' | 'absent' } = {}): Promise<string> {
+    async function runner(a: Acct, o: { hello?: boolean; revoked?: boolean; engine?: 'microvm' | 'os_sandbox'; auth?: boolean | null; kvm?: 'present' | 'absent'; preflight?: string[] } = {}): Promise<string> {
     const id = randomUUID();
     const jkt = randomUUID().replace(/-/g, '') + 'abcdefghijk';
     await admin.query(
@@ -46,6 +47,7 @@ describe('engine track (pg)', () => {
     if (o.hello === false) await admin.query(`UPDATE runners SET last_seen_at = now() WHERE id = $1`, [id]);
     if (o.hello !== false) await admin.query(`UPDATE runners SET protocol_version = 22, last_seen_at = now(), model_auth_present = $2 WHERE id = $1`, [id, o.auth ?? null]);
     if (o.kvm) await admin.query(`UPDATE runners SET kvm = $2 WHERE id = $1`, [id, o.kvm]);
+    if (o.preflight) await admin.query(`UPDATE runners SET preflight = $2::text[] WHERE id = $1`, [id, o.preflight]);
     if (o.revoked) await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [id]);
     if (o.engine) await admin.query(`INSERT INTO runner_facts (runner_id, account_id, os, arch, mem_gb_bucket, cpus, sandbox_engine) VALUES ($1, $2, 'linux', 'x64', 16, 8, $3)`, [id, a.accountId, o.engine]);
     return id;
@@ -114,6 +116,35 @@ describe('engine track (pg)', () => {
     await new Promise((r) => setTimeout(r, 15));
     await runner(a, { engine: 'os_sandbox', kvm: 'present' });
     expect((await engine(a))[0]).toMatchObject({ kvm: 'present', helper_missing: true });
+  });
+
+  // D#845 ON-21b: the machine step carries the preflight codes of the most recently heard machine, read for this account only.
+  it('machine: preflight follows the most recently heard machine, with the fixed lines; a machine that never said carries none, and an empty list is kept', async () => {
+    const a = await account();
+    await runner(a, { engine: 'os_sandbox' });
+    expect((await engine(a))[0]).not.toHaveProperty('preflight');
+    const b = await account();
+    await runner(b, { engine: 'os_sandbox', preflight: ['dns_failed', 'kvm_absent'] });
+    expect((await engine(b))[0]!.preflight).toEqual([
+      { code: 'kvm_absent', fix: PREFLIGHT_FIX.kvm_absent },
+      { code: 'dns_failed', fix: PREFLIGHT_FIX.dns_failed },
+    ]);
+    const c = await account();
+    await runner(c, { engine: 'microvm', preflight: [] });
+    expect((await engine(c))[0]!.preflight).toEqual([]);
+  });
+
+  it("machine: a revoked machine's codes are not read, the newest heard machine wins, and another account's codes never show", async () => {
+    const a = await account();
+    const other = await account();
+    await runner(other, { engine: 'os_sandbox', preflight: ['disk_low'] });
+    await runner(a, { engine: 'os_sandbox', preflight: ['clock_skew'], revoked: true });
+    expect((await engine(a))[0]).not.toHaveProperty('preflight');
+    await runner(a, { engine: 'os_sandbox', preflight: ['linger_off'] });
+    await new Promise((r) => setTimeout(r, 15));
+    await runner(a, { engine: 'os_sandbox', preflight: ['disk_low', 'vm_memory_low'] });
+    expect((await engine(a))[0]!.preflight!.map((p) => p.code)).toEqual(['disk_low', 'vm_memory_low']);
+    expect((await engine(other))[0]!.preflight!.map((p) => p.code)).toEqual(['disk_low']);
   });
 
   it('claude: done while the latest hello says true; false, never said and a revoked machine leave it open', async () => {

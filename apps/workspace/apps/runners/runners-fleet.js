@@ -56,7 +56,7 @@ export function readRunner(r) {
     runs: (Array.isArray(r.current_runs) ? r.current_runs : []).filter((x) => x && typeof x.id === "string").map((x) => ({ id: x.id, label: text(x.label) || "A run" })),
     repos: (Array.isArray(r.repos) ? r.repos : []).map((x) => text(x && x.name)).filter(Boolean),
     labels: (Array.isArray(r.labels) ? r.labels : []).map(text).filter(Boolean),
-    facts: r.facts && typeof r.facts === "object" ? { os: text(r.facts.os), arch: text(r.facts.arch), engine: text(r.facts.engine) } : null,
+    facts: r.facts && typeof r.facts === "object" ? { os: text(r.facts.os), arch: text(r.facts.arch), engine: text(r.facts.engine), preflight: readPreflight(r.facts.preflight) } : null,
     sandboxes: readSandboxes(r.sandboxes),
     paused: r.paused === true,
     draining: r.draining === true,
@@ -137,6 +137,13 @@ export function agoText(iso, nowMs) {
 }
 export const capacityText = (r) =>
   r.state === "revoked" ? "None" : r.capacity === null ? "Capacity unknown" : "Light " + r.capacity.light.in_use + " of " + r.capacity.light.limit + " · Heavy " + r.capacity.heavy.in_use + " of " + r.capacity.heavy.limit;
+// D#845 ON-21b: the preflight codes the machine reported, each with the cloud's one fixed line. null: the machine has not said (an old runner, or none yet); []: every check passed. Anything that is not a
+// { code, fix } pair of short strings is dropped, so nothing else can reach the screen.
+const readPreflight = (list) => (Array.isArray(list) ? list.filter((x) => x && typeof x.code === "string" && typeof x.fix === "string" && x.fix !== "" && x.fix.length <= 400).slice(0, 40).map((x) => ({ code: x.code, fix: x.fix })) : null);
+export const NO_PREFLIGHT = "Not reported yet";
+export const PREFLIGHT_OK = "All checks passed";
+/** The Machines row's preflight lines: the distinct fixed lines of the reported codes, or null while the machine has not said (the row then says NO_PREFLIGHT), or [] when every check passed. */
+export const preflightLines = (r) => (r.facts === null || r.facts.preflight === null ? null : [...new Set(r.facts.preflight.map((p) => p.fix))]);
 export const factsText = (r) => (r.facts === null ? "Not reported yet" : [r.facts.os, r.facts.arch, r.facts.engine].filter(Boolean).join(" · ") || "Not reported yet");
 export const provText = (r) => (r.prov === null ? "" : "Made from a token by " + r.prov.by + (r.prov.ip ? " · first seen at " + r.prov.ip : ""));
 
