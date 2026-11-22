@@ -121,7 +121,7 @@ request.
 | If your change... | Run | And do |
 |---|---|---|
 | imports another workspace package, in source or in a test | `node --test scripts/ci/declared-imports.test.mjs` and `pnpm typecheck` | Declare it in `package.json` (`devDependencies` for a test-only import). A test import compiles the other package under your package's flags, so typecheck everything, not just your package. |
-| adds a new package or app directory | `packages/test-guard/test/workspace-coverage.test.ts` | Register it in `vitest.workspace.ts` and list `../test-guard/src/setup.ts` first in its `vitest.config.ts` `setupFiles`, as `packages/hetzner` does (#1030). |
+| adds a new package or app directory | `packages/test-guard/test/workspace-coverage.test.ts` | Register it in `vitest.workspace.ts` and list `../test-guard/src/setup.ts` first in its `vitest.config.ts` `setupFiles`, as `packages/hetzner` and `packages/release-verify` do (#1030, #1174). |
 | adds or changes an API route or schema | `packages/api/test/openapi-drift.test.ts`, `packages/api/test/inventory.test.ts`, `packages/api-client/test/drift.test.ts`, `packages/api/test/contract.test.ts` | Regenerate with `pnpm --filter @fx/api gen-openapi`, then `pnpm --filter @fx/api-client gen`, and commit `packages/api/openapi.json` and `packages/api-client/src/generated.ts`. Never edit either by hand. |
 | adds `apps/web/app/api/**/route.ts` | `apps/web/test/route-inventory.test.ts` | Add its line to `apps/web/app/api/ROUTES.allowlist`. Run every test that enumerates routes or `vercel.json`: `git grep -l "vercel.json\|ROUTES.allowlist" -- '*.test.*'`. |
 | adds a cron to a `vercel.json` | `apps/live-e2e/test/platform-pack.test.ts` | Declare its probe; the test fails on a scheduled cron no probe covers. |

@@ -54,7 +54,7 @@ is known (`settle.ts`).
 
 - `types.ts`: `Budget`, `ReservationState`, `PlanId`, `WorkItemKind`, `Trigger`, `Purpose`, `ModelId`, `UsageTokens`, `DenyReason`, `ReservationRef`, `ReserveResult`, `MeterDecision`
 - `pricing.ts`: `ModelRate`, `SandboxRates`, `claudePricing()`, `pricingFetchedAt()`, `claudeModelIds()`, `isClaudeModelId(model)`, `computeUsd(rate, usage)`, `computeModelUsd(model, usage)`, `sandboxRates()`, `computeComputeUsd(seconds, vcpu, memGb)`
-- `plans.ts`: `FlatComputeBudget`, `ScalingComputeBudget`, `ComputeBudget`, `ApiRateLimits`, `Plan`, `planIds()`, `isPlanId(value)`, `planFor(plan)`, `listPlans()`, `apiLimitsFor(plan)`, `webhookEndpointLimitFor(plan)`, `backgroundBudgetUsd(plan, repoCount)`, `foregroundBudgetUsd(plan)`, `worstCaseComputeUsd(plan)`, `breakEvenMarginUsd(plan)`
+- `plans.ts`: `FlatComputeBudget`, `ScalingComputeBudget`, `ComputeBudget`, `ApiRateLimits`, `Plan`, `planIds()`, `isPlanId(value)`, `planFor(plan)`, `listPlans()`, `apiLimitsFor(plan)`, `webhookEndpointLimitFor(plan)`, `backgroundBudgetUsd(plan, repoCount)`, `foregroundBudgetUsd(plan)`, `worstCaseComputeUsd(plan)`, `breakEvenMarginUsd(plan)`, `enginePricePerMonthUsd()` (the Engine plan's price per live engine, or null when the plan data carries no engine plan), `watchLimitsFor(plan)` (how many people may watch one engine live and for how long; throws `PlanDataMissingError` when the plan data has no figures, so a missing cap is never an unlimited one)
 - `caps.ts`: `defaultPerSpawnCapUsd()`, `defaultFeatureCapUsd()`, `defaultSmallCapUsd()`, `maxFixRounds()`, `FixRoundDecision`, `checkFixRound(roundNumber)`
 
 No figure is compiled into this package. Every rate, budget, cap and limit above is read from the plan data (`loadPlanData()` in `@fx/plan-data`, the `FX_PLAN_DATA` setting) at the moment it is used, so with the setting missing each reader throws `PlanDataMissingError` and the callers show the unavailable state instead of a default.
@@ -115,7 +115,11 @@ window itself rather than trusting the stored string alone. It does not
 separately check `owner_paused_at`/`key_broken_at`/`platform_hold_at`/
 `partner_suspended_at`: migration 0606's derivation priority ranks all
 four above `past_due_since`, so `status` can only read back as
-`past_due` when none of them is set.
+`past_due` when none of them is set. Besides the status, every reservation
+that is not a preview also needs `accounts.hosted_plan_paid` (migration 1048):
+the account's subscription must carry a hosted-plan item. An account that pays
+only for engines is `active` but has no hosted entitlement, so `reserve()` and
+`checkHeadroom()` deny it `account_not_active` (#1166).
 `monthToDateUsd`'s month boundary is computed by `@fx/core`'s
 `utcMonthStart()` (`packages/core/src/time.ts`, `#175`), not the process's
 local timezone -- a prior local-time computation could disagree with the
