@@ -4,6 +4,7 @@ import { initCredentialMatches, isInitLine } from "./credentialCheck.js";
 import { verifyServerUp } from "./settingsFile.js";
 import { LineBuffer, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
 import type { EngineStartOptions, RunOutcome } from "./engine.js";
+import { RAW_TAIL_CHARS, earlyExit } from "../../sandbox/startFailure.js";
 
 /**
  * What the CLI writes to stderr when it overrides the permission mode a caller asked for (it does that whenever
@@ -98,6 +99,8 @@ export interface AgentStreamInput {
   log: { write(kind: "stdout" | "stderr" | "meta", line: string): void };
   /** Strings that must never appear in a local event. */
   secrets?: readonly string[];
+  /** The user's home directory, blanked in a start failure's stderr tail (any `/home/<name>` is blanked too). */
+  home?: string;
   onLocalEvent?: (event: LocalOnlyEvent) => void | Promise<void>;
   onNearLimit?: (info: { resetsAtMs?: number }) => void;
   /** Asked after a non-clean end that no other rung explains: did the kernel enforce the memory budget? An error counts as no. Absent: never `resource_limit`. */
@@ -153,6 +156,10 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
   // The version goes out first, so a breaking release shows up across runs.
   let chain: Promise<void> = Promise.resolve(input.onLocalEvent?.({ seq: localSeq++, ts: new Date().toISOString(), type: "engine_version", engine_version: engineVersion }));
   let stderrTail = "";
+  // The last stretch of raw stderr and whether stdout said anything at all: what a start failure's diagnostic is made from.
+  let stderrLast = "";
+  let stderrCut = false;
+  let sawOutput = false;
   const lineBuffer = new LineBuffer();
 
   const handleLine = async (line: string): Promise<void> => {
@@ -211,10 +218,15 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
     });
   };
 
-  const stdoutDone = pump(input.stdout, (chunk) => lineBuffer.push(chunk).forEach(enqueue));
+  const stdoutDone = pump(input.stdout, (chunk) => {
+    if (chunk.length > 0) sawOutput = true;
+    lineBuffer.push(chunk).forEach(enqueue);
+  });
   const stderrDone = pump(input.stderr, (chunk) => {
     // The scan comes before any log write, so a sink that throws can never hide the warning (fail closed).
     if (stderrTail.length < 4096) stderrTail += chunk;
+    if (stderrLast.length + chunk.length > RAW_TAIL_CHARS) stderrCut = true;
+    stderrLast = (stderrLast + chunk).slice(-RAW_TAIL_CHARS);
     // The warning can arrive split across chunks, so the accumulated tail is searched as well as the chunk.
     if (!modeForced && (PERMISSION_MODE_FORCED.test(chunk) || PERMISSION_MODE_FORCED.test(stderrTail))) {
       modeForced = true;
@@ -253,7 +265,7 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
     // Backstop for a build that dropped a flag after the --help check: an unknown-option exit before any init line.
     if (!sawInit && end.code !== 0 && /unknown (option|argument)|unrecognized (option|argument)|invalid option/i.test(stderrTail)) return { status: "failed", failureReason: "claude_flags_unsupported", engineVersion };
     // A lost command is reported as one: a result line that was seen stays in the outcome's fields, but only a clean end is `ok`.
-    if (result === undefined) return { status: "failed", failureReason: "agent_exit", ...base };
+    if (result === undefined) return { status: "failed", failureReason: "agent_exit", ...base, ...(sawOutput ? {} : { startFailure: earlyExit(end, stderrLast, secrets, input.home, stderrCut) }) };
     if (result.is_error === true) return { status: "failed", failureReason: "agent_error", ...base };
     return { status: "ok", ...base };
   })();

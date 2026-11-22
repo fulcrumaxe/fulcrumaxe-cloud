@@ -20,7 +20,7 @@
  *  - `readCounters` answers nothing: the daemon measures no CPU time or egress bytes yet, and a figure is never made up.
  */
 import type { AgentHandle, AgentRuntime, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
-import { AgentRunFailed, failureOf } from "../../sandbox/agentOutcome.js";
+import { AgentRunFailed, failureOf, startFailureOf } from "../../sandbox/agentOutcome.js";
 import {
   SandboxNotFoundError,
   type CreateSandboxOptions,
@@ -293,8 +293,9 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
     entry.launchedAt = Date.now();
     entry.deadline = entry.launchedAt + entry.timeoutMs;
     const starting = agentUp.then(async (agent) => {
-      const failure = failureOf(await agent.done);
-      if (failure !== undefined) throw new AgentRunFailed(failure);
+      const outcome = await agent.done;
+      const failure = failureOf(outcome);
+      if (failure !== undefined) throw new AgentRunFailed(failure, startFailureOf(outcome));
     });
     arm(entry);
     const finish = (): void => {

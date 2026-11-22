@@ -13,7 +13,7 @@ import type { WslMachine } from "./platform.js";
 import { wslDenyPaths } from "./wslChecks.js";
 import { unixSocketFilter } from "./checkSeccomp.js";
 import { checkProtected } from "./checkProtected.js";
-import { AgentRunFailed, failureOf } from "./agentOutcome.js";
+import { AgentRunFailed, failureOf, startFailureOf } from "./agentOutcome.js";
 
 /** Where a Linux session keeps per-user sockets (the session bus among them). */
 const USER_RUNTIME_ROOT = ["", "run", "user"].join("/");
@@ -307,8 +307,9 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     // The run ends when the agent's own `done` settles; a runtime that runs to completion inside `start` has none.
     // Its outcome is not dropped: a failed one (a credential mismatch, no init line, an unsupported flag) ends the run as that reason.
     const starting = agentUp.then(async (agent) => {
-      const failure = failureOf(await agent.done);
-      if (failure !== undefined) throw new AgentRunFailed(failure);
+      const outcome = await agent.done;
+      const failure = failureOf(outcome);
+      if (failure !== undefined) throw new AgentRunFailed(failure, startFailureOf(outcome));
     });
     arm(entry);
     const finish = (): void => {
