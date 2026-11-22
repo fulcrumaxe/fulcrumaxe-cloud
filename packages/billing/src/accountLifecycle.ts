@@ -14,7 +14,7 @@ import { authorizeAccountWrite, authorizeAccountWriteInTx } from './authorize.js
 import { recordAccountAction } from './audit.js';
 import { buildValidatedReturnUrl } from './returnUrl.js';
 import { appOriginFromEnv, stripeEnginePriceIdFromEnv, stripeEnginePriceIdsFromEnv, stripePriceIdFromEnv } from './env.js';
-import { addItemToSubscription, ENGINE_ACCOUNT_SQL, engineStanding, isValidEngineQuantity, logEngineRefusal, raiseEngineToAtLeast, type EngineAccountRow } from './engineItems.js';
+import { addItemToSubscription, ENGINE_ACCOUNT_SQL, engineStanding, HELD_STATUSES, isValidEngineQuantity, logEngineRefusal, raiseEngineToAtLeast, type EngineAccountRow } from './engineItems.js';
 import { ensurePortalConfigurationId } from './portalConfig.js';
 import { STRIPE_UNAVAILABLE_RESULT, noRefundsCheckoutLine, termsUrlFromEnv, type StripeLike } from './stripeClient.js';
 import type { BillingCtx } from './types.js';
@@ -499,16 +499,6 @@ export async function getBillingPortalUrl(
   }
 }
 
-/** D#69 B14: standings that already have a subscription Checkout must not duplicate. */
-const ALREADY_SUBSCRIBED_STATUSES: ReadonlySet<string> = new Set([
-  'active',
-  'trialing',
-  'past_due',
-  'unpaid',
-  'incomplete',
-  'paused',
-]);
-
 /** `itemAdded`: the plan joined the account's existing subscription as an item (no checkout), and `url` is the validated success url. */
 export type CheckoutSessionResult = { ok: true; url: string; itemAdded?: true } | { ok: false; reason: string };
 
@@ -606,7 +596,7 @@ export async function createCheckoutSession(
       if (!raised.ok && raised.reason === 'already_subscribed') logEngineRefusal(raised.reason, account);
       return raised.ok ? { ok: true, url: successUrl, itemAdded: true } : raised;
     }
-  } else if (account.stripe_subscription_status !== null && ALREADY_SUBSCRIBED_STATUSES.has(account.stripe_subscription_status)) {
+  } else if (account.stripe_subscription_status !== null && HELD_STATUSES.has(account.stripe_subscription_status)) {
     if (!account.stripe_customer_id || !account.stripe_subscription_id) return { ok: false, reason: 'already_subscribed' };
     const stored = { customerId: account.stripe_customer_id, subscriptionId: account.stripe_subscription_id, status: account.stripe_subscription_status };
     if (!['active', 'trialing'].includes(stored.status)) return { ok: false, reason: 'already_subscribed' };

@@ -1,8 +1,10 @@
 import type { Pool } from "pg";
 import { z } from "zod";
-import { createCheckoutSession, defaultStripeClient, getBillingPortalUrl, setAccountBudgets, setEngineQuantity, type StripeLike } from "@fx/billing";
-import { getBudgets, getUsage } from "@fx/spend";
+import { createCheckoutSession, defaultStripeClient, enginePlanOffered, getBillingPortalUrl, setAccountBudgets, setEngineQuantity, type StripeLike } from "@fx/billing";
+import { enginePricePerMonthUsd, getBudgets, getUsage } from "@fx/spend";
 import { countLiveEngines } from "@fx/core/src/onboarding/liveEngines.js";
+import { ENGINE_BILLING_MAX, readEngineBilling } from "@fx/core/src/onboarding/engineBilling.js";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
@@ -145,7 +147,52 @@ const readRoute: Pick<RouteEntry, "method" | "principals" | "minRole" | "scope" 
   rateClass: "read",
 };
 
+/** D#845 ON-22c: the Engine row of Budget & billing. One read of synced rows; the billing provider is never called. */
+export const engineBillingResponseSchema = z.object({
+  offered: z.boolean().describe("False when the plan data carries no Engine plan or no engine price is configured: the row is hidden."),
+  price_usd_month: z.number().nullable().describe("The Engine plan's price per live engine a month, from the plan data; null when it is not offered."),
+  paid_quantity: z.number().int().describe("Engines the subscription pays for, as last synced; 0 for an ended plan."),
+  live_count: z.number().int().describe("Engines live now."),
+  min_quantity: z.number().int().describe("The lowest total a change may ask for: the engines live now, and at least 1."),
+  max_quantity: z.number().int(),
+  state: z.enum(["none", "active", "past_due", "not_paying", "ended"]),
+  ended_at: z.string().nullable().describe("When the subscription ended (the synced `subscription_ended_at`); null when it has not, or the grace period ran out first."),
+  can_change: z.boolean().describe("True for the account owner on a session. The change routes stay owner-only whatever this says."),
+  as_of: z.string().nullable().describe("When the subscription was last synced from the provider; null before the first sync."),
+});
+
 export const billingRoutes: RouteEntry[] = [
+  {
+    method: "GET",
+    // principals omitted -> session-only: the owner flag belongs to a signed-in person.
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    path: "/api/v1/billing/engine",
+    operationId: "getEngineBilling",
+    summary: "The account's Engine plan: price, engines paid for and live, standing",
+    description:
+      "Session only, any member. Read from the account's synced billing rows and the engines live now: no billing-provider call is made. `state` is `none` (no engines paid for), `active`, `past_due` (inside the seven day grace), `not_paying` (unpaid, incomplete, paused, or its ids are missing) or `ended`. `min_quantity` is the engines live now (at least 1), `max_quantity` is 100. `can_change` is true for the owner. A change shows here once the provider confirms it.",
+    responseSchema: engineBillingResponseSchema,
+    async handler(ctx) {
+      const { accountId, userId } = ctx.principal;
+      const view = await withTenant(ctx.pool, accountId, userId, (client) => readEngineBilling(client, accountId));
+      if (!view) throw new ApiError(404, "not_found", "not found");
+      const price = enginePricePerMonthUsd();
+      return {
+        offered: enginePlanOffered(),
+        price_usd_month: price,
+        paid_quantity: view.paid_quantity,
+        live_count: view.live_count,
+        min_quantity: Math.max(view.live_count, 1),
+        max_quantity: ENGINE_BILLING_MAX,
+        state: view.state,
+        ended_at: view.ended_at,
+        can_change: ctx.principal.kind === "session" && ctx.principal.role === "owner",
+        as_of: view.as_of,
+      };
+    },
+  },
   {
     ...readRoute,
     path: "/api/v1/usage",

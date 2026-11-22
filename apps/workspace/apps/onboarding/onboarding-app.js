@@ -197,7 +197,7 @@ const ADDED_NOTE = "Engine added. This step updates when the provider confirms t
       st.planNote = refusal.text;
       st.planLink = refusal.link;
       st.planBusy = false;
-      if (refusal.code === "no_subscription" || refusal.code === "subscription_not_paying") { await load(); return; } // the step reads again and shows its current buttons; the sentence stays under it
+      if (words && words.PLAN_REREAD.includes(refusal.code)) { await load(); return; } // the step reads again and shows its current buttons; the sentence stays under it
     }
     st.planBusy = false;
     render();
