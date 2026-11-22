@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTree } from "../helpers/tempTree.js";
 
 // A clone the daemon has just made has no local change in the way, so "the merge is clean but the tree would not take it" cannot be produced with real git there;
 // the one test that needs it flips this switch, every other case runs the real merge.
@@ -64,7 +65,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllEnvs();
-  rmSync(root, { recursive: true, force: true });
+  removeTree(root);
 });
 
 interface Call {
