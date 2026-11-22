@@ -13,7 +13,7 @@ import type { WslMachine } from "./platform.js";
 import { wslDenyPaths } from "./wslChecks.js";
 import { unixSocketFilter } from "./checkSeccomp.js";
 import { checkProtected } from "./checkProtected.js";
-import { AgentRunFailed, failureOf, startFailureOf } from "./agentOutcome.js";
+import { AgentRunFailed, failureOf, firstLineOf, startFailureOf } from "./agentOutcome.js";
 
 /** Where a Linux session keeps per-user sockets (the session bus among them). */
 const USER_RUNTIME_ROOT = ["", "run", "user"].join("/");
@@ -309,7 +309,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     const starting = agentUp.then(async (agent) => {
       const outcome = await agent.done;
       const failure = failureOf(outcome);
-      if (failure !== undefined) throw new AgentRunFailed(failure, startFailureOf(outcome));
+      if (failure !== undefined) throw new AgentRunFailed(failure, startFailureOf(outcome), firstLineOf(outcome));
     });
     arm(entry);
     const finish = (): void => {

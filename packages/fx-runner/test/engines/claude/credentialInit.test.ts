@@ -32,7 +32,7 @@ describe("init-line credential check, through the engine", () => {
     const rig = makeRig({ fake, onLocalEvent: (event) => void local.push(event) });
     const opts = rig.startOptions();
     const { handle } = await engineFor(rig).start(opts);
-    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.295" });
+    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.295", firstLine: "assistant/other" });
     expect(opts.events).toEqual([]);
     expect(local.map((event) => event.type)).toEqual(["engine_version"]);
   });
@@ -44,7 +44,7 @@ describe("init-line credential check, through the engine", () => {
     const rig = makeRig({ fake });
     const opts = rig.startOptions();
     const { handle } = await engineFor(rig).start(opts);
-    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.295" });
+    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.295", firstLine: "result/error_during_execution" });
     expect(opts.events).toEqual([]);
     expect(Object.keys(readSessionIndex(rig.config.sessionsFile))).toEqual([]);
   });

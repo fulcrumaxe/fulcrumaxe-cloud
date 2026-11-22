@@ -75,6 +75,8 @@ export interface RunOutcome {
   failureReason?: "credential_mismatch" | "no_init_line" | "claude_flags_unsupported" | "permission_mode_forced" | "agent_error" | "agent_exit" | "resource_limit" | "verify_browser_unavailable";
   /** The agent build the run used. */
   engineVersion: string;
+  /** `no_init_line` only: the first line's closed `type/subtype` words (never its text), for the journal. */
+  firstLine?: string;
   sessionId?: string;
   agentOutput?: Record<string, unknown>;
   /** D#600 CX-5c: how many Read, Grep, Glob or LS calls the job's permission rules refused; present only when at least one was. An integer, counted the way the cloud's sandbox counts it. Kept on this machine: no field of the runner's wire carries it. */

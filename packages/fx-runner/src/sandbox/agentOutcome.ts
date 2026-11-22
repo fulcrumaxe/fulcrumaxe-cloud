@@ -8,7 +8,7 @@ import type { StartFailure } from "./startFailure.js";
 /** The agent ended in a failed outcome. `code` is the engine's closed failure reason, so the job runner reports it as is. */
 export class AgentRunFailed extends Error {
   /** Set when the agent never started or ended before its first output (already redacted). Only the runner's local log reads it; the job's reported reason is `code`. */
-  constructor(readonly code: string, readonly startFailure?: StartFailure) {
+  constructor(readonly code: string, readonly startFailure?: StartFailure, readonly firstLine?: string) {
     super(code);
     this.name = "AgentRunFailed";
   }
@@ -29,4 +29,12 @@ export function startFailureOf(outcome: unknown): StartFailure | undefined {
   if (found === null || typeof found !== "object") return undefined;
   const cause = (found as { cause?: unknown }).cause;
   return cause === "spawn_failed" || cause === "exited_early" || cause === "signal" ? (found as StartFailure) : undefined;
+}
+
+const FIRST_LINE = /^[a-z_]{1,40}\/[a-z_]{1,40}$/;
+
+/** The closed `type/subtype` words of the first line of a `no_init_line` outcome, when it carries a well-formed pair. */
+export function firstLineOf(outcome: unknown): string | undefined {
+  const found = (outcome as { firstLine?: unknown } | null)?.firstLine;
+  return typeof found === "string" && FIRST_LINE.test(found) ? found : undefined;
 }
