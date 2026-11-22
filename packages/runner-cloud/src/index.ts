@@ -71,6 +71,7 @@ export {
   type GithubResponse,
   type LocalOnlyAllowlistEntry,
 } from "./localOnlyGithub.js";
+export { EngineRemovalError, buildEngineRemovalPr, type EngineRemovalCode, type EngineRemovalInput, type EngineRemovalResult } from "./engineRemovalPr.js";
 export { HELLO_PATH, protocolVersionSupported, runnerHello } from "./hello.js";
 export { WAKE_PATH, acceptsWakeJson, runnerWake, type WakeDeps } from "./wake.js";
 export {
