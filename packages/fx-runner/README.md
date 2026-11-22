@@ -38,6 +38,9 @@ anything more, and rejects an unknown key):
 At most 400 tool uses per run carry an activity, and a burst inside 250 ms keeps its newest. Model text, tool output, file contents and
 the rest of a command never leave: they stay in `~/.fx-runner/logs/<run>.jsonl`.
 
+When an agent fails to start, the runner's own journal line also carries a cause, the exit code or signal, and the last 2 KB of the agent's standard error. That
+line never leaves the machine, and the journal may be readable by the `adm` or `systemd-journal` groups. The tail is redacted (credential shapes, known secrets, home paths), but the redaction is best-effort.
+
 ## The daemon's parts
 
 `src/daemon/` is what a runner does between claiming a run and reporting it done. `fx-runner run` (below) wires it together.

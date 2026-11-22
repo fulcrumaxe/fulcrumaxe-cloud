@@ -3,9 +3,12 @@
  * two read an engine's `{ status: "failed", failureReason }` the same way.
  */
 
+import type { StartFailure } from "./startFailure.js";
+
 /** The agent ended in a failed outcome. `code` is the engine's closed failure reason, so the job runner reports it as is. */
 export class AgentRunFailed extends Error {
-  constructor(readonly code: string) {
+  /** Set when the agent never started or ended before its first output (already redacted). Only the runner's local log reads it; the job's reported reason is `code`. */
+  constructor(readonly code: string, readonly startFailure?: StartFailure) {
     super(code);
     this.name = "AgentRunFailed";
   }
@@ -18,4 +21,12 @@ export function failureOf(outcome: unknown): string | undefined {
   if (outcome === null || typeof outcome !== "object" || (outcome as { status?: unknown }).status !== "failed") return undefined;
   const reason = (outcome as { failureReason?: unknown }).failureReason;
   return typeof reason === "string" && REASON.test(reason) ? reason : "agent_exit";
+}
+
+/** The start-failure diagnostic of an engine outcome, when it carries a well-formed one. */
+export function startFailureOf(outcome: unknown): StartFailure | undefined {
+  const found = (outcome as { startFailure?: unknown } | null)?.startFailure;
+  if (found === null || typeof found !== "object") return undefined;
+  const cause = (found as { cause?: unknown }).cause;
+  return cause === "spawn_failed" || cause === "exited_early" || cause === "signal" ? (found as StartFailure) : undefined;
 }

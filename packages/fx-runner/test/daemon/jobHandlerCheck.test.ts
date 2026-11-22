@@ -18,6 +18,7 @@ import { generateRunnerKey } from "../../src/keys.js";
 import { checkNote } from "../../src/job/prompt.js";
 import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
 import { createWorkspaceStore } from "../../src/job/workspace.js";
+import { AgentRunFailed } from "../../src/sandbox/agentOutcome.js";
 import type { SandboxPort, StartDetachedOptions } from "../../src/sandbox/port.js";
 import { fakeGitPath } from "../helpers/fakeGitPath.js";
 import { ledgerOptions } from "../helpers/ledgerOptions.js";
@@ -54,7 +55,7 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { startBase?: string; publishPushes?: boolean; tip?: string | null | "throws"; tipCalls?: string[]; updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> }; derived?: { table: object; files: Record<string, string>; generated: Record<string, string>; ran: string[]; dirty?: string[]; head?: Record<string, string | null>; hidden?: boolean } } = {}) {
+function rig(over: { agentFails?: Error; startBase?: string; publishPushes?: boolean; tip?: string | null | "throws"; tipCalls?: string[]; updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> }; derived?: { table: object; files: Record<string, string>; generated: Record<string, string>; ran: string[]; dirty?: string[]; head?: Record<string, string | null>; hidden?: boolean } } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -74,6 +75,7 @@ function rig(over: { startBase?: string; publishPushes?: boolean; tip?: string |
       // #751: the files the agent left behind (a route's generated output, as it committed it).
       for (const [rel, text] of Object.entries(over.derived?.files ?? {})) { mkdirSync(path.dirname(path.join(held, rel)), { recursive: true }); writeFileSync(path.join(held, rel), text); }
       const event: NormalizedEvent = { runId: opts.runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } };
+      if (over.agentFails !== undefined) return { handle, hookFired: Promise.reject(over.agentFails) };
       return { handle, hookFired: Promise.resolve(event) };
     },
     resume: () => { throw new Error("not used"); },
@@ -447,6 +449,23 @@ describe("a job with a check whose Spec lists a route (#751)", () => {
 });
 
 describe("the journal line per step", () => {
+  it("an agent that exited before its first output says its cause, exit code and redacted stderr tail on the local line; a refusal says its closed code", async () => {
+    const steps: string[] = [];
+    const failure = new AgentRunFailed("agent_exit", { cause: "exited_early", exitCode: 3, tail: "boom" });
+    const r = rig({ steps, agentFails: failure });
+    const job = withCheck();
+    await r.handle(await r.claim(job));
+    const p = `fx-runner: run ${job.run_id}: `;
+    expect(steps).toContain(`${p}agent turn ended (error: agent_exit; cause=exited_early exit=3 stderr_tail="boom")`);
+    const refused = Object.assign(new Error("text that must not travel"), { code: "sandbox_unusable" });
+    const steps2: string[] = [];
+    const r2 = rig({ steps: steps2, agentFails: refused });
+    const job2 = withCheck();
+    await r2.handle(await r2.claim(job2));
+    expect(steps2).toContain(`fx-runner: run ${job2.run_id}: agent turn ended (error: sandbox_unusable)`);
+    expect(steps2.join("\n")).not.toContain("must not travel");
+  });
+
   it("a run with a check says: agent turn started and ended, check started and ended with exit code, duration and timed_out, and done posted with the status", async () => {
     const steps: string[] = [];
     const r = rig({ steps, outcome: { passed: true, body: { ...PASSED, duration_ms: 1234 } } });

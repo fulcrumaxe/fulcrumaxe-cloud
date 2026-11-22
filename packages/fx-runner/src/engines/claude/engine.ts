@@ -18,6 +18,7 @@ import { readSessionIndex, recordSession } from "./session.js";
 import { bashSandboxUnusableFor, type SettingsWithDeny } from "./bashSandboxProbe.js";
 import { clearVerifyLeftovers, writeJobFiles, type VerifyServerSpec } from "./settingsFile.js";
 import { createRunLog } from "./stream.js";
+import { notStarted, type StartFailure } from "../../sandbox/startFailure.js";
 import { HOST_USAGE_LIMITS, PERMISSION_MODE_FORCED, runAgentStream, type AgentStreamEnd } from "./streamRun.js";
 
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
@@ -78,6 +79,8 @@ export interface RunOutcome {
   agentOutput?: Record<string, unknown>;
   /** D#600 CX-5c: how many Read, Grep, Glob or LS calls the job's permission rules refused; present only when at least one was. An integer, counted the way the cloud's sandbox counts it. Kept on this machine: no field of the runner's wire carries it. */
   deniedToolCalls?: number;
+  /** Why the agent never started or ended before its first output: closed cause, exit code or signal, errno, redacted stderr tail. Kept on this machine, for the runner's local log. */
+  startFailure?: StartFailure;
 }
 
 /** The start options this engine reads. `resumeSessionId` is set by the session planner when a workspace and session are both still there. */
@@ -180,7 +183,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     handle.done = new Promise<RunOutcome>((resolve) => {
-      child.on("error", () => resolve({ status: "failed", failureReason: "agent_exit", engineVersion }));
+      child.on("error", (error) => resolve({ status: "failed", failureReason: "agent_exit", engineVersion, startFailure: notStarted(error, secrets, env.HOME) }));
       void runAgentStream({
         options: opts,
         workdir,
@@ -193,6 +196,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
         usageLimits: HOST_USAGE_LIMITS,
         log,
         secrets,
+        home: env.HOME,
         ...(config.onLocalEvent === undefined ? {} : { onLocalEvent: config.onLocalEvent }),
         ...(config.onNearLimit === undefined ? {} : { onNearLimit: config.onNearLimit }),
         ...(config.limits === undefined ? {} : { resourceLimitExceeded: () => config.limits!.exceeded(opts.runId) }),
