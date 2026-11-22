@@ -4,7 +4,7 @@ import { initCredentialMatches, isInitLine } from "./credentialCheck.js";
 import { verifyServerUp } from "./settingsFile.js";
 import { LineBuffer, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
 import type { EngineStartOptions, RunOutcome } from "./engine.js";
-import { RAW_TAIL_CHARS, earlyExit } from "../../sandbox/startFailure.js";
+import { RAW_TAIL_CHARS, earlyExit, redactedTail } from "../../sandbox/startFailure.js";
 
 /**
  * What the CLI writes to stderr when it overrides the permission mode a caller asked for (it does that whenever
@@ -120,6 +120,12 @@ async function pump(source: AsyncIterable<string>, onChunk: (chunk: string) => v
   }
 }
 
+const CLOSED_WORD = /^[a-z_]{1,40}$/;
+/** A first-line field the log may keep: a short lowercase word, or "other". The line's own text is never copied. */
+const closedWordOrOther = (value: unknown): string => (typeof value === "string" && CLOSED_WORD.test(value) ? value : "other");
+/** What the local log keeps of a stderr tail when the first line was not the init line. */
+const NO_INIT_TAIL_CHARS = 512;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -142,6 +148,9 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
   let sawInit = false;
   let mismatch = false;
   let noInit = false;
+  // The shape of the first JSON line when it was not the init line: closed words and a boolean only, never its text.
+  let firstShape: { type: string; subtype: string; isError: boolean | null } | undefined;
+  let lineCount = 0;
   let modeForced = false;
   // D#749: a playwright job whose `fxverify` server is not up at the init line ends before its first turn, under its own closed code (never a tool-less answer).
   let browserDown = false;
@@ -164,6 +173,7 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
 
   const handleLine = async (line: string): Promise<void> => {
     log.write("stdout", line);
+    if (line.trim() !== "") lineCount++;
     if (mismatch || noInit || modeForced || browserDown || line.trim() === "") return;
     let message: unknown;
     try {
@@ -179,6 +189,7 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
       if (!isInitLine(message)) {
         // Not a credential problem: the stream did not open the way this engine requires (an early error result, a build that changed its output).
         noInit = true;
+        firstShape = { type: closedWordOrOther(message.type), subtype: closedWordOrOther(message.subtype), isError: typeof message.is_error === "boolean" ? message.is_error : null };
         void input.terminate();
         return;
       }
@@ -243,6 +254,14 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
     const [end] = await Promise.all([input.ended, stdoutDone, stderrDone]);
     lineBuffer.end().forEach(enqueue);
     await chain;
+    if (noInit && firstShape !== undefined) {
+      try {
+        const tail = redactedTail(stderrLast, secrets, input.home, stderrCut).slice(-NO_INIT_TAIL_CHARS);
+        log.write("meta", JSON.stringify({ no_init_line: { first_type: firstShape.type, first_subtype: firstShape.subtype, first_is_error: firstShape.isError, line_count: lineCount, stderr_tail: tail } }));
+      } catch {
+        // fx-swallow-ok: a diagnostic line that cannot be written must not change the run's outcome
+      }
+    }
     // A clean end needs no question; any other end may be the kernel enforcing the memory budget, which only the scope can say.
     // A lost stream is decided first (and never asks the memory question): the other signals may be incomplete, so none of their verdicts can be trusted.
     const lost = end.lost === true;
@@ -260,7 +279,7 @@ export function runAgentStream(input: AgentStreamInput): Promise<RunOutcome> {
     if (limited) return { status: "failed", failureReason: "resource_limit", ...base };
     if (modeForced) return { status: "failed", failureReason: "permission_mode_forced", engineVersion };
     if (mismatch) return { status: "failed", failureReason: "credential_mismatch", engineVersion };
-    if (noInit) return { status: "failed", failureReason: "no_init_line", engineVersion };
+    if (noInit) return { status: "failed", failureReason: "no_init_line", engineVersion, ...(firstShape === undefined ? {} : { firstLine: `${firstShape.type}/${firstShape.subtype}` }) };
     if (browserDown) return { status: "failed", failureReason: "verify_browser_unavailable", engineVersion };
     // Backstop for a build that dropped a flag after the --help check: an unknown-option exit before any init line.
     if (!sawInit && end.code !== 0 && /unknown (option|argument)|unrecognized (option|argument)|invalid option/i.test(stderrTail)) return { status: "failed", failureReason: "claude_flags_unsupported", engineVersion };

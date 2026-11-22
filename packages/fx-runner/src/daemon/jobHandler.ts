@@ -366,8 +366,9 @@ export function errorDetail(error: unknown, secrets: readonly string[] = [], hom
   try {
     const code = (error as { code?: unknown } | null)?.code;
     const failure = error instanceof AgentRunFailed ? error.startFailure : undefined;
+    const first = error instanceof AgentRunFailed && error.firstLine !== undefined ? `; first=${error.firstLine}` : "";
     if (typeof code !== "string" && failure === undefined) return `; thrown=${JSON.stringify(describeThrown(error, secrets, home))}`;
-    return `${typeof code === "string" ? `: ${closedWord(code)}` : ""}${failure === undefined ? "" : `; ${describeStartFailure(failure)}`}`;
+    return `${typeof code === "string" ? `: ${closedWord(code)}` : ""}${failure === undefined ? "" : `; ${describeStartFailure(failure)}`}${first}`;
   } catch {
     // fx-swallow-ok: an error whose `code` getter throws is logged as unprintable; the journal line must never become an unhandled rejection
     return `; thrown=${JSON.stringify("unprintable")}`;
