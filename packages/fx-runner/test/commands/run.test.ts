@@ -151,6 +151,16 @@ describe("1. the keyring is pinned in the build", () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  it("a search path with no runnable agent CLI refuses before the first claim with exit 1 and a closed reason in the error (the cause of a silent-looking exit 1 in the gated real-CLI job test)", async () => {
+    const bare = path.join(root, "bare-bin");
+    mkdirSync(bare);
+    for (const name of ["bwrap", "socat"]) writeFileSync(path.join(bare, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const result = await start({ hooks: { searchPath: bare } }).done;
+    expect(result.code).toBe(1);
+    expect(result.message).toBe("claude_binary_missing: no runnable claude found on the search path; fx-runner cannot run jobs here");
+    expect(claims()).toBe(0);
+  });
+
   it("the committed table pins nothing for production yet, so run refuses a production address", async () => {
     register("https://cloud.example.test");
     const fetchFn = vi.fn(async () => new Response("{}"));
