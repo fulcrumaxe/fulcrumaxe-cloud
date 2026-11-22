@@ -65,6 +65,13 @@ describe("infra/microvm-image/lock.json", () => {
     expect(froms).toEqual([lock.base_image, lock.base_image]);
   });
 
+  it("the Dockerfile installs bubblewrap and socat, which the CLI's Bash sandbox needs before it will start", () => {
+    const dockerfile = readFileSync(path.join(IMAGE_DIR, "Dockerfile"), "utf8");
+    const finalStage = dockerfile.slice(dockerfile.lastIndexOf("\nFROM "));
+    const installed = [...finalStage.matchAll(/apt-get install [^\n&]*/g)].flatMap((m) => m[0].split(/\s+/));
+    expect(installed).toEqual(expect.arrayContaining(["bubblewrap", "socat"]));
+  });
+
   it("the container images the workflow starts are pinned by digest", () => {
     expect(Object.keys(lock.containers).sort()).toEqual(["binfmt", "buildkit", "registry"]);
     for (const [name, ref] of Object.entries(lock.containers)) expect(ref, name).toMatch(/^[a-z0-9./-]+@sha256:[0-9a-f]{64}$/);

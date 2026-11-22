@@ -36,7 +36,7 @@ RUN set -eu; \
 # Stage 2: the image. It matches infra/sandbox-image where check.sh can see a difference: the same user, sudo and home, the
 # same pinned node, pnpm and claude (packages/fx-runner/test/vm/sandboxImageParity.test.ts fails when they drift), Postgres 18
 # and Chromium at the Playwright version pnpm-lock.yaml resolves. On top of that comes what only the guest needs: bubblewrap
-# for the agent's Bash sandbox, iproute2 for loopback, python3 for the guest agent, jq. libatomic1 is pnpm's one
+# and socat for the agent's Bash sandbox (the CLI refuses to start under failIfUnavailable without both), iproute2 for loopback, python3 for the guest agent, jq. libatomic1 is pnpm's one
 # shared-library dependency.
 # postgresql-18: initdb, pg_ctl and postgres for the throwaway clusters the pg-backed tests start. create_main_cluster=false
 # stops the package creating a cluster (the disk is read-only; tests make theirs under /tmp). Debian keeps the binaries in
@@ -48,7 +48,7 @@ RUN apt-get update \
     && apt-get upgrade -y \
     && install -d /etc/postgresql-common \
     && printf '%s\n' 'create_main_cluster = false' > /etc/postgresql-common/createcluster.conf \
-    && apt-get install -y --no-install-recommends ca-certificates sudo git bubblewrap iproute2 jq libatomic1 python3 postgresql-18 \
+    && apt-get install -y --no-install-recommends ca-certificates sudo git bubblewrap socat iproute2 jq libatomic1 python3 postgresql-18 \
     && for b in initdb pg_ctl postgres psql createdb pg_isready; do ln -s "/usr/lib/postgresql/18/bin/$b" "/usr/local/bin/$b"; done \
     && rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache
 RUN printf '%s\n' \

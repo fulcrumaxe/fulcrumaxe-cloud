@@ -5,7 +5,7 @@ The guest side of the Firecracker microVM engine: what runs inside the VM, and t
 | Path | What it is |
 |---|---|
 | `lock.json` | Every download (guest kernel, Firecracker, the agent CLI, node, pnpm, and the build tools), by URL and sha256, for amd64 and arm64. |
-| `Dockerfile` | The template image: the sandbox image's user and home, plus pnpm, Postgres 18, Chromium (Playwright, with its own sandbox on), Python, jq, bubblewrap and iproute2. It reads `lock.json`; it holds no URL of its own. |
+| `Dockerfile` | The template image: the sandbox image's user and home, plus pnpm, Postgres 18, Chromium (Playwright, with its own sandbox on), Python, jq, bubblewrap, socat (both are needed by the CLI's own Bash sandbox, which refuses to start without them) and iproute2. It reads `lock.json`; it holds no URL of its own. |
 | `guest/init` | PID 1 of the guest. Mounts the pseudo file systems, writes `/etc/hosts`, brings up loopback, starts the agent. The guest has no network device. |
 | `guest/agent.py` | The in-guest agent: ping, exec, put, get and counters over vsock, for the host only; plus `exec_stream` and `kill` (below). |
 
