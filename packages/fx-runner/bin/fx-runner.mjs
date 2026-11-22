@@ -15,6 +15,7 @@ import { runCli } from "../src/cli.js";
 import { RUNNER_VERSION } from "../src/version.js";
 import { API_KEY_MAX_BYTES } from "../src/credentials.js";
 import { readSecret } from "../src/secretInput.js";
+import { VM_TOKEN_MAX, VM_TOKEN_PROMPT, VmTokenError, readVmToken } from "../src/credentials/vmToken.js";
 import { askOnTerminal } from "../src/ttyAsk.js";
 import { CODE_MAX_BYTES } from "../src/codeSource.js";
 import { CliError } from "../src/cliError.js";
@@ -321,7 +322,8 @@ const microvmParts = createMicrovmParts({
   egress: { startProxy: startEgressProxy, startReverse: startReverseEndpoint },
   logDir: () => path.join(stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME), "logs"),
   // The one read of the model token for a VM run: a fresh buffer per call, zeroed by the token step after the send. Absent or empty is an empty buffer, which the token step refuses.
-  readToken: () => Buffer.from(process.env[SUBSCRIPTION_TOKEN_VAR] ?? "", "utf8"),
+  // The file `fx-runner credentials set-vm-token` wrote first; the environment variable only when that file is missing (a foreground dev run). Read at job start, so a new token applies from the next job.
+  readToken: () => readVmToken(stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME), process.getuid?.(), () => process.env[SUBSCRIPTION_TOKEN_VAR]),
 });
 const vmInstallHosts = createVmInstallHosts({
   // Read when uninstall runs, not at start: it needs a home directory, and the verify server has none.
@@ -359,6 +361,8 @@ runCli({
   xdgCacheHome: process.env.XDG_CACHE_HOME,
   // The one place standard input is touched: the API key is read here, never taken from the command line.
   readSecret: () => readSecret(process.stdin, (text) => process.stderr.write(text), API_KEY_MAX_BYTES),
+  // The microVM Claude token: a hidden prompt or standard input, never an argument.
+  readVmToken: () => readSecret(process.stdin, (text) => process.stderr.write(text), VM_TOKEN_MAX, { prompt: VM_TOKEN_PROMPT, tooLong: () => new VmTokenError("vm_token_format") }),
   // Likewise the registration code or token (`register --code-stdin`): never taken from the command line.
   readCode: () =>
     readSecret(process.stdin, (text) => process.stderr.write(text), CODE_MAX_BYTES, {

@@ -144,7 +144,7 @@ describe("the source of the entry point (guards)", () => {
 
   it("the model token is read in one place, the bin's `readToken`, and nowhere else in the wiring", () => {
     expect(bin.match(/process\.env\[SUBSCRIPTION_TOKEN_VAR\]/g)).toHaveLength(1);
-    expect(bin).toMatch(/readToken: \(\) => Buffer\.from\(process\.env\[SUBSCRIPTION_TOKEN_VAR\] \?\? "", "utf8"\)/);
+    expect(bin).toMatch(/readToken: \(\) => readVmToken\(stateDirFor\(process\.env\.HOME, process\.env\.FX_RUNNER_HOME\), process\.getuid\?\.\(\), \(\) => process\.env\[SUBSCRIPTION_TOKEN_VAR\]\)/);
     expect(partsSource).not.toContain(SUBSCRIPTION_TOKEN_VAR);
     expect(partsSource).not.toMatch(/readToken\s*\(/);
     expect(runSource).not.toMatch(/readToken\s*\(/);

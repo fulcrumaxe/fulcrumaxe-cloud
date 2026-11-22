@@ -60,6 +60,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engineBridge/daemon.ts": ["path"], // EB-3c: the cursor's and the events file's names below the state directories
   "src/commands/engineBridge.ts": ["path"], // EB-3c: the default engine state directory's name below the home directory
   "src/credentials.ts": ["crypto", "fs", "path"], // D#6 R5b-3: the API key file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
+  // D#587 B-6-VMTOKEN: the microVM Claude token file. secretFile.ts is the file rules (lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create, one rename); vmToken.ts takes the environment as an argument and starts no process.
+  "src/credentials/secretFile.ts": ["crypto", "fs", "path"],
+  "src/credentials/vmToken.ts": ["fs", "path"], // only an lstat of the file for its age, and path joins
   // D#597 CC-7a-1, the assistant link and its local tool proxy.
   "src/assistant/tokenFile.ts": ["crypto", "fs", "path"], // the token file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   "src/engineBridge/stateFiles.ts": ["crypto", "fs", "path"], // EB-11b: the engine bridge's local files (halt file, host handle): lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename

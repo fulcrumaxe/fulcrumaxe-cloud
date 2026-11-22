@@ -40,7 +40,7 @@ describe("fx-runner credentials", () => {
       expect(result.code, argv.join(" ")).toBe(2);
       expect(result.reads).toBe(0);
       expect(result.out + result.err).not.toContain("CLIKEY");
-      expect(result.err).toContain("never a key as an argument");
+      expect(result.err).toContain("never a key or token as an argument");
     }
     expect((await run(["credentials"], { secret: KEY })).code).toBe(2);
     expect(() => statSync(state)).toThrow();
