@@ -60,6 +60,7 @@ import { runHandoffRoutes } from "./run-handoff.js";
 import { memoryRoutes } from "./memory.js";
 import { engineRoutes } from "./engine.js";
 import { engineHaltRoutes } from "./engine-halt.js";
+import { engineWatchRoutes } from "./engine-watch.js";
 import { enginePlanRoutes } from "./enginePlan.js";
 
 /**
@@ -145,6 +146,7 @@ export const ROUTES: RouteEntry[] = [
   ...engineBridgeConnectRoutes,
   ...engineRoutes,
   ...engineHaltRoutes,
+  ...engineWatchRoutes,
   ...enginePlanRoutes,
 ];
 

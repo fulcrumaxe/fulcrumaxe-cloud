@@ -5943,6 +5943,42 @@ export interface Operations {
       halted: false;
     };
   };
+  watchEngineRepo: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      browser_id: string;
+      active: boolean;
+      before?: number;
+    };
+    response: {
+      lease_id: string;
+      expires_at: string;
+      session_ends_at: string;
+      limits: {
+        per_repo: number;
+        per_account: number;
+      };
+      command: "issued" | "held" | "throttled" | "runner_too_old";
+      machine: "online" | "offline";
+      last_seen: string | null;
+      detail_as_of: string | null;
+    };
+  };
+  stopWatchingEngineRepo: {
+    path: {
+      id: string;
+    };
+    query: {
+      browser_id: string;
+    };
+    body: undefined;
+    response: {
+      released: boolean;
+    };
+  };
   getEngineRepoPlan: {
     path: {
       id: string;
@@ -8538,6 +8574,28 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  watchEngineRepo: {
+    method: "POST",
+    path: "/api/v1/engine/repos/{id}/watch",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  stopWatchingEngineRepo: {
+    method: "DELETE",
+    path: "/api/v1/engine/repos/{id}/watch",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["browser_id"],
+    hasBody: false,
   },
   getEngineRepoPlan: {
     method: "GET",

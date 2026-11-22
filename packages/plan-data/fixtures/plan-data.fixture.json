@@ -13,6 +13,7 @@
       "webhookEndpointLimit": 111,
       "tokenStreamsPerTenant": 12,
       "monthlyWorkload": { "features": 1, "smalls": 2 },
+      "watch": { "perRepo": 3, "perAccount": 5, "maxSessionMinutes": 41, "idleMinutes": 7 },
       "runners": { "maxRunners": 6, "defaultAccountJobs": 4, "defaultPerRepoJobs": 2 }
     },
     "team": {
@@ -27,6 +28,7 @@
       "webhookEndpointLimit": 222,
       "tokenStreamsPerTenant": 23,
       "monthlyWorkload": { "features": 3, "smalls": 4 },
+      "watch": { "perRepo": 5, "perAccount": 7, "maxSessionMinutes": 52, "idleMinutes": 8 },
       "runners": { "maxRunners": 7, "defaultAccountJobs": 4, "defaultPerRepoJobs": 2 }
     },
     "scale": {
@@ -46,6 +48,7 @@
       "webhookEndpointLimit": 333,
       "tokenStreamsPerTenant": 34,
       "monthlyWorkload": { "features": 5, "smalls": 6 },
+      "watch": { "perRepo": 7, "perAccount": 9, "maxSessionMinutes": 63, "idleMinutes": 9 },
       "runners": { "maxRunners": 8, "defaultAccountJobs": 4, "defaultPerRepoJobs": 2 }
     }
   },
@@ -57,6 +60,7 @@
     "heavyLine": { "worstCaseUsdPerEngineMonth": 9.5, "atEngineCount": 10, "provisional": true, "source": "test fixture, invented figures" }
   },
   "runnerPlan": {
+    "watch": { "perRepo": 3, "perAccount": 5, "maxSessionMinutes": 41, "idleMinutes": 7 },
     "foreground": { "kind": "flat", "usdPerMonth": 6 },
     "background": { "kind": "flat", "usdPerMonth": 0 },
     "limits": { "maxRunners": 3, "maxConcurrentRunnerJobs": 2, "maxConcurrentHeavyRunnerJobs": 2, "runsPerDay": 7, "maxRunWallClockMs": 5400000, "fullClonesPerRepoPerDay": 4, "previews": false },

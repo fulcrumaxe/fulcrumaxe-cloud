@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { effectivePlan } from "@fx/plan-data";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { WATCH_RENEW_LIVE, WATCH_RENEW_SET } from "@fx/db/src/engineWatch.js";
 import { isPlanId, planFor, type PlanId } from "@fx/spend";
 import { reportError } from "@fx/telemetry";
 import { ApiError } from "../errors.js";
@@ -142,17 +143,24 @@ export async function recheckSessionMembership(
   subject: LeaseSubject,
   leaseId: string | null,
   nowMs: number,
+  watchLeaseId: string | null = null,
 ): Promise<RecheckOutcome> {
   const expires = new Date(nowMs + LEASE_TTL_MS);
   const row = await withTenant(pool, subject.accountId, subject.principalKey, async (client) => {
+    // D#845 ON-24b: a stream opened for a watch also renews that watch lease, in this same statement (no extra query). The renewal is guarded like the stream's own: the
+    // member must still be in the account, the lease must be this user's and still live (an ended view is never brought back), and its hard maximum and idle limit cap the new expiry.
     const { rows } = await client.query<{ role: string | null; renewed: number }>(
       `WITH m AS (SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2),
             l AS (UPDATE stream_leases SET expires_at = $4
                    WHERE id = $3 AND account_id = $1 AND kind = 'session' AND principal_key = $2
                      AND EXISTS (SELECT 1 FROM m)
+                  RETURNING 1),
+            w AS (UPDATE engine_watch_leases SET expires_at = ${WATCH_RENEW_SET}
+                   WHERE id = $5::uuid AND account_id = $1 AND user_id = $2 AND ${WATCH_RENEW_LIVE}
+                     AND EXISTS (SELECT 1 FROM m)
                   RETURNING 1)
-       SELECT (SELECT role FROM m) AS role, (SELECT count(*) FROM l)::int AS renewed`,
-      [subject.accountId, subject.principalKey, leaseId, expires],
+       SELECT (SELECT role FROM m) AS role, (SELECT count(*) FROM l)::int AS renewed, (SELECT count(*) FROM w)::int AS watch_renewed`,
+      [subject.accountId, subject.principalKey, leaseId, expires, watchLeaseId],
     );
     return rows[0]!;
   });

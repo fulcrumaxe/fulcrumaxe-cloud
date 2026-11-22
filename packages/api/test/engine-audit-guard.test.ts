@@ -165,6 +165,21 @@ async function askedDecision(ctx: GuardContext): Promise<string> {
 /** Later rows add their routes here. */
 export const ENGINE_AUDIT_GUARD: GuardEntry[] = [
   {
+    // ON-24b. A watch issues a `watch` command in the same transaction as its lease, so it is an operate path and writes `engine_command.issued`. Each run first cancels what the last one left
+    // and ages it out of the 30 s gap, so the one-command-per-repo rule never stands between a run and the audit write it is there to test.
+    id: 'POST /api/v1/engine/repos/{id}/watch',
+    action: 'engine_command.issued',
+    covers: ['engine-watch.ts#engineWatchRoutes'],
+    run: async (ctx) => {
+      const repo = await bridgeRepo(ctx, 'watch');
+      await ctx.admin.query('UPDATE runners SET protocol_version = 23 WHERE account_id = $1 AND $2::uuid = ANY (allowed_repo_ids)', [ctx.accountId, repo]);
+      await ctx.admin.query('INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ctx.accountId, repo]);
+      await ctx.admin.query("UPDATE engine_commands SET state = 'cancelled', issued_at = issued_at - interval '1 hour' WHERE repo_id = $1 AND kind = 'watch' AND state = 'pending'", [repo]);
+      await callEngineRoute(ctx, 'POST', `/engine/repos/${repo}/watch`, { browser_id: '00000000-0000-4000-8000-000000000001', active: true });
+    },
+    effects: (ctx) => commandRows(ctx, 'watch', "kind = 'watch'"),
+  },
+  {
     // ON-BR-2. Connect needs neither operate nor an engine session; the change is the bridge_enable row.
     id: 'POST /api/v1/engine/repos/{id}/bridge',
     action: 'engine_command.issued',
