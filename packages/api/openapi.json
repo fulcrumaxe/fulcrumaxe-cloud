@@ -27036,7 +27036,7 @@
             }
           },
           "402": {
-            "description": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+            "description": "`payment_pending` (engine quantity, an item added to the subscription, or a checkout: an earlier change is still waiting for payment, or the charge for this change was not collected, so nothing changed).",
             "content": {
               "application/json": {
                 "schema": {
@@ -27213,7 +27213,7 @@
             }
           },
           "402": {
-            "description": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+            "description": "`payment_pending` (engine quantity, an item added to the subscription, or a checkout: an earlier change is still waiting for payment, or the charge for this change was not collected, so nothing changed).",
             "content": {
               "application/json": {
                 "schema": {
@@ -27380,7 +27380,7 @@
             }
           },
           "402": {
-            "description": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+            "description": "`payment_pending` (engine quantity, an item added to the subscription, or a checkout: an earlier change is still waiting for payment, or the charge for this change was not collected, so nothing changed).",
             "content": {
               "application/json": {
                 "schema": {

@@ -23,7 +23,7 @@ class FakeEl extends FakeNode {
 globalThis.Node = FakeNode;
 globalThis.document = { createElement: (t) => new FakeEl(t), createTextNode: (t) => new FakeText(t) };
 globalThis.window = { FULC: { register: () => {} } };
-const { ENGINE_COPY, ENGINE_REFUSED, ENGINE_BY_STATUS, ENGINE_FAILED, engineModel, engineNode, engineRefusal } = await import("../apps/budget-billing/budget-billing-app.js");
+const { PAYMENT_PENDING, PAYMENT_PENDING_BILLING, ENGINE_COPY, ENGINE_REFUSED, ENGINE_BY_STATUS, ENGINE_FAILED, engineModel, engineNode, engineRefusal } = await import("../apps/budget-billing/budget-billing-app.js");
 const { ApiFailure } = await import("../apps/_lib/api.js");
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -164,6 +164,10 @@ describe("the refusal copy", () => {
     expect(engineRefusal(new ApiFailure(500, "internal_error", "SERVER-TEXT")).text).toBe(ENGINE_FAILED);
     expect(engineRefusal(new Error("x")).text).toBe(ENGINE_FAILED);
     expect(engineRefusal(null).text).toBe(ENGINE_FAILED);
+  });
+  it("the Subscribe 402 sentences say the earlier change waits, and only one names Manage billing", () => {
+    expect(PAYMENT_PENDING).toBe("An earlier change is waiting for payment, so nothing changed. Finish or update the payment, then try again.");
+    expect(PAYMENT_PENDING_BILLING).toBe("An earlier change is waiting for payment, so nothing changed. Finish or update the payment in Manage billing, then try again.");
   });
   it("every code the billing route answers for the engine routes is in the error-code list and in this copy map", () => {
     const codeList = [...codeListSource.matchAll(/^\s+"([a-z_0-9]+)",$/gm)].map((m) => m[1]);
