@@ -555,6 +555,46 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
     });
   });
 
+  describe('a hosted add while another change waits for payment', () => {
+    it('a hosted add while an engine raise is pending answers payment_pending with no write and leaves the raise pending', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
+      server.world.paymentOutcome = 'declined';
+      expect(await setEngineQuantity(ctx(t), { liveEngines: live(t), accountId: t.accountId, quantity: 4, stripe: like() })).toEqual({ ok: false, reason: 'payment_pending' });
+      server.seen.length = 0;
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'team' }))).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toEqual([]);
+      expect(t.fake.pending_update).toMatchObject({ changes: [{ kind: 'set', quantity: 4 }] });
+      expect(t.fake.items!.map((i) => i.priceId)).toEqual([ENGINE]);
+      expect(server.world.invoices.map((i) => i.status)).toEqual(['open']);
+    });
+
+    it('an engine raise while a hosted add is pending answers payment_pending with no write', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 1 }]);
+      server.world.paymentOutcome = 'declined';
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'team' }))).toEqual({ ok: false, reason: 'payment_pending' });
+      server.seen.length = 0;
+      expect(await setEngineQuantity(ctx(t), { liveEngines: live(t), accountId: t.accountId, quantity: 3, stripe: like() })).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toEqual([]);
+      expect(t.fake.pending_update).toBeTruthy();
+    });
+
+    it('two hosted adds with the first unpaid make one write; after the pending add expires, the hosted add works', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 1 }]);
+      server.world.paymentOutcome = 'declined';
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'team' }))).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toHaveLength(1);
+      server.seen.length = 0;
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'starter' }))).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(writes()).toEqual([]);
+      expect(server.world.invoices.map((i) => i.status)).toEqual(['open']);
+      expect(server.expirePending(t.sub)).toBe(true);
+      server.world.paymentOutcome = 'paid';
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'starter' }))).toMatchObject({ ok: true, itemAdded: true });
+      expect(t.fake.items!.map((i) => i.priceId).sort()).toEqual([ENGINE, STARTER].sort());
+      expect(writes()).toHaveLength(1);
+    });
+  });
+
   describe('per-call idempotency and read-back (ruling 35.3)', () => {
     it('2 -> 5 -> 2 -> 5 ends at 5: every call carries its own key, so no earlier stored answer stands in for a later request', async () => {
       const t = await billed([{ priceId: ENGINE, quantity: 2 }]);

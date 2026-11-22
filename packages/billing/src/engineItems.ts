@@ -86,6 +86,8 @@ export interface NewItem {
 
 /** The add itself, on a subscription already fetched; the caller holds the subscription's lock. */
 async function addUnlocked(stripe: StripeLike, stored: StoredSubscription, sub: Stripe.Subscription, item: NewItem, engineIds: readonly string[]): Promise<EngineResult> {
+  // An earlier change is still waiting for payment: an add (hosted or engine) sends a non-empty `items` list, which voids that pending update and its invoice, so it is refused with no write (see changeEngineUnlocked).
+  if (sub.pending_update) return PAYMENT_PENDING_RESULT;
   if (!stripe.subscriptions.update) return STRIPE_UNAVAILABLE_RESULT;
   const items = sub.items?.data ?? [];
   if (items.some((i) => i.price?.id === item.price)) return { ok: false, reason: 'already_subscribed' };
