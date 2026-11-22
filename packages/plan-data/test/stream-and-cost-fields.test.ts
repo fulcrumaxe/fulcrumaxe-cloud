@@ -62,6 +62,19 @@ describe('token stream caps, workloads and cost seeds', () => {
     expect(messageFor((d) => (d.plans.scale.monthlyWorkload.extra = 1))).toContain('unknown key plans.scale.monthlyWorkload.extra');
   });
 
+  it('the watch figures load, are optional so older data still loads, and a bad one names its path', () => {
+    process.env.FX_PLAN_DATA = fixtureText;
+    expect(loadPlanData().plans.team.watch).toEqual({ perRepo: 5, perAccount: 7, maxSessionMinutes: 52, idleMinutes: 8 });
+    const old: Json = JSON.parse(fixtureText);
+    for (const plan of Object.values<Json>(old.plans)) delete plan.watch;
+    process.env.FX_PLAN_DATA = JSON.stringify(old);
+    resetPlanDataCache();
+    expect(loadPlanData().plans.team.watch).toBeUndefined();
+    expect(messageFor((d) => (d.plans.team.watch.perRepo = 0))).toContain('plans.team.watch.perRepo');
+    expect(messageFor((d) => delete d.plans.team.watch.idleMinutes)).toContain('plans.team.watch.idleMinutes');
+    expect(messageFor((d) => (d.plans.team.watch.extra = 1))).toContain('unknown key plans.team.watch.extra');
+  });
+
   it('a negative or non-integer count is refused', () => {
     expect(messageFor((d) => (d.plans.starter.tokenStreamsPerTenant = -1))).toContain('plans.starter.tokenStreamsPerTenant');
     expect(messageFor((d) => (d.plans.starter.monthlyWorkload.features = 1.5))).toContain('plans.starter.monthlyWorkload.features');

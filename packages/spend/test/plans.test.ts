@@ -12,6 +12,7 @@ import {
   runnerLimitsFor,
   runnerPlanFor,
   RUNNER_PLAN_ID,
+  watchLimitsFor,
 } from '../src/plans.js';
 
 // The plan data under test is the public scaled fixture (FX_PLAN_DATA, set by the test setup): invented figures.
@@ -128,5 +129,52 @@ describe('plans: the runner tier (D#6 R2b criterion 12)', () => {
   it('is not one of the three subscription plans: the Stripe-backed list is unchanged', () => {
     expect(planIds()).toEqual(['starter', 'team', 'scale']);
     expect(isPlanId('runner')).toBe(false);
+  });
+});
+
+describe('watchLimitsFor: the watch caps and time limits of a plan', () => {
+  it("reads each plan's own figures", () => {
+    for (const plan of planIds()) {
+      const w = watchLimitsFor(plan);
+      expect(w.perAccount).toBeGreaterThan(w.perRepo);
+      expect(w).toEqual(loadPlanData().plans[plan].watch);
+    }
+  });
+
+  it('refuses a plan the data has no watch figures for, and an id it does not define, rather than returning a default', () => {
+    expect(() => watchLimitsFor('constructor')).toThrow(PlanDataMissingError);
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      const data = JSON.parse(saved!);
+      delete data.plans.team.watch;
+      process.env.FX_PLAN_DATA = JSON.stringify(data);
+      resetPlanDataCache();
+      expect(() => watchLimitsFor('team')).toThrow(/no watch figures/);
+      expect(watchLimitsFor('starter').perRepo).toBeGreaterThan(0);
+    } finally {
+      process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
+  it('the runner tier reads runnerPlan.watch, and refuses when it has none', () => {
+    expect(watchLimitsFor('runner')).toEqual(loadPlanData().runnerPlan!.watch);
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      const data = JSON.parse(saved!);
+      delete data.runnerPlan.watch;
+      process.env.FX_PLAN_DATA = JSON.stringify(data);
+      resetPlanDataCache();
+      expect(() => watchLimitsFor('runner')).toThrow(PlanDataMissingError);
+    } finally {
+      process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
+  it('hands out a copy: changing it does not change the plan data', () => {
+    const w = watchLimitsFor('starter');
+    w.perRepo = 999;
+    expect(watchLimitsFor('starter').perRepo).not.toBe(999);
   });
 });

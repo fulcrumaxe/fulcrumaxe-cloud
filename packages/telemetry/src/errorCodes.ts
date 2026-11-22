@@ -179,6 +179,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "untrusted_author",
   "validation_failed",
   "vercel_connection_not_configured",
+  "watch_ended",
+  "watch_limit",
   // DenyError reasons (packages/api/src/errors.ts DENY_REASONS), thrown through a variable, so the scan cannot see them.
   "account_not_active",
   "model_connection_not_ok",

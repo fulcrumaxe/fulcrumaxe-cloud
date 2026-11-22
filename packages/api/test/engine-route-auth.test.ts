@@ -19,11 +19,12 @@ import { engineCommandRoutes } from '../src/routes/engine-commands.js';
 import { engineDecisionRoutes } from '../src/routes/engine-decisions.js';
 import { engineHaltRoutes } from '../src/routes/engine-halt.js';
 import { enginePlanRoutes } from '../src/routes/enginePlan.js';
+import { engineWatchRoutes } from '../src/routes/engine-watch.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const ROUTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes');
 // Every engine route, from all five files. The command routes are session-only by default (no `principals` key), so the probes read `principalsOf`.
-const engineRoutes: RouteEntry[] = [...engineModule.engineRoutes, ...engineCommandRoutes, ...engineBridgeConnectRoutes, ...engineDecisionRoutes, ...engineHaltRoutes, ...enginePlanRoutes];
+const engineRoutes: RouteEntry[] = [...engineModule.engineRoutes, ...engineCommandRoutes, ...engineBridgeConnectRoutes, ...engineDecisionRoutes, ...engineHaltRoutes, ...enginePlanRoutes, ...engineWatchRoutes];
 const principalsOf = (r: RouteEntry): readonly string[] => r.principals ?? ['session'];
 
 /**
@@ -53,6 +54,8 @@ const EXPECTED_ROLES: Record<string, 'member' | 'admin' | 'owner'> = {
   haltEngineRepo: 'admin',
   clearEngineRepoHalt: 'admin',
   getEngineRepoPlan: 'member',
+  watchEngineRepo: 'member',
+  stopWatchingEngineRepo: 'member',
 };
 const roleOf = (r: RouteEntry) => EXPECTED_ROLES[r.operationId]!;
 
@@ -65,7 +68,7 @@ const exportsOf = (): string[] =>
  * `routes/engine*.ts` that is neither a route array nor named below as a helper fails, and every route it registers must declare its principals and
  * role itself and pass the four probes.
  */
-const ROUTE_ARRAYS = ['engine.ts#engineRoutes', 'engine-commands.ts#engineCommandRoutes', 'engine-bridge-connect.ts#engineBridgeConnectRoutes', 'engine-decisions.ts#engineDecisionRoutes', 'engine-halt.ts#engineHaltRoutes', 'enginePlan.ts#enginePlanRoutes'];
+const ROUTE_ARRAYS = ['engine.ts#engineRoutes', 'engine-commands.ts#engineCommandRoutes', 'engine-bridge-connect.ts#engineBridgeConnectRoutes', 'engine-decisions.ts#engineDecisionRoutes', 'engine-halt.ts#engineHaltRoutes', 'enginePlan.ts#enginePlanRoutes', 'engine-watch.ts#engineWatchRoutes'];
 const HELPER_EXPORTS: Record<string, string> = {
   'engine.ts#engineSettingsDeps': 'the GitHub visibility seam, not a route',
 };
@@ -88,6 +91,7 @@ describe('engine route auth meta-test [pg]', () => {
     if (method === 'GET' || method === 'DELETE' || urlPath.endsWith('/delete-data')) return undefined;
     if (urlPath.includes('/decisions/')) return JSON.stringify({ choice: 'approve' });
     if (urlPath.endsWith('/commands')) return JSON.stringify({ kind: 'pause_loop', args: {} });
+    if (urlPath.includes('/watch')) return JSON.stringify({ browser_id: randomUUID(), active: true });
     return '{}';
   };
   const call = async (method: string, urlPath: string, who: { accountId: string; userId: string } | 'none', bearer?: string) => {
@@ -102,7 +106,8 @@ describe('engine route auth meta-test [pg]', () => {
     return (await handleApiRequest(new Request(`http://localhost${urlPath}`, { headers }), appUserPool, platformOpsPool, ROUTES)).json() as Promise<{ items?: unknown[]; repos?: Array<{ repo_id: string }>; watch_enabled?: boolean }>;
   };
   // The decision route names a real decision of this account, so the stranger's 404 is isolation and not an unknown id.
-  const urlOf = (p: string) => p.replace('{id}', p.includes('/decisions/') ? decisionId : A.repoId);
+  const urlOf = (p: string) => p.replace('{id}', p.includes('/decisions/') ? decisionId : A.repoId) + (p.endsWith('/watch') ? `?browser_id=${watchBrowser}` : '');
+  const watchBrowser = randomUUID();
 
   beforeAll(async () => {
     adminPool = createPool(process.env.API_DATABASE_URL!);
@@ -150,6 +155,7 @@ describe('engine route auth meta-test [pg]', () => {
     expect(engineDecisionRoutes.map((r) => r.operationId)).toEqual(['answerEngineDecision']);
     expect(engineHaltRoutes.map((r) => r.operationId)).toEqual(['haltEngineRepo', 'clearEngineRepoHalt']);
     expect(enginePlanRoutes.map((r) => r.operationId)).toEqual(['getEngineRepoPlan']);
+    expect(engineWatchRoutes.map((r) => r.operationId)).toEqual(['watchEngineRepo', 'stopWatchingEngineRepo']);
     expect(engineBridgeConnectRoutes.map((r) => r.operationId)).toEqual(['getEngineBridgeConnect', 'connectEngineBridge', 'disconnectEngineBridge']);
     expect(engineCommandRoutes.map((r) => r.operationId)).toEqual(['issueEngineCommand', 'cancelEngineCommand', 'listEngineCommands']);
     for (const r of engineRoutes) {

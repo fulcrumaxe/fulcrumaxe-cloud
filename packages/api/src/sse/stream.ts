@@ -27,6 +27,8 @@ import {
   StreamLimitError,
   type LeaseSubject,
 } from "./leases.js";
+import { releaseWatchLeaseById, renewWatchLeaseById } from "@fx/db/src/engineWatch.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
 import { getSharedPoller, type AccountEventRow, type AccountPoller } from "./poller.js";
 import { HEARTBEAT_FRAME, MAX_RUN_EVENT_DATA_BYTES, accountEventCursor, capRunEventForWire, frame, isStreamVisible, toAccountEventDTO, toRunEventDTO } from "./views.js";
 
@@ -74,6 +76,7 @@ export const RUN_POLL_INTERVAL_MS = 2_000;
 export const LIFETIME_MIN_MS = 720_000;
 export const LIFETIME_MAX_MS = 780_000;
 const RUN_PAGE = 200;
+const WATCH_LEASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /**
  * A consumer that lets more than this many BYTES pile up unread is dropped
  * rather than buffered without bound (CWE-770; counting frames let 256
@@ -236,6 +239,13 @@ async function openStream(req: Request, target: StreamTarget, deps: StreamDeps, 
   const leaseId = await acquireLease(deps.pool, subject, clock.now());
 
   try {
+    // D#845 ON-24b: `?watch=<lease id>` ties this account stream to a watch lease the person took through the watch route. Only a session's own, live lease counts: it is renewed now
+    // (a stream that reconnects after its lifetime must not wait a whole re-check for it) and by every re-check, and removed when the stream closes. A malformed id is ignored.
+    const watchParam = target.kind === "account" && principal.kind === "session" ? new URL(req.url).searchParams.get("watch") : null;
+    const watchLeaseId = watchParam !== null && WATCH_LEASE_ID.test(watchParam) ? watchParam.toLowerCase() : null;
+    if (watchLeaseId !== null) {
+      await withTenant(deps.pool, principal.accountId, principal.userId, (client) => renewWatchLeaseById(client, { accountId: principal.accountId, userId: principal.userId, leaseId: watchLeaseId }));
+    }
     return buildStreamResponse({
       deps,
       clock,
@@ -245,6 +255,7 @@ async function openStream(req: Request, target: StreamTarget, deps: StreamDeps, 
       credential,
       subject,
       leaseId,
+      watchLeaseId,
       target,
       accountStart,
       runStart,
@@ -266,6 +277,7 @@ interface BuildArgs {
   credential: StreamCredential;
   subject: LeaseSubject;
   leaseId: string;
+  watchLeaseId: string | null;
   target: StreamTarget;
   accountStart: { afterSeq: bigint; resync: boolean } | undefined;
   runStart: { afterSeq: number; status: string } | undefined;
@@ -280,6 +292,7 @@ function buildStreamResponse(a: BuildArgs): Response {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let closed = false;
   let leaseId = a.leaseId;
+  let serverEnd = false;
   let subscription: { unsubscribe(): void } | undefined;
   const handles: Record<"life" | "heart" | "idle" | "recheck" | "run" | "stall", unknown> = {
     stall: undefined,
@@ -339,6 +352,13 @@ function buildStreamResponse(a: BuildArgs): Response {
     subscription = undefined;
     a.signal.removeEventListener("abort", onAbort);
     void releaseLease(deps.pool, subject, leaseId);
+    // The watch lease goes with the stream, at once, unless the server ended it at its drawn lifetime or for being idle: the client reconnects within seconds and the 90 s life bridges the gap.
+    if (a.watchLeaseId !== null && !serverEnd) {
+      void withTenant(deps.pool, principal.accountId, principal.userId, (client) => releaseWatchLeaseById(client, { accountId: principal.accountId, userId: principal.userId, leaseId: a.watchLeaseId! })).catch((err: unknown) => {
+        // The row expires on its own within 90 s; the failure is still counted.
+        reportError(err, { stage: "sse.watch_release", route: "/api/v1/events" });
+      });
+    }
   }
 
   function finish(finalFrame?: string): void {
@@ -393,7 +413,10 @@ function buildStreamResponse(a: BuildArgs): Response {
   function markActivity(): void {
     if (closed) return;
     clear("idle");
-    handles.idle = clock.setTimeout(() => finish(frame({ event: "idle", data: {} })), IDLE_TIMEOUT_MS);
+    handles.idle = clock.setTimeout(() => {
+      serverEnd = true;
+      finish(frame({ event: "idle", data: {} }));
+    }, IDLE_TIMEOUT_MS);
   }
 
   function scheduleHeartbeat(): void {
@@ -418,7 +441,7 @@ function buildStreamResponse(a: BuildArgs): Response {
       if (!live || live.epoch !== session.epoch || live.revoked) {
         return "revoked";
       }
-      outcome = await recheckSessionMembership(deps.pool, subject, leaseId, nowMs);
+      outcome = await recheckSessionMembership(deps.pool, subject, leaseId, nowMs, a.watchLeaseId);
     }
     if (outcome.status === "revoked") return "revoked";
     // A demotion ends the stream even though the lower role could still read it: the client
@@ -593,7 +616,10 @@ function buildStreamResponse(a: BuildArgs): Response {
       return;
     }
     a.signal.addEventListener("abort", onAbort, { once: true });
-    handles.life = clock.setTimeout(() => finish(), drawLifetimeMs(random));
+    handles.life = clock.setTimeout(() => {
+      serverEnd = true;
+      finish();
+    }, drawLifetimeMs(random));
     scheduleHeartbeat();
     scheduleRecheck();
     markActivity();

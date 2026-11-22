@@ -188,3 +188,30 @@ export function runnerLimitsFor(plan: string): RunnerLimits | HostedRunnerLimits
   if (runners === undefined) throw new PlanDataMissingError(`the plan data has no runner figures for plan ${JSON.stringify(plan)}`);
   return { hosted: true, ...runners };
 }
+
+/** D#845 ON-24b: how many people may watch one engine live on a plan, and for how long. See the plan data schema's `watch`. */
+export interface WatchLimits {
+  perRepo: number;
+  perAccount: number;
+  maxSessionMinutes: number;
+  idleMinutes: number;
+}
+
+/**
+ * The one place the watch route reads its caps and time limits from. Throws PlanDataMissingError for a plan the data gives no `watch` figures for
+ * (an unknown id, or data that predates them; the runner tier has its own `runnerPlan.watch`): the route answers 503 `plan_data_unavailable`, and a missing figure never
+ * becomes an unlimited one.
+ */
+export function watchLimitsFor(plan: string): WatchLimits {
+  const all = loadPlanData();
+  if (plan === RUNNER_PLAN_ID) {
+    const w = all.runnerPlan?.watch;
+    if (w === undefined) throw new PlanDataMissingError('the plan data has no watch figures for the runner plan');
+    return { ...w };
+  }
+  const data = all.plans;
+  if (!Object.hasOwn(data, plan)) throw new PlanDataMissingError(`the plan data has no plan ${JSON.stringify(plan)}`);
+  const watch = data[plan as PlanId].watch;
+  if (watch === undefined) throw new PlanDataMissingError(`the plan data has no watch figures for plan ${JSON.stringify(plan)}`);
+  return { ...watch };
+}
