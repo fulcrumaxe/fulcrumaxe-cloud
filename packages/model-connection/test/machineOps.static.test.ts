@@ -34,7 +34,7 @@ describe('machine_ops is the only code path that touches the machine key and the
 
   it('is imported only by the package index and the credential route (the route is the one caller)', () => {
     const users = filesMatching(/machineOps|machineKekSource|withHetznerToken|withManagedServer|connectHetznerCredential|removeHetznerCredential/);
-    expect(users).toEqual([MACHINE_OPS, 'packages/api-client/src/generated.ts', 'packages/api/src/routes/machine-credential.ts', 'packages/model-connection/src/index.ts'].sort());
+    expect(users).toEqual([MACHINE_OPS, 'packages/api-client/src/generated.ts', 'packages/api/src/machines/servers.ts', 'packages/api/src/routes/machine-credential.ts', 'packages/model-connection/src/index.ts'].sort());
   });
 
   it('the guard can fail: the scan finds the three words in machineOps.ts, so an empty result is not a broken scan', () => {

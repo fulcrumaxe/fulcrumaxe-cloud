@@ -33,13 +33,22 @@ export interface FakeWorld {
   /** Requests left now (refills by limit/3600 a second on `clock`). */
   remaining: number;
   serverLimit: number;
-  failNext: Array<{ status?: number; code?: string; message?: string; hang?: boolean; drop?: boolean; /** Only fail a request with this method (the rest pass through to a later request). */ method?: string; /** Commit the write, then answer this way. */ after?: "hang" | "drop" | "500" }>;
+  /** Added to every server type's net monthly price in `/pricing` and `/server_types` (a price that moved between a quote and a create). */
+  priceMonthlyDelta?: number;
+  failNext: Array<{ status?: number; code?: string; message?: string; hang?: boolean; drop?: boolean; /** Only fail a request with this method (the rest pass through to a later request). */ method?: string; /** Only fail a request to exactly this path after /v1 (`/servers`, `/servers/1001`). */ path?: string; /** Let this many matching requests through first, then fail the next. */ skip?: number; /** Commit the write, then answer this way. */ after?: "hang" | "drop" | "500" }>;
   servers: Array<Record<string, unknown>>;
   firewalls: Array<Record<string, unknown>>;
   sshKeys: Array<Record<string, unknown>>;
   actionStatus: "running" | "success" | "error";
   /** The published reply to a delete marks `action` optional: when true, a delete answers 200 with `{}`. */
   deleteOmitsAction?: boolean;
+  /**
+   * When set, a server delete answers an action and the server stays (status `deleting`, its firewalls still applied) until that action has been polled this many times, as on
+   * the real API: a firewall delete before then is 422 `resource_in_use`. Unset, a delete removes the server at once (the older tests rely on that).
+   */
+  deleteSteps?: number;
+  /** Delete actions by id: the polls seen and the server they remove. */
+  deleteActions?: Map<number, { serverId: unknown; polls: number }>;
   /** When true, a server `action` reply (delete, reboot, power on and off) carries a malformed `action` object, to prove a bad reply is `unavailable`. */
   malformedAction?: boolean;
   images: Array<Record<string, unknown>>;
@@ -80,7 +89,9 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
     const t = TYPES.find((x) => x.name === b.server_type)!;
     const l = LOCATIONS.find((x) => x.name === b.location)!;
     const id = ++nextId;
-    return { id, name: b.name, status: "initializing", created: "2026-01-01T00:00:00+00:00", public_net: { ipv4: { id: id + 1, ip: "203.0.113.7", blocked: false, dns_ptr: "x.example" }, ipv6: { id: id + 2, ip: "2001:db8::/64", blocked: false, dns_ptr: [] }, floating_ips: [], firewalls: (b.firewalls ?? []).map((f: { firewall: number }) => ({ id: f.firewall, status: "pending" })) }, private_net: [], server_type: t, location: l, image: null, rescue_enabled: false, locked: false, protection: { delete: false, rebuild: false }, labels: b.labels ?? {}, volumes: [], load_balancers: [], primary_disk_size: t.disk };
+    // `public_net.enable_ipv4` / `enable_ipv6` default to true; false leaves that address out, as the real API does.
+    const pn = (b.public_net ?? {}) as { enable_ipv4?: boolean; enable_ipv6?: boolean };
+    return { id, name: b.name, status: "initializing", created: "2026-01-01T00:00:00+00:00", public_net: { ipv4: pn.enable_ipv4 === false ? null : { id: id + 1, ip: "203.0.113.7", blocked: false, dns_ptr: "x.example" }, ipv6: pn.enable_ipv6 === false ? null : { id: id + 2, ip: "2001:db8::/64", blocked: false, dns_ptr: [] }, floating_ips: [], firewalls: (b.firewalls ?? []).map((f: { firewall: number }) => ({ id: f.firewall, status: "pending" })) }, private_net: [], server_type: t, location: l, image: null, rescue_enabled: false, locked: false, protection: { delete: false, rebuild: false }, labels: b.labels ?? {}, volumes: [], load_balancers: [], primary_disk_size: t.disk };
   };
   const page = (url: URL, key: string, all: Array<Record<string, unknown>>): Reply => {
     const per = Number(url.searchParams.get("per_page"));
@@ -121,6 +132,9 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
     return null;
   };
 
+  /** A server type with `world.priceMonthlyDelta` added to its net monthly prices. */
+  const moved = (t: (typeof TYPES)[number]): (typeof TYPES)[number] => (world.priceMonthlyDelta ? { ...t, prices: t.prices.map((p) => ({ ...p, price_monthly: money((Number(p.price_monthly.net) + world.priceMonthlyDelta!).toFixed(4)) })) } : t);
+
   function route(method: string, url: URL, body: Body): Reply {
     const parts = url.pathname.slice(3).split("/").filter(Boolean); // after /v1
     const [res, id, sub, sub2] = parts;
@@ -129,13 +143,20 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
     const only = (...m: string[]) => (m.includes(method) ? null : err(405, "method_not_allowed", "The request method is not allowed"));
     switch (res) {
       case "locations": return only("GET") ?? page(url, "locations", LOCATIONS);
-      case "server_types": return only("GET") ?? page(url, "server_types", TYPES);
-      case "pricing": return only("GET") ?? { status: 200, body: { pricing: { currency: "EUR", vat_rate: "19.00", primary_ips: [{ type: "ipv4", prices: LOCATIONS.map((l) => ({ location: l.name, price_hourly: money("0.0008"), price_monthly: money("0.5000") })) }, { type: "ipv6", prices: [] }], server_types: TYPES.map((t) => ({ id: t.id, name: t.name, prices: t.prices })), image: { price_per_gb_month: money("0.0119") }, volume: { price_per_gb_month: money("0.0440") } } } };
+      case "server_types": return only("GET") ?? page(url, "server_types", TYPES.map(moved));
+      case "pricing": return only("GET") ?? { status: 200, body: { pricing: { currency: "EUR", vat_rate: "19.00", primary_ips: [{ type: "ipv4", prices: LOCATIONS.map((l) => ({ location: l.name, price_hourly: money("0.0008"), price_monthly: money("0.5000") })) }, { type: "ipv6", prices: [] }], server_types: TYPES.map(moved).map((t) => ({ id: t.id, name: t.name, prices: t.prices })), image: { price_per_gb_month: money("0.0119") }, volume: { price_per_gb_month: money("0.0440") } } } };
       case "actions": {
         const e = only("GET");
         if (e) return e;
         const tracked = id === undefined ? undefined : world.imageActions.get(Number(id));
         if (tracked) { tracked.polls++; return { status: 200, body: { action: imgAction(tracked, Number(id), Number(((world.images.find((x) => x.id === tracked.imageId)!).created_from as { id: number }).id)) } }; }
+        const del = id === undefined ? undefined : world.deleteActions?.get(Number(id));
+        if (del) {
+          del.polls++;
+          const done = del.polls >= (world.deleteSteps ?? 1);
+          if (done) { const at = world.servers.findIndex((x) => x.id === del.serverId); if (at >= 0) world.servers.splice(at, 1); }
+          return { status: 200, body: { action: { ...act("delete_server", del.serverId as number), id: Number(id), status: done ? "success" : "running", progress: done ? 100 : 50, finished: done ? "2026-01-01T00:00:05+00:00" : null } } };
+        }
         if (id) return { status: 200, body: { action: act("x", 1) } };
         const ids = url.searchParams.getAll("id");
         if (ids.length === 0) return err(422, "invalid_input", "invalid input in field 'id': is required", { fields: [{ name: "id", messages: ["is required"] }] });
@@ -175,7 +196,15 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
             s.name = body.name;
             return { status: 200, body: { server: s } };
           }
-          if (method === "DELETE") { world.servers.splice(world.servers.indexOf(s), 1); return { status: 200, body: world.malformedAction ? { action: { id: "not-a-number" } } : world.deleteOmitsAction ? {} : { action: act("delete_server", s.id as number) } }; }
+          if (method === "DELETE") {
+            if (world.deleteSteps !== undefined && world.malformedAction !== true && world.deleteOmitsAction !== true) {
+              s.status = "deleting";
+              const a = act("delete_server", s.id as number);
+              (world.deleteActions ??= new Map()).set(a.id, { serverId: s.id, polls: 0 });
+              return { status: 200, body: { action: { ...a, status: "running", progress: 0, finished: null } } };
+            }
+            world.servers.splice(world.servers.indexOf(s), 1);
+            return { status: 200, body: world.malformedAction ? { action: { id: "not-a-number" } } : world.deleteOmitsAction ? {} : { action: act("delete_server", s.id as number) } }; }
           return only("GET", "PUT", "DELETE")!;
         }
         if (sub === "actions" && sub2 === "create_image") {
@@ -265,8 +294,10 @@ export async function startStrictHetzner(world: FakeWorld): Promise<StrictHetzne
       const raw = Buffer.concat(chunks).toString("utf8");
       const method = req.method ?? "GET";
       world.requests.push({ method, path: req.url ?? "/", headers, body: raw });
-      const at = world.failNext.findIndex((f) => f.method === undefined || f.method === method);
-      const injected = at < 0 ? undefined : world.failNext.splice(at, 1)[0];
+      const at = world.failNext.findIndex((f) => (f.method === undefined || f.method === method) && (f.path === undefined || (req.url ?? "").split("?")[0] === `/v1${f.path}`));
+      const passes = at >= 0 && (world.failNext[at]!.skip ?? 0) > 0;
+      if (passes) world.failNext[at]!.skip!--;
+      const injected = at < 0 || passes ? undefined : world.failNext.splice(at, 1)[0];
       if (injected?.hang) return;
       if (injected?.drop) return void req.socket.destroy();
       const elapsed = (world.clock.t - lastRefill) / 1000;
