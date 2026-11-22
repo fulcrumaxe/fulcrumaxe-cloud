@@ -6,7 +6,7 @@ import { CONFINED_READ_ROLES, type DoneCheck, type NormalizedEvent } from "@fulc
 import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import type { CheckOutcome } from "../../src/daemon/checkStep.js";
 import { GitPathError } from "../../src/daemon/git.js";
-import { createJobHandler, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
+import { createJobHandler, errorDetail, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import type { LockSyncOutcome } from "../../src/daemon/lockfileSync.js";
 import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
@@ -55,7 +55,7 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { agentFails?: Error; startBase?: string; publishPushes?: boolean; tip?: string | null | "throws"; tipCalls?: string[]; updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> }; derived?: { table: object; files: Record<string, string>; generated: Record<string, string>; ran: string[]; dirty?: string[]; head?: Record<string, string | null>; hidden?: boolean } } = {}) {
+function rig(over: { agentFails?: unknown; apiKey?: string; home?: string; startBase?: string; publishPushes?: boolean; tip?: string | null | "throws"; tipCalls?: string[]; updatedTo?: string; prepareThrows?: GitPathError; lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean; changed?: { files: string[] | null | "throws"; calls: Array<{ workspace: string; base: string }> }; derived?: { table: object; files: Record<string, string>; generated: Record<string, string>; ran: string[]; dirty?: string[]; head?: Record<string, string | null>; hidden?: boolean } } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -81,14 +81,14 @@ function rig(over: { agentFails?: Error; startBase?: string; publishPushes?: boo
     resume: () => { throw new Error("not used"); },
     async extendTimeout() {}, async stop() { if (over.lockfile !== undefined || over.recordStop === true) order.push("agent_stopped"); if (over.lockfile?.stopFails === true) throw new Error("group survived at /home/someone/x"); }, async deleteSandbox() { order.push("sandbox_deleted"); }, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
-  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
+  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: over.apiKey === undefined ? { mode: "subscription" } : { mode: "api_key", apiKey: over.apiKey }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
   const git = fakeGitPath({ prepare: async (_job, _claimed, workspace) => { held = workspace; if (over.prepareThrows !== undefined) throw over.prepareThrows; return { base: over.startBase ?? BASE, ...(over.updatedTo === undefined ? {} : { updatedTo: over.updatedTo }) }; }, publish: async () => (order.push("publish"), over.tip === BASE && over.publishPushes !== true ? { pushed: false } : { pushed: true, branch: BRANCH, sha: HEAD }) });
   if (over.tip !== undefined) git.tip = async (_job, workspace) => { over.tipCalls?.push(workspace); if (over.tip === "throws") throw new Error("boom at the host path"); return over.tip as string | null; };
   git.mirrorDir = (job) => `/mirrors/${job.repo.id}.git`;
   // The pin is the merge-base with the default branch, never the commit the run started from (BASE).
   git.checkBase = async () => (over.pin === undefined ? PIN : over.pin);
   const deps: JobHandlerDeps = {
-    client, keyring: KEYRING, clock, run, sandbox: port, ledger: createFileLedger(path.join(root, `jobs-${++rigs}.json`), ledgerOptions()), git, events: createEventRelay(),
+    client, keyring: KEYRING, ...(over.home === undefined ? {} : { checkHome: over.home }), clock, run, sandbox: port, ledger: createFileLedger(path.join(root, `jobs-${++rigs}.json`), ledgerOptions()), git, events: createEventRelay(),
     recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs: over.heartbeatMs ?? 1e9, flushMs: 1e9, runJobFn: runJob,
     ...(over.steps === undefined ? {} : { onStep: (line: string) => over.steps!.push(line) }),
     ...(over.shell === false ? {} : { nix: withShell }),
@@ -464,6 +464,68 @@ describe("the journal line per step", () => {
     await r2.handle(await r2.claim(job2));
     expect(steps2).toContain(`fx-runner: run ${job2.run_id}: agent turn ended (error: sandbox_unusable)`);
     expect(steps2.join("\n")).not.toContain("must not travel");
+  });
+
+  describe("an error with no closed code says its name and the first line of its message", () => {
+    const TOKEN = `sk-ant-${"api03"}-${"A1b2C3d4E5".repeat(4)}`;
+    const lineOf = async (thrown: unknown): Promise<string> => {
+      const steps: string[] = [];
+      const r = rig({ steps, agentFails: thrown });
+      const job = withCheck();
+      await r.handle(await r.claim(job));
+      const line = steps.find((s) => s.includes("agent turn ended"));
+      expect(line).toBeDefined();
+      return line!.slice(`fx-runner: run ${job.run_id}: `.length);
+    };
+
+    it("a plain Error: name plus the message with a token and a home path redacted, only the first line", async () => {
+      const line = await lineOf(new TypeError(`bad ${TOKEN} at /home/someone/x\nsecond line`));
+      expect(line).toMatch(/^agent turn ended \(error; thrown="TypeError: bad .* at ~\/x"\)$/);
+      expect(line).not.toContain(TOKEN);
+      expect(line).not.toContain("someone");
+      expect(line).not.toContain("second line");
+    });
+
+    it("a non-Error rejection is stringified, redacted and capped", async () => {
+      expect(await lineOf("plain string failure")).toBe('agent turn ended (error; thrown="plain string failure")');
+      expect(await lineOf(`tok ${TOKEN}`)).not.toContain(TOKEN);
+      expect(await lineOf(42)).toBe(`agent turn ended (error; thrown="42")`);
+    });
+
+    it("the text is capped at 300 characters", async () => {
+      const line = await lineOf(new Error("x".repeat(1000)));
+      const text = JSON.parse(line.match(/thrown=(".*")\)$/)![1]!) as string;
+      expect(text).toHaveLength(300);
+      expect(text.startsWith("Error: xxx")).toBe(true);
+    });
+
+    it("a configured key of an unknown shape and a non-standard home are blanked", async () => {
+      const KEY = `zz-live-${"Q9x8W7v6".repeat(3)}`;
+      const steps: string[] = [];
+      const r = rig({ steps, apiKey: KEY, home: "/srv/odd-home", agentFails: new Error(`denied ${KEY} under /srv/odd-home/.cache`) });
+      const job = withCheck();
+      await r.handle(await r.claim(job));
+      const line = steps.find((s) => s.includes("agent turn ended"))!;
+      expect(line).toContain("thrown=");
+      expect(line).not.toContain(KEY);
+      expect(line).not.toContain("odd-home");
+      expect(line).toContain("~/.cache");
+    });
+
+    it("an error whose code getter throws says unprintable, and no rejection goes unhandled", async () => {
+      const hostile = new Error("x");
+      Object.defineProperty(hostile, "code", { get() { throw new Error("getter"); } });
+      // Called directly: the run's own failure handling (runJob) reads `code` as well, which is outside this line's scope.
+      expect(errorDetail(hostile)).toBe('; thrown="unprintable"');
+      const hostileName = new Error("y");
+      Object.defineProperty(hostileName, "name", { get() { throw new Error("name getter"); } });
+      expect(await lineOf(hostileName)).toBe('agent turn ended (error; thrown="unprintable")');
+    });
+
+    it("C1 and bidi characters are blanked", async () => {
+      const line = await lineOf(new Error("a\u0085b‮c⁦d\u009fe"));
+      expect(line).toBe('agent turn ended (error; thrown="Error: a b c d e")');
+    });
   });
 
   it("a run with a check says: agent turn started and ended, check started and ended with exit code, duration and timed_out, and done posted with the status", async () => {

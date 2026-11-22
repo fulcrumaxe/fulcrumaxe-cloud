@@ -170,3 +170,16 @@ export function installEnv(options: CleanEnvOptions, fixed: Readonly<Record<stri
   Object.assign(env, fixed);
   return env;
 }
+
+/** The secret values this runner holds for the agent (the configured API key, the subscription token), so a journal line can blank them whatever their shape. */
+export function journalSecrets(credentials: CredentialMode): string[] {
+  const token = process.env[SUBSCRIPTION_TOKEN_VAR];
+  const key = credentials.mode === "api_key" ? credentials.apiKey : undefined;
+  return [key, token].filter((v): v is string => typeof v === "string" && v !== "");
+}
+
+/** The host user's home directory, for redacting paths under a non-standard home from a journal line. */
+export function journalHome(): string | undefined {
+  const home = process.env.HOME;
+  return typeof home === "string" && home !== "" ? home : undefined;
+}
