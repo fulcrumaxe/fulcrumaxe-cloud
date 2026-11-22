@@ -57,6 +57,8 @@ declare module "@fulc/sdk" {
   export interface FULCRegisterOptions {
     id?: string;
     title: string;
+    /** Extra words the launcher search matches besides the title. */
+    keywords?: string[];
     icon?: string;
     defaultSize?: { w: number; h: number };
     minSize?: { w: number; h: number };

@@ -54,6 +54,7 @@ export function register(options) {
     const def = {
         id,
         title: options.title,
+        keywords: Array.isArray(options.keywords) ? options.keywords : undefined,
         icon: options.icon,
         defaultSize: options.defaultSize,
         minSize: options.minSize,
