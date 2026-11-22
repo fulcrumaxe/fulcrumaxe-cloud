@@ -86,6 +86,8 @@ export interface CliIo {
   verifyLoginHost?: VerifyLoginHost;
   /** Reads the API key from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
   readSecret?: () => Promise<string>;
+  /** Reads the microVM Claude token from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
+  readVmToken?: () => Promise<string>;
   /** Reads the registration code or token from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
   readCode?: () => Promise<string>;
 }
@@ -115,6 +117,8 @@ Commands:
                      Make the read-only root disk of the microVM guest from a digest-pinned image, for amd64 and arm64, and print the sha256 of each. Needs crane, tar and mke2fs 1.47.1 or newer; no root.
   credentials set-api-key | clear-api-key | status
                      Store (from standard input only), remove or check the API key of an api_key runner. status prints "stored" or "not stored".
+  credentials set-vm-token | clear-vm-token | vm-token-status
+                     Store (from a hidden prompt or standard input, never an argument), remove or check the Claude token that microVM jobs are handed. vm-token-status prints present, missing or unsafe.
   service install | uninstall [--system --user <account>]
                      Write (or remove) the per-user service file that keeps "fx-runner run" going: a systemd user unit on Linux, a launchd agent on macOS.
                      --system writes a system service instead (a systemd system unit, a LaunchDaemon) that runs as the dedicated non-root account --user names and starts at boot. Needs root.
@@ -257,7 +261,7 @@ export async function runCli(io: CliIo): Promise<number> {
     // A bypass file that cannot be used stops a command that calls the cloud before any request; `doctor` reports it instead.
     if (command === "register" || command === "setup" || command === "revoke" || command === "run" || command === "assistant" || (command === "engine-bridge" && positionals0(parsed) === "enable")) requireUsable(ctx.bypass);
     // Its words are never echoed or parsed as options: one of them could be a key typed in the wrong place.
-    if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret);
+    if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret, io.readVmToken);
     if (command === "vm") {
       if (io.vmHost === undefined) throw new CliError("vm is only available from the fx-runner program");
       return await vmCommand(rest, io.vmHost, ctx.out, io.vmInstallHosts);

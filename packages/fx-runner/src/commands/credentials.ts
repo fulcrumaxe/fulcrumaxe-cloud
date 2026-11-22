@@ -7,10 +7,29 @@ import { loadRegistration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { ApiKeyError, clearApiKey, readApiKey, writeApiKey } from "../credentials.js";
 
-export const CREDENTIALS_USAGE = "credentials takes one of set-api-key, clear-api-key or status, and never a key as an argument (the key is read from standard input)";
+import { VM_TOKEN_USAGE, clearVmToken, vmTokenStatus, writeVmToken } from "../credentials/vmToken.js";
 
-export async function credentialsCommand(words: readonly string[], ctx: CommandContext, readSecret: (() => Promise<string>) | undefined): Promise<number> {
+export const CREDENTIALS_USAGE = "credentials takes one of set-api-key, clear-api-key, status, set-vm-token, clear-vm-token or vm-token-status, and never a key or token as an argument (it is read from standard input)";
+
+export async function credentialsCommand(words: readonly string[], ctx: CommandContext, readSecret: (() => Promise<string>) | undefined, readVmSecret?: () => Promise<string>): Promise<number> {
+  // A word after set-vm-token could be a token typed in the wrong place: refuse with fixed text that repeats nothing, and store nothing.
+  if (words[0] === "set-vm-token" && words.length > 1) throw new CliError(VM_TOKEN_USAGE, 2);
   const sub = words.length === 1 ? words[0] : undefined;
+  if (sub === "set-vm-token") {
+    if (readVmSecret === undefined) throw new CliError("set-vm-token is only available from the fx-runner program");
+    writeVmToken(ctx.stateDir, ctx.uid, await readVmSecret());
+    ctx.out("VM token stored. It applies from the next job. It is not revoked by removing it: revoke it in your Claude account if it may have been exposed.");
+    return 0;
+  }
+  if (sub === "clear-vm-token") {
+    ctx.out(clearVmToken(ctx.stateDir, ctx.uid) ? "VM token removed. Revoke it in your Claude account if it may have been exposed." : "No VM token was stored.");
+    return 0;
+  }
+  if (sub === "vm-token-status") {
+    const status = vmTokenStatus(ctx.stateDir, ctx.uid);
+    ctx.out(status.state === "present" ? `present (${status.source}, set ${status.ageDays} days ago)` : status.state);
+    return 0;
+  }
   if (sub === "set-api-key") {
     if (readSecret === undefined) throw new CliError("set-api-key is only available from the fx-runner program");
     writeApiKey(ctx.stateDir, ctx.uid, await readSecret());
