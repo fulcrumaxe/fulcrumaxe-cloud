@@ -127,6 +127,41 @@ describe("server token-to-IP binding [pg]", () => {
     await expect(mintServerProvisioningToken(h.deps(), { accountId: f.accountId, userId: f.m1 }, "api_key")).rejects.toMatchObject({ status: 403 });
   });
 
+  describe("the runner link (D#845 MC-7)", () => {
+    const rowOf = async (token: string) => (await h.admin.query<{ runner_id: string | null }>("SELECT s.runner_id FROM managed_servers s JOIN runner_provisioning_tokens t ON t.id = s.provisioning_token_id WHERE t.token_sha256 = $1", [hashProvisioningToken(token)])).rows[0]!.runner_id;
+
+    it("records the runner on the server's row in the registering transaction, and not before", async () => {
+      const f = await seedF2(h.admin);
+      const t = await serverWithToken(f, SERVER_IP);
+      expect(await rowOf(t.secret)).toBeNull();
+      expect((await register(t.secret, { "x-vercel-forwarded-for": "198.51.100.77" })).status).toBe(403);
+      expect(await rowOf(t.secret)).toBeNull();
+      const res = await register(t.secret, { "x-vercel-forwarded-for": SERVER_IP });
+      expect(await rowOf(t.secret)).toBe(RegisterResponse.parse(res.body).runner_id);
+    });
+
+    it("links nothing for a token no server holds, and the definer touches only the caller's account, only an unlinked row, only the runner that redeemed the token, and refuses a platform_ops login", async () => {
+      const f = await seedF2(h.admin);
+      const other = await seedF2(h.admin);
+      const own = await respond(() => mintProvisioningToken(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: f.o1 }, { credential_mode: "subscription" }));
+      const stranger = RegisterResponse.parse((await register((own.body as { token: string }).token, {})).body).runner_id;
+      const t = await serverWithToken(f, SERVER_IP);
+      const runner = RegisterResponse.parse((await register(t.secret, { "x-vercel-forwarded-for": SERVER_IP })).body).runner_id;
+      expect(await rowOf(t.secret)).toBe(runner);
+      await h.admin.query("UPDATE managed_servers SET runner_id = NULL WHERE provisioning_token_id = $1", [t.id]);
+      // Another runner of the same account (one registered with a different token) is not the redeemer: refused, the row stays unlinked.
+      expect(await withTenant(h.appPool, f.accountId, async (c) => (await c.query<{ ok: boolean }>("SELECT managed_server_link_runner($1, $2::uuid) AS ok", [hashProvisioningToken(t.secret), stranger])).rows[0]!.ok)).toBe(false);
+      expect(await rowOf(t.secret)).toBeNull();
+      const link = (accountId: string) => withTenant(h.appPool, accountId, async (c) => (await c.query<{ ok: boolean }>("SELECT managed_server_link_runner($1, $2::uuid) AS ok", [hashProvisioningToken(t.secret), runner])).rows[0]!.ok);
+      expect(await link(other.accountId)).toBe(false);
+      expect(await rowOf(t.secret)).toBeNull();
+      expect(await link(f.accountId)).toBe(true);
+      expect(await link(f.accountId)).toBe(false);
+      await expect(h.opsPool.query("SELECT managed_server_link_runner($1, $2::uuid)", [hashProvisioningToken(t.secret), runner])).rejects.toMatchObject({ code: "42501" });
+      await expect(withTenant(h.appPool, f.accountId, (c) => c.query("SELECT managed_server_link_runner('nope', $1::uuid)", [runner]))).rejects.toMatchObject({ code: "22023" });
+    });
+  });
+
   describe("the definer", () => {
     const ask = (accountId: string | null, token: string) =>
       accountId === null

@@ -337,6 +337,7 @@ describe('session rate limits', () => {
         connectHetznerCredential: 'machine-credential-put',
         quoteHetznerServer: 'machine-server-quote',
         createHetznerServer: 'machine-server-create',
+        deleteHetznerServer: 'machine-server-delete',
         createPortalSession: 'stripe',
         createCheckoutSession: 'stripe',
         setEngineQuantity: 'stripe',

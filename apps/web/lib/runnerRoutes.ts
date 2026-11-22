@@ -23,7 +23,7 @@ import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/sessi
  */
 
 /** The worker's lease-fail method, resolved per call: null (and so a 503 `leases_not_failed`) while no worker is configured. */
-const failRunnerLeases: FailRunnerLeases = async (input) => {
+export const failRunnerLeases: FailRunnerLeases = async (input) => {
   const worker = await getWorker();
   if (!worker) throw new Error("no worker configured");
   return worker.failRunnerLeases(input);

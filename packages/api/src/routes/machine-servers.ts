@@ -3,6 +3,7 @@ import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
 import { createServer, getServer, quoteServer, type ServerCtx } from "../machines/servers.js";
+import { deleteManagedServer } from "../machines/lifecycle.js";
 import { mapError } from "./machine-credential.js";
 
 /**
@@ -26,6 +27,8 @@ const createBody = z.strictObject({
 });
 const quoteQuery = z.strictObject({ server_type: z.string().regex(TYPE), location: z.string().regex(LOCATION) });
 const idParams = z.object({ id: z.string() });
+const deleteQuery = z.strictObject({ remove_projects: z.enum(["true", "false"]).optional() });
+export const deleteResultSchema = z.object({ id: z.string().uuid(), status: z.literal("deleted"), already_deleted: z.boolean() });
 
 export const serverQuoteSchema = priceSchema.extend({
   tier: z.literal("standard"),
@@ -44,7 +47,7 @@ export const serverSchema = z.object({
   location: z.string().nullable(),
   public_ipv4: z.string().nullable(),
   failure_code: z.string().nullable(),
-  price: priceSchema,
+  price: priceSchema.nullable(),
   created_at: z.string(),
 });
 
@@ -125,6 +128,36 @@ export const machineServerRoutes: RouteEntry[] = [
       const server = await getServer(serverCtx(ctx), id.toLowerCase());
       if (!server) throw new ApiError(404, "not_found", "no such server");
       return server;
+    },
+  },
+  {
+    method: "DELETE",
+    path: "/api/v1/machine-servers/{id}",
+    operationId: "deleteHetznerServer",
+    summary: "Delete a Hetzner Cloud server of this account: its runner and token are revoked, the server and then its firewall are deleted at Hetzner",
+    description:
+      "Session only, owner or admin. Safe to repeat: a repeat finishes what an earlier call left, and a server already deleted answers `already_deleted: true` without calling Hetzner. " +
+      "Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true` (then 409 `project_removal_unavailable` until project removal is available). " +
+      "A server or firewall Hetzner no longer has counts as deleted. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    sessionLimit: SESSION_LIMITS.machineServerDelete,
+    paramsSchema: idParams,
+    querySchema: deleteQuery,
+    responseSchema: deleteResultSchema,
+    extraResponses: {
+      "409": "Error `server_creating` (the create is still running; try again), `projects_placed`, `project_removal_unavailable`, `credential_changed` (the token that made the server is no longer the connected one) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
+      "503": "Error `leases_not_failed`: the runner was revoked but its runs could not be failed yet; repeat the call. Or a `hetzner_*` code.",
+    },
+    async handler(ctx, input) {
+      const id = (input.params as { id: string }).id;
+      const q = input.query as z.infer<typeof deleteQuery>;
+      try {
+        return await deleteManagedServer(serverCtx(ctx), id.toLowerCase(), { removeProjects: q.remove_projects === "true" });
+      } catch (err) {
+        throw mapError(err);
+      }
     },
   },
 ];

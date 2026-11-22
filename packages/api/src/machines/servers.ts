@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { HetznerError, MANAGED_LABEL, MANAGED_LABEL_VALUE, createHetznerClient, type HetznerClient, type HetznerCode, type HetznerOptions } from "@fx/hetzner";
 import { MachineOpsError, machineKekSource, withHetznerToken, type KekSource } from "@fx/model-connection";
+import { reportError } from "@fx/telemetry";
 import { RunnerHttpError, mintServerProvisioningToken, renderUserData, revokeProvisioningToken, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ApiError } from "../errors.js";
@@ -54,7 +55,7 @@ export interface ServerView {
   location: string | null;
   public_ipv4: string | null;
   failure_code: string | null;
-  price: PriceTriple;
+  price: PriceTriple | null;
   created_at: string;
 }
 
@@ -65,6 +66,14 @@ export const machineServerDeps: {
   hetznerOptions: () => Omit<HetznerOptions, "token">;
   /** Called at the named step of a create, tests only (ignored unless NODE_ENV is "test"): a throw there is a failure at that point. */
   checkpoint?: (step: CreateStep) => void | Promise<void>;
+  /** MC-7: starts the queued status worker of a new server (a Workflow in production, wired by the web app). Absent: nothing is started, and the row stays as the create left it. */
+  startStatusWorker?: (a: { accountId: string; userId: string; serverId: string }) => Promise<unknown>;
+  /** MC-7: the worker's lease-fail port, which `revokeRunner` needs. Absent, a delete that has a runner to revoke answers 503 `leases_not_failed` after the revoke. */
+  failRunnerLeases?: RunnerCloudDeps["failRunnerLeases"];
+  /** MC-7: removes the projects placed on a machine (ON-16, wired by MC-12). Absent: a delete asked to remove projects answers 409 `project_removal_unavailable`. */
+  removeProjects?: (ctx: ServerCtx, runnerId: string) => Promise<void>;
+  /** MC-7: how long a delete waits between two looks at Hetzner's delete action. */
+  actionWaitMs?: number;
 } = {
   getKek: () => machineKekSource(),
   getOrigin: () => process.env.FX_APP_ORIGIN,
@@ -90,9 +99,9 @@ const HETZNER_ANSWER: Record<HetznerCode, { status: number; message: string }> =
   not_found: { status: 409, message: "Hetzner doesn't have something this request names (an SSH key, for one)" },
   locked: { status: 409, message: "Hetzner reports the item is busy. Try again in a minute" },
 };
-const failureCodeOf = (e: unknown): string => (e instanceof HetznerError ? `hetzner_${e.code}` : "create_failed");
+export const failureCodeOf = (e: unknown): string => (e instanceof HetznerError ? `hetzner_${e.code}` : "create_failed");
 /** A Hetzner error as the API error a caller sees; anything else passes through. */
-function toApiError(e: unknown): unknown {
+export function toApiError(e: unknown): unknown {
   // The token service speaks RunnerHttpError (fixed text and a closed code, such as 409 `token_limit`); this API speaks ApiError.
   if (e instanceof RunnerHttpError) return new ApiError(e.status, e.code, e.message);
   if (!(e instanceof HetznerError)) return e;
@@ -103,7 +112,7 @@ function toApiError(e: unknown): unknown {
 export interface Caller { accountId: string; userId: string }
 export interface ServerCtx { pool: Pool; principal: Caller }
 
-const clientFor = (token: string): HetznerClient => {
+export const clientFor = (token: string): HetznerClient => {
   try {
     return createHetznerClient({ ...machineServerDeps.hetznerOptions(), token });
   } catch (e) {
@@ -113,6 +122,13 @@ const clientFor = (token: string): HetznerClient => {
   }
 };
 const opsCtx = (ctx: ServerCtx) => ({ pool: ctx.pool, principal: ctx.principal, kek: machineServerDeps.getKek() });
+
+/**
+ * The one door to the stored Hetzner token for the rest of the machines code: it opens the token through the machine-ops reader (which writes the audit row for the unseal)
+ * and hands `f` a Hetzner client, never the token itself. Other files in this folder (the server lifecycle) call this and name no machine-ops symbol of their own,
+ * which keeps the set of files that touch the sealed token pinned by the static guard in model-connection.
+ */
+export const withHetznerClient = <T>(ctx: ServerCtx, f: (client: HetznerClient) => Promise<T>): Promise<T> => withHetznerToken(opsCtx(ctx), (token) => f(clientFor(token)));
 
 /** The live prices of one size in one location, or null when Hetzner does not list a price there. Reads nothing but Hetzner. */
 async function livePrice(client: HetznerClient, serverType: string, location: string): Promise<(PriceTriple & { available: boolean }) | null> {
@@ -142,12 +158,13 @@ export async function quoteServer(ctx: ServerCtx, input: { serverType: string; l
 
 interface Row {
   id: string; name: string; status: string; server_type: string | null; location: string | null; public_ipv4: string | null; failure_code: string | null;
-  price_hourly_gross: string; price_monthly_gross: string; ipv4_monthly_gross: string; currency: string; created_at: Date;
+  price_hourly_gross: string | null; price_monthly_gross: string | null; ipv4_monthly_gross: string | null; currency: string; created_at: Date;
 }
 const COLUMNS = `id, name, status, server_type, location, host(public_ipv4) AS public_ipv4, failure_code, price_hourly_gross::text, price_monthly_gross::text, ipv4_monthly_gross::text, currency, created_at`;
 const viewOf = (r: Row): ServerView => ({
   id: r.id, name: r.name, kind: "hetzner_cloud", status: r.status, server_type: r.server_type, location: r.location, public_ipv4: r.public_ipv4, failure_code: r.failure_code,
-  price: { currency: r.currency, hourly_gross: r.price_hourly_gross, monthly_gross: r.price_monthly_gross, ipv4_monthly_gross: r.ipv4_monthly_gross }, created_at: r.created_at.toISOString(),
+  // A server found by the orphan sweep was not made through a create, so no price was stamped: it has none, and says so.
+  price: r.price_hourly_gross === null || r.price_monthly_gross === null || r.ipv4_monthly_gross === null ? null : { currency: r.currency, hourly_gross: r.price_hourly_gross, monthly_gross: r.price_monthly_gross, ipv4_monthly_gross: r.ipv4_monthly_gross }, created_at: r.created_at.toISOString(),
 });
 
 /** One of the account's servers, or null. The id must be a UUID (the caller checks; a malformed one never reaches the database). */
@@ -348,20 +365,26 @@ async function createLocked(ctx: ServerCtx, input: CreateInput): Promise<{ serve
         labels: { [MANAGED_LABEL]: MANAGED_LABEL_VALUE, "fx-server": serverId }, publicNet: { enableIpv4: true, enableIpv6: false }, idempotencyKey: serverId,
       });
       made.hetznerServerId = created.server.id;
+      const actionId = created.action?.id;
       // 6. The IP the token is bound to, and the audit row, together: either both are there or neither is and the whole create is undone.
       await checkpoint("finalize");
       const row = await withTenant(ctx.pool, accountId, userId, async (cl) => {
         const { rows } = await cl.query<Row>(
-          `UPDATE managed_servers SET provider_server_id = $3, provider_firewall_id = $4, public_ipv4 = $5::inet, status_at = now()
-            WHERE account_id = $1 AND id = $2 RETURNING ${COLUMNS}`,
-          [accountId, serverId, String(created.server.id), String(fw.id), created.server.ipv4],
+          `UPDATE managed_servers SET provider_server_id = $3, provider_firewall_id = $4, public_ipv4 = $5::inet, create_action_id = $6, status_at = now()
+            WHERE account_id = $1 AND id = $2 AND status = 'creating' RETURNING ${COLUMNS}`,
+          [accountId, serverId, String(created.server.id), String(fw.id), created.server.ipv4, actionId === undefined ? null : String(actionId)],
         );
-        if (!rows[0]) throw new Error("the server's row is gone");
+        // A delete that got in first has made the row `deleted`: the server just made must not live on under it, so this throws and the whole create is undone.
+        if (!rows[0]) throw new Error("the server's row is gone or is no longer being created");
         await checkpoint("audit");
         await cl.query("SELECT audit_write('server.create_confirmed', $1::jsonb)", [JSON.stringify({ server_id: serverId, server_type: input.serverType, location: input.location })]);
         return rows[0];
       });
       return { server: viewOf(row), reused: false };
+    }).then(async (out) => {
+      // The queued status worker follows the row to ready or failed. A start that is refused does not undo a server that now exists and is billed: it is reported, and the person's Delete still works.
+      try { await machineServerDeps.startStatusWorker?.({ accountId, userId, serverId: out.server.id }); } catch (e) { reportError(e, { stage: "machine_server.start_status_worker", route: "/api/v1/machine-servers" }); }
+      return out;
     });
   } catch (e) {
     const raced = isUniqueKey(e);

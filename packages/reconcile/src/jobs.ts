@@ -24,6 +24,8 @@ export function buildReconcileJobs(extra: {
   modelCreditsRevalidate: ReconcileJob;
   /** The sandbox reaper's jobs (they need the worker, so the route builds them); they follow the fixed jobs. */
   sandbox?: readonly ReconcileJob[];
+  /** D#845 MC-7: the Hetzner server sweep (it needs a way to start a queued job, so the route builds it). */
+  machine?: readonly ReconcileJob[];
 }): readonly ReconcileJob[] {
-  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
+  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), ...(extra.machine ?? []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
 }

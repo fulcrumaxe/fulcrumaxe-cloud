@@ -15034,32 +15034,39 @@
                       ]
                     },
                     "price": {
-                      "type": "object",
-                      "properties": {
-                        "currency": {
-                          "type": "string",
-                          "pattern": "^[A-Z]{3}$"
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "currency": {
+                              "type": "string",
+                              "pattern": "^[A-Z]{3}$"
+                            },
+                            "hourly_gross": {
+                              "type": "string",
+                              "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                            },
+                            "monthly_gross": {
+                              "type": "string",
+                              "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                            },
+                            "ipv4_monthly_gross": {
+                              "type": "string",
+                              "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                            }
+                          },
+                          "required": [
+                            "currency",
+                            "hourly_gross",
+                            "monthly_gross",
+                            "ipv4_monthly_gross"
+                          ],
+                          "additionalProperties": false
                         },
-                        "hourly_gross": {
-                          "type": "string",
-                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
-                        },
-                        "monthly_gross": {
-                          "type": "string",
-                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
-                        },
-                        "ipv4_monthly_gross": {
-                          "type": "string",
-                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        {
+                          "type": "null"
                         }
-                      },
-                      "required": [
-                        "currency",
-                        "hourly_gross",
-                        "monthly_gross",
-                        "ipv4_monthly_gross"
-                      ],
-                      "additionalProperties": false
+                      ]
                     },
                     "created_at": {
                       "type": "string"
@@ -15243,32 +15250,39 @@
                       ]
                     },
                     "price": {
-                      "type": "object",
-                      "properties": {
-                        "currency": {
-                          "type": "string",
-                          "pattern": "^[A-Z]{3}$"
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "currency": {
+                              "type": "string",
+                              "pattern": "^[A-Z]{3}$"
+                            },
+                            "hourly_gross": {
+                              "type": "string",
+                              "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                            },
+                            "monthly_gross": {
+                              "type": "string",
+                              "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                            },
+                            "ipv4_monthly_gross": {
+                              "type": "string",
+                              "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                            }
+                          },
+                          "required": [
+                            "currency",
+                            "hourly_gross",
+                            "monthly_gross",
+                            "ipv4_monthly_gross"
+                          ],
+                          "additionalProperties": false
                         },
-                        "hourly_gross": {
-                          "type": "string",
-                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
-                        },
-                        "monthly_gross": {
-                          "type": "string",
-                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
-                        },
-                        "ipv4_monthly_gross": {
-                          "type": "string",
-                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        {
+                          "type": "null"
                         }
-                      },
-                      "required": [
-                        "currency",
-                        "hourly_gross",
-                        "monthly_gross",
-                        "ipv4_monthly_gross"
-                      ],
-                      "additionalProperties": false
+                      ]
                     },
                     "created_at": {
                       "type": "string"
@@ -15333,6 +15347,160 @@
           },
           "500": {
             "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteHetznerServer",
+        "summary": "Delete a Hetzner Cloud server of this account: its runner and token are revoked, the server and then its firewall are deleted at Hetzner",
+        "description": "Session only, owner or admin. Safe to repeat: a repeat finishes what an earlier call left, and a server already deleted answers `already_deleted: true` without calling Hetzner. Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true` (then 409 `project_removal_unavailable` until project removal is available). A server or firewall Hetzner no longer has counts as deleted. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "remove_projects",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delete a Hetzner Cloud server of this account: its runner and token are revoked, the server and then its firewall are deleted at Hetzner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "status": {
+                      "type": "string",
+                      "const": "deleted"
+                    },
+                    "already_deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status",
+                    "already_deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `server_creating` (the create is still running; try again), `projects_placed`, `project_removal_unavailable`, `credential_changed` (the token that made the server is no longer the connected one) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `leases_not_failed`: the runner was revoked but its runs could not be failed yet; repeat the call. Or a `hetzner_*` code.",
             "content": {
               "application/json": {
                 "schema": {

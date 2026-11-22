@@ -1714,12 +1714,12 @@ export interface Operations {
       location: string | null;
       public_ipv4: string | null;
       failure_code: string | null;
-      price: {
+      price: ({
         currency: string;
         hourly_gross: string;
         monthly_gross: string;
         ipv4_monthly_gross: string;
-      };
+      }) | (null);
       created_at: string;
     };
   };
@@ -1738,13 +1738,27 @@ export interface Operations {
       location: string | null;
       public_ipv4: string | null;
       failure_code: string | null;
-      price: {
+      price: ({
         currency: string;
         hourly_gross: string;
         monthly_gross: string;
         ipv4_monthly_gross: string;
-      };
+      }) | (null);
       created_at: string;
+    };
+  };
+  deleteHetznerServer: {
+    path: {
+      id: string;
+    };
+    query: {
+      remove_projects?: "true" | "false";
+    };
+    body: undefined;
+    response: {
+      id: string;
+      status: "deleted";
+      already_deleted: boolean;
     };
   };
   listRepos: {
@@ -6812,6 +6826,17 @@ export const operations = {
     idempotency: "never",
     pathParams: ["id"],
     queryParams: [],
+    hasBody: false,
+  },
+  deleteHetznerServer: {
+    method: "DELETE",
+    path: "/api/v1/machine-servers/{id}",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["remove_projects"],
     hasBody: false,
   },
   listRepos: {

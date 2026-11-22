@@ -409,4 +409,15 @@ describe('machine tables [pg]', () => {
       for (const action of ['server.bootstrap_issued', 'project.github_identity_changed', 'server.deleted ', null]) await expect(call(action)).rejects.toMatchObject({ code: PG_ERROR.INVALID_PARAMETER_VALUE });
     });
   });
+
+  describe('orphan rows (D#845 MC-7, migration 1055)', () => {
+    it('allow no provisioning token only while the status is orphaned or deleted', async () => {
+      const cred = credA;
+      const orphan = (status: string, pid: string) => admin.query(`INSERT INTO managed_servers (account_id, kind, credential_id, name, status, created_by, provider_server_id${status === 'deleted' ? ', deleted_at' : ''}) VALUES ($1, 'hetzner_cloud', $2, 'o', $3, $4, $5${status === 'deleted' ? ', now()' : ''})`, [a.accountId, cred, status, a.userId, pid]);
+      await orphan('orphaned', '9100001');
+      await orphan('deleted', '9100002');
+      for (const [i, status] of ['creating', 'booting', 'ready', 'failed', 'deleting'].entries()) await expect(orphan(status, `910001${i}`), status).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      await expect(orphan('orphaned', '9100001')).rejects.toMatchObject({ code: '23505' });
+    });
+  });
 });

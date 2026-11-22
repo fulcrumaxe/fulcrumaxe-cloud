@@ -22,6 +22,9 @@ import { openInstallationHttp } from "../../../../lib/github/installationHttp";
 import { parsePreviewResult } from "@fx/pipeline";
 import { operatorMode } from "@fx/worker";
 import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js";
+import { machineServerDeps } from "@fx/api/src/machines/servers.js";
+import { failRunnerLeases } from "../../../../lib/runnerRoutes";
+import { startStatusWorker } from "../../../../lib/machineServers";
 import { getWorker, previewEnabled, workerConfigured } from "../../../../lib/worker";
 import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
 import { dequeueQueuedItem } from "../../../../lib/mergeQueue";
@@ -65,6 +68,9 @@ runActionDeps.getAuthorCheck = getAuthorCheck;
 // D#598 P1f-6b: Try the push again starts a durable job; Open the pull request again is one call to the worker. Both answer 503 until a worker can be built.
 publicChangeDeps.startRetryPush = (args) => (workerConfigured() ? createStartRetryPush()(args) : Promise.reject(new Error("worker not configured")));
 publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
+// D#845 MC-7: a created Hetzner server starts its queued status worker; a delete revokes the server's runner and fails that runner's leases through the worker.
+machineServerDeps.startStatusWorker = startStatusWorker;
+machineServerDeps.failRunnerLeases = failRunnerLeases;
 // D#694 B6-5: Remove from queue asks the host to take the pull request out, with the repository's merge-gate token.
 queueActionDeps.dequeue = (args) => dequeueQueuedItem(appUserPool(), args);
 // Engine bridge EB-5: ticking a repo for the engine asks GitHub whether it is private, now, through the same live read the runner's public-repo guard uses.
