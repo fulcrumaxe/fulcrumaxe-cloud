@@ -80,6 +80,8 @@ describe('stripe subscriptions reconcile job', () => {
     const sub = opts.sub === undefined ? `sub_${randomUUID()}` : opts.sub;
     await seedAccount(adminClient, id, { status: opts.status ?? 'active', plan: 'starter', stripeCustomerId: cus, stripeSubscriptionId: sub, stripeSyncedAt: opts.syncedAt ?? null });
     accounts.push(id);
+    // A mirror that is in step with Stripe carries the subscription's standing; seedAccount leaves it null.
+    if (sub) await adminClient.query('UPDATE accounts SET stripe_subscription_status = $2 WHERE id = $1', [id, opts.status === 'cancelled' ? 'canceled' : (opts.status ?? 'active')]);
     if (opts.customerInStripe !== false) stripeServer.world.customers.add(cus);
     return { id, cus, sub: sub ?? '' };
   }
@@ -105,7 +107,7 @@ describe('stripe subscriptions reconcile job', () => {
       const f = await account(fine.id);
       expect(f.status).toBe('active');
       expect(f.stripe_subscription_status).toBe('active');
-      expect(reports).toEqual([]);
+      expect(reports.map((r) => r.ctx.code)).toEqual(['stripe_mirror_drift']); // the one repaired account is the only drift
       expect(await webhookRows()).toBe(before); // the apply step skips the event dedupe and writes no ledger row
       expect((await jobRow()).last_full_pass_at).not.toBeNull(); // the pass completed
     });
@@ -135,7 +137,62 @@ describe('stripe subscriptions reconcile job', () => {
       await tick();
       expect((await account(one.id)).stripe_subscription_id).toBe('sub_one_live');
       expect((await account(two.id)).stripe_subscription_id).toBeNull();
-      expect(reports).toHaveLength(1);
+      expect(reports.filter((r) => r.ctx.code !== 'stripe_mirror_drift')).toHaveLength(1); // the two-live account; the single-live one is drift
+    });
+  });
+
+  describe('drift alert (D#845)', () => {
+    const drifts = () => reports.filter((r) => r.ctx.code === 'stripe_mirror_drift');
+
+    it('several drifted accounts in one run write exactly one closed-code line, with no id in it', async () => {
+      const a = await seed();
+      const b = await seed({ status: 'cancelled' });
+      const c = await seed();
+      stripeSub(a, { status: 'canceled', ended_at: 1_700_100_000 });
+      stripeSub(b);
+      stripeSub(c, { status: 'past_due' });
+      await tick();
+      expect(drifts()).toHaveLength(1);
+      const line = drifts()[0]!;
+      expect(line.ctx).toEqual({ stage: 'reconcile.stripe_subscriptions', route: expect.any(String), code: 'stripe_mirror_drift' });
+      const text = JSON.stringify([(line.err as Error).message, line.ctx]);
+      for (const id of [a.id, b.id, c.id, a.cus, a.sub]) expect(text).not.toContain(id);
+    });
+
+    it('a mirror that already matches Stripe writes no drift line', async () => {
+      const a = await seed();
+      const b = await seed();
+      stripeSub(a);
+      stripeSub(b);
+      await tick();
+      expect(reports).toEqual([]);
+    });
+
+    it('a subscription found for an account with none on file is drift', async () => {
+      const a = await seed({ sub: null });
+      stripeSub({ cus: a.cus, sub: 'sub_found_late' });
+      await tick();
+      expect(drifts()).toHaveLength(1);
+    });
+
+    it('a stale read that is refused repaired nothing, so it is not drift', async () => {
+      const a = await seed({ syncedAt: new Date(Date.now() + 60_000) });
+      stripeSub(a, { status: 'past_due' });
+      await tick();
+      expect(drifts()).toEqual([]);
+    });
+
+    it('the line is still written when a later customer stops the run', async () => {
+      const [first, second] = [randomUUID(), randomUUID()].sort();
+      const a = await seed({ id: first });
+      const b = await seed({ id: second });
+      stripeSub(a, { status: 'past_due' });
+      stripeSub(b);
+      stripeServer.world.onRequest = () => {
+        if (stripeServer.seen.length === 2) stripeServer.world.failNext.push(503);
+      };
+      expect((await tick()).results[0]!.result).toBe('error');
+      expect(drifts()).toHaveLength(1);
     });
   });
 
@@ -188,7 +245,7 @@ describe('stripe subscriptions reconcile job', () => {
       expect(out.results[0]!.result).toBe('ok');
       expect((await account(gone.id)).status).toBe('active');
       expect((await account(drifted.id)).status).toBe('cancelled');
-      expect(reports).toHaveLength(1);
+      expect(reports.map((r) => r.ctx.code)).toEqual([undefined, 'stripe_mirror_drift']); // the 404, then the one drift line (the repaired account)
       expect((reports[0]!.err as { code?: string }).code).toBe('resource_missing');
       expect(reports[0]!.ctx.stage).toBe('reconcile.stripe_subscriptions');
     });
@@ -265,7 +322,7 @@ describe('stripe subscriptions reconcile job', () => {
       await tick();
       const row = await account(a.id);
       expect(row.status).toBe('active');
-      expect(row.stripe_subscription_status).toBeNull(); // untouched by the older read
+      expect(row.stripe_subscription_status).toBe('active'); // untouched by the older read (not canceled)
       expect(reports).toEqual([]); // a refused stale read is expected, not an error
     });
 

@@ -93,14 +93,14 @@ describe("GET /api/health", () => {
     try {
       const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
       resetPlanDataCache();
-      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset", "engine_price_unset"] });
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset", "engine_price_unset", "stripe_reconcile_unset"] });
       const data = JSON.parse(process.env.FX_PLAN_DATA!);
       delete data.envelope;
       process.env.FX_PLAN_DATA = JSON.stringify(data);
       resetPlanDataCache();
       const operator = await call(env, bearer(OPERATOR_SECRET));
       expect(operator.status).toBe(200);
-      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset", "engine_price_unset"] });
+      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "hosted_sandbox_capacity_unconfigured", "analysis_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured", "machine_kek_unset", "engine_price_unset", "stripe_reconcile_unset"] });
       const anonymous = await call(env);
       expect(anonymous.status).toBe(200);
       expect(JSON.stringify(anonymous.body)).not.toContain("envelope_margin");
@@ -151,6 +151,26 @@ describe("GET /api/health", () => {
     expect(set.status).toBe(200);
     expect(JSON.stringify(set.body)).not.toContain("engine_price_unset");
     expect(JSON.stringify((await call(env)).body)).not.toContain("engine_price");
+  });
+
+  it("D#845: the operator is told, by a fixed code, when STRIPE_RECONCILE_KEY is unset outside production; with it set the code is gone; anonymous callers never see it", async () => {
+    const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
+    expect(env.STRIPE_RECONCILE_KEY).toBeUndefined();
+    expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: expect.arrayContaining(["stripe_reconcile_unset"]) });
+    const set = await call({ ...env, STRIPE_RECONCILE_KEY: "rk_test_read_only_1" }, bearer(OPERATOR_SECRET));
+    expect(set.status).toBe(200);
+    expect(JSON.stringify(set.body)).not.toContain("stripe_reconcile_unset");
+    expect(JSON.stringify((await call(env)).body)).not.toContain("stripe_reconcile");
+  });
+
+  it("D#845: a production deployment without STRIPE_RECONCILE_KEY is not healthy, and names the setting as missing", async () => {
+    const env: Env = { ...completeEnv("production"), CRON_SECRET: OPERATOR_SECRET };
+    expect(env.STRIPE_RECONCILE_KEY).toBeDefined();
+    expect((await call(env, bearer(OPERATOR_SECRET))).status).toBe(200);
+    const { STRIPE_RECONCILE_KEY: _gone, ...without } = env;
+    const res = await call(without, bearer(OPERATOR_SECRET));
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ ok: false, missing: expect.arrayContaining(["STRIPE_RECONCILE_KEY"]) });
   });
 
   it("D#845 ON-22 (ruling 36.3): the operator is told, by a fixed code, when the plan data has no enginePlan block, even with the Stripe price set; with the block the code is gone; anonymous callers never see it", async () => {

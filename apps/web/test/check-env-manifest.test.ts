@@ -63,9 +63,14 @@ describe("check-env-manifest (production build gate)", () => {
   });
 
   it("holds an unset kind to the production list, and honours FX_DEPLOY_KIND", async () => {
+    const production = { ...completeEnv("production"), FX_ENFORCE_ENV_MANIFEST: "1" };
+    delete (production as Record<string, string | undefined>).FX_DEPLOY_KIND;
+    expect((await run({ env: production, load })).status).toBe("checked");
+    // D#845: the reconcile key is required in production only, so a staging-complete environment with no kind set is held to the production list and fails on it.
     const stagingOnly = { ...completeEnv("staging"), FX_ENFORCE_ENV_MANIFEST: "1" };
     delete (stagingOnly as Record<string, string | undefined>).FX_DEPLOY_KIND;
-    expect((await run({ env: stagingOnly, load })).status).toBe("checked"); // staging and production require the same names today
+    await expect(run({ env: stagingOnly, load })).rejects.toThrow(/STRIPE_RECONCILE_KEY/);
+    expect((await run({ env: { ...completeEnv("staging"), FX_ENFORCE_ENV_MANIFEST: "1" }, load })).status).toBe("checked");
     await expect(run({ env: { FX_ENFORCE_ENV_MANIFEST: "1" }, load })).rejects.toThrow(/for a production build/);
     await expect(run({ env: { FX_ENFORCE_ENV_MANIFEST: "1", FX_DEPLOY_KIND: "staging" }, load })).rejects.toThrow(/for a staging build/);
     expect((await run({ env: { FX_ENFORCE_ENV_MANIFEST: "1", FX_DEPLOY_KIND: "local" }, load })).status).toBe("checked");

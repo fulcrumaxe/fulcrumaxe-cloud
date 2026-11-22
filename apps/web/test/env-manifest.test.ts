@@ -105,6 +105,11 @@ describe("env manifest coverage", () => {
     expect(cursor).toMatchObject({ secret: true, validation: { type: "base64-32" } });
     expect(cursor?.requiredIn).toEqual(["staging", "production"]);
   });
+
+  it("D#845: the reconcile key is required in production, a restricted secret key, so a missed Stripe webhook is always re-synced", () => {
+    const key = ENV_MANIFEST.find((e) => e.name === "STRIPE_RECONCILE_KEY");
+    expect(key).toMatchObject({ secret: true, validation: { type: "stripe-restricted-key" }, requiredIn: ["production"] });
+  });
 });
 
 /**

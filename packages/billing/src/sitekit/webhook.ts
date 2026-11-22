@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import type Stripe from 'stripe';
 import { withPlatformOps } from '../pg.js';
 import { buildPriceMap } from '../priceMap.js';
-import { NO_REFUNDS_POLICY_VERSION } from '../subscriptionSync.js';
+import { NO_REFUNDS_POLICY_VERSION, invoiceSubscriptionIdOf } from '../subscriptionSync.js';
 import { SITEKIT_MARKER_KEY, SITEKIT_MARKER_VALUE } from './checkout.js';
 import type { StripeWebhookDeps, WebhookResponse } from '../webhook.js';
 import type { SitekitProduct } from './plans.js';
@@ -184,14 +184,15 @@ async function handleSubscriptionEvent(event: Stripe.Event, deps: StripeWebhookD
     subscription?: string | { id: string } | null;
     metadata?: unknown;
     subscription_details?: { metadata?: unknown } | null;
+    parent?: { subscription_details?: { metadata?: unknown } | null } | null;
   };
-  const subscriptionId = event.type.startsWith('invoice.') ? idOf(object.subscription) : idOf(object.id);
+  const subscriptionId = event.type.startsWith('invoice.') ? invoiceSubscriptionIdOf(object) : idOf(object.id);
   if (!subscriptionId) return null;
   // No site-kit price configured (env unset): the price cannot classify, but a subscription on file still can,
   // and so can the marker the signed event itself carries (a subscription's own metadata, an invoice's copy of it).
   // No Stripe call is made on this branch.
   if (prices.size === 0) {
-    const eventMarked = hasMarker(event.type.startsWith('invoice.') ? object.subscription_details?.metadata : object.metadata);
+    const eventMarked = hasMarker(event.type.startsWith('invoice.') ? (object.parent?.subscription_details?.metadata ?? object.subscription_details?.metadata) : object.metadata);
     return eventMarked || (await onFile(deps, subscriptionId)) ? unknownPrice(undefined) : null;
   }
   const clock = await dbClock(deps);

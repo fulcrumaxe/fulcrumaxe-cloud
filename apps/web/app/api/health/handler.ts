@@ -53,6 +53,8 @@ export function isOperator(authHeader: string | null, secret: string | undefined
 export const BRANCH_CLEANUP_SIGNER_UNCONFIGURED = "branch_cleanup_signer_unconfigured";
 /** D#845 ON-22: STRIPE_PRICE_ID_ENGINE is unset, so the Engine plan is not offered. The server still starts. */
 export const ENGINE_PRICE_UNSET = "engine_price_unset";
+/** D#845: STRIPE_RECONCILE_KEY is unset (outside production, where it is required), so nothing re-syncs a missed Stripe webhook. Named by this fixed code. */
+export const STRIPE_RECONCILE_UNSET = "stripe_reconcile_unset";
 /** D#845 ON-22 (ruling 36.3): the plan data has no `enginePlan` block (the per-engine price), so the Engine plan is not offered even with a Stripe price set. Named by this fixed code. */
 export const ENGINE_PLAN_UNCONFIGURED = "engine_plan_unconfigured";
 const GIT_TICKET_FEATURE = "Cloud-verified runner git";
@@ -72,7 +74,7 @@ function detail(report: EnvReport) {
     disabled: report.disabled,
     // D#483 S5-e1: a plan-data figure that is absent is named by a fixed code, never a value. Approval still works; the envelope pre-fill is the bare estimate.
     // D#598 P8b: the setup-request env-var check has no credential source bound yet, so it answers "unavailable" and Mark done is the way on.
-    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(analysisSettings().on ? [] : ["analysis_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : []), ...(report.disabled.some((d) => d.feature === MACHINE_FEATURE) ? [MACHINE_KEK_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_PRICE_ID_ENGINE") ? [ENGINE_PRICE_UNSET] : []), ...(enginePricePerMonthUsd() === null ? [ENGINE_PLAN_UNCONFIGURED] : [])],
+    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(analysisSettings().on ? [] : ["analysis_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : []), ...(report.disabled.some((d) => d.feature === MACHINE_FEATURE) ? [MACHINE_KEK_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_PRICE_ID_ENGINE") ? [ENGINE_PRICE_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_RECONCILE_KEY") ? [STRIPE_RECONCILE_UNSET] : []), ...(enginePricePerMonthUsd() === null ? [ENGINE_PLAN_UNCONFIGURED] : [])],
   };
 }
 

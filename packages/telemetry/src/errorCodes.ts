@@ -529,6 +529,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Approval rules (D#7 AAP-a2): a rule set saved over a newer version, and a rollback to a version the scope never had.
   "action_rules_changed",
   "action_rules_version_not_found",
+  // Stripe subscription reconcile (D#845): the mirror differed from Stripe and was repaired.
+  "stripe_mirror_drift",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

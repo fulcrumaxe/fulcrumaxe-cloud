@@ -52,13 +52,26 @@ function idOf(value: string | { id: string } | null | undefined): string | null 
   return value?.id ? value.id : null;
 }
 
-function subscriptionIdOf(event: Stripe.Event): string | null {
+/**
+ * The subscription an invoice belongs to. From API version 2025-03-31 (basil) on, and so on the pinned-later dahlia endpoints, `Invoice.subscription`
+ * is gone and the id sits at `parent.subscription_details.subscription`; the acacia shape (the pinned version here) has it top level. The new place is
+ * read first, the old one is the fallback, and either may be an id or an expanded object.
+ */
+export function invoiceSubscriptionIdOf(invoice: unknown): string | null {
+  const inv = invoice as {
+    parent?: { subscription_details?: { subscription?: string | { id: string } | null } | null } | null;
+    subscription?: string | { id: string } | null;
+  } | null;
+  return idOf(inv?.parent?.subscription_details?.subscription) ?? idOf(inv?.subscription);
+}
+
+export function subscriptionIdOf(event: Stripe.Event): string | null {
   switch (event.type) {
     case 'checkout.session.completed':
       return idOf((event.data.object as Stripe.Checkout.Session).subscription);
     case 'invoice.paid':
     case 'invoice.payment_failed':
-      return idOf((event.data.object as Stripe.Invoice).subscription);
+      return invoiceSubscriptionIdOf(event.data.object);
     default:
       return idOf(event.data.object as { id: string });
   }
