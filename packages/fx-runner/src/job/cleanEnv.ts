@@ -56,6 +56,12 @@ export interface CleanEnvOptions {
    * carry a credential or a path to one. Looked up by name like the rest.
    */
   jobEnv?: Readonly<Record<string, string>>;
+  /**
+   * D#587 B-6-VMTOKEN: true when the runner is in `microvm` mode. A VM job gets its token from the runner's own file (never from an environment), so no host-side
+   * child (the CLI probes, the canary, a check, an OS-sandbox job) may carry `CLAUDE_CODE_OAUTH_TOKEN`: a dev-exported variable is left out even in subscription
+   * mode. It may be a getter, read each time an environment is built. The token read from the file never enters any environment, with or without this option.
+   */
+  omitSubscriptionToken?: boolean;
 }
 
 /** The only names a job's own environment may set. A repo's Nix dev shell (D#6 R7c) adds only the names in `NIX_ENV_NAMES`, each value checked again. */
@@ -113,7 +119,7 @@ export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions =
   Object.assign(env, CONTEXT_LEVER_ENV);
   if (credentials.mode === "subscription") {
     const token = process.env[SUBSCRIPTION_TOKEN_VAR];
-    if (typeof token === "string" && token !== "") env[SUBSCRIPTION_TOKEN_VAR] = token;
+    if (options.omitSubscriptionToken !== true && typeof token === "string" && token !== "") env[SUBSCRIPTION_TOKEN_VAR] = token;
   } else if (credentials.mode === "api_key") {
     if (typeof credentials.apiKey !== "string" || credentials.apiKey === "") throw new TypeError("cleanEnv: api_key mode needs the key from local config");
     env.ANTHROPIC_API_KEY = credentials.apiKey;

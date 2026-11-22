@@ -24,12 +24,13 @@ import { BYPASS_ENV_NAME, requireUsable } from "../protectionBypass.js";
 import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { ApiKeyError, perJobApiKey, readApiKey } from "../credentials.js";
+import { readVmToken } from "../credentials/vmToken.js";
 import { createAdmission } from "../daemon/admission.js";
 import { createUsageGate } from "../daemon/usageGate.js";
 import { createFootprintStore } from "../daemon/footprints.js";
 import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
-import { isDraining, isPaused, loadSettings, setDraining } from "../runnerSettings.js";
+import { isDraining, isPaused, loadSettings, omitsDevToken, setDraining } from "../runnerSettings.js";
 import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
 import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
 import { createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
@@ -114,6 +115,8 @@ export interface RunHost {
   /** `kill(pid, 0)`: throws `ESRCH` for a program that is gone, `EPERM` for one that belongs to another user. */
   kill: (pid: number, signal: 0) => unknown;
   engine: EngineKit;
+  /** D#587 B-6-VMTOKEN: the dev environment variable's value (the entry point looks it up by name), used only as `readVmToken`'s fallback while the token file is missing. Left out: no fallback. */
+  vmEnvToken?: (() => string | undefined) | undefined;
   /**
    * Changes this process's working directory (D#6 RUNNER-CWD-1). `run` calls it once, before it starts anything, with its own empty directory under
    * the launch root, so nothing it starts inherits the directory it was started in (a service's is the home directory, a person's may be a checkout).
@@ -357,7 +360,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   const toolchain = resolveToolchain(searchPath, { home, stateDir: ctx.stateDir, binaryDir: path.dirname(binaryPath), jobAreas: [mirrorsRoot, workspaceRoot, tempRoot, spillRoot] });
   const toolchainDirs = toolchainPathDirs(toolchain);
   toolDirs.push(...toolchainDirs.filter((dir) => !toolDirs.includes(dir)));
-  const envOptions = { extraPathDirs: toolDirs };
+  // D#587 B-6-VMTOKEN: in `microvm` mode no host-side child (probe, canary, check, OS-sandbox job) is given the dev token variable; a getter, so a settings change is seen at once.
+  const envOptions = { extraPathDirs: toolDirs, get omitSubscriptionToken(): boolean { return omitsDevToken(ctx.stateDir); } };
 
   // The runner's own directories. The state directory is private; the workspaces, temp directories and mirrors sit beside each other in the cache directory.
   const stateDir = ctx.stateDir;
@@ -651,6 +655,16 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       let modelAuthValue = false;
       const modelAuth = async (): Promise<boolean> => {
         if (credentials.mode === "api_key") return true;
+        // D#587 B-6-VMTOKEN: a microVM job never uses the host's login, so "holds model credentials" means a VM-usable token is there (the file, or the dev variable only
+        // while the file is missing; an unsafe or malformed file reads as none). Derived from the file on every call, a cheap local read, so it is never stale. The host login is not consulted.
+        if (settingsAtStart.sandboxEngine === "microvm") {
+          const token = readVmToken(stateDir, ctx.uid, host.vmEnvToken ?? (() => undefined));
+          try {
+            return token.length > 0;
+          } finally {
+            token.fill(0);
+          }
+        }
         const nowMs = clock.now().getTime();
         if (nowMs - modelAuthAt < 60_000) return modelAuthValue;
         modelAuthAt = nowMs;

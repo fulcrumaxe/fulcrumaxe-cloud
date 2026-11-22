@@ -1,7 +1,9 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { VM_TOKEN_DIR, VM_TOKEN_FILE, writeVmToken } from "../../src/credentials/vmToken.js";
+import { setSetting } from "../../src/runnerSettings.js";
 import { CliError } from "../../src/cliError.js";
 import type { CommandContext } from "../../src/context.js";
 import { LAUNCHD_LABEL, SERVICE_MARKER, SYSTEMD_UNIT_NAME, renderLaunchdPlist, renderSystemdUnit, serviceCommand, type ServiceHost } from "../../src/commands/service.js";
@@ -22,7 +24,7 @@ const hostOf = (over: Partial<ServiceHost> = {}): ServiceHost => ({ home, platfo
 
 function run(action: string | undefined, over: { host?: Partial<ServiceHost>; stateDir?: string; bypassFile?: string } = {}): { code: number; out: string } {
   const lines: string[] = [];
-  const ctx: CommandContext = { stateDir: over.stateDir ?? path.join(home, ".fx-runner"), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: fetch, ...(over.bypassFile === undefined ? {} : { bypassFile: over.bypassFile }) };
+  const ctx: CommandContext = { stateDir: over.stateDir ?? path.join(home, ".fx-runner"), uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: fetch, ...(over.bypassFile === undefined ? {} : { bypassFile: over.bypassFile }) };
   const code = serviceCommand(action, ctx, hostOf(over.host));
   return { code, out: lines.join("\n") };
 }
@@ -370,5 +372,54 @@ describe("through the command line", () => {
     expect(result.code).toBe(1);
     expect(result.err).toContain("only available from the fx-runner program");
     expect(existsSync(linuxFile())).toBe(false);
+  });
+});
+
+// D#587 B-6-VMTOKEN: in microvm mode the install says what is still needed; the unit never holds a token.
+describe("service install and the VM model token", () => {
+  const FAKE = ["sk-ant-", "oat01-", "SERVICEFAKE0123456789abc"].join("");
+  const stateDir = (): string => path.join(home, ".fx-runner");
+  const line = (out: string): string | undefined => out.split("\n").find((l) => l.startsWith("VM model token:"));
+
+  it("microvm engine and no token: prints the same missing line doctor does", () => {
+    setSetting(stateDir(), "sandbox_engine", "microvm");
+    expect(line(run("install").out)).toBe("VM model token: missing; run: fx-runner credentials set-vm-token");
+  });
+
+  it("microvm engine and a stored token: prints present with its age, nothing of the token", () => {
+    setSetting(stateDir(), "sandbox_engine", "microvm");
+    writeVmToken(stateDir(), process.getuid?.(), FAKE);
+    const result = run("install");
+    expect(line(result.out)).toBe("VM model token: present (file, set 0 days ago)");
+    expect(result.out).not.toContain("SERVICEFAKE");
+  });
+
+  it("an unsafe token file is named unsafe", () => {
+    setSetting(stateDir(), "sandbox_engine", "microvm");
+    writeVmToken(stateDir(), process.getuid?.(), FAKE);
+    chmodSync(path.join(stateDir(), VM_TOKEN_DIR, VM_TOKEN_FILE), 0o640);
+    expect(line(run("install").out)).toContain("VM model token: unsafe");
+  });
+
+  it("os_sandbox engine: no token line at all", () => {
+    expect(line(run("install").out)).toBeUndefined();
+  });
+
+  it("the written unit holds no token variable and no EnvironmentFile, with a token stored and the variable exported", () => {
+    setSetting(stateDir(), "sandbox_engine", "microvm");
+    writeVmToken(stateDir(), process.getuid?.(), FAKE);
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", FAKE);
+    try {
+      run("install");
+      const unit = readFileSync(linuxFile(), "utf8");
+      expect(unit).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+      expect(unit).not.toContain("EnvironmentFile");
+      expect(unit).not.toContain("SERVICEFAKE");
+      expect(unit).not.toContain("sk-ant");
+      const plist = renderLaunchdPlist({ command: COMMAND, workingDirectory: "/w", pathEntries: [], logFile: "/l" });
+      expect(plist).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

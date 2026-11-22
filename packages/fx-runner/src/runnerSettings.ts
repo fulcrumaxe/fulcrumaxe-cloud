@@ -150,6 +150,15 @@ const budgetKey = (key: string): { cls: JobClass; field: "memoryGb" | "tasks" } 
 
 const whole = (value: unknown, min: number, max: number): number | undefined => (typeof value === "number" && Number.isInteger(value) && value >= min && value <= max ? value : undefined);
 
+/**
+ * D#587 B-6-VMTOKEN: whether host-side children must be built without the dev token variable. True in `microvm` mode and, failing closed, when the settings
+ * cannot be read (the runner then claims nothing and the engine is unknown). The one rule `run`, `doctor` and the entry point all use.
+ */
+export function omitsDevToken(stateDir: string): boolean {
+  const settings = loadSettings(stateDir);
+  return settings.unreadable === true || settings.sandboxEngine === "microvm";
+}
+
 export function loadSettings(stateDir: string): RunnerSettings {
   const settings: RunnerSettings = { ...DEFAULT_SETTINGS, budget: { light: { ...DEFAULT_BUDGET.light }, heavy: { ...DEFAULT_BUDGET.heavy } } };
   try {

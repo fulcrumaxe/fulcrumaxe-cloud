@@ -28,7 +28,8 @@ import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
 import { findCliStubs } from "../daemon/cliStubs.js";
 import { ENGINE_LINES, engineLineOf, missingCaps, type VmHostFacts } from "../vm/limits.js";
-import { loadSettings } from "../runnerSettings.js";
+import { vmTokenLine, vmTokenStatus } from "../credentials/vmToken.js";
+import { loadSettings, omitsDevToken } from "../runnerSettings.js";
 import { vmInstallChecks, type VmInstallFacts } from "../vm/doctorChecks.js";
 import { VM_CHECKS, fixText, preflightChecks, probeNetwork, type NetworkPorts, type PreflightFacts } from "../daemon/preflight.js";
 import { updatesLine } from "./update.js";
@@ -68,6 +69,8 @@ export interface DoctorHost {
   userName?: string | undefined;
   /** D#587 B-6a: what the machine says about KVM, the VM helper's socket and memory. Left out means every one of them is unreadable, which never reads as available. */
   vm?: VmHostFacts | undefined;
+  /** D#587 B-6-VMTOKEN: whether the dev token variable (the subscription token's name, looked up by the entry point) is set in this shell (a boolean; the value never enters the command). It counts only while the token file is missing. */
+  vmEnvToken?: boolean | undefined;
   /** D#587 B-5b-3a: whether this build composed a live microVM stack (`liveMicrovmComplete`). Anything but `true` is "not wired", which fails a runner set to `microvm`, never passes it. */
   microvmWired?: boolean | undefined;
   /** D#845 ON-21: where the preflight list reads the kernel (the bin edge) and resolves names. Left out, no preflight line is printed. */
@@ -141,7 +144,7 @@ const MIB = 1024 ** 2;
  * line is printed whatever the mode; the checks after it can FAIL only when the person asked for `microvm`, and then the runner claims nothing. A fact that could
  * not be read is a failure there, never a pass.
  */
-function vmEngineCheck(ctx: CommandContext, host: DoctorHost, line: (level: Level, label: string, detail: string) => void): void {
+function vmEngineCheck(ctx: CommandContext, host: DoctorHost, mode: Registration["credential_mode"] | undefined, line: (level: Level, label: string, detail: string) => void): void {
   const settings = loadSettings(ctx.stateDir);
   const engine = settings.unreadable === true ? "invalid" : (settings.sandboxEngine ?? "os_sandbox");
   const text = engineLineOf({ platform: host.platform, engine, caps: settings.microvm, facts: host.vm });
@@ -150,6 +153,12 @@ function vmEngineCheck(ctx: CommandContext, host: DoctorHost, line: (level: Leve
     line("FAIL", "microvm", settings.unreadable === true ? "the settings file cannot be read (damaged, too large or not a regular file); nothing is claimed. Fix or remove it, then run: fx-runner config set sandbox_engine os_sandbox|microvm" : "sandbox_engine in the settings file is neither os_sandbox nor microvm; nothing is claimed. Fix it with: fx-runner config set sandbox_engine os_sandbox|microvm");
     return;
   }
+  // D#587 B-6-VMTOKEN: the token a VM job is handed. FAIL in microvm mode when it is missing or unsafe (the runner then claims nothing); INFO only in os_sandbox mode, and for an
+  // API-key runner, which sends no subscription token to a VM. Derived from the file on every run of doctor; never shows any part of it.
+  const tokenStatus = vmTokenStatus(ctx.stateDir, host.uid);
+  const tokenLine = vmTokenLine(tokenStatus, host.vmEnvToken === true);
+  const tokenNeeded = engine === "microvm" && mode !== "api_key";
+  line(tokenNeeded ? tokenLine.level : "INFO", "VM model token", tokenLine.detail);
   if (engine !== "microvm") return;
   const missing = missingCaps(settings.microvm);
   if (missing.length > 0) line("FAIL", "microvm limits", `missing or invalid: ${missing.join(", ")}; nothing is claimed. Set each with: fx-runner config set <key> <value>`);
@@ -380,7 +389,8 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   }
 
   if (binaryPath !== undefined) {
-    const report = await host.engine.inspect({ binaryPath, envOptions: {}, stateDir: ctx.stateDir, loginMode: mode === "subscription" ? "subscription" : undefined });
+    // In microvm mode the probes run without the dev token variable (it is for VM jobs only, from the file).
+    const report = await host.engine.inspect({ binaryPath, envOptions: { omitSubscriptionToken: omitsDevToken(ctx.stateDir) }, stateDir: ctx.stateDir, loginMode: mode === "subscription" ? "subscription" : undefined });
     if (report.version === undefined) line("FAIL", "Claude version", `could not be read; upgrade Claude Code to ${report.minimumVersion} or newer`);
     else if (!report.versionSupported) line("FAIL", "Claude version", `${report.version}, at least ${report.minimumVersion}: no; upgrade Claude Code`);
     else line("PASS", "Claude version", `${report.version}, at least ${report.minimumVersion}: yes`);
@@ -404,7 +414,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   await wslCheck(ctx, host, binaryPath, line);
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
   await limitsCheck(host, line);
-  vmEngineCheck(ctx, host, line);
+  vmEngineCheck(ctx, host, mode, line);
   const readLinger = lingerReader(host);
   await preflightCheck(ctx, host, registration?.cloud_origin ?? host.cloudOrigin, readLinger, line);
   await lingerCheck(host, readLinger, line);

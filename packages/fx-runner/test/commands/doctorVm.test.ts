@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,8 @@ import type { CommandContext } from "../../src/context.js";
 import { doctorCommand, type DoctorHost } from "../../src/commands/doctor.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
+import { cleanEnv } from "../../src/job/cleanEnv.js";
+import { VM_TOKEN_DIR, VM_TOKEN_FILE, writeVmToken } from "../../src/credentials/vmToken.js";
 import { SETTINGS_FILE, setSetting } from "../../src/runnerSettings.js";
 import type { ScopeSupport } from "../../src/sandbox/jobLimits.js";
 import type { VmHostFacts } from "../../src/vm/limits.js";
@@ -19,6 +21,8 @@ import { testLaunch } from "../helpers/launch.js";
 const SCOPES_OK: ScopeSupport = { ok: true, tools: { systemdRun: "/x/systemd-run", systemctl: "/x/systemctl", env: "/x/env" }, runtimeDir: "/run/user/1000" };
 const HOST_PATH = process.env.PATH ?? "";
 const GIB = 1024 ** 3;
+// A fake token, assembled from fragments so no token-shaped literal sits in the source.
+const FAKE_TOKEN = ["sk-ant-", "oat01-", "DOCTORFAKE0123456789abcd"].join("");
 
 let root: string;
 let stateDir: string;
@@ -48,10 +52,10 @@ afterEach(() => {
 
 const facts = (over: Partial<VmHostFacts> = {}): VmHostFacts => ({ kvm: "present", helperSocket: "present", helperSocketPath: "/fake/helper.sock", totalMemMb: 16384, cpus: 8, readMemAvailableBytes: () => 8 * GIB, ...over });
 
-async function doctor(vm: VmHostFacts | undefined, platform: NodeJS.Platform = "linux", wired: boolean | "absent" = true): Promise<{ code: number; out: string }> {
+async function doctor(vm: VmHostFacts | undefined, platform: NodeJS.Platform = "linux", wired: boolean | "absent" = true, extra: Partial<DoctorHost> = {}): Promise<{ code: number; out: string }> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir, uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: (async () => new Response("", { status: 200 })) as typeof fetch };
-  const host: DoctorHost = { platform, shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, vm, microvmWired: wired === "absent" ? undefined : wired };
+  const host: DoctorHost = { platform, shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, vm, microvmWired: wired === "absent" ? undefined : wired, uid: process.getuid?.(), ...extra };
   const code = await doctorCommand(ctx, host);
   return { code, out: lines.join("\n") };
 }
@@ -128,6 +132,7 @@ describe("doctor: a build that cannot start a VM yet (D#587 B-5b-3a)", () => {
 describe("doctor: microvm mode", () => {
   it("a fully set up host prints microvm, the limits beside the host's totals, and passes", async () => {
     enableMicrovm();
+    writeVmToken(stateDir, process.getuid?.(), FAKE_TOKEN);
     const result = await doctor(facts());
     expect(engineLine(result.out)).toBe("INFO  sandbox_engine: microvm");
     expect(levelOf(result.out, "microvm limits")).toBe("PASS");
@@ -201,5 +206,130 @@ describe("doctor: microvm mode", () => {
     expect(levelOf(result.out, "microvm")).toBe("FAIL");
     expect(result.out).toContain("neither os_sandbox nor microvm");
     expect(result.code).toBe(1);
+  });
+});
+
+describe("doctor: the VM model token line (D#587 B-6-VMTOKEN)", () => {
+  const tokenFile = (): string => path.join(stateDir, VM_TOKEN_DIR, VM_TOKEN_FILE);
+  const lineOf = (out: string): string | undefined => out.split("\n").find((l) => l.includes("VM model token:"));
+  const mint = (): void => writeVmToken(stateDir, process.getuid?.(), FAKE_TOKEN);
+
+  it("a stored token in microvm mode: PASS, with its age and source, and doctor passes", async () => {
+    enableMicrovm();
+    mint();
+    const result = await doctor(facts());
+    expect(lineOf(result.out)).toMatch(/^PASS\s+VM model token:\s+present \(file, set 0 days ago\)$/);
+    expect(result.code).toBe(0);
+  });
+
+  it("no file but the dev variable set: present (env, dev), PASS", async () => {
+    enableMicrovm();
+    const result = await doctor(facts(), "linux", true, { vmEnvToken: true });
+    expect(lineOf(result.out)).toMatch(/^PASS\s+VM model token:\s+present \(env, dev\)$/);
+    expect(result.code).toBe(0);
+  });
+
+  it("no file and no variable: FAIL naming the fix, and doctor fails", async () => {
+    enableMicrovm();
+    const result = await doctor(facts());
+    expect(levelOf(result.out, "VM model token")).toBe("FAIL");
+    expect(lineOf(result.out)).toContain("missing; run: fx-runner credentials set-vm-token");
+    expect(result.code).toBe(1);
+  });
+
+  it("an unsafe file (group-readable) is FAIL unsafe, and the dev variable is NOT a fallback", async () => {
+    enableMicrovm();
+    mint();
+    chmodSync(tokenFile(), 0o640);
+    const result = await doctor(facts(), "linux", true, { vmEnvToken: true });
+    expect(levelOf(result.out, "VM model token")).toBe("FAIL");
+    expect(lineOf(result.out)).toContain("unsafe");
+    expect(lineOf(result.out)).not.toContain("env");
+    expect(result.code).toBe(1);
+  });
+
+  it("a symlink in place of the file is unsafe too", async () => {
+    enableMicrovm();
+    mint();
+    const elsewhere = path.join(root, "elsewhere");
+    writeFileSync(elsewhere, FAKE_TOKEN, { mode: 0o600 });
+    rmSync(tokenFile());
+    symlinkSync(elsewhere, tokenFile());
+    const result = await doctor(facts());
+    expect(levelOf(result.out, "VM model token")).toBe("FAIL");
+    expect(lineOf(result.out)).toContain("unsafe");
+  });
+
+  it("a file older than 300 days warns (by mtime) but still passes doctor; at 299 days it does not", async () => {
+    enableMicrovm();
+    mint();
+    const old = new Date(Date.now() - 301 * 86_400_000);
+    utimesSync(tokenFile(), old, old);
+    const stale = await doctor(facts());
+    expect(levelOf(stale.out, "VM model token")).toBe("WARN");
+    expect(lineOf(stale.out)).toContain("set over 300 days ago; a minted token lasts about a year");
+    expect(stale.code).toBe(0);
+    const edge = new Date(Date.now() - 299 * 86_400_000);
+    utimesSync(tokenFile(), edge, edge);
+    expect(levelOf((await doctor(facts())).out, "VM model token")).toBe("PASS");
+  });
+
+  it("in os_sandbox mode the line is INFO only, even with no token", async () => {
+    const result = await doctor(facts());
+    expect(levelOf(result.out, "VM model token")).toBe("INFO");
+    expect(result.code).toBe(0);
+  });
+
+  it("an API-key runner in microvm mode sends no subscription token, so a missing token is INFO", async () => {
+    enableMicrovm();
+    const key = generateRunnerKey();
+    saveRunnerKey(stateDir, key);
+    saveRegistration(stateDir, { version: 1, cloud_origin: "https://cloud.example.test", runner_id: randomUUID(), account_id: randomUUID(), credential_mode: "api_key", jkt: key.jkt, registered_at: new Date().toISOString() });
+    const result = await doctor(facts());
+    expect(levelOf(result.out, "VM model token")).toBe("INFO");
+  });
+
+  it("never prints any part of the token", async () => {
+    enableMicrovm();
+    mint();
+    const result = await doctor(facts(), "linux", true, { vmEnvToken: true });
+    expect(result.out).not.toContain("DOCTORFAKE");
+    expect(result.out).not.toContain("sk-ant");
+  });
+
+  describe("the inspect probe never gets the dev token variable in microvm mode (or when the settings are unreadable)", () => {
+    const probeEnvs = async (): Promise<Array<Record<string, string>>> => {
+      vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "dev-exported-value");
+      const seen: Array<Record<string, string>> = [];
+      const real = createClaudeKit(spawn, { launch: testLaunch() });
+      const engine = { ...real, inspect: (async (input: Parameters<typeof real.inspect>[0]) => { seen.push(cleanEnv({ mode: "subscription" }, input.envOptions)); return real.inspect(input); }) as typeof real.inspect };
+      await doctor(facts(), "linux", true, { engine });
+      return seen;
+    };
+    it("microvm mode: the probe's environment holds no token", async () => {
+      enableMicrovm();
+      const seen = await probeEnvs();
+      expect(seen.length).toBeGreaterThan(0);
+      for (const env of seen) expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+    });
+    it("unreadable settings fail closed: no token either", async () => {
+      writeFileSync(path.join(stateDir, SETTINGS_FILE), "{broken");
+      const seen = await probeEnvs();
+      expect(seen.length).toBeGreaterThan(0);
+      for (const env of seen) expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+    });
+    it("control, os_sandbox mode: the probe gets the variable as before", async () => {
+      const seen = await probeEnvs();
+      expect(seen.length).toBeGreaterThan(0);
+      for (const env of seen) expect(env).toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN", "dev-exported-value");
+    });
+  });
+
+  it("removing the file flips the line from present to missing on the next run (derived, not stamped)", async () => {
+    enableMicrovm();
+    mint();
+    expect(levelOf((await doctor(facts())).out, "VM model token")).toBe("PASS");
+    rmSync(tokenFile());
+    expect(levelOf((await doctor(facts())).out, "VM model token")).toBe("FAIL");
   });
 });

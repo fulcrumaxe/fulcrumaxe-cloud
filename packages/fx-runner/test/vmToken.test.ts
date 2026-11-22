@@ -35,6 +35,17 @@ const codeOf = (fn: () => unknown): string | undefined => {
 };
 const status = (): string => vmTokenStatus(state, UID).state;
 
+describe("the exported file spec is frozen (D#587 B-6-VMTOKEN)", () => {
+  it("cannot be changed by any importer: every field is fixed", () => {
+    expect(Object.isFrozen(VM_TOKEN_SPEC)).toBe(true);
+    const before = { ...VM_TOKEN_SPEC };
+    expect(() => { (VM_TOKEN_SPEC as { file: string }).file = "other"; }).toThrow(TypeError);
+    expect(() => { (VM_TOKEN_SPEC as { maxBytes: number }).maxBytes = 1_000_000; }).toThrow(TypeError);
+    expect(() => { delete (VM_TOKEN_SPEC as { dir?: string }).dir; }).toThrow(TypeError);
+    expect({ ...VM_TOKEN_SPEC }).toEqual(before);
+  });
+});
+
 describe("what a token may look like (vm_token_format)", () => {
   it("takes a token with one trailing newline", () => {
     expect(parseVmToken(`${TOKEN}\n`)).toBe(TOKEN);

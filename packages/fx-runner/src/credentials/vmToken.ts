@@ -47,13 +47,13 @@ export const VM_TOKEN_PROMPT =
 /** The refusal when a token is given as an argument (fixed text; nothing of the argument is repeated). */
 export const VM_TOKEN_USAGE = "set-vm-token takes no argument and never a token on the command line; it reads the token from a hidden prompt or from standard input";
 
-export const VM_TOKEN_SPEC: SecretFileSpec = {
+export const VM_TOKEN_SPEC: Readonly<SecretFileSpec> = Object.freeze<SecretFileSpec>({
   dir: VM_TOKEN_DIR,
   file: VM_TOKEN_FILE,
   maxBytes: FILE_MAX_BYTES,
   missing: () => new VmTokenError("vm_token_missing"),
   unsafe: (reason, remedy) => new VmTokenError("vm_token_unsafe", `${reason}; ${remedy ?? "run: fx-runner credentials clear-vm-token"}, then run: fx-runner credentials set-vm-token`),
-};
+});
 
 /** The token a person typed or piped: one trailing newline is dropped, then it must have the prefix, fit, and be printable ASCII without spaces. */
 export function parseVmToken(raw: string): string {
@@ -94,6 +94,23 @@ export function vmTokenStatus(stateDir: string, uid: number | undefined, now: nu
   }
   const mtime = lstatSync(path.join(stateDir, VM_TOKEN_DIR, VM_TOKEN_FILE)).mtimeMs;
   return { state: "present", ageDays: Math.max(0, Math.floor((now - mtime) / 86_400_000)), source: "file" };
+}
+
+/** A file older than this many days gets a warning: a minted token lasts about a year and its expiry cannot be read, so the file's age is the only sign. */
+export const VM_TOKEN_STALE_DAYS = 300;
+
+/**
+ * The one line `doctor` and `service install` print about the token, derived from the file on every call. `envToken` is whether the dev variable is set (a boolean only:
+ * the value never comes here); it counts only when the file is missing, as in `readVmToken`. Nothing of the token is shown.
+ */
+export function vmTokenLine(status: VmTokenStatus, envToken: boolean): { level: "PASS" | "WARN" | "FAIL"; detail: string } {
+  if (status.state === "unsafe") return { level: "FAIL", detail: "unsafe; the token file or a directory above it is not safe to use. Run: fx-runner credentials clear-vm-token, then fx-runner credentials set-vm-token" };
+  if (status.state === "missing") {
+    if (envToken) return { level: "PASS", detail: "present (env, dev)" };
+    return { level: "FAIL", detail: "missing; run: fx-runner credentials set-vm-token" };
+  }
+  const detail = `present (file, set ${status.ageDays} days ago)`;
+  return status.ageDays > VM_TOKEN_STALE_DAYS ? { level: "WARN", detail: `${detail}; set over ${VM_TOKEN_STALE_DAYS} days ago; a minted token lasts about a year` } : { level: "PASS", detail };
 }
 
 /**
