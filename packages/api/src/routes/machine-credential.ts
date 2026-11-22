@@ -51,7 +51,7 @@ const STATUS_OF: Record<MachineOpsError["code"], number> = {
 const ON_TOKEN = new Set<MachineOpsError["code"]>(["invalid_token_format", "token_invalid", "token_read_only"]);
 
 /** The service's fixed message and a code from its closed list; nothing the caller sent is echoed. */
-function mapError(err: unknown): unknown {
+export function mapError(err: unknown): unknown {
   if (!(err instanceof MachineOpsError)) return err;
   return new ApiError(STATUS_OF[err.code], err.code, err.message, ON_TOKEN.has(err.code) ? [{ path: "token", code: err.code }] : undefined);
 }

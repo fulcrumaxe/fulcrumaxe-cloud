@@ -14726,6 +14726,624 @@
         }
       }
     },
+    "/api/v1/machine-servers/quote": {
+      "get": {
+        "operationId": "quoteHetznerServer",
+        "summary": "The live price of a Hetzner Cloud server (hourly, monthly and IPv4, gross), with the standard-tier statement that comes before it",
+        "description": "Session only, owner or admin. Read from Hetzner on every call; there is no cached or guessed price, and with Hetzner down the answer is 503 with none.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "server_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$"
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,15}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The live price of a Hetzner Cloud server (hourly, monthly and IPv4, gross), with the standard-tier statement that comes before it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "hourly_gross": {
+                      "type": "string",
+                      "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                    },
+                    "monthly_gross": {
+                      "type": "string",
+                      "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                    },
+                    "ipv4_monthly_gross": {
+                      "type": "string",
+                      "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                    },
+                    "tier": {
+                      "type": "string",
+                      "const": "standard"
+                    },
+                    "tier_notice": {
+                      "type": "string"
+                    },
+                    "billed_by": {
+                      "type": "string"
+                    },
+                    "server_type": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "type": "string"
+                    },
+                    "available": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "currency",
+                    "hourly_gross",
+                    "monthly_gross",
+                    "ipv4_monthly_gross",
+                    "tier",
+                    "tier_notice",
+                    "billed_by",
+                    "server_type",
+                    "location",
+                    "available"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `price_changed`: the live price differs from `quoted` by any amount; nothing was created, and `data.live` holds the live price. Other 409s are `hetzner_*` codes (limit reached, size not available, name used) and `credential_invalid`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `price_unavailable` or a `hetzner_*` code: Hetzner did not answer, and no price is shown. `not_configured` and `machine_kek_unset` mean Hetzner Cloud servers are off here.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-servers": {
+      "post": {
+        "operationId": "createHetznerServer",
+        "summary": "Create a Hetzner Cloud server with the stored token, at the price the person was shown",
+        "description": "Session only, owner or admin. Needs an `Idempotency-Key`: the same key answers the server the first request made and creates nothing more (the answer carries `Idempotent-Replayed: true`). `quoted` must equal the live price; any difference is 409 `price_changed` and nothing is created. A failure part way undoes what was made (firewall, token, server) and leaves the row `failed`.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "required",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "server_type": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$"
+                  },
+                  "location": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,15}$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+                  },
+                  "ssh_key_id": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "quoted": {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "pattern": "^[A-Z]{3}$"
+                      },
+                      "hourly_gross": {
+                        "type": "string",
+                        "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                      },
+                      "monthly_gross": {
+                        "type": "string",
+                        "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                      },
+                      "ipv4_monthly_gross": {
+                        "type": "string",
+                        "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "hourly_gross",
+                      "monthly_gross",
+                      "ipv4_monthly_gross"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "server_type",
+                  "location",
+                  "quoted"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Create a Hetzner Cloud server with the stored token, at the price the person was shown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "hetzner_cloud"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "server_type": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "location": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "public_ipv4": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "failure_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "price": {
+                      "type": "object",
+                      "properties": {
+                        "currency": {
+                          "type": "string",
+                          "pattern": "^[A-Z]{3}$"
+                        },
+                        "hourly_gross": {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        },
+                        "monthly_gross": {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        },
+                        "ipv4_monthly_gross": {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        }
+                      },
+                      "required": [
+                        "currency",
+                        "hourly_gross",
+                        "monthly_gross",
+                        "ipv4_monthly_gross"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "created_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "kind",
+                    "status",
+                    "server_type",
+                    "location",
+                    "public_ipv4",
+                    "failure_code",
+                    "price",
+                    "created_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `price_changed`: the live price differs from `quoted` by any amount; nothing was created, and `data.live` holds the live price. Other 409s are `hetzner_*` codes (limit reached, size not available, name used) and `credential_invalid`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `price_unavailable` or a `hetzner_*` code: Hetzner did not answer, and no price is shown. `not_configured` and `machine_kek_unset` mean Hetzner Cloud servers are off here.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-servers/{id}": {
+      "get": {
+        "operationId": "getHetznerServer",
+        "summary": "One Hetzner Cloud server of this account",
+        "description": "Session only, owner or admin. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One Hetzner Cloud server of this account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "hetzner_cloud"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "server_type": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "location": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "public_ipv4": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "failure_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "price": {
+                      "type": "object",
+                      "properties": {
+                        "currency": {
+                          "type": "string",
+                          "pattern": "^[A-Z]{3}$"
+                        },
+                        "hourly_gross": {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        },
+                        "monthly_gross": {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        },
+                        "ipv4_monthly_gross": {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,6}(\\.[0-9]{1,6})?$"
+                        }
+                      },
+                      "required": [
+                        "currency",
+                        "hourly_gross",
+                        "monthly_gross",
+                        "ipv4_monthly_gross"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "created_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "kind",
+                    "status",
+                    "server_type",
+                    "location",
+                    "public_ipv4",
+                    "failure_code",
+                    "price",
+                    "created_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repos": {
       "get": {
         "operationId": "listRepos",
