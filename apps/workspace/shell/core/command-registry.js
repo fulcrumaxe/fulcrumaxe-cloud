@@ -526,6 +526,24 @@ export const FULCCommands = {};
     while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
     const f = filter.toLowerCase();
     const names = getAvailableCommands().filter((name) => name.includes(f));
+    // Fork edit (MC-10c): apps whose title or keyword matches come first; a click opens the app.
+    const appHits = window.FULCApps && window.FULCApps.search ? window.FULCApps.search(filter) : [];
+    appHits.slice(0, 20).forEach((app) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.setAttribute('role', 'menuitem');
+      item.className = 'command-palette-item command-palette-app';
+      item.dataset.appId = app.id;
+      item.textContent = app.title;
+      item.style.cssText =
+        'display:block;width:100%;text-align:left;padding:8px 12px;background:none;' +
+        'border:none;color:inherit;font:inherit;cursor:pointer;';
+      item.addEventListener('click', () => {
+        closePalette();
+        if (window.FULCWM) window.FULCWM.open(app.id);
+      });
+      listEl.appendChild(item);
+    });
     names.slice(0, 20).forEach((name) => {
       const item = document.createElement('button');
       item.type = 'button';

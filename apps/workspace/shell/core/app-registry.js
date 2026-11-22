@@ -8,6 +8,8 @@
 //   it the argument (same rules: frozen plain JSON, at most 1024 characters, untrusted). Without the hook it is ignored.
 // onHide() / onShow(): optional. The shell calls them when it hides the window (minimized,
 //   another workspace, the phone's one-window view) and when it shows it again.
+// keywords: optional array of extra search words (fork edit, MC-10c). The launcher search matches the title and
+//   each keyword, so an app renamed later is still found by its old name. Non-string entries are dropped.
 // Entitlement fields: capability (default: 'app.<id>'), whenDenied ('show-locked' | 'hide')
 (function () {
   'use strict';
@@ -24,6 +26,9 @@
       app.id = id;
       app.capability = app.capability || ('app.' + id);
       app.whenDenied = app.whenDenied || 'show-locked';
+      app.keywords = Array.isArray(app.keywords)
+        ? app.keywords.filter((k) => typeof k === 'string' && k.trim() !== '')
+        : [];
       apps[id] = app;
     },
 
@@ -53,6 +58,15 @@
     // apps whose <script> was trimmed (never registered) are hidden entirely.
     isRegistered(id) {
       return inScope(id) && !!apps[id];
+    },
+
+    // Launcher search (fork edit, MC-10c): visible apps whose title or any keyword contains the query, ignoring
+    // case. Same plain substring match the command palette uses for command names; an empty query matches nothing.
+    search(query) {
+      const q = String(query == null ? '' : query).trim().toLowerCase();
+      if (q === '') return [];
+      return this.visible().filter((app) =>
+        [app.title].concat(app.keywords || []).some((t) => typeof t === 'string' && t.toLowerCase().includes(q)));
     },
 
     // Returns apps the current user can see (Allow + UpgradeRequired).
