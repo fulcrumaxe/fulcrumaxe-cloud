@@ -45,7 +45,7 @@ See `../security.md`. `escalate`'s clamp-on-unknown-model behavior and the floor
 
 ## Tests
 
-Run with `pnpm --filter @fx/model-router test` (`vitest run`). `test/route.determinism.test.ts` and a property test both call `route` repeatedly (the latter 1,000 times) against the same inputs to confirm it is deterministic. `test/route.live.pg.test.ts` and `test/proposal.pg.test.ts` run against a real Postgres instance via `test/globalSetup.ts`, with `fileParallelism: false` and a single forked worker since they mutate shared `routing_tables`/`routing_rows` state. `test/floors.test.ts`, `test/escalate.test.ts`, `test/tableSchema.test.ts`, `test/proposal.test.ts`, and `test/evalBootstrap.test.ts` cover the pure logic.
+Run with `pnpm --filter @fx/model-router test` (`vitest run`). `test/route.determinism.test.ts` and a property test both call `route` repeatedly (the latter 1,000 times) against the same inputs to confirm it is deterministic. `test/route.live.pg.test.ts` and `test/proposal.pg.test.ts` run against a real Postgres instance via `test/globalSetup.ts`, with `fileParallelism: false` and a single forked worker since they mutate shared `routing_tables`/`routing_rows` state. `test/floors.test.ts`, `test/escalate.test.ts`, `test/tableSchema.test.ts`, `test/proposal.test.ts`, and `test/evalBootstrap.test.ts` cover the pure logic. A test that seeds an account with a hosted plan also sets `hosted_plan_paid = true` (`accounts.hosted_plan_paid`, migration 1048): hosted entitlements now read that flag, not the plan name alone.
 
 ## Known gaps
 

@@ -20,6 +20,8 @@ Sources:
 - `packages/billing/src/webhook.ts`
 - `packages/billing/src/subscriptionSync.ts`
 - `packages/billing/src/priceMap.ts`
+- `packages/billing/src/engineItems.ts`
+- `packages/billing/src/portalConfig.ts`
 - `packages/billing/src/accountSettings.ts`
 - `packages/billing/src/statusReasons.ts`
 - `packages/billing/src/sitekit/webhook.ts`
@@ -28,6 +30,7 @@ Sources:
 - `packages/billing/test/publicSurface.test.ts`
 - `packages/db/migrations/0001_core.sql`
 - `packages/db/migrations/0606_derived_account_status.sql`
+- `packages/db/migrations/1048_engine_quantity.sql`
 
 ## What it does
 
@@ -65,7 +68,8 @@ several internal functions are *not* on this list.
 - `env.ts`: `requireEnv(name)`, `stripeSecretKeyFromEnv()`, `stripeWebhookSecretFromEnv()`, `appOriginFromEnv()`, `stripePriceIdFromEnv(plan)`
 - `pg.ts`: `createPool(connectionString)`, `withPlatformOps(pool, fn)`
 - `accountSettings.ts`: `AccountSettingResult`, `SetAccountBudgetsInput`, `setAccountBudgets(ctx, input)`, `SetSharePublicFiguresInput`, `setSharePublicFigures(ctx, input)`
-- `statusReasons.ts` also exports `AccountBillingBoundaries`; `env.ts` also exports `assertStripePriceIdsConfigured`, `assertSitekitPriceIdsConfigured`, `stripeKeyIsLive`, `stripeReconcileKeyFromEnv`, `stripeSitekitPriceIdFromEnv`, `sitekitBundleCouponFromEnv`
+- `statusReasons.ts` also exports `AccountBillingBoundaries`; `env.ts` also exports `assertStripePriceIdsConfigured`, `assertEnginePriceIdConfigured`, `stripeEnginePriceIdFromEnv`, `stripeEnginePriceIdsFromEnv`, `assertSitekitPriceIdsConfigured`, `stripeKeyIsLive`, `stripeReconcileKeyFromEnv`, `stripeSitekitPriceIdFromEnv`, `sitekitBundleCouponFromEnv`
+- `engineItems.ts` (#1166, #1168): `setEngineQuantity(ctx, input)`, `enginePlanOffered()` and `MAX_ENGINE_QUANTITY` (100); `portalConfig.ts` stays internal. `enginePricePerMonthUsd` is re-exported read-only from `@fx/spend` beside `listPlans`.
 - `priceMap.ts`: the `PriceMap` type; `subscriptionSync.ts`: `NO_REFUNDS_POLICY_VERSION`; and `listPlans`/`Plan`, re-exported read-only from `@fx/spend`
 - `sitekit/`: `isSetupPaid`, `isSyncEntitled`, `createSitekitCheckout`, `cancelSitekitSync`, `readSitekitBilling`, `SITEKIT_EXPECTED_SPEND`, `listSites`, `checkNoPaymentLinks`, `SITEKIT_PLANS`, `SITEKIT_PRICES_PROVISIONAL`
 - `package.json` also exposes the subpath `@fx/billing/subscriptionSync`
@@ -170,6 +174,10 @@ a conflicting live account under that lock.
 unique index on `stripe_customer_id` among live (non-deleted) accounts,
 backstopping that application-level check at the database level.
 
+**Engine plan (#1166).** An account has one Stripe subscription. It may hold at most two items: one hosted plan and one engine item whose quantity is the number of engines the account pays for (`STRIPE_PRICE_ID_ENGINE`; unset, the plan is not offered and `enginePlanOffered()` is false, as it is when the plan data has no engine price). `createCheckoutSession` takes `plan: "engine"` with a `quantity` (1 to 100, default 1). For an account that already has a paying subscription it adds the plan as an item to that subscription instead of opening a second Checkout, and answers with the success URL and `itemAdded`. `already_subscribed` then means the account already holds that plan, holds a hosted plan (changing hosted plans is the portal's job) or its subscription is not paying. `setEngineQuantity` changes the total: below the engines running now it answers `engine_quantity_in_use`, with no paying subscription `no_subscription`. Every change takes a per-subscription advisory lock and works from the subscription fetched from Stripe. A raise is invoiced first and applies only once paid (`pending_if_incomplete`); if the card is declined the answer is `payment_pending` and nothing changes. A lowering is a credit with Stripe's default proration. Each write is read back from Stripe before the call says ok, and none of them writes `accounts`: the signed webhook's sync stays the only writer, and it mirrors the summed engine quantity into `accounts.engine_quantity`, sets `hosted_plan_paid` from whether a recognised hosted item is present (a subscription with only engine items is not an unknown price and leaves `plan` and the cap alone), and flags `engine_quantity_below_live_at` with one `engine_quantity_below_live` audit row when the paid quantity is under the engines live now. A hosted plan's entitlement (hosted runs, limits, discounts) needs `hosted_plan_paid` as well as a paying standing.
+
+**Billing portal (#1166).** Every portal session names one configuration this package creates and pins (`portalConfig.ts`), or the one `STRIPE_PORTAL_CONFIGURATION_ID` names. It offers the payment method, invoices and cancellation at period end, and no item change: the portal would apply a price change at once with no payment taken. A pinned configuration that is inactive or allows item changes is refused, and with none usable no portal opens.
+
 **Return URLs.** `returnUrl.ts`'s `buildValidatedReturnUrl` accepts only a
 bare absolute path (must start with a single `/`, never `//`, and carry no
 scheme of its own), resolves it against a server-configured HTTPS app
@@ -216,7 +224,7 @@ for the same "no `main`/`exports`" reason described in
 
 See [`../data-model.md`](../data-model.md) for the full table list. This
 package writes `accounts` (`plan`, `compute_cap_usd_month`,
-`stripe_customer_id`, `past_due_since`, `owner_paused_at`, `deleted_at` --
+`stripe_customer_id`, `engine_quantity`, `hosted_plan_paid`, `engine_quantity_below_live_at`, `past_due_since`, `owner_paused_at`, `deleted_at` --
 never `status` itself, which `accounts_derive_status` computes) and
 `stripe_webhook_events` (the dedupe ledger); it reads `account_members`
 (for authorization) and the plan data (`listPlans()` / `planFor()` from `@fx/spend`, read from
