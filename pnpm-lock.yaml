@@ -807,6 +807,9 @@ importers:
       '@fx/sitekit-checks':
         specifier: workspace:*
         version: link:../sitekit-checks
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@fx/trust':
         specifier: workspace:*
         version: link:../trust
