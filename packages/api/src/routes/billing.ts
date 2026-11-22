@@ -46,7 +46,7 @@ function billingLinkError(reason: string): ApiError {
     case "engine_quantity_in_use":
       return new ApiError(409, "engine_quantity_in_use", "more engines are running than that quantity; park or stop an engine first");
     case "payment_pending":
-      return new ApiError(402, "payment_pending", "the provider could not collect the payment for this change, so it was not applied; update your payment method in the billing portal and try again");
+      return new ApiError(402, "payment_pending", "a change to this subscription is waiting for payment, or the provider could not collect it, so this change was not applied; update your payment method in the billing portal and try again once it settles");
     case "invalid_quantity":
       return new ApiError(422, "invalid_quantity", "the quantity must be a whole number from 1 to 100");
     case "invalid_return_url":
