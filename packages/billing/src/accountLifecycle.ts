@@ -14,7 +14,7 @@ import { authorizeAccountWrite, authorizeAccountWriteInTx } from './authorize.js
 import { recordAccountAction } from './audit.js';
 import { buildValidatedReturnUrl } from './returnUrl.js';
 import { appOriginFromEnv, stripeEnginePriceIdFromEnv, stripeEnginePriceIdsFromEnv, stripePriceIdFromEnv } from './env.js';
-import { addItemToSubscription, isValidEngineQuantity } from './engineItems.js';
+import { addItemToSubscription, ENGINE_ACCOUNT_SQL, engineStanding, isValidEngineQuantity, logEngineRefusal, raiseEngineToAtLeast, type EngineAccountRow } from './engineItems.js';
 import { ensurePortalConfigurationId } from './portalConfig.js';
 import { STRIPE_UNAVAILABLE_RESULT, noRefundsCheckoutLine, termsUrlFromEnv, type StripeLike } from './stripeClient.js';
 import type { BillingCtx } from './types.js';
@@ -574,11 +574,7 @@ export async function createCheckoutSession(
   if (authFailure) return authFailure;
 
   const account = await withPlatformOps(ctx.pool, async (client) => {
-    const { rows } = await client.query<{ stripe_customer_id: string | null; stripe_subscription_id: string | null; stripe_subscription_status: string | null }>(
-      'SELECT stripe_customer_id, stripe_subscription_id, stripe_subscription_status FROM accounts WHERE id = $1 AND deleted_at IS NULL',
-      [input.accountId],
-    );
-    return rows[0] ?? null;
+    return (await client.query<EngineAccountRow>(ENGINE_ACCOUNT_SQL, [input.accountId])).rows[0] ?? null;
   });
   if (!account) return { ok: false, reason: 'account_not_found' };
 
@@ -597,13 +593,26 @@ export async function createCheckoutSession(
   // D#69 B14, D#845 ON-22a: an account already billed on a subscription never gets a second Checkout (a second, parallel charge). A hosted plan or an
   // engine it does not hold yet joins that ONE subscription as an item; `already_subscribed` means it already holds this one, or holds a hosted plan
   // (changing hosted plans is the portal's job), or the subscription is not paying (settle it in the portal first).
-  if (account.stripe_subscription_status !== null && ALREADY_SUBSCRIBED_STATUSES.has(account.stripe_subscription_status)) {
+  if (isEngine) {
+    // D#845 ON-22c: an engine checkout on a subscription that already holds the engine item is an adjust to max(current, requested), never already_subscribed. A subscription that is not paying
+    // (or whose stored ids are missing) is its own refusal. Both go through the subscription's lock and the paid-before-applied update.
+    const standing = engineStanding(account);
+    if (standing.kind === 'not_paying') {
+      logEngineRefusal('subscription_not_paying', account);
+      return { ok: false, reason: 'subscription_not_paying' };
+    }
+    if (standing.kind === 'paying') {
+      const raised = await raiseEngineToAtLeast(ctx.pool, input.stripe, standing.stored, quantity, enginePriceIds);
+      if (!raised.ok && raised.reason === 'already_subscribed') logEngineRefusal(raised.reason, account);
+      return raised.ok ? { ok: true, url: successUrl, itemAdded: true } : raised;
+    }
+  } else if (account.stripe_subscription_status !== null && ALREADY_SUBSCRIBED_STATUSES.has(account.stripe_subscription_status)) {
     if (!account.stripe_customer_id || !account.stripe_subscription_id) return { ok: false, reason: 'already_subscribed' };
     const stored = { customerId: account.stripe_customer_id, subscriptionId: account.stripe_subscription_id, status: account.stripe_subscription_status };
     if (!['active', 'trialing'].includes(stored.status)) return { ok: false, reason: 'already_subscribed' };
-    const price = isEngine ? stripeEnginePriceIdFromEnv() : stripePriceIdFromEnv(input.plan as PlanId);
+    const price = stripePriceIdFromEnv(input.plan as PlanId);
     // The held-items check and the write happen under the subscription's lock (ruling 35.6), and the charge is invoiced before the item applies (ruling 35.1).
-    const added = await addItemToSubscription(ctx.pool, input.stripe, stored, { price, quantity, kind: isEngine ? 'engine' : 'hosted' }, enginePriceIds);
+    const added = await addItemToSubscription(ctx.pool, input.stripe, stored, { price, quantity, kind: 'hosted' }, enginePriceIds);
     return added.ok ? { ok: true, url: successUrl, itemAdded: true } : added;
   }
 

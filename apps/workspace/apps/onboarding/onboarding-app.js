@@ -55,7 +55,7 @@ const soft = (p) => p.catch((e) => { if (e && e.name === "AbortError") throw e; 
 
 function mountOnboarding(host) {
   const abort = new AbortController();
-  const st = { steps: null, parsed: null, eng: null, error: "", ctx: {}, price: null, choosing: false, choiceError: "", planBusy: false, planNote: "" };
+  const st = { steps: null, parsed: null, eng: null, error: "", ctx: {}, price: null, choosing: false, choiceError: "", planBusy: false, planNote: "", planLink: false };
   let destroyed = false, busy = false, again = false, preview = null, payShown = false;
   // The plan picker opens once, into payHost, and stays until pay is done. The server decides when pay is done.
   function showPlans() {
@@ -166,16 +166,15 @@ function mountOnboarding(host) {
     const m = st.parsed && st.parsed.engine ? st.parsed.engine[0] : null;
     return m ? { ...(m.kvm ? { kvm: m.kvm } : {}), ...(m.helper_missing ? { helper_missing: true } : {}), ...(m.preflight ? { preflight: m.preflight } : {}) } : {};
   };
-  const engineEnv = () => ({ ctx: { ...st.ctx, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
+  const engineEnv = () => ({ ctx: { ...st.ctx, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
   // D#845 ON-22: the project step's purchase buttons. Checkout is the existing one (the server never sells a second subscription: an account that already pays gets the item added, and the answer is its own success path).
   // Returning from Stripe reloads the app, which reads the step again. "Add an engine" changes the quantity on the subscription and reads now; the account follows the provider's confirmation, so the step says so and refreshes when the app is shown again (no timer here).
-  const PLAN_REFUSED = { 403: "Only the account owner can change the Engine plan.", 409: "This account's plan can't be changed here. Use Budget & Billing.", 422: "That quantity isn't accepted." };
-  const PLAN_FAILED = "The Engine plan couldn't be changed. Try again.";
 const ADDED_NOTE = "Engine added. This step updates when the provider confirms the change.";
   async function runPlanAction(id) {
     if (st.planBusy) return;
     st.planBusy = true;
     st.planNote = "";
+    st.planLink = false;
     render();
     try {
       if (id === "add_engine") {
@@ -193,7 +192,12 @@ const ADDED_NOTE = "Engine added. This step updates when the provider confirms t
       return;
     } catch (e) {
       if (e && e.name === "AbortError") return;
-      st.planNote = e instanceof ApiFailure && Object.hasOwn(PLAN_REFUSED, e.status) ? PLAN_REFUSED[e.status] : PLAN_FAILED;
+      const words = await loadEngine().catch(() => null); // the engine step is on screen, so its words are already fetched
+      const refusal = words ? words.planRefusal(e instanceof ApiFailure ? e : null) : { text: "The Engine plan couldn't be changed. Try again.", link: false, code: "" };
+      st.planNote = refusal.text;
+      st.planLink = refusal.link;
+      st.planBusy = false;
+      if (refusal.code === "no_subscription" || refusal.code === "subscription_not_paying") { await load(); return; } // the step reads again and shows its current buttons; the sentence stays under it
     }
     st.planBusy = false;
     render();

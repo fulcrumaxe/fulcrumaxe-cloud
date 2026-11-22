@@ -26296,7 +26296,7 @@
             }
           },
           "409": {
-            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
+            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription`, `subscription_not_paying` (the stored standing is past due, unpaid, incomplete or paused, or its ids are missing) or `engine_quantity_in_use` (engine quantity).",
             "content": {
               "application/json": {
                 "schema": {
@@ -26371,7 +26371,7 @@
       "post": {
         "operationId": "createCheckoutSession",
         "summary": "A Stripe Checkout link to subscribe to a plan",
-        "description": "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. Returns only the `url`.",
+        "description": "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. An engine checkout on a subscription that already holds engines sets the total to the larger of what it holds and `quantity`, and writes nothing when nothing is raised. Returns only the `url`.",
         "security": [
           {
             "session": []
@@ -26473,7 +26473,7 @@
             }
           },
           "409": {
-            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
+            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription`, `subscription_not_paying` (the stored standing is past due, unpaid, incomplete or paused, or its ids are missing) or `engine_quantity_in_use` (engine quantity).",
             "content": {
               "application/json": {
                 "schema": {
@@ -26640,7 +26640,7 @@
             }
           },
           "409": {
-            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription` or `engine_quantity_in_use` (engine quantity).",
+            "description": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription`, `subscription_not_paying` (the stored standing is past due, unpaid, incomplete or paused, or its ids are missing) or `engine_quantity_in_use` (engine quantity).",
             "content": {
               "application/json": {
                 "schema": {

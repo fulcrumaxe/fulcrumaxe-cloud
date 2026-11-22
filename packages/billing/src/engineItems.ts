@@ -131,37 +131,77 @@ export async function setEngineQuantity(ctx: BillingCtx, input: { accountId: str
   const engineIds = stripeEnginePriceIdsFromEnv();
   if (engineIds.length === 0) return { ok: false, reason: 'invalid_plan' };
 
-  const stored = await withPlatformOps(ctx.pool, async (client) => {
-    const { rows } = await client.query<{ stripe_customer_id: string | null; stripe_subscription_id: string | null; stripe_subscription_status: string | null }>(
-      'SELECT stripe_customer_id, stripe_subscription_id, stripe_subscription_status FROM accounts WHERE id = $1 AND deleted_at IS NULL',
-      [input.accountId],
-    );
-    return rows[0] ?? null;
-  });
-  if (!stored) return { ok: false, reason: 'account_not_found' };
-  if (!stored.stripe_customer_id || !stored.stripe_subscription_id || !ITEM_CHANGE_STATUSES.has(stored.stripe_subscription_status ?? '')) return { ok: false, reason: 'no_subscription' };
-  const sub = { customerId: stored.stripe_customer_id, subscriptionId: stored.stripe_subscription_id, status: stored.stripe_subscription_status! };
+  const row = await withPlatformOps(ctx.pool, async (client) => (await client.query<EngineAccountRow>(ENGINE_ACCOUNT_SQL, [input.accountId])).rows[0] ?? null);
+  if (!row) return { ok: false, reason: 'account_not_found' };
+  const standing = engineStanding(row);
+  if (standing.kind !== 'paying') {
+    const reason = standing.kind === 'not_paying' ? 'subscription_not_paying' : 'no_subscription';
+    logEngineRefusal(reason, row);
+    return { ok: false, reason };
+  }
+  const sub = standing.stored;
 
-  if (input.quantity < (await input.liveEngines())) return { ok: false, reason: 'engine_quantity_in_use' };
+  if (input.quantity < (await input.liveEngines())) {
+    logEngineRefusal('engine_quantity_in_use', row);
+    return { ok: false, reason: 'engine_quantity_in_use' };
+  }
 
   return withSubscriptionLock(ctx.pool, sub.subscriptionId, async () => {
     const fetched = await fetchStored(input.stripe, sub);
     if (!fetched) return STRIPE_UNAVAILABLE_RESULT;
-    const engineItems = (fetched.items?.data ?? []).filter((i) => isEngineItem(i, engineIds));
-    if (engineItems.length === 0) return addUnlocked(input.stripe, sub, fetched, { price: stripeEnginePriceIdFromEnv(), quantity: input.quantity, kind: 'engine' }, engineIds);
-    // Two engine items (a retired price beside the current one) cannot be set to one total by one item update: fail closed and leave it to ops.
-    const only = engineItems[0]!;
-    if (engineItems.length > 1 || !input.stripe.subscriptionItems?.update) return STRIPE_UNAVAILABLE_RESULT;
-    const current = only.quantity ?? 1;
-    try {
-      // A raise is invoiced now and applies when paid; a lowering is a credit and keeps the provider's default (ruling 35.1). One key per call (35.3).
-      await input.stripe.subscriptionItems.update(only.id, { quantity: input.quantity, ...(input.quantity > current ? PAID_BEFORE_APPLIED : {}) }, { idempotencyKey: `engine-quantity:${only.id}:${randomUUID()}` });
-    } catch (err) {
-      if (isCardError(err)) return PAYMENT_PENDING_RESULT;
-      reportError(err, { stage: 'billing.engine_quantity' });
-      return STRIPE_UNAVAILABLE_RESULT;
-    }
-    const confirmed = await confirm(input.stripe, sub, (s) => (s.items?.data ?? []).some((i) => i.id === only.id && (i.quantity ?? 1) === input.quantity));
-    return confirmed.ok ? { ok: true } : confirmed.result;
+    return changeEngineUnlocked(input.stripe, sub, fetched, input.quantity, engineIds, false);
   });
+}
+
+/**
+ * The engine item's total set on a subscription already fetched; the caller holds the subscription's lock. With `raiseOnly` (an engine checkout on a subscription that may already hold the item)
+ * the total becomes max(current, quantity): a request at or below what is held makes no provider write at all and still answers ok.
+ */
+async function changeEngineUnlocked(stripe: StripeLike, stored: StoredSubscription, fetched: Stripe.Subscription, quantity: number, engineIds: readonly string[], raiseOnly: boolean): Promise<EngineResult> {
+  const engineItems = (fetched.items?.data ?? []).filter((i) => isEngineItem(i, engineIds));
+  if (engineItems.length === 0) return addUnlocked(stripe, stored, fetched, { price: stripeEnginePriceIdFromEnv(), quantity, kind: 'engine' }, engineIds);
+  // Two engine items (a retired price beside the current one) cannot be set to one total by one item update: fail closed and leave it to ops.
+  const only = engineItems[0]!;
+  if (engineItems.length > 1 || !stripe.subscriptionItems?.update) return STRIPE_UNAVAILABLE_RESULT;
+  const current = only.quantity ?? 1;
+  if (raiseOnly && quantity <= current) return { ok: true };
+  try {
+    // A raise is invoiced now and applies when paid; a lowering is a credit and keeps the provider's default (ruling 35.1). One key per call (35.3).
+    await stripe.subscriptionItems.update(only.id, { quantity, ...(quantity > current ? PAID_BEFORE_APPLIED : {}) }, { idempotencyKey: `engine-quantity:${only.id}:${randomUUID()}` });
+  } catch (err) {
+    if (isCardError(err)) return PAYMENT_PENDING_RESULT;
+    reportError(err, { stage: 'billing.engine_quantity' });
+    return STRIPE_UNAVAILABLE_RESULT;
+  }
+  const confirmed = await confirm(stripe, stored, (s) => (s.items?.data ?? []).some((i) => i.id === only.id && (i.quantity ?? 1) === quantity));
+  return confirmed.ok ? { ok: true } : confirmed.result;
+}
+
+/** An engine checkout on a subscription that may already hold the engine item (D#845 ON-22c): add it, or raise it to at least `quantity`, under the subscription's lock, paid before applied. */
+export async function raiseEngineToAtLeast(pool: BillingCtx['pool'], stripe: StripeLike, stored: StoredSubscription, quantity: number, engineIds: readonly string[]): Promise<EngineResult> {
+  return withSubscriptionLock(pool, stored.subscriptionId, async () => {
+    const fetched = await fetchStored(stripe, stored);
+    if (!fetched) return STRIPE_UNAVAILABLE_RESULT;
+    return changeEngineUnlocked(stripe, stored, fetched, quantity, engineIds, true);
+  });
+}
+
+/** Standings that count as a subscription the account holds (a hosted checkout answers already_subscribed on them). */
+const HELD_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'paused']);
+export type EngineStanding = { kind: 'none' } | { kind: 'not_paying' } | { kind: 'paying'; stored: StoredSubscription };
+export type EngineAccountRow = { stripe_customer_id: string | null; stripe_subscription_id: string | null; stripe_subscription_status: string | null; engine_quantity: number | null };
+export const ENGINE_ACCOUNT_SQL = 'SELECT stripe_customer_id, stripe_subscription_id, stripe_subscription_status, engine_quantity FROM accounts WHERE id = $1 AND deleted_at IS NULL';
+
+/** D#845 ON-22c: where an account stands for an engine change, from its stored columns alone. A non-paying standing, or one missing its stored ids, is `not_paying`; no subscription at all is `none`. */
+export function engineStanding(row: EngineAccountRow): EngineStanding {
+  const status = row.stripe_subscription_status;
+  if (status === null || !HELD_STATUSES.has(status)) return { kind: 'none' };
+  if (!row.stripe_customer_id || !row.stripe_subscription_id || !ITEM_CHANGE_STATUSES.has(status)) return { kind: 'not_paying' };
+  return { kind: 'paying', stored: { customerId: row.stripe_customer_id, subscriptionId: row.stripe_subscription_id, status } };
+}
+
+/** One log line per engine 409 (D#845 ON-22c): the closed code, the stored standing and three booleans; never an id or an amount. `holds_engine_item` is what the synced mirror says (engine_quantity above 0). */
+export function logEngineRefusal(code: string, row: EngineAccountRow): void {
+  const status = row.stripe_subscription_status === null ? 'none' : HELD_STATUSES.has(row.stripe_subscription_status) || row.stripe_subscription_status === 'canceled' || row.stripe_subscription_status === 'incomplete_expired' ? row.stripe_subscription_status : 'other';
+  console.warn(JSON.stringify({ event: 'billing_engine_409', code, status, has_customer: !!row.stripe_customer_id, has_subscription: !!row.stripe_subscription_id, holds_engine_item: (row.engine_quantity ?? 0) > 0 }));
 }

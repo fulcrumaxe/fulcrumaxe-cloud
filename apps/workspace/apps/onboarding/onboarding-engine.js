@@ -121,6 +121,38 @@ export const machineChoiceLine = (m) => (m && m.tier === "standard" && m.hasProj
 /** "Public" or "Private" for a repo in the picker; "" when GitHub has not said. */
 export const visibilityLabel = (v) => (v === "public" ? "Public" : v === "private" ? "Private" : "");
 
+/**
+ * D#845 ON-22c: what a refused plan purchase says, by the server's closed `code` first and then by status. `link` marks the two lines that point at Budget & billing; the pointer is a link only
+ * while that app can be opened, otherwise the same sentence shows without it. Nothing the server wrote is shown.
+ */
+export const PLAN_BY_CODE = {
+  already_subscribed: { text: "This account already has that plan. Change the number of engines in Budget & billing.", link: true },
+  no_subscription: { text: "This account has no paying plan yet. Choose the Engine plan first.", link: false },
+  engine_quantity_in_use: { text: "More engines are running than that number. Park or stop an engine first.", link: false },
+  subscription_not_paying: { text: "The subscription isn't being paid right now. Settle the payment in Budget & billing, then try again.", link: true },
+  payment_pending: { text: "The charge wasn't collected, so nothing changed. Update your payment method and try again.", link: false },
+};
+export const PLAN_BY_STATUS = { 403: "Only the account owner can change the Engine plan.", 422: "That quantity isn't accepted." };
+export const PLAN_FAILED = "The Engine plan couldn't be changed. Try again.";
+/** Codes after which the step reads again, so it shows its current buttons (Choose plan again, or the payment line). */
+export const PLAN_REREAD = ["no_subscription", "subscription_not_paying"];
+export const BUDGET_APP = "budget-billing";
+export const BUDGET_PHRASE = "Budget & billing";
+/** `e` is anything thrown by the API call; returns { text, link, code } with text never empty. */
+export function planRefusal(e) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (Object.hasOwn(PLAN_BY_CODE, code)) return { ...PLAN_BY_CODE[code], code };
+  const status = e && typeof e.status === "number" ? e.status : 0;
+  if (Object.hasOwn(PLAN_BY_STATUS, status)) return { text: PLAN_BY_STATUS[status], link: false, code };
+  return { text: PLAN_FAILED, link: false, code };
+}
+
+/** A refusal's sentence with "Budget & billing" as a link that opens that app (text only, never markup). */
+function budgetLinked(text, env) {
+  const [pre, post] = text.split(BUDGET_PHRASE);
+  return [pre, h("button", { type: "button", class: "ob-link", "data-testid": "ob-open-budget-billing", onClick: () => env.openApp(BUDGET_APP) }, BUDGET_PHRASE), post];
+}
+
 const act = (id, label, app) => ({ id, label, app });
 /** An action the app runs itself (a purchase), not a hand-off to another app. */
 const run = (id, label) => ({ id, label, run: true });
@@ -272,7 +304,7 @@ export function engineSection(steps, env) {
     return h("li", { class: "ob-step ob-engine-step" + (s.state === "done" ? " ob-done" : "") + (i === first ? " ob-current" : "") + (v.failed ? " ob-failed" : ""), "data-testid": "ob-engine-" + s.step, "data-state": s.state, "aria-current": i === first ? "step" : null },
       h("div", { class: "ob-step-head" }, h("strong", null, v.label),
         h("span", { class: "ob-state", "data-testid": "ob-engine-state" }, v.word, s.completed_at ? [" ", timeNode(s.completed_at, true)] : null)),
-      v.lines.map((t) => h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, lineNodes(t, env.ctx.name))),
+      v.lines.map((t) => h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, env.ctx.planLink && t === env.ctx.planNote && env.canOpen(BUDGET_APP) && t.includes(BUDGET_PHRASE) ? budgetLinked(t, env) : lineNodes(t, env.ctx.name))),
       v.list.length ? h("ul", { class: "ob-issues", "aria-label": "Install progress" }, v.list.map((x) => h("li", { "data-testid": "ob-engine-sub" }, x.label + ": " + x.word))) : null,
       v.commands.map((c) => commandBox(c, env)), buttons);
   });

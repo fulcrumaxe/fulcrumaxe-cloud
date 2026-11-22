@@ -195,18 +195,113 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
       expect(await account(t.accountId)).toMatchObject({ plan: 'starter', engine_quantity: 2 });
     });
 
-    it('already_subscribed now means this plan is held: the same hosted plan, any other hosted plan, and engines already on the subscription', async () => {
+    it('already_subscribed now means a HOSTED plan is held (the same one or another); an engine checkout on held engines is an adjust, never already_subscribed (ON-22c)', async () => {
       const both = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 1 }]);
-      for (const plan of ['starter', 'team', 'engine']) {
+      for (const plan of ['starter', 'team']) {
         expect(await createCheckoutSession(ctx(both), input(both, { plan })), plan).toEqual({ ok: false, reason: 'already_subscribed' });
       }
+      expect(await createCheckoutSession(ctx(both), input(both, { plan: 'engine' }))).toMatchObject({ ok: true, itemAdded: true });
       expect(writes()).toEqual([]);
     });
 
-    it('a subscription that is not paying takes no item: settle it in the portal first', async () => {
-      const t = await billed([{ priceId: STARTER, quantity: 1 }], { status: 'past_due' });
-      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine' }))).toEqual({ ok: false, reason: 'already_subscribed' });
+    it('a subscription that is not paying takes no item: hosted checkout keeps already_subscribed, engine checkout and engine-quantity say subscription_not_paying (ON-22c)', async () => {
+      for (const status of ['past_due', 'unpaid', 'incomplete', 'paused'] as const) {
+        const t = await billed([{ priceId: STARTER, quantity: 1 }], { status });
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'team' })), status).toEqual({ ok: false, reason: 'already_subscribed' });
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine' })), status).toEqual({ ok: false, reason: 'subscription_not_paying' });
+        expect(await setEngineQuantity(ctx(t), { liveEngines: live(t), accountId: t.accountId, quantity: 1, stripe: like() }), status).toEqual({ ok: false, reason: 'subscription_not_paying' });
+      }
       expect(server.seen).toEqual([]);
+    });
+
+    it('a standing with its stored ids missing is subscription_not_paying for engines and already_subscribed for hosted', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }]);
+      await admin.query('UPDATE accounts SET stripe_subscription_id = NULL WHERE id = $1', [t.accountId]);
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine' }))).toEqual({ ok: false, reason: 'subscription_not_paying' });
+      expect(await setEngineQuantity(ctx(t), { liveEngines: live(t), accountId: t.accountId, quantity: 1, stripe: like() })).toEqual({ ok: false, reason: 'subscription_not_paying' });
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'team' }))).toEqual({ ok: false, reason: 'already_subscribed' });
+      await admin.query('UPDATE accounts SET stripe_subscription_id = $2, stripe_customer_id = NULL WHERE id = $1', [t.accountId, t.sub]);
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine' }))).toEqual({ ok: false, reason: 'subscription_not_paying' });
+      expect(server.seen).toEqual([]);
+    });
+
+    describe('D#845 ON-22c: an engine checkout on held engines sets max(current, requested)', () => {
+      const ratio = (t: { fake: FakeSubscription }) => t.fake.items!.find((i) => i.priceId === ENGINE)!;
+      it('the reported account: engine item at 2, engine_quantity 0, requesting 1 -> ok, total stays 2, no provider write; the sync then mirrors 2', async () => {
+        const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+        expect((await account(t.accountId)).engine_quantity).toBe(0);
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 1 }))).toEqual({ ok: true, url: `${APP_ORIGIN}/billing/success`, itemAdded: true });
+        expect(ratio(t).quantity).toBe(2);
+        expect(writes()).toEqual([]);
+        await sync(t.sub);
+        expect((await account(t.accountId)).engine_quantity).toBe(2);
+      });
+
+      it('the same account requesting 3 ends at 3 with exactly one update call, paid before applied, and one idempotency key unique to the call', async () => {
+        const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 3 }))).toMatchObject({ ok: true, itemAdded: true });
+        expect(ratio(t).quantity).toBe(3);
+        expect(writes()).toHaveLength(1);
+        const body = new URLSearchParams(writes()[0]!.body);
+        expect([body.get('payment_behavior'), body.get('proration_behavior')]).toEqual(['pending_if_incomplete', 'always_invoice']);
+        const keys = server.seen.filter((r) => r.method === 'POST').map((r) => r.headers['idempotency-key']);
+        expect(keys).toHaveLength(1);
+        expect(keys[0]).toMatch(/^engine-quantity:/);
+        await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 4 }));
+        expect(new Set(server.seen.filter((r) => r.method === 'POST').map((r) => r.headers['idempotency-key'])).size).toBe(2);
+        await sync(t.sub);
+        expect((await account(t.accountId)).engine_quantity).toBe(4);
+      });
+
+      it('an unpaid raise answers payment_pending and leaves the quantity; an expired pending raise changes nothing', async () => {
+        const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
+        server.world.paymentOutcome = 'requires_action';
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 5 }))).toEqual({ ok: false, reason: 'payment_pending' });
+        expect(ratio(t).quantity).toBe(2);
+        expect(t.fake.pending_update).toBeTruthy();
+        expect(server.expirePending(t.sub)).toBe(true);
+        await sync(t.sub);
+        expect((await account(t.accountId)).engine_quantity).toBe(2);
+      });
+
+      it('two engine checkouts at once take the subscription lock one after the other: one engine item, total max of the two', async () => {
+        const t = await billed([{ priceId: ENGINE, quantity: 1 }]);
+        let first = true;
+        server.world.onRequest = async (req) => {
+          if (req.method === 'POST' && first) {
+            first = false;
+            await new Promise((r) => setTimeout(r, 250)); // the first write is slow: without the lock the second reads the old quantity and may lower the total
+          }
+        };
+        const results = await Promise.all([createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 5 })), createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 3 }))]);
+        expect(results.every((r) => r.ok)).toBe(true);
+        expect(t.fake.items!.filter((i) => i.priceId === ENGINE)).toHaveLength(1);
+        expect(ratio(t).quantity).toBe(5);
+        expect(writes()).toHaveLength(1);
+      });
+
+      it('every engine 409 writes one log line with only the closed fields: code, standing, three booleans', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const paying = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+          await place(paying, 2);
+          const late = await billed([{ priceId: STARTER, quantity: 1 }], { status: 'past_due' });
+          const none = await seedAccountWithMember(admin, 'owner', { status: 'unsubscribed' });
+          await setEngineQuantity(ctx(paying), { liveEngines: live(paying), accountId: paying.accountId, quantity: 1, stripe: like() });
+          await createCheckoutSession(ctx(late), input(late, { plan: 'engine' }));
+          await setEngineQuantity(ctx(none), { liveEngines: live(none), accountId: none.accountId, quantity: 1, stripe: like() });
+          await createCheckoutSession(ctx(late), input(late, { plan: 'team' })); // hosted: no engine line
+          const lines = warn.mock.calls.map((c) => JSON.parse(String(c[0])) as Record<string, unknown>);
+          expect(lines).toEqual([
+            { event: 'billing_engine_409', code: 'engine_quantity_in_use', status: 'active', has_customer: true, has_subscription: true, holds_engine_item: false },
+            { event: 'billing_engine_409', code: 'subscription_not_paying', status: 'past_due', has_customer: true, has_subscription: true, holds_engine_item: false },
+            { event: 'billing_engine_409', code: 'no_subscription', status: 'none', has_customer: false, has_subscription: false, holds_engine_item: false },
+          ]);
+          expect(JSON.stringify(lines)).not.toMatch(/cus_|sub_|acc|[0-9a-f]{8}-[0-9a-f]{4}/);
+        } finally {
+          warn.mockRestore();
+        }
+      });
     });
 
     it('a stored subscription Stripe does not agree with (another customer) is never changed', async () => {
@@ -604,7 +699,7 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
       expect(writes()).toHaveLength(1);
     });
 
-    it('two engine adds at once make one engine item', async () => {
+    it('two engine adds at once make one engine item, at the larger total', async () => {
       const t = await billed([{ priceId: STARTER, quantity: 1 }]);
       let first = true;
       server.world.onRequest = async (req) => {
@@ -614,8 +709,9 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
         }
       };
       const results = await Promise.all([createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 2 })), createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 3 }))]);
-      expect(results.filter((r) => r.ok)).toHaveLength(1);
+      expect(results.every((r) => r.ok)).toBe(true);
       expect(t.fake.items!.filter((i) => i.priceId === ENGINE)).toHaveLength(1);
+      expect(t.fake.items!.find((i) => i.priceId === ENGINE)!.quantity).toBeGreaterThanOrEqual(2);
     });
   });
 });
