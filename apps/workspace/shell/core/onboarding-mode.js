@@ -53,6 +53,8 @@ function parseEngine(list) {
     if (s.step === "machine") {
       if (s.kvm === "present" || s.kvm === "absent") entry.kvm = s.kvm;
       if (s.helper_missing === true) entry.helper_missing = true;
+      // D#845 ON-21b: the preflight codes with the cloud's one line each; only { code, fix } pairs of short strings are kept, and a value that is not a list is "not said".
+      if (Array.isArray(s.preflight)) entry.preflight = s.preflight.filter((p) => p && typeof p.code === "string" && typeof p.fix === "string" && p.fix !== "" && p.fix.length <= 400).slice(0, 40).map((p) => ({ code: p.code, fix: p.fix }));
     }
     // D#845 ON-22: the project step's plan gate (a closed value, or none) and the engine counts the "Add an engine" prompt needs. Anything else is "no gate", never a failure of the whole track.
     if (s.step === "project") {

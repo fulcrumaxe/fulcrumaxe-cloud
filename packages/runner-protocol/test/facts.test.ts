@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CURRENT_PROTOCOL_VERSION, HelloMessage, RUNNER_MESSAGES, RUNNER_NAME_MAX, RegisterMessage, RunnerFacts, isValidRunnerName } from "../src/messages.js";
-import { HELLO_REPLY_CAPABILITIES, KVM_FACT_CAPABILITY } from "../src/replies.js";
-import { KVM_FACT_HELLO_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
+import { HELLO_REPLY_CAPABILITIES, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY } from "../src/replies.js";
+import { KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
+import { PREFLIGHT_CODES, PREFLIGHT_FIX, isPreflightCode, preflightView } from "../src/preflight.js";
 import { nonStrictObjects } from "./helpers/schemaWalk.js";
 
 describe("the kvm_fact handshake names (D#845 ON-6c)", () => {
@@ -11,7 +12,33 @@ describe("the kvm_fact handshake names (D#845 ON-6c)", () => {
     expect(KVM_FACT_HELLO_CAPABILITY).toBe("kvm_fact_v1");
     expect(RUNNER_CAPABILITIES).toContain(KVM_FACT_HELLO_CAPABILITY);
     expect(KVM_FACT_CAPABILITY).toBe("kvm_fact");
-    expect([...HELLO_REPLY_CAPABILITIES]).toEqual(["watch_mode", "kvm_fact"]);
+    expect([...HELLO_REPLY_CAPABILITIES]).toEqual(["watch_mode", "kvm_fact", "preflight"]);
+  });
+  it("preflight_v1 is a hello capability and preflight is the reply's closed one (D#845 ON-21b)", () => {
+    expect(PREFLIGHT_HELLO_CAPABILITY).toBe("preflight_v1");
+    expect(RUNNER_CAPABILITIES).toContain(PREFLIGHT_HELLO_CAPABILITY);
+    expect(PREFLIGHT_CAPABILITY).toBe("preflight");
+  });
+});
+
+describe("the preflight codes (D#845 ON-21b)", () => {
+  it("the closed list is the 11 fixed codes, one per host and one per check, each with a fix line", () => {
+    expect(PREFLIGHT_CODES).toHaveLength(11 + 5 + 16);
+    expect(new Set(PREFLIGHT_CODES).size).toBe(PREFLIGHT_CODES.length);
+    for (const code of PREFLIGHT_CODES) expect(PREFLIGHT_FIX[code], code).toMatch(/\S/);
+    expect(PREFLIGHT_FIX["net_blocked:github"]).toBe("github.com can't be reached from this machine. Check its firewall or proxy");
+  });
+  it("a view keeps only members of the set, once each, in the fixed order, with the fixed line; anything else is dropped", () => {
+    expect(preflightView(["dns_failed", "kvm_absent", "dns_failed", "fictional-path", "net_blocked:10.0.0.1", 7, null, { code: "kvm_absent" }])).toEqual([{ code: "kvm_absent", fix: PREFLIGHT_FIX.kvm_absent }, { code: "dns_failed", fix: PREFLIGHT_FIX.dns_failed }]);
+    for (const notList of [null, undefined, "kvm_absent", 1, {}]) expect(preflightView(notList)).toEqual([]);
+    expect(isPreflightCode("toString")).toBe(false);
+  });
+  it("facts.preflight is optional; a list of members, each once, is accepted (an empty one too); anything else is refused", () => {
+    const base = { os: "linux", arch: "x64", mem_gb_bucket: 16, cpus: 8, sandbox_engine: "os_sandbox" };
+    const ok = (preflight: unknown) => RunnerFacts.safeParse({ ...base, preflight }).success;
+    expect(RunnerFacts.safeParse(base).success).toBe(true);
+    for (const list of [[], ["kvm_absent"], ["kvm_absent", "net_blocked:cloud", "unchecked:disk"], [...PREFLIGHT_CODES]]) expect(ok(list), JSON.stringify(list)).toBe(true);
+    for (const bad of [["kvm_absent", "kvm_absent"], ["net_blocked:evil.example"], ["fictional-path"], ["unchecked:"], "kvm_absent", null, [1], [...PREFLIGHT_CODES, "kvm_absent"]]) expect(ok(bad), JSON.stringify(bad)).toBe(false);
   });
 });
 
@@ -84,7 +111,9 @@ describe("facts (criterion 1)", () => {
       const leaf = optionalLeaf instanceof z.ZodOptional ? optionalLeaf.unwrap() : optionalLeaf;
       const list = leaf instanceof z.ZodEffects ? leaf.innerType() : leaf;
       const boundedIds = list instanceof z.ZodArray && list.element instanceof z.ZodString && list.element._def.checks.some((c: { kind: string }) => c.kind === "regex") && list._def.maxLength !== null;
-      const closed = boundedIds || leaf instanceof z.ZodEnum || leaf instanceof z.ZodUnion || (leaf instanceof z.ZodNumber && leaf.minValue !== null && leaf.maxValue !== null && leaf.isInt);
+      // D#845 ON-21b: the preflight codes are a bounded list of members of one enum.
+      const boundedEnums = list instanceof z.ZodArray && list.element instanceof z.ZodEnum && list._def.maxLength !== null;
+      const closed = boundedIds || boundedEnums || leaf instanceof z.ZodEnum || leaf instanceof z.ZodUnion || (leaf instanceof z.ZodNumber && leaf.minValue !== null && leaf.maxValue !== null && leaf.isInt);
       expect(closed, key).toBe(true);
     }
     expect(nonStrictObjects(RUNNER_MESSAGES.hello)).toEqual([]);

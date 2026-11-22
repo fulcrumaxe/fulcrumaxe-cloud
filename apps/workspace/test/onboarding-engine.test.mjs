@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { PREFLIGHT_CODES, PREFLIGHT_FIX, preflightView } from "../../../packages/runner-protocol/src/preflight.ts";
 import { parseSteps, parseTracks, shownTracks } from "../shell/core/onboarding-mode.js";
 import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
@@ -26,6 +27,61 @@ const track = (states, extra = {}) => IDS.map((id) => {
 const ORIGIN = "https://cloud.example.test";
 const at = (steps, id, ctx = {}) => describeStep(steps, IDS.indexOf(id), { name: "box-1", origin: ORIGIN, ...ctx });
 const text = (v) => v.lines.join("\n");
+
+// D#845 ON-21b: the machine step shows the machine's preflight codes with the cloud's fixed lines. The data is built the way the server builds it (preflightView over the stored codes),
+// parsed the way the app parses a response, then rendered: every code in the closed set has its line on the screen.
+describe("the machine step's preflight lines (ON-21b)", () => {
+  const body = () => fixture("200-new.json");
+  const withPreflight = (preflight) => parseTracks({ ...body(), tracks: [body().tracks[0], { ...body().tracks[1], steps: body().tracks[1].steps.map((s, i) => (i === 0 ? { ...s, state: "done", completed_at: T, tier: "standard", ...(preflight === undefined ? {} : { preflight }) } : s)) }] }).engine;
+  const render = (codes, ctx = {}) => {
+    const steps = withPreflight(preflightView(codes));
+    return describeStep(steps, 0, { name: "box-1", origin: ORIGIN, machine: { preflight: steps[0].preflight, ...ctx } });
+  };
+
+  it("every code has a fixture: its fixed line is on the machine step, and only that code's", () => {
+    for (const code of PREFLIGHT_CODES) {
+      const v = render([code]);
+      expect(v.lines, code).toContain(PREFLIGHT_FIX[code]);
+      expect(v.lines.filter((l) => l === PREFLIGHT_FIX[code]), code).toHaveLength(1);
+      expect(v.commands, code).toEqual([]);
+    }
+  });
+
+  it("several codes show their lines in the protocol's order, identical lines once, and no line carries null or undefined", () => {
+    const v = render(["dns_failed", "unchecked:disk", "kvm_absent", "unchecked:memory"]);
+    expect(v.lines.slice(1)).toEqual([PREFLIGHT_FIX.kvm_absent, PREFLIGHT_FIX.dns_failed, PREFLIGHT_FIX["unchecked:disk"]]);
+    expect(text(v)).not.toMatch(/null|undefined/);
+  });
+
+  it("every check passing (an empty list), and a machine that has not said, add no line", () => {
+    const connected = describeStep(withPreflight(undefined), 0, { name: "box-1", origin: ORIGIN, machine: {} }).lines;
+    expect(render([]).lines).toEqual(connected);
+    expect(parseTracks({ ...body(), tracks: [body().tracks[0], body().tracks[1]] }).engine[0]).not.toHaveProperty("preflight");
+    expect(withPreflight([])[0].preflight).toEqual([]);
+  });
+
+  it("the reported kvm_absent line takes the place of the generic no-KVM sentence, and the sentence stays for a machine whose preflight did not report it", () => {
+    const reported = render(["kvm_absent"], { kvm: "absent" });
+    expect(reported.lines).toContain(PREFLIGHT_FIX.kvm_absent);
+    expect(reported.lines).not.toContain(NO_KVM);
+    const unreported = render([], { kvm: "absent" });
+    expect(unreported.lines).toContain(NO_KVM);
+  });
+
+  it("an open machine step shows them too, after its own lines", () => {
+    const steps = withPreflight(preflightView(["net_blocked:cloud"])).map((s, i) => (i === 0 ? { ...s, state: "active", completed_at: null } : s));
+    const v = describeStep(steps, 0, { name: "box-1", origin: ORIGIN, machine: { preflight: steps[0].preflight } });
+    expect(v.lines.at(-1)).toBe(PREFLIGHT_FIX["net_blocked:cloud"]);
+  });
+
+  it("the parser keeps only { code, fix } pairs of short strings, on the machine step only, and a value that is not a list is not said", () => {
+    const m = (preflight) => withPreflight(preflight)[0];
+    expect(m([{ code: "kvm_absent", fix: "Fixed" }, { code: 1, fix: "x" }, { code: "a" }, null, { code: "b", fix: "" }, { code: "c", fix: "y".repeat(401) }]).preflight).toEqual([{ code: "kvm_absent", fix: "Fixed" }]);
+    for (const bad of ["kvm_absent", 3, { code: "a", fix: "b" }, true]) expect(m(bad), JSON.stringify(bad)).not.toHaveProperty("preflight");
+    const other = parseTracks({ ...body(), tracks: [body().tracks[0], { ...body().tracks[1], steps: body().tracks[1].steps.map((s) => ({ ...s, preflight: [{ code: "kvm_absent", fix: "Fixed" }] })) }] }).engine;
+    for (const s of other.slice(1)) expect(s).not.toHaveProperty("preflight");
+  });
+});
 
 describe("parseTracks and parseSteps", () => {
   it("reads both tracks of every contract fixture, the pipeline first", () => {

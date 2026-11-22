@@ -61,13 +61,15 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
 import { createLockfileSync, type LockfileSync } from "../daemon/lockfileSync.js";
 import { createBaseFile, createChangedFiles, createCheckStep, createImportScope,createHeadBlob, createIndexHidesChanges, createTrackedFiles, createVcsState } from "../daemon/checkStep.js";
 import { createJobWatch } from "../daemon/watch.js";
+import type { NetworkPorts, PreflightFacts } from "../daemon/preflight.js";
+import { createPreflightReporter, readLinger } from "../daemon/preflightReport.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
 import { createAutoUpdate, type UpdateHost } from "../update/updater.js";
 import { createUpdater, type UpdateHooks } from "./update.js";
@@ -142,6 +144,8 @@ export interface RunHost {
   engineBridge?: EngineBridgePorts | undefined;
   /** D#587 B-5a part 3: what the machine says about KVM, the helper's socket and what the helper answered, read by the entry point. Absent: a runner set to `microvm` has no facts, which closes its gate (no KVM). */
   vmFacts?: (() => Promise<VmHostFacts | undefined>) | undefined;
+  /** D#845 ON-21b: where the preflight reading reads the kernel (the bin edge) and resolves names, the same pair `doctor` is given. Absent (or off Linux): the runner declares no `preflight_v1` and sends no codes. */
+  preflight?: { kernel: (input: { uid: number | undefined; stateDir: string }) => Pick<PreflightFacts, "kvm" | "vt" | "cgroup" | "cgroupDelegated" | "diskFreeBytes" | "memAvailableBytes">; lookup: NetworkPorts["lookup"]; /** Replaceable by a test only. */ urls?: NetworkPorts["urls"] } | undefined;
   /** D#587 B-5b-3a: the parts of the live microVM stack this build has, read by the entry point (the uid, the helper's socket). `createLiveMicrovm` wires them only when every part is there; absent or incomplete, a runner set to `microvm` claims nothing (`microvm_build_unwired`) and never runs a job in the OS sandbox instead. */
   microvm?: LiveMicrovmParts | undefined;
   /** D#845 ON-BR-2: what the machine gives the runner's own Connect handling (home, the engine's state directory variable, discovery roots). Absent: `bridge_enable` and `bridge_disable` are not pulled. */
@@ -412,6 +416,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let cloudWatchMode = false;
     // D#845 ON-6c: true once a hello reply listed the `kvm_fact` capability; only then does a hello carry `facts.kvm`.
     let cloudKvmFact = false;
+    // D#845 ON-21b: true once a hello reply listed the `preflight` capability; only then does a hello carry `facts.preflight`.
+    let cloudPreflight = false;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
     // D#587 B-5b-3a: the one engine this run reports, gates jobs by and runs them in, decided once here from the machine's engine line and whether this build composed a live microVM stack.
@@ -615,6 +621,24 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const factsPlain = readHostFacts(engine);
       const factsWithKvm = readHostFacts(engine, engineFacts?.kvm);
       let kvmSent = false;
+      // D#845 ON-21b: the preflight codes, read once per start and again at most hourly, off the hello's path (a reading touches the network). Declared (`preflight_v1`) on a Linux machine that has the readers; the codes
+      // go only on a hello after a reply that listed `preflight`, and the first hello never carries them. A reading that is not there yet says nothing.
+      const preflightPorts = host.platform === "linux" ? host.preflight : undefined;
+      const preflightReporter =
+        preflightPorts === undefined
+          ? undefined
+          : createPreflightReporter({
+              kernel: () => preflightPorts.kernel({ uid: host.uid, stateDir }),
+              linger: () => readLinger(host.sandbox, host.uid),
+              network: { fetchFn: ctx.fetchFn, lookup: preflightPorts.lookup, now: ctx.now, urls: preflightPorts.urls },
+              cloudOrigin: registration.cloud_origin,
+              nowMs: () => clock.now().getTime(),
+            });
+      // The first reading starts now, beside the first hello, so it is usually there by the next poll; the hello does not wait for it.
+      void preflightReporter?.refresh();
+      let preflightSent: string | undefined;
+      /** The codes a hello would carry now: only to a cloud that listed `preflight`, and only once a reading exists. */
+      const preflightNow = (): PreflightCode[] | undefined => (cloudPreflight ? preflightReporter?.codes() : undefined);
       // D#749 V2b: the build's capabilities and, only while their settings and probe pass, `browser_chrome_v1` and `deploy_order_v1`. Said again when that set changes (see `betweenJobs`).
       // D#845 ON-6b: whether the machine holds model credentials. An API key is held by definition. A subscription runner holds them while the doctor's own Claude check passes
       // (the CLI is there, its version is supported and `auth status` says signed in); the same `inspect` answers both. Read at most once a minute (it starts the CLI), and a
@@ -643,12 +667,15 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return modelAuthValue;
       };
       const helloMessage = async () => {
-        const facts = cloudKvmFact ? factsWithKvm : factsPlain;
+        const base = cloudKvmFact ? factsWithKvm : factsPlain;
+        const codes = preflightNow();
+        const facts = base === undefined || codes === undefined ? base : { ...base, preflight: codes };
         kvmSent = facts?.kvm !== undefined;
+        preflightSent = codes === undefined || base === undefined ? undefined : JSON.stringify(codes);
         return helloBody(facts);
       };
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
@@ -675,6 +702,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         engineBridgeAccepted = dropped !== undefined && !dropped.includes(ENGINE_BRIDGE_CAPABILITY);
         if (answer?.kind === "ok") cloudWatchMode = answer.watchMode === true;
         if (answer?.kind === "ok") cloudKvmFact = answer.kvmFact === true;
+        if (answer?.kind === "ok") cloudPreflight = answer.preflight === true;
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
@@ -756,7 +784,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           if (due) advertCheckedAt = nowMs;
           // D#845 ON-6c: the reply to an earlier hello changed whether `facts.kvm` may be sent (it listed `kvm_fact`, or a later one stopped listing it): say so at once, not on the 30 second check.
           const kvmStale = helloAnswered && (cloudKvmFact && factsWithKvm?.kvm !== undefined) !== kvmSent;
-          if (kvmStale || (due && (JSON.stringify(await capabilityList()) !== advertised || (await modelAuth()) !== advertisedAuth))) {
+          // D#845 ON-21b: a reading is due (this asks for it at most hourly and never waits on it), and the codes a hello would carry now differ from the ones the last hello sent: say so at once.
+          void preflightReporter?.refresh();
+          const preflightStale = helloAnswered && (preflightNow() === undefined ? undefined : JSON.stringify(preflightNow())) !== preflightSent;
+          if (kvmStale || preflightStale || (due && (JSON.stringify(await capabilityList()) !== advertised || (await modelAuth()) !== advertisedAuth))) {
             const changed = await helloMessage();
             advertised = JSON.stringify(changed.capabilities);
             advertisedAuth = changed.model_auth_present;

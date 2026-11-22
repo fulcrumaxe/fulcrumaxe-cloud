@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
+import { PREFLIGHT_FIX } from "@fulcrumaxe/runner-protocol";
+import { readReportedFacts } from "../src/fleetList.js";
 import { REVOKED_REGISTRANT_LEFT_NOTE, listRunners, type AccountLine, type RunnerRow } from "../src/index.js";
 import { NOT_YOUR_RUNNER_REASON, SET_BY_SOMEONE_ELSE_REASON } from "../src/fleetView.js";
 import { harness, respond, type Harness } from "./helpers.js";
@@ -69,6 +71,69 @@ describe("the fleet page read [pg]", () => {
     expect(rows.get(named)).toMatchObject({ name: "Desktop", labels: ["gpu", "macos"], facts: { os: "macos", arch: "arm64", engine: "os_sandbox" } });
     expect(rows.get(bare)).toMatchObject({ name: expect.stringMatching(/^Unnamed runner \(.+\)$/), has_name: false, labels: [], facts: null, current_runs: [] });
     expect(JSON.stringify(rows.get(bare)!.name)).not.toMatch(/null|undefined/);
+  });
+
+  // D#845 ON-21b: the preflight codes a runner reported, read for the Machines row. Unknown (never said) is not the same as an empty list (every check passed).
+  describe("the preflight codes on the fleet read (migration 1051)", () => {
+    const withFacts = async (f: F2Fixture, preflight: string[] | null): Promise<string> => {
+      const id = await runner(f, f.a1);
+      await h.admin.query("INSERT INTO runner_facts (runner_id, account_id, os, arch, mem_gb_bucket, cpus, sandbox_engine, reported_at) VALUES ($1, $2, 'linux', 'x64', 16, 8, 'os_sandbox', now())", [id, f.accountId]);
+      await h.admin.query("UPDATE runners SET preflight = $2::text[] WHERE id = $1", [id, preflight]);
+      return id;
+    };
+    const factsOf = async (f: F2Fixture, id: string) => (await list(f, f.m1)).runners.find((r) => r.id === id)!.facts;
+
+    it("shows each stored code with its one fixed line, in the protocol's order; none said is null and all-ok is an empty list", async () => {
+      const f = await fresh();
+      const some = await withFacts(f, ["dns_failed", "net_blocked:github", "kvm_absent"]);
+      const none = await withFacts(f, null);
+      const ok = await withFacts(f, []);
+      expect((await factsOf(f, some))!.preflight).toEqual([
+        { code: "kvm_absent", fix: PREFLIGHT_FIX.kvm_absent },
+        { code: "dns_failed", fix: PREFLIGHT_FIX.dns_failed },
+        { code: "net_blocked:github", fix: PREFLIGHT_FIX["net_blocked:github"] },
+      ]);
+      expect((await factsOf(f, none))!.preflight).toBeNull();
+      expect((await factsOf(f, ok))!.preflight).toEqual([]);
+    });
+
+    it("keeps each runner's own list when the same account has a second runner, and never shows another account's", async () => {
+      const f = await fresh();
+      const other = await fresh();
+      const mine = await withFacts(f, ["disk_low"]);
+      const sibling = await withFacts(f, ["clock_skew"]);
+      const foreign = await withFacts(other, ["dns_failed"]);
+      expect((await factsOf(f, mine))!.preflight).toEqual([{ code: "disk_low", fix: PREFLIGHT_FIX.disk_low }]);
+      expect((await factsOf(f, sibling))!.preflight).toEqual([{ code: "clock_skew", fix: PREFLIGHT_FIX.clock_skew }]);
+      expect((await list(f, f.m1)).runners.map((r) => r.id)).not.toContain(foreign);
+      expect(JSON.stringify(await list(f, f.m1))).not.toContain("dns_failed");
+    });
+
+    it("the reader names the account itself: through the RLS-bypassing client, a foreign account id gets no row and no code, and the right one gets only its own", async () => {
+      const f = await fresh();
+      const other = await fresh();
+      const mine = await withFacts(f, ["disk_low"]);
+      const foreign = await withFacts(other, ["dns_failed"]);
+      const asOther = await readReportedFacts(h.admin as never, other.accountId);
+      expect([...asOther.keys()]).toEqual([foreign]);
+      expect(asOther.has(mine)).toBe(false);
+      expect([...(await readReportedFacts(h.admin as never, f.accountId)).keys()]).toEqual([mine]);
+      expect((await readReportedFacts(h.admin as never, randomUUID())).size).toBe(0);
+    });
+
+    it("only members of the closed set are ever shown: a value planted past the constraint is dropped", async () => {
+      const f = await fresh();
+      const id = await withFacts(f, ["kvm_absent"]);
+      const constraint = (await h.admin.query<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'runners_preflight_check' AND conrelid = 'runners'::regclass")).rows[0]!.def;
+      await h.admin.query("ALTER TABLE runners DROP CONSTRAINT runners_preflight_check");
+      try {
+        await h.admin.query("UPDATE runners SET preflight = ARRAY['kvm_absent', 'fictional-dir/file', 'internal.example'] WHERE id = $1", [id]);
+        expect((await factsOf(f, id))!.preflight).toEqual([{ code: "kvm_absent", fix: PREFLIGHT_FIX.kvm_absent }]);
+      } finally {
+        await h.admin.query("UPDATE runners SET preflight = NULL WHERE id = $1", [id]);
+        await h.admin.query(`ALTER TABLE runners ADD CONSTRAINT runners_preflight_check ${constraint}`);
+      }
+    });
   });
 
   it("lists the runs a runner holds with a live lease, named by role and repository, and not a run whose lease ran out or another runner's", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ENGINE_STEPS, FAILURE_STEP_BY_PHASE, buildEngineSteps, claudeDoneAt, type EngineSources, type EngineStepKey } from '../src/onboarding/engineTrack.js';
+import { PREFLIGHT_FIX } from '@fulcrumaxe/runner-protocol';
 
 const T = (n: number) => `2026-11-0${n}T00:00:00.000Z`;
 const none = Object.fromEntries(ENGINE_STEPS.map((s) => [s, null])) as Record<EngineStepKey, string | null>;
@@ -59,6 +60,28 @@ describe('buildEngineSteps', () => {
         expect(s).not.toHaveProperty('kvm');
         expect(s).not.toHaveProperty('helper_missing');
       }
+    });
+  });
+
+  // D#845 ON-21b: the machine step's preflight codes, each with the one fixed line, only members of the closed set; unsaid leaves the key out and an empty list (every check passed) is kept.
+  describe('the machine step: preflight', () => {
+    const machine = (preflight: EngineSources['preflight']) => buildEngineSteps(src({ machine: T(1) }, { preflight }))[0]!;
+    it('shows each stored code with its fixed line, in the protocol order', () => {
+      expect(machine(['dns_failed', 'kvm_absent']).preflight).toEqual([
+        { code: 'kvm_absent', fix: PREFLIGHT_FIX.kvm_absent },
+        { code: 'dns_failed', fix: PREFLIGHT_FIX.dns_failed },
+      ]);
+    });
+    it('a machine that did not say leaves the key out, and one whose checks all passed has an empty list', () => {
+      expect('preflight' in machine(null)).toBe(false);
+      expect('preflight' in machine(undefined)).toBe(false);
+      expect(machine([]).preflight).toEqual([]);
+    });
+    it('nothing beyond the closed set is shown, whatever the row holds', () => {
+      expect(machine(['kvm_absent', 'fictional-dir/file', 'net_blocked:internal.example', 'KVM_ABSENT', '']).preflight).toEqual([{ code: 'kvm_absent', fix: PREFLIGHT_FIX.kvm_absent }]);
+    });
+    it('no other step carries it', () => {
+      for (const s of buildEngineSteps(src({}, { preflight: ['kvm_absent'] })).slice(1)) expect(s).not.toHaveProperty('preflight');
     });
   });
 

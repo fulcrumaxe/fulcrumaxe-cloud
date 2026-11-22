@@ -4,6 +4,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import type { RunActionCtx } from '../runActions/request.js';
 import { emitDomainEvent } from '../domain-events/emit.js';
 import { planGateOf, readEngineCoverage, type EngineCoverage, type PlanGate } from './engineCoverage.js';
+import { preflightView } from '@fulcrumaxe/runner-protocol';
 
 /**
  * D#845 ON-5: the engine track of onboarding. The seven steps are DERIVED from current rows on every read, so a step reopens when what it stands for goes away.
@@ -32,6 +33,8 @@ export interface EngineStep {
   plan_gate?: PlanGate;
   /** D#845 ON-22, project step only: the engines the plan pays for and the engines live now, when the plan has a quantity (the "Add an engine" prompt needs it). Counts only. */
   engines?: { quantity: number; live: number };
+  /** D#845 ON-21b, machine step only: the preflight codes the machine's latest hello reported that are not ok, each with its one fixed line, only members of the closed set. Left out when the machine did not say; an empty list says every check passed. */
+  preflight?: Array<{ code: string; fix: string }>;
   /** The stored failure for this step; null unless `state` is `failed`. */
   failure: { code: string; at: string } | null;
 }
@@ -44,6 +47,8 @@ export interface EngineSources {
   kvm?: 'present' | 'absent' | null;
   /** D#845 ON-22: whether the plan covers one more engine; absent when the caller did not supply the billing fact it needs. */
   coverage?: EngineCoverage;
+  /** The most recently heard machine's stored preflight codes; null when it never said. */
+  preflight?: string[] | null;
   failures: Partial<Record<EngineStepKey, { code: string; at: string }>>;
 }
 
@@ -71,7 +76,7 @@ export function buildEngineSteps(src: EngineSources): EngineStep[] {
     if (state !== 'done' && state !== 'pending') activeTaken = true;
     const machine =
       step === 'machine'
-        ? { ...(src.kvm ? { kvm: src.kvm } : {}), ...(src.kvm === 'present' && src.tier === 'standard' ? { helper_missing: true as const } : {}) }
+        ? { ...(src.kvm ? { kvm: src.kvm } : {}), ...(src.kvm === 'present' && src.tier === 'standard' ? { helper_missing: true as const } : {}), ...(src.preflight ? { preflight: preflightView(src.preflight) } : {}) }
         : {};
     // A placed project needs no purchase prompt; only an ended plan still matters then (its engine is stopped).
     const gate = step === 'project' && src.coverage ? planGateOf(src.coverage) : null;
@@ -100,8 +105,8 @@ export async function readEngineSources(
   enginePlanOffered?: boolean,
 ): Promise<{ sources: EngineSources; runners: { id: string; heardAt: string }[] }> {
   const rn = (
-    await client.query<{ id: string; last_seen_at: Date; sandbox_engine: string | null; kvm: string | null }>(
-      `SELECT rn.id, rn.last_seen_at, rn.kvm, f.sandbox_engine FROM runners rn LEFT JOIN runner_facts f ON f.account_id = rn.account_id AND f.runner_id = rn.id
+    await client.query<{ id: string; last_seen_at: Date; sandbox_engine: string | null; kvm: string | null; preflight: string[] | null }>(
+      `SELECT rn.id, rn.last_seen_at, rn.kvm, rn.preflight, f.sandbox_engine FROM runners rn LEFT JOIN runner_facts f ON f.account_id = rn.account_id AND f.runner_id = rn.id
         WHERE rn.account_id = $1 AND rn.revoked_at IS NULL AND rn.protocol_version IS NOT NULL AND rn.last_seen_at IS NOT NULL ORDER BY rn.last_seen_at DESC, rn.id`,
       [accountId],
     )
@@ -124,10 +129,12 @@ export async function readEngineSources(
   }
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
-  return {
+  const read: { sources: EngineSources; runners: { id: string; heardAt: string }[] } = {
     sources: { ...(enginePlanOffered === undefined ? {} : { coverage: await readEngineCoverage(client, accountId, enginePlanOffered) }), done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
     runners,
   };
+  read.sources.preflight = rn[0]?.preflight ?? null;
+  return read;
 }
 
 /** The `claude` step: done while a live machine's latest hello says it holds model credentials. A machine that never said (null) does not count: fail closed. */
