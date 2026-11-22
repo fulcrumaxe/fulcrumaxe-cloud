@@ -42,6 +42,7 @@ runner/engine/events/route.ts
 runner/git-ticket/route.ts
 runner/heartbeat/route.ts
 runner/hello/route.ts
+runner/machine-job/claim/route.ts
 runner/memory-proposals/route.ts
 runner/plane-merge-claim/route.ts
 runner/plane-merge-report/route.ts
@@ -54,6 +55,7 @@ runner/revoke/route.ts
 runner/rotate/route.ts
 runner/runs/[id]/done/route.ts
 runner/runs/[id]/events/route.ts
+runner/setup/[setup_id]/progress/route.ts
 runner/wake/route.ts
 runners/[id]/check/route.ts
 runners/[id]/drain/route.ts

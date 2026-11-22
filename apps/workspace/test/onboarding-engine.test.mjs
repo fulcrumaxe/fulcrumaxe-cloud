@@ -12,7 +12,7 @@ import { PREFLIGHT_CODES, PREFLIGHT_FIX, preflightView } from "../../../packages
 import { parseSteps, parseTracks, shownTracks } from "../shell/core/onboarding-mode.js";
 import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
-  cleanOrigin, copyText, describeStep, enginePrice, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
+  cleanOrigin, copyText, describeStep, enginePrice, installDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
 } from "../apps/onboarding/onboarding-engine.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "getOnboarding");
@@ -553,5 +553,16 @@ describe("the Engine plan gate on the project step", () => {
       expect(other).not.toHaveProperty("engines");
     }
     expect(parseTracks(body).engine.every((s) => !("plan_gate" in s))).toBe(true);
+  });
+});
+
+describe("installDetail (D#845 ON-8a)", () => {
+  it("shows the sub-step a setup row reports, with skipped as done, and nothing outside the install phase or for a name it does not know", () => {
+    const steps = track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "active" });
+    const list = (row) => at(steps, "install", installDetail(row)).list;
+    expect(list({ phase: "install", sub_step: "deps", state: "started" })).toEqual([{ label: "Install dependencies", word: "Running" }]);
+    expect(list({ phase: "install", sub_step: "gh_labels", state: "skipped" })).toEqual([{ label: "Create the labels", word: "Done" }]);
+    expect(list({ phase: "install", sub_step: "bundle_out", state: "failed" })).toEqual([{ label: "Bundle the changes", word: "Failed" }]);
+    for (const row of [{ phase: "survey", sub_step: "deps", state: "started" }, { phase: "install", sub_step: "nope", state: "ok" }, { phase: "install", sub_step: "constructor", state: "ok" }, null]) expect(installDetail(row)).toEqual({});
   });
 });

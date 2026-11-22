@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RUNNER_SETUP_DETAILS, runnerSetupText } from "@fulcrumaxe/runner-protocol";
+import { RUNNER_SETUP_DETAILS, SETUP_VM_JOB_CODES, runnerSetupText } from "@fulcrumaxe/runner-protocol";
 import type { MicrovmCaps } from "../../src/vm/limits.js";
 import { idOfRunner, sandboxIdOf, isRunnerIdPrefix, runnerIdPrefix } from "../../src/vm/sandboxd/sdkAdapter.js";
 import {
@@ -447,6 +447,8 @@ describe("the token's wipe (FU-155 decision)", () => {
 describe("closed codes and what may be recorded (criterion 23)", () => {
   it("the six codes are the protocol's details, each has its own plain line, and nothing else is added", () => {
     expect([...VM_JOB_CODES]).toEqual(RUNNER_SETUP_DETAILS.filter((d) => d.startsWith("vm_")));
+    // D#845 ON-8a: a setup may fail with each of them (SetupProgressBody takes the same six, in the same order).
+    expect([...VM_JOB_CODES]).toEqual([...SETUP_VM_JOB_CODES]);
     for (const code of VM_JOB_CODES) {
       const line = runnerSetupText(code);
       expect(line, code).not.toContain(code);

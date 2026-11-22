@@ -20,7 +20,12 @@ export const OPERATE_OFF = "The engine runs only while operate is on. Operate le
 export const ASK_OWNER = "Ask an owner or admin to turn on operate";
 const GENERIC_FAIL = "This step stopped. Try again.";
 const CLAUDE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash";
-const SUB_STEPS = { archive: "Archive", boot: "Boot the sandbox", populate: "Populate", provision: "Provision", bundle: "Bundle", push: "Push", open_pr: "Open the pull request" };
+const SUB_STEPS = {
+  archive: "Archive", boot: "Boot the sandbox", populate: "Populate", provision: "Provision", bundle: "Bundle", push: "Push", open_pr: "Open the pull request",
+  // D#845 ON-8a: the sub-steps a setup job reports (the protocol's SETUP_SUB_STEPS).
+  engine_fetch: "Download the engine", plan_fetch: "Fetch the plan", sandbox_boot: "Boot the sandbox", workspace_in: "Copy the project in", bootstrap: "Set up the engine", preflight: "Check the machine", interview: "Record the answers",
+  wiring: "Wire the project", deps: "Install dependencies", labels: "Labels", sandbox_hook: "Sandbox hook", done: "Finish coldstart", finalize: "Finish the install", bundle_out: "Bundle the changes", pr_open: "Open the pull request", gh_labels: "Create the labels",
+};
 const SUB_WORDS = { pending: "Pending", running: "Running", ok: "Done", failed: "Failed" };
 
 /** The origin a command may carry: a plain http(s) origin, or "" (the commands that need it are then left out). */
@@ -133,6 +138,12 @@ function planGate(v, gate, ctx) {
   if (ctx.planNote) v.lines.push(ctx.planNote);
 }
 
+/** D#845 ON-8a: the install step's detail from a setup row ({ phase, sub_step, state }): the sub-step the running job last reported, `skipped` counting as done. Empty outside the install phase or for a name it does not know. */
+export function installDetail(row) {
+  if (!row || row.phase !== "install" || !Object.hasOwn(SUB_STEPS, row.sub_step)) return {};
+  const state = row.state === "started" ? "running" : row.state === "skipped" ? "ok" : row.state;
+  return { install: { sub_steps: [{ id: row.sub_step, state }] } };
+}
 /**
  * One engine step's copy. `steps` is the engine track, `i` the step, `ctx` the view-model (every field optional):
  *   name, origin, isAdmin, offline, last_seen_min, price (the Engine plan's monthly price), planNote (a refused purchase's sentence, or the "Engine added" notice), planBusy

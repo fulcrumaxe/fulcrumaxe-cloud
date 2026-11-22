@@ -32,7 +32,10 @@ describe("no cloud response schema has a download-URL field", () => {
   it("holds for every runner reply and the registration response", () => {
     const all: Array<[string, z.ZodTypeAny]> = [...Object.entries(RUNNER_REPLIES), ["register_response", RegisterResponse]];
     expect(all.length).toBeGreaterThan(8);
-    for (const [name, schema] of all) expect(violations(schema), name).toEqual([]);
+    // D#845 ON-8a: a signed machine job names the engine's source tarball (`args.engine.tarball_url`), and nothing else may look like a download address. It is an engine archive, never a runner update:
+    // the host is held to ENGINE_TARBALL_HOSTS by the job schema and the bytes to the signed sha256 by the runner before they go anywhere. The exemption is this one path of this one reply.
+    const allowed: Record<string, string[]> = { machine_job_claim: ["signed_job.job.args.engine.tarball_url"] };
+    for (const [name, schema] of all) expect(violations(schema).filter((path) => !(allowed[name] ?? []).includes(path)), name).toEqual([]);
   });
 
   it("the walk does reach fields inside a union and a signed job, and the pattern does catch a download field", () => {

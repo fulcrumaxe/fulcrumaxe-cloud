@@ -18,6 +18,7 @@ export const COVERED: Record<string, string> = {
   "wake.transport": ENVELOPE,
   merge_order: ENVELOPE,
   deploy_order: ENVELOPE,
+  machine_job: ENVELOPE,
   // D#587 B-7b: at most five signed sandbox commands (about 700 bytes each, every field short and fixed in shape)
   sandbox_commands: CONTAINER,
   "sandbox_commands.command": CONTAINER,

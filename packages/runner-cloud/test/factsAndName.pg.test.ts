@@ -290,7 +290,9 @@ describe("facts on hello and the runner name on register [pg]", () => {
       expect(files.length).toBeGreaterThan(0);
       for (const file of files) {
         expect(path.basename(file), `${entry} reaches ${file}`).not.toBe("hello.ts");
-        expect(readFileSync(file, "utf8"), file).not.toMatch(/runner_facts|runner_name_initial|runner_routing|\.facts\b/);
+        // D#845 ON-8a: machineJob.ts reads the one fact `sandbox_engine` to NARROW what a runner is offered (a microVM job goes to a microVM machine only, D#605's claim gate; no facts means no such job). It grants nothing: authorization is the signature and the session, and every other name stays barred there.
+        const barred = path.basename(file) === "machineJob.ts" ? /runner_name_initial|runner_routing|\.facts\b/ : /runner_facts|runner_name_initial|runner_routing|\.facts\b/;
+        expect(readFileSync(file, "utf8"), file).not.toMatch(barred);
       }
     });
   });
