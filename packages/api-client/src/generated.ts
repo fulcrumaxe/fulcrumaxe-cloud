@@ -1650,6 +1650,16 @@ export interface Operations {
     body: undefined;
     response: null;
   };
+  getHetznerCredential: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      status: "connected" | "invalid" | "none";
+      token_hint: string | null;
+      unlabelled_server_count: (number) | (null);
+    };
+  };
   connectHetznerCredential: {
     path: undefined;
     query: undefined;
@@ -1670,24 +1680,28 @@ export interface Operations {
     body: undefined;
     response: null;
   };
-  quoteHetznerServer: {
+  listHetznerServers: {
     path: undefined;
-    query: {
-      server_type: string;
-      location: string;
-    };
+    query: undefined;
     body: undefined;
     response: {
-      currency: string;
-      hourly_gross: string;
-      monthly_gross: string;
-      ipv4_monthly_gross: string;
-      tier: "standard";
-      tier_notice: string;
-      billed_by: string;
-      server_type: string;
-      location: string;
-      available: boolean;
+      servers: Array<{
+        id: string;
+        name: string;
+        kind: "hetzner_cloud";
+        status: string;
+        server_type: string | null;
+        location: string | null;
+        public_ipv4: string | null;
+        failure_code: string | null;
+        price: ({
+          currency: string;
+          hourly_gross: string;
+          monthly_gross: string;
+          ipv4_monthly_gross: string;
+        }) | (null);
+        created_at: string;
+      }>;
     };
   };
   createHetznerServer: {
@@ -1721,6 +1735,64 @@ export interface Operations {
         ipv4_monthly_gross: string;
       }) | (null);
       created_at: string;
+    };
+  };
+  getHetznerCatalog: {
+    path: undefined;
+    query: {
+      location?: string;
+    };
+    body: undefined;
+    response: {
+      currency: string;
+      location: string | null;
+      presets: {
+        small: string | null;
+        medium: string | null;
+      };
+      locations: Array<{
+        name: string;
+        description: string;
+        city: string;
+        country: string;
+      }>;
+      server_types: Array<{
+        name: string;
+        description: string;
+        cores: number;
+        memory_gb: number;
+        disk_gb: number;
+        architecture: string;
+        cpu_type: string;
+        locations: Array<{
+          location: string;
+          available: boolean;
+          hourly_gross: string;
+          monthly_gross: string;
+          ipv4_monthly_gross: string;
+        }>;
+      }>;
+      fetched_at: string;
+    };
+  };
+  quoteHetznerServer: {
+    path: undefined;
+    query: {
+      server_type: string;
+      location: string;
+    };
+    body: undefined;
+    response: {
+      currency: string;
+      hourly_gross: string;
+      monthly_gross: string;
+      ipv4_monthly_gross: string;
+      tier: "standard";
+      tier_notice: string;
+      billed_by: string;
+      server_type: string;
+      location: string;
+      available: boolean;
     };
   };
   getHetznerServer: {
@@ -6791,6 +6863,17 @@ export const operations = {
     queryParams: [],
     hasBody: false,
   },
+  getHetznerCredential: {
+    method: "GET",
+    path: "/api/v1/machine-credentials/hetzner",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
   connectHetznerCredential: {
     method: "POST",
     path: "/api/v1/machine-credentials/hetzner",
@@ -6813,15 +6896,15 @@ export const operations = {
     queryParams: [],
     hasBody: false,
   },
-  quoteHetznerServer: {
+  listHetznerServers: {
     method: "GET",
-    path: "/api/v1/machine-servers/quote",
+    path: "/api/v1/machine-servers",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: [],
-    queryParams: ["server_type","location"],
+    queryParams: [],
     hasBody: false,
   },
   createHetznerServer: {
@@ -6834,6 +6917,28 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: true,
+  },
+  getHetznerCatalog: {
+    method: "GET",
+    path: "/api/v1/machine-servers/catalog",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["location"],
+    hasBody: false,
+  },
+  quoteHetznerServer: {
+    method: "GET",
+    path: "/api/v1/machine-servers/quote",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["server_type","location"],
+    hasBody: false,
   },
   getHetznerServer: {
     method: "GET",

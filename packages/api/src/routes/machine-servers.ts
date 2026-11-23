@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
-import { createServer, getServer, quoteServer, type ServerCtx } from "../machines/servers.js";
+import { createServer, getServer, listServers, quoteServer, type ServerCtx } from "../machines/servers.js";
+import { getCatalog } from "../machines/catalog.js";
 import { deleteManagedServer } from "../machines/lifecycle.js";
 import { mapError } from "./machine-credential.js";
 
@@ -26,6 +27,7 @@ const createBody = z.strictObject({
   quoted: priceSchema,
 });
 const quoteQuery = z.strictObject({ server_type: z.string().regex(TYPE), location: z.string().regex(LOCATION) });
+const catalogQuery = z.strictObject({ location: z.string().regex(LOCATION).optional() });
 const idParams = z.object({ id: z.string() });
 const deleteQuery = z.strictObject({ remove_projects: z.enum(["true", "false"]).optional() });
 export const deleteResultSchema = z.object({ id: z.string().uuid(), status: z.literal("deleted"), already_deleted: z.boolean() });
@@ -51,6 +53,19 @@ export const serverSchema = z.object({
   created_at: z.string(),
 });
 
+const catalogPriceSchema = z.object({ location: z.string(), available: z.boolean(), hourly_gross: z.string(), monthly_gross: z.string(), ipv4_monthly_gross: z.string() });
+export const catalogSchema = z.object({
+  currency: z.string(),
+  location: z.string().nullable(),
+  presets: z.object({ small: z.string().nullable(), medium: z.string().nullable() }),
+  locations: z.array(z.object({ name: z.string(), description: z.string(), city: z.string(), country: z.string() })),
+  server_types: z.array(z.object({
+    name: z.string(), description: z.string(), cores: z.number(), memory_gb: z.number(), disk_gb: z.number(), architecture: z.string(), cpu_type: z.string(), locations: z.array(catalogPriceSchema),
+  })),
+  fetched_at: z.string(),
+});
+export const serverListSchema = z.object({ servers: z.array(serverSchema) });
+
 const serverCtx = (ctx: RouteContext): ServerCtx => ({ pool: ctx.pool, principal: { accountId: ctx.principal.accountId, userId: ctx.principal.userId } });
 const EXTRA = {
   "409": "Error `price_changed`: the live price differs from `quoted` by any amount; nothing was created, and `data.live` holds the live price. Other 409s are `hetzner_*` codes (limit reached, size not available, name used) and `credential_invalid`.",
@@ -58,6 +73,44 @@ const EXTRA = {
 };
 
 export const machineServerRoutes: RouteEntry[] = [
+  {
+    method: "GET",
+    path: "/api/v1/machine-servers",
+    operationId: "listHetznerServers",
+    summary: "The Hetzner Cloud servers of this account that have not been deleted, newest first",
+    description: "Session only, owner or admin. Each entry has the same fields as one server. Reads the account's own rows only; it does not open the token and does not call Hetzner.",
+    idempotency: "never",
+    rateClass: "read",
+    minRole: "admin",
+    responseSchema: serverListSchema,
+    async handler(ctx) {
+      return { servers: await listServers(serverCtx(ctx)) };
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/machine-servers/catalog",
+    operationId: "getHetznerCatalog",
+    summary: "The live Hetzner locations and server types, with per-location availability and price, and the Small and Medium sizes for a location",
+    description:
+      "Session only, owner or admin. Read from Hetzner and cached for at most five minutes per account. With `location`, `presets` names the cheapest available x86 shared type with at least 4 vCPU and 8 GB (`small`) and at least 8 vCPU and 16 GB (`medium`) there, or null; " +
+      "without it, both are null. With no token connected the answer is 404 `not_connected`.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "read",
+    sessionLimit: SESSION_LIMITS.machineServerQuote,
+    querySchema: catalogQuery,
+    responseSchema: catalogSchema,
+    extraResponses: EXTRA,
+    async handler(ctx, input) {
+      const q = input.query as z.infer<typeof catalogQuery>;
+      try {
+        return await getCatalog(serverCtx(ctx), q.location === undefined ? {} : { location: q.location });
+      } catch (err) {
+        throw mapError(err);
+      }
+    },
+  },
   {
     method: "GET",
     path: "/api/v1/machine-servers/quote",

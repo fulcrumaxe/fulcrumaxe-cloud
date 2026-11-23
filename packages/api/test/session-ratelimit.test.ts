@@ -336,6 +336,7 @@ describe('session rate limits', () => {
         rotateVercelConnection: 'vercel-token-put',
         connectHetznerCredential: 'machine-credential-put',
         quoteHetznerServer: 'machine-server-quote',
+        getHetznerCatalog: 'machine-server-quote',
         createHetznerServer: 'machine-server-create',
         deleteHetznerServer: 'machine-server-delete',
         createPortalSession: 'stripe',

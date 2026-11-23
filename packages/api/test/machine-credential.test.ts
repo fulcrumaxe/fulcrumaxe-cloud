@@ -60,9 +60,9 @@ describe('machine credential routes', () => {
     return handleApiRequest(new Request(URL_, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), appUserPool, platformOpsPool, ROUTES);
   }
 
-  it('both routes are session-only and owner-or-admin in the registry, and the connect route has its own session limit', () => {
+  it('the three routes are session-only and owner-or-admin in the registry, and the connect route has its own session limit', () => {
     const mine = ROUTES.filter((r) => r.path === '/api/v1/machine-credentials/hetzner');
-    expect(mine.map((r) => r.method).sort()).toEqual(['DELETE', 'POST']);
+    expect(mine.map((r) => r.method).sort()).toEqual(['DELETE', 'GET', 'POST']);
     for (const r of mine) { expect(effectivePrincipals(r), r.method).toEqual(['session']); expect(r, r.method).toMatchObject({ minRole: 'admin', idempotency: 'never' }); }
     expect(mine.find((r) => r.method === 'POST')!.sessionLimit?.name).toBe('machine-credential-put');
   });
