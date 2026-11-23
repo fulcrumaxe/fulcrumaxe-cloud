@@ -39,6 +39,8 @@ export interface CreateRepoResult {
   outcome: CreateRepoOutcome;
   /** `ok` and `created_not_connected` only. */
   repoUrl?: string;
+  /** `ok` only: the account's own `repos.id` for the new repo (no GitHub data), so the app can return the person to it. */
+  repoId?: string;
   /** `created_not_connected` only: the installation's settings page on GitHub. */
   installationUrl?: string;
 }
@@ -177,12 +179,15 @@ async function attempt(deps: CreateRepoDeps, input: CreateRepoInput, claims: Cre
   const repoUrl = `https://github.com/${login}/${claims.name}`;
 
   let connected = false;
+  let repoId: string | undefined;
   if (typeof ghRepoId === "number" && Number.isSafeInteger(ghRepoId) && ghRepoId > 0) {
     try {
       await syncInstallationRepos(deps, rec.id);
-      connected = await withTenant(deps.appUserPool, input.accountId, async (client) =>
-        (await client.query("SELECT 1 FROM repos WHERE account_id = $1 AND gh_repo_id = $2 AND installation_id = $3", [input.accountId, ghRepoId, rec.id])).rowCount === 1,
+      const found = await withTenant(deps.appUserPool, input.accountId, async (client) =>
+        (await client.query<{ id: string }>("SELECT id FROM repos WHERE account_id = $1 AND gh_repo_id = $2 AND installation_id = $3", [input.accountId, ghRepoId, rec.id])).rows,
       );
+      connected = found.length === 1;
+      repoId = found.length === 1 ? found[0]!.id : undefined;
     } catch (err) {
       reportError(err, { stage: "github.create_repo.sync" });
       connected = false;
@@ -192,6 +197,7 @@ async function attempt(deps: CreateRepoDeps, input: CreateRepoInput, claims: Cre
   await audit(deps, input.accountId, "github.repo_created", {
     gh_owner_id: claims.owner_gh_id, gh_repo_id: ghRepoId ?? null, name: claims.name, visibility: claims.visibility, connected, by: input.userId, nonce: claims.nonce,
   });
+  if (connected && repoId !== undefined) return { outcome: "ok", repoUrl, repoId };
   if (connected) return { outcome: "ok", repoUrl };
   const installationUrl =
     type === "User"

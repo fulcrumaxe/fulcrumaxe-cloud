@@ -132,6 +132,7 @@ describe('createCustomerRepo (D#2 RC-1a)', () => {
     const h = harness(s, o);
     const res = await run(h, s);
     expect(res.outcome).toBe(want);
+    if (want !== 'ok') expect(res.repoId).toBeUndefined();
     expect(h.reqs.filter((r) => r.method === 'PUT' || r.method === 'DELETE' || r.url.includes('/user/installations/'))).toEqual([]);
     expect(JSON.stringify(res)).not.toContain('boom');
     expect(JSON.stringify(res)).not.toContain('secondary');
@@ -235,10 +236,14 @@ describe('createCustomerRepo (D#2 RC-1a)', () => {
     const s = await setup();
     const h = harness(s);
     const state = stateFor(s);
-    expect((await run(h, s, state)).outcome).toBe('ok');
+    const first = await run(h, s, state);
+    expect(first.outcome).toBe('ok');
     expect((await run(h, s, state)).outcome).toBe('failed');
     expect(h.reqs.filter((r) => r.method === 'POST' && r.url.endsWith('/user/repos'))).toHaveLength(1);
-    expect(await rows('repos', s.accountId, `AND gh_repo_id = ${NEW_ID}`)).toHaveLength(1);
+    const made = await rows('repos', s.accountId, `AND gh_repo_id = ${NEW_ID}`);
+    expect(made).toHaveLength(1);
+    // The success carries the account's own repos.id for the new repo.
+    expect(first.repoId).toBe(made[0].id);
     const a = await rows('audit_log', s.accountId, `AND action = 'github.repo_created'`);
     expect(a).toHaveLength(1);
     expect(a[0].payload).toMatchObject({ gh_owner_id: 500, gh_repo_id: NEW_ID, name: 'widgets', visibility: 'private', connected: true, by: s.userId });
