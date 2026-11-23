@@ -548,3 +548,67 @@ describe.skipIf(!usable)("a whole project setup on the standard tier", () => {
     expect(compact(standard.progress).at(-1)).toBe("interview:failed:missing_topic:roster");
   }, 120_000);
 });
+
+/**
+ * The runner's whole cache directory is hidden from the guest wherever `XDG_CACHE_HOME` put it. Layout as `cacheRootsFor` builds it: `<cache>/fx-runner/{mirrors,workspaces,tmp,spill,launch,setup-guests,setup-egress}`.
+ * The cache here sits OUTSIDE the fake home (the case where denying the home directory alone covers nothing) and, in the second case, in the default place under it.
+ */
+describe.skipIf(!usable)("the runner's cache directory is hidden from the guest", () => {
+  const HIDDEN = "FX-CACHE-HIDDEN-SENTINEL";
+  let saved: string;
+  beforeAll(() => {
+    saved = jobsRoot;
+  });
+  afterAll(() => {
+    jobsRoot = saved;
+  });
+
+  /** Plants a sentinel in each sibling directory of the cache, and returns their paths. */
+  const plant = (cacheDir: string): string[] => {
+    const files = ["mirrors/github.com/o/r.git/HEAD", "workspaces/job-1/secret.txt", "tmp/job-1/scratch.txt", "spill/run-1/prompt.txt", "launch/q-1/note.txt"].map((rel) => path.join(cacheDir, rel));
+    for (const file of files) {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, HIDDEN);
+    }
+    return files;
+  };
+
+  it("an XDG_CACHE_HOME outside the home directory: no mirror, workspace, temp, spill or launch file, and no other guest's root, can be read; its own root and egress still work", async () => {
+    const cacheDir = path.join(base, "xdg-cache", "fx-runner");
+    jobsRoot = path.join(cacheDir, "setup-guests");
+    const files = plant(cacheDir);
+    const other = newGuest();
+    writeFileSync(path.join(other.root, "theirs.txt"), HIDDEN);
+    const g = newGuest();
+    for (const file of [...files, path.join(other.root, "theirs.txt")]) {
+      expect(readFileSync(file, "utf8"), file).toBe(HIDDEN); // control: really there
+      const out = await g.run("sh", ["-c", 'cat "$1" 2>&1; echo "exit=$?"', "fx", file]);
+      expect(out.stdout, file).not.toContain(HIDDEN);
+      expect(out.stdout, file).toMatch(/exit=[1-9]/);
+    }
+    const listing = await g.run("sh", ["-c", 'ls "$1" 2>&1; echo "exit=$?"', "fx", path.join(cacheDir, "mirrors")]);
+    expect(listing.stdout).not.toContain("github.com");
+    // its own root and its egress directory are the narrower grants
+    const own = await g.run("sh", ["-c", 'echo ok >w.txt; cat w.txt; ls "$1"', "fx", g.egressDir]);
+    expect(own.stdout.split("\n")[0]).toBe("ok");
+    await g.guest.updateNetworkPolicy(projectSetupPolicy());
+    expect(JSON.parse((await g.run(process.execPath, ["-e", CONNECT_CLIENT, "registry.npmjs.org", "443"], guestEnvOf({}))).stdout.trim())).toContain("from-registry");
+    await other.guest.close();
+    await g.guest.close();
+  }, 120_000);
+
+  it("the default layout (cache under the home directory) still works: own root, writes, tools and egress", async () => {
+    const cacheDir = path.join(home, ".cache", "fx-runner");
+    jobsRoot = path.join(cacheDir, "setup-guests");
+    const files = plant(cacheDir);
+    const g = newGuest();
+    const out = await g.run("sh", ["-c", "pwd; echo ok >w.txt; cat w.txt; command -v git >/dev/null && echo tools-ok"]);
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout.split("\n").slice(0, 3)).toEqual([g.root, "ok", "tools-ok"]);
+    const read = await g.run("sh", ["-c", 'cat "$1" 2>&1; echo "exit=$?"', "fx", files[0] as string]);
+    expect(read.stdout).not.toContain(HIDDEN);
+    await g.guest.updateNetworkPolicy(projectSetupPolicy());
+    expect(JSON.parse((await g.run(process.execPath, ["-e", CONNECT_CLIENT, "registry.npmjs.org", "443"], guestEnvOf({}))).stdout.trim())).toContain("from-registry");
+    await g.guest.close();
+  }, 120_000);
+});
