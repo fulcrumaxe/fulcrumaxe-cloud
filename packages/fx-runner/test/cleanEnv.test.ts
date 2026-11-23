@@ -377,3 +377,43 @@ describe("cleanEnv in API-key mode", () => {
     expect(() => cleanEnv({ mode: "other" } as never)).toThrow(TypeError);
   });
 });
+
+// D#587 B-6-VMTOKEN: in microvm mode a VM job gets its token from the runner's file, so no host-side child holds the dev variable.
+describe("cleanEnv with omitSubscriptionToken (microvm mode)", () => {
+  it("leaves out the dev token variable in subscription mode, and keeps everything else the same", () => {
+    const withToken = cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/a/bin"] });
+    expect(withToken[SUBSCRIPTION_TOKEN_VAR]).toBe("host-oauth-value");
+    const omitted = cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/a/bin"], omitSubscriptionToken: true });
+    expect(omitted).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);
+    expect(Object.values(omitted)).not.toContain("host-oauth-value");
+    const rest: Record<string, string> = { ...withToken };
+    delete rest[SUBSCRIPTION_TOKEN_VAR];
+    expect(omitted).toEqual(rest);
+  });
+
+  it("is off by default and when false: the variable is passed as before (os_sandbox mode)", () => {
+    expect(cleanEnv({ mode: "subscription" })).toHaveProperty(SUBSCRIPTION_TOKEN_VAR, "host-oauth-value");
+    expect(cleanEnv({ mode: "subscription" }, { omitSubscriptionToken: false })).toHaveProperty(SUBSCRIPTION_TOKEN_VAR, "host-oauth-value");
+  });
+
+  it("is read when the environment is built, so a getter that flips is followed", () => {
+    let microvm = false;
+    const options = { get omitSubscriptionToken(): boolean { return microvm; } };
+    expect(cleanEnv({ mode: "subscription" }, options)).toHaveProperty(SUBSCRIPTION_TOKEN_VAR);
+    microvm = true;
+    expect(cleanEnv({ mode: "subscription" }, options)).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);
+  });
+
+  it("with the variable empty and the flag either way, no token is in the environment: the file's token never enters one", () => {
+    vi.stubEnv(SUBSCRIPTION_TOKEN_VAR, "");
+    for (const flag of [true, false]) expect(cleanEnv({ mode: "subscription" }, { omitSubscriptionToken: flag })).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);
+  });
+
+  it("an API-key run holds no subscription token in either mode, and the flag does not touch the key", () => {
+    for (const flag of [true, false]) {
+      const env = cleanEnv({ mode: "api_key", apiKey: "config-api-key-value" }, { omitSubscriptionToken: flag });
+      expect(env).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);
+      expect(env.ANTHROPIC_API_KEY).toBe("config-api-key-value");
+    }
+  });
+});

@@ -26,6 +26,8 @@ import path from "node:path";
 import { CliError } from "../cliError.js";
 import { STATE_DIR_NAME, loadRegistration } from "../config.js";
 import type { CommandContext } from "../context.js";
+import { vmTokenLine, vmTokenStatus } from "../credentials/vmToken.js";
+import { loadSettings } from "../runnerSettings.js";
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
 import { BYPASS_ENV_NAME } from "../protectionBypass.js";
 import { cacheRootsFor } from "../daemon/mirror.js";
@@ -395,12 +397,19 @@ export function serviceCommand(action: string | undefined, ctx: CommandContext, 
     if (darwin) ctx.out(`  install -d -m 0700 -o ${account} ${workingDirectory}`);
     ctx.out(`  sudo -u ${account} env FX_RUNNER_HOME=${stateRoot} fx-runner register --code-stdin --credential-mode <mode> --cloud-url <url>`);
     for (const step of target.start) ctx.out(`  ${step}`);
+    // The account's settings are in its own state directory, which this command cannot read, so the hint is given whatever the engine.
+    ctx.out(`If ${account} will run jobs in a microVM (sandbox_engine microvm), it also needs a Claude token: sudo -u ${account} env FX_RUNNER_HOME=${stateRoot} fx-runner credentials set-vm-token (the unit never holds it)`);
     if (darwin) ctx.out(MACOS_PREVIEW_NOTICE);
     return 0;
   }
   ctx.out("It runs one instance for this user: fx-runner run. Start it now, and at every login, with:");
   for (const step of target.start) ctx.out(`  ${step}`);
   if (!loadRegistration(ctx.stateDir)) ctx.out("This machine is not registered yet; run: fx-runner register --code-stdin --credential-mode <mode> --cloud-url <url>");
+  // D#587 B-6-VMTOKEN: in microvm mode say what is still needed, with the same line `doctor` prints. The service has no environment, so only the file counts here.
+  if (loadSettings(ctx.stateDir).sandboxEngine === "microvm") {
+    const tokenLine = vmTokenLine(vmTokenStatus(ctx.stateDir, ctx.uid), false);
+    ctx.out(`VM model token: ${tokenLine.detail}`);
+  }
   if (host.platform === "darwin") ctx.out(MACOS_PREVIEW_NOTICE);
   return 0;
 }

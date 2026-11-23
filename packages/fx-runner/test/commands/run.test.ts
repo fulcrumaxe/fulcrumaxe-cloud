@@ -7,12 +7,14 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURRENT_PROTOCOL_VERSION, HelloMessage, PREFLIGHT_CODES, SANDBOX_COMMAND_PURPOSE, sha256Text, type SandboxCommand } from "@fulcrumaxe/runner-protocol";
+import { cleanEnv } from "../../src/job/cleanEnv.js";
 import { spillRootFor } from "../../src/job/spillFiles.js";
 import { CliError } from "../../src/cliError.js";
 import { readHostFacts } from "../../src/hostFacts.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_VERSION } from "../../src/version.js";
 import { loadRegistration, saveRegistration } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
+import { VM_TOKEN_DIR, VM_TOKEN_FILE, writeVmToken } from "../../src/credentials/vmToken.js";
 import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { SETTINGS_FILE, setSetting } from "../../src/runnerSettings.js";
 import { setPlaywrightLoader } from "../../src/verifyBrowser/loadPlaywright.js";
@@ -699,6 +701,112 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
       expect(authOf(0)).toBe(true);
       expect(inspect).not.toHaveBeenCalled();
       expect(await stop(run)).toMatchObject({ code: 0 });
+    });
+    // D#587 B-6-VMTOKEN: a microVM job never uses the host login, so for a subscription runner set to microvm the hello says whether a VM-usable token is there, and the host login is not consulted.
+    describe("a microvm subscription runner says whether a VM token is present, not whether the host is signed in", () => {
+      const VM_FAKE = ["sk-ant-", "oat01-", "HELLOFAKE0123456789abcdef"].join("");
+      const microvmSettings = (): void => {
+        setSetting(stateDir, "sandbox_engine", "microvm");
+        for (const [key, value] of [["microvm.max_vms", "2"], ["microvm.max_vcpus", "4"], ["microvm.max_memory_mb", "4096"], ["microvm.snapshot_dir", path.join(home, "snaps")], ["microvm.snapshot_quota_bytes", "1073741824"]] as const) setSetting(stateDir, key, value);
+      };
+      const uid = (): number | undefined => process.getuid?.();
+      it("no token sends false even when the host login is good, and the host login is never read", async () => {
+        microvmSettings();
+        const inspect = vi.fn(async () => reportOf({ login: "yes" }));
+        const run = start({ ...withInspect(inspect), ctx: { uid: uid() } });
+        await until(() => claims() >= 1);
+        expect(authOf(0)).toBe(false);
+        expect(inspect).not.toHaveBeenCalled();
+        expect(await stop(run)).toMatchObject({ code: 0 });
+      });
+      it("a token and no host login sends true", async () => {
+        microvmSettings();
+        writeVmToken(stateDir, uid(), VM_FAKE);
+        const run = start({ ...withInspect(async () => reportOf({ login: "no" })), ctx: { uid: uid() } });
+        await until(() => claims() >= 1);
+        expect(authOf(0)).toBe(true);
+        expect(await stop(run)).toMatchObject({ code: 0 });
+      });
+      it("the dev variable counts only while the file is missing, and an unsafe file reads as no token", async () => {
+        microvmSettings();
+        const envOnly = start({ ...withInspect(async () => reportOf({ login: "no" })), host: { ...withInspect(async () => reportOf({ login: "no" })).host, vmEnvToken: () => VM_FAKE }, ctx: { uid: uid() } });
+        await until(() => claims() >= 1);
+        expect(authOf(0)).toBe(true);
+        expect(await stop(envOnly)).toMatchObject({ code: 0 });
+        cloud.seen.length = 0;
+        writeVmToken(stateDir, uid(), VM_FAKE);
+        chmodSync(path.join(stateDir, VM_TOKEN_DIR, VM_TOKEN_FILE), 0o640);
+        const unsafe = start({ host: { ...withInspect(async () => reportOf({ login: "yes" })).host, vmEnvToken: () => VM_FAKE }, ctx: { uid: uid() } });
+        await until(() => claims() >= 1);
+        expect(authOf(0)).toBe(false);
+        expect(await stop(unsafe)).toMatchObject({ code: 0 });
+      });
+      it("changing the token file changes the next hello, both ways", async () => {
+        microvmSettings();
+        const clock = manualClock();
+        const run = start({ ...withInspect(async () => reportOf({ login: "yes" })), hooks: { clock }, ctx: { uid: uid() } });
+        await until(() => claims() >= 1);
+        expect(authOf(0)).toBe(false);
+        writeVmToken(stateDir, uid(), VM_FAKE);
+        while (hellos().length < 2) await clock.advance(5000);
+        expect(authOf(1)).toBe(true);
+        rmSync(path.join(stateDir, VM_TOKEN_DIR, VM_TOKEN_FILE));
+        while (hellos().length < 3) await clock.advance(5000);
+        expect(authOf(2)).toBe(false);
+        expect(await stop(run)).toMatchObject({ code: 0 });
+      });
+      it("the environment options the run hands every host-side child omit the dev token in microvm mode only", async () => {
+        vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "dev-exported-value");
+        const seen: Array<Record<string, string>> = [];
+        const spy = async (input: { envOptions: Parameters<typeof cleanEnv>[1] }): Promise<Report> => {
+          seen.push(cleanEnv({ mode: "subscription" }, input.envOptions));
+          return reportOf({});
+        };
+        // The instruction canary is one host-side child the run starts in every mode, before the first claim; it is handed the same options as every other.
+        const canary = async (input: { credentials: Parameters<typeof cleanEnv>[0]; envOptions: Parameters<typeof cleanEnv>[1] }): Promise<{ ok: true }> => {
+          seen.push(cleanEnv(input.credentials, input.envOptions));
+          return { ok: true };
+        };
+        const kit = (): RunHost["engine"] => ({ ...createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), inspect: spy as never, instructionCanary: canary as never, instructionCanaryKey: () => `k-${randomUUID()}` });
+        microvmSettings();
+        const microvm = start({ host: { engine: kit() }, ctx: { uid: uid() } });
+        await until(() => claims() >= 1);
+        expect(await stop(microvm)).toMatchObject({ code: 0 });
+        expect(seen.length).toBeGreaterThan(0);
+        for (const env of seen) expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+        seen.length = 0;
+        setSetting(stateDir, "sandbox_engine", "os_sandbox");
+        const plain = start({ host: { engine: kit() }, ctx: { uid: uid() } });
+        await until(() => claims() >= 2);
+        expect(await stop(plain)).toMatchObject({ code: 0 });
+        expect(seen.length).toBeGreaterThan(0);
+        for (const env of seen) expect(env).toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN", "dev-exported-value");
+      });
+      it("unreadable settings fail closed: the environment options still omit the dev token", async () => {
+        vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "dev-exported-value");
+        writeFileSync(path.join(stateDir, SETTINGS_FILE), "{broken");
+        const seen: Array<Record<string, string>> = [];
+        const canary = async (input: { credentials: Parameters<typeof cleanEnv>[0]; envOptions: Parameters<typeof cleanEnv>[1] }): Promise<{ ok: true }> => {
+          seen.push(cleanEnv(input.credentials, input.envOptions));
+          return { ok: true };
+        };
+        const inspect = async (input: { envOptions: Parameters<typeof cleanEnv>[1] }): Promise<Report> => {
+          seen.push(cleanEnv({ mode: "subscription" }, input.envOptions));
+          return reportOf({});
+        };
+        const kit: RunHost["engine"] = { ...createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), inspect: inspect as never, instructionCanary: canary as never, instructionCanaryKey: () => `k-${randomUUID()}` };
+        const run = start({ host: { engine: kit }, ctx: { uid: uid() } });
+        await until(() => seen.length >= 1);
+        await stop(run);
+        for (const env of seen) expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+      });
+      it("an os_sandbox runner is unchanged: a stored token does not matter, the host login decides", async () => {
+        writeVmToken(stateDir, uid(), VM_FAKE);
+        const run = start({ ...withInspect(async () => reportOf({ login: "no" })), ctx: { uid: uid() } });
+        await until(() => claims() >= 1);
+        expect(authOf(0)).toBe(false);
+        expect(await stop(run)).toMatchObject({ code: 0 });
+      });
     });
     it("a reading that never answers is cut at one overall limit and counts as not signed in, so the first hello is not held for the probes' sum (FU-174)", async () => {
       const clock = manualClock();

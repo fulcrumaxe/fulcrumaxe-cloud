@@ -42,7 +42,7 @@ import { liveMicrovmComplete } from "../src/vm/sandboxd/live.js";
 import { createMicrovmParts } from "../src/vm/liveParts.js";
 import { LAYOUT } from "../src/vm/installPlan.js";
 import { readInstalledManifest } from "../scripts/vm-read-manifest.mjs";
-import { loadSettings } from "../src/runnerSettings.js";
+import { loadSettings, omitsDevToken } from "../src/runnerSettings.js";
 import { hostRefusal } from "../src/vm/rootApply.js";
 import { buildRemoveArgv } from "../src/vm/uninstall.js";
 import { uninstallPathActions } from "../src/vm/uninstallActions.js";
@@ -248,7 +248,7 @@ const engineHostRuntime = {
   // The path the job runner resolves (its clean search path, as `doctor` and `run` use), never the PATH of whatever shell or service started this; then the same version and flag check every job gets.
   locateClaude: () => resolveClaudePath(cleanEnv({ mode: "subscription" }).PATH ?? ""),
   inspectClaude: async (binaryPath, stateDir) => {
-    const report = await engine.inspect({ binaryPath, envOptions: {}, stateDir, loginMode: undefined });
+    const report = await engine.inspect({ binaryPath, envOptions: { omitSubscriptionToken: omitsDevToken(stateDir) }, stateDir, loginMode: undefined });
     return report.versionSupported && report.missingFlags !== undefined && report.missingFlags.length === 0;
   },
   ownPid: process.pid,
@@ -323,8 +323,10 @@ const microvmParts = createMicrovmParts({
   logDir: () => path.join(stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME), "logs"),
   // The one read of the model token for a VM run: a fresh buffer per call, zeroed by the token step after the send. Absent or empty is an empty buffer, which the token step refuses.
   // The file `fx-runner credentials set-vm-token` wrote first; the environment variable only when that file is missing (a foreground dev run). Read at job start, so a new token applies from the next job.
-  readToken: () => readVmToken(stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME), process.getuid?.(), () => process.env[SUBSCRIPTION_TOKEN_VAR]),
+  readToken: () => readVmToken(stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME), process.getuid?.(), devVmToken),
 });
+// The dev fallback's one environment read, by name (this line only): the value is handed to `readVmToken` (the file comes first) and, as a yes or no, to `doctor`; `run` gets the same getter for the hello.
+const devVmToken = () => process.env[SUBSCRIPTION_TOKEN_VAR];
 const vmInstallHosts = createVmInstallHosts({
   // Read when uninstall runs, not at start: it needs a home directory, and the verify server has none.
   get stateDir() {
@@ -374,6 +376,7 @@ runCli({
   host: {
     home: process.env.HOME,
     platform: process.platform,
+    vmEnvToken: devVmToken,
     xdgCacheHome: process.env.XDG_CACHE_HOME,
     signals: process,
     pid: process.pid,
@@ -410,7 +413,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), microvmWired: liveMicrovmComplete(microvmParts), vmInstall: createVmInstallFacts({ tuf: vmTufPort }), preflight: preflightReaders },
+  doctorHost: { platform: process.platform, vmEnvToken: (devVmToken() ?? "") !== "", shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr, wslMachine), update: { version: RUNNER_VERSION, execPath }, vm: vmHostFacts(), microvmWired: liveMicrovmComplete(microvmParts), vmInstall: createVmInstallFacts({ tuf: vmTufPort }), preflight: preflightReaders },
   vmHost: vmBuildHost,
   // D#845 ON-3: `setup` and a code-less `register`. Ctrl-C is listened for only once one of them asks (every other command keeps the default), the one question is read from the
   // terminal only (a pipe or a timeout is no answer), and the service start is two fixed programs with a fixed environment, no shell.

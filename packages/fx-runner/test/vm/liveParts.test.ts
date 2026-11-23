@@ -144,10 +144,23 @@ describe("the source of the entry point (guards)", () => {
 
   it("the model token is read in one place, the bin's `readToken`, and nowhere else in the wiring", () => {
     expect(bin.match(/process\.env\[SUBSCRIPTION_TOKEN_VAR\]/g)).toHaveLength(1);
-    expect(bin).toMatch(/readToken: \(\) => readVmToken\(stateDirFor\(process\.env\.HOME, process\.env\.FX_RUNNER_HOME\), process\.getuid\?\.\(\), \(\) => process\.env\[SUBSCRIPTION_TOKEN_VAR\]\)/);
+    expect(bin).toMatch(/readToken: \(\) => readVmToken\(stateDirFor\(process\.env\.HOME, process\.env\.FX_RUNNER_HOME\), process\.getuid\?\.\(\), devVmToken\)/);
+    // One environment read in the whole bin, named once; `readToken`, the run host's hello check and doctor's yes-or-no all go through it.
+    expect(bin).toContain("const devVmToken = () => process.env[SUBSCRIPTION_TOKEN_VAR];");
     expect(partsSource).not.toContain(SUBSCRIPTION_TOKEN_VAR);
     expect(partsSource).not.toMatch(/readToken\s*\(/);
     expect(runSource).not.toMatch(/readToken\s*\(/);
     expect(runSource).not.toContain(SUBSCRIPTION_TOKEN_VAR);
+  });
+
+  // D#587 B-6-VMTOKEN: every host-side probe is built without the dev token in microvm mode, by the one shared rule. A source pin for the paths a behaviour test cannot reach from here.
+  it("every host-side inspect and the take-over pane pass the one omit rule (`omitsDevToken`), never an empty options object", () => {
+    expect(bin).toContain("engine.inspect({ binaryPath, envOptions: { omitSubscriptionToken: omitsDevToken(stateDir) }, stateDir, loginMode: undefined })");
+    expect(bin).not.toMatch(/inspect\(\{[^}]*envOptions: \{\}/);
+    const pane = readFileSync(path.join(PACKAGE_DIR, "src", "commands", "watchPane.ts"), "utf8");
+    expect(pane).toContain("envOptions: { extraPathDirs: toolDirs, omitSubscriptionToken: omitsDevToken(ctx.stateDir) }");
+    const doctorSource = readFileSync(path.join(PACKAGE_DIR, "src", "commands", "doctor.ts"), "utf8");
+    expect(doctorSource).toContain("envOptions: { omitSubscriptionToken: omitsDevToken(ctx.stateDir) }");
+    expect(runSource).toContain("get omitSubscriptionToken(): boolean { return omitsDevToken(ctx.stateDir); }");
   });
 });
