@@ -1044,6 +1044,24 @@ test.describe("D#845 ON-22c-2: Budget & Billing Engines row", () => {
     expect(page.url()).not.toMatch(/app\.test/);
   });
 
+  test("Choose plan on a subscription that already holds the engine: the server mirrors what it read, so the row shows the engine as held right after the held answer, with no reload", async ({ page }) => {
+    const w = engineWorld({ state: "none", paid: 0, live: 0 });
+    // Stands in for the server: the checkout answer comes after the account row was written from the provider's own read, so the next read of the row sees it.
+    const seen = await boot(page, { owner: true, link: (route) => { w.state = "active"; w.paid = 1; return json(route, 200, { url: "https://app.test/", already_held: true }); } });
+    await engineWorldRoutes(page, w);
+    await reopen(page);
+    await expect(tid(page, "bb-engines")).toContainText("No Engine plan yet.");
+    await tid(page, "bb-engine-choose").click();
+    await expect(tid(page, "bb-engine-notice")).toHaveText("You already have the Engine plan.");
+    await expect(tid(page, "bb-engine-paid")).toHaveText("1");
+    await expect(tid(page, "bb-engine-choose")).toHaveCount(0);
+    await expect(tid(page, "bb-engines")).not.toContainText("No Engine plan yet.");
+    // One checkout call, no loop of reads, and the page was never left.
+    await page.waitForTimeout(500);
+    expect(seen.sent.filter((x) => x.path === "/api/v1/billing/checkout-session")).toHaveLength(1);
+    expect(page.url()).not.toMatch(/app\.test/);
+  });
+
   test("subscribing to a hosted plan the subscription already holds says so and stays on the page; an added plan says 'Plan added'", async ({ page }) => {
     let answer: Record<string, unknown> = { url: "https://app.test/", already_held: true };
     await boot(page, { owner: true, account: NO_SUBSCRIPTION, link: (route) => json(route, 200, answer) });

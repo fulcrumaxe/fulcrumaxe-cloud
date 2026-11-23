@@ -22,7 +22,7 @@ export const MAX_ENGINE_QUANTITY = 100;
 /** Standings on which Stripe still bills the subscription; an item is added or changed only on one that is paying or in a paid-for trial. */
 const ITEM_CHANGE_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing']);
 
-/** `alreadyHeld`: a hosted plan add whose exact price the subscription already held (nothing was written). */
+/** `alreadyHeld`: an add, or an engine checkout, whose plan the subscription already held at least as much of (nothing was written). */
 export type EngineResult = { ok: true; alreadyHeld?: true } | { ok: false; reason: string };
 export type StoredSubscription = { customerId: string; subscriptionId: string; status: string };
 
@@ -84,18 +84,23 @@ async function withSubscriptionLock<T>(pool: BillingCtx['pool'], subscriptionId:
  * error (a timeout, a dropped connection): the answer is whatever the provider holds, never the error. A failed read is tried once more before the outcome is called unreadable. A confirmed write is mirrored
  * into the account at once through the reconciler's own apply step (its stale-fetch guard included), so a webhook that never arrives cannot hide a paid change; that mirror write is best effort and never changes the answer.
  */
+/** Postgres's clock on the lock-holding connection, read BEFORE a provider fetch (the stale-fetch guard's input); null when it cannot be read, and then nothing is mirrored. */
+async function readClock(scope: LockScope): Promise<string | null> {
+  try {
+    return (await scope.client.query<{ t: string }>('SELECT clock_timestamp()::text AS t')).rows[0]!.t;
+  } catch (err) {
+    reportError(err, { stage: 'billing.engine_confirm_clock' });
+    return null;
+  }
+}
+
 type Confirmed = { ok: true } | { ok: false; result: { ok: false; reason: string } };
 async function confirm(pool: BillingCtx['pool'], scope: LockScope, stripe: StripeLike, stored: StoredSubscription, applied: (sub: Stripe.Subscription) => boolean): Promise<Confirmed> {
   let clock: string | null = null;
   let sub: Stripe.Subscription | null = null;
   for (let attempt = 0; attempt < 2 && !sub; attempt += 1) {
-    try {
-      // On the lock-holding connection, read BEFORE the fetch: a webhook that lands while it is in flight is never overwritten by this older read.
-      clock = (await scope.client.query<{ t: string }>('SELECT clock_timestamp()::text AS t')).rows[0]!.t;
-    } catch (err) {
-      reportError(err, { stage: 'billing.engine_confirm_clock' });
-      clock = null;
-    }
+    // On the lock-holding connection, read BEFORE the fetch: a webhook that lands while it is in flight is never overwritten by this older read.
+    clock = await readClock(scope);
     sub = await fetchStored(stripe, stored);
   }
   if (!sub) return { ok: false, result: STRIPE_UNAVAILABLE_RESULT };
@@ -207,7 +212,7 @@ export async function setEngineQuantity(ctx: BillingCtx, input: { accountId: str
  * The engine item's total set on a subscription already fetched; the caller holds the subscription's lock. With `raiseOnly` (an engine checkout on a subscription that may already hold the item)
  * the total becomes max(current, quantity): a request at or below what is held makes no provider write at all and still answers ok.
  */
-async function changeEngineUnlocked(pool: BillingCtx['pool'], scope: LockScope, stripe: StripeLike, stored: StoredSubscription, fetched: Stripe.Subscription, quantity: number, engineIds: readonly string[], raiseOnly: boolean): Promise<EngineResult> {
+async function changeEngineUnlocked(pool: BillingCtx['pool'], scope: LockScope, stripe: StripeLike, stored: StoredSubscription, fetched: Stripe.Subscription, quantity: number, engineIds: readonly string[], raiseOnly: boolean, fetchedAfter: string | null = null): Promise<EngineResult> {
   // An earlier raise is still waiting for payment (`pending_if_incomplete` holds it as `pending_update`, and the item's quantity has not moved). Every engine change is refused with `payment_pending`
   // and no write, a lowering included: Stripe voids the pending update and its invoice on any later update that carries a non-empty `items` list, so a lowering would silently cancel the raise the
   // customer is still paying for. The pending update is applied by payment or dropped by expiry; the caller retries after either. Read under the subscription's lock, so two raises cannot both pass.
@@ -218,7 +223,12 @@ async function changeEngineUnlocked(pool: BillingCtx['pool'], scope: LockScope, 
   const only = engineItems[0]!;
   if (engineItems.length > 1 || !stripe.subscriptionItems?.update) return STRIPE_UNAVAILABLE_RESULT;
   const current = only.quantity ?? 1;
-  if (raiseOnly && quantity <= current) return { ok: true };
+  if (raiseOnly && quantity <= current) {
+    // The provider already holds this much and nothing is written, but the read just made is authoritative: mirror it through the same apply step (its stale-fetch guard included), so a mirror
+    // that missed its webhook shows the held engines at once. No second read; `fetchedAfter` is the clock taken before the one fetch.
+    if (fetchedAfter !== null) scope.after(() => mirrorConfirmed(pool, fetched, fetchedAfter));
+    return { ok: true, alreadyHeld: true };
+  }
   try {
     // A raise is invoiced now and applies when paid; a lowering is a credit and keeps the provider's default (ruling 35.1). One key per call (35.3).
     await stripe.subscriptionItems.update(only.id, { quantity, ...(quantity > current ? PAID_BEFORE_APPLIED : {}) }, { idempotencyKey: `engine-quantity:${only.id}:${randomUUID()}` });
@@ -234,9 +244,10 @@ async function changeEngineUnlocked(pool: BillingCtx['pool'], scope: LockScope, 
 /** An engine checkout on a subscription that may already hold the engine item (D#845 ON-22c): add it, or raise it to at least `quantity`, under the subscription's lock, paid before applied. */
 export async function raiseEngineToAtLeast(pool: BillingCtx['pool'], stripe: StripeLike, stored: StoredSubscription, quantity: number, engineIds: readonly string[]): Promise<EngineResult> {
   return withSubscriptionLock(pool, stored.subscriptionId, async (scope) => {
+    const clock = await readClock(scope);
     const fetched = await fetchStored(stripe, stored);
     if (!fetched) return STRIPE_UNAVAILABLE_RESULT;
-    return changeEngineUnlocked(pool, scope, stripe, stored, fetched, quantity, engineIds, true);
+    return changeEngineUnlocked(pool, scope, stripe, stored, fetched, quantity, engineIds, true, clock);
   });
 }
 

@@ -1184,6 +1184,57 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     await noPlaceholder(page);
   });
 
+  test("Choose plan when the subscription already holds the engine answers already_held: the step says so instead of offering a purchase, reads again, and asks once (D#845)", async ({ page }) => {
+    const gated = () => {
+      const b = states({ machine: "done", claude: "done", github_app: "done", project: "active" });
+      b.tracks[1].steps = b.tracks[1].steps.map((s) => (s.step === "project" ? { ...s, plan_gate: "plan_required" } : s));
+      return b;
+    };
+    const m = mock({ onboarding: [json(gated())], enginePlan: { price_usd_month: 17 } });
+    await engineSetup(page, m, extra());
+    await page.route("**/api/v1/billing/checkout-session", (route) => {
+      m.checkouts.push(route.request().postDataJSON());
+      return route.fulfill({ json: { url: "https://app.test/", already_held: true } });
+    });
+    await bootToDesktop(page);
+    await expect(eng(page, "choose_plan")).toBeVisible();
+    const reads = count(m, "GET /api/v1/onboarding");
+    await eng(page, "choose_plan").click();
+    await expect(eng(page, "choose_plan")).toHaveCount(0);
+    await expect(ob(page).getByText("You already have the Engine plan.")).toBeVisible();
+    await expect(ob(page).getByText("Engine added.")).toHaveCount(0);
+    await page.waitForTimeout(500);
+    const after = count(m, "GET /api/v1/onboarding");
+    expect(after).toBeGreaterThan(reads);
+    await page.waitForTimeout(500);
+    expect(count(m, "GET /api/v1/onboarding")).toBe(after); // no reload loop
+    expect(m.checkouts).toEqual([{ plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" }]);
+    expect(page.url()).not.toMatch(/app\.test/);
+    await noPlaceholder(page);
+  });
+
+  test("Choose plan answers already_held and the server has mirrored it: the next read is ungated, so the purchase is gone and nothing asks twice (D#845)", async ({ page }) => {
+    const gated = () => {
+      const b = states({ machine: "done", claude: "done", github_app: "done", project: "active" });
+      b.tracks[1].steps = b.tracks[1].steps.map((s) => (s.step === "project" ? { ...s, plan_gate: "plan_required" } : s));
+      return b;
+    };
+    const m = mock({ onboarding: [json(gated())], enginePlan: { price_usd_month: 17 } });
+    await engineSetup(page, m, extra());
+    await page.route("**/api/v1/billing/checkout-session", (route) => {
+      m.checkouts.push(route.request().postDataJSON());
+      m.onboarding = [json(states({ machine: "done", claude: "done", github_app: "done", project: "active" }))];
+      return route.fulfill({ json: { url: "https://app.test/", already_held: true } });
+    });
+    await bootToDesktop(page);
+    await eng(page, "choose_plan").click();
+    await expect(eng(page, "choose_plan")).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(m.checkouts).toHaveLength(1);
+    expect(page.url()).not.toMatch(/app\.test/);
+    await noPlaceholder(page);
+  });
+
   test("choosing the cloud-builds track shows the six pipeline steps", async ({ page }) => {
     const x = extra({ track: json({ track: "pipeline", chosen_at: "2026-11-20T10:00:00.000Z", created: true }) });
     const m = mock({ onboarding: [json(RAW_NEW)] });

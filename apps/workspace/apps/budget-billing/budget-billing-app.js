@@ -106,6 +106,7 @@ export const ENGINE_COPY = {
   notPaying: "The subscription isn't being paid right now. Settle the payment in the billing portal.",
   endedOn: (date) => "The Engine plan ended on " + date + ". Choose plan to start again.",
   ended: "The Engine plan has ended.",
+  alreadyHeld: "You already have the Engine plan.",
   added: "Engine added. This updates when the provider confirms the change.",
   removed: "Engine removed. The unused part of this month is credited to your next invoice.",
   paymentPending: "The charge wasn't collected, so nothing changed. Update your payment method and try again.",
@@ -420,6 +421,12 @@ export function mountBudgetBilling(host) {
       engineNotice.textContent = "";
       try {
         const res = await api("POST", CHECKOUT, { plan: "engine", quantity: 1, success_path: BACK_PATH, cancel_path: BACK_PATH }, abort.signal);
+        if (res && res.already_held === true) {
+          // Nothing was written: the subscription already holds the engines, and the server mirrored that read. Say so and read the row again.
+          engineNotice.textContent = ENGINE_COPY.alreadyHeld;
+          await read("engine", ENGINE);
+          return;
+        }
         if (res && res.added === true) {
           // The engine joined the subscription already paid for: no page to go to. Say so and read the row again (a reload would offer "Choose plan" again until the provider's confirmation lands).
           engineNotice.textContent = ENGINE_COPY.added;

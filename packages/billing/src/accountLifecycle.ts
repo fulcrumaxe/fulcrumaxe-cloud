@@ -594,7 +594,8 @@ export async function createCheckoutSession(
     if (standing.kind === 'paying') {
       const raised = await raiseEngineToAtLeast(ctx.pool, input.stripe, standing.stored, quantity, enginePriceIds);
       if (!raised.ok && raised.reason === 'already_subscribed') logEngineRefusal(raised.reason, account);
-      return raised.ok ? { ok: true, url: successUrl, itemAdded: true } : raised;
+      if (!raised.ok) return raised;
+      return raised.alreadyHeld ? { ok: true, url: successUrl, alreadyHeld: true } : { ok: true, url: successUrl, itemAdded: true };
     }
   } else if (account.stripe_subscription_status !== null && HELD_STATUSES.has(account.stripe_subscription_status)) {
     if (!account.stripe_customer_id || !account.stripe_subscription_id) return { ok: false, reason: 'already_subscribed' };

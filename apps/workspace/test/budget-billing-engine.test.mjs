@@ -178,6 +178,7 @@ describe("the refusal copy", () => {
       expect(Object.keys(ENGINE_REFUSED), code).toContain(code);
     }
     expect(Object.keys(ENGINE_BY_STATUS).map(Number)).toEqual([403, 422]);
+    expect(ENGINE_COPY.alreadyHeld).toBe("You already have the Engine plan.");
     expect(ENGINE_COPY.added).toBe("Engine added. This updates when the provider confirms the change.");
     expect(ENGINE_COPY.removed).toBe("Engine removed. The unused part of this month is credited to your next invoice.");
   });
