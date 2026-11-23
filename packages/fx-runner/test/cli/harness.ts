@@ -10,7 +10,7 @@ export const CODE = `fxrr_${"A1b2C3d4".repeat(5)}`;
 export interface Rig {
   cloud: FakeCloud;
   dir: string;
-  run: (argv: string[], over?: { fetchFn?: typeof fetch; now?: () => Date; hostname?: string; readCode?: () => Promise<string> }) => Promise<{ code: number; out: string; err: string }>;
+  run: (argv: string[], over?: { fetchFn?: typeof fetch; now?: () => Date; hostname?: string; readCode?: () => Promise<string>; uid?: number }) => Promise<{ code: number; out: string; err: string }>;
   /** `serverMode` is the mode the code was minted for (default: the same as `mode`). */
   register: (mode?: string, serverMode?: "subscription" | "api_key") => Promise<{ code: number; out: string; err: string }>;
 }

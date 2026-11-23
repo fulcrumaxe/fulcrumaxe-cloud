@@ -11,11 +11,17 @@ import { requireUsable } from "../protectionBypass.js";
 import { REVOKE_PATH, errorCodeOf, refusalError, signedPost } from "../cloud.js";
 import { KEY_FILE, REGISTRATION_FILE, loadRegistration, removeStateFile } from "../config.js";
 import type { CommandContext, Flags } from "../context.js";
+import { vmTokenStatus } from "../credentials/vmToken.js";
 import { loadRunnerKey } from "../keys.js";
 
 function forget(ctx: CommandContext): void {
   removeStateFile(ctx.stateDir, KEY_FILE);
   removeStateFile(ctx.stateDir, REGISTRATION_FILE);
+}
+
+/** Presence only, from the existing no-follow check: any state but missing means a file is there (an unsafe one too, which clear-vm-token also removes). Nothing of its content is shown. */
+function vmTokenReminder(ctx: CommandContext): void {
+  if (vmTokenStatus(ctx.stateDir, ctx.uid).state !== "missing") ctx.out("The VM token file is still on this machine; run fx-runner credentials clear-vm-token to remove it");
 }
 
 export async function revokeCommand(flags: Flags, ctx: CommandContext): Promise<number> {
@@ -27,6 +33,7 @@ export async function revokeCommand(flags: Flags, ctx: CommandContext): Promise<
   if (local) {
     forget(ctx);
     ctx.out("Removed this machine's runner key and registration. The runner stays registered in the workspace until it is revoked there.");
+    vmTokenReminder(ctx);
     return 0;
   }
 
@@ -45,6 +52,7 @@ export async function revokeCommand(flags: Flags, ctx: CommandContext): Promise<
     const failed = typeof body.runs_failed === "number" && Number.isSafeInteger(body.runs_failed) ? body.runs_failed : 0;
     ctx.out(`Revoked runner ${registration.runner_id}. ${failed} running job${failed === 1 ? " was" : "s were"} stopped. The local key is deleted.`);
     if (registration.credential_mode === "api_key") ctx.out("The stored API key file is left in place; to remove it run: fx-runner credentials clear-api-key");
+    vmTokenReminder(ctx);
     return 0;
   }
   // The cloud revoked the runner but could not yet fail its jobs: the key is dead either way, so it goes.
