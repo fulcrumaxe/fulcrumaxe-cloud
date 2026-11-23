@@ -31,6 +31,12 @@ const ALLOWLIST: ReadonlyArray<{ fn: string; owner: string; reason: string }> = 
     reason:
       "1062 (D#845 ON-2b): deletes a revoked runner's stored link address. SECURITY DEFINER, owned by the NOLOGIN role that holds the table's DELETE grant. It deletes only the row of the runner the trigger fired for. 0720's invoker-plus-helper shape needs EXECUTE for platform_ops and guard_definer, which the neon-shape exception check refuses.",
   },
+  {
+    fn: 'engine_operate_off_supersede()',
+    owner: 'machine_jobs_owner',
+    reason:
+      "1066 (D#845 ON-13a0): the AFTER trigger on a switch of operate to off marks the account's issued, undelivered engine_session_start jobs superseded in the same transaction. It must write machine_jobs, which no writer of engine_bridge_settings can, so it is SECURITY DEFINER, owned by the NOLOGIN machine_jobs_owner (1053's owner of the machine job definers, which holds nothing but those functions' reads and writes). EXECUTE is app_user's alone and a call outside a trigger only raises. 0720's invoker-plus-helper shape would make a directly callable helper that supersedes jobs with no switch.",
+  },
 ];
 
 describe('trigger function ownership (all migrations applied)', () => {

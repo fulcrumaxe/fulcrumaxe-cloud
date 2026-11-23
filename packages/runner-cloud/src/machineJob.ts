@@ -3,9 +3,11 @@ import {
   MACHINE_JOB_CLAIM_PATH,
   MachineJobClaimMessage,
   MachineJobClaimReply,
+  SessionJobProgressBody,
   SetupProgressBody,
   SetupProgressReply,
   machineJobOffered,
+  machineJobProgressPath,
   setupProgressPath,
   type MachineJobKind,
   type RunnerOffer,
@@ -24,6 +26,8 @@ import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js
  *   claim     POST /api/runner/machine-job/claim hands over one offered job, once, and nothing while the runner holds a delivered one. A delivered job is never delivered again: it ends, or expires.
  *   progress  POST /api/runner/setup/:setup_id/progress records one step of one job. 404 for a job that is not this runner's for this setup (so for every foreign id), 409 `job_superseded` for an earlier
  *             attempt, 409 `job_not_active` for a job that is not delivered or has ended, 409 `seq_not_increasing` for a number at or below the last. The row's own fence is the definer's (migration 1053).
+ *
+ *  session   POST /api/runner/machine-job/:job_id/progress (ON-13a0) is the same report for a SESSION job (start, stop, delete), keyed by the job and not by a setup; see `machineJobProgressRun` below.
  *
  * Statuses: 401 (unsigned or wrong runner), 400 (invalid message), 404, 409.
  */
@@ -94,6 +98,37 @@ export async function setupProgressRun(deps: RunnerCloudDeps, req: RunnerHttpReq
   });
   if (result === "ok") return { status: 200, body: SetupProgressReply.parse({ recorded: true }), headers: NO_STORE };
   if (result === "superseded") throw new RunnerHttpError(409, "job_superseded", "a later attempt replaced this job");
+  if (result === "not_active") throw new RunnerHttpError(409, "job_not_active", "this job is not running");
+  if (result === "seq") throw new RunnerHttpError(409, "seq_not_increasing", "the sequence number is not above the last one");
+  throw new RunnerHttpError(404, "not_found", "no such job");
+}
+
+/**
+ * D#845 ON-13a0: POST /api/runner/machine-job/:job_id/progress. The runner reports one step of a SESSION job (`engine_session_start`, `_stop`, `_delete`), keyed by the signed `job_id` in the path. Same door, same
+ * signature and single-use nonce, same replies as the setup route: 200 `{recorded: true}`, 404 `not_found` (a job that is not this runner's, a setup job, any id that is not a job), 409 `job_not_active`, 409
+ * `seq_not_increasing`, 400 for a body outside `SessionJobProgressBody` or one the definer refuses for its kind (a step the kind does not have, a start mode on the wrong step or kind). The fence and the write are the
+ * definer's `machine_job_progress_record` (migration 1066). There is no superseded reply: a superseded job is simply not active.
+ */
+export async function machineJobProgressRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, jobId: string): Promise<RunnerHttpResponse> {
+  const runner = await verifyRunnerRequest(deps, machineJobProgressPath(jobId), req, { replay: "once" });
+  // After the signature, not before: an unsigned caller must not learn from a 404 which ids are well formed.
+  if (!UUID.test(jobId)) throw new RunnerHttpError(404, "not_found", "no such job");
+  const body = parseMessage(SessionJobProgressBody, parseJsonBody(req));
+  const result = await asRunner(async () => {
+    try {
+      return await withRunnerSession(deps.appUserPool, runner, async (client) => {
+        const { rows } = await client.query<{ o_result: string }>("SELECT o_result FROM machine_job_progress_record($1::uuid, $2, $3, $4, $5, $6, $7)", [
+          jobId.toLowerCase(), body.seq, body.step, body.state, body.failure_code ?? null, body.failure_reason ?? null, body.start_mode ?? null,
+        ]);
+        return rows[0]?.o_result ?? "not_found";
+      });
+    } catch (error) {
+      // A shape the schema allows but the kind or the column does not (a step of another kind, a start mode on a stop): a bad report, not a server fault.
+      if (pgCode(error) === "23514" || pgCode(error) === "22023") throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+      throw error;
+    }
+  });
+  if (result === "ok") return { status: 200, body: SetupProgressReply.parse({ recorded: true }), headers: NO_STORE };
   if (result === "not_active") throw new RunnerHttpError(409, "job_not_active", "this job is not running");
   if (result === "seq") throw new RunnerHttpError(409, "seq_not_increasing", "the sequence number is not above the last one");
   throw new RunnerHttpError(404, "not_found", "no such job");

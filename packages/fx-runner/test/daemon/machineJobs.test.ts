@@ -39,7 +39,7 @@ describe("the dispatcher", () => {
   it("every other kind with no handler is unsupported too; one with no setup id has nothing to report to and sends nothing", async () => {
     const withSetup = jobOf({ kind: "engine_update" }, {});
     const update = { ...withSetup, args: { engine: (withSetup.args as { engine: unknown }).engine, branch: "fx/engine-update-1.2.4" } } as MachineJob;
-    const stop = { ...jobOf({ kind: "engine_session_stop", setup_id: undefined }), args: { reason: "person" } } as MachineJob;
+    const stop = { ...jobOf({ kind: "engine_session_stop", setup_id: undefined }), args: { reason: "person", operate_epoch: 0 } } as MachineJob;
     const r = rig([{ kind: "job", signedJob: signedJob(update) }, { kind: "job", signedJob: signedJob(stop) }]);
     const d = r.make();
     await d.run();
