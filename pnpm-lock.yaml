@@ -208,6 +208,9 @@ importers:
       '@fx/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@fx/hetzner':
+        specifier: workspace:*
+        version: link:../../packages/hetzner
       '@fx/model-connection':
         specifier: workspace:*
         version: link:../../packages/model-connection

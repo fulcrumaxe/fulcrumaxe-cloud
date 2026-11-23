@@ -1,6 +1,7 @@
 import net from "node:net";
 import { request as httpsRequest } from "node:https";
 import { isBlockedAddress, resolveChecked, type HostLookup } from "@fx/net-guard";
+import { fakeProviderAllowed } from "./fakeGate.js";
 import * as P from "./parse.js";
 
 /**
@@ -56,6 +57,8 @@ export interface HetznerOptions {
   now?: () => number;
   /** Test only (refused unless NODE_ENV is exactly "test"): answers the DNS query so a local TLS fake can stand in; the certificate is still verified against `ca`. */
   testTarget?: { lookup: HostLookup; port: number; ca: string };
+  /** D#845 MC-13a: an https URL whose path is the fake's root (`https://host/api/_fake/hetzner`; the client adds `/v1`). Refused unless FX_MACHINE_PROVIDER_FAKE=1 and FX_DEPLOY_KIND is staging. Real DNS, real TLS and the address guard still apply. */
+  fakeBaseUrl?: string;
 }
 
 interface RawResponse { status: number; headers: Record<string, string>; json: unknown }
@@ -102,6 +105,13 @@ export function createHetznerClient(options: HetznerOptions) {
   const scrub = (s: string): string => sanitize(s, token);
   const fail = (code: HetznerCode, message: string, extra: HetznerError["extra"] = {}): HetznerError => new HetznerError(code, scrub(message), extra);
   if (test && process.env.NODE_ENV !== "test") throw fail("unavailable", "The test target is refused outside tests.");
+  let target = { host: HOST, port: 443, prefix: BASE };
+  if (options.fakeBaseUrl !== undefined) {
+    let u: URL | undefined;
+    try { u = new URL(options.fakeBaseUrl); } catch { /* fx-swallow-ok: an unparsable address is refused just below with a fixed message */ u = undefined; }
+    if (!fakeProviderAllowed(process.env) || !u || u.protocol !== "https:" || u.username || u.password) throw fail("unavailable", "The fake provider address is refused.");
+    target = { host: u.hostname, port: Number(u.port || 443), prefix: u.pathname.replace(/\/+$/, "") + BASE };
+  }
 
   /** Seconds until one more request is allowed. The limit refills gradually (RateLimit-Reset is when it is full again), so one request's wait is the time to full over the requests missing. */
   const waitSeconds = (): number => {
@@ -116,7 +126,7 @@ export function createHetznerClient(options: HetznerOptions) {
     if (test && process.env.NODE_ENV !== "test") throw fail("unavailable", "The test target is refused outside tests.");
     let address: string | undefined;
     try {
-      address = test ? (await test.lookup(HOST, { all: true, verbatim: true }))[0]?.address : (await resolveChecked(HOST))[0];
+      address = test ? (await test.lookup(HOST, { all: true, verbatim: true }))[0]?.address : (await resolveChecked(target.host))[0];
     } catch {
       // fx-swallow-ok: reduced to a fixed message; the resolver's text names the host only
       throw fail("unavailable", "Hetzner could not be resolved.", { ambiguous: false });
@@ -129,7 +139,7 @@ export function createHetznerClient(options: HetznerOptions) {
       const deadline = setTimeout(() => { req.destroy(); done(() => reject(fail("unavailable", "Hetzner did not answer in time.", { ambiguous: true, reason: "timeout" }))); }, timeoutMs);
       const req = httpsRequest(
         {
-          hostname: HOST, port: test ? test.port : 443, path: BASE + path, method, timeout: timeoutMs,
+          hostname: target.host, port: test ? test.port : target.port, path: target.prefix + path, method, timeout: timeoutMs,
           headers: { Authorization: `Bearer ${token}`, "User-Agent": `fulcrumaxe-cloud/${version}`, Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body).toString() }) },
           ...(test ? { ca: test.ca } : {}),
           lookup: ((_h: string, opts: { all?: boolean }, cb: (...args: unknown[]) => void) => {
