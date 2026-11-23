@@ -12,7 +12,8 @@
 export type BundleRefusal = "bundle_too_large" | "bundle_malformed" | "bundle_prerequisite" | "bundle_ref";
 
 export class BundleRefused extends Error {
-  constructor(readonly code: BundleRefusal | "bundle_commits" | "bundle_tree" | "bundle_base_moved" | "bundle_fetch_failed") {
+  /** `detail` is only on `bundle_tree`: a link that leaves the tree (`symlink`), any other path or entry type (`path`), or a workflow path a caller's policy refused (`workflow`). A policy that reports a closed reason reads it. */
+  constructor(readonly code: BundleRefusal | "bundle_commits" | "bundle_tree" | "bundle_base_moved" | "bundle_fetch_failed", readonly detail?: "symlink" | "path" | "workflow") {
     super(code);
     this.name = "BundleRefused";
   }

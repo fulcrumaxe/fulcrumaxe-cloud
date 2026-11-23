@@ -16,7 +16,8 @@ import type { UsageGate } from "./usageGate.js";
 import { createCheckInVm } from "../vm/workspace/guestCheck.js";
 import { buildWorkspaceArchive } from "./vmArchive.js";
 import { applyBundle } from "./vmBundle.js";
-import { createGit, type GitCapture } from "./git.js";
+import { createGit, type Git, type GitCapture } from "./git.js";
+import { workflowPolicy } from "../setup/setupPolicy.js";
 import type { JobHandlerDeps } from "./jobHandler.js";
 
 export interface VmJobWiring {
@@ -70,6 +71,15 @@ export function createVmJobDeps(wiring: VmJobWiring): NonNullable<JobHandlerDeps
       token: { needed: () => wiring.subscription, slot: (vm) => live.bindings.slot(vm, live.readToken) },
     },
   };
+}
+
+/** D#845 ON-8d: what a project setup takes from the run jobs' guarded runners and scratch directory, and the bundle apply WITH the setup's policy (`setupPolicy.ts`). A run's own `apply` is unchanged. */
+export function createSetupVmParts(wiring: Pick<VmJobWiring, "stateDir" | "capture" | "captureLarge" | "envOptions">): { git: Git; gitLarge: Git; scratch: () => string; apply: NonNullable<JobHandlerDeps["vm"]>["apply"] } {
+  const gitOptions = wiring.envOptions === undefined ? {} : { envOptions: wiring.envOptions };
+  const git = createGit({ capture: wiring.capture, ...gitOptions });
+  const gitLarge = createGit({ capture: wiring.captureLarge ?? wiring.capture, ...gitOptions });
+  const scratch = (): string => privateDir(path.join(wiring.stateDir, "vm-scratch"));
+  return { git, gitLarge, scratch, apply: async (input) => applyBundle({ git, gitLarge, scratchDir: scratch(), policy: workflowPolicy(gitLarge) }, input) };
 }
 
 /**

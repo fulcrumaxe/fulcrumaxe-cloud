@@ -47,6 +47,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#845 ON-8c: the engine archive: an https GET per redirect hop (no agent, no redirect followed), a sha256 of the body as it streams, and gunzip with an output cap. It reads no file and no environment.
   "src/setup/engineArchive.ts": ["crypto", "https", "zlib"],
   "src/setup/planCheck.ts": ["crypto"], // the sha256 of the plan route's reply bytes, compared with the job's plan_ref before the reply is parsed
+  // D#845 ON-8d: the project setup. The local log (a 0600 no-follow open judged by fstat, at most 1 MiB, never sent), the guest's engine archive (a gzip of the verified tar and its sha256, sent as a file), the host copy's random name; no process is started and no environment is read.
+  "src/setup/projectSetup.ts": ["fs", "path"],
+  "src/setup/guestScripts.ts": ["crypto", "zlib"],
+  "src/setup/setupRepos.ts": ["crypto", "fs", "path"],
   "src/config.ts": ["crypto", "fs", "path"],
   "src/keys.ts": ["crypto"],
   // The engine bridge (EB-3): the runner's user id is given by the caller, never read from `process` here.
