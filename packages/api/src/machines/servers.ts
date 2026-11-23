@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { HetznerError, MANAGED_LABEL, MANAGED_LABEL_VALUE, createHetznerClient, type HetznerClient, type HetznerCode, type HetznerOptions } from "@fx/hetzner";
 import { MachineOpsError, machineKekSource, withHetznerToken, type KekSource } from "@fx/model-connection";
 import { reportError } from "@fx/telemetry";
@@ -20,7 +20,8 @@ import { ApiError } from "../errors.js";
  *
  * Idempotency. One key makes one server. A transaction-scoped advisory lock on (account, key) serialises the requests that carry the same key, so the second one
  * waits and then finds the first one's row instead of starting its own; the unique index on (account, key) is the backstop under that. A key that already has a row
- * answers that row, whatever state it is in, and calls nothing.
+ * answers that row, whatever state it is in, and calls nothing. A second advisory lock, on the account alone, is tried (never waited for) after that: a create under a new key
+ * while another is running answers 409 `server_creating`, so a reload or a second tab cannot make a second billed server.
  *
  * A crash between two steps (the process dies, not an error) leaves a labelled firewall or server and no finished row: the orphan sweep (MC-7) finds those by their labels.
  */
@@ -300,7 +301,7 @@ async function createUnderLock(ctx: ServerCtx, input: CreateInput): Promise<{ se
     await lock.query("BEGIN");
     await lock.query(`SET LOCAL lock_timeout = '${KEY_LOCK_TIMEOUT}'`);
     await lock.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`machine-server-create:${ctx.principal.accountId}:${input.idempotencyKey}`]);
-    return await createLocked(ctx, input);
+    return await createLocked(ctx, input, lock);
   } catch (e) {
     broken = true;
     throw e;
@@ -313,10 +314,24 @@ async function createUnderLock(ctx: ServerCtx, input: CreateInput): Promise<{ se
   }
 }
 
-async function createLocked(ctx: ServerCtx, input: CreateInput): Promise<{ server: ServerView; reused: boolean }> {
+/** How long a `creating` row with no Hetzner id still counts as a create in progress, when its lock is gone (a create that was killed). */
+const CREATING_WINDOW = "10 minutes";
+const SERVER_CREATING = "A server is already being made for this account. Wait for it to finish, then try again";
+
+async function createLocked(ctx: ServerCtx, input: CreateInput, lock: PoolClient): Promise<{ server: ServerView; reused: boolean }> {
   const { accountId, userId } = ctx.principal;
   const existing = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND idempotency_key = $2`, [accountId, input.idempotencyKey])).rows[0]);
   if (existing) return { server: viewOf(existing), reused: true };
+  // One create per account at a time, whatever the key: a reload or a second tab has lost the first key. The per-key lock above is already held, so a retry with the same key
+  // has been answered by the lookup above and never gets here. This one does not wait, and it is held (on the same transaction) for as long as the per-key lock.
+  const got = await lock.query<{ got: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS got", [`machine-server-create-account:${accountId}`]);
+  if (got.rows[0]?.got !== true) throw new ApiError(409, "server_creating", SERVER_CREATING);
+  // A create is several transactions (the row is committed before the Hetzner calls), so a create killed after its row, before the server, holds no lock but may still have
+  // a server landing at Hetzner. Its row, with no Hetzner id yet and under another key, blocks a new create for a few minutes. A finished create has its id and does not.
+  const busy = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query(
+    `SELECT 1 FROM managed_servers WHERE account_id = $1 AND status = 'creating' AND provider_server_id IS NULL AND idempotency_key IS DISTINCT FROM $2 AND created_at > now() - interval '${CREATING_WINDOW}' LIMIT 1`,
+    [accountId, input.idempotencyKey])).rowCount);
+  if (busy) throw new ApiError(409, "server_creating", SERVER_CREATING);
   const origin = machineServerDeps.getOrigin();
   if (origin === undefined || origin === "") throw new ApiError(503, "not_configured", "Hetzner Cloud servers are not available right now");
 

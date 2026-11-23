@@ -561,11 +561,12 @@ describe('machine servers: quote and create', () => {
       const who = await owner();
       const small = createPool(process.env.API_DATABASE_URL_APP_USER!, { max: 3 });
       try {
-        const ctx = { pool: small, principal: who };
-        const results = await Promise.all(Array.from({ length: 5 }, (_, i) => createServer(ctx, { idempotencyKey: `k-pool-${i}`, serverType: 'cx22', location: 'fsn1', name: `pool-box-${i}`, quoted: LIVE })));
+        // Five accounts: one account makes one server at a time, so the pool is loaded by different accounts.
+        const whos = [who, ...(await Promise.all(Array.from({ length: 4 }, () => owner())))];
+        const results = await Promise.all(whos.map((w, i) => createServer({ pool: small, principal: w }, { idempotencyKey: `k-pool-${i}`, serverType: 'cx22', location: 'fsn1', name: `pool-box-${i}`, quoted: LIVE })));
         expect(results.every((r) => !r.reused && r.server.status === 'creating')).toBe(true);
         expect(world.servers).toHaveLength(5);
-        expect(await serversOf(who.accountId)).toHaveLength(5);
+        expect(await serversOf(who.accountId)).toHaveLength(1);
       } finally {
         await small.end();
       }
@@ -584,17 +585,86 @@ describe('machine servers: quote and create', () => {
       expect(await tokenRows(who.accountId)).toHaveLength(1);
     });
 
-    it('RACE across keys: two different keys make two servers, each with its own firewall and token, with no mix-up', async () => {
-      const who = await owner();
-      const ctx = { pool: appUserPool, principal: who };
-      const [a, b] = await Promise.all([
-        createServer(ctx, { idempotencyKey: 'k-a', serverType: 'cx22', location: 'fsn1', quoted: LIVE, name: 'box-a' }),
-        createServer(ctx, { idempotencyKey: 'k-b', serverType: 'cx22', location: 'fsn1', quoted: LIVE, name: 'box-b' }),
-      ]);
-      expect(a.server.id).not.toBe(b.server.id);
-      expect(world.servers).toHaveLength(2);
-      expect(new Set((await serversOf(who.accountId)).map((r) => r.provisioning_token_id)).size).toBe(2);
-      expect(new Set((await serversOf(who.accountId)).map((r) => r.provider_firewall_id)).size).toBe(2);
+    describe('one create at a time per account (FU-238)', () => {
+      const input = (key: string, name: string) => ({ idempotencyKey: key, serverType: 'cx22', location: 'fsn1', quoted: LIVE, name });
+      /** Runs `during` once the first create has reached the Hetzner server step, with its locks held, then lets it finish. */
+      async function whileCreating(who: { accountId: string; userId: string }, key: string, during: () => Promise<void>): Promise<Awaited<ReturnType<typeof createServer>>> {
+        let reached!: () => void;
+        const atServer = new Promise<void>((r) => { reached = r; });
+        let release!: () => void;
+        const held = new Promise<void>((r) => { release = r; });
+        let blocked = false;
+        machineServerDeps.checkpoint = async (step) => { if (step === 'server' && !blocked) { blocked = true; reached(); await held; } };
+        const first = createServer({ pool: appUserPool, principal: who }, input(key, 'box-first'));
+        await atServer;
+        try { await during(); } finally { release(); }
+        const out = await first;
+        delete machineServerDeps.checkpoint;
+        return out;
+      }
+
+      it('RACE across keys: while one create runs, a create under another key is refused at once with 409 server_creating and Hetzner sees one server', async () => {
+        const who = await owner();
+        const first = await whileCreating(who, 'k-a', async () => {
+          const started = Date.now();
+          const res = await create(who, 'k-b', { name: 'box-b' });
+          expect([res.status, ((await res.json()) as Reply).error.code]).toEqual([409, 'server_creating']);
+          expect(Date.now() - started, 'refused without waiting').toBeLessThan(5000);
+          await expect(createServer({ pool: appUserPool, principal: who }, input('k-c', 'box-c'))).rejects.toMatchObject({ status: 409, code: 'server_creating' });
+        });
+        expect(first.reused).toBe(false);
+        expect(world.servers).toHaveLength(1);
+        expect(postsTo('/servers')).toHaveLength(1);
+        expect(postsTo('/firewalls')).toHaveLength(1);
+        expect(await serversOf(who.accountId)).toHaveLength(1);
+        expect(await tokenRows(who.accountId)).toHaveLength(1);
+      });
+
+      it('a retry with the same key during the create waits for it and replays its answer, not server_creating', async () => {
+        const who = await owner();
+        let retry!: Promise<Awaited<ReturnType<typeof createServer>>>;
+        const first = await whileCreating(who, 'k-same', async () => {
+          retry = createServer({ pool: appUserPool, principal: who }, input('k-same', 'box-first'));
+          retry.catch(() => undefined);
+          await new Promise((r) => setTimeout(r, 300));
+        });
+        const again = await retry;
+        expect(again).toEqual({ server: first.server, reused: true });
+        expect(world.servers).toHaveLength(1);
+      });
+
+      it('after the first create finishes a new key succeeds, and a failed create frees the account too', async () => {
+        const who = await owner();
+        expect((await create(who, 'k-one')).status).toBe(201);
+        expect((await create(who, 'k-two', { name: 'box-two' })).status).toBe(201);
+        world.serverLimit = 0;
+        expect((await create(who, 'k-bad', { name: 'box-bad' })).status).toBe(409);
+        world.serverLimit = 10;
+        expect((await create(who, 'k-three', { name: 'box-three' })).status).toBe(201);
+        expect(world.servers).toHaveLength(3);
+      });
+
+      it('another account is not blocked by a create that is running, even with the same key', async () => {
+        const who = await owner();
+        const other = await owner();
+        await whileCreating(who, 'k-shared', async () => {
+          expect((await create(who, 'k-x', { name: 'box-x' })).status).toBe(409);
+          expect((await create(other, 'k-shared', { name: 'box-y' })).status).toBe(201);
+        });
+        expect(world.servers).toHaveLength(2);
+      });
+
+      it('a create killed after its row, with no lock left, still blocks a new key for ten minutes and not after; its own key still replays', async () => {
+        const who = await owner();
+        expect((await create(who, 'k-dead')).status).toBe(201);
+        await admin.query(`UPDATE managed_servers SET provider_server_id = NULL WHERE account_id = $1`, [who.accountId]);
+        const refused = await create(who, 'k-new', { name: 'box-new' });
+        expect([refused.status, ((await refused.json()) as Reply).error.code]).toEqual([409, 'server_creating']);
+        expect(world.servers).toHaveLength(1);
+        expect((await create(who, 'k-dead')).headers.get('idempotent-replayed')).toBe('true');
+        await admin.query(`UPDATE managed_servers SET created_at = now() - interval '11 minutes' WHERE account_id = $1`, [who.accountId]);
+        expect((await create(who, 'k-new', { name: 'box-new' })).status).toBe(201);
+      });
     });
 
     it('the unique index is the backstop: a second row with the same key in one account is refused by the database, another account may use it', async () => {
