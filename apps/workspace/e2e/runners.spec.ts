@@ -654,6 +654,34 @@ test.describe("D#845 MC-10a: the Machines app", () => {
     await clean(page, errors);
   });
 
+  test("a microVM machine with no Claude token shows the token notice with a command to copy; nothing new with the token, a standard machine or an unknown engine", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const { errors } = await setup(page, {
+      machines: [
+        machine({ name: "NoToken", claude: false }),
+        machine({ id: R2, name: "HasToken", claude: true }),
+        machine({ id: R3, name: "Plain", tier: "standard", claude: false }),
+        machine({ id: "00000000-0000-4000-8000-0000000000a4", name: "Unknown", tier: null, claude: false }),
+      ],
+    });
+    await openMachines(page);
+    const rows = t(page, "runners-machine");
+    await expect(rows).toHaveCount(4);
+    const notice = t(page, "runners-machine-vmtoken");
+    await expect(notice).toHaveCount(1);
+    await expect(rows.nth(0).locator('[data-testid="runners-machine-vmtoken"]')).toHaveCount(1);
+    await expect(notice).toContainText("Virtual machine mode needs a Claude token on this machine. On that machine run fx-runner credentials set-vm-token.");
+    await expect(notice).toContainText("The token stays on that machine and is never sent to us.");
+    await expect(notice.locator("pre")).toHaveText("fx-runner credentials set-vm-token");
+    await expect(notice.locator("input, textarea")).toHaveCount(0);
+    await expect(rows.nth(0)).toContainText("Claude token");
+    await press(t(page, "runners-machine-vmtoken-copy"));
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("fx-runner credentials set-vm-token");
+    for (const i of [1, 2, 3]) await expect(rows.nth(i).locator('[data-testid="runners-machine-vmtoken"]')).toHaveCount(0);
+    expect(await page.locator(WIN).innerText()).not.toMatch(/undefined|null/);
+    await clean(page, errors);
+  });
+
   test("empty, load error with Retry, the tab keys, and a member told why they cannot add", async ({ page }) => {
     const { mock, errors } = await setup(page, { machinesFail: true, role: "member", isAdmin: false });
     await openMachines(page);

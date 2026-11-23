@@ -108,6 +108,7 @@ Sources:
 - `packages/reconcile/src/jobs/machinePrune.ts`
 - `packages/fx-runner/src/engineBridge/ports.ts`
 - `packages/fx-runner/src/commands/run.ts`
+- `packages/fx-runner/src/credentials/vmToken.ts`
 - `packages/fx-runner/src/engineBridge/loop.ts`
 - `packages/fx-runner/src/engineBridge/commands.ts`
 - `packages/api/src/routes/engine-decisions.ts`
@@ -191,6 +192,7 @@ Sources:
 
 - Sandbox egress is enforced by the sandbox platform from the policy this repo computes; no test here proves the platform drops what is off the list.
 - A microVM's egress is enforced by this repo's own proxy, but the real jailer and Firecracker run only in `.github/workflows/vmhelper-real-root.yml` on a hosted VM, and nothing has run a customer job in one.
+- The shape of a minted Claude token (`sk-ant-oat` prefix, 20 to 512 printable characters) that `fx-runner credentials set-vm-token` checks is an assumption, not yet confirmed against a real token; a wrong guess fails closed (it can refuse a real token, never admit a bad one). The first owner run of the command confirms it. A microVM job's model sign-in with the token read from the file has not yet been run against the real model (`packages/fx-runner/src/credentials/vmToken.ts`).
 - The hosted-Postgres owner shape has been proven against a local cluster built to match Neon's grant, not against a real Neon branch.
 
 ## Apps

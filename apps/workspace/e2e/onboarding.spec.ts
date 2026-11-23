@@ -1294,17 +1294,42 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     await expect(ob(page).locator('[data-testid="ob-prereq-line"]').nth(3)).toHaveText("Price: shown when you choose a plan");
   });
 
-  test("machine done on microVM, claude open: the machine is named from the runners list and the next step is current", async ({ page }) => {
+  test("machine done on microVM, claude open: the step asks for a Claude token on the machine, with a command to copy, and the next step is current", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra());
     await bootToDesktop(page);
     expect(await lines(page, "machine")).toEqual([`${BOX} connected · MicroVM isolation`]);
     await expect(eng(page, "machine").locator('[data-testid="ob-engine-state"]')).toContainText("Done");
     await expect(eng(page, "machine").locator("time")).toHaveCount(1);
-    expect(await lines(page, "claude")).toEqual([`Run claude on ${BOX} and sign in`]);
-    await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveText("claude");
+    expect(await lines(page, "claude")).toEqual(["Virtual machine mode needs a Claude token on this machine. On that machine run fx-runner credentials set-vm-token.", "The token stays on that machine and is never sent to us."]);
+    await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveText("fx-runner credentials set-vm-token");
+    await expect(eng(page, "claude").locator("input, textarea")).toHaveCount(0); // no token field: the token is typed on the machine
+    expect(await eng(page, "claude").innerText()).not.toMatch(/sign in|signed in|undefined|null/i);
     await expect(ob(page).locator('[data-testid="ob-track-engine"] [aria-current="step"]')).toHaveAttribute("data-testid", "ob-engine-claude");
     await expect(ob(page).locator('[data-testid="ob-prereq"]')).toHaveCount(0); // the list is for before the first command
+    expect(await lines(page, "github_app")).toEqual(["Finish Give the machine a Claude token first"]);
+    await noPlaceholder(page);
+  });
+
+  test("the token command's Copy button copies exactly the command shown", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra());
+    await bootToDesktop(page);
+    await eng(page, "claude").locator('[data-testid="ob-copy"]').click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("fx-runner credentials set-vm-token");
+  });
+
+  test("a Standard machine with claude open keeps the sign-in copy, and a microVM machine with the token present shows nothing new", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard" }))] }), extra());
+    await bootToDesktop(page);
+    expect(await lines(page, "claude")).toEqual([`Run claude on ${BOX} and sign in`]);
     expect(await lines(page, "github_app")).toEqual(["Finish Sign in to Claude on the machine first"]);
+  });
+
+  test("a microVM machine with a token set says so and shows no command", async ({ page }) => {
+    await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "done", github_app: "active" }, { tier: "microvm" }))] }), extra());
+    await bootToDesktop(page);
+    expect(await lines(page, "claude")).toEqual([`A Claude token is set on ${BOX}`]);
+    await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveCount(0);
   });
 
   test("Standard isolation says nothing about KVM while the machine's facts do not (the tier follows the engine setting, not the hardware), with no failure styling, word or copy", async ({ page }) => {

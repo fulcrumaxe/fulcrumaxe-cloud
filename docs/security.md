@@ -65,6 +65,7 @@ Sources:
 - `packages/api/src/routes/engine-halt.ts`
 - `packages/worker/src/compositionRoot.ts`
 - `packages/fx-runner/src/engineBridge/commands.ts`
+- `packages/fx-runner/src/credentials/vmToken.ts`
 - `packages/fx-runner/src/engineBridge/decideSocket.ts`
 - `packages/fx-runner/src/engineBridge/daemon.ts`
 - `packages/fx-runner/src/engineBridge/tail.ts`
@@ -200,6 +201,12 @@ The post-merge verify stage drives a real browser at a deployed app, so its inpu
 ## The operator subscription exception
 
 A customer's Claude subscription credential is never allowed on our hosted sandboxes. The one exception is our own: runs and previews started by an account on the operator allow-list may use our own Claude subscription. `packages/runtime/src/operatorSubscription.ts` is the one place that decides it, from three settings that must all hold (`FX_OPERATOR_SUBSCRIPTION` exactly `on`, the account on `FX_OPERATOR_ACCOUNT_IDS`, a token-shaped `FX_OPERATOR_CLAUDE_OAUTH_TOKEN`); a run needs both its own account and its payer on the list. The token is read only by the worker, when it builds the firewall policy (`buildOperatorFirewallPolicy`), and rides the `api.anthropic.com` rule as a non-enumerable `Authorization` value, like a tenant key. The sandbox's CLI holds the fixed placeholder `brokered-at-firewall` in `CLAUDE_CODE_OAUTH_TOKEN` (so it sends its own OAuth headers) and no `ANTHROPIC_AUTH_TOKEN`. `packages/runtime/src/production/guard.ts` allows exactly that placeholder, only for a spec flagged `operatorSubscription` toward the Anthropic default, and lets the orchestrator env hold the token under its one name only. Usage is recorded under the ledger source `operator_subscription` at $0; the per-run cap still stops a runaway.
+
+## The Claude token of a microVM job
+
+A microVM job gets its model credential from a token the person minted on their own machine, not from the machine's Claude login and not from the cloud. `fx-runner credentials set-vm-token` stores it at `<state dir>/credentials/claude-vm-token` (`packages/fx-runner/src/credentials/vmToken.ts`), the same exposure class as the API key file: a plain 0600 file in a 0700 directory owned by the runner's user, read with no-follow opens judged on the open handle, readable by that user and root, and not encrypted at rest. The token is never an argument (shell history and `ps` would hold it), never in a service unit, an environment, a log, a job's environment, a snapshot or a message to the cloud, which learns only whether one is present. Every message is fixed text without the token or a path. Where the token goes after that is unchanged: over vsock into a memory-only directory in the guest, wiped and confirmed before the VM is stopped or snapshotted. The agent can still send the header to the model host (the reverse relay passes it on the plain route), and an exposed token is revoked by the user in their Claude account; the file's age is checked by `doctor` (a warning after 300 days) because the runner cannot read the token's expiry.
+
+The Claude CLI's token command may be named in one source file only, as fixed text, and that file spawns nothing (`packages/fx-runner/test/credentialGrep.test.ts`). This is for the machine the person owns; the managed-server sign-in does not use it. Back up the state directory without `credentials/`.
 
 ## Bring-your-own-key encryption
 
