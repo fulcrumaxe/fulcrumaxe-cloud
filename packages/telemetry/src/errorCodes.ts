@@ -70,6 +70,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "hetzner_uniqueness_error",
   "hetzner_invalid_input",
   "hetzner_server_error",
+  "server_outcome_unknown",
   "hetzner_unavailable",
   "hetzner_not_found",
   "hetzner_locked",

@@ -149,7 +149,7 @@ export const machineServerRoutes: RouteEntry[] = [
     bodySchema: createBody,
     responseSchema: serverSchema,
     successStatus: 201,
-    extraResponses: { ...EXTRA, "409": `${EXTRA["409"]} ${CREATE_409}` },
+    extraResponses: { ...EXTRA, "409": `${EXTRA["409"]} ${CREATE_409}`, "503": EXTRA["503"] + " On create only: `server_outcome_unknown` means the create was sent and nobody can say whether the server was made; check the servers list before trying again. The same key answers `server_outcome_unknown` again for as long as the row is `cleanup_failed`." },
     async handler(ctx, input) {
       const b = input.body as z.infer<typeof createBody>;
       if (!ctx.idempotencyKey) throw new ApiError(400, "idempotency_key_required", "an Idempotency-Key is required");

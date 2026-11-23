@@ -206,7 +206,7 @@ const DELETE_WAIT_MS = 60_000;
  * When the server create was sent and nothing says whether it landed (any answer but a plain refusal), an empty search by label proves nothing: a create Hetzner is still
  * processing appears later and bills. That row is stamped `cleanup_failed`, never a clean failure, so the sweep and the status worker look again by label.
  */
-async function unwind(ctx: ServerCtx, client: HetznerClient, deps: RunnerCloudDeps, serverId: string, made: Made, failureCode: string, cause: unknown): Promise<void> {
+async function unwind(ctx: ServerCtx, client: HetznerClient, deps: RunnerCloudDeps, serverId: string, made: Made, failureCode: string, cause: unknown): Promise<{ outcomeUnknown: boolean }> {
   let clean = true;
   const attempt = async (f: () => Promise<unknown>): Promise<boolean> => {
     try { await f(); return true; } catch {
@@ -244,7 +244,12 @@ async function unwind(ctx: ServerCtx, client: HetznerClient, deps: RunnerCloudDe
       ),
     );
   }
+  // A create was sent, no id came back, and the undo could not rule a server out: the caller must not read the cause (a lock, a rate limit, a revoked token) as "nothing was made".
+  return { outcomeUnknown: !clean && made.serverSent === true && made.hetznerServerId === undefined };
 }
+
+/** The one answer when a server create was sent and nobody can say whether it landed. Fixed text; the underlying Hetzner code is logged, never sent. */
+export const outcomeUnknown = (): ApiError => new ApiError(503, "server_outcome_unknown", "We couldn't tell whether the server was made. Check the servers list before trying again.");
 
 const KEY_LOCK_TIMEOUT = "120s";
 
@@ -321,7 +326,10 @@ const SERVER_CREATING = "A server is already being made for this account. Wait f
 async function createLocked(ctx: ServerCtx, input: CreateInput, lock: PoolClient): Promise<{ server: ServerView; reused: boolean }> {
   const { accountId, userId } = ctx.principal;
   const existing = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND idempotency_key = $2`, [accountId, input.idempotencyKey])).rows[0]);
-  if (existing) return { server: viewOf(existing), reused: true };
+  if (existing) {
+    if (existing.status === "failed" && existing.failure_code === "cleanup_failed") throw outcomeUnknown();
+    return { server: viewOf(existing), reused: true };
+  }
   // One create per account at a time, whatever the key: a reload or a second tab has lost the first key. The per-key lock above is already held, so a retry with the same key
   // has been answered by the lookup above and never gets here. This one does not wait, and it is held (on the same transaction) for as long as the per-key lock.
   const got = await lock.query<{ got: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS got", [`machine-server-create-account:${accountId}`]);
@@ -410,7 +418,11 @@ async function createLocked(ctx: ServerCtx, input: CreateInput, lock: PoolClient
     });
   } catch (e) {
     const raced = isUniqueKey(e);
-    if (client !== undefined) await unwind(ctx, client, deps, serverId, raced ? { ...made, serverRowId: undefined } : made, failureCodeOf(e), e);
+    const undone = client === undefined ? undefined : await unwind(ctx, client, deps, serverId, raced ? { ...made, serverRowId: undefined } : made, failureCodeOf(e), e);
+    if (undone?.outcomeUnknown === true && !raced) {
+      reportError(e, { stage: "machine_server.create_outcome_unknown", route: "/api/v1/machine-servers" });
+      throw outcomeUnknown();
+    }
     if (raced) {
       const again = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND idempotency_key = $2`, [accountId, input.idempotencyKey])).rows[0]);
       if (again) return { server: viewOf(again), reused: true };
