@@ -44,6 +44,8 @@ export interface BundleDeps {
   scratchDir: string;
   /** What a pack may hold (tests set small ones; a runner takes the defaults). */
   limits?: Partial<PackLimits>;
+  /** A caller's own rule on the verified tip, run after the tree checks and before the workspace changes. It throws `BundleRefused` to refuse. */
+  policy?: (input: { repo: string; base: string; tip: string }) => Promise<void>;
 }
 
 /** What the fetches run with besides the guard config: one thread, because git resolves deltas on several at once and each holds a whole result. */
@@ -54,8 +56,8 @@ export interface AppliedBundle {
   commits: number;
 }
 
-const refuse = (code: ConstructorParameters<typeof BundleRefused>[0]): never => {
-  throw new BundleRefused(code);
+const refuse = (code: ConstructorParameters<typeof BundleRefused>[0], detail?: "symlink" | "path"): never => {
+  throw new BundleRefused(code, detail);
 };
 
 /** Step 4: the tip's tree, listed and checked here whatever git's own checks did. Throws `bundle_tree`. */
@@ -64,13 +66,13 @@ export async function checkTipTree(deps: Pick<BundleDeps, "git" | "gitLarge"> & 
     const items = parseTreeListing(await deps.gitLarge.run("workspace_failed", ["-C", repo, "ls-tree", "-r", "-l", "-z", "--full-tree", `${tip}^{tree}`]), MAX_ENTRIES);
     assertTreeSize(items, deps.limits?.total ?? DEFAULT_PACK_LIMITS.total);
     const links = items.filter((i) => i.mode === "120000");
-    if (links.length > MAX_LINKS) return refuse("bundle_tree");
+    if (links.length > MAX_LINKS) return refuse("bundle_tree", "symlink");
     for (const link of links) {
       const target = await deps.git.run("workspace_failed", ["-C", repo, "cat-file", "blob", link.oid]);
-      if (!linkStaysInside(link.path, target)) return refuse("bundle_tree");
+      if (!linkStaysInside(link.path, target)) return refuse("bundle_tree", "symlink");
     }
   } catch (error) {
-    if (error instanceof ArchiveRefused) return refuse(error.code === "archive_too_large" ? "bundle_too_large" : "bundle_tree");
+    if (error instanceof ArchiveRefused) return error.code === "archive_too_large" ? refuse("bundle_too_large") : refuse("bundle_tree", error.code === "archive_link" ? "symlink" : "path");
     throw error;
   }
 }
@@ -119,6 +121,7 @@ export async function applyBundle(deps: BundleDeps, input: { bundle: Buffer; bas
     if (walk !== input.base) return refuse("bundle_commits");
 
     await checkTipTree({ git: deps.git, gitLarge: deps.gitLarge, limits }, repo, tip);
+    await deps.policy?.({ repo, base: input.base, tip });
 
     // From here the workspace changes. It must still be exactly where the run started, or the checkout would mix two states.
     const head = (await runWorkspaceGit(deps.git, "workspace_failed", input.workspace, hostGit("rev-parse", "--verify", "HEAD^{commit}"))).trim();

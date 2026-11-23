@@ -33,7 +33,9 @@ import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "..
 import { isDraining, isPaused, loadSettings, omitsDevToken, setDraining } from "../runnerSettings.js";
 import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
 import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
-import { createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
+import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
+import { createProjectSetupHandler } from "../setup/projectSetup.js";
+import { createSetupRepos } from "../setup/setupRepos.js";
 import { daemonInventorySource, daemonSandboxLifecycle } from "../vm/sandboxd/management.js";
 import { createMicrovmGate } from "../daemon/microvmGate.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
@@ -76,7 +78,7 @@ import { createAutoUpdate, type UpdateHost } from "../update/updater.js";
 import { createUpdater, type UpdateHooks } from "./update.js";
 import { createFileLedger, LedgerLockedError, type FileLedger, type LedgerOptions } from "../daemon/ledger.js";
 import { createPushLog, PUSH_LOG_FILE, type PushLog } from "../daemon/pushLog.js";
-import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
+import { cacheRootsFor, createMirrors, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
 import { LaunchRefused, prepareDaemonDir } from "../launchDir.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
 import { createMachineJobDispatcher, effectiveEngine, type MachineJobDispatcher } from "../daemon/machineJobs.js";
@@ -751,8 +753,11 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         takeHello(again);
       };
       const deployOrder = verifyLocal.deployOrderHandler(client);
-      // D#845 ON-8c: no kind has a handler yet, so a job the cloud hands over is reported `kind_unsupported`; the rows that build a kind add its handler here.
-      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: {}, sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
+      // D#845 ON-8d: `project_setup` runs on the microVM engine only (a job that requires one is refused on any other engine by the dispatcher); every other kind has no handler yet and is reported `kind_unsupported`.
+      const setupParts = vmDeps === undefined ? undefined : createSetupVmParts({ stateDir, capture: host.engine.capture, captureLarge: host.engine.captureLarge, envOptions });
+      const mirrors = setupParts === undefined ? undefined : createMirrors({ git: setupParts.git, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
+      const setupHandler = vmDeps === undefined || setupParts === undefined || mirrors === undefined ? undefined : createProjectSetupHandler({ client, vm: vmDeps, apply: setupParts.apply, logDir: path.join(home, ".local", "state", "fx-runner", "setup"), repos: createSetupRepos({ git: setupParts.git, gitLarge: setupParts.gitLarge, mirrors, workspaceRoot, scratchDir: setupParts.scratch }) });
+      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: setupHandler === undefined ? {} : { project_setup: setupHandler },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {
         const cloud = { origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) };
