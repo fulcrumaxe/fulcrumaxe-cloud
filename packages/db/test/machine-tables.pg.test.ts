@@ -159,8 +159,14 @@ describe('machine tables [pg]', () => {
       await expect(admin.query(`INSERT INTO machine_login_requests (account_id, runner_id, status, code_ct, expires_at, created_by) VALUES ($1, $2, 'done', $4, now() + interval '5 minutes', $3)`, [a.accountId, runnerA1, a.userId, randomBytes(8)])).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
     });
 
-    it('a usage row is unique per machine, repo (or none), day, source and tier', async () => {
-      await expect(admin.query(`INSERT INTO machine_usage_daily (account_id, runner_id, day, source, model_tier) VALUES ($1, $2, current_date, 'run', 'sonnet')`, [a.accountId, runnerA1])).rejects.toMatchObject({ code: PG_ERROR.UNIQUE_VIOLATION });
+    it('a usage row is unique per machine, repo, day, source and tier; rows with no repo (1063) are not merged, readers sum them', async () => {
+      const ins = (repo: string | null) => admin.query(`INSERT INTO machine_usage_daily (account_id, runner_id, repo_id, day, source, model_tier) VALUES ($1, $2, $3, current_date, 'run', 'keytest')`, [a.accountId, runnerA1, repo]);
+      await ins(a.repoId);
+      await expect(ins(a.repoId)).rejects.toMatchObject({ code: PG_ERROR.UNIQUE_VIOLATION });
+      await ins(null);
+      await ins(null);
+      expect((await admin.query(`SELECT count(*)::int AS n FROM machine_usage_daily WHERE account_id = $1 AND model_tier = 'keytest' AND repo_id IS NULL`, [a.accountId])).rows[0].n).toBe(2);
+      await admin.query(`DELETE FROM machine_usage_daily WHERE model_tier = 'keytest'`);
     });
   });
 
