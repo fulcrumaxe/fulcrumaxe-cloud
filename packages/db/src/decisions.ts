@@ -57,7 +57,7 @@ export interface DecisionReceipt {
  */
 export const DIAL_DEFAULT_MARKER = 'default';
 
-interface DecisionSettingRow {
+export interface DecisionSettingRow {
   id: string;
   account_id: string;
   repo_id: string;
@@ -69,7 +69,7 @@ interface DecisionSettingRow {
   created_at: Date;
 }
 
-function mapDecisionSettingRow(row: DecisionSettingRow): DecisionSetting {
+export function mapDecisionSettingRow(row: DecisionSettingRow): DecisionSetting {
   return {
     id: row.id,
     accountId: row.account_id,

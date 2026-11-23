@@ -84,6 +84,16 @@ describe("GET /api/github/create-repo/callback", () => {
     expect(await res.text()).toBe("");
   });
 
+  it("on success the redirect carries the account's own repo id, and only on success and only as a uuid", async () => {
+    const id = "0b9d4f64-5a2c-4a71-9d0e-3c5b8f6a1e22";
+    const go = async (result: CreateRepoResult) => (await call(q(state()), {}, deps(result).d)).headers.get("location");
+    expect(await go({ outcome: "ok", repoUrl: "https://github.com/acme/widgets", repoId: id })).toBe(`/?create=ok&repo=${id}`);
+    expect(await go({ outcome: "ok", repoId: id.toUpperCase() })).toBe(`/?create=ok&repo=${id}`);
+    for (const bad of ["not-a-uuid", "../../x", `${id}&x=1`, ""]) expect(await go({ outcome: "ok", repoId: bad })).toBe("/?create=ok");
+    expect(await go({ outcome: "ok" })).toBe("/?create=ok");
+    for (const outcome of ["created_not_connected", "name_taken", "failed", "refused"] as const) expect(await go({ outcome, repoId: id }), outcome).not.toContain("repo=");
+  });
+
   it("a state secret shorter than 32 bytes is refused before the service is called", async () => {
     const { d, create } = deps();
     d.env = { GITHUB_INSTALL_STATE_SECRET: "short" };

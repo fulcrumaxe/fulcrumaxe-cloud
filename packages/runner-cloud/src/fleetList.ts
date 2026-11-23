@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { withTenant } from "@fx/db/src/withTenant.js";
 import { COPY, preflightView } from "@fulcrumaxe/runner-protocol";
 import type { RunnerCloudDeps, RunnerHttpResponse, SessionPrincipal } from "./http.js";
 import { readSandboxViews } from "./fleetSandboxes.js";
@@ -21,6 +22,19 @@ export const readReportedFacts: ReportedFactsLoader = async (client: PoolClient,
 };
 
 /**
+ * When each machine was linked and the address its link request came from (D#845 ON-7a2), for owners and admins only. The table is its own because a column on
+ * `runners` would be readable by every member; its policy is owner or admin of the account, and this read names the account on top of it and is skipped for
+ * anyone else. No country: nothing here looks an address up anywhere.
+ */
+async function readLinkFacts(deps: RunnerCloudDeps, principal: SessionPrincipal, role: "owner" | "admin" | "member" | null): Promise<Map<string, { at: string; ip: string | null }>> {
+  if (role !== "owner" && role !== "admin") return new Map();
+  const { rows } = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) =>
+    client.query<{ runner_id: string; linked_at: Date; ip: string | null }>("SELECT runner_id, linked_at, host(linked_from_ip) AS ip FROM runner_link_facts WHERE account_id = $1", [principal.accountId]),
+  );
+  return new Map(rows.map((r) => [r.runner_id, { at: r.linked_at.toISOString(), ip: r.ip }]));
+}
+
+/**
  * GET /api/runners (a session route, any member of the account). The runners with their derived state and consent, the caller's role, the account
  * line, and the copy strings the runner screens show, so the UI never retypes them. A runner's key, thumbprint and nonces are not selected, so they
  * cannot be returned. Its repo list is returned as `{ id, name }` pairs, and only for repos the caller's tenant context can read.
@@ -29,10 +43,11 @@ export async function listRunners(deps: RunnerCloudDeps, principal: SessionPrinc
   const { runners, viewer, account } = await readFleet(deps, principal.accountId, principal.userId, readReportedFacts);
   // D#587 B-7b-ii: each runner's sandboxes, host limits and recent sandbox commands, for display. Read apart from the fleet so nothing about them reaches a decision.
   const sandboxes = await readSandboxViews(deps, principal.accountId, principal.userId);
+  const links = await readLinkFacts(deps, principal, viewer?.role ?? null);
   return {
     status: 200,
     body: {
-      runners: runners.map((r) => ({ ...r, sandboxes: sandboxes.get(r.id) ?? null })),
+      runners: runners.map((r) => ({ ...r, sandboxes: sandboxes.get(r.id) ?? null, linked_at: links.get(r.id)?.at ?? null, linked_from_ip: links.get(r.id)?.ip ?? null })),
       viewer,
       account,
       copy: {

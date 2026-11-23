@@ -44,6 +44,8 @@ export function defaultCreateRepoCallbackDeps(): CreateRepoCallbackDeps {
   };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const OUTCOMES = new Set([
   "ok", "created_not_connected", "name_taken", "visibility_not_allowed", "refused", "github_busy", "rate_limited", "install_first", "failed",
 ]);
@@ -63,6 +65,8 @@ function githubUrl(raw: string | undefined): string | null {
 function redirect(result: CreateRepoResult, refreshedToken: string | null = null): NextResponse {
   const outcome = OUTCOMES.has(result.outcome) ? result.outcome : "failed";
   const params = new URLSearchParams({ create: outcome });
+  // On success only, the account's own repos.id (a uuid we hold; never GitHub text), checked for shape before it is echoed.
+  if (outcome === "ok" && typeof result.repoId === "string" && UUID.test(result.repoId)) params.set("repo", result.repoId.toLowerCase());
   if (outcome === "created_not_connected") {
     const repo = githubUrl(result.repoUrl);
     const settings = githubUrl(result.installationUrl);

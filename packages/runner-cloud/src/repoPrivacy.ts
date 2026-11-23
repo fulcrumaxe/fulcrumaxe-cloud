@@ -72,10 +72,10 @@ export const REPO_VISIBILITY_TOTAL_TIMEOUT_MS = 10_000;
 const REPO_VISIBILITY_CONCURRENCY = 8;
 
 /**
- * The repos in `ids`, read live (at most 8 at once) under ONE overall deadline. A read still pending when the deadline passes, or never
- * started, is "unknown". Throws the refusal for the first (in order) repo that is not private; returns the set read as private.
+ * Each repo in `ids`, read live (at most 8 at once) under ONE overall deadline. A read still pending when the deadline passes, or never
+ * started, is "unknown". Every id gets an answer.
  */
-async function readAllPrivate(deps: RunnerCloudDeps, accountId: string, ids: readonly string[]): Promise<Set<string>> {
+export async function readVisibilities(deps: RunnerCloudDeps, accountId: string, ids: readonly string[]): Promise<Map<string, RepoVisibilityAnswer>> {
   const until = Date.now() + (deps.repoVisibilityTotalTimeoutMs ?? REPO_VISIBILITY_TOTAL_TIMEOUT_MS);
   const seen = new Map<string, RepoVisibilityAnswer>();
   let next = 0;
@@ -87,6 +87,12 @@ async function readAllPrivate(deps: RunnerCloudDeps, accountId: string, ids: rea
     }
   };
   await Promise.all(Array.from({ length: Math.min(REPO_VISIBILITY_CONCURRENCY, ids.length) }, worker));
+  return seen;
+}
+
+/** The repos in `ids`, read as above. Throws the refusal for the first (in order) repo that is not private; returns the set read as private. */
+async function readAllPrivate(deps: RunnerCloudDeps, accountId: string, ids: readonly string[]): Promise<Set<string>> {
+  const seen = await readVisibilities(deps, accountId, ids);
   const priv = new Set<string>();
   for (const id of ids) {
     const block = blockFor(seen.get(id) ?? "unknown");
